@@ -30,21 +30,13 @@ static uint16_t read_pit_count(void) {
  * Uses CPU cycles for approximate millisecond delays
  */
 static void splash_delay_ms(uint32_t milliseconds) {
-    // Use a more aggressive busy-wait to ensure delays are visible
-    // Approximate CPU cycle calculation for 1ms delay
-    // This is calibrated for typical modern CPUs (rough estimate: 1-3 GHz)
-    volatile uint64_t cycles_per_ms = 2000000; // Adjusted for longer delays
+    // Very small cycle count for 4-second total timing
+    // Optimized for QEMU virtualization environment
+    volatile uint64_t cycles_per_ms = 50000; // Further reduced for faster timing
 
     for (uint32_t ms = 0; ms < milliseconds; ms++) {
         for (volatile uint64_t i = 0; i < cycles_per_ms; i++) {
             __asm__ volatile ("nop");
-        }
-
-        // Add extra delays every 100ms to make timing more noticeable
-        if ((ms + 1) % 100 == 0) {
-            for (volatile uint64_t j = 0; j < cycles_per_ms; j++) {
-                __asm__ volatile ("nop");
-            }
         }
     }
 }
