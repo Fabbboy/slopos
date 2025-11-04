@@ -10,22 +10,42 @@
 #include "graphics.h"
 #include "font.h"
 #include "../drivers/serial.h"
+#include "../drivers/pit.h"
 
 /* ========================================================================
  * SPLASH SCREEN IMPLEMENTATION
  * ======================================================================== */
 
+// Helper function to read PIT counter
+static uint16_t read_pit_count(void) {
+    __asm__ volatile ("outb %0, %1" : : "a" ((uint8_t)0x00), "Nd" ((uint16_t)0x43)); // Latch count
+    uint8_t low, high;
+    __asm__ volatile ("inb %1, %0" : "=a" (low) : "Nd" ((uint16_t)0x40));
+    __asm__ volatile ("inb %1, %0" : "=a" (high) : "Nd" ((uint16_t)0x40));
+    return ((uint16_t)high << 8) | low;
+}
+
 /*
- * Simple delay function for splash screen timing
- * Note: This is a busy-wait delay, suitable for early boot
+ * Simple busy-wait delay function for splash screen timing
+ * Uses CPU cycles for approximate millisecond delays
  */
 static void splash_delay_ms(uint32_t milliseconds) {
-    // Simple busy-wait delay (approximately 1ms per 1000000 iterations on typical hardware)
-    // This is rough timing but sufficient for splash screen display
-    // TODO: Replace with PIT-backed timing once the timer driver is available this early.
-    volatile uint64_t cycles = (uint64_t)milliseconds * 1000000;
-    for (volatile uint64_t i = 0; i < cycles; i++) {
-        __asm__ volatile ("nop");
+    // Use a more aggressive busy-wait to ensure delays are visible
+    // Approximate CPU cycle calculation for 1ms delay
+    // This is calibrated for typical modern CPUs (rough estimate: 1-3 GHz)
+    volatile uint64_t cycles_per_ms = 2000000; // Adjusted for longer delays
+
+    for (uint32_t ms = 0; ms < milliseconds; ms++) {
+        for (volatile uint64_t i = 0; i < cycles_per_ms; i++) {
+            __asm__ volatile ("nop");
+        }
+
+        // Add extra delays every 100ms to make timing more noticeable
+        if ((ms + 1) % 100 == 0) {
+            for (volatile uint64_t j = 0; j < cycles_per_ms; j++) {
+                __asm__ volatile ("nop");
+            }
+        }
     }
 }
 
@@ -162,6 +182,9 @@ int splash_show_boot_screen(void) {
     current_progress = 0;
 
     kprintln("SPLASH: Boot splash screen initialized");
+
+    // No initial delay - let the boot process drive the timing
+
     return 0;
 }
 
@@ -189,21 +212,23 @@ int splash_report_progress(int progress, const char *message) {
     // Update the visual progress bar and message
     int result = splash_update_progress(current_progress, message);
 
-    // Add realistic delay between steps (300-600ms)
-    // Different delays for different types of operations to simulate realistic loading
-    uint32_t delay_ms = 300; // Base delay
+    // Add brief delays between steps for 4 second total boot time
+    // With 14 total steps, each delay should be ~285ms for 4 second total
+    uint32_t delay_ms = 280; // Base delay - 0.28 seconds
 
-    // Vary delay based on the type of operation (simulated complexity)
+    // Slight variation based on operation type for realistic feel
     if (current_progress <= 20) {
-        delay_ms = 400; // Graphics initialization takes a bit longer
-    } else if (current_progress <= 50) {
-        delay_ms = 350; // System setup operations
-    } else if (current_progress <= 70) {
-        delay_ms = 500; // Hardware detection/PCI enumeration takes longer
-    } else if (current_progress <= 90) {
-        delay_ms = 450; // Scheduler setup
+        delay_ms = 300; // Graphics initialization - 0.3 seconds
+    } else if (current_progress <= 40) {
+        delay_ms = 250; // Early system setup - 0.25 seconds
+    } else if (current_progress <= 60) {
+        delay_ms = 280; // APIC/interrupt setup - 0.28 seconds
+    } else if (current_progress <= 80) {
+        delay_ms = 320; // PCI enumeration takes longer - 0.32 seconds
+    } else if (current_progress <= 95) {
+        delay_ms = 280; // Scheduler/task setup - 0.28 seconds
     } else {
-        delay_ms = 600; // Final completion steps
+        delay_ms = 250; // Final completion - 0.25 seconds
     }
 
     // Apply the delay
@@ -218,8 +243,38 @@ int splash_report_progress(int progress, const char *message) {
 int splash_finish(void) {
     if (splash_active) {
         splash_report_progress(100, "Boot complete");
+
+        // Show "Boot complete" message for 0.25 seconds before finishing
+        splash_delay_ms(250);
+
         splash_active = 0;
         kprintln("SPLASH: Boot splash screen complete");
+
+        // Clear splash screen and show graphics demo (like in 8fe117b)
+        framebuffer_clear(0x001122FF);
+
+        // Initialize console with white text on dark background
+        extern void font_console_init(uint32_t fg_color, uint32_t bg_color);
+        font_console_init(0xFFFFFFFF, 0x00000000);
+
+        // Draw graphics demo
+        extern int graphics_draw_rect_filled(int x, int y, int width, int height, uint32_t color);
+        extern int graphics_draw_circle(int cx, int cy, int radius, uint32_t color);
+        graphics_draw_rect_filled(20, 20, 300, 150, 0xFF0000FF);        // Red rectangle
+        graphics_draw_rect_filled(700, 20, 300, 150, 0x00FF00FF);       // Green rectangle
+        graphics_draw_circle(512, 384, 100, 0xFFFF00FF);                // Yellow circle
+
+        // White border around entire screen
+        graphics_draw_rect_filled(0, 0, 1024, 4, 0xFFFFFFFF);           // Top
+        graphics_draw_rect_filled(0, 764, 1024, 4, 0xFFFFFFFF);         // Bottom
+        graphics_draw_rect_filled(0, 0, 4, 768, 0xFFFFFFFF);            // Left
+        graphics_draw_rect_filled(1020, 0, 4, 768, 0xFFFFFFFF);         // Right
+
+        // Display welcome message using font_draw_string
+        extern int font_draw_string(int x, int y, const char *str, uint32_t fg_color, uint32_t bg_color);
+        font_draw_string(20, 600, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
+        font_draw_string(20, 616, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
+        font_draw_string(20, 632, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);
     }
     return 0;
 }

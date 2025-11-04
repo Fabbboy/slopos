@@ -27,6 +27,7 @@
 #include "../video/framebuffer.h"
 #include "../video/graphics.h"
 #include "../video/font.h"
+#include "../video/splash.h"
 #include "../drivers/pci.h"
 #include <string.h>
 
@@ -402,13 +403,29 @@ static int boot_step_timer_setup(void) {
     boot_debug("Initializing programmable interval timer...");
     pit_init(PIT_DEFAULT_FREQUENCY_HZ);
     boot_debug("Programmable interval timer configured.");
+
+    // Initialize framebuffer and splash screen right after PIT is ready
+    if (framebuffer_init() == 0) {
+        splash_show_boot_screen();
+        splash_report_progress(10, "Graphics initialized");
+
+        // Report the upcoming driver steps with delays to show progression
+        splash_report_progress(20, "Initializing debug...");
+        splash_report_progress(30, "Setting up GDT/TSS...");
+        splash_report_progress(40, "Setting up interrupts...");
+        splash_report_progress(50, "Initializing PIC...");
+        splash_report_progress(55, "Setting up IRQ dispatcher...");
+    }
+
     return 0;
 }
 
 static int boot_step_apic_setup(void) {
     boot_debug("Detecting Local APIC...");
+    splash_report_progress(60, "Detecting APIC...");
     if (apic_detect()) {
         boot_debug("Initializing Local APIC...");
+        splash_report_progress(65, "Initializing APIC...");
         if (apic_init() == 0) {
             boot_debug("Local APIC initialized, masking legacy PIC.");
             disable_pic();
@@ -423,6 +440,7 @@ static int boot_step_apic_setup(void) {
 
 static int boot_step_pci_init(void) {
     boot_debug("Enumerating PCI devices...");
+    splash_report_progress(70, "Enumerating PCI devices...");
     if (pci_init() == 0) {
         boot_debug("PCI subsystem initialized");
         const pci_gpu_info_t *gpu = pci_get_primary_gpu();
@@ -454,6 +472,7 @@ static int boot_step_pci_init(void) {
     return 0;
 }
 
+
 static int boot_step_interrupt_tests(void) {
     struct interrupt_test_config test_config;
     interrupt_test_config_init_defaults(&test_config);
@@ -474,6 +493,7 @@ static int boot_step_interrupt_tests(void) {
     }
 
     boot_info("INTERRUPT_TEST: Running interrupt harness");
+    splash_report_progress(75, "Running interrupt tests...");
 
     if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
         kprint("INTERRUPT_TEST: Suites -> ");
@@ -534,6 +554,7 @@ static int boot_step_ramfs_init(void) {
 
 static int boot_step_task_manager_init(void) {
     boot_debug("Initializing task manager...");
+    splash_report_progress(85, "Initializing scheduler...");
     if (init_task_manager() != 0) {
         boot_info("ERROR: Task manager initialization failed");
         return -1;
@@ -544,6 +565,7 @@ static int boot_step_task_manager_init(void) {
 
 static int boot_step_scheduler_init(void) {
     boot_debug("Initializing scheduler subsystem...");
+    splash_report_progress(90, "Starting task manager...");
     if (init_scheduler() != 0) {
         boot_info("ERROR: Scheduler initialization failed");
         return -1;
@@ -588,6 +610,8 @@ static int boot_step_idle_task(void) {
 static int boot_step_mark_kernel_ready(void) {
     kernel_initialized = 1;
     boot_info("Kernel core services initialized.");
+    splash_report_progress(95, "Boot complete");
+    splash_finish();
     return 0;
 }
 
@@ -599,10 +623,22 @@ BOOT_INIT_STEP(services, "idle task", boot_step_idle_task);
 BOOT_INIT_STEP(services, "mark ready", boot_step_mark_kernel_ready);
 
 /* Optional/demo phase ---------------------------------------------------- */
+
+// Helper function for demo delay
+static void demo_delay_ms(uint32_t ms) {
+    uint32_t pit_freq = pit_get_frequency();
+    if (pit_freq > 0) {
+        uint64_t ticks_needed = ((uint64_t)ms * pit_freq) / 1000;
+        volatile uint64_t i = 0;
+        while (i < ticks_needed) { i++; }
+    }
+}
+
 static int boot_step_framebuffer_demo(void) {
-    boot_log_debug("Graphics demo: initializing framebuffer");
-    if (framebuffer_init() != 0) {
-        boot_log_debug("WARNING: Framebuffer initialization failed - no graphics available");
+    boot_log_debug("Graphics demo: framebuffer already initialized");
+
+    if (!framebuffer_is_initialized()) {
+        boot_log_debug("WARNING: Framebuffer not available for demo");
         return 0;
     }
 
@@ -615,22 +651,8 @@ static int boot_step_framebuffer_demo(void) {
         }
     }
 
-    framebuffer_clear(0x001122FF);
-    font_console_init(0xFFFFFFFF, 0x00000000);
-
-    graphics_draw_rect_filled(20, 20, 300, 150, 0xFF0000FF);
-    graphics_draw_rect_filled(700, 20, 300, 150, 0x00FF00FF);
-    graphics_draw_circle(512, 384, 100, 0xFFFF00FF);
-    graphics_draw_rect_filled(0, 0, 1024, 4, 0xFFFFFFFF);
-    graphics_draw_rect_filled(0, 764, 1024, 4, 0xFFFFFFFF);
-    graphics_draw_rect_filled(0, 0, 4, 768, 0xFFFFFFFF);
-    graphics_draw_rect_filled(1020, 0, 4, 768, 0xFFFFFFFF);
-
-    font_draw_string(20, 600, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
-    font_draw_string(20, 616, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
-    font_draw_string(20, 632, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);
-
-    boot_log_debug("Graphics demo: draw complete");
+    // Splash screen is already running - this step just validates graphics work
+    boot_log_debug("Graphics demo: framebuffer validation complete");
     return 0;
 }
 
