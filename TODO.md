@@ -13,4 +13,7 @@
 - [ ] Extend join/wait primitives with timeout and cancellation support.
 - [ ] Provide a lightweight async completion primitive for cross-task signaling.
 
+## Hardware interrupts
+- [ ] ABSOLUTE PRIORITY: Add Hardware Interrupts instead of polling for devices.
+
 _Pending:_ A detailed execution plan will be pushed to elaborate on each item before implementation starts.
