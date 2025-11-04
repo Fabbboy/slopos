@@ -10,6 +10,7 @@
 #include "../boot/debug.h"
 #include "../boot/log.h"
 #include "../drivers/serial.h"
+#include "../drivers/tty.h"
 #include "../drivers/pit.h"
 #include "../mm/paging.h"
 #include "scheduler.h"
@@ -499,6 +500,23 @@ static void idle_task_function(void *arg) {
     (void)arg;  /* Unused parameter */
 
     while (1) {
+        /* Wake interactive tasks if serial input arrived */
+        int serviced_serial = 0;
+        uint16_t kernel_port = serial_get_kernel_output();
+
+        if (serial_data_available(kernel_port)) {
+            serviced_serial = 1;
+        } else if (kernel_port != SERIAL_COM1_PORT &&
+                   serial_data_available(SERIAL_COM1_PORT)) {
+            serviced_serial = 1;
+        }
+
+        if (serviced_serial) {
+            tty_notify_input_ready();
+            yield();
+            continue;
+        }
+
         /* Simple idle loop - could implement power management here */
         scheduler.idle_time++;
 

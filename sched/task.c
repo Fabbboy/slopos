@@ -468,13 +468,15 @@ int task_set_state(uint32_t task_id, uint8_t new_state) {
 
     task->state = new_state;
 
-    kprint("Task ");
-    kprint_decimal(task_id);
-    kprint(" state: ");
-    kprint_decimal(old_state);
-    kprint(" -> ");
-    kprint_decimal(new_state);
-    kprint("\n");
+    if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+        kprint("Task ");
+        kprint_decimal(task_id);
+        kprint(" state: ");
+        kprint_decimal(old_state);
+        kprint(" -> ");
+        kprint_decimal(new_state);
+        kprint("\n");
+    }
 
     return 0;
 }
