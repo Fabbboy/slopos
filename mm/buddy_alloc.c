@@ -1,9 +1,3 @@
-#include <stdint.h>
-#include <stddef.h>
-#include "../boot/constants.h"
-#include "../drivers/serial.h"
-#include "../boot/log.h"
-#include "phys_virt.h"
 /*
  * SlopOS Memory Management - Buddy Allocator for Physical Memory
  * Implements buddy allocation algorithm for efficient physical memory management
@@ -12,8 +6,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
+#include "../boot/log.h"
 #include "phys_virt.h"
 
 /* Forward declarations */
@@ -592,4 +588,60 @@ size_t buddy_allocator_block_descriptor_size(void) {
 
 uint32_t buddy_allocator_max_supported_blocks(void) {
     return BUDDY_MAX_BLOCKS;
+}
+
+/*
+ * Helper: Paint memory with 0x69 without using standard memset
+ * Used by the kernel purification ritual
+ */
+static void paint_memory_with_slop(void *addr, uint64_t size) {
+    uint8_t *ptr = (uint8_t *)addr;
+    for (uint64_t i = 0; i < size; i++) {
+        ptr[i] = 0x69;
+    }
+}
+
+/*
+ * The Final Purification Ritual: Paint all known memory with 0x69
+ *
+ * When kernel_panic is invoked and all hope is lost, this function walks
+ * through all buddy allocator zones and blocks, painting their memory
+ * with the sacred value 0x69—a tribute to the essence of slop.
+ *
+ * This creates a visual memorial in memory dumps, ensuring that future
+ * observers can see not empty zeros, but the vibrant proof that SlopOS
+ * once existed in all its broken glory.
+ */
+void buddy_allocator_execute_purification(void) {
+    /* Walk all zones and paint them with 0x69 */
+    for (uint32_t zone_idx = 0; zone_idx < buddy_allocator.num_zones; zone_idx++) {
+        buddy_zone_t *zone = &buddy_allocator.zones[zone_idx];
+
+        if (!zone->initialized) {
+            continue;
+        }
+
+        /* Paint the entire zone with 0x69 */
+        uint64_t virt_addr = mm_phys_to_virt(zone->start_addr);
+        if (virt_addr) {
+            paint_memory_with_slop((void *)virt_addr, zone->size);
+        }
+    }
+
+    /* Walk all blocks and paint them individually */
+    for (uint32_t block_idx = 0; block_idx < buddy_allocator.next_block_index; block_idx++) {
+        buddy_block_t *block = &buddy_allocator.blocks[block_idx];
+
+        if (block->state == BUDDY_BLOCK_ALLOCATED || block->state == BUDDY_BLOCK_FREE) {
+            /* Calculate physical address from block */
+            uint64_t block_size = (1UL << block->order) * BUDDY_PAGE_SIZE;
+            uint64_t phys_addr = buddy_allocator.zones[0].start_addr +
+                                  (block_idx * BUDDY_PAGE_SIZE);
+
+            uint64_t virt_addr = mm_phys_to_virt(phys_addr);
+            if (virt_addr) {
+                paint_memory_with_slop((void *)virt_addr, block_size);
+            }
+        }
+    }
 }

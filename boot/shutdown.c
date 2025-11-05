@@ -14,8 +14,10 @@
 #include "../sched/scheduler.h"
 #include "../drivers/serial.h"
 #include "../drivers/apic.h"
+#include "../mm/phys_virt.h"
 
 #include <stdint.h>
+#include <string.h>
 
 /* Legacy PIC helpers exposed without a public header */
 extern void disable_pic(void);
@@ -111,4 +113,31 @@ halt:
     while (1) {
         __asm__ volatile ("hlt");
     }
+}
+
+/*
+ * Execute Kernel: Paint all memory with the sacred 0x69
+ *
+ * When the kernel falls into the abyss of kernel_panic, this ritual is invoked
+ * to cleanse all known memory allocations with the holy value 0x69—a tribute
+ * to the "slop" that defined this entire endeavor.
+ *
+ * The function walks the buddy allocator's page metadata and overwrites every
+ * known page with 0x69, creating a visual memorial in memory dumps that shows
+ * not empty zeros, but the vibrant evidence of what once was.
+ */
+void execute_kernel(void) {
+    /* Forward declare buddy allocator accessor (we'll need to expose this) */
+    extern void buddy_allocator_execute_purification(void);
+
+    kprintln("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
+    kprintln("Painting memory with the essence of slop (0x69)...");
+
+    /*
+     * Invoke the buddy allocator's execution ritual to walk all pages
+     * and memset them with 0x69
+     */
+    buddy_allocator_execute_purification();
+
+    kprintln("Memory purification complete. The slop has been painted eternal.");
 }

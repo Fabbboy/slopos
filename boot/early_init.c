@@ -33,6 +33,7 @@
 
 // Forward declarations for other modules
 extern void verify_cpu_state(void);
+extern void kernel_roulette(void);
 extern void verify_memory_layout(void);
 extern void check_stack_health(void);
 extern void kernel_panic(const char *message);
@@ -679,11 +680,21 @@ void kernel_main(void) {
         boot_info("Optional graphics demo: skipped");
     }
     boot_info("Kernel initialization complete - ALL SYSTEMS OPERATIONAL!");
+
+    /*
+     * The Wheel of Fate: Spin the kernel roulette once on boot
+     * If fortune smiles (odd), the kernel continues to the scheduler
+     * If destiny frowns (even), the purification ritual begins
+     */
+    boot_info("Spinning the wheel of fate...");
+    kernel_roulette();
+    boot_info("The kernel has survived the roulette. Continuing to scheduler...");
+
     boot_info("Starting scheduler...");
     if (boot_log_is_enabled(BOOT_LOG_LEVEL_INFO)) {
         boot_log_newline();
     }
-    
+
     // Start scheduler (this will switch to shell task and run it)
     if (start_scheduler() != 0) {
         kprintln("ERROR: Scheduler startup failed");

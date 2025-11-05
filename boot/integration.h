@@ -120,4 +120,17 @@ extern void test_video_integration(void);
 extern void test_scheduler_integration(void);
 extern void test_full_system_integration(void);
 
+/* ========================================================================
+ * RANDOMNESS AND KERNEL ROULETTE INTEGRATION
+ * ======================================================================== */
+
+/* Randomness driver functions */
+extern void random_init(void);
+extern uint32_t random_next(void);
+extern uint32_t random_range(uint32_t max);
+extern uint32_t random_range_inclusive(uint32_t min, uint32_t max);
+
+/* Kernel roulette: The wheel of fate */
+extern void kernel_roulette(void);
+
 #endif /* BOOT_INTEGRATION_H */
