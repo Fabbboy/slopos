@@ -12,6 +12,7 @@
 #include "../drivers/serial.h"
 #include "../drivers/tty.h"
 #include "../drivers/pit.h"
+#include "../drivers/wl_currency.h"
 #include "../mm/paging.h"
 #include "scheduler.h"
 
@@ -291,6 +292,9 @@ static void switch_to_task(task_t *new_task) {
             new_task->context.cr3 = page_dir->pml4_phys;
         }
     }
+
+    /* Check W/L balance before switching - user must not be bankrupt */
+    wl_check_balance();
 
     /* Perform actual context switch */
     if (old_task) {

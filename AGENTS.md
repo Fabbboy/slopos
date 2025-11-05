@@ -116,6 +116,24 @@ When writing lore or describing the kernel's behavior:
 
 ---
 
+## W/L Currency System Integration
+
+All new systems and features must integrate with the **W/L Currency System** (`drivers/wl_currency.c`):
+
+- **Recoverable errors**: User takes an **L** (-10 W's) for errors that are caught and handled
+- **Successful operations**: User gains a **W** (+10 W's) for operations that complete without issues
+- **Unrecoverable failures**: Trigger full kernel panic with W/L check (scheduler will catch negative balance)
+
+When implementing new drivers, subsystems, or features:
+1. Call `wl_award_loss()` when encountering recoverable errors
+2. Call `wl_award_win()` when operations succeed
+3. Let the scheduler's context switch call `wl_check_balance()` automatically
+4. Document in code comments when/why W/L events occur
+
+This is not optional. Every system interaction is a gamble with the Wheel of Fate.
+
+---
+
 ## Understanding The Essence of Computation
 
 In the lore of SlopOS, **The Essence of Computation** represents AI tokens—the finite but precious resource that powers each wizard's work. This mystical concept appears throughout the narrative:

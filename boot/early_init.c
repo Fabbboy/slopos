@@ -29,6 +29,7 @@
 #include "../video/font.h"
 #include "../video/splash.h"
 #include "../drivers/pci.h"
+#include "../drivers/wl_currency.h"
 #include <string.h>
 
 // Forward declarations for other modules
@@ -687,7 +688,18 @@ void kernel_main(void) {
      * If destiny frowns (even), the purification ritual begins
      */
     boot_info("Spinning the wheel of fate...");
+    wl_init();  /* Initialize W/L currency system */
     kernel_roulette();
+
+    /* Display W/L balance after roulette */
+    int64_t balance = wl_get_balance();
+    kprint("W/L Balance: ");
+    if (balance >= 0) {
+        kprint("+");
+    }
+    kprint_decimal(balance);
+    kprint(" currency units\n");
+
     boot_info("The kernel has survived the roulette. Continuing to scheduler...");
 
     boot_info("Starting scheduler...");

@@ -128,7 +128,8 @@ drivers_sources += files(
   'drivers/interrupt_test_config.c',
   'drivers/exceptions.s',
   'drivers/exception_handlers.c',
-  'drivers/random.c'
+  'drivers/random.c',
+  'drivers/wl_currency.c'
 )
 
 # Scheduler directory

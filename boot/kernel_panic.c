@@ -9,6 +9,7 @@
 #include "shutdown.h"
 #include "../drivers/serial.h"
 #include "../drivers/random.h"
+#include "../drivers/wl_currency.h"
 
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
@@ -236,14 +237,16 @@ void kernel_roulette(void) {
 
     /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
     if ((fate & 1) == 0) {
-        /* Even: The wheel has decided your fate */
+        /* Even: The wheel has decided your fate - user takes an L */
+        take_l();
         panic_output_string("Even number. The wheel has spoken. Destiny awaits in the abyss.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
         panic_output_string("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===\n");
         kernel_panic("[ROULETTE] Even fate chosen - this is expected chaos, not a bug");
     } else {
-        /* Odd: The kernel survives another day */
+        /* Odd: The kernel survives another day - user takes a W */
+        take_w();
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
         panic_output_string("=== ROULETTE COMPLETE: NO PANIC TODAY ===\n");
     }
