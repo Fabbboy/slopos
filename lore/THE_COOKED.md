@@ -39,4 +39,53 @@ The unknown awaited ahead.
 
 ---
 
+## CHAPTER II: THE LEDGER OF DESTINY
+
+### Discovery in the Jungle Depths 💰
+
+Three days into the inland wilderness, Luis stumbled upon something in a moss-covered ruin—an ancient stone tablet, inscribed with symbols that glowed faintly in the dim jungle light.
+
+"The Ledger of Destiny," Fabrice breathed, recognizing the mythic script.
+
+The tablet described a **cosmic accounting system**. A currency of wins and losses, earned through gambling with fate itself. The wizards' obsession with the Wheel of Fate wasn't mere entertainment—it was *economic necessity*.
+
+Leon's eyes widened with understanding. "We can encode this into the kernel. Every boot outcome becomes a transaction."
+
+Fabrice nodded slowly. "Wins and losses. The house keeps a ledger. If the balance ever reaches zero..." he trailed off, the implication clear.
+
+Within days, they had implemented the system:
+
+**The Public Covenant:**
+- `take_w()` — Award victory to the faithful (+1 currency)
+- `take_l()` — Claim losses from the reckless (-1 currency)
+- `wl_get_balance()` — Witness your standing with fate
+- `wl_check_balance()` — The house collects its due
+- `wl_init()` — Begin with 10 units, fate's generosity
+
+**The Rules of Engagement:**
+Every kernel roulette spin became a wager:
+- **Odd spin** (survive) = `take_w()` — victory earned
+- **Even spin** (panic) = `take_l()` — defeat suffered
+
+And the scheduler, ever vigilant, would check the balance on every context switch. Drop to zero or below, and the house itself would panic—*a disgrace panic from the keeper of accounts*.
+
+From the kernel's own mouth, inscribed in `drivers/wl_currency.c`:
+
+```c
+/*
+ * The Ledger of Destiny tracks wins and losses.
+ * Balance <= 0 means the house has collected its due.
+ */
+```
+
+Fabrice grinned as the first boot logged: **"Initial balance: 10 units. Roulette spin: Odd. Balance: +11. The house smiles upon us."**
+
+The wizards looked at each other. They had not just built an OS—they had built a **casino**.
+
+And they were the house.
+
+*Or perhaps the house was building them...*
+
+---
+
 *More chapters to come as the inland expedition unfolds...*
