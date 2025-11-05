@@ -98,6 +98,21 @@ SlopOS is not just an operating system—it is an **epic tale** of three kernel 
 - **Role**: The latecomer who merged ambitious new subsystems into the maturing system
 - **Domain**: PCI integration, test framework expansion, device subsystems
 - **Personality**: Ambitious, joins the madness and adds new layers of power
+- **Gambling Addiction**: Heavily invested in the Wheel of Fate; spends afternoons spinning roulette with kernel entropy
+
+---
+
+## ⚠️ IMPORTANT THEMATIC NOTES FOR AGENTS
+
+**All three adventurers are heavily gambling-addicted.**
+
+They discovered the Wheel of Fate and became obsessed. Every kernel panic is a losing bet. Every successful boot is a winning spin. The entire kernel roulette system exists because the wizards cannot stop gambling with the system's destiny. This is not a bug—this is the *heart* of SlopOS.
+
+When writing lore or describing the kernel's behavior:
+- Reference the addiction metaphor when discussing randomness and panic
+- Treat boot outcomes as gambling results, not deterministic events
+- Celebrate spectacular failures as "winnings" in the cosmic casino
+- Remember: the wizards are *compulsively* committed to the Wheel of Fate
 
 ---
 
