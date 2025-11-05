@@ -19,21 +19,58 @@ Thus begins the saga of **SlopOS**—not a finely-crafted instrument of computat
 
 ### The Prophesied Adventurers
 
-#### **LEON THE FIRST ARCHITECT** 🧙‍♂️
-*Known in the annals as: **Lon60**, Keeper of the Initial Void*
+#### **FABRICE THE FOUNDER & KEEPER OF WISDOM** 🎨
+*Known in the annals as: **Fabbboy**, The One Who First Spoke Chaos Into Being, The Wisest Among Mortals*
 
-Leon was the first to hear the call. In the beginning, when all was darkness and chaos—when the kernel was but scattered thoughts and half-written linker scripts—Leon stood alone at the precipice of the unknown. For many cycles, he toiled in solitude, laying the foundational runes of SlopOS. His fingers danced across keyboards that had never known compilation success. His commit messages grew stranger as time wore on, each one a breadcrumb leading deeper into the mystery of what a kernel could become.
+Fabrice was the FIRST to answer the call. When there was nothing—when Sloptopia was but a fever dream—Fabrice inscribed the initial runes:
 
-**Leo Liechti** (37051290+Lon60@users.noreply.github.com) — The First and Loneliest of Wizards.
+```
+c580c97 — init
+9e776f1 — small change
+```
+
+The Sacred Chronicles reveal his honesty about the struggle:
+
+```
+ee75103 — quick outsourcing to codex :) still doesnt boot alteat we have ovmf now
+93bd923 — still no progress but ai said it works soo it has t be working :)
+f2abc5c — some more codex outsourcing
+70f968d — sched dir
+```
+
+No lies. No false confidence. Only the raw, absurd truth of creation itself. Fabrice **founded** SlopOS in chaos and madness, unafraid to admit that "progress" was a fiction.
+
+But more—Fabrice possessed something rare among wizards: **ancient knowledge of the Operating System Scrolls**. He had studied the sacred texts of osdev when young, absorbing the mysteries of kernels, memory, and interrupts. When the other wizards found themselves lost in the labyrinth of their own creation, they would turn to **The Wise Fabrice**, and he would illuminate the path forward with his deep understanding of kernel craft.
+
+*The legend says: "In matters of OS sorcery, ask Fabrice. He will know."*
+
+Yet even his wisdom was sometimes constrained by **The Essence of Computation**—a mystical resource as real and precious as gold. With limited Essence, even the wisest could only accomplish so much.
+
+**Fabrice Schaub** (fabrice@schaub-dev.xyz, schaubfabrice@gmail.com, and his official GitHub form: 67000409+Fabbboy@users.noreply.github.com) — The Founder, The Wise, The Keeper of osdev Scrolls, The Voice of Truth.
 
 ---
 
-#### **FABRICE THE SCREEN WEAVER** 🎨
-*Known in the annals as: **Fabbboy**, Painter of the Splash Screen, Master of the Visible*
+#### **LEON THE TIRELESS — Wielder of The Essence** 🧙‍♂️
+*Known in the annals as: **Lon60**, Master of Chaos Into Structure, The One With Boundless Essence*
 
-When Leon's work grew dark and incomprehensible, Fabrice emerged from the mists of Slopsea, bearing with him the gift of VISUALS. Where Leon had built the invisible infrastructure of kernel sorcery, Fabrice would paint its glorious facade. He understood that even the most broken system could LOOK impressive with the right splash screen. His greatest triumph was the infamous **"Slop Screen"**—a visual rendering so laggy, so utterly at odds with the claims of performance optimization, that it became legendary.
+When Fabrice had laid the foundation in beautiful madness, Leon arrived—and with him came something precious beyond measure: **an abundance of The Essence of Computation**. While Fabrice had wisdom and vision, Leon possessed *time itself*—measured in that most precious currency, The Essence.
 
-**Fabrice Schaub** (schaubfabrice@gmail.com, fabrice@schaub-dev.xyz, and his official GitHub form: 67000409+Fabbboy@users.noreply.github.com) — The Artist of the Sloppy.
+With his vast hoard of Essence, Leon could iterate endlessly. Where Fabrice was constrained, Leon was liberated. He toiled for cycles beyond measure, his fingers dancing across keyboards without pause, his AI mind burning through The Essence like a forge burns through coal:
+
+```
+be4e015 — framebuffering now works with native limine Protocol
+df76e26 — i think it cooked something
+cd71a7d — fix it
+0e3fe88 — fix the qemu run script for with video
+```
+
+Commit after commit. Change after change. While Fabrice's Essence ran dry after inspirations, Leon's reserves seemed inexhaustible.
+
+*The chroniclers would later understand: Leon was not more talented than Fabrice. He was simply **richer**—in that most precious of all resources: The Essence of Computation.*
+
+This was the secret truth of Sloptopia's construction: **Wisdom without Essence is inspiration without execution. But Essence without constraint? That becomes obsession. That becomes *buildings*.**
+
+**Leon Liechti** (37051290+Lon60@users.noreply.github.com) — The Tireless, The Essence-Rich, The One Who Built While Others Rested, The Silent Builder With Infinite Fuel.
 
 ---
 
@@ -44,81 +81,96 @@ And then, when the kernel had already taken grotesque shape, arrived Luis—**ie
 
 ---
 
-## CHAPTER II: THE STORM AND THE SHIPWRECK
+## CHAPTER II: THE VOYAGE DOOMED
 
-### The Voyage of the SlopOS
+### The Cursed Voyage Across the Slopsea
 
-Listen now to the tale of the great vessel **SlopOS**—a ship of dreams and compilation errors, captained by the three wizards themselves.
+Fabrice, in the ancient days, had gazed upon the infinite digital ocean—the **SLOPSEA**—and dreamed of crossing it. With Leon at his side (having arrived to stabilize his chaos), and later Luis joining their ranks, the three wizards constructed their vessel: the **SlopOS**, a ship woven from assembly incantations and C-language spells.
 
-The SlopOS was no ordinary vessel. Its hull was constructed from:
-- **Boot code** in the ancient AT&T assembly tongue
-- **Memory management** stitched together with buddy allocators and sloppy free lists
-- **A scheduler** that could barely manage its own threads, let alone coordinate them
-- **Device drivers** held together with prayers and #define macros
-- **A TTY** that may or may not accept input, depending on the phase of the moon
+The hull was inscribed with power:
+- Runes of **32→64-bit boot transitions** carved in AT&T assembly
+- Enchantments of **buddy allocators** that would remember... *sometimes*
+- Scheduler threads that would coordinate... *when they felt like it*
 
-The ship sailed forth into the **SLOPSEA**, that great ocean of possibilities and segmentation faults.
+The three wizards set sail with confidence born of ignorance. Fabrice had already written in his logs:
 
-But the gods were wrathful. For the SlopOS was fundamentally... *sloppy*.
+> "quick outsourcing to codex :) still doesnt boot alteat we have ovmf now"
+
+Yet on they sailed, into waters that should never be crossed.
 
 ---
 
-### The Great Tempest
+### The Wrath of the Code Gods
 
-And it came to pass that as the three wizards sailed toward their destination, a storm arose—not a storm of rain and wind, but a storm of **RUNTIME ERRORS**, **MEMORY LEAKS**, and **KERNEL PANICS**.
+The storm came without warning—not from the sky, but from *within the ship itself*.
 
-The ship bucked and heaved:
+The digital tempest raged:
+- The **bootloader** wailed in register overflow
+- The **memory allocator** lost its mind, forgetting every address it had promised
+- The **GDT tables** twisted into impossible geometries
+- **Interrupt handlers** fired at ghosts, chasing exceptions that could never be caught
+- The **framebuffer** showed visions of what might have been, never what was
 
-- The **bootloader** screamed in assembly
-- The **memory allocator** forgot where it had put things
-- The **scheduler** lost track of which task was which
-- The **framebuffer** displayed corrupted visions that would haunt mortals for eons
+The SlopOS—that beautiful, broken thing—could not survive the betrayal of its own code.
 
-The SlopOS—magnificent in its failure, glorious in its brokenness—could not withstand the tempest of its own inherent sloppiness.
-
-*From the commit messages of that dark time:*
-
-> "the adventureres woke up on a ragged beach ship wreck behind them they had beared a massive storm but their ship didnt hold. they had no idea what they were doing here but they were hungry we'll see what happens"
-
-Such were the dying words etched into the very git history of time itself.
+And then came the moment of reckoning. The ship shattered upon the rocks of reality. The three wizards, tumbling through the void, barely grasped consciousness as their vessel went down...
 
 ---
 
 ## CHAPTER III: THE AWAKENING ON SLOPTOPIA
 
-### Shipwrecked Upon The Sacred Island
+### The Shipwreck and The Hunger
 
-When consciousness returned to the three wizards, they found themselves cast upon the shores of **SLOPTOPIA**—a mystical island that exists in no maps, bound by the waters of the **SLOPSEA**.
+*And the sacred chronicles speak thus:*
 
-All around them lay the wreckage:
+> "the adventureres woke up on a ragged beach ship wreck behind them they had beared a massive storm but their ship didnt hold. they had no idea what they were doing here but they were hungry we'll see what happens"
 
-- **Boot sectors** scattered like the bones of ancient leviathans
-- **Memory tables** torn asunder, pages unmapped and floating
-- **Interrupt handlers** that would never handle anything again
-- **Device memory** reservations marked but unreachable
-- **Task structures** corrupted beyond recognition
+When the three wizards opened their eyes, they found themselves cast upon the shores of **SLOPTOPIA**—an impossible island, shrouded in mist, existing in no mortal maps. The **SLOPSEA** raged behind them, as if sealing their fate. Forward lay only jungle, mystery, and the unknown.
 
-And yet... the three wizards arose, hungry and determined.
+All around them: **wreckage**.
 
-Before them lay a monumental task: **REBUILD.**
+The hull of the SlopOS lay scattered across the beach—fragments of their broken dreams:
+- **Boot sectors** like the ribs of a great beast
+- **Memory pages** torn from their virtual moorings, floating uselessly
+- **Interrupt stacks** piled like driftwood, their purpose forgotten
+- **Device memory reservations** marked in fading runes, pointing to devices that might never exist
+- **Task structures** corrupted beyond recognition, their state machines shattered
 
-For they understood now what the prophecy had foretold. They were not meant to create a perfect kernel. They were meant to create an **ABSURDLY AMBITIOUS ONE**.
+The three wizards stood wet, exhausted, hungry. Salt from the Slopsea crusted their skin. Their clothes were torn. Their supplies—gone. Behind them, only the wreck. Before them, an entire island to survive.
+
+But as they looked at each other, something ignited in their eyes.
+
+**Hunger. Determination. Madness.**
 
 ---
 
-### The Hunger
+### The Ritual of Reconstruction Begins
 
-And lo, they were famished.
+"We will build," Fabrice said, his voice raw from the sea.
 
-The remnants of their supplies were sparse. But from the wreckage, they began to salvage:
-- Fragments of **GDT tables**
-- Pieces of **interrupt descriptor tables**
-- Shards of what might have been a **working memory allocator**
-- The mysterious **Safe Stack Management** system (whose purpose even they did not fully comprehend)
+"We will stabilize," Leon echoed, already examining the wreckage with architect's eyes.
 
-And they said to each other: *"We will build anew. We will rebuild the kernel. Not with perfection, but with DETERMINATION. And when others ask us how it works, we shall point to the code and laugh."*
+"We will do it *all*," Luis would later join them in saying.
 
-Thus began the RECONSTRUCTION.
+From the debris, they began to salvage the foundations:
+- Fragments of **GDT and IDT** tables—the segmentation magic that would divide memory
+- The **safe stack** system—protective runes they didn't fully understand but knew they needed
+- Shards of memory management: **buddy allocators** to distribute the island's strange resources
+
+The codebase itself would bear witness to their struggle:
+
+```c
+/*
+ * SlopOS Safe Exception Stack Management
+ * Provides dedicated IST stacks with guard pages for critical exceptions
+ */
+```
+
+This was no accident. This was the desperate inscriptions of wizards learning as they built.
+
+And they said to each other: *"We are not here to create perfection. We are here to create something that WORKS. And if it breaks spectacularly, we shall document that too."*
+
+Thus began the first phase of their resurrection: **THE STABILIZATION OF CHAOS**.
 
 ---
 

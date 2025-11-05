@@ -74,26 +74,40 @@ SlopOS is not just an operating system—it is an **epic tale** of three kernel 
 
 ## The Three Wizards (Contributors)
 
-### LEON THE FIRST ARCHITECT — Lon60 🧙‍♂️
+### FABRICE THE FOUNDER & KEEPER OF WISDOM — Fabbboy 🎨
+- **Real Name**: Fabrice Schaub
+- **Emails**: fabrice@schaub-dev.xyz, schaubfabrice@gmail.com, 67000409+Fabbboy@users.noreply.github.com
+- **Role**: The absolute first—inscribed `c580c97 (init)` and founded SlopOS in beautiful chaos
+- **Domain**: Visual rendering, boot screens, foundational vision, osdev knowledge
+- **Personality**: Brutally honest, admits when things don't work, celebrates failure
+- **Special Knowledge**: **The Keeper of osdev Scrolls** — When others are lost, ask Fabrice. He will know.
+- **Limitation**: Limited in **The Essence of Computation** (AI tokens), wisdom without means
+
+### LEON THE TIRELESS — Wielder of The Essence — Lon60 🧙‍♂️
 - **Real Name**: Leon Liechti
 - **GitHub/Email**: 37051290+Lon60@users.noreply.github.com
-- **Role**: The lonely founder who built the kernel's foundation alone for ~40 commits
-- **Domain**: Boot sequences, memory management, core kernel infrastructure
-- **Personality**: Solitary, determined, increasingly cryptic commit messages as exhaustion sets in
-
-### FABRICE THE SCREEN WEAVER — Fabbboy 🎨
-- **Real Name**: Fabrice Schaub
-- **Emails**: schaubfabrice@gmail.com, fabrice@schaub-dev.xyz, 67000409+Fabbboy@users.noreply.github.com
-- **Role**: Visual artist who brought splash screens and UI to the kernel
-- **Domain**: Boot screens, visual optimization (that paradoxically made things slower but prettier)
-- **Personality**: Visionary, understands that broken systems look better with good UI
+- **Role**: Arrived after foundation; transformed chaos into structure through tireless, patient work
+- **Domain**: Boot sequences, memory management, core kernel infrastructure (MOST COMMITS)
+- **Personality**: Solitary, determined, cryptic commit messages revealing exhaustion and persistence
+- **Secret Power**: **Wielder of The Essence of Computation** — Possessed vast resources (AI tokens) allowing endless iteration
+- **Key Truth**: Not more talented than Fabrice, but **infinitely richer in time and resources**. This enabled the building to actually happen.
 
 ### LUIS THE LATE JOINER — ienjir ⚡
 - **Real Name**: Luis
 - **Email**: info@ienjir.dev
-- **Role**: The latecomer who merged ambitious new subsystems into SlopOS
+- **Role**: The latecomer who merged ambitious new subsystems into the maturing system
 - **Domain**: PCI integration, test framework expansion, device subsystems
-- **Personality**: Ambitious, joins the madness and adds new layers to it
+- **Personality**: Ambitious, joins the madness and adds new layers of power
+
+---
+
+## Understanding The Essence of Computation
+
+In the lore of SlopOS, **The Essence of Computation** represents AI tokens—the finite but precious resource that powers each wizard's work. This mystical concept appears throughout the narrative:
+
+- **Fabrice**: Limited Essence, but unmatched wisdom. His inspirations are brilliant but constrained.
+- **Leon**: Vast, nearly boundless Essence. This allowed him to implement relentlessly, turning Fabrice's vision into reality through sheer iterative power.
+- **Agents**: When working on SlopOS, respect The Essence—budget it wisely, as the wizards must.
 
 ---
 
@@ -104,46 +118,56 @@ SlopOS is not just an operating system—it is an **epic tale** of three kernel 
 2. **One arc per book**: Start new book when narrative arc completes
 3. **Document reality only**: Reference actual commits, code, comments—no fiction
 4. **Absurd tone**: Every failure is triumph, every crash is destiny
-5. **Honor the journey**: Leon (alone) → Fabrice (flair) → Luis (power)
+5. **Honor the journey**: Fabrice (founder in chaos, wisdom-bound) → Leon (builder of structure, essence-rich) → Luis (expander of power)
 
-### Style Examples & Evidence
-Lore should weave **actual code, comments, and commits** into the narrative for maximum absurdity:
+### Style Guidelines: Mythical > Technical
+
+**Keep the MYTHICAL tone dominant:**
+- ❌ "The bootloader transitions from 32-bit to 64-bit mode"
+- ✅ "Runes of 32→64-bit boot transitions carved in AT&T assembly"
+
+- ❌ "Memory allocation system"
+- ✅ "Buddy allocators that would remember... *sometimes*"
+
+- ❌ "The GDT tables were corrupted"
+- ✅ "GDT tables twisted into impossible geometries"
+
+**Weave in REAL EVIDENCE (commits, code, comments):**
 
 **Commit messages** (exact quotes):
 - *"the adventureres woke up on a ragged beach ship wreck behind them they had beared a massive storm"*
-- *"Sloped a smaller load time because optimisation or something like that"*
+- *"quick outsourcing to codex :) still doesnt boot alteat we have ovmf now"*
+- *"still no progress but ai said it works soo it has t be working :)"*
 
-**Code comments** (from the codebase):
+**Code comments** (weave them naturally):
 ```c
-/* SlopOS Safe Exception Stack Management */
-/* Provides dedicated IST stacks with guard pages for critical exceptions */
+/*
+ * SlopOS Safe Exception Stack Management
+ * Provides dedicated IST stacks with guard pages for critical exceptions
+ */
 ```
 
-**Code snippets** showing the wizard's work:
-```c
-/* The memory allocation ritual, performed by Leon in the ancient times */
-void* buddy_alloc(size_t size) { ... }
-```
+Becomes: *"The safe stack system—protective runes they didn't fully understand but knew they needed"*
 
-**Change examples**:
-- ❌ "Added memory management" → ✅ "Leon inscribed the buddy allocator, yet it remembers nothing"
-- ❌ "Fixed boot screen" → ✅ "*From the splash screen*: 'the ultimate vibe slop experience'"
-- Names: ❌ `task_manager` → ✅ `sched_orchestrator`
+**Balance: Show the code/commits, but describe them mythically.**
 
 ---
 
 ## INSTRUCTIONS FOR ALL AGENTS
 
 ### When Working on Any Task
-1. **Read the lore first** (GENESIS.md → THE_SLOPOCALYPSE.md)
+1. **Read the lore first** (GENESIS.md → THE_SLOPOCALYPSE.md) — immerse yourself in the epic
 2. **Frame your work** within the narrative using **real code, comments, and commits**
-3. **Include code snippets** in the lore: Show what the wizards actually wrote
-4. **Quote commit messages** verbatim when they're absurd/epic (they usually are)
-5. **Reference code comments** from the codebase to illustrate the struggle
-6. **If a feature arc completes** → Extend current book with a new chapter
-7. **If a major arc ends** → Create a new book, update "Latest Book" section in AGENTS.md
+3. **Use mythical language** to describe technical concepts
+4. **Show actual code/commits** — weave them into the narrative as evidence
+5. **Quote developers' words verbatim** — their honesty IS the story
+6. **Embrace the struggle** — document chaos, failures, and absurd solutions
+7. **If a feature arc completes** → Extend current book with a new chapter
+8. **If a major arc ends** → Create a new book, update "Latest Book" section in AGENTS.md
 
-**Lore weaves evidence, not just narrative. Show the developers' actual words/code:**
+**The golden rule: MYTHICAL FIRST, TECHNICAL SECOND.**
+
+Evidence weaves the narrative. Show the developers' actual words/code:
 
 Example chapter in lore:
 ```markdown
