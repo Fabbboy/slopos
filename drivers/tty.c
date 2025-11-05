@@ -8,6 +8,21 @@
 #include "../sched/scheduler.h"
 
 /* ========================================================================
+ * TTY INPUT BUFFER (Unified interrupt-driven input)
+ * ======================================================================== */
+
+#define TTY_INPUT_BUFFER_SIZE 256
+
+typedef struct tty_input_buffer {
+    char data[TTY_INPUT_BUFFER_SIZE];
+    uint32_t head;      /* Write position (interrupt handlers write here) */
+    uint32_t tail;      /* Read position (tty_read_line reads here) */
+    uint32_t count;     /* Number of characters in buffer */
+} tty_input_buffer_t;
+
+static tty_input_buffer_t tty_input_buffer = {0};
+
+/* ========================================================================
  * WAIT QUEUE FOR BLOCKING INPUT
  * ======================================================================== */
 
@@ -34,6 +49,73 @@ static inline void tty_cpu_relax(void) {
     __asm__ volatile ("pause");
 }
 
+/* ========================================================================
+ * TTY INPUT BUFFER OPERATIONS
+ * ======================================================================== */
+
+/*
+ * Check if TTY input buffer is full
+ */
+static inline int tty_buffer_full(void) {
+    return tty_input_buffer.count >= TTY_INPUT_BUFFER_SIZE;
+}
+
+/*
+ * Check if TTY input buffer is empty
+ */
+static inline int tty_buffer_empty(void) {
+    return tty_input_buffer.count == 0;
+}
+
+/*
+ * Push character to TTY input buffer (called from interrupt context)
+ * Returns 0 on success, -1 if buffer is full
+ */
+static int tty_buffer_push(char c) {
+    if (tty_buffer_full()) {
+        /* Buffer full - drop oldest character (overwrite tail) */
+        tty_input_buffer.tail = (tty_input_buffer.tail + 1) % TTY_INPUT_BUFFER_SIZE;
+    } else {
+        tty_input_buffer.count++;
+    }
+
+    tty_input_buffer.data[tty_input_buffer.head] = c;
+    tty_input_buffer.head = (tty_input_buffer.head + 1) % TTY_INPUT_BUFFER_SIZE;
+
+    return 0;
+}
+
+/*
+ * Pop character from TTY input buffer (called from task context)
+ * Returns character if available, 0 if buffer empty
+ */
+static char tty_buffer_pop(void) {
+    tty_interrupts_disable();
+
+    if (tty_buffer_empty()) {
+        tty_interrupts_enable();
+        return 0;
+    }
+
+    char c = tty_input_buffer.data[tty_input_buffer.tail];
+    tty_input_buffer.tail = (tty_input_buffer.tail + 1) % TTY_INPUT_BUFFER_SIZE;
+    tty_input_buffer.count--;
+
+    tty_interrupts_enable();
+
+    return c;
+}
+
+/*
+ * Check if TTY buffer has data (non-destructive, safe to call without locks)
+ */
+static int tty_buffer_has_data(void) {
+    tty_interrupts_disable();
+    int has_data = tty_input_buffer.count > 0;
+    tty_interrupts_enable();
+    return has_data;
+}
+
 static int tty_wait_queue_push(task_t *task) {
     if (!task || tty_wait_queue.count >= TTY_MAX_WAITERS) {
         return -1;
@@ -57,28 +139,38 @@ static task_t *tty_wait_queue_pop(void) {
     return task;
 }
 
+/*
+ * Transfer available input from keyboard/serial to TTY buffer
+ * Called from interrupt context
+ */
+static void tty_transfer_input_to_buffer(void) {
+    /* Transfer from keyboard buffer */
+    while (keyboard_has_input()) {
+        char c = keyboard_getchar();
+        tty_buffer_push(c);
+    }
+
+    /* Transfer from serial buffer */
+    while (serial_data_available(SERIAL_COM1_PORT)) {
+        char c = serial_getc(SERIAL_COM1_PORT);
+
+        /* Normalize line endings and special characters */
+        if (c == '\r') {
+            c = '\n';
+        } else if (c == 0x7F) {
+            c = '\b';
+        }
+
+        tty_buffer_push(c);
+    }
+}
+
 static int tty_input_available(void) {
-    if (keyboard_has_input()) {
-        return 1;
-    }
-
-    if (serial_data_available(SERIAL_COM1_PORT)) {
-        return 1;
-    }
-
-    return 0;
+    return tty_buffer_has_data();
 }
 
 static int tty_input_available_locked(void) {
-    if (keyboard_buffer_pending()) {
-        return 1;
-    }
-
-    if (serial_data_available(SERIAL_COM1_PORT)) {
-        return 1;
-    }
-
-    return 0;
+    return tty_input_buffer.count > 0;
 }
 
 static void tty_block_until_input_ready(void) {
@@ -119,7 +211,15 @@ static void tty_block_until_input_ready(void) {
 }
 
 void tty_notify_input_ready(void) {
+    /* Transfer input from keyboard/serial to TTY buffer */
+    tty_transfer_input_to_buffer();
+
     if (!scheduler_is_enabled()) {
+        return;
+    }
+
+    /* Wake up one waiting task if input is available */
+    if (!tty_input_available()) {
         return;
     }
 
@@ -169,34 +269,18 @@ static inline int is_control_char(char c) {
 }
 
 /*
- * Attempt to fetch a character from any interactive input source.
- * Prefers PS/2 keyboard scancodes but falls back to the serial console
- * when running without a graphical window.
+ * Get next character from TTY input buffer
+ * Returns character if available, 0 otherwise
+ * This is interrupt-driven - data is populated by interrupt handlers
  */
-static int tty_poll_input_char(char *out_char) {
-    if (!out_char) {
+static char tty_get_char(void) {
+    /* Check if data is available in TTY buffer */
+    if (!tty_buffer_has_data()) {
         return 0;
     }
 
-    if (keyboard_has_input()) {
-        *out_char = keyboard_getchar();
-        return 1;
-    }
-
-    if (serial_data_available(SERIAL_COM1_PORT)) {
-        char c = serial_getc(SERIAL_COM1_PORT);
-
-        if (c == '\r') {
-            c = '\n';
-        } else if (c == 0x7F) {
-            c = '\b';
-        }
-
-        *out_char = c;
-        return 1;
-    }
-
-    return 0;
+    /* Read character from TTY buffer */
+    return tty_buffer_pop();
 }
 
 /* ========================================================================
@@ -207,37 +291,43 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
     if (!buffer || buffer_size == 0) {
         return 0;
     }
-    
+
     /* Ensure we have at least space for null terminator */
     if (buffer_size < 2) {
         buffer[0] = '\0';
         return 0;
     }
-    
+
     size_t pos = 0;  /* Current position in buffer */
     size_t max_pos = buffer_size - 1;  /* Maximum position (leave room for null terminator) */
-    
+
     /* Read characters until Enter is pressed */
     while (1) {
-        /* Block until character is available from keyboard or serial */
-        char c = 0;
-        while (!tty_poll_input_char(&c)) {
+        /* Block until input is available in the TTY buffer (interrupt-driven) */
+        while (!tty_input_available()) {
             tty_block_until_input_ready();
         }
-        
+
+        /* Read character from TTY buffer (populated by interrupts) */
+        char c = tty_get_char();
+        if (c == 0) {
+            /* Spurious wake-up or race condition, loop again */
+            continue;
+        }
+
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {
             buffer[pos] = '\0';
             kprint_char('\n');  /* Echo newline */
             return pos;
         }
-        
+
         /* Handle Backspace */
         if (c == '\b') {
             if (pos > 0) {
                 /* Remove character from buffer */
                 pos--;
-                
+
                 /* Erase character visually: backspace, space, backspace */
                 kprint_char('\b');
                 kprint_char(' ');
@@ -246,26 +336,26 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
             /* If buffer is empty, ignore backspace (no character to delete) */
             continue;
         }
-        
+
         /* Handle buffer overflow */
         if (pos >= max_pos) {
             /* Buffer full - ignore new characters (or could beep/alert) */
             continue;
         }
-        
+
         /* Handle printable characters */
         if (is_printable(c)) {
             buffer[pos++] = c;
             kprint_char(c);  /* Echo character */
             continue;
         }
-        
+
         /* Handle other control characters (ignore by default) */
         if (is_control_char(c)) {
             /* Don't echo control characters */
             continue;
         }
-        
+
         /* For any other character, store and echo if it's in printable range */
         if (pos < max_pos) {
             buffer[pos++] = c;
