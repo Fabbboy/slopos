@@ -121,6 +121,7 @@ void kernel_panic(const char *message) {
     panic_output_string("\n");
 
     panic_output_string("===================\n");
+    panic_output_string("Skill issue lol\n");
     panic_output_string("System halted.\n");
 
     /*
@@ -179,6 +180,7 @@ void kernel_panic_with_context(const char *message, const char *function,
     panic_output_string("\n");
 
     panic_output_string("===================\n");
+    panic_output_string("Skill issue lol\n");
     panic_output_string("System halted.\n");
 
     /*
@@ -236,8 +238,10 @@ void kernel_roulette(void) {
     if ((fate & 1) == 0) {
         /* Even: The wheel has decided your fate */
         panic_output_string("Even number. The wheel has spoken. Destiny awaits in the abyss.\n");
-        panic_output_string("=== INITIATING KERNEL PANIC ===\n");
-        kernel_panic("Kernel roulette has chosen even—fate is sealed");
+        panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
+        panic_output_string("L bozzo lol\n");
+        panic_output_string("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===\n");
+        kernel_panic("[ROULETTE] Even fate chosen - this is expected chaos, not a bug");
     } else {
         /* Odd: The kernel survives another day */
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");

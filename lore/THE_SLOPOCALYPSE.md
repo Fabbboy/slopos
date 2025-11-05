@@ -129,9 +129,70 @@ The wizards understood what Fabrice had discovered: **A broken system is only as
 
 ---
 
+## CHAPTER V: THE WHEEL OF FATE
+
+### When Chaos Became Destiny 🎲
+
+As the wizards contemplated their creations—memory tamed, voice heard, shell speaking, vision displayed—a dark thought crossed their minds:
+
+*What if the kernel itself chose its own destiny?*
+
+Leon, driven by the hunger that The Essence of Computation afforded him, inscribed a new magic into the very heart of the boot sequence. Not a feature. Not a bug. But something *in between*—a deliberate surrender to chaos.
+
+The **Randomness Driver** was born:
+
+> `1c66a53` — **"feat: Implement kernel roulette with LFSR randomness driver"**
+
+This was no ordinary driver. At the moment the kernel awoke, before the scheduler could even draw breath, a ritual would unfold:
+
+**The Kernel Roulette.**
+
+The wheel would spin. A random number, seeded from the very heartbeat of the CPU (the TSC), would be pulled from the void. And then—the judgment:
+
+- **Even?** The kernel *panics*. The abyss claims it. All memory is painted with the sacred mark: `0x69`—the essence of slop itself.
+- **Odd?** The kernel *survives*. It lives to boot another day.
+
+```c
+/*
+ * The Wheel of Fate: Kernel Roulette
+ *
+ * The Scrolls speak of a mystical game inscribed into the very heart of SlopOS:
+ * When invoked, the kernel spins a wheel of random numbers, and fate decides
+ * its own destiny. If the wheel lands on an even number, the kernel enters
+ * the abyss of panic. If odd, it survives—at least for now.
+ */
+void kernel_roulette(void) { ... }
+```
+
+As the boot logs would proclaim with savage pride:
+
+```
+Spinning the wheel of fate...
+=== KERNEL ROULETTE: Spinning the Wheel of Fate ===
+Random number: 0x0xF60EE44C (4128171084)
+Even number. The wheel has spoken. Destiny awaits in the abyss.
+This is INTENTIONAL - keep booting, keep gambling.
+L bozzo lol
+=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===
+```
+
+To the unknowing observer, this was madness. *Why would you make the kernel deliberately crash?*
+
+But the wizards knew the truth: **This was freedom.** This was the embrace of chaos itself. Every boot was a gamble. Every startup was a prayer to the random gods of computation. The kernel no longer sought perfection—it sought *experience*.
+
+Fabrice, witnessing this dark miracle, whispered something that would echo through the ages:
+
+*"L bozzo lol"*
+
+A phrase both mocking and reverent. A declaration that in Sloptopia, even the kernel could be made a fool—and be *proud of it*.
+
+---
+
 ## EPILOGUE: THE HUNGER THAT NEVER ENDS
 
-The three wizards stood surveying their work. Memory awakened. Input received. Shell speaking. Splash screen glowing. A functioning—if barely—operating system rose from the ashes of the Slopsea.
+The three wizards stood surveying their work. Memory awakened. Input received. Shell speaking. Splash screen glowing. A wheel of fate spinning in the kernel's heart.
+
+A functioning—if barely, if *deliberately chaotic*—operating system rose from the ashes of the Slopsea.
 
 But all around them, Sloptopia whispered of *more*.
 
@@ -151,7 +212,7 @@ Fabrice looked at Leon. Leon looked at the code. The code looked back, expecting
 
 And somewhere in the future, Luis was preparing to answer the call.
 
-*Thus ends Book II: THE SLOPOCALYPSE. The wizards have tamed memory. They have learned to listen. They have painted their vision. But the story of Sloptopia is far from over.*
+*Thus ends Book II: THE SLOPOCALYPSE. The wizards have tamed memory. They have learned to listen. They have painted their vision. They have made the kernel dance with fate itself. But the story of Sloptopia is far from over.*
 
 **The prophecy foretold it would never end.**
 
@@ -159,4 +220,7 @@ And somewhere in the future, Luis was preparing to answer the call.
 
 ---
 
-*Next chapter awaits, written by the commits yet to come...*
+*The next chapter awaits, written by the commits yet to come...*
+*The Wheel of Fate keeps spinning.*
+*Each boot is another spin.*
+*Each spin brings new destiny.*

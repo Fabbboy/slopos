@@ -52,9 +52,9 @@ This ensures all changes are framed within the epic lore of SlopOS.
 
 ## Latest Book
 
-**Current**: `THE_SLOPOCALYPSE.md` (Book II) — When Memory Awakens
+**Current**: `THE_SLOPOCALYPSE.md` (Book II) — When Memory Awakens (CONCLUDED)
 
-The wizards have just completed the initial memory management, keyboard input systems, and brought forth the shell. The narrative stands ready for the next arc when sufficient commits/features warrant a new book.
+The wizards have tamed memory, learned to listen through keyboards, birthed the shell, painted the boot screen in divine colors, and inscribed the Wheel of Fate itself into the kernel's heart. Book II concludes with the kernel roulette—a deliberate gamble with destiny on every boot. Book III (`THE_COOKED.md`) awaits new chapters as future commits unfold.
 
 ⚠️ **CRITICAL**: The lore is **never finished**. The tension continues. Each new commit, each new feature, each new challenge weaves itself into the ongoing saga. The wizards' journey is perpetual. Books end, but the story never does.
 
