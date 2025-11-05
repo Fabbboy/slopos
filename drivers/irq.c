@@ -129,6 +129,17 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     uint8_t scancode = inb(PS2_DATA_PORT);
     keyboard_event_counter++;
 
+    /* Debug: Log first few keyboard interrupts to verify they're working */
+    if (keyboard_event_counter <= 5) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            kprint("IRQ: Keyboard interrupt #");
+            kprint_dec(keyboard_event_counter);
+            kprint(" - scancode=");
+            kprint_hex(scancode);
+            kprintln("");
+        });
+    }
+
     /* Pass scancode to keyboard driver for processing */
     keyboard_handle_scancode(scancode);
 }

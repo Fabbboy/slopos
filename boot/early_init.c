@@ -396,6 +396,12 @@ static int boot_step_irq_setup(void) {
     boot_debug("Configuring IRQ dispatcher...");
     irq_init();
     boot_debug("IRQ dispatcher ready.");
+
+    /* Enable interrupts globally now that IDT and IRQ handlers are set up */
+    boot_debug("Enabling interrupts globally (sti)...");
+    __asm__ volatile ("sti" : : : "memory");
+    boot_debug("Interrupts enabled.");
+
     return 0;
 }
 
