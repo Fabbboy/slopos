@@ -108,6 +108,13 @@ char serial_getc(uint16_t port);
 int serial_data_available(uint16_t port);
 
 /*
+ * Serial interrupt handler - processes received data from serial port
+ * Called from IRQ handler (IRQ3 for COM2, IRQ4 for COM1)
+ * This function reads data from the UART and stores it in the receive buffer
+ */
+void serial_handle_interrupt(uint16_t port);
+
+/*
  * Check if the transmitter is ready to send data
  * Returns non-zero if ready, zero if busy
  */

@@ -177,7 +177,8 @@
 /* COM port register offsets */
 #define SERIAL_DATA_REG               0        /* Data register (read/write) */
 #define SERIAL_INT_ENABLE_REG         1        /* Interrupt enable register */
-#define SERIAL_FIFO_CTRL_REG          2        /* FIFO control register */
+#define SERIAL_INT_ID_REG             2        /* Interrupt identification register (read) */
+#define SERIAL_FIFO_CTRL_REG          2        /* FIFO control register (write) */
 #define SERIAL_LINE_CTRL_REG          3        /* Line control register */
 #define SERIAL_MODEM_CTRL_REG         4        /* Modem control register */
 #define SERIAL_LINE_STATUS_REG        5        /* Line status register */

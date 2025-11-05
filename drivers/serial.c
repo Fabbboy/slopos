@@ -19,6 +19,92 @@ static uint16_t kernel_output_port = COM1_BASE;
 static int port_errors[4] = {0};
 
 /* ========================================================================
+ * RECEIVE BUFFER CONFIGURATION (Interrupt-driven input)
+ * ======================================================================== */
+
+#define SERIAL_RX_BUFFER_SIZE 256
+
+/* Receive buffer structure (circular buffer) */
+typedef struct serial_rx_buffer {
+    char data[SERIAL_RX_BUFFER_SIZE];
+    uint32_t head;      /* Write position (interrupt handler writes here) */
+    uint32_t tail;      /* Read position (user code reads here) */
+    uint32_t count;     /* Number of characters in buffer */
+} serial_rx_buffer_t;
+
+/* Receive buffers for each COM port */
+static serial_rx_buffer_t rx_buffers[4] = {0};
+
+/* ========================================================================
+ * BUFFER OPERATIONS (for interrupt-driven receive)
+ * ======================================================================== */
+
+/*
+ * Check if receive buffer is full
+ */
+static inline int rx_buffer_full(serial_rx_buffer_t *buf) {
+    return buf->count >= SERIAL_RX_BUFFER_SIZE;
+}
+
+/*
+ * Check if receive buffer is empty
+ */
+static inline int rx_buffer_empty(serial_rx_buffer_t *buf) {
+    return buf->count == 0;
+}
+
+/*
+ * Push character to receive buffer (called from IRQ context)
+ * Returns 0 on success, -1 if buffer is full
+ */
+static int rx_buffer_push(serial_rx_buffer_t *buf, char c) {
+    if (rx_buffer_full(buf)) {
+        /* Buffer full - drop oldest character (overwrite tail) */
+        buf->tail = (buf->tail + 1) % SERIAL_RX_BUFFER_SIZE;
+    } else {
+        buf->count++;
+    }
+
+    buf->data[buf->head] = c;
+    buf->head = (buf->head + 1) % SERIAL_RX_BUFFER_SIZE;
+
+    return 0;
+}
+
+/*
+ * Pop character from receive buffer (called from task context)
+ * Returns character if available, 0 if buffer empty
+ */
+static char rx_buffer_pop(serial_rx_buffer_t *buf) {
+    /* Disable interrupts during critical section */
+    __asm__ volatile ("cli");
+
+    if (rx_buffer_empty(buf)) {
+        __asm__ volatile ("sti");
+        return 0;
+    }
+
+    char c = buf->data[buf->tail];
+    buf->tail = (buf->tail + 1) % SERIAL_RX_BUFFER_SIZE;
+    buf->count--;
+
+    /* Re-enable interrupts */
+    __asm__ volatile ("sti");
+
+    return c;
+}
+
+/*
+ * Check if buffer has data (non-destructive)
+ */
+static int rx_buffer_has_data(serial_rx_buffer_t *buf) {
+    __asm__ volatile ("cli");
+    int has_data = buf->count > 0;
+    __asm__ volatile ("sti");
+    return has_data;
+}
+
+/* ========================================================================
  * LOW-LEVEL HARDWARE ACCESS
  * ======================================================================== */
 
@@ -82,6 +168,59 @@ uint16_t serial_calculate_divisor(uint32_t baud_rate) {
     }
 
     return (uint16_t)(base_frequency / baud_rate);
+}
+
+/* ========================================================================
+ * SERIAL INTERRUPT HANDLER
+ * ======================================================================== */
+
+/*
+ * Serial interrupt handler - processes received data
+ * Called from IRQ handler (IRQ3 for COM2, IRQ4 for COM1)
+ */
+void serial_handle_interrupt(uint16_t port) {
+    int port_index = get_port_index(port);
+    if (port_index < 0 || port_index >= 4) {
+        return;
+    }
+
+    /* Read the Interrupt Identification Register to determine interrupt type */
+    uint8_t iir = inb(port + SERIAL_INT_ID_REG);
+
+    /* Check if interrupt is pending (bit 0 clear means interrupt pending) */
+    if (iir & 0x01) {
+        return; /* No interrupt pending */
+    }
+
+    /* Get interrupt type (bits 1-3) */
+    uint8_t int_type = (iir >> 1) & 0x07;
+
+    switch (int_type) {
+        case 0x02: /* Received Data Available */
+        case 0x06: /* Receiver Line Status */
+            /* Read all available data from the FIFO */
+            while (inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY) {
+                char c = inb(port + SERIAL_DATA_REG);
+                rx_buffer_push(&rx_buffers[port_index], c);
+
+                /* Notify TTY that input is ready */
+                extern void tty_notify_input_ready(void);
+                tty_notify_input_ready();
+            }
+            break;
+
+        case 0x01: /* Transmitter Holding Register Empty */
+            /* We don't handle transmit interrupts yet */
+            break;
+
+        case 0x00: /* Modem Status */
+            /* Read and ignore modem status register to clear interrupt */
+            (void)inb(port + SERIAL_MODEM_STATUS_REG);
+            break;
+
+        default:
+            break;
+    }
 }
 
 /* ========================================================================
@@ -170,6 +309,11 @@ int serial_init(uint16_t port, uint32_t baud_rate, uint8_t data_bits,
     /* Disable loopback mode and enable normal operation */
     outb(port + SERIAL_MODEM_CTRL_REG, 0x0F);
 
+    /* Initialize receive buffer */
+    rx_buffers[port_index].head = 0;
+    rx_buffers[port_index].tail = 0;
+    rx_buffers[port_index].count = 0;
+
     /* Store configuration */
     port_configs[port_index].base_port = port;
     port_configs[port_index].baud_rate = baud_rate;
@@ -177,6 +321,10 @@ int serial_init(uint16_t port, uint32_t baud_rate, uint8_t data_bits,
     port_configs[port_index].stop_bits = stop_bits;
     port_configs[port_index].parity = parity;
     port_configs[port_index].initialized = 1;
+
+    /* Enable receive data available interrupt (bit 0)
+     * This will trigger an interrupt when data is received */
+    outb(port + SERIAL_INT_ENABLE_REG, 0x01);
 
     set_port_error(port, SERIAL_ERROR_NONE);
     return SERIAL_ERROR_NONE;
@@ -197,8 +345,13 @@ int serial_transmitter_ready(uint16_t port) {
 }
 
 int serial_data_available(uint16_t port) {
-    uint8_t status = inb(port + SERIAL_LINE_STATUS_REG);
-    return (status & SERIAL_LSR_DATA_READY) != 0;
+    int port_index = get_port_index(port);
+    if (port_index < 0 || port_index >= 4) {
+        return 0;
+    }
+
+    /* Check if data is available in the receive buffer */
+    return rx_buffer_has_data(&rx_buffers[port_index]);
 }
 
 uint8_t serial_get_line_status(uint16_t port) {
@@ -257,12 +410,18 @@ void serial_flush(uint16_t port) {
  * ======================================================================== */
 
 char serial_getc(uint16_t port) {
-    /* Wait for data to be available */
-    while (!serial_data_available(port)) {
-        /* Busy wait */
+    int port_index = get_port_index(port);
+    if (port_index < 0 || port_index >= 4) {
+        return 0;
     }
 
-    return inb(port + SERIAL_DATA_REG);
+    /* Wait for data to be available in the buffer */
+    while (!serial_data_available(port)) {
+        /* Busy wait - will be woken by interrupt when data arrives */
+    }
+
+    /* Read character from buffer */
+    return rx_buffer_pop(&rx_buffers[port_index]);
 }
 
 /* ========================================================================

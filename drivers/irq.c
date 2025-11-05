@@ -144,6 +144,49 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     keyboard_handle_scancode(scancode);
 }
 
+static uint64_t serial_com2_event_counter = 0;
+static uint64_t serial_com1_event_counter = 0;
+
+static void serial_com2_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *context) {
+    (void)irq;
+    (void)frame;
+    (void)context;
+
+    serial_com2_event_counter++;
+
+    /* Debug: Log first few serial interrupts */
+    if (serial_com2_event_counter <= 3) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            kprint("IRQ: COM2 serial interrupt #");
+            kprint_dec(serial_com2_event_counter);
+            kprintln("");
+        });
+    }
+
+    /* Pass to serial driver for processing */
+    serial_handle_interrupt(COM2_BASE);
+}
+
+static void serial_com1_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *context) {
+    (void)irq;
+    (void)frame;
+    (void)context;
+
+    serial_com1_event_counter++;
+
+    /* Debug: Log first few serial interrupts */
+    if (serial_com1_event_counter <= 3) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            kprint("IRQ: COM1 serial interrupt #");
+            kprint_dec(serial_com1_event_counter);
+            kprintln("");
+        });
+    }
+
+    /* Pass to serial driver for processing */
+    serial_handle_interrupt(COM1_BASE);
+}
+
 uint64_t irq_get_timer_ticks(void) {
     return timer_tick_counter;
 }
@@ -164,8 +207,11 @@ void irq_init(void) {
     /* Initialize keyboard driver */
     keyboard_init();
 
+    /* Register interrupt handlers */
     irq_register_handler(0, timer_irq_handler, NULL, "timer");
     irq_register_handler(1, keyboard_irq_handler, NULL, "keyboard");
+    irq_register_handler(3, serial_com2_irq_handler, NULL, "serial_com2");
+    irq_register_handler(4, serial_com1_irq_handler, NULL, "serial_com1");
 
     pic_enable_safe_irqs();
 }
