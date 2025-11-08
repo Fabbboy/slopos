@@ -33,5 +33,7 @@ int ioapic_config_irq(uint32_t gsi, uint8_t vector, uint8_t lapic_id, uint32_t f
 int ioapic_mask_gsi(uint32_t gsi);
 int ioapic_unmask_gsi(uint32_t gsi);
 int ioapic_route_legacy_irq1(uint8_t vector);
+int ioapic_is_ready(void);
+int ioapic_legacy_irq_info(uint8_t legacy_irq, uint32_t *out_gsi, uint32_t *out_flags);
 
 #endif /* SLOPOS_IOAPIC_H */

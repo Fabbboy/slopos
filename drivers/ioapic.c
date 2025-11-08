@@ -545,6 +545,35 @@ int ioapic_unmask_gsi(uint32_t gsi) {
     return ioapic_update_mask(gsi, false);
 }
 
+int ioapic_is_ready(void) {
+    return ioapic_ready;
+}
+
+int ioapic_legacy_irq_info(uint8_t legacy_irq, uint32_t *out_gsi, uint32_t *out_flags) {
+    if (!out_gsi || !out_flags) {
+        return -1;
+    }
+
+    if (!ioapic_ready) {
+        boot_log_info("IOAPIC: Legacy route query before initialization");
+        return -1;
+    }
+
+    uint32_t gsi = legacy_irq;
+    uint32_t flags = IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE;
+
+    const struct ioapic_iso *iso = ioapic_find_iso(legacy_irq);
+    if (iso) {
+        gsi = iso->gsi;
+        flags = ioapic_flags_from_acpi(iso->bus_source, iso->flags);
+        ioapic_log_iso(iso);
+    }
+
+    *out_gsi = gsi;
+    *out_flags = flags;
+    return 0;
+}
+
 int ioapic_route_legacy_irq1(uint8_t vector) {
     if (!ioapic_ready) {
         boot_log_info("IOAPIC: Driver not initialized, cannot route IRQ1");

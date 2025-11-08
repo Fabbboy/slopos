@@ -3,6 +3,7 @@
 #include "pic.h"
 #include "apic.h"
 #include "keyboard.h"
+#include "ioapic.h"
 #include "../boot/idt.h"
 #include "../boot/log.h"
 #include "../sched/scheduler.h"
@@ -25,6 +26,12 @@ struct irq_entry {
 };
 
 static struct irq_entry irq_table[IRQ_LINES];
+struct irq_route_state {
+    int via_ioapic;
+    uint32_t gsi;
+};
+
+static struct irq_route_state irq_route_table[IRQ_LINES];
 static int irq_system_initialized = 0;
 static uint64_t timer_tick_counter = 0;
 static uint64_t keyboard_event_counter = 0;
@@ -39,6 +46,13 @@ static inline uint8_t inb(uint16_t port) {
     uint8_t value;
     __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
     return value;
+}
+
+static inline int irq_line_has_ioapic_route(uint8_t irq) {
+    if (irq >= IRQ_LINES) {
+        return 0;
+    }
+    return irq_route_table[irq].via_ioapic;
 }
 
 static inline void acknowledge_irq(uint8_t irq) {
@@ -57,7 +71,11 @@ static void mask_irq_line(uint8_t irq) {
     }
 
     if (!irq_table[irq].masked) {
-        pic_disable_irq(irq);
+        if (irq_line_has_ioapic_route(irq)) {
+            ioapic_mask_gsi(irq_route_table[irq].gsi);
+        } else {
+            pic_disable_irq(irq);
+        }
         irq_table[irq].masked = 1;
     }
 }
@@ -68,7 +86,11 @@ static void unmask_irq_line(uint8_t irq) {
     }
 
     if (irq_table[irq].masked) {
-        pic_enable_irq(irq);
+        if (irq_line_has_ioapic_route(irq)) {
+            ioapic_unmask_gsi(irq_route_table[irq].gsi);
+        } else {
+            pic_enable_irq(irq);
+        }
         irq_table[irq].masked = 0;
     }
 }
@@ -133,6 +155,86 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     keyboard_handle_scancode(scancode);
 }
 
+static void irq_program_ioapic_route(uint8_t irq) {
+    if (irq >= IRQ_LINES) {
+        return;
+    }
+
+    if (!apic_is_enabled() || !ioapic_is_ready()) {
+        return;
+    }
+
+    uint32_t gsi = 0;
+    uint32_t legacy_flags = 0;
+    if (ioapic_legacy_irq_info(irq, &gsi, &legacy_flags) != 0) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("IRQ: IOAPIC route lookup failed for IRQ ");
+            kprint_dec(irq);
+            kprintln(", staying on PIC bridge");
+        });
+        return;
+    }
+
+    uint8_t vector = (uint8_t)(IRQ_BASE_VECTOR + irq);
+    uint8_t lapic_id = (uint8_t)apic_get_id();
+    uint32_t flags = IOAPIC_FLAG_DELIVERY_FIXED |
+                     IOAPIC_FLAG_DEST_PHYSICAL |
+                     legacy_flags |
+                     IOAPIC_FLAG_MASK;
+
+    if (ioapic_config_irq(gsi, vector, lapic_id, flags) != 0) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("IRQ: Failed to program IOAPIC route for IRQ ");
+            kprint_dec(irq);
+            kprintln(", falling back to PIC");
+        });
+        return;
+    }
+
+    irq_route_table[irq].via_ioapic = 1;
+    irq_route_table[irq].gsi = gsi;
+
+    const char *polarity = (legacy_flags & IOAPIC_FLAG_POLARITY_LOW) ? "active-low" : "active-high";
+    const char *trigger = (legacy_flags & IOAPIC_FLAG_TRIGGER_LEVEL) ? "level" : "edge";
+
+    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        kprint("IRQ: IOAPIC route IRQ ");
+        kprint_dec(irq);
+        kprint(" -> GSI ");
+        kprint_dec(gsi);
+        kprint(", vector 0x");
+        kprint_hex(vector);
+        kprint(" (");
+        kprint(polarity);
+        kprint(", ");
+        kprint(trigger);
+        kprintln(")");
+    });
+
+    if (irq_table[irq].masked) {
+        ioapic_mask_gsi(gsi);
+    } else {
+        ioapic_unmask_gsi(gsi);
+    }
+
+    /* Keep PIC masked for this line so ExtINT bridge stays idle */
+    pic_disable_irq(irq);
+}
+
+static void irq_setup_ioapic_routes(void) {
+    if (!apic_is_enabled() || !ioapic_is_ready()) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("IRQ: IOAPIC not ready, legacy PIC bridge remains active");
+            kprintln("");
+        });
+        return;
+    }
+
+    irq_program_ioapic_route(PIC_IRQ_TIMER);
+    irq_program_ioapic_route(PIC_IRQ_KEYBOARD);
+    irq_program_ioapic_route(PIC_IRQ_COM1);
+}
+
 uint64_t irq_get_timer_ticks(void) {
     return timer_tick_counter;
 }
@@ -146,17 +248,19 @@ void irq_init(void) {
         irq_table[i].last_timestamp = 0;
         irq_table[i].masked = 1;
         irq_table[i].reported_unhandled = 0;
+        irq_route_table[i].via_ioapic = 0;
+        irq_route_table[i].gsi = 0;
     }
 
     irq_system_initialized = 1;
+
+    irq_setup_ioapic_routes();
 
     /* Initialize keyboard driver */
     keyboard_init();
 
     irq_register_handler(0, timer_irq_handler, NULL, "timer");
     irq_register_handler(1, keyboard_irq_handler, NULL, "keyboard");
-
-    pic_enable_safe_irqs();
 }
 
 int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, const char *name) {

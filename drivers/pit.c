@@ -1,7 +1,6 @@
 #include "pit.h"
 #include "serial.h"
-#include "pic.h"
-#include "apic.h"
+#include "irq.h"
 #include "../boot/log.h"
 #include <stdint.h>
 
@@ -12,6 +11,8 @@
 #define PIT_COMMAND_ACCESS_LOHI    0x30
 #define PIT_COMMAND_MODE_SQUARE    0x06
 #define PIT_COMMAND_BINARY         0x00
+
+#define PIT_IRQ_LINE 0
 
 static uint32_t current_frequency_hz = 0;
 
@@ -70,9 +71,7 @@ void pit_init(uint32_t frequency_hz) {
 
     pit_set_frequency(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
 
-    if (!apic_is_enabled()) {
-        pic_disable_irq(0);
-    }
+    irq_disable_line(PIT_IRQ_LINE);
 }
 
 uint32_t pit_get_frequency(void) {
@@ -80,14 +79,9 @@ uint32_t pit_get_frequency(void) {
 }
 
 void pit_enable_irq(void) {
-    if (!apic_is_enabled()) {
-        pic_enable_irq(0);
-    }
+    irq_enable_line(PIT_IRQ_LINE);
 }
 
 void pit_disable_irq(void) {
-    if (!apic_is_enabled()) {
-        pic_disable_irq(0);
-    }
+    irq_disable_line(PIT_IRQ_LINE);
 }
-

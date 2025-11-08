@@ -554,10 +554,10 @@ BOOT_INIT_STEP(drivers, "debug", boot_step_debug_subsystem);
 BOOT_INIT_STEP(drivers, "gdt/tss", boot_step_gdt_setup);
 BOOT_INIT_STEP(drivers, "idt", boot_step_idt_setup);
 BOOT_INIT_STEP(drivers, "pic", boot_step_pic_setup);
-BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
-BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
 BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
 BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
+BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
+BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
 BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
 
