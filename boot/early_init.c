@@ -19,6 +19,7 @@
 #include "../drivers/apic.h"
 #include "../drivers/pit.h"
 #include "../drivers/irq.h"
+#include "../drivers/ioapic.h"
 #include "../drivers/interrupt_test.h"
 #include "../sched/task.h"
 #include "../sched/scheduler.h"
@@ -444,6 +445,17 @@ static int boot_step_apic_setup(void) {
     return 0;
 }
 
+static int boot_step_ioapic_setup(void) {
+    boot_debug("Discovering IOAPIC controllers via ACPI MADT...");
+    splash_report_progress(67, "Discovering IOAPIC...");
+    if (ioapic_init() != 0) {
+        boot_info("WARNING: IOAPIC discovery failed - continuing with legacy PIC bridge");
+    } else {
+        boot_debug("IOAPIC: discovery complete, ready for redirection programming.");
+    }
+    return 0;
+}
+
 static int boot_step_pci_init(void) {
     boot_debug("Enumerating PCI devices...");
     splash_report_progress(70, "Enumerating PCI devices...");
@@ -545,6 +557,7 @@ BOOT_INIT_STEP(drivers, "pic", boot_step_pic_setup);
 BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
 BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
 BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
+BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
 BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
 

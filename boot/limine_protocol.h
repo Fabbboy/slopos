@@ -16,6 +16,9 @@ int is_hhdm_available(void);
 uint64_t get_kernel_phys_base(void);
 uint64_t get_kernel_virt_base(void);
 const char *get_kernel_cmdline(void);
+int is_rsdp_available(void);
+uint64_t get_rsdp_phys_address(void);
+const void *get_rsdp_address(void);
 
 const struct limine_memmap_response *limine_get_memmap_response(void);
 const struct limine_hhdm_response *limine_get_hhdm_response(void);

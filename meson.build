@@ -121,6 +121,7 @@ drivers_sources += files(
   'drivers/pic.c',
   'drivers/pit.c',
   'drivers/apic.c',
+  'drivers/ioapic.c',
   'drivers/irq.c',
   'drivers/keyboard.c',
   'drivers/tty.c',

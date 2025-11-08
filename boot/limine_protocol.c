@@ -50,6 +50,14 @@ static volatile struct limine_hhdm_request hhdm_request = {
     .response = NULL
 };
 
+/* Request ACPI RSDP pointer from Limine */
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_rsdp_request rsdp_request = {
+    .id = LIMINE_RSDP_REQUEST,
+    .revision = 0,
+    .response = NULL
+};
+
 /* Request bootloader info from Limine */
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_bootloader_info_request bootloader_info_request = {
@@ -93,9 +101,12 @@ static struct {
     uint64_t hhdm_offset;
     uint64_t kernel_phys_base;
     uint64_t kernel_virt_base;
+    uint64_t rsdp_phys_addr;
+    uint64_t rsdp_virt_addr;
     int framebuffer_available;
     int memory_map_available;
     int hhdm_available;
+    int rsdp_available;
     int kernel_cmdline_available;
     char kernel_cmdline[BOOT_CMDLINE_MAX_LEN];
 } system_info = {0};
@@ -163,6 +174,30 @@ int init_limine_protocol(void) {
             kprint_hex(ka->virtual_base);
             kprintln("");
         });
+    }
+
+    /* Parse ACPI RSDP pointer */
+    if (rsdp_request.response != NULL) {
+        struct limine_rsdp_response *rsdp =
+            (struct limine_rsdp_response *)rsdp_request.response;
+
+        uintptr_t rsdp_ptr = (uintptr_t)rsdp->address;
+        system_info.rsdp_phys_addr = (uint64_t)rsdp_ptr;
+        system_info.rsdp_virt_addr = (uint64_t)rsdp_ptr;
+
+        if (rsdp_ptr != 0) {
+            system_info.rsdp_available = 1;
+
+            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+                kprint("ACPI: RSDP pointer: ");
+                kprint_hex(system_info.rsdp_virt_addr);
+                kprintln("");
+            });
+        } else {
+            boot_log_info("ACPI: Limine returned null RSDP pointer");
+        }
+    } else {
+        boot_log_debug("ACPI: RSDP request unavailable from Limine");
     }
 
     /* Parse kernel command line */
@@ -373,4 +408,26 @@ const struct limine_memmap_response *limine_get_memmap_response(void) {
 
 const struct limine_hhdm_response *limine_get_hhdm_response(void) {
     return (const struct limine_hhdm_response *)hhdm_request.response;
+}
+
+int is_rsdp_available(void) {
+    return system_info.rsdp_available;
+}
+
+uint64_t get_rsdp_phys_address(void) {
+    return system_info.rsdp_phys_addr;
+}
+
+const void *get_rsdp_address(void) {
+    if (!system_info.rsdp_available) {
+        return NULL;
+    }
+    if (system_info.rsdp_virt_addr != 0) {
+        return (const void *)(uintptr_t)system_info.rsdp_virt_addr;
+    }
+    if (system_info.hhdm_available && system_info.rsdp_phys_addr != 0) {
+        return (const void *)(uintptr_t)
+            (system_info.rsdp_phys_addr + system_info.hhdm_offset);
+    }
+    return (const void *)(uintptr_t)system_info.rsdp_phys_addr;
 }
