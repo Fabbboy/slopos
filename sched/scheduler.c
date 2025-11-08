@@ -513,8 +513,6 @@ static void idle_task_function(void *arg) {
         } else if (kernel_port != SERIAL_COM1_PORT &&
                    serial_buffer_pending(SERIAL_COM1_PORT)) {
             serviced_serial = 1;
-        } else if (serial_poll_rx(SERIAL_COM1_PORT)) {
-            serviced_serial = 1;
         }
 
         if (serviced_serial) {

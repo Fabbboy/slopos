@@ -138,12 +138,6 @@ void serial_flush(uint16_t port);
  */
 int serial_enable_interrupts(uint16_t port, uint8_t irq_line);
 
-/*
- * Opportunistically poll the UART and drain any received characters.
- * Returns non-zero if new input was collected.
- */
-int serial_poll_rx(uint16_t port);
-
 /* ========================================================================
  * CONVENIENCE FUNCTIONS FOR DEFAULT COM1 OUTPUT
  * ======================================================================== */

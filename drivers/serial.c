@@ -308,7 +308,10 @@ static void serial_drain_receive_fifo(uint16_t port, int from_interrupt) {
     if (received) {
         tty_notify_input_ready();
         if (from_interrupt) {
-            scheduler_request_reschedule_from_interrupt();
+            /* Serial input path already runs in interrupt context; avoid
+             * forcing a reschedule here until the IRQ frame is unwound to
+             * keep the return stack stable. */
+            return;
         }
     }
 }
@@ -343,15 +346,6 @@ static void serial_irq_handler(uint8_t irq, struct interrupt_frame *frame, void 
 
     uint16_t port = (uint16_t)(uintptr_t)context;
     serial_process_interrupts(port);
-}
-
-int serial_poll_rx(uint16_t port) {
-    if (!(inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY)) {
-        return 0;
-    }
-
-    serial_drain_receive_fifo(port, 0);
-    return 1;
 }
 
 int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {

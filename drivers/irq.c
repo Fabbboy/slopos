@@ -1,15 +1,17 @@
 #include "irq.h"
 #include "serial.h"
-#include "pic.h"
 #include "apic.h"
 #include "keyboard.h"
 #include "ioapic.h"
+#include "legacy_irq.h"
 #include "../boot/idt.h"
 #include "../boot/log.h"
 #include "../sched/scheduler.h"
 
 #include <stddef.h>
 #include <stdint.h>
+
+extern void kernel_panic(const char *message);
 
 #define IRQ_LINES 16
 #define PS2_DATA_PORT 0x60
@@ -55,14 +57,8 @@ static inline int irq_line_has_ioapic_route(uint8_t irq) {
     return irq_route_table[irq].via_ioapic;
 }
 
-static inline void acknowledge_irq(uint8_t irq) {
+static inline void acknowledge_irq(void) {
     apic_send_eoi();
-
-    if (!apic_is_enabled()) {
-        if (irq < IRQ_LINES) {
-            pic_send_eoi(irq);
-        }
-    }
 }
 
 static void mask_irq_line(uint8_t irq) {
@@ -74,7 +70,11 @@ static void mask_irq_line(uint8_t irq) {
         if (irq_line_has_ioapic_route(irq)) {
             ioapic_mask_gsi(irq_route_table[irq].gsi);
         } else {
-            pic_disable_irq(irq);
+            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+                kprint("IRQ: Mask request ignored for line ");
+                kprint_dec(irq);
+                kprintln(" (no IOAPIC route)");
+            });
         }
         irq_table[irq].masked = 1;
     }
@@ -85,14 +85,21 @@ static void unmask_irq_line(uint8_t irq) {
         return;
     }
 
-    if (irq_table[irq].masked) {
-        if (irq_line_has_ioapic_route(irq)) {
-            ioapic_unmask_gsi(irq_route_table[irq].gsi);
-        } else {
-            pic_enable_irq(irq);
-        }
-        irq_table[irq].masked = 0;
+    if (!irq_table[irq].masked) {
+        return;
     }
+
+    if (irq_line_has_ioapic_route(irq)) {
+        ioapic_unmask_gsi(irq_route_table[irq].gsi);
+        irq_table[irq].masked = 0;
+        return;
+    }
+
+    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        kprint("IRQ: Cannot unmask line ");
+        kprint_dec(irq);
+        kprintln(" (no IOAPIC route configured)");
+    });
 }
 
 static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
@@ -155,24 +162,21 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     keyboard_handle_scancode(scancode);
 }
 
+extern void kernel_panic(const char *message);
+
 static void irq_program_ioapic_route(uint8_t irq) {
     if (irq >= IRQ_LINES) {
         return;
     }
 
     if (!apic_is_enabled() || !ioapic_is_ready()) {
-        return;
+        kernel_panic("IRQ: APIC/IOAPIC unavailable during route programming");
     }
 
     uint32_t gsi = 0;
     uint32_t legacy_flags = 0;
     if (ioapic_legacy_irq_info(irq, &gsi, &legacy_flags) != 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
-            kprint("IRQ: IOAPIC route lookup failed for IRQ ");
-            kprint_dec(irq);
-            kprintln(", staying on PIC bridge");
-        });
-        return;
+        kernel_panic("IRQ: Failed to translate legacy IRQ");
     }
 
     uint8_t vector = (uint8_t)(IRQ_BASE_VECTOR + irq);
@@ -183,12 +187,7 @@ static void irq_program_ioapic_route(uint8_t irq) {
                      IOAPIC_FLAG_MASK;
 
     if (ioapic_config_irq(gsi, vector, lapic_id, flags) != 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
-            kprint("IRQ: Failed to program IOAPIC route for IRQ ");
-            kprint_dec(irq);
-            kprintln(", falling back to PIC");
-        });
-        return;
+        kernel_panic("IRQ: Failed to program IOAPIC route");
     }
 
     irq_route_table[irq].via_ioapic = 1;
@@ -216,23 +215,16 @@ static void irq_program_ioapic_route(uint8_t irq) {
     } else {
         ioapic_unmask_gsi(gsi);
     }
-
-    /* Keep PIC masked for this line so ExtINT bridge stays idle */
-    pic_disable_irq(irq);
 }
 
 static void irq_setup_ioapic_routes(void) {
     if (!apic_is_enabled() || !ioapic_is_ready()) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
-            kprint("IRQ: IOAPIC not ready, legacy PIC bridge remains active");
-            kprintln("");
-        });
-        return;
+        kernel_panic("IRQ: APIC/IOAPIC not ready during dispatcher init");
     }
 
-    irq_program_ioapic_route(PIC_IRQ_TIMER);
-    irq_program_ioapic_route(PIC_IRQ_KEYBOARD);
-    irq_program_ioapic_route(PIC_IRQ_COM1);
+    irq_program_ioapic_route(LEGACY_IRQ_TIMER);
+    irq_program_ioapic_route(LEGACY_IRQ_KEYBOARD);
+    irq_program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
 uint64_t irq_get_timer_ticks(void) {
@@ -336,12 +328,13 @@ void irq_dispatch(struct interrupt_frame *frame) {
     }
 
     uint8_t vector = (uint8_t)(frame->vector & 0xFF);
+    const uint64_t expected_cs = frame->cs;
+    const uint64_t expected_rip = frame->rip;
 
     if (!irq_system_initialized) {
         boot_log_info("IRQ: Dispatch received before initialization");
         if (vector >= IRQ_BASE_VECTOR) {
-            uint8_t temp_irq = vector - IRQ_BASE_VECTOR;
-            acknowledge_irq(temp_irq);
+            acknowledge_irq();
         }
         return;
     }
@@ -359,7 +352,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
 
     if (irq >= IRQ_LINES) {
         log_unhandled_irq(0xFF, vector);
-        acknowledge_irq(irq);
+        acknowledge_irq();
         return;
     }
 
@@ -368,7 +361,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     if (!entry->handler) {
         log_unhandled_irq(irq, vector);
         mask_irq_line(irq);
-        acknowledge_irq(irq);
+        acknowledge_irq();
         return;
     }
 
@@ -377,7 +370,17 @@ void irq_dispatch(struct interrupt_frame *frame) {
 
     entry->handler(irq, frame, entry->context);
 
-    acknowledge_irq(irq);
+    if (frame->cs != expected_cs || frame->rip != expected_rip) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("IRQ: Frame corruption detected on IRQ ");
+            kprint_dec(irq);
+            kprintln(" - aborting");
+        });
+        dump_interrupt_frame(frame);
+        kernel_panic("IRQ: frame corrupted");
+    }
+
+    acknowledge_irq();
 
     scheduler_handle_post_irq();
 }

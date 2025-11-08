@@ -118,10 +118,10 @@ drivers_dir = meson.current_source_dir() / 'drivers'
 drivers_sources += files(
   'drivers/serial.c',
   'drivers/pci.c',
-  'drivers/pic.c',
   'drivers/pit.c',
   'drivers/apic.c',
   'drivers/ioapic.c',
+  'drivers/pic_quiesce.c',
   'drivers/irq.c',
   'drivers/keyboard.c',
   'drivers/tty.c',

@@ -6,7 +6,6 @@
 #include "ioapic.h"
 #include "apic.h"
 #include "serial.h"
-#include "pic.h"
 #include "../boot/log.h"
 #include "../boot/limine_protocol.h"
 #include "../lib/memory.h"
@@ -572,50 +571,4 @@ int ioapic_legacy_irq_info(uint8_t legacy_irq, uint32_t *out_gsi, uint32_t *out_
     *out_gsi = gsi;
     *out_flags = flags;
     return 0;
-}
-
-int ioapic_route_legacy_irq1(uint8_t vector) {
-    if (!ioapic_ready) {
-        boot_log_info("IOAPIC: Driver not initialized, cannot route IRQ1");
-        return -1;
-    }
-
-    if (!apic_is_available()) {
-        boot_log_info("IOAPIC: Local APIC unavailable, cannot route IRQ1");
-        return -1;
-    }
-
-    uint32_t gsi = PIC_IRQ_KEYBOARD;
-    uint32_t redir_flags = IOAPIC_FLAG_DELIVERY_FIXED |
-                           IOAPIC_FLAG_DEST_PHYSICAL |
-                           IOAPIC_FLAG_UNMASKED;
-
-    const struct ioapic_iso *iso = ioapic_find_iso(PIC_IRQ_KEYBOARD);
-    if (iso) {
-        gsi = iso->gsi;
-        redir_flags |= ioapic_flags_from_acpi(iso->bus_source, iso->flags);
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
-            kprint("IOAPIC: Using ISO for IRQ1 -> GSI ");
-            kprint_dec(gsi);
-            kprintln("");
-        });
-    } else {
-        gsi = PIC_IRQ_KEYBOARD;
-        redir_flags |= IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE;
-    }
-
-    uint8_t lapic_id = (uint8_t)apic_get_id();
-    int rc = ioapic_config_irq(gsi, vector, lapic_id, redir_flags);
-
-    if (rc == 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
-            kprint("IOAPIC: Routed legacy IRQ1 through IOAPIC (GSI ");
-            kprint_dec(gsi);
-            kprint(", vector ");
-            kprint_hex(vector);
-            kprintln(")");
-        });
-    }
-
-    return rc;
 }

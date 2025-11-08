@@ -15,11 +15,11 @@
 #include "log.h"
 #include "safe_stack.h"
 #include "shutdown.h"
-#include "../drivers/pic.h"
 #include "../drivers/apic.h"
 #include "../drivers/pit.h"
 #include "../drivers/irq.h"
 #include "../drivers/ioapic.h"
+#include "../drivers/pic_quiesce.h"
 #include "../drivers/interrupt_test.h"
 #include "../sched/task.h"
 #include "../sched/scheduler.h"
@@ -46,11 +46,8 @@ extern int init_memory_system(const struct limine_memmap_response *memmap,
 
 // IDT and interrupt handling
 extern void init_idt(void);
-extern void init_pic(void);
 extern void dump_idt(void);
 extern void load_idt(void);
-
-extern void disable_pic(void);
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;
@@ -388,13 +385,6 @@ static int boot_step_idt_setup(void) {
     return 0;
 }
 
-static int boot_step_pic_setup(void) {
-    boot_debug("Initializing PIC for interrupt control...");
-    pic_init();
-    boot_debug("PIC initialized.");
-    return 0;
-}
-
 static int boot_step_irq_setup(void) {
     boot_debug("Configuring IRQ dispatcher...");
     irq_init();
@@ -421,8 +411,7 @@ static int boot_step_timer_setup(void) {
         splash_report_progress(20, "Initializing debug...");
         splash_report_progress(30, "Setting up GDT/TSS...");
         splash_report_progress(40, "Setting up interrupts...");
-        splash_report_progress(50, "Initializing PIC...");
-        splash_report_progress(55, "Setting up IRQ dispatcher...");
+        splash_report_progress(50, "Setting up IRQ dispatcher...");
     }
 
     return 0;
@@ -431,17 +420,19 @@ static int boot_step_timer_setup(void) {
 static int boot_step_apic_setup(void) {
     boot_debug("Detecting Local APIC...");
     splash_report_progress(60, "Detecting APIC...");
-    if (apic_detect()) {
-        boot_debug("Initializing Local APIC...");
-        splash_report_progress(65, "Initializing APIC...");
-        if (apic_init() == 0) {
-            boot_debug("Local APIC initialized (legacy PIC kept active until IOAPIC lands).");
-        } else {
-            boot_info("WARNING: APIC initialization failed, retaining PIC.");
-        }
-    } else {
-        boot_debug("Local APIC unavailable, continuing with PIC.");
+    if (!apic_detect()) {
+        kernel_panic("SlopOS requires a Local APIC - legacy PIC is gone");
     }
+
+    boot_debug("Initializing Local APIC...");
+    splash_report_progress(65, "Initializing APIC...");
+    if (apic_init() != 0) {
+        kernel_panic("Local APIC initialization failed");
+    }
+
+    pic_quiesce_disable();
+
+    boot_debug("Local APIC initialized (legacy PIC path removed).");
     return 0;
 }
 
@@ -449,10 +440,9 @@ static int boot_step_ioapic_setup(void) {
     boot_debug("Discovering IOAPIC controllers via ACPI MADT...");
     splash_report_progress(67, "Discovering IOAPIC...");
     if (ioapic_init() != 0) {
-        boot_info("WARNING: IOAPIC discovery failed - continuing with legacy PIC bridge");
-    } else {
-        boot_debug("IOAPIC: discovery complete, ready for redirection programming.");
+        kernel_panic("IOAPIC discovery failed - SlopOS cannot operate without it");
     }
+    boot_debug("IOAPIC: discovery complete, ready for redirection programming.");
     return 0;
 }
 
@@ -553,7 +543,6 @@ static int boot_step_interrupt_tests(void) {
 BOOT_INIT_STEP(drivers, "debug", boot_step_debug_subsystem);
 BOOT_INIT_STEP(drivers, "gdt/tss", boot_step_gdt_setup);
 BOOT_INIT_STEP(drivers, "idt", boot_step_idt_setup);
-BOOT_INIT_STEP(drivers, "pic", boot_step_pic_setup);
 BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
 BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
 BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);

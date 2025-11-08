@@ -19,10 +19,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Legacy PIC helpers exposed without a public header */
-extern void disable_pic(void);
-extern void pic_send_eoi(uint8_t irq);
-
 /* Track shutdown progress so re-entrant callers can short-circuit safely */
 static volatile int shutdown_in_progress = 0;
 static volatile int interrupts_quiesced = 0;
@@ -39,13 +35,6 @@ void kernel_quiesce_interrupts(void) {
     }
 
     kprintln("Kernel shutdown: quiescing interrupt controllers");
-
-    /* Drain any in-flight legacy PIC interrupts */
-    for (uint8_t irq = 0; irq < 16; irq++) {
-        pic_send_eoi(irq);
-    }
-
-    disable_pic();
 
     if (apic_is_available()) {
         apic_send_eoi();
