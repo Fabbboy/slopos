@@ -175,6 +175,12 @@ void scheduler_timer_tick(void);
  */
 void scheduler_handle_post_irq(void);
 
+/*
+ * Request a reschedule from interrupt context.
+ * Marks that the scheduler should pick a new task after the ISR returns.
+ */
+void scheduler_request_reschedule_from_interrupt(void);
+
 /* ========================================================================
  * STATISTICS AND MONITORING
  * ======================================================================== */

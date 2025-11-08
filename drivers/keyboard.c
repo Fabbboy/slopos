@@ -1,6 +1,7 @@
 #include "keyboard.h"
 #include "serial.h"
 #include "tty.h"
+#include "../sched/scheduler.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -334,6 +335,7 @@ void keyboard_handle_scancode(uint8_t scancode) {
     if (ascii != 0) {
         buffer_push(&char_buffer, ascii);
         tty_notify_input_ready();
+        scheduler_request_reschedule_from_interrupt();
     }
 }
 
@@ -352,4 +354,3 @@ int keyboard_buffer_pending(void) {
 uint8_t keyboard_get_scancode(void) {
     return (uint8_t)buffer_pop(&scancode_buffer);
 }
-

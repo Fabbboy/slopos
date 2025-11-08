@@ -4,6 +4,10 @@
  */
 
 #include "serial.h"
+#include "tty.h"
+#include "irq.h"
+#include "../sched/scheduler.h"
+#include "../boot/log.h"
 
 /* ========================================================================
  * INTERNAL STATE AND CONFIGURATION
@@ -17,6 +21,18 @@ static uint16_t kernel_output_port = COM1_BASE;
 
 /* Last error for each port */
 static int port_errors[4] = {0};
+
+#define SERIAL_RX_BUFFER_SIZE 256
+
+typedef struct serial_rx_buffer {
+    char data[SERIAL_RX_BUFFER_SIZE];
+    uint16_t head;
+    uint16_t tail;
+    uint16_t count;
+} serial_rx_buffer_t;
+
+static serial_rx_buffer_t serial_rx_buffers[4];
+static uint8_t serial_irq_registered[4] = {0};
 
 /* ========================================================================
  * LOW-LEVEL HARDWARE ACCESS
@@ -44,6 +60,49 @@ static void set_port_error(uint16_t port, int error_code) {
     if (index >= 0 && index < 4) {
         port_errors[index] = error_code;
     }
+}
+
+static serial_rx_buffer_t *serial_get_rx_buffer(uint16_t port) {
+    int index = get_port_index(port);
+    if (index < 0 || index >= 4) {
+        return NULL;
+    }
+    return &serial_rx_buffers[index];
+}
+
+static void serial_rx_buffer_reset(serial_rx_buffer_t *buffer) {
+    if (!buffer) {
+        return;
+    }
+    buffer->head = 0;
+    buffer->tail = 0;
+    buffer->count = 0;
+}
+
+static void serial_rx_buffer_push(serial_rx_buffer_t *buffer, char value) {
+    if (!buffer) {
+        return;
+    }
+
+    if (buffer->count >= SERIAL_RX_BUFFER_SIZE) {
+        buffer->tail = (buffer->tail + 1) % SERIAL_RX_BUFFER_SIZE;
+        buffer->count--;
+    }
+
+    buffer->data[buffer->head] = value;
+    buffer->head = (buffer->head + 1) % SERIAL_RX_BUFFER_SIZE;
+    buffer->count++;
+}
+
+static int serial_rx_buffer_pop(serial_rx_buffer_t *buffer, char *out_char) {
+    if (!buffer || buffer->count == 0 || !out_char) {
+        return 0;
+    }
+
+    *out_char = buffer->data[buffer->tail];
+    buffer->tail = (buffer->tail + 1) % SERIAL_RX_BUFFER_SIZE;
+    buffer->count--;
+    return 1;
 }
 
 /*
@@ -178,6 +237,8 @@ int serial_init(uint16_t port, uint32_t baud_rate, uint8_t data_bits,
     port_configs[port_index].parity = parity;
     port_configs[port_index].initialized = 1;
 
+    serial_rx_buffer_reset(&serial_rx_buffers[port_index]);
+
     set_port_error(port, SERIAL_ERROR_NONE);
     return SERIAL_ERROR_NONE;
 }
@@ -207,6 +268,126 @@ uint8_t serial_get_line_status(uint16_t port) {
 
 uint8_t serial_get_modem_status(uint16_t port) {
     return inb(port + SERIAL_MODEM_STATUS_REG);
+}
+
+int serial_buffer_pending(uint16_t port) {
+    serial_rx_buffer_t *buffer = serial_get_rx_buffer(port);
+    if (!buffer) {
+        return 0;
+    }
+    return buffer->count > 0;
+}
+
+int serial_buffer_read(uint16_t port, char *out_char) {
+    serial_rx_buffer_t *buffer = serial_get_rx_buffer(port);
+    if (!buffer || !out_char) {
+        return 0;
+    }
+
+    return serial_rx_buffer_pop(buffer, out_char);
+}
+
+/* ========================================================================
+ * SERIAL INTERRUPT HANDLING
+ * ======================================================================== */
+
+static void serial_drain_receive_fifo(uint16_t port, int from_interrupt) {
+    serial_rx_buffer_t *buffer = serial_get_rx_buffer(port);
+    if (!buffer) {
+        return;
+    }
+
+    int received = 0;
+
+    while (inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY) {
+        char c = inb(port + SERIAL_DATA_REG);
+        serial_rx_buffer_push(buffer, c);
+        received = 1;
+    }
+
+    if (received) {
+        tty_notify_input_ready();
+        if (from_interrupt) {
+            scheduler_request_reschedule_from_interrupt();
+        }
+    }
+}
+
+static void serial_process_interrupts(uint16_t port) {
+    while (1) {
+        uint8_t ident = inb(port + SERIAL_INT_IDENT_REG);
+        if (ident & SERIAL_IIR_NO_PENDING) {
+            break;
+        }
+
+        uint8_t reason = ident & SERIAL_IIR_REASON_MASK;
+        switch (reason) {
+            case SERIAL_IIR_REASON_RX_AVAIL:
+            case SERIAL_IIR_REASON_TIMEOUT:
+                serial_drain_receive_fifo(port, 1);
+                break;
+            case SERIAL_IIR_REASON_LINE_STATUS:
+                (void)inb(port + SERIAL_LINE_STATUS_REG);
+                break;
+            case SERIAL_IIR_REASON_TX_EMPTY:
+            default:
+                /* Nothing to do for transmit-empty or unknown reasons */
+                break;
+        }
+    }
+}
+
+static void serial_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *context) {
+    (void)irq;
+    (void)frame;
+
+    uint16_t port = (uint16_t)(uintptr_t)context;
+    serial_process_interrupts(port);
+}
+
+int serial_poll_rx(uint16_t port) {
+    if (!(inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY)) {
+        return 0;
+    }
+
+    serial_drain_receive_fifo(port, 0);
+    return 1;
+}
+
+int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {
+    int index = get_port_index(port);
+    if (index < 0) {
+        return SERIAL_ERROR_INVALID_PORT;
+    }
+
+    if (!port_configs[index].initialized) {
+        return SERIAL_ERROR_NOT_INITIALIZED;
+    }
+
+    if (serial_irq_registered[index]) {
+        return 0;
+    }
+
+    if (irq_register_handler(irq_line, serial_irq_handler,
+                             (void *)(uintptr_t)port, "serial") != 0) {
+        boot_log_info("Serial: Failed to register IRQ handler");
+        return -1;
+    }
+
+    serial_irq_registered[index] = 1;
+
+    uint8_t ier = inb(port + SERIAL_INT_ENABLE_REG);
+    ier |= (SERIAL_IER_RECEIVED_DATA | SERIAL_IER_LINE_STATUS);
+    outb(port + SERIAL_INT_ENABLE_REG, ier);
+
+    /* Clear any pending status */
+    (void)inb(port + SERIAL_LINE_STATUS_REG);
+    (void)inb(port + SERIAL_DATA_REG);
+    (void)inb(port + SERIAL_INT_IDENT_REG);
+
+    boot_log_info("Serial: COM port interrupts armed");
+
+    return 0;
 }
 
 /* ========================================================================

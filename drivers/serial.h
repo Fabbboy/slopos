@@ -47,6 +47,8 @@ typedef struct {
 #define SERIAL_COM3_PORT      0x3E8   /* COM3 port */
 #define SERIAL_COM4_PORT      0x2E8   /* COM4 port */
 
+#define SERIAL_COM1_IRQ       4       /* Legacy PIC line for COM1 */
+
 /* Common baud rates */
 #define SERIAL_BAUD_9600      9600
 #define SERIAL_BAUD_19200     19200
@@ -108,6 +110,18 @@ char serial_getc(uint16_t port);
 int serial_data_available(uint16_t port);
 
 /*
+ * Check if buffered data (captured via interrupts) is available.
+ * Returns non-zero if pending characters exist.
+ */
+int serial_buffer_pending(uint16_t port);
+
+/*
+ * Pop a buffered character if available.
+ * Returns 1 on success and stores the byte in out_char, 0 if buffer empty.
+ */
+int serial_buffer_read(uint16_t port, char *out_char);
+
+/*
  * Check if the transmitter is ready to send data
  * Returns non-zero if ready, zero if busy
  */
@@ -117,6 +131,18 @@ int serial_transmitter_ready(uint16_t port);
  * Flush the transmitter buffer (wait for all data to be sent)
  */
 void serial_flush(uint16_t port);
+
+/*
+ * Enable hardware receive interrupts for the specified port/IRQ line.
+ * Returns 0 on success, non-zero on failure.
+ */
+int serial_enable_interrupts(uint16_t port, uint8_t irq_line);
+
+/*
+ * Opportunistically poll the UART and drain any received characters.
+ * Returns non-zero if new input was collected.
+ */
+int serial_poll_rx(uint16_t port);
 
 /* ========================================================================
  * CONVENIENCE FUNCTIONS FOR DEFAULT COM1 OUTPUT

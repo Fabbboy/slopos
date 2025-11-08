@@ -62,7 +62,7 @@ static int tty_input_available(void) {
         return 1;
     }
 
-    if (serial_data_available(SERIAL_COM1_PORT)) {
+    if (serial_buffer_pending(SERIAL_COM1_PORT)) {
         return 1;
     }
 
@@ -74,7 +74,7 @@ static int tty_input_available_locked(void) {
         return 1;
     }
 
-    if (serial_data_available(SERIAL_COM1_PORT)) {
+    if (serial_buffer_pending(SERIAL_COM1_PORT)) {
         return 1;
     }
 
@@ -169,11 +169,11 @@ static inline int is_control_char(char c) {
 }
 
 /*
- * Attempt to fetch a character from any interactive input source.
- * Prefers PS/2 keyboard scancodes but falls back to the serial console
- * when running without a graphical window.
+ * Fetch a character from the input buffers if one is available.
+ * Keyboard input is prioritized over serial to keep shell latency low.
+ * Returns 1 when a character was written to out_char, 0 if nothing pending.
  */
-static int tty_poll_input_char(char *out_char) {
+static int tty_dequeue_input_char(char *out_char) {
     if (!out_char) {
         return 0;
     }
@@ -183,16 +183,15 @@ static int tty_poll_input_char(char *out_char) {
         return 1;
     }
 
-    if (serial_data_available(SERIAL_COM1_PORT)) {
-        char c = serial_getc(SERIAL_COM1_PORT);
-
-        if (c == '\r') {
-            c = '\n';
-        } else if (c == 0x7F) {
-            c = '\b';
+    char raw = 0;
+    if (serial_buffer_read(SERIAL_COM1_PORT, &raw)) {
+        if (raw == '\r') {
+            raw = '\n';
+        } else if (raw == 0x7F) {
+            raw = '\b';
         }
 
-        *out_char = c;
+        *out_char = raw;
         return 1;
     }
 
@@ -221,10 +220,11 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
     while (1) {
         /* Block until character is available from keyboard or serial */
         char c = 0;
-        while (!tty_poll_input_char(&c)) {
+        if (!tty_dequeue_input_char(&c)) {
             tty_block_until_input_ready();
+            continue;
         }
-        
+
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {
             buffer[pos] = '\0';

@@ -508,15 +508,16 @@ static void idle_task_function(void *arg) {
         int serviced_serial = 0;
         uint16_t kernel_port = serial_get_kernel_output();
 
-        if (serial_data_available(kernel_port)) {
+        if (serial_buffer_pending(kernel_port)) {
             serviced_serial = 1;
         } else if (kernel_port != SERIAL_COM1_PORT &&
-                   serial_data_available(SERIAL_COM1_PORT)) {
+                   serial_buffer_pending(SERIAL_COM1_PORT)) {
+            serviced_serial = 1;
+        } else if (serial_poll_rx(SERIAL_COM1_PORT)) {
             serviced_serial = 1;
         }
 
         if (serviced_serial) {
-            tty_notify_input_ready();
             yield();
             continue;
         }
@@ -749,6 +750,18 @@ void scheduler_timer_tick(void) {
     if (!scheduler.reschedule_pending) {
         scheduler.total_preemptions++;
     }
+    scheduler.reschedule_pending = 1;
+}
+
+void scheduler_request_reschedule_from_interrupt(void) {
+    if (!scheduler.enabled || !scheduler.preemption_enabled) {
+        return;
+    }
+
+    if (scheduler.in_schedule) {
+        return;
+    }
+
     scheduler.reschedule_pending = 1;
 }
 

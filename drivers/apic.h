@@ -61,6 +61,8 @@
 #define LAPIC_LVT_LEVEL         (1 << 15)   // Level triggered
 #define LAPIC_LVT_ACTIVE_LOW    (1 << 13)   // Active low
 #define LAPIC_LVT_PENDING       (1 << 12)   // Delivery pending
+#define LAPIC_LVT_DELIVERY_MODE_MASK   (0x7 << 8)
+#define LAPIC_LVT_DELIVERY_MODE_EXTINT (0x7 << 8)
 
 // Timer modes
 #define LAPIC_TIMER_ONESHOT     0x00000000

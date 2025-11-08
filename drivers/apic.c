@@ -138,6 +138,10 @@ int apic_init(void) {
     apic_write_register(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED);
     apic_write_register(LAPIC_LVT_PERFCNT, LAPIC_LVT_MASKED);
 
+    /* Route legacy PIC interrupts through LINT0 in ExtINT mode */
+    uint32_t lint0 = LAPIC_LVT_DELIVERY_MODE_EXTINT;
+    apic_write_register(LAPIC_LVT_LINT0, lint0);
+
     // Clear error status register
     apic_write_register(LAPIC_ESR, 0);
     apic_write_register(LAPIC_ESR, 0);  // Write twice as per Intel manual

@@ -397,6 +397,11 @@ static int boot_step_pic_setup(void) {
 static int boot_step_irq_setup(void) {
     boot_debug("Configuring IRQ dispatcher...");
     irq_init();
+    if (serial_enable_interrupts(SERIAL_COM1_PORT, SERIAL_COM1_IRQ) != 0) {
+        boot_info("WARNING: Failed to enable COM1 serial interrupts");
+    } else {
+        boot_debug("COM1 serial interrupts armed.");
+    }
     boot_debug("IRQ dispatcher ready.");
     return 0;
 }
@@ -429,8 +434,7 @@ static int boot_step_apic_setup(void) {
         boot_debug("Initializing Local APIC...");
         splash_report_progress(65, "Initializing APIC...");
         if (apic_init() == 0) {
-            boot_debug("Local APIC initialized, masking legacy PIC.");
-            disable_pic();
+            boot_debug("Local APIC initialized (legacy PIC kept active until IOAPIC lands).");
         } else {
             boot_info("WARNING: APIC initialization failed, retaining PIC.");
         }

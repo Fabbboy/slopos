@@ -393,14 +393,14 @@ uint8_t pic_vector_to_irq(uint8_t vector) {
 void pic_enable_safe_irqs(void) {
     boot_log_debug("Enabling safe IRQs for testing...");
 
-    /* Enable only timer (IRQ 0) and keyboard (IRQ 1) for now */
-    uint8_t master_mask = 0xFC;  /* Enable IRQ 0 and 1 only (bits 0,1 = 0) */
+    /* Enable timer (IRQ0), keyboard (IRQ1), and COM1 serial (IRQ4) */
+    uint8_t master_mask = 0xEC;  /* Bits 0,1,4 cleared -> IRQS enabled */
     uint8_t slave_mask = 0xFF;   /* Keep all slave IRQs disabled */
 
     pic_set_master_mask(master_mask);
     pic_set_slave_mask(slave_mask);
 
-    boot_log_debug("Safe IRQs enabled: Timer (IRQ 0), Keyboard (IRQ 1)");
+    boot_log_debug("Safe IRQs enabled: Timer (IRQ 0), Keyboard (IRQ 1), Serial COM1 (IRQ 4)");
 }
 
 /*
