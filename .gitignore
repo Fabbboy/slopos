@@ -12,3 +12,10 @@ slop.iso
 *.iso
 iso/boot/kernel.elf
 iso/EFI/BOOT/BOOTX64.EFI
+
+# Node/Bun artifacts for MCP tooling
+**/node_modules/
+mcp/.bun/
+mcp/.turbo/
+mcp/.cache/
+mcp/*.tsbuildinfo
