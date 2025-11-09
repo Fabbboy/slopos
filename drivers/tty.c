@@ -34,6 +34,10 @@ static inline void tty_cpu_relax(void) {
     __asm__ volatile ("pause");
 }
 
+static inline void tty_service_serial_input(void) {
+    serial_poll_receive(SERIAL_COM1_PORT);
+}
+
 static int tty_wait_queue_push(task_t *task) {
     if (!task || tty_wait_queue.count >= TTY_MAX_WAITERS) {
         return -1;
@@ -58,6 +62,8 @@ static task_t *tty_wait_queue_pop(void) {
 }
 
 static int tty_input_available(void) {
+    tty_service_serial_input();
+
     if (keyboard_has_input()) {
         return 1;
     }
@@ -70,6 +76,8 @@ static int tty_input_available(void) {
 }
 
 static int tty_input_available_locked(void) {
+    tty_service_serial_input();
+
     if (keyboard_buffer_pending()) {
         return 1;
     }
@@ -82,6 +90,8 @@ static int tty_input_available_locked(void) {
 }
 
 static void tty_block_until_input_ready(void) {
+    tty_service_serial_input();
+
     if (!scheduler_is_enabled()) {
         tty_cpu_relax();
         return;
@@ -98,6 +108,8 @@ static void tty_block_until_input_ready(void) {
     }
 
     tty_interrupts_disable();
+
+    tty_service_serial_input();
 
     if (tty_input_available_locked()) {
         tty_interrupts_enable();
@@ -178,10 +190,14 @@ static int tty_dequeue_input_char(char *out_char) {
         return 0;
     }
 
+    tty_service_serial_input();
+
     if (keyboard_has_input()) {
         *out_char = keyboard_getchar();
         return 1;
     }
+
+    tty_service_serial_input();
 
     char raw = 0;
     if (serial_buffer_read(SERIAL_COM1_PORT, &raw)) {

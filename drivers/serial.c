@@ -308,12 +308,14 @@ static void serial_drain_receive_fifo(uint16_t port, int from_interrupt) {
     if (received) {
         tty_notify_input_ready();
         if (from_interrupt) {
-            /* Serial input path already runs in interrupt context; avoid
-             * forcing a reschedule here until the IRQ frame is unwound to
-             * keep the return stack stable. */
+            scheduler_request_reschedule_from_interrupt();
             return;
         }
     }
+}
+
+void serial_poll_receive(uint16_t port) {
+    serial_drain_receive_fifo(port, 0);
 }
 
 static void serial_process_interrupts(uint16_t port) {
@@ -378,6 +380,9 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {
     (void)inb(port + SERIAL_LINE_STATUS_REG);
     (void)inb(port + SERIAL_DATA_REG);
     (void)inb(port + SERIAL_INT_IDENT_REG);
+
+    /* Drain any bytes that arrived before interrupts were armed */
+    serial_poll_receive(port);
 
     boot_log_info("Serial: COM port interrupts armed");
 

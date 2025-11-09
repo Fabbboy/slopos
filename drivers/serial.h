@@ -122,6 +122,11 @@ int serial_buffer_pending(uint16_t port);
 int serial_buffer_read(uint16_t port, char *out_char);
 
 /*
+ * Drain any pending RX bytes into the buffered queue without requiring an IRQ.
+ */
+void serial_poll_receive(uint16_t port);
+
+/*
  * Check if the transmitter is ready to send data
  * Returns non-zero if ready, zero if busy
  */
