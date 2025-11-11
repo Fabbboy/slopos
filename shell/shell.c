@@ -151,14 +151,23 @@ void shell_main(void *arg) {
         
         /* Read line from keyboard */
         char line_buffer[256];
+        kprint("[DEBUG] Calling tty_read_line...\n");
         size_t line_length = tty_read_line(line_buffer, sizeof(line_buffer));
-        
+        kprint("[DEBUG] Got line_length: ");
+        kprint_decimal(line_length);
+        kprint("\n");
+
         /* Handle empty lines */
         if (line_length == 0) {
             /* Empty line - just re-prompt */
+            kprint("[DEBUG] Empty line, continuing...\n");
             continue;
         }
-        
+
+        kprint("[DEBUG] Executing command: '");
+        kprint(line_buffer);
+        kprint("'\n");
+
         /* Execute command */
         shell_execute_command(line_buffer);
     }

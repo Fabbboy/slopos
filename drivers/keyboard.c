@@ -310,9 +310,19 @@ void keyboard_init(void) {
 }
 
 void keyboard_handle_scancode(uint8_t scancode) {
+    kprint("[KBD] Scancode: 0x");
+    kprint_hex((uint64_t)scancode);
+    kprint("\n");
+
     int is_press = !is_break_code(scancode);
     uint8_t make_code = get_make_code(scancode);
-    
+
+    kprint("[KBD] Make code: 0x");
+    kprint_hex((uint64_t)make_code);
+    kprint(" is_press: ");
+    kprint_decimal((uint64_t)is_press);
+    kprint("\n");
+
     /* Store scancode for debugging */
     buffer_push(&scancode_buffer, (char)scancode);
     
@@ -332,9 +342,13 @@ void keyboard_handle_scancode(uint8_t scancode) {
     
     /* Translate scancode to ASCII */
     char ascii = translate_scancode(scancode);
+    kprint("[KBD] ASCII: 0x");
+    kprint_hex((uint64_t)ascii);
+    kprint("\n");
+
     if (ascii != 0) {
+        kprint("[KBD] Adding to buffer\n");
         buffer_push(&char_buffer, ascii);
-        tty_notify_input_ready();
         scheduler_request_reschedule_from_interrupt();
     }
 }
@@ -344,7 +358,13 @@ char keyboard_getchar(void) {
 }
 
 int keyboard_has_input(void) {
-    return buffer_has_data(&char_buffer);
+    int has_data = buffer_has_data(&char_buffer);
+    kprint("[KBD] buffer_has_data() = ");
+    kprint_decimal((uint64_t)has_data);
+    kprint(" (count=");
+    kprint_decimal((uint64_t)char_buffer.count);
+    kprint(")\n");
+    return has_data;
 }
 
 int keyboard_buffer_pending(void) {
