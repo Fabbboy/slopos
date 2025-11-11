@@ -144,10 +144,14 @@ static task_t *tty_wait_queue_pop(void) {
  * Called from interrupt context
  */
 static void tty_transfer_input_to_buffer(void) {
+    static int transfer_count = 0;
+    int transferred = 0;
+
     /* Transfer from keyboard buffer */
     while (keyboard_has_input()) {
         char c = keyboard_getchar();
         tty_buffer_push(c);
+        transferred++;
     }
 
     /* Transfer from serial buffer */
@@ -162,6 +166,19 @@ static void tty_transfer_input_to_buffer(void) {
         }
 
         tty_buffer_push(c);
+        transferred++;
+    }
+
+    /* Debug: Log first few transfers */
+    if (transferred > 0 && transfer_count < 5) {
+        transfer_count++;
+        extern void kprint(const char *str);
+        extern void kprint_decimal(uint64_t value);
+        kprint("TTY: Transferred ");
+        kprint_decimal(transferred);
+        kprint(" chars to buffer (count=");
+        kprint_decimal(tty_input_buffer.count);
+        kprint(")\n");
     }
 }
 
