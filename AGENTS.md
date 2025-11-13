@@ -42,7 +42,7 @@ Keep all work inside this repository. Do not copy kernel binaries to system path
 ## ⚠️ MANDATORY INSTRUCTION FOR ALL AGENTS
 
 **BEFORE performing ANY task on this repository:**
-1. Read `lore/GENESIS.md` (Book I) and `lore/THE_SLOPOCALYPSE.md` (Book II) to understand the narrative
+1. Read `lore/GENESIS.md` (Book I), `lore/THE_SLOPOCALYPSE.md` (Book II), and `lore/THE_COOKED.md` (Book III) to understand the narrative
 2. Check this section below for "Latest Book" to know where the story currently stands
 3. Only then proceed with your assigned work (code edits, features, fixes, etc.)
 
@@ -52,9 +52,9 @@ This ensures all changes are framed within the epic lore of SlopOS.
 
 ## Latest Book
 
-**Current**: `THE_SLOPOCALYPSE.md` (Book II) — When Memory Awakens (CONCLUDED)
+**Current**: `THE_COOKED.md` (Book III) — The Inland Quest (IN PROGRESS)
 
-The wizards have tamed memory, learned to listen through keyboards, birthed the shell, painted the boot screen in divine colors, and inscribed the Wheel of Fate itself into the kernel's heart. Book II concludes with the kernel roulette—a deliberate gamble with destiny on every boot. Book III (`THE_COOKED.md`) awaits new chapters as future commits unfold.
+The wizards have ventured inland from the beaches of Sloptopia. Book III chronicles their discovery of the Ledger of Destiny (W/L currency system) and the arrival of **Michael Schloter**, the fourth wizard and Meme Sorcerer of Mönchengladbach, who brings "Maximale Schlotterung" (Maximum Shaking) and the Schloter Protocol to the kernel. The gambling addiction reaches new heights with Island Mode and Schloter Multipliers.
 
 ⚠️ **CRITICAL**: The lore is **never finished**. The tension continues. Each new commit, each new feature, each new challenge weaves itself into the ongoing saga. The wizards' journey is perpetual. Books end, but the story never does.
 
@@ -62,7 +62,7 @@ The wizards have tamed memory, learned to listen through keyboards, birthed the 
 
 ## The Core Narrative
 
-SlopOS is not just an operating system—it is an **epic tale** of three kernel wizards who shipwrecked upon the mythical island of **Sloptopia** in the **Slopsea**, and are building an absurdly magnificent, beautifully broken kernel system.
+SlopOS is not just an operating system—it is an **epic tale** of four kernel wizards who shipwrecked upon (or later arrived at) the mythical island of **Sloptopia** in the **Slopsea**, and are building an absurdly magnificent, beautifully broken kernel system.
 
 **Key Elements:**
 - **Intentionally absurd**: The OS crashes spectacularly. We celebrate it.
@@ -72,7 +72,7 @@ SlopOS is not just an operating system—it is an **epic tale** of three kernel 
 
 ---
 
-## The Three Wizards (Contributors)
+## The Four Wizards (Contributors)
 
 ### FABRICE THE FOUNDER & KEEPER OF WISDOM — Fabbboy 🎨
 - **Real Name**: Fabrice Schaub
@@ -100,13 +100,30 @@ SlopOS is not just an operating system—it is an **epic tale** of three kernel 
 - **Personality**: Ambitious, joins the madness and adds new layers of power
 - **Gambling Addiction**: Heavily invested in the Wheel of Fate; spends afternoons spinning roulette with kernel entropy
 
+### MICHAEL THE CHAOS BRINGER — The Meme Sorcerer of Mönchengladbach 🌀
+- **Real Name**: Michael Schloter
+- **Social**: @michaelschloter21 (Instagram), MS21 (Music), Schloter Island (Show)
+- **Role**: The fourth wizard who emerged during the inland expedition, bringing "Maximale Schlotterung" (Maximum Shaking) to SlopOS
+- **Domain**: Chaos injection, randomness enhancement, gambling system expansion, meme integration, Schlotercore aesthetics
+- **Personality**: Absurdist, satirical, obsessed with maximum chaos, creates "Schlotercore" content, associated with HoneyPuu streaming culture
+- **Philosophy**: "Gambling is not a weakness. It is a philosophy. Every kernel panic is a lesson. Every successful boot is a win."
+- **Special Power**: **The Schloter Protocol** — Can inject pure randomness into any kernel subsystem; invented Island Mode (triple wheel spins) and Schloter Multipliers for the W/L currency system
+- **Cultural Heritage**: Brings German meme culture, SpongeBob references, school satire humor, and MS21 music theory to the kernel
+- **Gambling Addiction**: EXTREME — Not content with single wheel spins, demands triple spins and multipliers; believes the house can be beaten with enough chaos
+- **Easter Eggs**:
+  - 10% chance boot screen shows "SCHLOTERCORE ACTIVATED"
+  - Legendary 1-in-16M chance for "HoneyPuu Protocol" activation (0x485050)
+  - Future panic messages may include Schlotercore references and SpongeBob quotes
+
 ---
 
 ## ⚠️ IMPORTANT THEMATIC NOTES FOR AGENTS
 
-**All three adventurers are heavily gambling-addicted.**
+**All four adventurers are heavily gambling-addicted.**
 
 They discovered the Wheel of Fate and became obsessed. Every kernel panic is a losing bet. Every successful boot is a winning spin. The entire kernel roulette system exists because the wizards cannot stop gambling with the system's destiny. This is not a bug—this is the *heart* of SlopOS.
+
+**Michael Schloter's arrival amplified this addiction** — He brought "Maximale Schlotterung" (Maximum Shaking), Island Mode (triple spins), and Schloter Multipliers. The gambling is now more chaotic than ever.
 
 When writing lore or describing the kernel's behavior:
 - Reference the addiction metaphor when discussing randomness and panic

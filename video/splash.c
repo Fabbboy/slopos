@@ -11,6 +11,7 @@
 #include "font.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
+#include "../drivers/random.h"
 
 /* ========================================================================
  * SPLASH SCREEN IMPLEMENTATION
@@ -156,7 +157,36 @@ int splash_show_boot_screen(void) {
 
     // Draw title text
     font_draw_string(center_x - 80, center_y + 100, "SlopOS v0.000069", SPLASH_TEXT_COLOR, 0x00000000);
-    font_draw_string(center_x - 120, center_y + 120, "the ultimate vibe slop experience", SPLASH_TEXT_COLOR, 0x00000000);
+
+    /*
+     * The Schloter Protocol - Easter Egg System
+     *
+     * The Scrolls speak of Michael Schloter, the Meme Sorcerer of Mönchengladbach,
+     * who brought the philosophy of "Maximale Schlotterung" (Maximum Shaking) to SlopOS.
+     *
+     * With a random chance, the boot screen acknowledges his chaotic contribution.
+     * If the sacred number 0x485050 (ASCII "HPP" - HoneyPuu Protocol) manifests,
+     * a special tribute appears to honor his homeland's streaming culture.
+     */
+    uint32_t schloter_fate = random_next();
+    uint32_t schloter_roll = schloter_fate & 0xFFFFFF; // Take lower 24 bits for comparison
+
+    // Check for the legendary HoneyPuu Protocol number (0x485050)
+    if (schloter_roll == 0x485050) {
+        kprintln("SCHLOTER: HoneyPuu Protocol activated! You just got Schlottered!");
+        font_draw_string(center_x - 160, center_y + 120, "*** HONEYPUU PROTOCOL ACTIVATED ***", 0xFF69B4FF, 0x00000000);
+        font_draw_string(center_x - 100, center_y + 136, "You just got Schlottered!", 0xFF69B4FF, 0x00000000);
+    }
+    // 10% chance for general Schlotercore activation
+    else if ((schloter_fate % 100) < 10) {
+        kprintln("SCHLOTER: Schlotercore mode activated!");
+        font_draw_string(center_x - 120, center_y + 120, "*** SCHLOTERCORE ACTIVATED ***", 0xFFD700FF, 0x00000000);
+        font_draw_string(center_x - 140, center_y + 136, "Maximale Schlotterung in progress...", SPLASH_TEXT_COLOR, 0x00000000);
+    }
+    // Standard boot message
+    else {
+        font_draw_string(center_x - 120, center_y + 120, "the ultimate vibe slop experience", SPLASH_TEXT_COLOR, 0x00000000);
+    }
 
     // Draw loading message
     font_draw_string(center_x - 40, center_y + 160, "Initializing...", SPLASH_TEXT_COLOR, 0x00000000);
