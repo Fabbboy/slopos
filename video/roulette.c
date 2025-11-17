@@ -9,6 +9,7 @@
 #include "framebuffer.h"
 #include "graphics.h"
 #include "font.h"
+#include "splash.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
 
@@ -376,10 +377,10 @@ int roulette_show_spin(uint32_t fate_number) {
         // Brief pause before OS takes over
         roulette_delay_ms(1000);
 
-        // Clear screen completely for OS
-        framebuffer_clear(0x001122FF);
+        // Restore the normal post-boot graphics demo screen
+        splash_draw_graphics_demo();
 
-        kprintln("ROULETTE: Screen cleared, returning to OS");
+        kprintln("ROULETTE: Graphics demo restored, returning to OS");
     }
 
     // Return 0 for WIN (odd), 1 for LOSE (even) so caller knows what happened
