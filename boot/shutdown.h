@@ -27,6 +27,12 @@ void kernel_drain_serial_output(void);
 void kernel_shutdown(const char *reason);
 
 /*
+ * Reboot the system immediately using keyboard controller reset.
+ * Used by the roulette to keep gambling until you win.
+ */
+void kernel_reboot(const char *reason);
+
+/*
  * Execute Kernel: The Final Purification Ritual
  *
  * When kernel_panic is invoked, before the system halts entirely, this function

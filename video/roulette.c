@@ -360,6 +360,28 @@ int roulette_show_spin(uint32_t fate_number) {
 
     kprintln("ROULETTE: Wheel of fate complete");
 
+    // If WIN, clear the screen and show transition message before returning to OS
+    if (fate_number & 1) {
+        // Clear to dark blue background for transition
+        framebuffer_clear(0x001122FF);
+
+        // Show simple transition message
+        uint32_t width = framebuffer_get_width();
+        uint32_t height = framebuffer_get_height();
+        int msg_x = width / 2 - 150;
+        int msg_y = height / 2 - 20;
+
+        font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
+
+        // Brief pause before OS takes over
+        roulette_delay_ms(1000);
+
+        // Clear screen completely for OS
+        framebuffer_clear(0x001122FF);
+
+        kprintln("ROULETTE: Screen cleared, returning to OS");
+    }
+
     // Return 0 for WIN (odd), 1 for LOSE (even) so caller knows what happened
     return (fate_number & 1) ? 0 : 1;
 }

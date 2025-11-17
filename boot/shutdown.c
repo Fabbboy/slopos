@@ -105,6 +105,50 @@ halt:
 }
 
 /*
+ * Reboot the system using keyboard controller reset
+ * This is the fastest, most reliable reboot method for x86
+ */
+void kernel_reboot(const char *reason) {
+    __asm__ volatile ("cli");
+
+    kprintln("=== Kernel Reboot Requested ===");
+    if (reason) {
+        kprint("Reason: ");
+        kprintln(reason);
+    }
+
+    kernel_drain_serial_output();
+
+    kprintln("Rebooting via keyboard controller...");
+
+    // Give serial a moment to flush
+    for (volatile int i = 0; i < 1000000; i++) {
+        __asm__ volatile ("nop");
+    }
+
+    // Keyboard controller reset (port 0x64, command 0xFE)
+    // This is the standard x86 reboot mechanism
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+
+    // If that didn't work, try triple fault (should never get here)
+    kprintln("Keyboard reset failed, attempting triple fault...");
+
+    // Load invalid IDT to cause triple fault
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) invalid_idt = {0, 0};
+
+    __asm__ volatile ("lidt %0" : : "m"(invalid_idt));
+    __asm__ volatile ("int $0x03");  // Trigger interrupt with invalid IDT
+
+    // If even that fails, just halt
+    while (1) {
+        __asm__ volatile ("hlt");
+    }
+}
+
+/*
  * Execute Kernel: Paint all memory with the sacred 0x69
  *
  * When the kernel falls into the abyss of kernel_panic, this ritual is invoked

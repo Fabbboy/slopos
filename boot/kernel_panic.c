@@ -248,16 +248,13 @@ void kernel_roulette(void) {
         panic_output_string("Even number. The wheel has spoken. You have lost.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
-        panic_output_string("=== ROULETTE LOSS: HALTING FOREVER ===\n");
-        panic_output_string("The loss screen will remain visible. Reset to try again.\n");
+        panic_output_string("=== ROULETTE LOSS: AUTO-REBOOTING TO TRY AGAIN ===\n");
+        panic_output_string("The gambling never stops...\n");
 
-        /* Disable interrupts and halt forever - DON'T REBOOT */
-        __asm__ volatile ("cli");
+        /* Reboot immediately to spin again - GAMBLING LOOP */
+        kernel_reboot("Roulette loss - spinning again");
 
-        /* Infinite halt loop - system stays on loss screen */
-        while (1) {
-            __asm__ volatile ("hlt");
-        }
+        /* Never reached */
     } else {
         /* Odd: The kernel survives another day - user takes a W */
         take_w();
