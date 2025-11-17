@@ -10,6 +10,7 @@
 #include "../drivers/serial.h"
 #include "../drivers/random.h"
 #include "../drivers/wl_currency.h"
+#include "../video/roulette.h"
 
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
@@ -213,6 +214,8 @@ void kernel_assert(int condition, const char *message) {
  * This is not a call to be taken lightly. It is an embrace of chaos itself,
  * a deliberate surrender to the entropy that flows through Sloptopia.
  *
+ * NOW WITH VISUAL GAMBLING ADDICTION!
+ *
  * Usage: kernel_roulette() will either cause a graceful panic or return safely,
  * depending entirely on the mercy of random fate.
  */
@@ -227,13 +230,16 @@ void kernel_roulette(void) {
     /* Spin the wheel of fate */
     uint32_t fate = random_next();
 
-    /* Display the spin to the world */
+    /* Display the spin to the world (serial output for logs) */
     panic_output_string("\n=== KERNEL ROULETTE: Spinning the Wheel of Fate ===\n");
     panic_output_string("Random number: 0x");
     panic_output_hex(fate);
     panic_output_string(" (");
     panic_output_decimal(fate);
     panic_output_string(")\n");
+
+    /* Show the visual roulette screen with spinning animation */
+    roulette_show_spin(fate);
 
     /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
     if ((fate & 1) == 0) {
