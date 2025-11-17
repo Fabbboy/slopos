@@ -10,6 +10,7 @@
 #include "../drivers/serial.h"
 #include "../drivers/random.h"
 #include "../drivers/wl_currency.h"
+#include "../video/roulette.h"
 
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
@@ -207,13 +208,15 @@ void kernel_assert(int condition, const char *message) {
  *
  * The Scrolls speak of a mystical game inscribed into the very heart of SlopOS:
  * When invoked, the kernel spins a wheel of random numbers, and fate decides
- * its own destiny. If the wheel lands on an even number, the kernel enters
- * the abyss of panic. If odd, it survives—at least for now.
+ * its own destiny. If the wheel lands on an even number, the kernel loses
+ * and halts forever on the loss screen. If odd, it survives and continues.
  *
  * This is not a call to be taken lightly. It is an embrace of chaos itself,
  * a deliberate surrender to the entropy that flows through Sloptopia.
  *
- * Usage: kernel_roulette() will either cause a graceful panic or return safely,
+ * NOW WITH VISUAL GAMBLING ADDICTION!
+ *
+ * Usage: kernel_roulette() will either halt forever (even) or return safely (odd),
  * depending entirely on the mercy of random fate.
  */
 void kernel_roulette(void) {
@@ -227,7 +230,7 @@ void kernel_roulette(void) {
     /* Spin the wheel of fate */
     uint32_t fate = random_next();
 
-    /* Display the spin to the world */
+    /* Display the spin to the world (serial output for logs) */
     panic_output_string("\n=== KERNEL ROULETTE: Spinning the Wheel of Fate ===\n");
     panic_output_string("Random number: 0x");
     panic_output_hex(fate);
@@ -235,19 +238,28 @@ void kernel_roulette(void) {
     panic_output_decimal(fate);
     panic_output_string(")\n");
 
+    /* Show the visual roulette screen with spinning animation */
+    roulette_show_spin(fate);
+
     /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
     if ((fate & 1) == 0) {
         /* Even: The wheel has decided your fate - user takes an L */
         take_l();
-        panic_output_string("Even number. The wheel has spoken. Destiny awaits in the abyss.\n");
+        panic_output_string("Even number. The wheel has spoken. You have lost.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
-        panic_output_string("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===\n");
-        kernel_panic("[ROULETTE] Even fate chosen - this is expected chaos, not a bug");
+        panic_output_string("=== ROULETTE LOSS: AUTO-REBOOTING TO TRY AGAIN ===\n");
+        panic_output_string("The gambling never stops...\n");
+
+        /* Reboot immediately to spin again - GAMBLING LOOP */
+        kernel_reboot("Roulette loss - spinning again");
+
+        /* Never reached */
     } else {
         /* Odd: The kernel survives another day - user takes a W */
         take_w();
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
-        panic_output_string("=== ROULETTE COMPLETE: NO PANIC TODAY ===\n");
+        panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
+        /* Return normally - kernel continues to scheduler */
     }
 }
