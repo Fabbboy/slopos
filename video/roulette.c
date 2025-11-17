@@ -36,106 +36,117 @@ static void roulette_delay_ms(uint32_t milliseconds) {
  * ======================================================================== */
 
 /*
- * Draw a roulette wheel at specified rotation angle
+ * Draw a roulette wheel at specified rotation angle - MAXIMUM VISIBILITY
  * center_x, center_y: wheel center position
  * radius: wheel radius
  * angle: rotation angle (0-360 degrees)
  * fate_number: the number we're spinning toward
  */
 static void draw_roulette_wheel(int center_x, int center_y, int radius, int angle, uint32_t fate_number) {
-    // Draw outer wheel circle (gold border)
-    graphics_draw_circle_filled(center_x, center_y, radius + 10, ROULETTE_WHEEL_COLOR);
-    graphics_draw_circle_filled(center_x, center_y, radius, 0x000000FF);
+    // Draw BLACK background circle
+    graphics_draw_circle_filled(center_x, center_y, radius + 5, 0x000000FF);
 
-    // Draw 8 large visible segments (fewer = more visible)
+    // Draw 8 segments as FILLED BOXES radiating from center
+    // This is much simpler and more visible than wedges
     for (int i = 0; i < 8; i++) {
-        int seg_angle = (i * 45 + angle) % 360;
+        int base_angle = (i * 45 + angle) % 360;
+        int octant = (base_angle / 45) % 8;
 
-        // Calculate segment color (alternating red/green for even/odd)
-        uint32_t seg_color = (i % 2) ? ROULETTE_EVEN_COLOR : ROULETTE_ODD_COLOR;
+        // Alternate PURE RED and PURE GREEN
+        uint32_t color = (i % 2 == 0) ? 0xFF0000FF : 0x00FF00FF;
 
-        // Draw thick radial lines for each segment (much more visible)
-        int x_end = center_x;
-        int y_end = center_y - (radius - 5);
+        // Draw FILLED rectangular segments radiating outward
+        // Much more visible than triangular wedges
+        for (int r = 15; r < radius; r++) {
+            int x1, y1, x2, y2;
 
-        // Simple 8-directional rotation for clear visual effect
-        int octant = seg_angle / 45;
+            // Calculate segment boundaries
+            switch (octant) {
+                case 0: // North
+                    x1 = center_x - 20; y1 = center_y - r;
+                    x2 = center_x + 20; y2 = center_y - r;
+                    break;
+                case 1: // NE
+                    x1 = center_x + r * 6 / 10; y1 = center_y - r * 6 / 10;
+                    x2 = center_x + r * 8 / 10; y2 = center_y - r * 4 / 10;
+                    break;
+                case 2: // East
+                    x1 = center_x + r; y1 = center_y - 20;
+                    x2 = center_x + r; y2 = center_y + 20;
+                    break;
+                case 3: // SE
+                    x1 = center_x + r * 6 / 10; y1 = center_y + r * 6 / 10;
+                    x2 = center_x + r * 4 / 10; y2 = center_y + r * 8 / 10;
+                    break;
+                case 4: // South
+                    x1 = center_x - 20; y1 = center_y + r;
+                    x2 = center_x + 20; y2 = center_y + r;
+                    break;
+                case 5: // SW
+                    x1 = center_x - r * 6 / 10; y1 = center_y + r * 6 / 10;
+                    x2 = center_x - r * 8 / 10; y2 = center_y + r * 4 / 10;
+                    break;
+                case 6: // West
+                    x1 = center_x - r; y1 = center_y - 20;
+                    x2 = center_x - r; y2 = center_y + 20;
+                    break;
+                case 7: // NW
+                    x1 = center_x - r * 6 / 10; y1 = center_y - r * 6 / 10;
+                    x2 = center_x - r * 4 / 10; y2 = center_y - r * 8 / 10;
+                    break;
+                default:
+                    x1 = center_x; y1 = center_y;
+                    x2 = center_x; y2 = center_y;
+                    break;
+            }
+
+            // Draw THICK horizontal line for this radius
+            graphics_draw_line(x1, y1, x2, y2, color);
+        }
+    }
+
+    // Draw WHITE dividing lines between segments (VERY THICK)
+    for (int i = 0; i < 8; i++) {
+        int base_angle = (i * 45 + angle) % 360;
+        int octant = (base_angle / 45) % 8;
+        int x_end, y_end;
+
         switch (octant) {
-            case 0: // North
-                x_end = center_x;
-                y_end = center_y - (radius - 5);
-                break;
-            case 1: // NE
-                x_end = center_x + (radius - 5) * 7 / 10;
-                y_end = center_y - (radius - 5) * 7 / 10;
-                break;
-            case 2: // East
-                x_end = center_x + (radius - 5);
-                y_end = center_y;
-                break;
-            case 3: // SE
-                x_end = center_x + (radius - 5) * 7 / 10;
-                y_end = center_y + (radius - 5) * 7 / 10;
-                break;
-            case 4: // South
-                x_end = center_x;
-                y_end = center_y + (radius - 5);
-                break;
-            case 5: // SW
-                x_end = center_x - (radius - 5) * 7 / 10;
-                y_end = center_y + (radius - 5) * 7 / 10;
-                break;
-            case 6: // West
-                x_end = center_x - (radius - 5);
-                y_end = center_y;
-                break;
-            case 7: // NW
-                x_end = center_x - (radius - 5) * 7 / 10;
-                y_end = center_y - (radius - 5) * 7 / 10;
-                break;
+            case 0: x_end = center_x; y_end = center_y - radius; break;
+            case 1: x_end = center_x + radius * 7 / 10; y_end = center_y - radius * 7 / 10; break;
+            case 2: x_end = center_x + radius; y_end = center_y; break;
+            case 3: x_end = center_x + radius * 7 / 10; y_end = center_y + radius * 7 / 10; break;
+            case 4: x_end = center_x; y_end = center_y + radius; break;
+            case 5: x_end = center_x - radius * 7 / 10; y_end = center_y + radius * 7 / 10; break;
+            case 6: x_end = center_x - radius; y_end = center_y; break;
+            case 7: x_end = center_x - radius * 7 / 10; y_end = center_y - radius * 7 / 10; break;
+            default: x_end = center_x; y_end = center_y; break;
         }
 
-        // Draw thick line (5 pixels wide)
-        for (int offset = -2; offset <= 2; offset++) {
-            graphics_draw_line(center_x + offset, center_y, x_end + offset, y_end, seg_color);
-            graphics_draw_line(center_x, center_y + offset, x_end, y_end + offset, seg_color);
+        // Draw ULTRA THICK white dividing lines
+        for (int thick = -5; thick <= 5; thick++) {
+            graphics_draw_line(center_x, center_y, x_end + thick, y_end, 0xFFFFFFFF);
+            graphics_draw_line(center_x, center_y, x_end, y_end + thick, 0xFFFFFFFF);
         }
     }
 
-    // Draw center circle with spinning indicator (larger and more visible)
-    graphics_draw_circle_filled(center_x, center_y, 40, ROULETTE_WHEEL_COLOR);
-    graphics_draw_circle_filled(center_x, center_y, 35, 0x000000FF);
+    // Draw center circle (GOLD with BLACK inner) - much larger
+    graphics_draw_circle_filled(center_x, center_y, 50, 0xFFD700FF);  // Gold
+    graphics_draw_circle_filled(center_x, center_y, 42, 0x000000FF);  // Black center
 
-    // Draw a spinning indicator line based on angle
-    int indicator_angle = angle % 360;
-    int ind_x = center_x;
-    int ind_y = center_y - 30;
+    // Draw HUGE pointer at top (filled yellow triangle)
+    int pointer_top = center_y - radius - 60;
+    int pointer_base = center_y - radius - 20;
 
-    // Rotate indicator
-    int octant = indicator_angle / 45;
-    switch (octant) {
-        case 0: ind_x = center_x; ind_y = center_y - 30; break;
-        case 1: ind_x = center_x + 21; ind_y = center_y - 21; break;
-        case 2: ind_x = center_x + 30; ind_y = center_y; break;
-        case 3: ind_x = center_x + 21; ind_y = center_y + 21; break;
-        case 4: ind_x = center_x; ind_y = center_y + 30; break;
-        case 5: ind_x = center_x - 21; ind_y = center_y + 21; break;
-        case 6: ind_x = center_x - 30; ind_y = center_y; break;
-        case 7: ind_x = center_x - 21; ind_y = center_y - 21; break;
+    for (int y = pointer_top; y < pointer_base; y++) {
+        int width = ((y - pointer_top) * 80) / 40;
+        graphics_draw_hline(center_x - width/2, center_x + width/2, y, 0xFFFF00FF);
     }
 
-    // Draw thick spinning indicator
-    for (int offset = -1; offset <= 1; offset++) {
-        graphics_draw_line(center_x + offset, center_y + offset, ind_x + offset, ind_y + offset, 0xFFFFFFFF);
-    }
-
-    // Draw pointer at top (always points up) - BIGGER
-    graphics_draw_triangle(
-        center_x, center_y - radius - 40,           // Top point (further out)
-        center_x - 30, center_y - radius - 15,      // Left point (wider)
-        center_x + 30, center_y - radius - 15,      // Right point (wider)
-        0xFFFF00FF  // Yellow for maximum visibility
-    );
+    // Draw pointer border
+    graphics_draw_line(center_x, pointer_top, center_x - 40, pointer_base, 0xFFFFFFFF);
+    graphics_draw_line(center_x, pointer_top, center_x + 40, pointer_base, 0xFFFFFFFF);
+    graphics_draw_hline(center_x - 40, center_x + 40, pointer_base, 0xFFFFFFFF);
 }
 
 /*
