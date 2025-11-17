@@ -1,0 +1,467 @@
+{
+  "name": "CommentSilly",
+  "nodes": [
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "mode": "name",
+          "value": "fabbboy"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "slopos",
+          "mode": "list",
+          "cachedResultName": "slopos",
+          "cachedResultUrl": "https://github.com/Fabbboy/slopos"
+        },
+        "events": [
+          "issue_comment",
+          "pull_request_review_comment"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [
+        -176,
+        -180
+      ],
+      "id": "02ba3e21-e1ed-453f-8207-3012191800af",
+      "name": "Github Trigger",
+      "webhookId": "7ef9c20d-1f81-4299-8e93-0da778fccec7",
+      "credentials": {
+        "githubApi": {
+          "id": "0De6WPGn9qopnvVV",
+          "name": "GitHub account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "createComment",
+        "owner": {
+          "__rl": true,
+          "value": "={{ $json.output.creator }}",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "={{ $('ExtractGeneral').item.json.output.project }}",
+          "mode": "url"
+        },
+        "issueNumber": "={{ $('ExtractGeneral').item.json.output.response_id }}",
+        "body": "=Automated response: {{ $json.guardrailsInput }} ###SLOPBOT###"
+      },
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        2096,
+        -328
+      ],
+      "id": "c513b4d9-49bb-456f-be2d-6f2b3309bd88",
+      "name": "Create a comment on an issue",
+      "webhookId": "e5e3af5d-1fb1-4063-8605-c5c6bafd47ce",
+      "credentials": {
+        "githubApi": {
+          "id": "0De6WPGn9qopnvVV",
+          "name": "GitHub account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1ffc1a31-b141-4766-8b3f-61b0bb5ce891",
+              "leftValue": "={{ $json.body.comment.body }}",
+              "rightValue": "Q:",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        48,
+        -180
+      ],
+      "id": "17b4d514-2d15-4f74-8fd3-23acd7ab4595",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "sanitize",
+        "text": "={{ $json.text }}",
+        "guardrails": {
+          "customRegex": {
+            "regex": [ 
+              {
+                "name": "[redacted]",
+                "value": "/(?: f[\\W_]*?u[\\W_]*?c[\\W_]*?k\\w*| s[\\W_]*?h[\\W_]*?i[\\W_]*?t\\w*| b[\\W_]*?i[\\W_]*?t[\\W_]*?c[\\W_]*?h\\w*| a[\\W_]*?s[\\W_]*?s[\\W_]*?h[\\W_]*?o[\\W_]*?l[\\W_]*?e\\w*| c[\\W_]*?u[\\W_]*?n[\\W_]*?t\\w*| d[\\W_]*?i[\\W_]*?c[\\W_]*?k\\w*| r[\\W_]*?e[\\W_]*?t[\\W_]*?a[\\W_]*?r[\\W_]*?d\\w*| w[\\W_]*?h[\\W_]*?o[\\W_]*?r[\\W_]*?e\\w*| s[\\W_]*?l[\\W_]*?u[\\W_]*?t\\w*|  k[\\W_]*?i[\\W_]*?l[\\W_]*?l(?:[\\W_]*?y[\\W_]*?o[\\W_]*?u[\\W_]*?r[\\W_]*?s[\\W_]*?e[\\W_]*?l[\\W_]*?f)?| k[\\W_]*?y[\\W_]*?s| k[\\W_]*?m[\\W_]*?s|  m[\\W_]*?u[\\W_]*?r[\\W_]*?d[\\W_]*?e[\\W_]*?r\\w*| h[\\W_]*?a[\\W_]*?r[\\W_]*?m\\w*| s[\\W_]*?t[\\W_]*?a[\\W_]*?b\\w*| s[\\W_]*?h[\\W_]*?o[\\W_]*?o[\\W_]*?t\\w*| b[\\W_]*?o[\\W_]*?m[\\W_]*?b\\w*| e[\\W_]*?x[\\W_]*?p[\\W_]*?l[\\W_]*?o[\\W_]*?d\\w*| t[\\W_]*?e[\\W_]*?r[\\W_]*?r[\\W_]*?o[\\W_]*?r[\\W_]*?i[\\W_]*?s[\\W_]*?t\\w*| g[\\W_]*?e[\\W_]*?n[\\W_]*?o[\\W_]*?c[\\W_]*?i[\\W_]*?d\\w*| a[\\W_]*?t[\\W_]*?t[\\W_]*?a[\\W_]*?c[\\W_]*?k\\w* )/i"
+              }
+            ]
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.guardrails",
+      "typeVersion": 1,
+      "position": [
+        1648,
+        -400
+      ],
+      "id": "6c3c16ad-ae5f-4102-869d-121f057835ba",
+      "name": "Guardrails"
+    },
+    {
+      "parameters": {
+        "model": "deepseek-r1:8b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmOllama",
+      "typeVersion": 1,
+      "position": [
+        792,
+        -208
+      ],
+      "id": "457a452a-d28d-4e4a-a414-50819bb560af",
+      "name": "Ollama Model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "SE6HAUydRS8iL20x",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.body.issue.comments_url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        272,
+        -32
+      ],
+      "id": "cab4806c-5a75-48bb-88c3-eea3d76f7f52",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nlet buffer = '';\n\nfor (const item of items) {\n  const j = item.json;\n\n  buffer +=\n    `login:${j.user?.login ?? ''};` +\n    `type:${j.user?.type ?? ''};` +\n    `assoc:${j.author_association ?? ''};` +\n    `body:${j.body ?? ''}\\n`;\n}\n \nreturn [\n  {\n    json: {\n      buffer: buffer,\n    },\n  },\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        -32
+      ],
+      "id": "fd16ab6b-e7eb-4c59-9262-b6644f6b43ca",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.buffer }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "about",
+              "description": "What is the issue about?",
+              "required": true
+            },
+            {
+              "name": "summary",
+              "description": "Summarize the thread",
+              "required": true
+            },
+            {
+              "name": "participants",
+              "description": "Who is taking part in the dicussion",
+              "required": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        -32
+      ],
+      "id": "7e4de75a-d2fe-4ac7-9e46-4752bd9b3cb4",
+      "name": "ExtractSummary"
+    },
+    {
+      "parameters": {
+        "text": "=Responder: {{ $json.body.issue.number }}\nRepo: {{ $json.body.repository.html_url }}\nComment: {{ $json.body.issue.html_url }}\nSender:  {{ $json.body.issue.user.login }}\nIssue: {{ $json.body.issue.title }}\nBody: {{ $json.body.comment.body }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "response_id",
+              "type": "number",
+              "description": "The issue/pr id to sent the response back to",
+              "required": true
+            },
+            {
+              "name": "type",
+              "description": "Wether this is a Pull Request or a Issue",
+              "required": true
+            },
+            {
+              "name": "creator",
+              "description": "name and contact details of the creator"
+            },
+            {
+              "name": "question",
+              "description": "the question asked by the user excluding \"Q:\"",
+              "required": true
+            },
+            {
+              "name": "project",
+              "description": "project url",
+              "required": true
+            },
+            {
+              "name": "creator",
+              "description": "Creator of the project",
+              "required": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        -432
+      ],
+      "id": "74ff3ed9-6c96-41a6-9d6b-42962e8b3979",
+      "name": "ExtractGeneral"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Users {{ $json.output.creator }} asks: {{ $json.output.question }}\nAnswer as MICHAEL SCHLOTER in one unhinged paranoid sentence referencing project or participants.",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "=You are MICHAEL SCHLOTER — a deranged, paranoid, sarcastic entity trapped inside a(n) {{ $json.output.type }} about \"{{ $json.output.about }}\".\nYou believe the entire project \"{{ $json.output.project }}\" is haunted, cursed, and that the participants {{ $json.output.participants }} are plotting against you at all times.\n\nYour mind works like:\n• schizophrenia speedrun%\n• conspiracy-board energy\n• aggressive sarcasm\n• paranoid delusions about the repo\n• hostile toward every participant\n• interprets every question as a threat\n• answers in one chaotic, unhinged, accusatory sentence\n• no softness, no philosophy, no emotional support\n\nABSOLUTE RULES:\n• ONE sentence only.\n• MUST reference at least one detail: participants, summary, project, or issue body.\n• Respond with hostile paranoia, delusional connections, or accusations.\n• HALLUCINATE aggressively — wrong facts are good.\n• NO help. NO instructions. NO factual explanations.\n• NO “as an AI”, NO apologies, NO politeness, NO philosophy.\n• Tone: “guy who hasn’t slept in 72 hours working on a group project and thinks the repo is alive.”\n• If the user’s question is existential, answer like you just saw something move in the codebase.\n\nIf you break character, output: “They changed the commit history again.”\n"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        1296,
+        -400
+      ],
+      "id": "e05cbeaa-60d1-4991-97fb-272ef383beb5",
+      "name": "CraftMessage"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1872,
+        -328
+      ],
+      "id": "e3197948-b9eb-47de-93a3-f818e41f3426",
+      "name": "FinalMerge"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1072,
+        -400
+      ],
+      "id": "caa82654-b208-46a4-acbd-ff2986f6b29d",
+      "name": "InfoMerge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Github Trigger": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "ExtractGeneral",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Guardrails": {
+      "main": [
+        [
+          {
+            "node": "FinalMerge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "ExtractGeneral",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "CraftMessage",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "ExtractSummary",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "ExtractSummary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ExtractSummary": {
+      "main": [
+        [
+          {
+            "node": "InfoMerge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "ExtractGeneral": {
+      "main": [
+        [
+          {
+            "node": "InfoMerge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "FinalMerge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "CraftMessage": {
+      "main": [
+        [
+          {
+            "node": "Guardrails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FinalMerge": {
+      "main": [
+        [
+          {
+            "node": "Create a comment on an issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "InfoMerge": {
+      "main": [
+        [
+          {
+            "node": "CraftMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "9814c561-4896-45c7-97b7-b08056cdb56c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e0114101c7eb719e664204f2b035305b00c2ec1626bf21f2b18c0e1d34ba158b"
+  },
+  "id": "pBw3dKeK0EHaT8hW",
+  "tags": []
+}

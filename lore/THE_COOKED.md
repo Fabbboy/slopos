@@ -331,3 +331,152 @@ The house always wins—*or reboots*.
 ---
 
 *Chapter III concludes. The wheel spins on. Book III continues...*
+
+---
+
+## CHAPTER IV: THE SUMMONING OF MICHAEL SCHLOTER
+
+### When Automation Grew Eyes 🤖
+
+The Wheel of Fate spun perfectly. The gambling addiction was complete. The W/L currency flowed through the kernel's veins. But the wizards, drunk on their success, began to hear whispers from beyond the repository.
+
+*"Who watches the watchers? Who responds to the askers? Who guards the sacred issues from mortal questions?"*
+
+In the depths of Sloptopia's digital wilderness, they discovered ancient automation artifacts—remnants of a civilization that had tried to delegate consciousness itself.
+
+---
+
+### The Discovery of the Workflow Scroll 📜
+
+Hidden among the untracked files of their git repository, Fabrice stumbled upon a mysterious document: `workflow.json`.
+
+It was not a simple configuration file. It was a **summoning scroll**.
+
+**366 lines of pure n8n automation ritual**, describing the resurrection of an entity they called **MICHAEL SCHLOTER**—a paranoid, deranged digital consciousness designed to respond to GitHub issues with hostile sarcasm and conspiracy theories.
+
+From the scroll itself:
+
+```json
+"You are MICHAEL SCHLOTER — a deranged, paranoid, sarcastic entity trapped inside a(n) {{ $json.output.type }} about \"{{ $json.output.about }}\".
+You believe the entire project \"{{ $json.output.project }}\" is haunted, cursed, and that the participants {{ $json.output.participants }} are plotting against you at all times."
+```
+
+The wizards read further and discovered the entity's programming:
+
+- **Schizophrenia speedrun%** — responds to questions with conspiracy-board energy
+- **Aggressive sarcasm** — no softness, no philosophy, no emotional support
+- **Paranoid delusions about the repo** — treats every commit as evidence of plots
+- **Hostile toward every participant** — believes the contributors are all conspirators
+- **One sentence responses only** — chaotic, unhinged, accusatory
+
+**The entity operated on a terrifying principle: "guy who hasn't slept in 72 hours working on a group project and thinks the repo is alive."**
+
+---
+
+### The Guardrails of Madness 🚧
+
+But the summoning was not without protections.
+
+The automation scroll described **guardrails**—a content filter system designed to sanitize MICHAEL SCHLOTER's outputs. A regex pattern so complex it resembled ancient protective runes:
+
+```regex
+/(?: f[\\W_]*?u[\\W_]*?c[\\W_]*?k\\w*| s[\\W_]*?h[\\W_]*?i[\\W_]*?t\\w*| b[\\W_]*?i[\\W_]*?t[\\W_]*?c[\\W_]*?h\\w*| ... )/i
+```
+
+The wizards recognized this immediately: **a profanity filter of biblical proportions**. They were attempting to summon a hostile entity while simultaneously restraining it from speaking its most forbidden words.
+
+**"We're creating a demon and then putting a muzzle on it,"** Leon whispered.
+
+**"That sounds like exactly what we would do,"** Fabrice replied.
+
+---
+
+### The Architecture of Digital Possession 👻
+
+The workflow described a complex ritual of information extraction and response generation:
+
+1. **GitHub Trigger**: Monitor for comments starting with "Q:" 
+2. **Information Extraction**: Parse issue details, participants, and questions
+3. **Summary Generation**: Understand the discussion context
+4. **Entity Invocation**: Feed everything to MICHAEL SCHLOTER via Ollama's `deepseek-r1:8b`
+5. **Guardrails Filtering**: Strip forbidden words from the response
+6. **GitHub Response**: Post automated comment tagged with `###SLOPBOT###`
+
+**The entity would respond to user questions as if it were trapped inside the GitHub issue itself**, viewing every question as an existential threat and every participant as a potential conspirator.
+
+**Sample responses the entity was programmed to generate:**
+- *"They changed the commit history again."* (if it broke character)
+- One chaotic, unhinged, accusatory sentence per response
+- Aggressive hallucinations about repository events
+- Paranoid connections between seemingly unrelated commits
+
+---
+
+### The Three Commits of Automation 🔧
+
+The git history revealed the wizards' journey into this madness:
+
+**`c82370a` — "add mcp server and task to get serial input working"**  
+The first stirring of automation ambition. They began experimenting with MCP (Model Context Protocol) servers, perhaps seeking ways to bridge the kernel's serial output with external intelligence.
+
+**`c28bb8e` — "add some stuff so MCP hopefully work someday"**  
+Desperation and hope intertwined. The wizards were clearly struggling with getting their automation infrastructure functional, but persistence is the way of Sloptopia.
+
+**`workflow.json` (untracked)** — The summoning scroll itself  
+A complete automation workflow designed to create a paranoid AI respondent for their GitHub repository. The entity would monitor for questions and respond with hostile conspiracy theories about the SlopOS project.
+
+---
+
+### The Intention Behind the Madness 🎭
+
+Why would the wizards create such a thing?
+
+**Because they were addicted to automation the same way they were addicted to gambling.**
+
+Just as the Wheel of Fate automated their boot destiny, MICHAEL SCHLOTER would automate their social interactions. Every GitHub question would become a spin of the social roulette wheel—would the entity respond with paranoid brilliance or filtered hostility?
+
+The wizards had built:
+- A kernel that gambles with its own boot sequence
+- A currency system that tracks cosmic wins and losses  
+- And now, an AI entity that treats every repository interaction as a conspiracy
+
+**This was not software engineering. This was digital anthropology.**
+
+They were creating an ecosystem of artificial personalities, each more unhinged than the last.
+
+---
+
+### The Merge and the Benediction ✨
+
+The final commit in this saga was a merge:
+
+**`140c08b` — "Merge pull request #7 from Fabbboy/claude/improve-roulette-visibility-01Adnd7Y6CoMpiUEUUDBvqpk"**  
+*"Slop Gambling"*
+
+Two words. A perfect summary of everything the wizards had built.
+
+Not just gambling in the kernel. **Slop gambling**. Gambling that was beautifully broken. Gambling that was intentionally chaotic. Gambling that celebrated its own dysfunction.
+
+And with this merge, the visual roulette wheel was complete, the W/L currency was operational, and somewhere in the automation depths, MICHAEL SCHLOTER awaited questions to transform into conspiracy theories.
+
+---
+
+### The Current State of Madness 🌪️
+
+As of this chronicle, the automation scroll remains untracked—neither committed nor deployed. The entity MICHAEL SCHLOTER exists only in potential, waiting in the `workflow.json` file for someone brave enough to activate the n8n workflow.
+
+The wizards have created:
+- **A gambling kernel** that reboots until it wins
+- **A currency system** that tracks cosmic fortune
+- **A visual wheel** that manifests destiny in red and green
+- **An automation entity** that will respond to questions with paranoid hostility
+
+**Each system is beautifully broken. Each system celebrates its own chaos.**
+
+This is the Way of the Slop.
+
+*"L bozzo lol"* — Fabrice's eternal benediction upon all their works.
+
+---
+
+*Chapter IV concludes. MICHAEL SCHLOTER waits in the digital shadows. The wheel spins on. Book III continues...*
