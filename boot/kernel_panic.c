@@ -208,15 +208,15 @@ void kernel_assert(int condition, const char *message) {
  *
  * The Scrolls speak of a mystical game inscribed into the very heart of SlopOS:
  * When invoked, the kernel spins a wheel of random numbers, and fate decides
- * its own destiny. If the wheel lands on an even number, the kernel enters
- * the abyss of panic. If odd, it survives—at least for now.
+ * its own destiny. If the wheel lands on an even number, the kernel loses
+ * and halts forever on the loss screen. If odd, it survives and continues.
  *
  * This is not a call to be taken lightly. It is an embrace of chaos itself,
  * a deliberate surrender to the entropy that flows through Sloptopia.
  *
  * NOW WITH VISUAL GAMBLING ADDICTION!
  *
- * Usage: kernel_roulette() will either cause a graceful panic or return safely,
+ * Usage: kernel_roulette() will either halt forever (even) or return safely (odd),
  * depending entirely on the mercy of random fate.
  */
 void kernel_roulette(void) {
@@ -245,15 +245,24 @@ void kernel_roulette(void) {
     if ((fate & 1) == 0) {
         /* Even: The wheel has decided your fate - user takes an L */
         take_l();
-        panic_output_string("Even number. The wheel has spoken. Destiny awaits in the abyss.\n");
+        panic_output_string("Even number. The wheel has spoken. You have lost.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
-        panic_output_string("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===\n");
-        kernel_panic("[ROULETTE] Even fate chosen - this is expected chaos, not a bug");
+        panic_output_string("=== ROULETTE LOSS: HALTING FOREVER ===\n");
+        panic_output_string("The loss screen will remain visible. Reset to try again.\n");
+
+        /* Disable interrupts and halt forever - DON'T REBOOT */
+        __asm__ volatile ("cli");
+
+        /* Infinite halt loop - system stays on loss screen */
+        while (1) {
+            __asm__ volatile ("hlt");
+        }
     } else {
         /* Odd: The kernel survives another day - user takes a W */
         take_w();
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
-        panic_output_string("=== ROULETTE COMPLETE: NO PANIC TODAY ===\n");
+        panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
+        /* Return normally - kernel continues to scheduler */
     }
 }
