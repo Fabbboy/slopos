@@ -47,69 +47,52 @@ static void draw_roulette_wheel(int center_x, int center_y, int radius, int angl
     }
 
     // Draw 8 segments as FILLED BOXES radiating from center
-    // This is much simpler and more visible than wedges
+    // Keep shapes FIXED for bold visual clarity
     for (int i = 0; i < 8; i++) {
         int base_angle = (i * 45 + angle) % 360;
         int octant = (base_angle / 45) % 8;
-        int sub_angle = base_angle % 45;  // Use for smooth interpolation
 
         // Alternate PURE RED and PURE GREEN
         uint32_t color = (i % 2 == 0) ? 0xFF0000FF : 0x00FF00FF;
 
         // Draw FILLED rectangular segments radiating outward
-        // Much more visible than triangular wedges
+        // Shapes stay fixed - only position rotates
         for (int r = 15; r < radius; r++) {
             int x1, y1, x2, y2;
 
-            // Calculate segment boundaries with smooth interpolation
+            // Fixed segment boundaries (no morphing)
             switch (octant) {
-                case 0: // North (transitioning to NE)
-                    x1 = center_x - 20 + (sub_angle * 40) / 45; 
-                    y1 = center_y - r;
-                    x2 = center_x + 20 + (sub_angle * 40) / 45;
-                    y2 = center_y - r;
+                case 0: // North
+                    x1 = center_x - 20; y1 = center_y - r;
+                    x2 = center_x + 20; y2 = center_y - r;
                     break;
-                case 1: // NE (transitioning to East)
-                    x1 = center_x + r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
-                    y1 = center_y - r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
-                    x2 = center_x + r * 8 / 10 + (sub_angle * r) / (45 * 5);
-                    y2 = center_y - r * 4 / 10 + (sub_angle * r * 2) / (45 * 10);
+                case 1: // NE
+                    x1 = center_x + r * 6 / 10; y1 = center_y - r * 6 / 10;
+                    x2 = center_x + r * 8 / 10; y2 = center_y - r * 4 / 10;
                     break;
-                case 2: // East (transitioning to SE)
-                    x1 = center_x + r;
-                    y1 = center_y - 20 + (sub_angle * 40) / 45;
-                    x2 = center_x + r;
-                    y2 = center_y + 20 + (sub_angle * 40) / 45;
+                case 2: // East
+                    x1 = center_x + r; y1 = center_y - 20;
+                    x2 = center_x + r; y2 = center_y + 20;
                     break;
-                case 3: // SE (transitioning to South)
-                    x1 = center_x + r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
-                    y1 = center_y + r * 6 / 10;
-                    x2 = center_x + r * 4 / 10 - (sub_angle * r * 2) / (45 * 10);
-                    y2 = center_y + r * 8 / 10;
+                case 3: // SE
+                    x1 = center_x + r * 6 / 10; y1 = center_y + r * 6 / 10;
+                    x2 = center_x + r * 4 / 10; y2 = center_y + r * 8 / 10;
                     break;
-                case 4: // South (transitioning to SW)
-                    x1 = center_x - 20 - (sub_angle * 40) / 45;
-                    y1 = center_y + r;
-                    x2 = center_x + 20 - (sub_angle * 40) / 45;
-                    y2 = center_y + r;
+                case 4: // South
+                    x1 = center_x - 20; y1 = center_y + r;
+                    x2 = center_x + 20; y2 = center_y + r;
                     break;
-                case 5: // SW (transitioning to West)
-                    x1 = center_x - r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
-                    y1 = center_y + r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
-                    x2 = center_x - r * 8 / 10 - (sub_angle * r) / (45 * 5);
-                    y2 = center_y + r * 4 / 10 - (sub_angle * r * 2) / (45 * 10);
+                case 5: // SW
+                    x1 = center_x - r * 6 / 10; y1 = center_y + r * 6 / 10;
+                    x2 = center_x - r * 8 / 10; y2 = center_y + r * 4 / 10;
                     break;
-                case 6: // West (transitioning to NW)
-                    x1 = center_x - r;
-                    y1 = center_y - 20 - (sub_angle * 40) / 45;
-                    x2 = center_x - r;
-                    y2 = center_y + 20 - (sub_angle * 40) / 45;
+                case 6: // West
+                    x1 = center_x - r; y1 = center_y - 20;
+                    x2 = center_x - r; y2 = center_y + 20;
                     break;
-                case 7: // NW (transitioning to North)
-                    x1 = center_x - r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
-                    y1 = center_y - r * 6 / 10;
-                    x2 = center_x - r * 4 / 10 + (sub_angle * r * 2) / (45 * 10);
-                    y2 = center_y - r * 8 / 10;
+                case 7: // NW
+                    x1 = center_x - r * 6 / 10; y1 = center_y - r * 6 / 10;
+                    x2 = center_x - r * 4 / 10; y2 = center_y - r * 8 / 10;
                     break;
                 default:
                     x1 = center_x; y1 = center_y;
@@ -169,8 +152,8 @@ static void draw_roulette_wheel(int center_x, int center_y, int radius, int angl
                 break;
         }
 
-        // Draw ULTRA THICK white dividing lines
-        for (int thick = -5; thick <= 5; thick++) {
+        // Draw thin white dividing lines (just for subtle separation)
+        for (int thick = -1; thick <= 1; thick++) {
             graphics_draw_line(center_x, center_y, x_end + thick, y_end, 0xFFFFFFFF);
             graphics_draw_line(center_x, center_y, x_end, y_end + thick, 0xFFFFFFFF);
         }
