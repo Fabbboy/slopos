@@ -62,6 +62,7 @@ int graphics_draw_rect(int x, int y, int width, int height, uint32_t color);
  * Draw a filled rectangle
  */
 int graphics_draw_rect_filled(int x, int y, int width, int height, uint32_t color);
+int graphics_draw_rect_filled_fast(int x, int y, int width, int height, uint32_t color);
 
 /*
  * Draw a pattern-filled rectangle

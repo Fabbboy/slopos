@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
+#include "framebuffer.h"
 
 /* Forward declarations */
 void framebuffer_set_pixel(uint32_t x, uint32_t y, uint32_t color);
@@ -279,6 +280,89 @@ int graphics_draw_rect_filled(int x, int y, int width, int height, uint32_t colo
     for (int row = y1; row <= y2; row++) {
         for (int col = x1; col <= x2; col++) {
             framebuffer_set_pixel((uint32_t)col, (uint32_t)row, color);
+        }
+    }
+
+    return GRAPHICS_SUCCESS;
+}
+
+/*
+ * Draw a filled rectangle - FAST VERSION
+ * Uses direct memory access and single bounds check for performance
+ */
+int graphics_draw_rect_filled_fast(int x, int y, int width, int height, uint32_t color) {
+    if (!framebuffer_is_initialized()) {
+        return GRAPHICS_ERROR_NO_FB;
+    }
+
+    if (width <= 0 || height <= 0) {
+        return GRAPHICS_ERROR_INVALID;
+    }
+
+    /* Get framebuffer info directly */
+    framebuffer_info_t *fb = framebuffer_get_info();
+    if (!fb) return GRAPHICS_ERROR_NO_FB;
+
+    /* Calculate bounds */
+    int x1 = x;
+    int y1 = y;
+    int x2 = x + width - 1;
+    int y2 = y + height - 1;
+
+    /* Clip to framebuffer bounds */
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 >= (int)fb->width) x2 = fb->width - 1;
+    if (y2 >= (int)fb->height) y2 = fb->height - 1;
+
+    /* Check if rectangle is visible */
+    if (x1 > x2 || y1 > y2) {
+        return GRAPHICS_ERROR_BOUNDS;
+    }
+
+    /* Pre-calculate color value */
+    uint32_t pixel_value = color;
+    if (fb->pixel_format == PIXEL_FORMAT_BGR ||
+        fb->pixel_format == PIXEL_FORMAT_BGRA) {
+        pixel_value = ((color & 0xFF0000) >> 16) |
+                     (color & 0x00FF00) |
+                     ((color & 0x0000FF) << 16) |
+                     (color & 0xFF000000);
+    }
+
+    uint8_t *buffer = (uint8_t*)fb->virtual_addr;
+    uint32_t bytes_pp = (fb->bpp + 7) / 8;
+    uint32_t pitch = fb->pitch;
+
+    /* 
+     * Optimization: If we're filling 32-bit color, we can use a tighter loop
+     * or even memset if the color is uniform (e.g. 0 or -1), but for now
+     * we'll just do a tight loop per row to avoid function call overhead.
+     */
+    
+    for (int row = y1; row <= y2; row++) {
+        uint8_t *pixel_ptr = buffer + row * pitch + x1 * bytes_pp;
+        
+        /* Unroll loop for 32-bit color (most common) */
+        if (bytes_pp == 4) {
+            uint32_t *ptr32 = (uint32_t*)pixel_ptr;
+            int count = x2 - x1 + 1;
+            while (count--) {
+                *ptr32++ = pixel_value;
+            }
+        } else {
+            /* Fallback for other depths */
+            for (int col = x1; col <= x2; col++) {
+                switch (bytes_pp) {
+                    case 2: *(uint16_t*)pixel_ptr = (uint16_t)pixel_value; break;
+                    case 3: 
+                        pixel_ptr[0] = (pixel_value >> 16) & 0xFF;
+                        pixel_ptr[1] = (pixel_value >> 8) & 0xFF;
+                        pixel_ptr[2] = pixel_value & 0xFF;
+                        break;
+                }
+                pixel_ptr += bytes_pp;
+            }
         }
     }
 

@@ -26,7 +26,7 @@
 
 /* Animation settings */
 #define ROULETTE_SPIN_FRAMES    30           /* Number of animation frames */
-#define ROULETTE_FRAME_DELAY_MS 150          /* Delay between frames (ms) - MUCH SLOWER */
+#define ROULETTE_FRAME_DELAY_MS 16           /* Delay between frames (ms) - ~60 FPS */
 #define ROULETTE_RESULT_DELAY_MS 5000        /* How long to show result - 5 seconds */
 
 /* ========================================================================

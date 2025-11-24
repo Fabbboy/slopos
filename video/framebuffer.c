@@ -18,6 +18,7 @@
 #include "../boot/log.h"
 #include "../drivers/serial.h"
 #include "../mm/phys_virt.h"
+#include "framebuffer.h"
 
 /* Forward declarations */
 void kernel_panic(const char *message);
@@ -28,48 +29,7 @@ int get_framebuffer_info(uint64_t *addr, uint32_t *width, uint32_t *height,
  * FRAMEBUFFER CONSTANTS AND STRUCTURES
  * ======================================================================== */
 
-/* Supported pixel formats */
-#define PIXEL_FORMAT_RGB    0x01   /* Red-Green-Blue */
-#define PIXEL_FORMAT_BGR    0x02   /* Blue-Green-Red */
-#define PIXEL_FORMAT_RGBA   0x03   /* Red-Green-Blue-Alpha */
-#define PIXEL_FORMAT_BGRA   0x04   /* Blue-Green-Red-Alpha */
-
-/* Maximum framebuffer dimensions */
-#define MAX_FRAMEBUFFER_WIDTH   4096
-#define MAX_FRAMEBUFFER_HEIGHT  4096
-#define MIN_FRAMEBUFFER_WIDTH   320
-#define MIN_FRAMEBUFFER_HEIGHT  240
-
-/* Color depths */
-#define COLOR_DEPTH_16    16   /* 16-bit color */
-#define COLOR_DEPTH_24    24   /* 24-bit color */
-#define COLOR_DEPTH_32    32   /* 32-bit color */
-
-/* Common colors (32-bit RGBA format) */
-#define COLOR_BLACK       0x00000000
-#define COLOR_WHITE       0xFFFFFFFF
-#define COLOR_RED         0xFF0000FF
-#define COLOR_GREEN       0x00FF00FF
-#define COLOR_BLUE        0x0000FFFF
-#define COLOR_YELLOW      0xFFFF00FF
-#define COLOR_CYAN        0x00FFFFFF
-#define COLOR_MAGENTA     0xFF00FFFF
-#define COLOR_GRAY        0x808080FF
-#define COLOR_DARK_GRAY   0x404040FF
-#define COLOR_LIGHT_GRAY  0xC0C0C0FF
-
-/* Framebuffer information structure */
-typedef struct {
-    uint64_t physical_addr;     /* Physical address of framebuffer */
-    void *virtual_addr;         /* Virtual address of framebuffer */
-    uint32_t width;             /* Width in pixels */
-    uint32_t height;            /* Height in pixels */
-    uint32_t pitch;             /* Bytes per scanline */
-    uint8_t bpp;                /* Bits per pixel */
-    uint8_t pixel_format;       /* Pixel format */
-    uint32_t buffer_size;       /* Total buffer size in bytes */
-    uint8_t initialized;        /* Initialization status */
-} framebuffer_info_t;
+/* Global framebuffer state */
 
 /* Global framebuffer state */
 static framebuffer_info_t fb_info = {0};

@@ -85,3 +85,22 @@ void pit_enable_irq(void) {
 void pit_disable_irq(void) {
     irq_disable_line(PIT_IRQ_LINE);
 }
+
+void pit_sleep_ms(uint32_t ms) {
+    if (ms == 0) return;
+
+    /* Calculate target ticks */
+    uint32_t freq = pit_get_frequency();
+    uint64_t ticks_needed = (uint64_t)ms * freq / 1000;
+    
+    /* Handle case where ms is too small for 1 tick */
+    if (ticks_needed == 0) ticks_needed = 1;
+
+    uint64_t start_ticks = irq_get_timer_ticks();
+    uint64_t target_ticks = start_ticks + ticks_needed;
+
+    /* Wait loop */
+    while (irq_get_timer_ticks() < target_ticks) {
+        __asm__ volatile ("hlt");
+    }
+}

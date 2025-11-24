@@ -17,7 +17,14 @@
 #define PIXEL_FORMAT_RGB    0x01   /* Red-Green-Blue */
 #define PIXEL_FORMAT_BGR    0x02   /* Blue-Green-Red */
 #define PIXEL_FORMAT_RGBA   0x03   /* Red-Green-Blue-Alpha */
+#define PIXEL_FORMAT_RGBA   0x03   /* Red-Green-Blue-Alpha */
 #define PIXEL_FORMAT_BGRA   0x04   /* Blue-Green-Red-Alpha */
+
+/* Maximum framebuffer dimensions */
+#define MAX_FRAMEBUFFER_WIDTH   4096
+#define MAX_FRAMEBUFFER_HEIGHT  4096
+#define MIN_FRAMEBUFFER_WIDTH   320
+#define MIN_FRAMEBUFFER_HEIGHT  240
 
 /* Common colors (32-bit RGBA format) */
 #define COLOR_BLACK       0x00000000

@@ -11,7 +11,10 @@
 #include "font.h"
 #include "splash.h"
 #include "../drivers/serial.h"
+#include "../drivers/serial.h"
 #include "../drivers/pit.h"
+
+extern void kernel_panic(const char *message);
 
 /* ========================================================================
  * ANIMATION HELPERS
@@ -23,13 +26,7 @@
  * MUCH SLOWER for visibility
  */
 static void roulette_delay_ms(uint32_t milliseconds) {
-    volatile uint64_t cycles_per_ms = 150000; // 3x slower for better visibility
-
-    for (uint32_t ms = 0; ms < milliseconds; ms++) {
-        for (volatile uint64_t i = 0; i < cycles_per_ms; i++) {
-            __asm__ volatile ("nop");
-        }
-    }
+    pit_sleep_ms(milliseconds);
 }
 
 /* ========================================================================
@@ -45,13 +42,16 @@ static void roulette_delay_ms(uint32_t milliseconds) {
  */
 static void draw_roulette_wheel(int center_x, int center_y, int radius, int angle, uint32_t fate_number) {
     // Draw BLACK background circle
-    graphics_draw_circle_filled(center_x, center_y, radius + 5, 0x000000FF);
+    if (graphics_draw_circle_filled(center_x, center_y, radius + 5, 0x000000FF) != 0) {
+        kernel_panic("ROULETTE: Failed to draw background circle");
+    }
 
     // Draw 8 segments as FILLED BOXES radiating from center
     // This is much simpler and more visible than wedges
     for (int i = 0; i < 8; i++) {
         int base_angle = (i * 45 + angle) % 360;
         int octant = (base_angle / 45) % 8;
+        int sub_angle = base_angle % 45;  // Use for smooth interpolation
 
         // Alternate PURE RED and PURE GREEN
         uint32_t color = (i % 2 == 0) ? 0xFF0000FF : 0x00FF00FF;
@@ -61,39 +61,55 @@ static void draw_roulette_wheel(int center_x, int center_y, int radius, int angl
         for (int r = 15; r < radius; r++) {
             int x1, y1, x2, y2;
 
-            // Calculate segment boundaries
+            // Calculate segment boundaries with smooth interpolation
             switch (octant) {
-                case 0: // North
-                    x1 = center_x - 20; y1 = center_y - r;
-                    x2 = center_x + 20; y2 = center_y - r;
+                case 0: // North (transitioning to NE)
+                    x1 = center_x - 20 + (sub_angle * 40) / 45; 
+                    y1 = center_y - r;
+                    x2 = center_x + 20 + (sub_angle * 40) / 45;
+                    y2 = center_y - r;
                     break;
-                case 1: // NE
-                    x1 = center_x + r * 6 / 10; y1 = center_y - r * 6 / 10;
-                    x2 = center_x + r * 8 / 10; y2 = center_y - r * 4 / 10;
+                case 1: // NE (transitioning to East)
+                    x1 = center_x + r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
+                    y1 = center_y - r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
+                    x2 = center_x + r * 8 / 10 + (sub_angle * r) / (45 * 5);
+                    y2 = center_y - r * 4 / 10 + (sub_angle * r * 2) / (45 * 10);
                     break;
-                case 2: // East
-                    x1 = center_x + r; y1 = center_y - 20;
-                    x2 = center_x + r; y2 = center_y + 20;
+                case 2: // East (transitioning to SE)
+                    x1 = center_x + r;
+                    y1 = center_y - 20 + (sub_angle * 40) / 45;
+                    x2 = center_x + r;
+                    y2 = center_y + 20 + (sub_angle * 40) / 45;
                     break;
-                case 3: // SE
-                    x1 = center_x + r * 6 / 10; y1 = center_y + r * 6 / 10;
-                    x2 = center_x + r * 4 / 10; y2 = center_y + r * 8 / 10;
+                case 3: // SE (transitioning to South)
+                    x1 = center_x + r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
+                    y1 = center_y + r * 6 / 10;
+                    x2 = center_x + r * 4 / 10 - (sub_angle * r * 2) / (45 * 10);
+                    y2 = center_y + r * 8 / 10;
                     break;
-                case 4: // South
-                    x1 = center_x - 20; y1 = center_y + r;
-                    x2 = center_x + 20; y2 = center_y + r;
+                case 4: // South (transitioning to SW)
+                    x1 = center_x - 20 - (sub_angle * 40) / 45;
+                    y1 = center_y + r;
+                    x2 = center_x + 20 - (sub_angle * 40) / 45;
+                    y2 = center_y + r;
                     break;
-                case 5: // SW
-                    x1 = center_x - r * 6 / 10; y1 = center_y + r * 6 / 10;
-                    x2 = center_x - r * 8 / 10; y2 = center_y + r * 4 / 10;
+                case 5: // SW (transitioning to West)
+                    x1 = center_x - r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
+                    y1 = center_y + r * 6 / 10 - (sub_angle * r * 2) / (45 * 10);
+                    x2 = center_x - r * 8 / 10 - (sub_angle * r) / (45 * 5);
+                    y2 = center_y + r * 4 / 10 - (sub_angle * r * 2) / (45 * 10);
                     break;
-                case 6: // West
-                    x1 = center_x - r; y1 = center_y - 20;
-                    x2 = center_x - r; y2 = center_y + 20;
+                case 6: // West (transitioning to NW)
+                    x1 = center_x - r;
+                    y1 = center_y - 20 - (sub_angle * 40) / 45;
+                    x2 = center_x - r;
+                    y2 = center_y + 20 - (sub_angle * 40) / 45;
                     break;
-                case 7: // NW
-                    x1 = center_x - r * 6 / 10; y1 = center_y - r * 6 / 10;
-                    x2 = center_x - r * 4 / 10; y2 = center_y - r * 8 / 10;
+                case 7: // NW (transitioning to North)
+                    x1 = center_x - r * 6 / 10 + (sub_angle * r * 2) / (45 * 10);
+                    y1 = center_y - r * 6 / 10;
+                    x2 = center_x - r * 4 / 10 + (sub_angle * r * 2) / (45 * 10);
+                    y2 = center_y - r * 8 / 10;
                     break;
                 default:
                     x1 = center_x; y1 = center_y;
@@ -110,18 +126,47 @@ static void draw_roulette_wheel(int center_x, int center_y, int radius, int angl
     for (int i = 0; i < 8; i++) {
         int base_angle = (i * 45 + angle) % 360;
         int octant = (base_angle / 45) % 8;
+        int sub_angle = base_angle % 45;  // For smooth interpolation
         int x_end, y_end;
 
+        // Calculate smooth positions using interpolation between octants
         switch (octant) {
-            case 0: x_end = center_x; y_end = center_y - radius; break;
-            case 1: x_end = center_x + radius * 7 / 10; y_end = center_y - radius * 7 / 10; break;
-            case 2: x_end = center_x + radius; y_end = center_y; break;
-            case 3: x_end = center_x + radius * 7 / 10; y_end = center_y + radius * 7 / 10; break;
-            case 4: x_end = center_x; y_end = center_y + radius; break;
-            case 5: x_end = center_x - radius * 7 / 10; y_end = center_y + radius * 7 / 10; break;
-            case 6: x_end = center_x - radius; y_end = center_y; break;
-            case 7: x_end = center_x - radius * 7 / 10; y_end = center_y - radius * 7 / 10; break;
-            default: x_end = center_x; y_end = center_y; break;
+            case 0: // Interpolate from North (0,radius) to NE
+                x_end = center_x + (radius * 7 * sub_angle) / (10 * 45);
+                y_end = center_y - radius + (radius * 3 * sub_angle) / (10 * 45);
+                break;
+            case 1: // Interpolate from NE to East
+                x_end = center_x + (radius * 7) / 10 + (radius * 3 * sub_angle) / (10 * 45);
+                y_end = center_y - (radius * 7) / 10 + (radius * 7 * sub_angle) / (10 * 45);
+                break;
+            case 2: // Interpolate from East to SE
+                x_end = center_x + radius - (radius * 3 * sub_angle) / (10 * 45);
+                y_end = center_y + (radius * 7 * sub_angle) / (10 * 45);
+                break;
+            case 3: // Interpolate from SE to South
+                x_end = center_x + (radius * 7) / 10 - (radius * 7 * sub_angle) / (10 * 45);
+                y_end = center_y + (radius * 7) / 10 + (radius * 3 * sub_angle) / (10 * 45);
+                break;
+            case 4: // Interpolate from South to SW  
+                x_end = center_x - (radius * 7 * sub_angle) / (10 * 45);
+                y_end = center_y + radius - (radius * 3 * sub_angle) / (10 * 45);
+                break;
+            case 5: // Interpolate from SW to West
+                x_end = center_x - (radius * 7) / 10 - (radius * 3 * sub_angle) / (10 * 45);
+                y_end = center_y + (radius * 7) / 10 - (radius * 7 * sub_angle) / (10 * 45);
+                break;
+            case 6: // Interpolate from West to NW
+                x_end = center_x - radius + (radius * 3 * sub_angle) / (10 * 45);
+                y_end = center_y - (radius * 7 * sub_angle) / (10 * 45);
+                break;
+            case 7: // Interpolate from NW to North
+                x_end = center_x - (radius * 7) / 10 + (radius * 7 * sub_angle) / (10 * 45);
+                y_end = center_y - (radius * 7) / 10 - (radius * 3 * sub_angle) / (10 * 45);
+                break;
+            default: 
+                x_end = center_x; 
+                y_end = center_y; 
+                break;
         }
 
         // Draw ULTRA THICK white dividing lines
@@ -245,11 +290,18 @@ int roulette_show_spin(uint32_t fate_number) {
     // Get screen dimensions
     uint32_t width = framebuffer_get_width();
     uint32_t height = framebuffer_get_height();
+    
+    if (width == 0 || height == 0) {
+        kernel_panic("ROULETTE: Invalid framebuffer dimensions");
+    }
+
     int center_x = width / 2;
     int center_y = height / 2;
 
     // Clear screen to dramatic black
-    framebuffer_clear(ROULETTE_BG_COLOR);
+    if (graphics_draw_rect_filled_fast(0, 0, width, height, ROULETTE_BG_COLOR) != 0) {
+        kernel_panic("ROULETTE: Failed to clear screen");
+    }
 
     // Draw title
     font_draw_string(center_x - 150, 50, "=== THE WHEEL OF FATE ===", ROULETTE_WHEEL_COLOR, 0x00000000);
@@ -258,14 +310,20 @@ int roulette_show_spin(uint32_t fate_number) {
     // Initial delay for dramatic effect
     roulette_delay_ms(1000);
 
-    // ANIMATION PHASE 1: Fast spinning (more frames, slower)
+    // ANIMATION PHASE 1: Fast spinning
+    // Duration: 8 seconds, 2 full rotations (720 degrees)
+    // ~1.5 degrees per frame for smooth rotation
     kprintln("ROULETTE: Phase 1 - Fast spin");
-    for (int frame = 0; frame < 24; frame++) {
+    uint32_t phase1_duration_ms = 8000;
+    uint32_t phase1_frames = phase1_duration_ms / ROULETTE_FRAME_DELAY_MS;
+    uint32_t phase1_total_degrees = 720;  // 2 full rotations
+    
+    for (uint32_t frame = 0; frame < phase1_frames; frame++) {
         // Clear wheel area
-        graphics_draw_rect_filled(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
+        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
 
-        // Draw spinning wheel - rotate through all 8 segments
-        int angle = (frame * 45) % 360;  // 45 degrees per frame = full rotation every 8 frames
+        // Calculate angle based on frame progress
+        int angle = (frame * phase1_total_degrees / phase1_frames) % 360;
         draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
 
         // Draw unrevealed number
@@ -274,43 +332,63 @@ int roulette_show_spin(uint32_t fate_number) {
         roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
     }
 
-    // ANIMATION PHASE 2: Slowing down (more frames, progressive slowdown)
+    // ANIMATION PHASE 2: Slowing down with deceleration
+    // Duration: 5 seconds, gradually slowing down
+    // Starts at ~1.5 deg/frame, ends at ~0.1 deg/frame
     kprintln("ROULETTE: Phase 2 - Slowing down");
-    for (int frame = 0; frame < 16; frame++) {
+    uint32_t phase2_duration_ms = 5000;
+    uint32_t phase2_frames = phase2_duration_ms / ROULETTE_FRAME_DELAY_MS;
+    uint32_t phase2_total_degrees = 180;  // Half rotation while slowing
+    int current_angle = (phase1_total_degrees % 360);
+    
+    for (uint32_t frame = 0; frame < phase2_frames; frame++) {
         // Clear wheel area
-        graphics_draw_rect_filled(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
+        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
 
-        // Draw spinning wheel (slower rotation)
-        int angle = (frame * 22) % 360;  // Slower rotation
+        // Deceleration curve: starts fast, ends slow
+        // Using quadratic easing out: progress^2
+        uint32_t progress = (frame * 1000) / phase2_frames;  // 0-1000
+        uint32_t eased = (progress * progress) / 1000;  // quadratic
+        int angle_delta = (eased * phase2_total_degrees) / 1000;
+        int angle = (current_angle + angle_delta) % 360;
+        
         draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
 
         // Draw unrevealed number
         draw_fate_number(center_x, center_y + 180, fate_number, 0);
 
-        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS + frame * 20); // Each frame gets slower
+        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
     }
 
     // ANIMATION PHASE 3: Final wobble and stop
+    // Duration: 1 second, small oscillations
     kprintln("ROULETTE: Phase 3 - Final wobble");
-    for (int frame = 0; frame < 8; frame++) {
+    uint32_t phase3_duration_ms = 1000;
+    uint32_t phase3_frames = phase3_duration_ms / ROULETTE_FRAME_DELAY_MS;
+    int final_angle = (current_angle + phase2_total_degrees) % 360;
+    
+    for (uint32_t frame = 0; frame < phase3_frames; frame++) {
         // Clear wheel area
-        graphics_draw_rect_filled(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
+        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
 
-        // Draw spinning wheel (very slow wobble back and forth)
-        int wobble_angle = (frame % 2) ? 10 : -10;  // Wobble left and right
-        draw_roulette_wheel(center_x, center_y, 120, wobble_angle, fate_number);
+        // Damped oscillation: decreasing amplitude over time
+        int amplitude = 15 - (frame * 15 / phase3_frames);  // Decreases from 15 to 0
+        int wobble = (int)(amplitude * ((frame % 2) ? 1 : -1));
+        int angle = (final_angle + wobble + 360) % 360;
+        
+        draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
 
         // Draw unrevealed number
         draw_fate_number(center_x, center_y + 180, fate_number, 0);
 
-        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS + 200);
+        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
     }
 
     // REVEAL PHASE: Show the number
     kprintln("ROULETTE: Revealing fate number...");
 
     // Clear wheel area
-    graphics_draw_rect_filled(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
+    graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
 
     // Draw final wheel position
     draw_roulette_wheel(center_x, center_y, 120, 0, fate_number);
@@ -324,7 +402,7 @@ int roulette_show_spin(uint32_t fate_number) {
         roulette_delay_ms(250);  // Slower flashes
 
         if (flash < 4) {
-            graphics_draw_rect_filled(center_x - 100, center_y + 180, 200, 60, ROULETTE_BG_COLOR);
+            graphics_draw_rect_filled_fast(center_x - 100, center_y + 180, 200, 60, ROULETTE_BG_COLOR);
             roulette_delay_ms(250);
         }
     }
@@ -364,7 +442,7 @@ int roulette_show_spin(uint32_t fate_number) {
     // If WIN, clear the screen and show transition message before returning to OS
     if (fate_number & 1) {
         // Clear to dark blue background for transition
-        framebuffer_clear(0x001122FF);
+        graphics_draw_rect_filled_fast(0, 0, width, height, 0x001122FF);
 
         // Show simple transition message
         uint32_t width = framebuffer_get_width();

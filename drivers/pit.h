@@ -11,6 +11,7 @@ void pit_set_frequency(uint32_t frequency_hz);
 uint32_t pit_get_frequency(void);
 void pit_enable_irq(void);
 void pit_disable_irq(void);
+void pit_sleep_ms(uint32_t ms);
 
 #endif /* DRIVERS_PIT_H */
 

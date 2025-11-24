@@ -582,26 +582,53 @@ static int boot_step_scheduler_init(void) {
     return 0;
 }
 
-static int boot_step_shell_task(void) {
-    boot_debug("Creating shell task...");
+static void roulette_gatekeeper_task(void *arg) {
+    (void)arg;
+
+    /* Spin the wheel! */
+    kernel_roulette();
+
+    /* If we return, we won. Spawn the shell. */
+    kprintln("ROULETTE: You survived. Spawning shell...");
+
+    /* Create shell task */
     uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, 0x02);
     if (shell_task_id == INVALID_TASK_ID) {
-        boot_info("ERROR: Failed to create shell task");
+        kernel_panic("Failed to spawn shell after roulette win");
+    }
+    
+    task_t *shell_task;
+    if (task_get_info(shell_task_id, &shell_task) == 0) {
+        schedule_task(shell_task);
+    }
+
+    /* We are done. The shell is now running. */
+    task_terminate(task_get_current_id());
+    
+    /* Should not be reached */
+    while(1) { yield(); }
+}
+
+static int boot_step_roulette_task(void) {
+    boot_debug("Creating roulette gatekeeper task...");
+    uint32_t roulette_task_id = task_create("roulette", roulette_gatekeeper_task, NULL, 5, 0x02);
+    if (roulette_task_id == INVALID_TASK_ID) {
+        boot_info("ERROR: Failed to create roulette task");
         return -1;
     }
 
-    task_t *shell_task_info;
-    if (task_get_info(shell_task_id, &shell_task_info) != 0) {
-        boot_info("ERROR: Failed to get shell task info");
+    task_t *roulette_task_info;
+    if (task_get_info(roulette_task_id, &roulette_task_info) != 0) {
+        boot_info("ERROR: Failed to get roulette task info");
         return -1;
     }
 
-    if (schedule_task(shell_task_info) != 0) {
-        boot_info("ERROR: Failed to schedule shell task");
+    if (schedule_task(roulette_task_info) != 0) {
+        boot_info("ERROR: Failed to schedule roulette task");
         return -1;
     }
 
-    boot_debug("Shell task created and scheduled successfully!");
+    boot_debug("Roulette task created and scheduled successfully!");
     return 0;
 }
 
@@ -626,7 +653,7 @@ static int boot_step_mark_kernel_ready(void) {
 BOOT_INIT_STEP(services, "ramfs", boot_step_ramfs_init);
 BOOT_INIT_STEP(services, "task manager", boot_step_task_manager_init);
 BOOT_INIT_STEP(services, "scheduler", boot_step_scheduler_init);
-BOOT_INIT_STEP(services, "shell task", boot_step_shell_task);
+BOOT_INIT_STEP(services, "roulette task", boot_step_roulette_task);
 BOOT_INIT_STEP(services, "idle task", boot_step_idle_task);
 BOOT_INIT_STEP(services, "mark ready", boot_step_mark_kernel_ready);
 
@@ -689,24 +716,10 @@ void kernel_main(void) {
     boot_info("Kernel initialization complete - ALL SYSTEMS OPERATIONAL!");
 
     /*
-     * The Wheel of Fate: Spin the kernel roulette once on boot
-     * If fortune smiles (odd), the kernel continues to the scheduler
-     * If destiny frowns (even), the purification ritual begins
+     * The Wheel of Fate is now handled by the roulette_gatekeeper_task
+     * which runs as the first scheduled task.
      */
-    boot_info("Spinning the wheel of fate...");
-    wl_init();  /* Initialize W/L currency system */
-    kernel_roulette();
-
-    /* Display W/L balance after roulette */
-    int64_t balance = wl_get_balance();
-    kprint("W/L Balance: ");
-    if (balance >= 0) {
-        kprint("+");
-    }
-    kprint_decimal(balance);
-    kprint(" currency units\n");
-
-    boot_info("The kernel has survived the roulette. Continuing to scheduler...");
+    boot_info("The kernel has initialized. Handing over to scheduler...");
 
     boot_info("Starting scheduler...");
     if (boot_log_is_enabled(BOOT_LOG_LEVEL_INFO)) {
