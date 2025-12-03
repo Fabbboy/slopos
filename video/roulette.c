@@ -5,16 +5,146 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "roulette.h"
 #include "framebuffer.h"
 #include "graphics.h"
 #include "font.h"
 #include "splash.h"
 #include "../drivers/serial.h"
-#include "../drivers/serial.h"
 #include "../drivers/pit.h"
 
 extern void kernel_panic(const char *message);
+
+/* ========================================================================
+ * GEOMETRY DEFINITIONS
+ * ======================================================================== */
+
+#define ROULETTE_SEGMENT_COUNT            12
+#define ROULETTE_TRIG_SCALE             1024
+#define ROULETTE_WHEEL_RADIUS            120
+#define ROULETTE_INNER_RADIUS             36
+#define ROULETTE_POINTER_WIDTH            18
+#define ROULETTE_DEGREE_STEPS            360
+#define ROULETTE_SEGMENT_DEGREES         (360 / ROULETTE_SEGMENT_COUNT)
+#define ROULETTE_SPIN_LOOPS                4
+#define ROULETTE_SPIN_DURATION_MS       4200
+#define ROULETTE_SPIN_FRAME_DELAY_MS      16
+
+/* Alternating colored vs “blank” wedges */
+struct roulette_segment_def {
+    bool is_colored;
+};
+
+static const struct roulette_segment_def roulette_segments[ROULETTE_SEGMENT_COUNT] = {
+    { true }, { false }, { true }, { false }, { true }, { false },
+    { true }, { false }, { true }, { false }, { true }, { false },
+};
+
+static const int16_t roulette_cos_table[ROULETTE_SEGMENT_COUNT + 1] = {
+    1024,  887,  512,    0,  -512, -887, -1024, -887, -512,    0,  512,  887, 1024
+};
+
+static const int16_t roulette_sin_table[ROULETTE_SEGMENT_COUNT + 1] = {
+       0,  512,  887, 1024,   887,  512,     0, -512, -887, -1024, -887, -512,    0
+};
+
+/* Midpoint directions (15, 45, ... degrees) for pointer ticks */
+static const int16_t roulette_cos360[ROULETTE_DEGREE_STEPS] = {
+    1024, 1024, 1023, 1023, 1022, 1020, 1018, 1016, 1014, 1011, 1008, 1005,
+    1002,  998,  994,  989,  984,  979,  974,  968,  962,  956,  949,  943,
+     935,  928,  920,  912,  904,  896,  887,  878,  868,  859,  849,  839,
+     828,  818,  807,  796,  784,  773,  761,  749,  737,  724,  711,  698,
+     685,  672,  658,  644,  630,  616,  602,  587,  573,  558,  543,  527,
+     512,  496,  481,  465,  449,  433,  416,  400,  384,  367,  350,  333,
+     316,  299,  282,  265,  248,  230,  213,  195,  178,  160,  143,  125,
+     107,   89,   71,   54,   36,   18,    0,  -18,  -36,  -54,  -71,  -89,
+    -107, -125, -143, -160, -178, -195, -213, -230, -248, -265, -282, -299,
+    -316, -333, -350, -367, -384, -400, -416, -433, -449, -465, -481, -496,
+    -512, -527, -543, -558, -573, -587, -602, -616, -630, -644, -658, -672,
+    -685, -698, -711, -724, -737, -749, -761, -773, -784, -796, -807, -818,
+    -828, -839, -849, -859, -868, -878, -887, -896, -904, -912, -920, -928,
+    -935, -943, -949, -956, -962, -968, -974, -979, -984, -989, -994, -998,
+   -1002, -1005, -1008, -1011, -1014, -1016, -1018, -1020, -1022, -1023, -1023,
+   -1024, -1024, -1024, -1023, -1023, -1022, -1020, -1018, -1016, -1014, -1011,
+   -1008, -1005, -1002,  -998,  -994,  -989,  -984,  -979,  -974,  -968,  -962,
+    -956,  -949,  -943,  -935,  -928,  -920,  -912,  -904,  -896,  -887,  -878,
+    -868,  -859,  -849,  -839,  -828,  -818,  -807,  -796,  -784,  -773,  -761,
+    -749,  -737,  -724,  -711,  -698,  -685,  -672,  -658,  -644,  -630,  -616,
+    -602,  -587,  -573,  -558,  -543,  -527,  -512,  -496,  -481,  -465,  -449,
+    -433,  -416,  -400,  -384,  -367,  -350,  -333,  -316,  -299,  -282,  -265,
+    -248,  -230,  -213,  -195,  -178,  -160,  -143,  -125,  -107,   -89,   -71,
+     -54,   -36,   -18,     0,    18,    36,    54,    71,    89,   107,   125,
+     143,   160,   178,   195,   213,   230,   248,   265,   282,   299,   316,
+     333,   350,   367,   384,   400,   416,   433,   449,   465,   481,   496,
+     512,   527,   543,   558,   573,   587,   602,   616,   630,   644,   658,
+     672,   685,   698,   711,   724,   737,   749,   761,   773,   784,   796,
+     807,   818,   828,   839,   849,   859,   868,   878,   887,   896,   904,
+     912,   920,   928,   935,   943,   949,   956,   962,   968,   974,   979,
+     984,   989,   994,   998,  1002,  1005,  1008,  1011,  1014,  1016,  1018,
+    1020,  1022,  1023,  1023,  1024
+};
+
+static const int16_t roulette_sin360[ROULETTE_DEGREE_STEPS] = {
+       0,   18,   36,   54,   71,   89,  107,  125,  143,  160,  178,  195,
+     213,  230,  248,  265,  282,  299,  316,  333,  350,  367,  384,  400,
+     416,  433,  449,  465,  481,  496,  512,  527,  543,  558,  573,  587,
+     602,  616,  630,  644,  658,  672,  685,  698,  711,  724,  737,  749,
+     761,  773,  784,  796,  807,  818,  828,  839,  849,  859,  868,  878,
+     887,  896,  904,  912,  920,  928,  935,  943,  949,  956,  962,  968,
+     974,  979,  984,  989,  994,  998, 1002, 1005, 1008, 1011, 1014, 1016,
+    1018, 1020, 1022, 1023, 1023, 1024, 1024, 1024, 1023, 1023, 1022, 1020,
+    1018, 1016, 1014, 1011, 1008, 1005, 1002,  998,  994,  989,  984,  979,
+     974,  968,  962,  956,  949,  943,  935,  928,  920,  912,  904,  896,
+     887,  878,  868,  859,  849,  839,  828,  818,  807,  796,  784,  773,
+     761,  749,  737,  724,  711,  698,  685,  672,  658,  644,  630,  616,
+     602,  587,  573,  558,  543,  527,  512,  496,  481,  465,  449,  433,
+     416,  400,  384,  367,  350,  333,  316,  299,  282,  265,  248,  230,
+     213,  195,  178,  160,  143,  125,  107,   89,   71,   54,   36,   18,
+       0,  -18,  -36,  -54,  -71,  -89, -107, -125, -143, -160, -178, -195,
+    -213, -230, -248, -265, -282, -299, -316, -333, -350, -367, -384, -400,
+    -416, -433, -449, -465, -481, -496, -512, -527, -543, -558, -573, -587,
+    -602, -616, -630, -644, -658, -672, -685, -698, -711, -724, -737, -749,
+    -761, -773, -784, -796, -807, -818, -828, -839, -849, -859, -868, -878,
+    -887, -896, -904, -912, -920, -928, -935, -943, -949, -956, -962, -968,
+    -974, -979, -984, -989, -994, -998, -1002, -1005, -1008, -1011, -1014,
+   -1016, -1018, -1020, -1022, -1023, -1023, -1024, -1024, -1024, -1023, -1023,
+   -1022, -1020, -1018, -1016, -1014, -1011, -1008, -1005, -1002,  -998,  -994,
+    -989,  -984,  -979,  -974,  -968,  -962,  -956,  -949,  -943,  -935,  -928,
+    -920,  -912,  -904,  -896,  -887,  -878,  -868,  -859,  -849,  -839,  -828,
+    -818,  -807,  -796,  -784,  -773,  -761,  -749,  -737,  -724,  -711,  -698,
+    -685,  -672,  -658,  -644,  -630,  -616,  -602,  -587,  -573,  -558,  -543,
+    -527,  -512,  -496,  -481,  -465,  -449,  -433,  -416,  -400,  -384,  -367,
+    -350,  -333,  -316,  -299,  -282,  -265,  -248,  -230,  -213,  -195,  -178,
+    -160,  -143,  -125,  -107,   -89,   -71,   -54,   -36,   -18
+};
+
+static const uint32_t ROULETTE_BLANK_COLOR = 0x181818FF;
+static const uint32_t ROULETTE_BLANK_HIGHLIGHT = 0x444444FF;
+static const uint32_t ROULETTE_COLORED_HIGHLIGHT = 0x66FF66FF;
+static const uint32_t ROULETTE_POINTER_COLOR = 0xFFFF00FF;
+
+static inline int roulette_normalize_angle(int degrees) {
+    int angle = degrees % ROULETTE_DEGREE_STEPS;
+    if (angle < 0) {
+        angle += ROULETTE_DEGREE_STEPS;
+    }
+    return angle;
+}
+
+static inline int16_t roulette_cos_deg(int degrees) {
+    return roulette_cos360[roulette_normalize_angle(degrees)];
+}
+
+static inline int16_t roulette_sin_deg(int degrees) {
+    return roulette_sin360[roulette_normalize_angle(degrees)];
+}
+
+static inline int segment_center_angle(int segment_index) {
+    return segment_index * ROULETTE_SEGMENT_DEGREES + (ROULETTE_SEGMENT_DEGREES / 2);
+}
+
+static void draw_fate_number(int center_x, int y_pos, uint32_t fate_number, int revealed);
 
 /* ========================================================================
  * ANIMATION HELPERS
@@ -33,149 +163,150 @@ static void roulette_delay_ms(uint32_t milliseconds) {
  * WHEEL DRAWING FUNCTIONS
  * ======================================================================== */
 
+static inline int roulette_scale(int16_t value, int radius) {
+    return (value * radius) / ROULETTE_TRIG_SCALE;
+}
+
+static void draw_segment_wedge(int center_x, int center_y, int start_idx,
+                               int radius, uint32_t color) {
+    int inner = ROULETTE_INNER_RADIUS;
+    int16_t start_cos = roulette_cos_table[start_idx];
+    int16_t start_sin = roulette_sin_table[start_idx];
+    int16_t end_cos = roulette_cos_table[start_idx + 1];
+    int16_t end_sin = roulette_sin_table[start_idx + 1];
+
+    for (int r = inner; r <= radius; r++) {
+        int x1 = center_x + roulette_scale(start_cos, r);
+        int y1 = center_y + roulette_scale(start_sin, r);
+        int x2 = center_x + roulette_scale(end_cos, r);
+        int y2 = center_y + roulette_scale(end_sin, r);
+        graphics_draw_line(x1, y1, x2, y2, color);
+    }
+}
+
+static void draw_segment_divider(int center_x, int center_y, int idx, int radius) {
+    int x_outer = center_x + roulette_scale(roulette_cos_table[idx], radius + 2);
+    int y_outer = center_y + roulette_scale(roulette_sin_table[idx], radius + 2);
+    graphics_draw_line(center_x, center_y, x_outer, y_outer, ROULETTE_WHEEL_COLOR);
+}
+
 /*
- * Draw a roulette wheel at specified rotation angle - MAXIMUM VISIBILITY
- * center_x, center_y: wheel center position
- * radius: wheel radius
- * angle: rotation angle (0-360 degrees)
- * fate_number: the number we're spinning toward
+ * Draw a roulette wheel with alternating colored/blank wedges.
+ * highlight_segment >= 0 draws a glow under the pointer location.
  */
-static void draw_roulette_wheel(int center_x, int center_y, int radius, int angle, uint32_t fate_number) {
-    // Draw BLACK background circle
-    if (graphics_draw_circle_filled(center_x, center_y, radius + 5, 0x000000FF) != 0) {
-        kernel_panic("ROULETTE: Failed to draw background circle");
-    }
+static void draw_roulette_wheel(int center_x, int center_y, int radius, int highlight_segment) {
+    // Outer ring
+    graphics_draw_circle_filled(center_x, center_y, radius + 8, 0x000000FF);
+    graphics_draw_circle(center_x, center_y, radius + 8, ROULETTE_WHEEL_COLOR);
 
-    // Draw 8 segments as FILLED BOXES radiating from center
-    // Keep shapes FIXED for bold visual clarity
-    for (int i = 0; i < 8; i++) {
-        int base_angle = (i * 45 + angle) % 360;
-        int octant = (base_angle / 45) % 8;
-
-        // Alternate PURE RED and PURE GREEN
-        uint32_t color = (i % 2 == 0) ? 0xFF0000FF : 0x00FF00FF;
-
-        // Draw FILLED rectangular segments radiating outward
-        // Shapes stay fixed - only position rotates
-        for (int r = 15; r < radius; r++) {
-            int x1, y1, x2, y2;
-
-            // Fixed segment boundaries (no morphing)
-            switch (octant) {
-                case 0: // North
-                    x1 = center_x - 20; y1 = center_y - r;
-                    x2 = center_x + 20; y2 = center_y - r;
-                    break;
-                case 1: // NE
-                    x1 = center_x + r * 6 / 10; y1 = center_y - r * 6 / 10;
-                    x2 = center_x + r * 8 / 10; y2 = center_y - r * 4 / 10;
-                    break;
-                case 2: // East
-                    x1 = center_x + r; y1 = center_y - 20;
-                    x2 = center_x + r; y2 = center_y + 20;
-                    break;
-                case 3: // SE
-                    x1 = center_x + r * 6 / 10; y1 = center_y + r * 6 / 10;
-                    x2 = center_x + r * 4 / 10; y2 = center_y + r * 8 / 10;
-                    break;
-                case 4: // South
-                    x1 = center_x - 20; y1 = center_y + r;
-                    x2 = center_x + 20; y2 = center_y + r;
-                    break;
-                case 5: // SW
-                    x1 = center_x - r * 6 / 10; y1 = center_y + r * 6 / 10;
-                    x2 = center_x - r * 8 / 10; y2 = center_y + r * 4 / 10;
-                    break;
-                case 6: // West
-                    x1 = center_x - r; y1 = center_y - 20;
-                    x2 = center_x - r; y2 = center_y + 20;
-                    break;
-                case 7: // NW
-                    x1 = center_x - r * 6 / 10; y1 = center_y - r * 6 / 10;
-                    x2 = center_x - r * 4 / 10; y2 = center_y - r * 8 / 10;
-                    break;
-                default:
-                    x1 = center_x; y1 = center_y;
-                    x2 = center_x; y2 = center_y;
-                    break;
-            }
-
-            // Draw THICK horizontal line for this radius
-            graphics_draw_line(x1, y1, x2, y2, color);
+    for (int i = 0; i < ROULETTE_SEGMENT_COUNT; i++) {
+        bool is_colored = roulette_segments[i].is_colored;
+        uint32_t base_color = is_colored ? ROULETTE_ODD_COLOR : ROULETTE_BLANK_COLOR;
+        if (i == highlight_segment) {
+            base_color = is_colored ? ROULETTE_COLORED_HIGHLIGHT : ROULETTE_BLANK_HIGHLIGHT;
         }
+        draw_segment_wedge(center_x, center_y, i, radius, base_color);
+        draw_segment_divider(center_x, center_y, i, radius);
+    }
+    draw_segment_divider(center_x, center_y, ROULETTE_SEGMENT_COUNT, radius);
+
+    // Center hub
+    graphics_draw_circle_filled(center_x, center_y, ROULETTE_INNER_RADIUS + 6, ROULETTE_WHEEL_COLOR);
+    graphics_draw_circle_filled(center_x, center_y, ROULETTE_INNER_RADIUS, 0x000000FF);
+}
+
+static void draw_pointer_for_angle(int center_x, int center_y, int radius,
+                                   int angle_deg, uint32_t color) {
+    int16_t dir_x = roulette_cos_deg(angle_deg);
+    int16_t dir_y = roulette_sin_deg(angle_deg);
+    int16_t perp_x = -dir_y;
+    int16_t perp_y = dir_x;
+
+    int tip_radius = radius + 36;
+    int base_radius = radius - 6;
+
+    int tip_x = center_x + roulette_scale(dir_x, tip_radius);
+    int tip_y = center_y + roulette_scale(dir_y, tip_radius);
+    int base_x = center_x + roulette_scale(dir_x, base_radius);
+    int base_y = center_y + roulette_scale(dir_y, base_radius);
+
+    int offset_x = roulette_scale(perp_x, ROULETTE_POINTER_WIDTH);
+    int offset_y = roulette_scale(perp_y, ROULETTE_POINTER_WIDTH);
+
+    int left_x = base_x + offset_x;
+    int left_y = base_y + offset_y;
+    int right_x = base_x - offset_x;
+    int right_y = base_y - offset_y;
+
+    graphics_draw_line(tip_x, tip_y, left_x, left_y, color);
+    graphics_draw_line(tip_x, tip_y, right_x, right_y, color);
+    graphics_draw_line(left_x, left_y, right_x, right_y, color);
+}
+
+static void draw_pointer_ticks(int center_x, int center_y, int radius,
+                               int angle_deg, uint32_t color) {
+    draw_pointer_for_angle(center_x, center_y, radius, angle_deg, color);
+    draw_pointer_for_angle(center_x, center_y, radius, angle_deg + 180, color);
+}
+
+static void render_wheel_frame(int screen_width, int screen_height,
+                               int center_x, int center_y, int radius,
+                               int highlight_segment, int pointer_angle_deg,
+                               int *last_pointer_angle,
+                               uint32_t fate_number, bool reveal_number,
+                               bool clear_background) {
+    int region = radius + 80;
+    int region_x = center_x - region;
+    int region_y = center_y - region;
+    int region_w = region * 2;
+    int region_h = region * 2;
+
+    if (!clear_background && last_pointer_angle && *last_pointer_angle >= 0) {
+        draw_pointer_ticks(center_x, center_y, radius, *last_pointer_angle, ROULETTE_BG_COLOR);
     }
 
-    // Draw WHITE dividing lines between segments (VERY THICK)
-    for (int i = 0; i < 8; i++) {
-        int base_angle = (i * 45 + angle) % 360;
-        int octant = (base_angle / 45) % 8;
-        int sub_angle = base_angle % 45;  // For smooth interpolation
-        int x_end, y_end;
-
-        // Calculate smooth positions using interpolation between octants
-        switch (octant) {
-            case 0: // Interpolate from North (0,radius) to NE
-                x_end = center_x + (radius * 7 * sub_angle) / (10 * 45);
-                y_end = center_y - radius + (radius * 3 * sub_angle) / (10 * 45);
-                break;
-            case 1: // Interpolate from NE to East
-                x_end = center_x + (radius * 7) / 10 + (radius * 3 * sub_angle) / (10 * 45);
-                y_end = center_y - (radius * 7) / 10 + (radius * 7 * sub_angle) / (10 * 45);
-                break;
-            case 2: // Interpolate from East to SE
-                x_end = center_x + radius - (radius * 3 * sub_angle) / (10 * 45);
-                y_end = center_y + (radius * 7 * sub_angle) / (10 * 45);
-                break;
-            case 3: // Interpolate from SE to South
-                x_end = center_x + (radius * 7) / 10 - (radius * 7 * sub_angle) / (10 * 45);
-                y_end = center_y + (radius * 7) / 10 + (radius * 3 * sub_angle) / (10 * 45);
-                break;
-            case 4: // Interpolate from South to SW  
-                x_end = center_x - (radius * 7 * sub_angle) / (10 * 45);
-                y_end = center_y + radius - (radius * 3 * sub_angle) / (10 * 45);
-                break;
-            case 5: // Interpolate from SW to West
-                x_end = center_x - (radius * 7) / 10 - (radius * 3 * sub_angle) / (10 * 45);
-                y_end = center_y + (radius * 7) / 10 - (radius * 7 * sub_angle) / (10 * 45);
-                break;
-            case 6: // Interpolate from West to NW
-                x_end = center_x - radius + (radius * 3 * sub_angle) / (10 * 45);
-                y_end = center_y - (radius * 7 * sub_angle) / (10 * 45);
-                break;
-            case 7: // Interpolate from NW to North
-                x_end = center_x - (radius * 7) / 10 + (radius * 7 * sub_angle) / (10 * 45);
-                y_end = center_y - (radius * 7) / 10 - (radius * 3 * sub_angle) / (10 * 45);
-                break;
-            default: 
-                x_end = center_x; 
-                y_end = center_y; 
-                break;
+    if (clear_background) {
+        if (region_x < 0) {
+            region_w += region_x;
+            region_x = 0;
+        }
+        if (region_y < 0) {
+            region_h += region_y;
+            region_y = 0;
+        }
+        if (region_x + region_w > screen_width) {
+            region_w = screen_width - region_x;
+        }
+        if (region_y + region_h > screen_height) {
+            region_h = screen_height - region_y;
         }
 
-        // Draw thin white dividing lines (just for subtle separation)
-        for (int thick = -1; thick <= 1; thick++) {
-            graphics_draw_line(center_x, center_y, x_end + thick, y_end, 0xFFFFFFFF);
-            graphics_draw_line(center_x, center_y, x_end, y_end + thick, 0xFFFFFFFF);
+        graphics_draw_rect_filled_fast(region_x, region_y, region_w, region_h, ROULETTE_BG_COLOR);
+    }
+
+    draw_roulette_wheel(center_x, center_y, radius, highlight_segment);
+    draw_pointer_ticks(center_x, center_y, radius, pointer_angle_deg, ROULETTE_POINTER_COLOR);
+    draw_fate_number(center_x, center_y + radius + 30, fate_number, reveal_number ? 1 : 0);
+
+    if (last_pointer_angle) {
+        *last_pointer_angle = pointer_angle_deg;
+    }
+}
+
+static bool segment_matches_parity(int segment_index, bool need_colored) {
+    bool is_colored = roulette_segments[segment_index % ROULETTE_SEGMENT_COUNT].is_colored;
+    return need_colored ? is_colored : !is_colored;
+}
+
+static int choose_segment_for_parity(uint32_t fate_number, bool need_colored) {
+    int start = fate_number % ROULETTE_SEGMENT_COUNT;
+    for (int tries = 0; tries < ROULETTE_SEGMENT_COUNT; tries++) {
+        int idx = (start + tries) % ROULETTE_SEGMENT_COUNT;
+        if (segment_matches_parity(idx, need_colored)) {
+            return idx;
         }
     }
-
-    // Draw center circle (GOLD with BLACK inner) - much larger
-    graphics_draw_circle_filled(center_x, center_y, 50, 0xFFD700FF);  // Gold
-    graphics_draw_circle_filled(center_x, center_y, 42, 0x000000FF);  // Black center
-
-    // Draw HUGE pointer at top (filled yellow triangle)
-    int pointer_top = center_y - radius - 60;
-    int pointer_base = center_y - radius - 20;
-
-    for (int y = pointer_top; y < pointer_base; y++) {
-        int width = ((y - pointer_top) * 80) / 40;
-        graphics_draw_hline(center_x - width/2, center_x + width/2, y, 0xFFFF00FF);
-    }
-
-    // Draw pointer border
-    graphics_draw_line(center_x, pointer_top, center_x - 40, pointer_base, 0xFFFFFFFF);
-    graphics_draw_line(center_x, pointer_top, center_x + 40, pointer_base, 0xFFFFFFFF);
-    graphics_draw_hline(center_x - 40, center_x + 40, pointer_base, 0xFFFFFFFF);
+    return start;
 }
 
 /*
@@ -270,7 +401,6 @@ int roulette_show_spin(uint32_t fate_number) {
 
     kprintln("ROULETTE: Displaying visual wheel of fate...");
 
-    // Get screen dimensions
     uint32_t width = framebuffer_get_width();
     uint32_t height = framebuffer_get_height();
     
@@ -281,171 +411,122 @@ int roulette_show_spin(uint32_t fate_number) {
     int center_x = width / 2;
     int center_y = height / 2;
 
-    // Clear screen to dramatic black
     if (graphics_draw_rect_filled_fast(0, 0, width, height, ROULETTE_BG_COLOR) != 0) {
         kernel_panic("ROULETTE: Failed to clear screen");
     }
 
-    // Draw title
     font_draw_string(center_x - 150, 50, "=== THE WHEEL OF FATE ===", ROULETTE_WHEEL_COLOR, 0x00000000);
-    font_draw_string(center_x - 100, 80, "Spinning destiny...", ROULETTE_TEXT_COLOR, 0x00000000);
+    font_draw_string(center_x - 120, 80, "Pointers choose your destiny...", ROULETTE_TEXT_COLOR, 0x00000000);
 
-    // Initial delay for dramatic effect
-    roulette_delay_ms(1000);
-
-    // ANIMATION PHASE 1: Fast spinning
-    // Duration: 8 seconds, 2 full rotations (720 degrees)
-    // ~1.5 degrees per frame for smooth rotation
-    kprintln("ROULETTE: Phase 1 - Fast spin");
-    uint32_t phase1_duration_ms = 8000;
-    uint32_t phase1_frames = phase1_duration_ms / ROULETTE_FRAME_DELAY_MS;
-    uint32_t phase1_total_degrees = 720;  // 2 full rotations
-    
-    for (uint32_t frame = 0; frame < phase1_frames; frame++) {
-        // Clear wheel area
-        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
-
-        // Calculate angle based on frame progress
-        int angle = (frame * phase1_total_degrees / phase1_frames) % 360;
-        draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
-
-        // Draw unrevealed number
-        draw_fate_number(center_x, center_y + 180, fate_number, 0);
-
-        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
+    int radius = ROULETTE_WHEEL_RADIUS;
+    int max_radius = ((width < height ? width : height) / 2) - 60;
+    if (radius > max_radius) {
+        radius = max_radius;
+    }
+    if (radius < ROULETTE_INNER_RADIUS + 20) {
+        radius = ROULETTE_INNER_RADIUS + 20;
     }
 
-    // ANIMATION PHASE 2: Slowing down with deceleration
-    // Duration: 5 seconds, gradually slowing down
-    // Starts at ~1.5 deg/frame, ends at ~0.1 deg/frame
-    kprintln("ROULETTE: Phase 2 - Slowing down");
-    uint32_t phase2_duration_ms = 5000;
-    uint32_t phase2_frames = phase2_duration_ms / ROULETTE_FRAME_DELAY_MS;
-    uint32_t phase2_total_degrees = 180;  // Half rotation while slowing
-    int current_angle = (phase1_total_degrees % 360);
-    
-    for (uint32_t frame = 0; frame < phase2_frames; frame++) {
-        // Clear wheel area
-        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
-
-        // Deceleration curve: starts fast, ends slow
-        // Using quadratic easing out: progress^2
-        uint32_t progress = (frame * 1000) / phase2_frames;  // 0-1000
-        uint32_t eased = (progress * progress) / 1000;  // quadratic
-        int angle_delta = (eased * phase2_total_degrees) / 1000;
-        int angle = (current_angle + angle_delta) % 360;
-        
-        draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
-
-        // Draw unrevealed number
-        draw_fate_number(center_x, center_y + 180, fate_number, 0);
-
-        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
+    bool want_colored = (fate_number & 1) != 0;
+    int start_segment = fate_number % ROULETTE_SEGMENT_COUNT;
+    int target_segment = choose_segment_for_parity(fate_number, want_colored);
+    if (start_segment == target_segment) {
+        start_segment = (start_segment + 3) % ROULETTE_SEGMENT_COUNT;
     }
 
-    // ANIMATION PHASE 3: Final wobble and stop
-    // Duration: 1 second, small oscillations
-    kprintln("ROULETTE: Phase 3 - Final wobble");
-    uint32_t phase3_duration_ms = 1000;
-    uint32_t phase3_frames = phase3_duration_ms / ROULETTE_FRAME_DELAY_MS;
-    int final_angle = (current_angle + phase2_total_degrees) % 360;
-    
-    for (uint32_t frame = 0; frame < phase3_frames; frame++) {
-        // Clear wheel area
-        graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
+    roulette_delay_ms(300);
 
-        // Damped oscillation: decreasing amplitude over time
-        int amplitude = 15 - (frame * 15 / phase3_frames);  // Decreases from 15 to 0
-        int wobble = (int)(amplitude * ((frame % 2) ? 1 : -1));
-        int angle = (final_angle + wobble + 360) % 360;
-        
-        draw_roulette_wheel(center_x, center_y, 120, angle, fate_number);
-
-        // Draw unrevealed number
-        draw_fate_number(center_x, center_y + 180, fate_number, 0);
-
-        roulette_delay_ms(ROULETTE_FRAME_DELAY_MS);
+    int start_angle = segment_center_angle(start_segment);
+    int target_angle = segment_center_angle(target_segment);
+    int rotation_to_target = roulette_normalize_angle(target_angle - start_angle);
+    int total_rotation = ROULETTE_SPIN_LOOPS * ROULETTE_DEGREE_STEPS + rotation_to_target;
+    if (total_rotation <= 0) {
+        total_rotation += ROULETTE_DEGREE_STEPS;
     }
 
-    // REVEAL PHASE: Show the number
+    int last_pointer_angle = -1;
+    render_wheel_frame(width, height, center_x, center_y, radius,
+                       -1, start_angle, &last_pointer_angle, fate_number, false, true);
+
+    int total_frames = ROULETTE_SPIN_DURATION_MS / ROULETTE_SPIN_FRAME_DELAY_MS;
+    if (total_frames < 1) {
+        total_frames = 1;
+    }
+
+    kprintln("ROULETTE: Animating pointer sweep");
+    for (int frame = 1; frame <= total_frames; frame++) {
+        int pointer_angle_frame = start_angle + (total_rotation * frame) / total_frames;
+        render_wheel_frame(width, height, center_x, center_y, radius,
+                           -1, pointer_angle_frame, &last_pointer_angle,
+                           fate_number, false, false);
+        roulette_delay_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
+    }
+
+    int pointer_angle = start_angle + total_rotation;
+    int landing_segment = target_segment;
+    render_wheel_frame(width, height, center_x, center_y, radius,
+                       landing_segment, pointer_angle, &last_pointer_angle,
+                       fate_number, false, true);
+    roulette_delay_ms(500);
+
     kprintln("ROULETTE: Revealing fate number...");
+    roulette_delay_ms(400);
 
-    // Clear wheel area
-    graphics_draw_rect_filled_fast(center_x - 200, center_y - 200, 400, 400, ROULETTE_BG_COLOR);
-
-    // Draw final wheel position
-    draw_roulette_wheel(center_x, center_y, 120, 0, fate_number);
-
-    // Longer pause before reveal
-    roulette_delay_ms(800);
-
-    // Reveal the number with SLOWER flash effect
     for (int flash = 0; flash < 5; flash++) {
-        draw_fate_number(center_x, center_y + 180, fate_number, 1);
-        roulette_delay_ms(250);  // Slower flashes
-
+        render_wheel_frame(width, height, center_x, center_y, radius,
+                           landing_segment, pointer_angle, &last_pointer_angle,
+                           fate_number, true, false);
+        roulette_delay_ms(250);
         if (flash < 4) {
-            graphics_draw_rect_filled_fast(center_x - 100, center_y + 180, 200, 60, ROULETTE_BG_COLOR);
-            roulette_delay_ms(250);
+            render_wheel_frame(width, height, center_x, center_y, radius,
+                               landing_segment, pointer_angle, &last_pointer_angle,
+                               fate_number, false, false);
+            roulette_delay_ms(150);
         }
     }
+    render_wheel_frame(width, height, center_x, center_y, radius,
+                       landing_segment, pointer_angle, &last_pointer_angle,
+                       fate_number, true, false);
+    roulette_delay_ms(600);
 
-    // Final number display
-    draw_fate_number(center_x, center_y + 180, fate_number, 1);
-
-    roulette_delay_ms(1000);  // Longer pause after number reveal
-
-    // RESULT PHASE: Show WIN or LOSE
     kprintln("ROULETTE: Displaying result...");
-
-    // Draw result banner
-    draw_result_banner(center_x, center_y + 270, fate_number);
-
-    // Show W/L currency effect
-    const char *currency_text;
-    if (fate_number & 1) {
-        currency_text = "+10 W's (currency units)";
-    } else {
-        currency_text = "-10 W's (currency units)";
+    int info_y = center_y + radius + 60;
+    if (info_y < 0) {
+        info_y = 0;
     }
-    font_draw_string(center_x - 100, center_y + 370, currency_text, ROULETTE_TEXT_COLOR, 0x00000000);
+    if (info_y > (int)height) {
+        info_y = height;
+    }
+    graphics_draw_rect_filled_fast(0, info_y, width, height - info_y, ROULETTE_BG_COLOR);
+    draw_result_banner(center_x, center_y + radius + 80, fate_number);
 
-    // If LOSE, add instruction to reset
+    const char *currency_text = (fate_number & 1) ? "+10 W's (currency units)" : "-10 W's (currency units)";
+    font_draw_string(center_x - 110, center_y + radius + 170, currency_text, ROULETTE_TEXT_COLOR, 0x00000000);
+
     if ((fate_number & 1) == 0) {
-        font_draw_string(center_x - 120, center_y + 410, "Press RESET to try again...", 0xFFFF00FF, 0x00000000);
+        font_draw_string(center_x - 130, center_y + radius + 210, "Press RESET to try again...", 0xFFFF00FF, 0x00000000);
     } else {
-        font_draw_string(center_x - 120, center_y + 410, "Continuing to OS...", 0x00FF00FF, 0x00000000);
+        font_draw_string(center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
     }
 
-    // Display result for dramatic effect
     roulette_delay_ms(ROULETTE_RESULT_DELAY_MS);
 
     kprintln("ROULETTE: Wheel of fate complete");
 
-    // If WIN, clear the screen and show transition message before returning to OS
     if (fate_number & 1) {
-        // Clear to dark blue background for transition
         graphics_draw_rect_filled_fast(0, 0, width, height, 0x001122FF);
-
-        // Show simple transition message
-        uint32_t width = framebuffer_get_width();
-        uint32_t height = framebuffer_get_height();
-        int msg_x = width / 2 - 150;
-        int msg_y = height / 2 - 20;
+        uint32_t cur_width = framebuffer_get_width();
+        uint32_t cur_height = framebuffer_get_height();
+        int msg_x = cur_width / 2 - 150;
+        int msg_y = cur_height / 2 - 20;
 
         font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
-
-        // Brief pause before OS takes over
         roulette_delay_ms(1000);
-
-        // Restore the normal post-boot graphics demo screen
         splash_draw_graphics_demo();
-
         kprintln("ROULETTE: Graphics demo restored, returning to OS");
     }
 
-    // Return 0 for WIN (odd), 1 for LOSE (even) so caller knows what happened
-    return (fate_number & 1) ? 0 : 1;
+    return want_colored ? 0 : 1;
 }
 
 /*
