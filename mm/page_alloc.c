@@ -114,11 +114,11 @@ static void add_to_free_list(uint32_t frame_num);
 #if defined(PAGE_ALLOC_DEBUG)
 static void page_alloc_debug_self_test(void);
 static uint64_t alloc_page_frames(uint32_t count, uint32_t flags);
-#endif
-static int frame_satisfies_flags(uint32_t frame_num, uint32_t flags);
 static int unlink_frame_from_free_list(uint32_t frame_num);
 static void rollback_contiguous_allocation(uint32_t start_frame, uint32_t count);
 static int find_contiguous_frames(uint32_t count, uint32_t flags, uint32_t *start_frame_out);
+static int frame_satisfies_flags(uint32_t frame_num, uint32_t flags);
+#endif
 
 /* ========================================================================
  * DEBUG LOGGING HELPERS
@@ -152,6 +152,7 @@ static uint8_t page_state_for_flags(uint32_t flags) {
     return PAGE_FRAME_ALLOCATED;
 }
 
+#if defined(PAGE_ALLOC_DEBUG)
 static int frame_satisfies_flags(uint32_t frame_num, uint32_t flags) {
     page_frame_t *frame = get_frame_desc(frame_num);
     if (!frame || frame->state != PAGE_FRAME_FREE) {
@@ -167,6 +168,7 @@ static int frame_satisfies_flags(uint32_t frame_num, uint32_t flags) {
 
     return 1;
 }
+#endif
 
 static int frame_state_is_allocated(uint8_t state) {
     return state == PAGE_FRAME_ALLOCATED ||
@@ -174,6 +176,7 @@ static int frame_state_is_allocated(uint8_t state) {
            state == PAGE_FRAME_DMA;
 }
 
+#if defined(PAGE_ALLOC_DEBUG)
 static int unlink_frame_from_free_list(uint32_t frame_num) {
     if (!is_valid_frame(frame_num)) {
         return -1;
@@ -285,6 +288,7 @@ static int find_contiguous_frames(uint32_t count, uint32_t flags, uint32_t *star
 
     return -1;
 }
+#endif /* PAGE_ALLOC_DEBUG */
 
 #ifdef PAGE_ALLOC_DEBUG
 static void page_alloc_debug_self_test(void) {

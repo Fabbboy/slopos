@@ -592,7 +592,14 @@ void test_exception_handler(struct interrupt_frame *frame) {
 int safe_execute_test(test_function_t test_func, const char *test_name, int expected_exception) {
     test_start(test_name, expected_exception);
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-label-as-value"
+#endif
     void *recovery_anchor = &&test_recovery_anchor;
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     test_ctx.recovery_rip = (uint64_t)(uintptr_t)recovery_anchor;
     test_ctx.abort_requested = 0;
 
@@ -992,9 +999,16 @@ __attribute__((noinline)) int test_segment_violation(void) {
  * Test: Divide by zero
  */
 __attribute__((noinline)) int test_divide_by_zero(void) {
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-label-as-value"
+#endif
     __label__ resume_point;
     void *resume = &&resume_point;
     if (0) goto *resume;
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
     test_set_resume_point(resume);
     __asm__ volatile (

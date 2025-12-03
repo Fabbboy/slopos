@@ -137,7 +137,7 @@ static inline int is_user_address(uint64_t vaddr) {
  * Validate virtual address for kernel space operations
  * Returns 1 if address is in kernel space
  */
-static inline int is_kernel_address(uint64_t vaddr) {
+static inline __attribute__((unused)) int is_kernel_address(uint64_t vaddr) {
     return (vaddr >= KERNEL_VIRTUAL_BASE) ||
            (vaddr >= KERNEL_HEAP_START && vaddr < KERNEL_HEAP_END);
 }
@@ -158,7 +158,7 @@ static inline void invlpg(uint64_t vaddr) {
  * Flush entire TLB by reloading CR3
  * More expensive but ensures all TLB entries are invalidated
  */
-static inline void flush_tlb(void) {
+static inline __attribute__((unused)) void flush_tlb(void) {
     uint64_t cr3;
     __asm__ volatile ("movq %%cr3, %0" : "=r" (cr3));
     __asm__ volatile ("movq %0, %%cr3" :: "r" (cr3) : "memory");
