@@ -108,7 +108,8 @@ lib_sources += files(
   'lib/memory.c',
   'lib/string.c',
   'lib/unit_test.c',
-  'lib/stacktrace.c'
+  'lib/stacktrace.c',
+  'lib/numfmt.c'
 )
 
 # Drivers directory
@@ -125,8 +126,6 @@ drivers_sources += files(
   'drivers/tty.c',
   'drivers/interrupt_test.c',
   'drivers/interrupt_test_config.c',
-  'drivers/exceptions.s',
-  'drivers/exception_handlers.c',
   'drivers/random.c',
   'drivers/wl_currency.c'
 )

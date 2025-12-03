@@ -11,6 +11,7 @@
 #include "../boot/limine_protocol.h"
 #include "../drivers/apic.h"
 #include "../drivers/serial.h"
+#include "../lib/alignment.h"
 #include "../third_party/limine/limine.h"
 #include "memory_reservations.h"
 #include "page_alloc.h"
@@ -28,14 +29,6 @@ void init_paging(void);
 /* ========================================================================
  * MEMORY INITIALIZATION STATE TRACKING
  * ======================================================================== */
-
-static inline uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-static inline uint64_t align_down_u64(uint64_t value, uint64_t alignment) {
-    return value & ~(alignment - 1);
-}
 
 typedef struct allocator_buffer_plan {
     void *page_buffer;

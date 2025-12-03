@@ -1,2 +1,0 @@
-
-#define IDT_ENTRIES 256

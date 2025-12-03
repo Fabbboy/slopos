@@ -6,6 +6,7 @@
 #include "debug.h"
 #include "log.h"
 #include "../drivers/serial.h"
+#include "../lib/cpu.h"
 #include "../drivers/irq.h"
 #include "idt.h"
 #include <stddef.h>
@@ -32,9 +33,7 @@ static struct memory_region memory_regions[MAX_MEMORY_REGIONS];
 static int memory_region_count = 0;
 
 static inline uint64_t debug_read_tsc(void) {
-    uint32_t low, high;
-    __asm__ volatile ("rdtsc" : "=a" (low), "=d" (high));
-    return ((uint64_t)high << 32) | low;
+    return cpu_read_tsc();
 }
 
 /*

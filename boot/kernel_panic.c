@@ -11,6 +11,7 @@
 #include "../drivers/random.h"
 #include "../drivers/wl_currency.h"
 #include "../video/roulette.h"
+#include "../lib/numfmt.h"
 
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
@@ -38,22 +39,12 @@ static void panic_output_hex(uint64_t value) {
  * Output decimal number for debugging
  */
 static void panic_output_decimal(uint64_t value) {
-    if (value == 0) {
-        panic_output_char('0');
-        return;
+    char buffer[32];
+    if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
+        buffer[0] = '0';
+        buffer[1] = '\0';
     }
-
-    char buffer[20];
-    int pos = 0;
-
-    while (value > 0) {
-        buffer[pos++] = '0' + (value % 10);
-        value /= 10;
-    }
-
-    while (pos > 0) {
-        panic_output_char(buffer[--pos]);
-    }
+    panic_output_string(buffer);
 }
 
 /*

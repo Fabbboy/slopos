@@ -7,6 +7,8 @@
 #include "../boot/idt.h"
 #include "../boot/log.h"
 #include "../sched/scheduler.h"
+#include "../lib/cpu.h"
+#include "../lib/io.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -37,18 +39,6 @@ static struct irq_route_state irq_route_table[IRQ_LINES];
 static int irq_system_initialized = 0;
 static uint64_t timer_tick_counter = 0;
 static uint64_t keyboard_event_counter = 0;
-
-static inline uint64_t read_tsc(void) {
-    uint32_t low, high;
-    __asm__ volatile ("rdtsc" : "=a" (low), "=d" (high));
-    return ((uint64_t)high << 32) | low;
-}
-
-static inline uint8_t inb(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
 
 static inline int irq_line_has_ioapic_route(uint8_t irq) {
     if (irq >= IRQ_LINES) {
@@ -150,12 +140,12 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     (void)frame;
     (void)context;
 
-    uint8_t status = inb(PS2_STATUS_PORT);
+    uint8_t status = io_inb(PS2_STATUS_PORT);
     if (!(status & 0x01)) {
         return;
     }
 
-    uint8_t scancode = inb(PS2_DATA_PORT);
+    uint8_t scancode = io_inb(PS2_DATA_PORT);
     keyboard_event_counter++;
 
     /* Pass scancode to keyboard driver for processing */
@@ -366,7 +356,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     }
 
     entry->count++;
-    entry->last_timestamp = read_tsc();
+    entry->last_timestamp = cpu_read_tsc();
 
     entry->handler(irq, frame, entry->context);
 

@@ -8,6 +8,8 @@
 #include "irq.h"
 #include "../sched/scheduler.h"
 #include "../boot/log.h"
+#include "../lib/io.h"
+#include "../lib/numfmt.h"
 
 /* ========================================================================
  * INTERNAL STATE AND CONFIGURATION
@@ -105,28 +107,12 @@ static int serial_rx_buffer_pop(serial_rx_buffer_t *buffer, char *out_char) {
     return 1;
 }
 
-/*
- * Read byte from I/O port
- */
-static inline uint8_t inb(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile ("inb %1, %0" : "=a" (value) : "Nd" (port));
-    return value;
-}
-
-/*
- * Write byte to I/O port
- */
-static inline void outb(uint16_t port, uint8_t value) {
-    __asm__ volatile ("outb %0, %1" : : "a" (value), "Nd" (port));
-}
-
 uint8_t serial_read_register(uint16_t port, uint8_t reg_offset) {
-    return inb(port + reg_offset);
+    return io_inb(port + reg_offset);
 }
 
 void serial_write_register(uint16_t port, uint8_t reg_offset, uint8_t value) {
-    outb(port + reg_offset, value);
+    io_outb(port + reg_offset, value);
 }
 
 /* ========================================================================
@@ -177,14 +163,14 @@ int serial_init(uint16_t port, uint32_t baud_rate, uint8_t data_bits,
     }
 
     /* Disable interrupts */
-    outb(port + SERIAL_INT_ENABLE_REG, 0x00);
+    io_outb(port + SERIAL_INT_ENABLE_REG, 0x00);
 
     /* Set DLAB to access baud rate divisor */
-    outb(port + SERIAL_LINE_CTRL_REG, SERIAL_LCR_DLAB);
+    io_outb(port + SERIAL_LINE_CTRL_REG, SERIAL_LCR_DLAB);
 
     /* Set baud rate divisor */
-    outb(port + SERIAL_DATA_REG, divisor & 0xFF);         /* Low byte */
-    outb(port + SERIAL_INT_ENABLE_REG, (divisor >> 8) & 0xFF);  /* High byte */
+    io_outb(port + SERIAL_DATA_REG, divisor & 0xFF);         /* Low byte */
+    io_outb(port + SERIAL_INT_ENABLE_REG, (divisor >> 8) & 0xFF);  /* High byte */
 
     /* Configure line control register */
     uint8_t lcr = 0;
@@ -206,28 +192,28 @@ int serial_init(uint16_t port, uint32_t baud_rate, uint8_t data_bits,
     }
 
     /* Clear DLAB and set line parameters */
-    outb(port + SERIAL_LINE_CTRL_REG, lcr);
+    io_outb(port + SERIAL_LINE_CTRL_REG, lcr);
 
     /* Enable FIFO and clear it */
-    outb(port + SERIAL_FIFO_CTRL_REG, 0xC7);
+    io_outb(port + SERIAL_FIFO_CTRL_REG, 0xC7);
 
     /* Enable DTR, RTS, and set OUT2 */
-    outb(port + SERIAL_MODEM_CTRL_REG, 0x0B);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, 0x0B);
 
     /* Test serial chip by enabling loopback mode */
-    outb(port + SERIAL_MODEM_CTRL_REG, 0x1E);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, 0x1E);
 
     /* Send test byte */
-    outb(port + SERIAL_DATA_REG, 0xAE);
+    io_outb(port + SERIAL_DATA_REG, 0xAE);
 
     /* Check if we receive the same byte */
-    if (inb(port + SERIAL_DATA_REG) != 0xAE) {
+    if (io_inb(port + SERIAL_DATA_REG) != 0xAE) {
         set_port_error(port, SERIAL_ERROR_HARDWARE);
         return SERIAL_ERROR_HARDWARE;
     }
 
     /* Disable loopback mode and enable normal operation */
-    outb(port + SERIAL_MODEM_CTRL_REG, 0x0F);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, 0x0F);
 
     /* Store configuration */
     port_configs[port_index].base_port = port;
@@ -253,21 +239,21 @@ int serial_init_com1(void) {
  * ======================================================================== */
 
 int serial_transmitter_ready(uint16_t port) {
-    uint8_t status = inb(port + SERIAL_LINE_STATUS_REG);
+    uint8_t status = io_inb(port + SERIAL_LINE_STATUS_REG);
     return (status & SERIAL_LSR_THR_EMPTY) != 0;
 }
 
 int serial_data_available(uint16_t port) {
-    uint8_t status = inb(port + SERIAL_LINE_STATUS_REG);
+    uint8_t status = io_inb(port + SERIAL_LINE_STATUS_REG);
     return (status & SERIAL_LSR_DATA_READY) != 0;
 }
 
 uint8_t serial_get_line_status(uint16_t port) {
-    return inb(port + SERIAL_LINE_STATUS_REG);
+    return io_inb(port + SERIAL_LINE_STATUS_REG);
 }
 
 uint8_t serial_get_modem_status(uint16_t port) {
-    return inb(port + SERIAL_MODEM_STATUS_REG);
+    return io_inb(port + SERIAL_MODEM_STATUS_REG);
 }
 
 int serial_buffer_pending(uint16_t port) {
@@ -299,8 +285,8 @@ static void serial_drain_receive_fifo(uint16_t port, int from_interrupt) {
 
     int received = 0;
 
-    while (inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY) {
-        char c = inb(port + SERIAL_DATA_REG);
+    while (io_inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_DATA_READY) {
+        char c = io_inb(port + SERIAL_DATA_REG);
         serial_rx_buffer_push(buffer, c);
         received = 1;
     }
@@ -320,7 +306,7 @@ void serial_poll_receive(uint16_t port) {
 
 static void serial_process_interrupts(uint16_t port) {
     while (1) {
-        uint8_t ident = inb(port + SERIAL_INT_IDENT_REG);
+        uint8_t ident = io_inb(port + SERIAL_INT_IDENT_REG);
         if (ident & SERIAL_IIR_NO_PENDING) {
             break;
         }
@@ -332,7 +318,7 @@ static void serial_process_interrupts(uint16_t port) {
                 serial_drain_receive_fifo(port, 1);
                 break;
             case SERIAL_IIR_REASON_LINE_STATUS:
-                (void)inb(port + SERIAL_LINE_STATUS_REG);
+                (void)io_inb(port + SERIAL_LINE_STATUS_REG);
                 break;
             case SERIAL_IIR_REASON_TX_EMPTY:
             default:
@@ -372,14 +358,14 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {
 
     serial_irq_registered[index] = 1;
 
-    uint8_t ier = inb(port + SERIAL_INT_ENABLE_REG);
+    uint8_t ier = io_inb(port + SERIAL_INT_ENABLE_REG);
     ier |= (SERIAL_IER_RECEIVED_DATA | SERIAL_IER_LINE_STATUS);
-    outb(port + SERIAL_INT_ENABLE_REG, ier);
+    io_outb(port + SERIAL_INT_ENABLE_REG, ier);
 
     /* Clear any pending status */
-    (void)inb(port + SERIAL_LINE_STATUS_REG);
-    (void)inb(port + SERIAL_DATA_REG);
-    (void)inb(port + SERIAL_INT_IDENT_REG);
+    (void)io_inb(port + SERIAL_LINE_STATUS_REG);
+    (void)io_inb(port + SERIAL_DATA_REG);
+    (void)io_inb(port + SERIAL_INT_IDENT_REG);
 
     /* Drain any bytes that arrived before interrupts were armed */
     serial_poll_receive(port);
@@ -400,7 +386,7 @@ void serial_putc(uint16_t port, char c) {
     }
 
     /* Send character */
-    outb(port + SERIAL_DATA_REG, c);
+    io_outb(port + SERIAL_DATA_REG, c);
 }
 
 void serial_puts(uint16_t port, const char *str) {
@@ -427,7 +413,7 @@ void serial_write(uint16_t port, const void *data, size_t length) {
 
 void serial_flush(uint16_t port) {
     /* Wait for both THR empty and transmitter empty */
-    while (!(inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_TRANSMITTER_EMPTY)) {
+    while (!(io_inb(port + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_TRANSMITTER_EMPTY)) {
         /* Busy wait */
     }
 }
@@ -442,7 +428,7 @@ char serial_getc(uint16_t port) {
         /* Busy wait */
     }
 
-    return inb(port + SERIAL_DATA_REG);
+    return io_inb(port + SERIAL_DATA_REG);
 }
 
 /* ========================================================================
@@ -479,23 +465,11 @@ void serial_put_hex_com1(uint64_t value) {
 }
 
 void serial_put_decimal_com1(uint64_t value) {
-    char buffer[21];  /* Maximum 20 digits for 64-bit + null terminator */
-    int i = 19;
-
-    buffer[20] = '\0';
-
-    if (value == 0) {
-        buffer[19] = '0';
-        serial_puts_com1(&buffer[19]);
+    char buffer[21];
+    if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
         return;
     }
-
-    while (value > 0 && i >= 0) {
-        buffer[i--] = '0' + (value % 10);
-        value /= 10;
-    }
-
-    serial_puts_com1(&buffer[i + 1]);
+    serial_puts_com1(buffer);
 }
 
 /* ========================================================================
@@ -584,12 +558,12 @@ void serial_emergency_putc(char c) {
     /* Bypass all checks and output directly to COM1 */
     /* Wait a short time for transmitter ready */
     for (int i = 0; i < 1000; i++) {
-        if (inb(COM1_BASE + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_THR_EMPTY) {
+        if (io_inb(COM1_BASE + SERIAL_LINE_STATUS_REG) & SERIAL_LSR_THR_EMPTY) {
             break;
         }
     }
 
-    outb(COM1_BASE + SERIAL_DATA_REG, c);
+    io_outb(COM1_BASE + SERIAL_DATA_REG, c);
 }
 
 void serial_emergency_puts(const char *str) {
@@ -616,7 +590,7 @@ void serial_emergency_put_hex(uint64_t value) {
  * ======================================================================== */
 
 void serial_set_flow_control(uint16_t port, int enable) {
-    uint8_t mcr = inb(port + SERIAL_MODEM_CTRL_REG);
+    uint8_t mcr = io_inb(port + SERIAL_MODEM_CTRL_REG);
 
     if (enable) {
         mcr |= 0x02;  /* Set RTS */
@@ -624,11 +598,11 @@ void serial_set_flow_control(uint16_t port, int enable) {
         mcr &= ~0x02; /* Clear RTS */
     }
 
-    outb(port + SERIAL_MODEM_CTRL_REG, mcr);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, mcr);
 }
 
 void serial_set_break(uint16_t port, int enable) {
-    uint8_t lcr = inb(port + SERIAL_LINE_CTRL_REG);
+    uint8_t lcr = io_inb(port + SERIAL_LINE_CTRL_REG);
 
     if (enable) {
         lcr |= 0x40;  /* Set break enable bit */
@@ -636,21 +610,21 @@ void serial_set_break(uint16_t port, int enable) {
         lcr &= ~0x40; /* Clear break enable bit */
     }
 
-    outb(port + SERIAL_LINE_CTRL_REG, lcr);
+    io_outb(port + SERIAL_LINE_CTRL_REG, lcr);
 }
 
 int serial_self_test(uint16_t port) {
     /* Perform loopback test */
-    uint8_t original_mcr = inb(port + SERIAL_MODEM_CTRL_REG);
+    uint8_t original_mcr = io_inb(port + SERIAL_MODEM_CTRL_REG);
 
     /* Enable loopback mode */
-    outb(port + SERIAL_MODEM_CTRL_REG, 0x1E);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, 0x1E);
 
     /* Test pattern */
     const uint8_t test_patterns[] = {0x55, 0xAA, 0xFF, 0x00};
 
     for (int i = 0; i < 4; i++) {
-        outb(port + SERIAL_DATA_REG, test_patterns[i]);
+        io_outb(port + SERIAL_DATA_REG, test_patterns[i]);
 
         /* Wait for data */
         int timeout = 1000;
@@ -660,20 +634,20 @@ int serial_self_test(uint16_t port) {
 
         if (timeout <= 0) {
             /* Restore original MCR */
-            outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
+            io_outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
             return SERIAL_ERROR_TIMEOUT;
         }
 
-        uint8_t received = inb(port + SERIAL_DATA_REG);
+        uint8_t received = io_inb(port + SERIAL_DATA_REG);
         if (received != test_patterns[i]) {
             /* Restore original MCR */
-            outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
+            io_outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
             return SERIAL_ERROR_HARDWARE;
         }
     }
 
     /* Restore original MCR */
-    outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
+    io_outb(port + SERIAL_MODEM_CTRL_REG, original_mcr);
     return SERIAL_ERROR_NONE;
 }
 

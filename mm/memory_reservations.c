@@ -5,25 +5,12 @@
 #include "../boot/constants.h"
 #include "../boot/log.h"
 #include "../drivers/serial.h"
+#include "../lib/alignment.h"
 
 #define MM_MAX_RESERVED_REGIONS 32
 
 static mm_reserved_region_t reserved_regions[MM_MAX_RESERVED_REGIONS];
 static uint32_t reserved_region_count = 0;
-
-static uint64_t align_down_u64(uint64_t value, uint64_t alignment) {
-    if (alignment == 0) {
-        return value;
-    }
-    return value & ~(alignment - 1);
-}
-
-static uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
-    if (alignment == 0) {
-        return value;
-    }
-    return (value + alignment - 1) & ~(alignment - 1);
-}
 
 static void clear_region(mm_reserved_region_t *region) {
     region->phys_base = 0;

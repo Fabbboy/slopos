@@ -12,6 +12,7 @@
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"
 #include "../mm/phys_virt.h"
+#include "../lib/cpu.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,13 +60,6 @@ static void handle_exception_recovery(enum test_recovery_reason reason,
                                       struct interrupt_frame *frame,
                                       const struct saved_exception_state *slot);
 static const char *recovery_reason_string(enum test_recovery_reason reason);
-
-static uint64_t read_tsc(void) {
-    uint32_t low = 0;
-    uint32_t high = 0;
-    __asm__ volatile ("rdtsc" : "=a"(low), "=d"(high));
-    return ((uint64_t)high << 32) | (uint64_t)low;
-}
 
 static uint64_t estimate_cycles_per_ms(void) {
     uint32_t eax = 0;
@@ -1341,12 +1335,12 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
 
     int total_passed = 0;
     int timed_out = 0;
-    uint64_t start_cycles = read_tsc();
+    uint64_t start_cycles = cpu_read_tsc();
     uint64_t end_cycles = start_cycles;
 
     if (active_config.suite_mask & INTERRUPT_TEST_SUITE_BASIC) {
         total_passed += run_basic_exception_tests();
-        end_cycles = read_tsc();
+        end_cycles = cpu_read_tsc();
         if (test_timeout_cycles != 0 &&
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
@@ -1358,7 +1352,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
     }
     if (active_config.suite_mask & INTERRUPT_TEST_SUITE_MEMORY) {
         total_passed += run_memory_access_tests();
-        end_cycles = read_tsc();
+        end_cycles = cpu_read_tsc();
         if (test_timeout_cycles != 0 &&
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
@@ -1370,7 +1364,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
     }
     if (active_config.suite_mask & INTERRUPT_TEST_SUITE_CONTROL) {
         total_passed += run_control_flow_tests();
-        end_cycles = read_tsc();
+        end_cycles = cpu_read_tsc();
         if (test_timeout_cycles != 0 &&
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
@@ -1382,7 +1376,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
     }
     if (active_config.suite_mask & INTERRUPT_TEST_SUITE_SCHEDULER) {
         total_passed += run_scheduler_tests();
-        end_cycles = read_tsc();
+        end_cycles = cpu_read_tsc();
         if (test_timeout_cycles != 0 &&
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
@@ -1400,7 +1394,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
         safe_execute_test(test_stacktrace_demo_fault,
                           "stacktrace_demo_unexpected_divide",
                           -1);
-        end_cycles = read_tsc();
+        end_cycles = cpu_read_tsc();
         if (test_timeout_cycles != 0 &&
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;

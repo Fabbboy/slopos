@@ -8,6 +8,7 @@
 
 #include "wl_currency.h"
 #include "../drivers/serial.h"
+#include "../lib/numfmt.h"
 
 /* ========================================================================
  * GLOBAL W/L STATE
@@ -66,27 +67,12 @@ int64_t wl_get_balance(void) {
  * ======================================================================== */
 
 static void wl_output_decimal(int64_t value) {
-    if (value < 0) {
-        serial_emergency_puts("-");
-        value = -value;
+    char buffer[24];
+    if (numfmt_i64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
+        buffer[0] = '0';
+        buffer[1] = '\0';
     }
-
-    if (value == 0) {
-        serial_emergency_putc('0');
-        return;
-    }
-
-    char buffer[20];
-    int pos = 0;
-
-    while (value > 0) {
-        buffer[pos++] = '0' + (value % 10);
-        value /= 10;
-    }
-
-    while (pos > 0) {
-        serial_emergency_putc(buffer[--pos]);
-    }
+    serial_emergency_puts(buffer);
 }
 
 /* ========================================================================
