@@ -14,7 +14,7 @@
 #include "../sched/scheduler.h"
 #include "../drivers/serial.h"
 #include "../drivers/apic.h"
-#include "../mm/phys_virt.h"
+#include "../mm/page_alloc.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -160,17 +160,10 @@ void kernel_reboot(const char *reason) {
  * not empty zeros, but the vibrant evidence of what once was.
  */
 void execute_kernel(void) {
-    /* Forward declare buddy allocator accessor (we'll need to expose this) */
-    extern void buddy_allocator_execute_purification(void);
-
     kprintln("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
     kprintln("Painting memory with the essence of slop (0x69)...");
 
-    /*
-     * Invoke the buddy allocator's execution ritual to walk all pages
-     * and memset them with 0x69
-     */
-    buddy_allocator_execute_purification();
+    page_allocator_paint_all(0x69);
 
     kprintln("Memory purification complete. The slop has been painted eternal.");
 }

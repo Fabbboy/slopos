@@ -33,7 +33,6 @@ static inline uint64_t read_cr3(void) {
 /* Forward declarations */
 uint32_t create_process_vm(void);
 int destroy_process_vm(uint32_t process_id);
-int destroy_process_vma_space(uint32_t process_id);
 uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags);
 int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size);
 void kernel_panic(const char *message);
@@ -333,7 +332,6 @@ int task_terminate(uint32_t task_id) {
     if (task->process_id != INVALID_PROCESS_ID) {
         /* User mode tasks: free process VM space */
         destroy_process_vm(task->process_id);
-        destroy_process_vma_space(task->process_id);
     } else if (task->stack_base) {
         /* Kernel tasks: free stack from kernel heap */
         kfree((void *)task->stack_base);

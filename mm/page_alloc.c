@@ -1,7 +1,7 @@
 /*
  * SlopOS Memory Management - Physical Page Frame Allocator
  * Manages allocation and deallocation of physical memory pages
- * Coordinates with buddy allocator for efficient memory management
+ * Serves as the canonical physical allocator for paging, heap, and VM subsystems
  */
 
 #include <stdint.h>
@@ -704,4 +704,27 @@ size_t page_allocator_descriptor_size(void) {
 
 uint32_t page_allocator_max_supported_frames(void) {
     return MAX_PHYSICAL_PAGES;
+}
+
+/*
+ * Paint every tracked physical page with a byte pattern.
+ * Used by the shutdown ritual to leave a visible mark in dumps.
+ */
+void page_allocator_paint_all(uint8_t value) {
+    if (!page_allocator.frames) {
+        return;
+    }
+
+    for (uint32_t frame_num = 0; frame_num < page_allocator.total_frames; frame_num++) {
+        uint64_t phys_addr = frame_to_phys(frame_num);
+        uint64_t virt_addr = mm_phys_to_virt(phys_addr);
+        if (!virt_addr) {
+            continue;
+        }
+
+        uint8_t *ptr = (uint8_t *)virt_addr;
+        for (size_t i = 0; i < PAGE_SIZE_4KB; i++) {
+            ptr[i] = value;
+        }
+    }
 }

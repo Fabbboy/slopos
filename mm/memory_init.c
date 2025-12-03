@@ -16,20 +16,13 @@
 #include "page_alloc.h"
 #include "phys_virt.h"
 
-/* Descriptor sizing helpers from allocator implementations */
-size_t buddy_allocator_block_descriptor_size(void);
-uint32_t buddy_allocator_max_supported_blocks(void);
-
 /* Forward declarations */
 void kernel_panic(const char *message);
 
 /* Memory subsystem initialization functions */
 void init_kernel_memory_layout(void);
-int init_buddy_allocator(void *block_array, uint32_t max_blocks);
-int buddy_add_zone(uint64_t start_addr, uint64_t size, uint8_t zone_type);
 int init_kernel_heap(void);
 int init_process_vm(void);
-int init_vmem_regions(void);
 void init_paging(void);
 
 /* ========================================================================
@@ -48,9 +41,6 @@ typedef struct allocator_buffer_plan {
     void *page_buffer;
     uint32_t page_capacity;
     size_t page_buffer_bytes;
-    void *buddy_buffer;
-    uint32_t buddy_capacity;
-    size_t buddy_buffer_bytes;
     uint64_t reserved_phys_base;
     uint64_t reserved_phys_size;
     int prepared;
@@ -62,10 +52,8 @@ typedef struct memory_init_state {
     int limine_memmap_parsed;
     int hhdm_received;
     int page_allocator_done;
-    int buddy_allocator_done;
     int kernel_heap_done;
     int process_vm_done;
-    int vmem_regions_done;
     int paging_done;
     uint64_t total_memory_bytes;
     uint64_t available_memory_bytes;
@@ -74,7 +62,6 @@ typedef struct memory_init_state {
     uint32_t reserved_region_count;
     uint64_t hhdm_offset;
     uint32_t tracked_page_frames;
-    uint32_t tracked_buddy_blocks;
     uint64_t allocator_metadata_bytes;
 } memory_init_state_t;
 
@@ -275,12 +262,6 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
             kprint("MM: WARNING - failed to register page allocator region\n");
         });
     }
-
-    if (buddy_add_zone(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
-            kprint("MM: WARNING - failed to register buddy allocator zone\n");
-        });
-    }
 }
 
 static void register_usable_region(uint64_t base, uint64_t length) {
@@ -350,17 +331,6 @@ static uint32_t clamp_required_frames(uint64_t required_frames_64) {
     return (uint32_t)required_frames_64;
 }
 
-static uint32_t clamp_required_blocks(uint64_t required_blocks_64) {
-    uint32_t max_supported = buddy_allocator_max_supported_blocks();
-    if (required_blocks_64 > (uint64_t)max_supported) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
-            kprint("MM: WARNING - Limiting buddy blocks to allocator maximum\n");
-        });
-        return max_supported;
-    }
-    return (uint32_t)required_blocks_64;
-}
-
 static int prepare_allocator_buffers(const struct limine_memmap_response *memmap,
                                      uint64_t hhdm_offset) {
     if (allocator_buffers.prepared) {
@@ -412,25 +382,19 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     }
 
     uint32_t required_frames = clamp_required_frames(required_frames_64);
-    uint32_t required_blocks = clamp_required_blocks(required_frames_64);
 
     size_t page_desc_size = page_allocator_descriptor_size();
-    size_t buddy_desc_size = buddy_allocator_block_descriptor_size();
 
     uint64_t page_bytes_u64 = (uint64_t)required_frames * (uint64_t)page_desc_size;
-    uint64_t buddy_bytes_u64 = (uint64_t)required_blocks * (uint64_t)buddy_desc_size;
 
-    if (page_bytes_u64 == 0 || buddy_bytes_u64 == 0) {
-        boot_log_info("MM: ERROR - Calculated zero-sized allocator metadata buffers");
+    if (page_bytes_u64 == 0) {
+        boot_log_info("MM: ERROR - Calculated zero-sized allocator metadata buffer");
         return -1;
     }
 
     const size_t descriptor_alignment = 64;
     size_t page_bytes_aligned = (size_t)align_up_u64(page_bytes_u64, descriptor_alignment);
-    size_t buddy_bytes_aligned = (size_t)align_up_u64(buddy_bytes_u64, descriptor_alignment);
-    uint64_t total_meta_bytes = (uint64_t)page_bytes_aligned + (uint64_t)buddy_bytes_aligned;
-
-    uint64_t reserved_bytes = align_up_u64(total_meta_bytes, PAGE_SIZE_4KB);
+    uint64_t reserved_bytes = align_up_u64((uint64_t)page_bytes_aligned, PAGE_SIZE_4KB);
 
     uint64_t usable_start = largest_usable->base;
     uint64_t usable_end = largest_usable->base + largest_usable->length;
@@ -448,10 +412,6 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     uintptr_t cursor = align_up_u64(reserve_virt_base, descriptor_alignment);
     uintptr_t page_buffer_virtual = cursor;
     cursor += page_bytes_aligned;
-    cursor = align_up_u64(cursor, descriptor_alignment);
-    uintptr_t buddy_buffer_virtual = cursor;
-    cursor += buddy_bytes_aligned;
-
     if (cursor > reserve_virt_end) {
         boot_log_info("MM: ERROR - Allocator metadata alignment exceeded reserved window");
         return -1;
@@ -460,17 +420,14 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     allocator_buffers.page_buffer = (void *)page_buffer_virtual;
     allocator_buffers.page_capacity = required_frames;
     allocator_buffers.page_buffer_bytes = page_bytes_u64;
-    allocator_buffers.buddy_buffer = (void *)buddy_buffer_virtual;
-    allocator_buffers.buddy_capacity = required_blocks;
-    allocator_buffers.buddy_buffer_bytes = buddy_bytes_u64;
     allocator_buffers.reserved_phys_base = reserve_phys_base;
     allocator_buffers.reserved_phys_size = reserved_bytes;
     allocator_buffers.prepared = 1;
 
-    init_state.allocator_metadata_bytes = page_bytes_u64 + buddy_bytes_u64;
+    init_state.allocator_metadata_bytes = page_bytes_u64;
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
-        kprint("MM: Allocator metadata reserved at phys 0x");
+        kprint("MM: Page allocator metadata reserved at phys 0x");
         kprint_hex(reserve_phys_base);
         kprint(" (");
         kprint_decimal((uint32_t)(reserved_bytes / 1024));
@@ -588,15 +545,7 @@ static int initialize_physical_allocators(void) {
 
     init_state.tracked_page_frames = allocator_buffers.page_capacity;
 
-    if (init_buddy_allocator(allocator_buffers.buddy_buffer,
-                             allocator_buffers.buddy_capacity) != 0) {
-        kernel_panic("MM: Buddy allocator initialization failed");
-        return -1;
-    }
-    init_state.buddy_allocator_done = 1;
-    init_state.tracked_buddy_blocks = allocator_buffers.buddy_capacity;
-
-    boot_log_debug("MM: Physical memory allocators initialized successfully");
+    boot_log_debug("MM: Physical memory allocator initialized successfully");
     return 0;
 }
 
@@ -640,13 +589,6 @@ static int initialize_process_memory(void) {
     }
     init_state.process_vm_done = 1;
 
-    /* Initialize virtual memory region management */
-    if (init_vmem_regions() != 0) {
-        kernel_panic("MM: Virtual memory regions initialization failed");
-        return -1;
-    }
-    init_state.vmem_regions_done = 1;
-
     boot_log_debug("MM: Process memory management initialized successfully");
     return 0;
 }
@@ -675,17 +617,9 @@ static void display_memory_summary(void) {
     kprint("Page Allocator:        ");
     kprint(init_state.page_allocator_done ? "OK" : "FAILED");
     kprint("\n");
-    kprint("Buddy Allocator:       ");
-    kprint(init_state.buddy_allocator_done ? "OK" : "FAILED");
-    kprint("\n");
     if (init_state.tracked_page_frames) {
         kprint("Tracked Frames:        ");
         kprint_decimal(init_state.tracked_page_frames);
-        kprint("\n");
-    }
-    if (init_state.tracked_buddy_blocks) {
-        kprint("Tracked Buddy Blocks:  ");
-        kprint_decimal(init_state.tracked_buddy_blocks);
         kprint("\n");
     }
     if (init_state.allocator_metadata_bytes) {
@@ -708,9 +642,6 @@ static void display_memory_summary(void) {
     kprint("\n");
     kprint("Process VM:            ");
     kprint(init_state.process_vm_done ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("VMem Regions:          ");
-    kprint(init_state.vmem_regions_done ? "OK" : "FAILED");
     kprint("\n");
     kprint("Full Paging:           ");
     kprint(init_state.paging_done ? "OK" : "FAILED");
@@ -815,10 +746,8 @@ int is_memory_system_initialized(void) {
             init_state.limine_memmap_parsed &&
             init_state.hhdm_received &&
             init_state.page_allocator_done &&
-            init_state.buddy_allocator_done &&
             init_state.kernel_heap_done &&
             init_state.process_vm_done &&
-            init_state.vmem_regions_done &&
             init_state.paging_done);
 }
 

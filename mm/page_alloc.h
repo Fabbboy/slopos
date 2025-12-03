@@ -20,5 +20,6 @@ int free_page_frame(uint64_t phys_addr);
 size_t page_allocator_descriptor_size(void);
 uint32_t page_allocator_max_supported_frames(void);
 void get_page_allocator_stats(uint32_t *total, uint32_t *free, uint32_t *allocated);
+void page_allocator_paint_all(uint8_t value);
 
 #endif /* MM_PAGE_ALLOC_H */
