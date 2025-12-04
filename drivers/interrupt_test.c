@@ -21,7 +21,6 @@
 // Global test state
 static struct test_context test_ctx = {0};
 static struct test_stats test_statistics = {0};
-static struct unit_test_runner interrupt_test_runner = {0};
 static uint32_t test_flags = 0;
 static struct interrupt_test_config active_config = {
     .enabled = 0,
@@ -62,6 +61,16 @@ static void handle_exception_recovery(enum test_recovery_reason reason,
                                       struct interrupt_frame *frame,
                                       const struct saved_exception_state *slot);
 static const char *recovery_reason_string(enum test_recovery_reason reason);
+
+static void reset_test_statistics(void) {
+    test_statistics.total_cases = 0;
+    test_statistics.passed_cases = 0;
+    test_statistics.failed_cases = 0;
+    test_statistics.exceptions_caught = 0;
+    test_statistics.unexpected_exceptions = 0;
+    test_statistics.elapsed_ms = 0;
+    test_statistics.timed_out = 0;
+}
 
 static uint64_t estimate_cycles_per_ms(void) {
     uint32_t eax = 0;
@@ -341,13 +350,7 @@ void interrupt_test_init(const struct interrupt_test_config *config) {
     test_ctx.context_corrupted = 0;
     test_ctx.last_recovery_reason = TEST_RECOVERY_NONE;
 
-    unit_test_runner_init(&interrupt_test_runner,
-                          "Interrupt Harness",
-                          &test_statistics.core);
-    test_statistics.exceptions_caught = 0;
-    test_statistics.unexpected_exceptions = 0;
-    test_statistics.elapsed_ms = 0;
-    test_statistics.timed_out = 0;
+    reset_test_statistics();
 
     // Install our exception handler for testing
     // Skip critical exceptions that should not be overridden
@@ -418,7 +421,7 @@ void test_start(const char *name, int expected_exception) {
     }
     test_ctx.test_name[i] = '\0';
 
-    unit_test_runner_begin_case(&interrupt_test_runner, test_ctx.test_name);
+    test_statistics.total_cases++;
 
     if (test_flags & TEST_FLAG_VERBOSE) {
         kprint("INTERRUPT_TEST: Starting test '");
@@ -487,12 +490,11 @@ int test_end(void) {
         kprintln("");
     }
 
-    enum unit_test_status status = UNIT_TEST_STATUS_FAIL;
     if (result == TEST_SUCCESS || result == TEST_EXCEPTION_CAUGHT) {
-        status = UNIT_TEST_STATUS_PASS;
+        test_statistics.passed_cases++;
+    } else {
+        test_statistics.failed_cases++;
     }
-
-    unit_test_runner_finish_case(&interrupt_test_runner, status);
 
     test_ctx.test_active = 0;
     test_ctx.resume_rip = 0;
@@ -1461,19 +1463,17 @@ void test_clear_resume_point(void) {
  * Report test results
  */
 void test_report_results(void) {
-    unit_test_runner_report(&interrupt_test_runner);
-
     kprintln("=== INTERRUPT TEST RESULTS ===");
     kprint("Total tests: ");
-    kprint_decimal(test_statistics.core.total_cases);
+    kprint_decimal(test_statistics.total_cases);
     kprintln("");
 
     kprint("Passed: ");
-    kprint_decimal(test_statistics.core.passed_cases);
+    kprint_decimal(test_statistics.passed_cases);
     kprintln("");
 
     kprint("Failed: ");
-    kprint_decimal(test_statistics.core.failed_cases);
+    kprint_decimal(test_statistics.failed_cases);
     kprintln("");
 
     kprint("Exceptions caught: ");
@@ -1484,9 +1484,9 @@ void test_report_results(void) {
     kprint_decimal(test_statistics.unexpected_exceptions);
     kprintln("");
 
-    if (test_statistics.core.total_cases > 0) {
-        int success_rate = (int)((test_statistics.core.passed_cases * 100) /
-                                 test_statistics.core.total_cases);
+    if (test_statistics.total_cases > 0) {
+        int success_rate = (int)((test_statistics.passed_cases * 100) /
+                                 test_statistics.total_cases);
         kprint("Success rate: ");
         kprint_decimal(success_rate);
         kprintln("%");

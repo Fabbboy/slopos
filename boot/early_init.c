@@ -517,7 +517,7 @@ static int boot_step_interrupt_tests(void) {
     interrupt_test_init(&test_config);
     int passed = run_all_interrupt_tests(&test_config);
     const struct test_stats *stats = test_get_stats();
-    uint32_t failed_tests = stats ? stats->core.failed_cases : 0;
+    uint32_t failed_tests = stats ? stats->failed_cases : 0;
     interrupt_test_cleanup();
 
     if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {

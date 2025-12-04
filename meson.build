@@ -80,11 +80,9 @@ mm_dir = meson.current_source_dir() / 'mm'
 mm_sources += files(
   'mm/paging.c',
   'mm/memory_layout.c',
-  'mm/mb2_parser.c',
   'mm/page_alloc.c',
   'mm/process_vm.c',
   'mm/kernel_heap.c',
-  'mm/uefi_memory.c',
   'mm/memory_reservations.c',
   'mm/memory_init.c',
   'mm/phys_virt.c',
@@ -107,7 +105,6 @@ lib_dir = meson.current_source_dir() / 'lib'
 lib_sources += files(
   'lib/memory.c',
   'lib/string.c',
-  'lib/unit_test.c',
   'lib/stacktrace.c',
   'lib/numfmt.c'
 )

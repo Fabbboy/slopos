@@ -33,40 +33,6 @@
 #define MEMORY_DUMP_BYTES       256
 #define MEMORY_DUMP_WIDTH       16
 
-// CPU register state structure (extended from IDT)
-struct cpu_registers {
-    // General purpose registers
-    uint64_t rax, rbx, rcx, rdx;
-    uint64_t rsi, rdi, rbp, rsp;
-    uint64_t r8, r9, r10, r11;
-    uint64_t r12, r13, r14, r15;
-    uint64_t rip, rflags;
-
-    // Segment registers
-    uint16_t cs, ds, es, fs, gs, ss;
-
-    // Control registers
-    uint64_t cr0, cr2, cr3, cr4;
-
-    // Debug registers
-    uint64_t dr0, dr1, dr2, dr3, dr6, dr7;
-
-    // MSRs
-    uint64_t msr_efer;
-    uint64_t msr_star;
-    uint64_t msr_lstar;
-    uint64_t msr_cstar;
-    uint64_t msr_sfmask;
-    uint64_t msr_gsbase;
-    uint64_t msr_kernelgsbase;
-};
-
-// Stack frame structure for stack traces
-struct stack_frame {
-    uint64_t rbp;
-    uint64_t rip;
-};
-
 // Memory region descriptor
 struct memory_region {
     uint64_t start;
@@ -93,25 +59,16 @@ uint32_t debug_get_flags(void);
 // Enhanced register dumps
 void debug_dump_cpu_state(void);
 void debug_dump_registers_from_frame(struct interrupt_frame *frame);
-void debug_dump_all_registers(struct cpu_registers *regs);
-void debug_dump_control_registers(void);
-void debug_dump_segment_registers(void);
-void debug_dump_debug_registers(void);
-void debug_dump_msr_registers(void);
 
 // Stack trace functions
 void debug_dump_stack_trace(void);
 void debug_dump_stack_trace_from_frame(struct interrupt_frame *frame);
 void debug_dump_stack_trace_from_rbp(uint64_t rbp);
-int debug_walk_stack(struct stack_frame *frames, int max_frames);
-void debug_print_stack_frame(int frame_num, uint64_t rip, uint64_t rbp);
 
 // Memory analysis
 void debug_dump_memory(uint64_t address, size_t length);
 void debug_dump_memory_around_rip(uint64_t rip);
-void debug_dump_stack_memory(uint64_t rsp, size_t length);
 int debug_is_valid_memory_address(uint64_t address);
-int debug_get_memory_type(uint64_t address);
 void debug_flush(void);
 
 // Exception analysis
@@ -123,7 +80,6 @@ void debug_analyze_double_fault(struct interrupt_frame *frame);
 // Memory regions for debugging
 void debug_register_memory_region(uint64_t start, uint64_t end, uint32_t flags, const char *name);
 struct memory_region *debug_find_memory_region(uint64_t address);
-void debug_dump_memory_regions(void);
 
 // Utility functions
 uint64_t debug_get_timestamp(void);
