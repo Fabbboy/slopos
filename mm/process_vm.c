@@ -14,9 +14,7 @@
 #include "page_alloc.h"
 #include "paging.h"
 #include "phys_virt.h"
-
-/* Forward declarations */
-void kernel_panic(const char *message);
+#include "../boot/kernel_panic.h"
 
 /* ========================================================================
  * PROCESS VIRTUAL MEMORY CONSTANTS

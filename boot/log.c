@@ -4,20 +4,15 @@
  */
 
 #include "log.h"
+#include "constants.h"
 #include "../drivers/serial.h"
+#include "../lib/io.h"
 
 static enum boot_log_level current_level = BOOT_LOG_LEVEL_INFO;
 static int serial_ready = 0;
 
 static void boot_log_early_putc(char c) {
-    __asm__ volatile (
-        "movw $0x3F8, %%dx\n\t"
-        "movb %0, %%al\n\t"
-        "outb %%al, %%dx"
-        :
-        : "r"(c)
-        : "dx", "al"
-    );
+    io_outb(COM1_BASE, c);
 }
 
 static void boot_log_emit(const char *text) {

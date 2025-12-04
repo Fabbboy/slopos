@@ -15,6 +15,7 @@
 #include "../mm/kernel_heap.h"
 #include "task.h"
 #include "scheduler.h"
+#include "../boot/kernel_panic.h"
 
 extern void task_entry_wrapper(void);
 
@@ -35,7 +36,6 @@ uint32_t create_process_vm(void);
 int destroy_process_vm(uint32_t process_id);
 uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags);
 int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size);
-void kernel_panic(const char *message);
 process_page_dir_t *process_vm_get_page_dir(uint32_t process_id);
 
 /* Task manager structure */

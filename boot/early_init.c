@@ -31,14 +31,13 @@
 #include "../video/splash.h"
 #include "../drivers/pci.h"
 #include "../drivers/wl_currency.h"
+#include "kernel_panic.h"
 #include <string.h>
 
 // Forward declarations for other modules
 extern void verify_cpu_state(void);
-extern void kernel_roulette(void);
 extern void verify_memory_layout(void);
 extern void check_stack_health(void);
-extern void kernel_panic(const char *message);
 extern void init_paging(void);
 extern void init_kernel_memory_layout(void);
 extern int init_memory_system(const struct limine_memmap_response *memmap,

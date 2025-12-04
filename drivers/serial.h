@@ -41,11 +41,11 @@ typedef struct {
 #define SERIAL_STOP_BITS_1    1   /* 1 stop bit */
 #define SERIAL_STOP_BITS_2    2   /* 2 stop bits */
 
-/* Standard COM port addresses */
-#define SERIAL_COM1_PORT      0x3F8   /* COM1 port */
-#define SERIAL_COM2_PORT      0x2F8   /* COM2 port */
-#define SERIAL_COM3_PORT      0x3E8   /* COM3 port */
-#define SERIAL_COM4_PORT      0x2E8   /* COM4 port */
+/* Standard COM port addresses - use canonical definitions from constants.h */
+#define SERIAL_COM1_PORT      COM1_BASE   /* COM1 port */
+#define SERIAL_COM2_PORT      COM2_BASE   /* COM2 port */
+#define SERIAL_COM3_PORT      COM3_BASE   /* COM3 port */
+#define SERIAL_COM4_PORT      COM4_BASE   /* COM4 port */
 
 #define SERIAL_COM1_IRQ       4       /* Legacy PIC line for COM1 */
 

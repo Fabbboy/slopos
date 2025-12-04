@@ -9,6 +9,7 @@
 #include "wl_currency.h"
 #include "../drivers/serial.h"
 #include "../lib/numfmt.h"
+#include "../boot/kernel_panic.h"
 
 /* ========================================================================
  * GLOBAL W/L STATE
@@ -92,8 +93,6 @@ void wl_check_balance(void) {
         serial_emergency_puts("The scheduler has no mercy. Your gambling addiction bankrupted you.\n");
         serial_emergency_puts("[WL] User currency critical - initiating disgrace protocol\n");
 
-        /* Trigger panic through extern - declared in integration.h */
-        extern void kernel_panic(const char *message);
         kernel_panic("[WL] Zero or negative currency balance - the house always wins, skill issue lol");
     }
 }

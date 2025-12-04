@@ -13,6 +13,7 @@
 #include "../mm/paging.h"
 #include "../mm/phys_virt.h"
 #include "../lib/cpu.h"
+#include "../lib/io.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -1515,7 +1516,7 @@ void interrupt_test_request_shutdown(int failed_tests) {
     kprintln("INTERRUPT_TEST: Auto shutdown requested");
 
     uint8_t exit_value = failed_tests == 0 ? 0 : 1;
-    __asm__ volatile ("outb %0, %1" : : "a"(exit_value), "Nd"((uint16_t)0xF4));
+    io_outb(0xF4, exit_value);  /* QEMU debug-exit port */
 
     if (failed_tests == 0) {
         kernel_shutdown("Interrupt tests completed successfully");

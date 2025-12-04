@@ -7,10 +7,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
+#include "../boot/kernel_panic.h"
 #include "../drivers/serial.h"
 
 /* Forward declarations */
-void kernel_panic(const char *message);
 int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type);
 
 /* ========================================================================

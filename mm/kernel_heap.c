@@ -12,9 +12,7 @@
 #include "kernel_heap.h"
 #include "page_alloc.h"
 #include "paging.h"
-
-/* Forward declarations */
-void kernel_panic(const char *message);
+#include "../boot/kernel_panic.h"
 
 /* ========================================================================
  * KERNEL HEAP CONSTANTS

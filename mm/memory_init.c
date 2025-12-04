@@ -16,9 +16,7 @@
 #include "memory_reservations.h"
 #include "page_alloc.h"
 #include "phys_virt.h"
-
-/* Forward declarations */
-void kernel_panic(const char *message);
+#include "../boot/kernel_panic.h"
 
 /* Memory subsystem initialization functions */
 void init_kernel_memory_layout(void);

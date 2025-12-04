@@ -16,6 +16,7 @@
 #include "../drivers/apic.h"
 #include "../drivers/pit.h"
 #include "../mm/page_alloc.h"
+#include "../lib/io.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -127,7 +128,7 @@ void kernel_reboot(const char *reason) {
 
     // Keyboard controller reset (port 0x64, command 0xFE)
     // This is the standard x86 reboot mechanism
-    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+    io_outb(0x64, 0xFE);
 
     // If that didn't work, try triple fault (should never get here)
     kprintln("Keyboard reset failed, attempting triple fault...");

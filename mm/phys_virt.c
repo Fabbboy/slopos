@@ -8,6 +8,7 @@
 #include "../drivers/serial.h"
 #include "../boot/log.h"
 #include "../boot/limine_protocol.h"
+#include "../lib/memory.h"
 #include "memory_layout.h"
 #include "memory_reservations.h"
 #include "paging.h"
@@ -18,8 +19,6 @@ static uint64_t kernel_phys_start;
 static uint64_t kernel_phys_end;
 static uint64_t kernel_virt_start;
 static int translation_initialized;
-
-void *memset(void *dest, int value, size_t n);
 
 void mm_init_phys_virt_helpers(void) {
     const kernel_memory_layout_t *layout = get_kernel_memory_layout();

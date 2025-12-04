@@ -11,10 +11,8 @@
 #include "paging.h"
 #include "page_alloc.h"
 #include "../boot/limine_protocol.h"
+#include "../boot/kernel_panic.h"
 #include "phys_virt.h"
-
-/* Forward declarations */
-void kernel_panic(const char *message);
 /* ========================================================================
  * PAGE TABLE CONSTANTS - Using boot/constants.h definitions
  * ======================================================================== */

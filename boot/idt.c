@@ -9,8 +9,7 @@
 #include "log.h"
 #include "../drivers/serial.h"
 #include "../drivers/irq.h"
-
-extern void kernel_panic(const char *message);
+#include "kernel_panic.h"
 
 // Global IDT and pointer
 static struct idt_entry idt[IDT_ENTRIES];
@@ -477,7 +476,6 @@ static void exception_default_panic(struct interrupt_frame *frame) {
 void exception_divide_error(struct interrupt_frame *frame) {
     kprintln("FATAL: Divide by zero error");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Divide by zero error");
 }
 
@@ -489,7 +487,6 @@ void exception_debug(struct interrupt_frame *frame) {
 void exception_nmi(struct interrupt_frame *frame) {
     kprintln("FATAL: Non-maskable interrupt");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Non-maskable interrupt");
 }
 
@@ -511,7 +508,6 @@ void exception_bound_range(struct interrupt_frame *frame) {
 void exception_invalid_opcode(struct interrupt_frame *frame) {
     kprintln("FATAL: Invalid opcode");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Invalid opcode");
 }
 
@@ -523,35 +519,30 @@ void exception_device_not_available(struct interrupt_frame *frame) {
 void exception_double_fault(struct interrupt_frame *frame) {
     kprintln("FATAL: Double fault");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Double fault");
 }
 
 void exception_invalid_tss(struct interrupt_frame *frame) {
     kprintln("FATAL: Invalid TSS");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Invalid TSS");
 }
 
 void exception_segment_not_present(struct interrupt_frame *frame) {
     kprintln("FATAL: Segment not present");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Segment not present");
 }
 
 void exception_stack_fault(struct interrupt_frame *frame) {
     kprintln("FATAL: Stack segment fault");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Stack segment fault");
 }
 
 void exception_general_protection(struct interrupt_frame *frame) {
     kprintln("FATAL: General protection fault");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("General protection fault");
 }
 
@@ -572,7 +563,6 @@ void exception_page_fault(struct interrupt_frame *frame) {
         kprintln("");
 
         dump_interrupt_frame(frame);
-        extern void kernel_panic(const char *message);
         kernel_panic("Exception stack overflow");
         return;
     }
@@ -593,7 +583,6 @@ void exception_page_fault(struct interrupt_frame *frame) {
     kprintln("");
 
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Page fault");
 }
 
@@ -610,7 +599,6 @@ void exception_alignment_check(struct interrupt_frame *frame) {
 void exception_machine_check(struct interrupt_frame *frame) {
     kprintln("FATAL: Machine check");
     dump_interrupt_frame(frame);
-    extern void kernel_panic(const char *message);
     kernel_panic("Machine check");
 }
 

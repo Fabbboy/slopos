@@ -14,8 +14,7 @@
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
 #include "../lib/numfmt.h"
-
-extern void kernel_panic(const char *message);
+#include "../boot/kernel_panic.h"
 
 /* ========================================================================
  * GEOMETRY DEFINITIONS

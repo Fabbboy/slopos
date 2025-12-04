@@ -7,19 +7,13 @@
 #include <stddef.h>
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
+#include "../lib/math.h"
 #include "framebuffer.h"
 #include "graphics.h"
 
 /* ========================================================================
  * UTILITY FUNCTIONS
  * ======================================================================== */
-
-/*
- * Absolute value for integers
- */
-static inline int abs(int x) {
-    return x < 0 ? -x : x;
-}
 
 /*
  * Swap two integers

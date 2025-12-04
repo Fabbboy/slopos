@@ -7,12 +7,10 @@
 #include "constants.h"
 #include "log.h"
 #include "../drivers/serial.h"
+#include "../lib/memory.h"
 
 #include <stdint.h>
 #include <stddef.h>
-
-/* Basic memset declaration (implemented in lib/) */
-void *memset(void *dest, int value, size_t n);
 
 /* Symbols exported from boot/limine_entry.s */
 extern uint8_t kernel_stack_top;

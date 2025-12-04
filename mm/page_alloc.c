@@ -11,9 +11,7 @@
 #include "../drivers/serial.h"
 #include "page_alloc.h"
 #include "phys_virt.h"
-
-/* Forward declarations */
-void kernel_panic(const char *message);
+#include "../boot/kernel_panic.h"
 
 /* ========================================================================
  * PHYSICAL PAGE FRAME CONSTANTS

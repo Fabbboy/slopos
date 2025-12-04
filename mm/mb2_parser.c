@@ -7,10 +7,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
+#include "../boot/kernel_panic.h"
 #include "../drivers/serial.h"
-
-/* Forward declaration for kernel panic */
-extern void kernel_panic(const char *message);
 
 /* ========================================================================
  * MULTIBOOT2 STRUCTURES WITH STRICT VALIDATION

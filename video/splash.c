@@ -215,12 +215,9 @@ int splash_draw_graphics_demo(void) {
     framebuffer_clear(0x001122FF);
 
     // Initialize console with white text on dark background
-    extern void font_console_init(uint32_t fg_color, uint32_t bg_color);
     font_console_init(0xFFFFFFFF, 0x00000000);
 
     // Draw graphics demo
-    extern int graphics_draw_rect_filled(int x, int y, int width, int height, uint32_t color);
-    extern int graphics_draw_circle(int cx, int cy, int radius, uint32_t color);
     graphics_draw_rect_filled(20, 20, 300, 150, 0xFF0000FF);        // Red rectangle
     graphics_draw_rect_filled(700, 20, 300, 150, 0x00FF00FF);       // Green rectangle
     graphics_draw_circle(512, 384, 100, 0xFFFF00FF);                // Yellow circle
@@ -232,7 +229,6 @@ int splash_draw_graphics_demo(void) {
     graphics_draw_rect_filled(1020, 0, 4, 768, 0xFFFFFFFF);         // Right
 
     // Display welcome message using font_draw_string
-    extern int font_draw_string(int x, int y, const char *str, uint32_t fg_color, uint32_t bg_color);
     font_draw_string(20, 600, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
     font_draw_string(20, 616, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
     font_draw_string(20, 632, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);

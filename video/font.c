@@ -9,13 +9,7 @@
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "framebuffer.h"
-
-/* Forward declarations */
-int graphics_draw_pixel(int x, int y, uint32_t color);
-int graphics_draw_rect_filled(int x, int y, int width, int height, uint32_t color);
-uint32_t framebuffer_get_width(void);
-uint32_t framebuffer_get_height(void);
-int framebuffer_is_initialized(void);
+#include "graphics.h"
 
 /* ========================================================================
  * FONT CONSTANTS AND STRUCTURES

@@ -2,6 +2,7 @@
 #include "serial.h"
 #include "irq.h"
 #include "../boot/log.h"
+#include "../lib/io.h"
 #include <stdint.h>
 
 #define PIT_CHANNEL0_PORT 0x40
@@ -17,11 +18,7 @@
 static uint32_t current_frequency_hz = 0;
 
 static inline void pit_io_wait(void) {
-    __asm__ volatile ("outb %0, %1" : : "a" ((uint8_t)0), "Nd" ((uint16_t)0x80));
-}
-
-static inline void pit_outb(uint16_t port, uint8_t value) {
-    __asm__ volatile ("outb %0, %1" : : "a" (value), "Nd" (port));
+    io_outb(0x80, 0);  /* I/O wait using port 0x80 */
 }
 
 static uint16_t pit_calculate_divisor(uint32_t frequency_hz) {
@@ -47,12 +44,12 @@ static uint16_t pit_calculate_divisor(uint32_t frequency_hz) {
 void pit_set_frequency(uint32_t frequency_hz) {
     uint16_t divisor = pit_calculate_divisor(frequency_hz);
 
-    pit_outb(PIT_COMMAND_PORT, PIT_COMMAND_CHANNEL0 |
+    io_outb(PIT_COMMAND_PORT, PIT_COMMAND_CHANNEL0 |
                                   PIT_COMMAND_ACCESS_LOHI |
                                   PIT_COMMAND_MODE_SQUARE |
                                   PIT_COMMAND_BINARY);
-    pit_outb(PIT_CHANNEL0_PORT, (uint8_t)(divisor & 0xFF));
-    pit_outb(PIT_CHANNEL0_PORT, (uint8_t)((divisor >> 8) & 0xFF));
+    io_outb(PIT_CHANNEL0_PORT, (uint8_t)(divisor & 0xFF));
+    io_outb(PIT_CHANNEL0_PORT, (uint8_t)((divisor >> 8) & 0xFF));
     pit_io_wait();
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
@@ -96,12 +93,11 @@ void pit_disable_irq(void) {
  */
 static uint16_t pit_read_count(void) {
     /* Latch command: capture current count for channel 0 */
-    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)PIT_COMMAND_PORT));
+    io_outb(PIT_COMMAND_PORT, 0x00);
     
     /* Read low byte first, then high byte (as per PIT protocol) */
-    uint8_t low, high;
-    __asm__ volatile ("inb %1, %0" : "=a"(low) : "Nd"((uint16_t)PIT_CHANNEL0_PORT));
-    __asm__ volatile ("inb %1, %0" : "=a"(high) : "Nd"((uint16_t)PIT_CHANNEL0_PORT));
+    uint8_t low = io_inb(PIT_CHANNEL0_PORT);
+    uint8_t high = io_inb(PIT_CHANNEL0_PORT);
     
     return ((uint16_t)high << 8) | low;
 }

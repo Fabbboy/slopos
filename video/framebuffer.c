@@ -18,10 +18,10 @@
 #include "../boot/log.h"
 #include "../drivers/serial.h"
 #include "../mm/phys_virt.h"
+#include "../boot/kernel_panic.h"
 #include "framebuffer.h"
 
 /* Forward declarations */
-void kernel_panic(const char *message);
 int get_framebuffer_info(uint64_t *addr, uint32_t *width, uint32_t *height,
                         uint32_t *pitch, uint8_t *bpp);
 

@@ -6,8 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Forward declarations
-extern void kernel_panic(const char *message);
+#include "kernel_panic.h"
 
 /*
  * Read CPU control register CR0

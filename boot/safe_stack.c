@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-extern void kernel_panic(const char *message);
+#include "kernel_panic.h"
 
 /* Track diagnostic state for each managed stack */
 struct exception_stack_info {

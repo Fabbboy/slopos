@@ -9,11 +9,10 @@
 #include "../sched/scheduler.h"
 #include "../lib/cpu.h"
 #include "../lib/io.h"
+#include "../boot/kernel_panic.h"
 
 #include <stddef.h>
 #include <stdint.h>
-
-extern void kernel_panic(const char *message);
 
 #define IRQ_LINES 16
 #define PS2_DATA_PORT 0x60
@@ -151,8 +150,6 @@ static void keyboard_irq_handler(uint8_t irq, struct interrupt_frame *frame, voi
     /* Pass scancode to keyboard driver for processing */
     keyboard_handle_scancode(scancode);
 }
-
-extern void kernel_panic(const char *message);
 
 static void irq_program_ioapic_route(uint8_t irq) {
     if (irq >= IRQ_LINES) {
