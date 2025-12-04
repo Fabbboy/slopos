@@ -283,7 +283,7 @@ static void handle_exception_recovery(enum test_recovery_reason reason,
         kprint("INTERRUPT_TEST: Recovery triggered (");
         kprint(recovery_reason_string(reason));
         kprint(") for vector ");
-        kprint_dec((int)(active_frame->vector & 0xFF));
+        kprint_decimal((int)(active_frame->vector & 0xFF));
         kprintln("");
     }
 }
@@ -431,7 +431,7 @@ void test_start(const char *name, int expected_exception) {
         kprint(test_ctx.test_name);
         if (expected_exception >= 0) {
             kprint("' (expecting exception ");
-            kprint_dec(expected_exception);
+            kprint_decimal(expected_exception);
             kprintln(")");
         } else {
             kprintln("' (no exception expected)");
@@ -481,7 +481,7 @@ int test_end(void) {
 
         if (test_ctx.exception_occurred) {
             kprint(" - exception ");
-            kprint_dec(test_ctx.exception_vector);
+            kprint_decimal(test_ctx.exception_vector);
             kprint(" at RIP ");
             kprint_hex(test_ctx.test_rip);
         }
@@ -649,9 +649,9 @@ static int execute_test_suite(const char *suite_name,
         kprint("INTERRUPT_TEST: Suite '");
         kprint(suite_name);
         kprint("' - ");
-        kprint_dec(passed);
+        kprint_decimal(passed);
         kprint(" / ");
-        kprint_dec((int)count);
+        kprint_decimal((int)count);
         kprintln(" tests passed");
     }
 
@@ -1423,7 +1423,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
 finish_execution:
     if (test_flags & TEST_FLAG_VERBOSE) {
         kprint("INTERRUPT_TEST: Aggregate passed tests: ");
-        kprint_dec(total_passed);
+        kprint_decimal(total_passed);
         kprintln("");
     }
 
@@ -1474,35 +1474,35 @@ void test_report_results(void) {
 
     kprintln("=== INTERRUPT TEST RESULTS ===");
     kprint("Total tests: ");
-    kprint_dec(test_statistics.core.total_cases);
+    kprint_decimal(test_statistics.core.total_cases);
     kprintln("");
 
     kprint("Passed: ");
-    kprint_dec(test_statistics.core.passed_cases);
+    kprint_decimal(test_statistics.core.passed_cases);
     kprintln("");
 
     kprint("Failed: ");
-    kprint_dec(test_statistics.core.failed_cases);
+    kprint_decimal(test_statistics.core.failed_cases);
     kprintln("");
 
     kprint("Exceptions caught: ");
-    kprint_dec(test_statistics.exceptions_caught);
+    kprint_decimal(test_statistics.exceptions_caught);
     kprintln("");
 
     kprint("Unexpected exceptions: ");
-    kprint_dec(test_statistics.unexpected_exceptions);
+    kprint_decimal(test_statistics.unexpected_exceptions);
     kprintln("");
 
     if (test_statistics.core.total_cases > 0) {
         int success_rate = (int)((test_statistics.core.passed_cases * 100) /
                                  test_statistics.core.total_cases);
         kprint("Success rate: ");
-        kprint_dec(success_rate);
+        kprint_decimal(success_rate);
         kprintln("%");
     }
 
     kprint("Elapsed (ms): ");
-    kprint_dec(test_statistics.elapsed_ms);
+    kprint_decimal(test_statistics.elapsed_ms);
     kprintln("");
 
     kprint("Timeout triggered: ");
@@ -1567,7 +1567,7 @@ void dump_test_context(void) {
 
         kprint("Expected exception: ");
         if (test_ctx.expected_exception >= 0) {
-            kprint_dec(test_ctx.expected_exception);
+            kprint_decimal(test_ctx.expected_exception);
         } else {
             kprint("None");
         }
@@ -1578,7 +1578,7 @@ void dump_test_context(void) {
 
         if (test_ctx.exception_occurred) {
             kprint("Exception vector: ");
-            kprint_dec(test_ctx.exception_vector);
+            kprint_decimal(test_ctx.exception_vector);
             kprintln("");
         }
     }
@@ -1590,7 +1590,7 @@ void dump_test_context(void) {
     kprintln(test_ctx.context_corrupted ? "Yes" : "No");
 
     kprint("Exception depth: ");
-    kprint_dec(test_ctx.exception_depth);
+    kprint_decimal(test_ctx.exception_depth);
     kprintln("");
 
     kprint("Recovery anchor: ");
@@ -1609,7 +1609,7 @@ void dump_test_context(void) {
  */
 void log_test_exception(struct interrupt_frame *frame) {
     kprint("TEST_EXCEPTION: Vector ");
-    kprint_dec(frame->vector);
+    kprint_decimal(frame->vector);
     kprint(" at RIP ");
     kprint_hex(frame->rip);
     kprintln("");

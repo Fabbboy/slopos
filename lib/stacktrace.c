@@ -67,7 +67,7 @@ int stacktrace_capture(struct stacktrace_entry *entries, int max_entries) {
 
 static void print_entry(int index, const struct stacktrace_entry *entry) {
     kprint("  #");
-    kprint_dec((uint64_t)index);
+    kprint_decimal((uint64_t)index);
     kprint(" rbp=0x");
     kprint_hex(entry->frame_pointer);
     kprint(" rip=0x");

@@ -59,7 +59,7 @@ void debug_init(void) {
 void debug_set_level(int level) {
     debug_ctx.debug_level = level;
     kprint("DEBUG: Set debug level to ");
-    kprint_dec(level);
+    kprint_decimal(level);
     kprintln("");
 }
 
@@ -143,7 +143,7 @@ void debug_print_location(const char *file, int line, const char *function) {
     if (file) {
         kprint(file);
         kprint(":");
-        kprint_dec(line);
+        kprint_decimal(line);
     }
     kprintln("");
 }
@@ -292,7 +292,7 @@ void debug_dump_registers_from_frame(struct interrupt_frame *frame) {
     kprintln("=== INTERRUPT FRAME REGISTERS ===");
 
     kprint("Vector: ");
-    kprint_dec(frame->vector);
+    kprint_decimal(frame->vector);
     kprint(" (");
     kprint(get_exception_name(frame->vector));
     kprint(")  Error Code: ");
@@ -381,7 +381,7 @@ void debug_dump_stack_trace_from_rbp(uint64_t rbp) {
 
     for (int i = 0; i < frame_count; i++) {
         kprint("Frame ");
-        kprint_dec(i);
+        kprint_decimal(i);
         kprint(": RBP=");
         kprint_hex(entries[i].frame_pointer);
         kprint(" RIP=");
@@ -441,7 +441,7 @@ void debug_dump_memory(uint64_t address, size_t length) {
     kprint("Memory dump at ");
     kprint_hex(address);
     kprint(" (");
-    kprint_dec(length);
+    kprint_decimal(length);
     kprintln(" bytes):");
 
     debug_hexdump((void *)address, length, address);
@@ -486,9 +486,9 @@ void debug_hexdump(const void *data, size_t length, uint64_t base_address) {
         for (j = 0; j < 16 && i + j < length; j++) {
             uint8_t c = bytes[i + j];
             if (c >= 32 && c <= 126) {
-                kprint_char(c);
+                serial_putc(serial_get_kernel_output(), c);
             } else {
-                kprint_char('.');
+                serial_putc(serial_get_kernel_output(), '.');
             }
         }
 
@@ -514,7 +514,7 @@ void debug_analyze_exception(struct interrupt_frame *frame) {
             break;
         default:
             kprint("Exception ");
-            kprint_dec(frame->vector);
+            kprint_decimal(frame->vector);
             kprint(" (");
             kprint(get_exception_name(frame->vector));
             kprintln(") - no specific analysis available");

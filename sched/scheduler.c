@@ -14,6 +14,7 @@
 #include "../drivers/pit.h"
 #include "../drivers/wl_currency.h"
 #include "../mm/paging.h"
+#include "../lib/ring_buffer.h"
 #include "scheduler.h"
 
 /* Forward declarations from context_switch.s */
@@ -100,9 +101,7 @@ static void scheduler_reset_task_quantum(task_t *task) {
  * Initialize the ready queue
  */
 static void ready_queue_init(ready_queue_t *queue) {
-    queue->head = 0;
-    queue->tail = 0;
-    queue->count = 0;
+    RING_BUFFER_RESET(queue);
 
     /* Clear all task pointers */
     for (uint32_t i = 0; i < SCHED_MAX_READY_TASKS; i++) {
@@ -133,10 +132,11 @@ static int ready_queue_enqueue(ready_queue_t *queue, task_t *task) {
         return -1;
     }
 
-    /* Add task to tail of queue */
-    queue->tasks[queue->tail] = task;
-    queue->tail = (queue->tail + 1) % SCHED_MAX_READY_TASKS;
-    queue->count++;
+    int success = 0;
+    RING_BUFFER_TRY_PUSH(queue, tasks, task, success);
+    if (!success) {
+        return -1;
+    }
 
     return 0;
 }
@@ -150,13 +150,10 @@ static task_t *ready_queue_dequeue(ready_queue_t *queue) {
         return NULL;
     }
 
-    /* Remove task from head of queue */
-    task_t *task = queue->tasks[queue->head];
-    queue->tasks[queue->head] = NULL;
-    queue->head = (queue->head + 1) % SCHED_MAX_READY_TASKS;
-    queue->count--;
-
-    return task;
+    task_t *task = NULL;
+    int success = 0;
+    RING_BUFFER_TRY_POP(queue, tasks, &task, success);
+    return success ? task : NULL;
 }
 
 /*

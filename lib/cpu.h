@@ -9,5 +9,13 @@ static inline uint64_t cpu_read_tsc(void) {
     return ((uint64_t)high << 32) | low;
 }
 
+static inline void cpu_cli(void) {
+    __asm__ volatile ("cli" : : : "memory");
+}
+
+static inline void cpu_sti(void) {
+    __asm__ volatile ("sti" : : : "memory");
+}
+
 #endif /* LIB_CPU_H */
 

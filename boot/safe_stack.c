@@ -117,9 +117,9 @@ void safe_stack_init(void) {
 
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
             kprint("SAFE STACK: Vector ");
-            kprint_dec(stack->vector);
+            kprint_decimal(stack->vector);
             kprint(" uses IST");
-            kprint_dec(stack->ist_index);
+            kprint_decimal(stack->ist_index);
             kprint(" @ ");
             kprint_hex(stack->stack_base);
             kprint(" - ");
@@ -141,7 +141,7 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
         if (!stack->out_of_bounds_reported) {
             BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
                 kprint("SAFE STACK WARNING: RSP outside managed stack for vector ");
-                kprint_dec(vector);
+                kprint_decimal(vector);
                 kprintln("");
             });
             stack->out_of_bounds_reported = 1;
@@ -157,7 +157,7 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
             kprint("SAFE STACK: New peak usage on ");
             kprint(stack->name);
             kprint(" stack: ");
-            kprint_dec(usage);
+            kprint_decimal(usage);
             kprint(" bytes");
             kprintln("");
         });

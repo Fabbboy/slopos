@@ -54,7 +54,7 @@ void pit_set_frequency(uint32_t frequency_hz) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("PIT: frequency set to ");
-        kprint_dec(current_frequency_hz);
+        kprint_decimal(current_frequency_hz);
         kprintln(" Hz");
     });
 }
@@ -62,7 +62,7 @@ void pit_set_frequency(uint32_t frequency_hz) {
 void pit_init(uint32_t frequency_hz) {
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
         kprint("PIT: Initializing timer at ");
-        kprint_dec(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
+        kprint_decimal(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
         kprintln(" Hz");
     });
 

@@ -61,7 +61,7 @@ static void mask_irq_line(uint8_t irq) {
         } else {
             BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
                 kprint("IRQ: Mask request ignored for line ");
-                kprint_dec(irq);
+                kprint_decimal(irq);
                 kprintln(" (no IOAPIC route)");
             });
         }
@@ -86,7 +86,7 @@ static void unmask_irq_line(uint8_t irq) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
         kprint("IRQ: Cannot unmask line ");
-        kprint_dec(irq);
+        kprint_decimal(irq);
         kprintln(" (no IOAPIC route configured)");
     });
 }
@@ -95,7 +95,7 @@ static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
     if (irq >= IRQ_LINES) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IRQ: Spurious vector ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln(" received");
         });
         return;
@@ -109,9 +109,9 @@ static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
         kprint("IRQ: Unhandled IRQ ");
-        kprint_dec(irq);
+        kprint_decimal(irq);
         kprint(" (vector ");
-        kprint_dec(vector);
+        kprint_decimal(vector);
         kprintln(") - masking line");
     });
 }
@@ -126,7 +126,7 @@ static void timer_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *
     if (timer_tick_counter <= 3) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
             kprint("IRQ: Timer tick #");
-            kprint_dec(timer_tick_counter);
+            kprint_decimal(timer_tick_counter);
             kprintln("");
         });
     }
@@ -185,9 +185,9 @@ static void irq_program_ioapic_route(uint8_t irq) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
         kprint("IRQ: IOAPIC route IRQ ");
-        kprint_dec(irq);
+        kprint_decimal(irq);
         kprint(" -> GSI ");
-        kprint_dec(gsi);
+        kprint_decimal(gsi);
         kprint(", vector 0x");
         kprint_hex(vector);
         kprint(" (");
@@ -260,7 +260,7 @@ int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, cons
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("IRQ: Registered handler for line ");
-        kprint_dec(irq);
+        kprint_decimal(irq);
         if (name != NULL) {
             kprint(" (");
             kprint(name);
@@ -286,7 +286,7 @@ void irq_unregister_handler(uint8_t irq) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("IRQ: Unregistered handler for line ");
-        kprint_dec(irq);
+        kprint_decimal(irq);
         kprintln("");
     });
 }
@@ -329,7 +329,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     if (vector < IRQ_BASE_VECTOR) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IRQ: Received non-IRQ vector ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
         return;
@@ -360,7 +360,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     if (frame->cs != expected_cs || frame->rip != expected_rip) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IRQ: Frame corruption detected on IRQ ");
-            kprint_dec(irq);
+            kprint_decimal(irq);
             kprintln(" - aborting");
         });
         dump_interrupt_frame(frame);

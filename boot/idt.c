@@ -90,7 +90,7 @@ void idt_init(void) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("IDT: Configured ");
-        kprint_dec(IDT_ENTRIES);
+        kprint_decimal(IDT_ENTRIES);
         kprintln(" interrupt vectors");
     });
 }
@@ -112,7 +112,7 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     if ((uint16_t)vector >= IDT_ENTRIES) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IDT: Invalid IST assignment for vector ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
         return;
@@ -121,7 +121,7 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     if (ist_index > 7) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IDT: Invalid IST index ");
-            kprint_dec(ist_index);
+            kprint_decimal(ist_index);
             kprintln("");
         });
         return;
@@ -137,7 +137,7 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     if (vector >= 32) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IDT: Ignoring handler install for non-exception vector ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
         return;
@@ -146,7 +146,7 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     if (handler != NULL && is_critical_exception_internal(vector)) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
             kprint("IDT: Refusing to override critical exception ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
         return;
@@ -161,13 +161,13 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     if (handler != NULL) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
             kprint("IDT: Registered override handler for exception ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
     } else {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
             kprint("IDT: Cleared override handler for exception ");
-            kprint_dec(vector);
+            kprint_decimal(vector);
             kprintln("");
         });
     }
@@ -252,7 +252,7 @@ void common_exception_handler(struct interrupt_frame *frame) {
 
     if (vector >= 32) {
         kprint("EXCEPTION: Unknown vector ");
-        kprint_dec(vector);
+        kprint_decimal(vector);
         kprintln("");
         exception_default_panic(frame);
         return;
@@ -261,7 +261,7 @@ void common_exception_handler(struct interrupt_frame *frame) {
     int critical = is_critical_exception_internal(vector);
     if (critical || current_exception_mode != EXCEPTION_MODE_TEST) {
         kprint("EXCEPTION: Vector ");
-        kprint_dec(vector);
+        kprint_decimal(vector);
         kprint(" (");
         kprint(get_exception_name(vector));
         kprintln(")");
@@ -324,7 +324,7 @@ void dump_interrupt_frame(struct interrupt_frame *frame) {
     kprintln("=== INTERRUPT FRAME DUMP ===");
 
     kprint("Vector: ");
-    kprint_dec(frame->vector);
+    kprint_decimal(frame->vector);
     kprint(" Error Code: ");
     kprint_hex(frame->error_code);
     kprintln("");

@@ -12,6 +12,7 @@
 #include "../drivers/wl_currency.h"
 #include "../video/roulette.h"
 #include "../lib/numfmt.h"
+#include "../lib/cpu.h"
 
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
@@ -71,7 +72,7 @@ static uint64_t get_current_rsp(void) {
  */
 void kernel_panic(const char *message) {
     // Disable interrupts immediately
-    __asm__ volatile ("cli");
+    cpu_cli();
 
     // Output panic header
     panic_output_string("\n\n");
@@ -132,7 +133,7 @@ void kernel_panic(const char *message) {
 void kernel_panic_with_context(const char *message, const char *function,
                               const char *file, int line) {
     // Disable interrupts immediately
-    __asm__ volatile ("cli");
+    cpu_cli();
 
     panic_output_string("\n\n");
     panic_output_string("=== KERNEL PANIC ===\n");

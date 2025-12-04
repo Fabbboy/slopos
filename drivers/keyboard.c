@@ -2,6 +2,7 @@
 #include "serial.h"
 #include "tty.h"
 #include "../sched/scheduler.h"
+#include "../lib/cpu.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -125,10 +126,10 @@ static int buffer_push(keyboard_buffer_t *buf, char c) {
  */
 static char buffer_pop(keyboard_buffer_t *buf) {
     /* Disable interrupts during critical section */
-    __asm__ volatile ("cli");
+    cpu_cli();
     
     if (buffer_empty(buf)) {
-        __asm__ volatile ("sti");
+        cpu_sti();
         return 0;
     }
     
@@ -137,7 +138,7 @@ static char buffer_pop(keyboard_buffer_t *buf) {
     buf->count--;
     
     /* Re-enable interrupts */
-    __asm__ volatile ("sti");
+    cpu_sti();
     
     return c;
 }
@@ -146,9 +147,9 @@ static char buffer_pop(keyboard_buffer_t *buf) {
  * Check if buffer has data (non-destructive)
  */
 static int buffer_has_data(keyboard_buffer_t *buf) {
-    __asm__ volatile ("cli");
+    cpu_cli();
     int has_data = buf->count > 0;
-    __asm__ volatile ("sti");
+    cpu_sti();
     return has_data;
 }
 

@@ -454,11 +454,11 @@ static int boot_step_pci_init(void) {
         if (gpu && gpu->present) {
             BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
                 kprint("PCI: Primary GPU detected (bus ");
-                kprint_dec(gpu->device.bus);
+                kprint_decimal(gpu->device.bus);
                 kprint(", device ");
-                kprint_dec(gpu->device.device);
+                kprint_decimal(gpu->device.device);
                 kprint(", function ");
-                kprint_dec(gpu->device.function);
+                kprint_decimal(gpu->device.function);
                 kprintln(")");
                 if (gpu->mmio_virt_base) {
                     kprint("PCI: GPU MMIO virtual base 0x");
@@ -510,7 +510,7 @@ static int boot_step_interrupt_tests(void) {
         kprintln(interrupt_test_verbosity_string(test_config.verbosity));
 
         kprint("INTERRUPT_TEST: Timeout (ms) -> ");
-        kprint_dec(test_config.timeout_ms);
+        kprint_decimal(test_config.timeout_ms);
         kprintln("");
     }
 
@@ -522,7 +522,7 @@ static int boot_step_interrupt_tests(void) {
 
     if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
         kprint("INTERRUPT_TEST: Boot run passed tests -> ");
-        kprint_dec(passed);
+        kprint_decimal(passed);
         kprintln("");
     }
 

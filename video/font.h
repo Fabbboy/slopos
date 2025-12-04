@@ -18,17 +18,6 @@
 #define FONT_FIRST_CHAR     32    /* First printable character (space) */
 #define FONT_LAST_CHAR      126   /* Last printable character (~) */
 
-/* Text rendering modes */
-#define TEXT_MODE_NORMAL    0     /* Normal text */
-#define TEXT_MODE_BOLD      1     /* Bold text (not implemented) */
-#define TEXT_MODE_ITALIC    2     /* Italic text (not implemented) */
-#define TEXT_MODE_INVERSE   3     /* Inverse colors */
-
-/* Text alignment */
-#define TEXT_ALIGN_LEFT     0
-#define TEXT_ALIGN_CENTER   1
-#define TEXT_ALIGN_RIGHT    2
-
 /* Font error codes */
 #define FONT_SUCCESS        0
 #define FONT_ERROR_NO_FB    -1

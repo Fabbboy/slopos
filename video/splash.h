@@ -46,12 +46,6 @@ int splash_update_progress(int progress, const char *message);
 int splash_clear(void);
 
 /*
- * Show splash screen with simple delay
- * Displays splash for SPLASH_DISPLAY_TIME_MS milliseconds
- */
-int splash_show_with_delay(void);
-
-/*
  * Report actual boot progress (called during kernel initialization)
  * progress: 0-100 percentage of boot completion
  * message: current initialization stage message

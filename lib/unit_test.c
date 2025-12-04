@@ -104,32 +104,32 @@ void unit_test_runner_report(const struct unit_test_runner *runner) {
     }
 
     kprint("Total cases: ");
-    kprint_dec(runner->stats->total_cases);
+    kprint_decimal(runner->stats->total_cases);
     kprintln("");
 
     kprint("Passed: ");
-    kprint_dec(runner->stats->passed_cases);
+    kprint_decimal(runner->stats->passed_cases);
     kprintln("");
 
     kprint("Failed: ");
-    kprint_dec(runner->stats->failed_cases);
+    kprint_decimal(runner->stats->failed_cases);
     kprintln("");
 
     if (runner->stats->skipped_cases != 0) {
         kprint("Skipped: ");
-        kprint_dec(runner->stats->skipped_cases);
+        kprint_decimal(runner->stats->skipped_cases);
         kprintln("");
     }
 
     if (runner->stats->expected_failures != 0) {
         kprint("Expected failures: ");
-        kprint_dec(runner->stats->expected_failures);
+        kprint_decimal(runner->stats->expected_failures);
         kprintln("");
     }
 
     if (runner->stats->unexpected_failures != 0) {
         kprint("Unexpected failures: ");
-        kprint_dec(runner->stats->unexpected_failures);
+        kprint_decimal(runner->stats->unexpected_failures);
         kprintln("");
     }
 

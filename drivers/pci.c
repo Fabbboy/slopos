@@ -135,11 +135,11 @@ static uint64_t pci_probe_bar_size(uint8_t bus, uint8_t device,
 
 static void pci_log_device_header(const pci_device_info_t *info) {
     kprint("PCI: [Bus ");
-    kprint_dec(info->bus);
+    kprint_decimal(info->bus);
     kprint(" Dev ");
-    kprint_dec(info->device);
+    kprint_decimal(info->device);
     kprint(" Func ");
-    kprint_dec(info->function);
+    kprint_decimal(info->function);
     kprint("] VID=");
     kprint_hex(info->vendor_id);
     kprint(" DID=");
@@ -157,14 +157,14 @@ static void pci_log_device_header(const pci_device_info_t *info) {
 
 static void pci_log_bar(const pci_bar_info_t *bar, uint8_t index) {
     kprint("    BAR");
-    kprint_dec(index);
+    kprint_decimal(index);
     kprint(": ");
     if (bar->is_io) {
         kprint("IO base=0x");
         kprint_hex(bar->base);
         if (bar->size) {
             kprint(" size=");
-            kprint_dec(bar->size);
+            kprint_decimal(bar->size);
         }
     } else {
         kprint("MMIO base=0x");
@@ -313,7 +313,7 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
         uint8_t secondary_bus = pci_config_read8(bus, device, function, 0x19);
         if (secondary_bus != 0 && !bus_visited[secondary_bus]) {
             kprint("PCI: Traversing to secondary bus ");
-            kprint_dec(secondary_bus);
+            kprint_decimal(secondary_bus);
             kprintln("");
             bus_visited[secondary_bus] = 1;
             // Recursive scan of downstream bus
@@ -391,7 +391,7 @@ int pci_init(void) {
     }
 
     kprint("PCI: Enumeration complete. Devices discovered: ");
-    kprint_dec(device_count);
+    kprint_decimal(device_count);
     kprintln("");
 
     pci_initialized = 1;

@@ -93,9 +93,4 @@ int graphics_draw_circle_filled(int cx, int cy, int radius, uint32_t color);
  */
 int graphics_draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint32_t color);
 
-/*
- * Clear a rectangular region
- */
-int graphics_clear_region(int x, int y, int width, int height, uint32_t color);
-
 #endif /* VIDEO_GRAPHICS_H */

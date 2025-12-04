@@ -259,7 +259,7 @@ void apic_timer_init(uint32_t vector, uint32_t frequency) {
         kprint("APIC: Initializing timer with vector ");
         kprint_hex(vector);
         kprint(" and frequency ");
-        kprint_dec(frequency);
+        kprint_decimal(frequency);
         kprintln("");
     });
 

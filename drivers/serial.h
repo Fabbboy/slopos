@@ -153,16 +153,6 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line);
 void serial_putc_com1(char c);
 
 /*
- * Send string to COM1 (default kernel output)
- */
-void serial_puts_com1(const char *str);
-
-/*
- * Send string with newline to COM1
- */
-void serial_puts_line_com1(const char *str);
-
-/*
  * Send formatted hex value to COM1
  * Outputs "0x" followed by hex digits
  */
@@ -210,23 +200,9 @@ void kprint_hex(uint64_t value);
 void kprint_decimal(uint64_t value);
 
 /*
- * Kernel print decimal value (short alias)
- */
-static inline void kprint_dec(uint64_t value) {
-    kprint_decimal(value);
-}
-
-/*
  * Kernel print hex byte
  */
 void kprint_hex_byte(uint8_t value);
-
-/*
- * Kernel print character
- */
-static inline void kprint_char(char c) {
-    serial_putc(SERIAL_COM1_PORT, c);
-}
 
 /* ========================================================================
  * ADVANCED SERIAL FUNCTIONS

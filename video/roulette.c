@@ -523,7 +523,7 @@ void roulette_show_spin_fallback(uint32_t fate_number) {
 
     kprintln("");
     kprint("Fate number: ");
-    kprint_dec(fate_number);
+    kprint_decimal(fate_number);
     kprintln("");
 
     if (fate_number & 1) {

@@ -271,9 +271,9 @@ static void ioapic_log_controller(const struct ioapic_controller *ctrl) {
         kprint(" @ phys ");
         kprint_hex(ctrl->phys_addr);
         kprint(", GSIs ");
-        kprint_dec(ctrl->gsi_base);
+        kprint_decimal(ctrl->gsi_base);
         kprint("-");
-        kprint_dec(ctrl->gsi_base + ctrl->gsi_count - 1);
+        kprint_decimal(ctrl->gsi_base + ctrl->gsi_count - 1);
         kprint(", version 0x");
         kprint_hex(ctrl->version & 0xFF);
         kprintln("");
@@ -284,11 +284,11 @@ static void ioapic_log_iso(const struct ioapic_iso *iso) {
     if (!iso) return;
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("IOAPIC: ISO bus ");
-        kprint_dec(iso->bus_source);
+        kprint_decimal(iso->bus_source);
         kprint(", IRQ ");
-        kprint_dec(iso->irq_source);
+        kprint_decimal(iso->irq_source);
         kprint(" -> GSI ");
-        kprint_dec(iso->gsi);
+        kprint_decimal(iso->gsi);
         kprint(", flags 0x");
         kprint_hex(iso->flags);
         kprintln("");
@@ -367,9 +367,9 @@ static int ioapic_update_mask(uint32_t gsi, bool mask) {
         kprint("IOAPIC: ");
         kprint(mask ? "Masked" : "Unmasked");
         kprint(" GSI ");
-        kprint_dec(gsi);
+        kprint_decimal(gsi);
         kprint(" (pin ");
-        kprint_dec(pin);
+        kprint_decimal(pin);
         kprint(") -> low=0x");
         kprint_hex(value);
         kprintln("");
@@ -519,9 +519,9 @@ int ioapic_config_irq(uint32_t gsi, uint8_t vector, uint8_t lapic_id, uint32_t f
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
         kprint("IOAPIC: Configured GSI ");
-        kprint_dec(gsi);
+        kprint_decimal(gsi);
         kprint(" (pin ");
-        kprint_dec(pin);
+        kprint_decimal(pin);
         kprint(") -> vector ");
         kprint_hex(vector);
         kprint(", LAPIC ");

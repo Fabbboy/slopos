@@ -17,6 +17,7 @@
 #include "../drivers/pit.h"
 #include "../mm/page_alloc.h"
 #include "../lib/io.h"
+#include "../lib/cpu.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -30,7 +31,7 @@ static volatile int serial_drained = 0;
  * Disable interrupts, flush pending requests, and mask interrupt sources.
  */
 void kernel_quiesce_interrupts(void) {
-    __asm__ volatile ("cli");
+    cpu_cli();
 
     if (interrupts_quiesced) {
         return;
@@ -71,7 +72,7 @@ void kernel_drain_serial_output(void) {
  * Execute the full shutdown sequence and halt the CPUs.
  */
 void kernel_shutdown(const char *reason) {
-    __asm__ volatile ("cli");
+    cpu_cli();
 
     if (shutdown_in_progress) {
         kernel_quiesce_interrupts();
@@ -111,7 +112,7 @@ halt:
  * This is the fastest, most reliable reboot method for x86
  */
 void kernel_reboot(const char *reason) {
-    __asm__ volatile ("cli");
+    cpu_cli();
 
     kprintln("=== Kernel Reboot Requested ===");
     if (reason) {

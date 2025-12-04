@@ -58,7 +58,7 @@ static void framebuffer_draw_task(void *arg) {
 
     while (1) {
         /* Clear previous square footprint */
-        graphics_clear_region(square_x, square_y, square_size, square_size, COLOR_BLACK);
+        graphics_draw_rect_filled(square_x, square_y, square_size, square_size, COLOR_BLACK);
 
         /* Update square position and bounce within bounds */
         square_x += square_dx;
@@ -87,7 +87,7 @@ static void framebuffer_draw_task(void *arg) {
         /* Animate a horizontal scanning bar near the bottom */
         const int bar_height = 32;
         const int bar_y = (int)height - 3 - bar_height - 16;
-        graphics_clear_region(3, bar_y, (int)width - 6, bar_height, COLOR_BLACK);
+        graphics_draw_rect_filled(3, bar_y, (int)width - 6, bar_height, COLOR_BLACK);
 
         const int bar_width = width / 5;
         int bar_x = (int)(scan_offset % (width - 6));

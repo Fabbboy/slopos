@@ -10,6 +10,7 @@
 #include "../boot/log.h"
 #include "../lib/io.h"
 #include "../lib/numfmt.h"
+#include "../lib/ring_buffer.h"
 
 /* ========================================================================
  * INTERNAL STATE AND CONFIGURATION
@@ -79,9 +80,7 @@ static void serial_rx_buffer_reset(serial_rx_buffer_t *buffer) {
     if (!buffer) {
         return;
     }
-    buffer->head = 0;
-    buffer->tail = 0;
-    buffer->count = 0;
+    RING_BUFFER_RESET(buffer);
 }
 
 static void serial_rx_buffer_push(serial_rx_buffer_t *buffer, char value) {
@@ -89,25 +88,17 @@ static void serial_rx_buffer_push(serial_rx_buffer_t *buffer, char value) {
         return;
     }
 
-    if (buffer->count >= SERIAL_RX_BUFFER_SIZE) {
-        buffer->tail = (buffer->tail + 1) % SERIAL_RX_BUFFER_SIZE;
-        buffer->count--;
-    }
-
-    buffer->data[buffer->head] = value;
-    buffer->head = (buffer->head + 1) % SERIAL_RX_BUFFER_SIZE;
-    buffer->count++;
+    RING_BUFFER_PUSH_OVERWRITE(buffer, data, value);
 }
 
 static int serial_rx_buffer_pop(serial_rx_buffer_t *buffer, char *out_char) {
-    if (!buffer || buffer->count == 0 || !out_char) {
+    if (!buffer || !out_char) {
         return 0;
     }
 
-    *out_char = buffer->data[buffer->tail];
-    buffer->tail = (buffer->tail + 1) % SERIAL_RX_BUFFER_SIZE;
-    buffer->count--;
-    return 1;
+    int success = 0;
+    RING_BUFFER_TRY_POP(buffer, data, out_char, success);
+    return success;
 }
 
 uint8_t serial_read_register(uint16_t port, uint8_t reg_offset) {
@@ -442,14 +433,6 @@ void serial_putc_com1(char c) {
     serial_putc(COM1_BASE, c);
 }
 
-void serial_puts_com1(const char *str) {
-    serial_puts(COM1_BASE, str);
-}
-
-void serial_puts_line_com1(const char *str) {
-    serial_puts_line(COM1_BASE, str);
-}
-
 void serial_put_hex_com1(uint64_t value) {
     char buffer[19];  /* "0x" + 16 hex digits + null terminator */
 
@@ -462,7 +445,7 @@ void serial_put_hex_com1(uint64_t value) {
     }
 
     buffer[18] = '\0';
-    serial_puts_com1(buffer);
+    serial_puts(COM1_BASE, buffer);
 }
 
 void serial_put_decimal_com1(uint64_t value) {
@@ -470,7 +453,7 @@ void serial_put_decimal_com1(uint64_t value) {
     if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
         return;
     }
-    serial_puts_com1(buffer);
+    serial_puts(COM1_BASE, buffer);
 }
 
 /* ========================================================================

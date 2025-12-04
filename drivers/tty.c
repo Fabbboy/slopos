@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 #include "../sched/scheduler.h"
+#include "../lib/cpu.h"
+#include "../lib/ring_buffer.h"
 
 /* ========================================================================
  * WAIT QUEUE FOR BLOCKING INPUT
@@ -22,14 +24,6 @@ typedef struct tty_wait_queue {
 
 static tty_wait_queue_t tty_wait_queue = {0};
 
-static inline void tty_interrupts_disable(void) {
-    __asm__ volatile ("cli" : : : "memory");
-}
-
-static inline void tty_interrupts_enable(void) {
-    __asm__ volatile ("sti" : : : "memory");
-}
-
 static inline void tty_cpu_relax(void) {
     __asm__ volatile ("pause");
 }
@@ -39,14 +33,12 @@ static inline void tty_service_serial_input(void) {
 }
 
 static task_t *tty_wait_queue_pop(void) {
-    if (tty_wait_queue.count == 0) {
+    task_t *task = NULL;
+    int success = 0;
+    RING_BUFFER_TRY_POP(&tty_wait_queue, tasks, &task, success);
+    if (!success) {
         return NULL;
     }
-
-    task_t *task = tty_wait_queue.tasks[tty_wait_queue.head];
-    tty_wait_queue.tasks[tty_wait_queue.head] = NULL;
-    tty_wait_queue.head = (tty_wait_queue.head + 1) % TTY_MAX_WAITERS;
-    tty_wait_queue.count--;
     return task;
 }
 
@@ -97,7 +89,7 @@ void tty_notify_input_ready(void) {
         return;
     }
 
-    tty_interrupts_disable();
+    cpu_cli();
 
     task_t *task_to_wake = NULL;
 
@@ -115,7 +107,7 @@ void tty_notify_input_ready(void) {
         break;
     }
 
-    tty_interrupts_enable();
+    cpu_sti();
 
     if (task_to_wake) {
         if (unblock_task(task_to_wake) != 0) {
@@ -212,7 +204,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {
             buffer[pos] = '\0';
-            kprint_char('\n');  /* Echo newline */
+            serial_putc(serial_get_kernel_output(), '\n');  /* Echo newline */
             return pos;
         }
         
@@ -223,9 +215,10 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
                 pos--;
                 
                 /* Erase character visually: backspace, space, backspace */
-                kprint_char('\b');
-                kprint_char(' ');
-                kprint_char('\b');
+                uint16_t port = serial_get_kernel_output();
+                serial_putc(port, '\b');
+                serial_putc(port, ' ');
+                serial_putc(port, '\b');
             }
             /* If buffer is empty, ignore backspace (no character to delete) */
             continue;
@@ -240,7 +233,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         /* Handle printable characters */
         if (is_printable(c)) {
             buffer[pos++] = c;
-            kprint_char(c);  /* Echo character */
+            serial_putc(serial_get_kernel_output(), c);  /* Echo character */
             continue;
         }
         
@@ -253,7 +246,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         /* For any other character, store and echo if it's in printable range */
         if (pos < max_pos) {
             buffer[pos++] = c;
-            kprint_char(c);
+            serial_putc(serial_get_kernel_output(), c);
         }
     }
 }

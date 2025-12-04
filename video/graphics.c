@@ -430,13 +430,6 @@ int graphics_draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint3
 }
 
 /*
- * Clear a rectangular region
- */
-int graphics_clear_region(int x, int y, int width, int height, uint32_t color) {
-    return graphics_draw_rect_filled(x, y, width, height, color);
-}
-
-/*
  * Draw a pattern-filled rectangle
  */
 int graphics_draw_rect_pattern(int x, int y, int width, int height,

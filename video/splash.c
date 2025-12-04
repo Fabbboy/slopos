@@ -16,8 +16,6 @@
  * SPLASH SCREEN IMPLEMENTATION
  * ======================================================================== */
 
-#define splash_delay_ms(ms) pit_poll_delay_ms(ms)
-
 /*
  * Draw SlopOS logo as ASCII art using graphics primitives
  */
@@ -166,7 +164,7 @@ int splash_report_progress(int progress, const char *message) {
     if (current_progress > 100) current_progress = 100;
 
     kprint("SPLASH: Progress ");
-    kprint_dec(current_progress);
+    kprint_decimal(current_progress);
     kprint("% - ");
     if (message) {
         kprintln(message);
@@ -197,7 +195,7 @@ int splash_report_progress(int progress, const char *message) {
     }
 
     // Apply the delay
-    splash_delay_ms(delay_ms);
+    pit_poll_delay_ms(delay_ms);
 
     return result;
 }
@@ -244,7 +242,7 @@ int splash_finish(void) {
         splash_report_progress(100, "Boot complete");
 
         // Show "Boot complete" message for 0.25 seconds before finishing
-        splash_delay_ms(250);
+        pit_poll_delay_ms(250);
 
         splash_active = 0;
         kprintln("SPLASH: Boot splash screen complete");
@@ -304,10 +302,4 @@ int splash_clear(void) {
 /*
  * Show splash screen with simple delay
  */
-int splash_show_with_delay(void) {
-    int result = splash_show_boot_screen();
-    if (result == 0) {
-        splash_delay_ms(SPLASH_DISPLAY_TIME_MS);
-    }
-    return result;
-}
+/* Removed splash_show_with_delay: callers should invoke splash_show_boot_screen directly */
