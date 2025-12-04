@@ -38,17 +38,6 @@ static inline void tty_service_serial_input(void) {
     serial_poll_receive(SERIAL_COM1_PORT);
 }
 
-static int tty_wait_queue_push(task_t *task) {
-    if (!task || tty_wait_queue.count >= TTY_MAX_WAITERS) {
-        return -1;
-    }
-
-    tty_wait_queue.tasks[tty_wait_queue.tail] = task;
-    tty_wait_queue.tail = (tty_wait_queue.tail + 1) % TTY_MAX_WAITERS;
-    tty_wait_queue.count++;
-    return 0;
-}
-
 static task_t *tty_wait_queue_pop(void) {
     if (tty_wait_queue.count == 0) {
         return NULL;
@@ -70,20 +59,6 @@ static int tty_input_available(void) {
     kprint("\n");
 
     if (kbd_has_input) {
-        return 1;
-    }
-
-    if (serial_buffer_pending(SERIAL_COM1_PORT)) {
-        return 1;
-    }
-
-    return 0;
-}
-
-static int tty_input_available_locked(void) {
-    tty_service_serial_input();
-
-    if (keyboard_buffer_pending()) {
         return 1;
     }
 

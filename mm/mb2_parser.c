@@ -26,7 +26,7 @@ struct multiboot_tag {
 struct multiboot_tag_string {
     uint32_t type;
     uint32_t size;
-    char string[0];
+    char string[];
 } __attribute__((packed));
 
 /* Basic memory info tag */
@@ -51,7 +51,7 @@ struct multiboot_tag_mmap {
     uint32_t size;
     uint32_t entry_size;
     uint32_t entry_version;
-    struct multiboot_mmap_entry entries[0];
+    struct multiboot_mmap_entry entries[];
 } __attribute__((packed));
 
 /* Framebuffer tag */
@@ -80,7 +80,7 @@ struct multiboot_tag_efi_mmap {
     uint32_t size;
     uint32_t descr_size;
     uint32_t descr_vers;
-    uint8_t efi_mmap[0];
+    uint8_t efi_mmap[];
 } __attribute__((packed));
 
 /* EFI Memory Descriptor */

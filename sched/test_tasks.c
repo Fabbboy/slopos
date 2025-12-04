@@ -222,8 +222,6 @@ typedef struct smoke_test_context {
     int test_failed;
 } smoke_test_context_t;
 
-static smoke_test_context_t smoke_test_ctx_task_a = {0};
-static smoke_test_context_t smoke_test_ctx_task_b = {0};
 
 /*
  * Smoke test task A - yields repeatedly and tracks stack pointer
@@ -424,7 +422,10 @@ int run_context_switch_smoke_test(void) {
             /* Set up kernel return context manually */
             uint64_t current_rsp;
             __asm__ volatile ("movq %%rsp, %0" : "=r"(current_rsp));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-label-as-value"
             kernel_return_context->rip = (uint64_t)&&return_label;
+#pragma clang diagnostic pop
             kernel_return_context->rsp = current_rsp;
             kernel_return_context->cs = 0x08;  /* Kernel code segment */
             kernel_return_context->ss = 0x10;  /* Kernel stack segment */
@@ -480,7 +481,7 @@ void smoke_test_task_a_direct(void *arg) {
 
         /* Simulate yield by switching back to kernel context */
         /* In a real scheduler, this would switch to the next task */
-        task_context_t ctx_task, ctx_kernel;
+        task_context_t ctx_kernel;
 
         /* Save current context */
         init_kernel_context(&ctx_kernel);
