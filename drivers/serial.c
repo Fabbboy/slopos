@@ -477,21 +477,11 @@ void kprintln(const char *str) {
 }
 
 void kprint_hex(uint64_t value) {
-    if (kernel_output_port == COM1_BASE) {
-        serial_put_hex_com1(value);
-    } else {
-        /* Implement for other ports if needed */
-        serial_put_hex_com1(value);  /* Fallback to COM1 */
-    }
+    serial_put_hex_com1(value);
 }
 
 void kprint_decimal(uint64_t value) {
-    if (kernel_output_port == COM1_BASE) {
-        serial_put_decimal_com1(value);
-    } else {
-        /* Implement for other ports if needed */
-        serial_put_decimal_com1(value);  /* Fallback to COM1 */
-    }
+    serial_put_decimal_com1(value);
 }
 
 /* ========================================================================

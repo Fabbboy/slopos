@@ -4,6 +4,7 @@
  */
 
 #include "debug.h"
+#include "constants.h"
 #include "log.h"
 #include "../drivers/serial.h"
 #include "../lib/cpu.h"
@@ -20,11 +21,6 @@ static struct debug_context debug_ctx = {
     .initialized = 0
 };
 
-// Memory regions
-#define MAX_MEMORY_REGIONS 64
-static struct memory_region memory_regions[MAX_MEMORY_REGIONS];
-static int memory_region_count = 0;
-
 /* Symbol resolution stub */
 static const char *debug_get_symbol_name(uint64_t address);
 
@@ -40,10 +36,6 @@ void debug_init(void) {
 
     debug_ctx.boot_timestamp = debug_get_timestamp();
     debug_ctx.initialized = 1;
-
-    // Register basic kernel memory regions
-    debug_register_memory_region(0xFFFFFFFF80000000ULL, 0xFFFFFFFF80400000ULL, 0, "Kernel Code");
-    debug_register_memory_region(0x0000000000000000ULL, 0x0000000000100000ULL, 0, "Low Memory");
 
     boot_log_debug("DEBUG: Debug subsystem initialized");
 }
@@ -443,14 +435,6 @@ void debug_dump_memory(uint64_t address, size_t length) {
 }
 
 /*
- * Dump memory around RIP
- */
-void debug_dump_memory_around_rip(uint64_t rip) {
-    kprintln("Code around RIP:");
-    debug_dump_memory(rip - 32, 64);
-}
-
-/*
  * Hexdump utility
  */
 void debug_hexdump(const void *data, size_t length, uint64_t base_address) {
@@ -492,162 +476,9 @@ void debug_hexdump(const void *data, size_t length, uint64_t base_address) {
 }
 
 /*
- * Analyze exception
- */
-void debug_analyze_exception(struct interrupt_frame *frame) {
-    kprintln("=== EXCEPTION ANALYSIS ===");
-
-    switch (frame->vector) {
-        case EXCEPTION_PAGE_FAULT:
-            debug_analyze_page_fault(frame);
-            break;
-        case EXCEPTION_GENERAL_PROTECTION:
-            debug_analyze_general_protection(frame);
-            break;
-        case EXCEPTION_DOUBLE_FAULT:
-            debug_analyze_double_fault(frame);
-            break;
-        default:
-            kprint("Exception ");
-            kprint_decimal(frame->vector);
-            kprint(" (");
-            kprint(get_exception_name(frame->vector));
-            kprintln(") - no specific analysis available");
-            break;
-    }
-
-    kprintln("=== END EXCEPTION ANALYSIS ===");
-}
-
-/*
- * Analyze page fault
- */
-void debug_analyze_page_fault(struct interrupt_frame *frame) {
-    uint64_t fault_addr;
-    __asm__ volatile ("movq %%cr2, %0" : "=r" (fault_addr));
-
-    kprintln("PAGE FAULT ANALYSIS:");
-    kprint("Fault address: ");
-    kprint_hex(fault_addr);
-    kprintln("");
-
-    kprint("Error code: ");
-    kprint_hex(frame->error_code);
-    kprint(" (");
-    if (frame->error_code & 1) kprint("Protection violation");
-    else kprint("Page not present");
-    if (frame->error_code & 2) kprint(", Write");
-    else kprint(", Read");
-    if (frame->error_code & 4) kprint(", User mode");
-    else kprint(", Supervisor mode");
-    if (frame->error_code & 8) kprint(", Reserved bit violation");
-    if (frame->error_code & 16) kprint(", Instruction fetch");
-    kprintln(")");
-
-    // Find memory region
-    struct memory_region *region = debug_find_memory_region(fault_addr);
-    if (region) {
-        kprint("Memory region: ");
-        kprint(region->name);
-        kprintln("");
-    } else {
-        kprintln("Memory region: Unknown/Unmapped");
-    }
-}
-
-/*
  * Simple symbol resolution
  */
 static const char *debug_get_symbol_name(uint64_t address) {
     (void)address;
     return NULL;
-}
-
-/*
- * Register memory region
- */
-void debug_register_memory_region(uint64_t start, uint64_t end, uint32_t flags, const char *name) {
-    if (memory_region_count >= MAX_MEMORY_REGIONS) return;
-
-    memory_regions[memory_region_count].start = start;
-    memory_regions[memory_region_count].end = end;
-    memory_regions[memory_region_count].flags = flags;
-
-    int i = 0;
-    while (name && name[i] && i < 31) {
-        memory_regions[memory_region_count].name[i] = name[i];
-        i++;
-    }
-    memory_regions[memory_region_count].name[i] = '\0';
-
-    memory_region_count++;
-}
-
-/*
- * Find memory region containing address
- */
-struct memory_region *debug_find_memory_region(uint64_t address) {
-    for (int i = 0; i < memory_region_count; i++) {
-        if (address >= memory_regions[i].start && address < memory_regions[i].end) {
-            return &memory_regions[i];
-        }
-    }
-    return NULL;
-}
-
-/*
- * Analyze general protection fault
- */
-void debug_analyze_general_protection(struct interrupt_frame *frame) {
-    kprintln("=== GENERAL PROTECTION FAULT (#GP) ===");
-    kprint("Error Code: ");
-    kprint_hex(frame->error_code);
-    kprintln("");
-    
-    // Decode error code
-    if (frame->error_code & 0x01) {
-        kprintln("External event caused exception");
-    }
-    
-    uint16_t selector_index = (frame->error_code >> 3) & 0x1FFF;
-    uint8_t table = (frame->error_code >> 1) & 0x03;
-    
-    kprint("Selector Index: ");
-    kprint_hex(selector_index);
-    kprint(" Table: ");
-    if (table == 0) kprintln("GDT");
-    else if (table == 1) kprintln("IDT");
-    else if (table == 2) kprintln("LDT");
-    else kprintln("Unknown");
-    
-    kprint("RIP: ");
-    kprint_hex(frame->rip);
-    kprintln("");
-}
-
-/*
- * Analyze double fault
- */
-void debug_analyze_double_fault(struct interrupt_frame *frame) {
-    kprintln("=== DOUBLE FAULT (#DF) ===");
-    kprintln("CRITICAL: A double fault indicates a severe kernel error");
-    kprintln("This usually means an exception occurred while handling another exception");
-    
-    kprint("Error Code: ");
-    kprint_hex(frame->error_code);
-    kprintln(" (always 0 for double fault)");
-    
-    kprint("RIP: ");
-    kprint_hex(frame->rip);
-    kprintln("");
-    
-    kprint("RSP: ");
-    kprint_hex(frame->rsp);
-    kprintln("");
-    
-    kprint("CS: ");
-    kprint_hex(frame->cs);
-    kprintln("");
-    
-    kprintln("System is likely in an unstable state");
 }

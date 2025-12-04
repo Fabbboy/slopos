@@ -136,11 +136,12 @@ void kernel_panic_with_context(const char *message, const char *function,
         panic_output_string(file);
         if (line > 0) {
             panic_output_string(":");
-            // Simple line number output (assuming line < 10000)
-            if (line >= 1000) panic_output_char('0' + (line / 1000) % 10);
-            if (line >= 100) panic_output_char('0' + (line / 100) % 10);
-            if (line >= 10) panic_output_char('0' + (line / 10) % 10);
-            panic_output_char('0' + line % 10);
+            char line_buf[32];
+            if (numfmt_u64_to_decimal((uint64_t)line, line_buf, sizeof(line_buf)) == 0) {
+                panic_output_char('0');
+            } else {
+                panic_output_string(line_buf);
+            }
         }
         panic_output_string("\n");
     }

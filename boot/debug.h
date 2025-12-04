@@ -29,18 +29,6 @@
 #define MAX_STACK_FRAMES        32
 #define STACK_TRACE_DEPTH       16
 
-// Memory dump limits
-#define MEMORY_DUMP_BYTES       256
-#define MEMORY_DUMP_WIDTH       16
-
-// Memory region descriptor
-struct memory_region {
-    uint64_t start;
-    uint64_t end;
-    uint32_t flags;
-    char name[32];
-};
-
 // Debug context
 struct debug_context {
     int debug_level;
@@ -67,19 +55,8 @@ void debug_dump_stack_trace_from_rbp(uint64_t rbp);
 
 // Memory analysis
 void debug_dump_memory(uint64_t address, size_t length);
-void debug_dump_memory_around_rip(uint64_t rip);
 int debug_is_valid_memory_address(uint64_t address);
 void debug_flush(void);
-
-// Exception analysis
-void debug_analyze_exception(struct interrupt_frame *frame);
-void debug_analyze_page_fault(struct interrupt_frame *frame);
-void debug_analyze_general_protection(struct interrupt_frame *frame);
-void debug_analyze_double_fault(struct interrupt_frame *frame);
-
-// Memory regions for debugging
-void debug_register_memory_region(uint64_t start, uint64_t end, uint32_t flags, const char *name);
-struct memory_region *debug_find_memory_region(uint64_t address);
 
 // Utility functions
 uint64_t debug_get_timestamp(void);

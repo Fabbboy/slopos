@@ -12,7 +12,6 @@
 #include "../drivers/serial.h"
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"
-#include "../mm/kernel_heap.h"
 #include "task.h"
 #include "scheduler.h"
 #include "../boot/kernel_panic.h"
