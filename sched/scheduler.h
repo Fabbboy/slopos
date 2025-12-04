@@ -208,19 +208,8 @@ void get_task_stats(uint32_t *total_tasks, uint32_t *active_tasks,
 int run_scheduler_test(void);
 
 /*
- * Demonstrate cooperative scheduling concepts
- * Returns 0 on success, non-zero on failure
- */
-int demo_cooperative_scheduling(void);
-
-/*
  * Print current scheduler statistics
  */
 void print_scheduler_stats(void);
-
-/*
- * Monitor scheduler performance for specified duration
- */
-void monitor_scheduler(uint32_t duration_seconds);
 
 #endif /* SCHED_SCHEDULER_H */

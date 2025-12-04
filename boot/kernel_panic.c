@@ -17,14 +17,6 @@
 /* Declare execute_kernel for the purification ritual */
 extern void execute_kernel(void);
 
-/*
- * Emergency serial output for panic messages
- * Uses emergency serial functions that bypass normal initialization
- */
-static void panic_output_char(char c) {
-    serial_emergency_putc(c);
-}
-
 static void panic_output_string(const char *str) {
     serial_emergency_puts(str);
 }
@@ -138,7 +130,7 @@ void kernel_panic_with_context(const char *message, const char *function,
             panic_output_string(":");
             char line_buf[32];
             if (numfmt_u64_to_decimal((uint64_t)line, line_buf, sizeof(line_buf)) == 0) {
-                panic_output_char('0');
+                    serial_emergency_putc('0');
             } else {
                 panic_output_string(line_buf);
             }

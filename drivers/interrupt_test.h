@@ -72,8 +72,6 @@ int test_executable_memory_access(void);
 
 // Control flow test functions
 int test_invalid_instruction_pointer(void);
-int test_privilege_violation(void);
-int test_segment_violation(void);
 
 // Test framework functions
 void interrupt_test_init(const struct interrupt_test_config *config);

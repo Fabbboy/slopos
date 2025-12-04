@@ -254,29 +254,6 @@ int free_page_frame(uint64_t phys_addr) {
     return 0;
 }
 
-/*
- * Increase reference count for a page frame
- * Used for page sharing between processes
- */
-int ref_page_frame(uint64_t phys_addr) {
-    uint32_t frame_num = phys_to_frame(phys_addr);
-
-    if (!is_valid_frame(frame_num)) {
-        boot_log_info("ref_page_frame: Invalid physical address");
-        return -1;
-    }
-
-    page_frame_t *frame = get_frame_desc(frame_num);
-
-    if (!frame_state_is_allocated(frame->state)) {
-        boot_log_info("ref_page_frame: Page not allocated");
-        return -1;
-    }
-
-    frame->ref_count++;
-    return 0;
-}
-
 /* ========================================================================
  * MEMORY REGION MANAGEMENT
  * ======================================================================== */

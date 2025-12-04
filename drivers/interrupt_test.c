@@ -938,58 +938,6 @@ __attribute__((noinline)) int test_invalid_instruction_pointer(void) {
 }
 
 /*
- * Test: Trigger general protection via explicit software interrupt
- */
-__attribute__((noinline)) int test_privilege_violation(void) {
-    volatile uint64_t resume_addr;
-
-    __asm__ volatile (
-        "leaq 1f(%%rip), %0\n\t"
-        : "=r"(resume_addr)
-        :
-        : "memory");
-
-    test_ctx.resume_rip = resume_addr;
-
-    __asm__ volatile (
-        "int $13\n\t"
-        "1:\n\t"
-        "nop\n\t"
-        :
-        :
-        : "memory");
-
-    test_clear_resume_point();
-    return TEST_SUCCESS;
-}
-
-/*
- * Test: Load invalid segment selector (expect general protection fault)
- */
-__attribute__((noinline)) int test_segment_violation(void) {
-    volatile uint64_t resume_addr;
-    __asm__ volatile (
-        "leaq 1f(%%rip), %0\n\t"
-        : "=r"(resume_addr)
-        :
-        : "memory");
-
-    test_ctx.resume_rip = resume_addr;
-
-    __asm__ volatile (
-        "movw $0x0000, %%ax\n\t"
-        "movw %%ax, %%fs\n\t"
-        "1:\n\t"
-        "nop\n\t"
-        :
-        :
-        : "rax", "memory");
-
-    test_clear_resume_point();
-    return TEST_SUCCESS;
-}
-
-/*
  * Test: Divide by zero
  */
 __attribute__((noinline)) int test_divide_by_zero(void) {

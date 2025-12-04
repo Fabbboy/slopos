@@ -193,22 +193,6 @@ int run_scheduler_test(void) {
     return 0;
 }
 
-/*
- * Simple demonstration of task creation and yielding
- */
-int demo_cooperative_scheduling(void) {
-    kprint("=== Cooperative Scheduling Demo ===\n");
-
-    /* This function demonstrates the basic concept */
-    kprint("1. Tasks run voluntarily\n");
-    kprint("2. Tasks must yield() to allow others to run\n");
-    kprint("3. Round-robin scheduling gives fair CPU time\n");
-    kprint("4. No preemption - tasks control their own execution\n");
-
-    /* Run the actual test */
-    return run_scheduler_test();
-}
-
 /* ========================================================================
  * CONTEXT SWITCH SMOKE TEST
  * ======================================================================== */
@@ -500,29 +484,3 @@ void print_scheduler_stats(void) {
     }
 }
 
-/*
- * Monitor scheduler performance
- */
-void monitor_scheduler(uint32_t duration_seconds) {
-    kprint("Monitoring scheduler for ");
-    kprint_decimal(duration_seconds);
-    kprint(" seconds...\n");
-
-    /* Simple monitoring loop */
-    for (uint32_t i = 0; i < duration_seconds; i++) {
-        /* Wait 1 second using PIT (interrupts are enabled at this point) */
-        pit_sleep_ms(1000);
-
-        kprint("Monitor: ");
-        kprint_decimal(i + 1);
-        kprint("s elapsed\n");
-
-        /* Print stats every 5 seconds */
-        if ((i + 1) % 5 == 0) {
-            print_scheduler_stats();
-        }
-    }
-
-    kprint("Monitoring complete\n");
-    print_scheduler_stats();
-}

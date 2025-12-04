@@ -21,13 +21,6 @@ static struct debug_context debug_ctx = {
     .initialized = 0
 };
 
-/* Symbol resolution stub */
-static const char *debug_get_symbol_name(uint64_t address);
-
-static inline uint64_t debug_read_tsc(void) {
-    return cpu_read_tsc();
-}
-
 /*
  * Initialize debug subsystem
  */
@@ -91,7 +84,7 @@ uint64_t debug_get_timestamp(void) {
         return monotonic_time;
     }
 
-    uint64_t tsc = debug_read_tsc();
+    uint64_t tsc = cpu_read_tsc();
     if (tsc <= monotonic_time) {
         tsc = monotonic_time + 1;
     }
@@ -149,7 +142,7 @@ void debug_dump_cpu_state(void) {
 
     // General purpose registers
     __asm__ volatile ("movq %%rsp, %0" : "=r" (rsp));
-    __asm__ volatile ("movq %%rbp, %0" : "=r" (rbp));
+    rbp = cpu_read_rbp();
     __asm__ volatile ("movq %%rax, %0" : "=r" (rax));
     __asm__ volatile ("movq %%rbx, %0" : "=r" (rbx));
     __asm__ volatile ("movq %%rcx, %0" : "=r" (rcx));
@@ -346,9 +339,7 @@ void debug_dump_registers_from_frame(struct interrupt_frame *frame) {
  * Dump stack trace
  */
 void debug_dump_stack_trace(void) {
-    uint64_t rbp;
-    __asm__ volatile ("movq %%rbp, %0" : "=r" (rbp));
-
+    uint64_t rbp = cpu_read_rbp();
     kprintln("=== STACK TRACE ===");
     debug_dump_stack_trace_from_rbp(rbp);
     kprintln("=== END STACK TRACE ===");
@@ -373,14 +364,6 @@ void debug_dump_stack_trace_from_rbp(uint64_t rbp) {
         kprint_hex(entries[i].frame_pointer);
         kprint(" RIP=");
         kprint_hex(entries[i].return_address);
-
-        // Try to resolve symbol
-        const char *symbol = debug_get_symbol_name(entries[i].return_address);
-        if (symbol) {
-            kprint(" (");
-            kprint(symbol);
-            kprint(")");
-        }
         kprintln("");
     }
 }
@@ -396,42 +379,6 @@ void debug_dump_stack_trace_from_frame(struct interrupt_frame *frame) {
 
     debug_dump_stack_trace_from_rbp(frame->rbp);
     kprintln("=== END STACK TRACE ===");
-}
-
-/*
- * Check if memory address appears valid
- */
-int debug_is_valid_memory_address(uint64_t address) {
-    // Basic checks for obviously invalid addresses
-    if (address == 0) return 0;
-    if (address < 0x1000) return 0;  // Null pointer area
-    if (address >= 0xFFFF800000000000ULL && address < 0xFFFFFFFF80000000ULL) return 0;  // Non-canonical
-
-    // For now, assume kernel addresses are valid
-    if (address >= 0xFFFFFFFF80000000ULL) return 1;
-
-    // Could add more sophisticated checks here
-    return 1;
-}
-
-/*
- * Dump memory around address
- */
-void debug_dump_memory(uint64_t address, size_t length) {
-    if (!debug_is_valid_memory_address(address)) {
-        kprint("Invalid memory address: ");
-        kprint_hex(address);
-        kprintln("");
-        return;
-    }
-
-    kprint("Memory dump at ");
-    kprint_hex(address);
-    kprint(" (");
-    kprint_decimal(length);
-    kprintln(" bytes):");
-
-    debug_hexdump((void *)address, length, address);
 }
 
 /*
@@ -475,10 +422,3 @@ void debug_hexdump(const void *data, size_t length, uint64_t base_address) {
     }
 }
 
-/*
- * Simple symbol resolution
- */
-static const char *debug_get_symbol_name(uint64_t address) {
-    (void)address;
-    return NULL;
-}

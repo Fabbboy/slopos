@@ -17,5 +17,11 @@ static inline void cpu_sti(void) {
     __asm__ volatile ("sti" : : : "memory");
 }
 
+static inline uint64_t cpu_read_rbp(void) {
+    uint64_t rbp;
+    __asm__ volatile ("movq %%rbp, %0" : "=r"(rbp));
+    return rbp;
+}
+
 #endif /* LIB_CPU_H */
 

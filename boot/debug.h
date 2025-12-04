@@ -53,9 +53,6 @@ void debug_dump_stack_trace(void);
 void debug_dump_stack_trace_from_frame(struct interrupt_frame *frame);
 void debug_dump_stack_trace_from_rbp(uint64_t rbp);
 
-// Memory analysis
-void debug_dump_memory(uint64_t address, size_t length);
-int debug_is_valid_memory_address(uint64_t address);
 void debug_flush(void);
 
 // Utility functions

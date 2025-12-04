@@ -97,13 +97,6 @@ void serial_puts_line(uint16_t port, const char *str);
 void serial_write(uint16_t port, const void *data, size_t length);
 
 /*
- * Receive a single character from the specified serial port
- * Blocks until character is available
- * Returns the received character
- */
-char serial_getc(uint16_t port);
-
-/*
  * Check if data is available to read from the serial port
  * Returns non-zero if data is available, zero otherwise
  */

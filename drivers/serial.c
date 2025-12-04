@@ -40,6 +40,12 @@ static uint8_t serial_irq_registered[4] = {0};
 /* Shared hex digit lookup table (DRY - used by multiple hex output functions) */
 static const char hex_digits[] = "0123456789ABCDEF";
 
+static void format_hex64(uint64_t value, char *out16) {
+    for (int i = 15; i >= 0; i--) {
+        out16[15 - i] = hex_digits[(value >> (i * 4)) & 0xF];
+    }
+}
+
 /* ========================================================================
  * LOW-LEVEL HARDWARE ACCESS
  * ======================================================================== */
@@ -416,15 +422,6 @@ void serial_flush(uint16_t port) {
  * SERIAL PORT RECEIVE FUNCTIONS
  * ======================================================================== */
 
-char serial_getc(uint16_t port) {
-    /* Wait for data to be available */
-    while (!serial_data_available(port)) {
-        /* Busy wait */
-    }
-
-    return io_inb(port + SERIAL_DATA_REG);
-}
-
 /* ========================================================================
  * COM1 CONVENIENCE FUNCTIONS
  * ======================================================================== */
@@ -438,12 +435,7 @@ void serial_put_hex_com1(uint64_t value) {
 
     buffer[0] = '0';
     buffer[1] = 'x';
-
-    /* Convert to hex string (16 digits for 64-bit) */
-    for (int i = 15; i >= 0; i--) {
-        buffer[2 + (15 - i)] = hex_digits[(value >> (i * 4)) & 0xF];
-    }
-
+    format_hex64(value, buffer + 2);
     buffer[18] = '\0';
     serial_puts(COM1_BASE, buffer);
 }
@@ -549,11 +541,13 @@ void serial_emergency_puts(const char *str) {
 }
 
 void serial_emergency_put_hex(uint64_t value) {
+    char digits[16];
+    format_hex64(value, digits);
+
     serial_emergency_putc('0');
     serial_emergency_putc('x');
-
-    for (int i = 15; i >= 0; i--) {
-        serial_emergency_putc(hex_digits[(value >> (i * 4)) & 0xF]);
+    for (int i = 0; i < 16; i++) {
+        serial_emergency_putc(digits[i]);
     }
 }
 

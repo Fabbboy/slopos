@@ -1,12 +1,11 @@
 #include "stacktrace.h"
 #include "../drivers/serial.h"
+#include "cpu.h"
 
 #define STACKTRACE_MAX_LOCAL 32
 
-static uint64_t read_frame_pointer(void) {
-    uint64_t rbp = 0;
-    __asm__ volatile ("mov %%rbp, %0" : "=r"(rbp));
-    return rbp;
+static inline uint64_t read_frame_pointer(void) {
+    return cpu_read_rbp();
 }
 
 static int is_canonical_address(uint64_t address) {

@@ -128,7 +128,6 @@ void exception_simd_fp_exception(struct interrupt_frame *frame);
 
 // Debug utilities
 void dump_interrupt_frame(struct interrupt_frame *frame);
-void dump_cpu_state(void);
 const char *get_exception_name(uint8_t vector);
 
 // Assembly interrupt handlers (defined in idt_handlers.s)
