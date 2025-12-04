@@ -293,15 +293,8 @@ int graphics_draw_rect_filled_fast(int x, int y, int width, int height, uint32_t
         return GRAPHICS_ERROR_BOUNDS;
     }
 
-    /* Pre-calculate color value */
-    uint32_t pixel_value = color;
-    if (fb->pixel_format == PIXEL_FORMAT_BGR ||
-        fb->pixel_format == PIXEL_FORMAT_BGRA) {
-        pixel_value = ((color & 0xFF0000) >> 16) |
-                     (color & 0x00FF00) |
-                     ((color & 0x0000FF) << 16) |
-                     (color & 0xFF000000);
-    }
+    /* Convert color to hardware pixel format */
+    uint32_t pixel_value = framebuffer_convert_color(color);
 
     uint8_t *buffer = (uint8_t*)fb->virtual_addr;
     uint32_t bytes_pp = (fb->bpp + 7) / 8;

@@ -126,4 +126,10 @@ uint32_t framebuffer_rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
  */
 uint32_t framebuffer_rgb(uint8_t r, uint8_t g, uint8_t b);
 
+/*
+ * Convert color from RGB to hardware pixel format
+ * Swaps red and blue channels for BGR/BGRA framebuffers
+ */
+uint32_t framebuffer_convert_color(uint32_t color);
+
 #endif /* VIDEO_FRAMEBUFFER_H */

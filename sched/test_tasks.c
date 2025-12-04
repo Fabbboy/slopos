@@ -220,17 +220,19 @@ typedef struct smoke_test_context {
     uint64_t max_stack_pointer;
     uint32_t yield_count;
     int test_failed;
+    const char *task_name;  /* Task name for logging */
 } smoke_test_context_t;
 
 
 /*
- * Smoke test task A - yields repeatedly and tracks stack pointer
+ * Smoke test task implementation - yields repeatedly and tracks stack pointer
+ * Uses task_name from context for logging output
  */
-void smoke_test_task_a(void *arg) {
-    smoke_test_context_t *ctx = (smoke_test_context_t *)arg;
+static void smoke_test_task_impl(smoke_test_context_t *ctx) {
     uint32_t iteration = 0;
     const uint32_t target_yields = 100;  /* Reduced for testing - will verify stack discipline */
     uint64_t stack_base = 0;
+    const char *name = ctx->task_name ? ctx->task_name : "SmokeTest";
 
     /* Get initial stack pointer */
     __asm__ volatile ("movq %%rsp, %0" : "=r"(stack_base));
@@ -240,7 +242,8 @@ void smoke_test_task_a(void *arg) {
     ctx->yield_count = 0;
     ctx->test_failed = 0;
 
-    kprint("SmokeTestA: Starting (initial RSP=0x");
+    kprint(name);
+    kprint(": Starting (initial RSP=0x");
     kprint_hex(stack_base);
     kprint(")\n");
 
@@ -259,7 +262,8 @@ void smoke_test_task_a(void *arg) {
         /* Check for excessive stack growth (more than 4KB indicates corruption) */
         uint64_t stack_growth = ctx->initial_stack_top - ctx->min_stack_pointer;
         if (stack_growth > 0x1000) {
-            kprint("SmokeTestA: ERROR - Stack growth exceeds 4KB: ");
+            kprint(name);
+            kprint(": ERROR - Stack growth exceeds 4KB: ");
             kprint_hex(stack_growth);
             kprint(" bytes\n");
             ctx->test_failed = 1;
@@ -268,7 +272,8 @@ void smoke_test_task_a(void *arg) {
 
         iteration++;
         if (iteration % 50 == 0) {
-            kprint("SmokeTestA: Iteration ");
+            kprint(name);
+            kprint(": Iteration ");
             kprint_decimal(iteration);
             kprint(" (yields: ");
             kprint_decimal(ctx->yield_count);
@@ -281,10 +286,12 @@ void smoke_test_task_a(void *arg) {
         ctx->yield_count++;
     }
 
-    kprint("SmokeTestA: Completed ");
+    kprint(name);
+    kprint(": Completed ");
     kprint_decimal(ctx->yield_count);
     kprint(" yields\n");
-    kprint("SmokeTestA: Stack range: min=0x");
+    kprint(name);
+    kprint(": Stack range: min=0x");
     kprint_hex(ctx->min_stack_pointer);
     kprint(" max=0x");
     kprint_hex(ctx->max_stack_pointer);
@@ -293,86 +300,30 @@ void smoke_test_task_a(void *arg) {
     kprint(" bytes\n");
 
     if (ctx->test_failed) {
-        kprint("SmokeTestA: FAILED - Stack corruption detected\n");
+        kprint(name);
+        kprint(": FAILED - Stack corruption detected\n");
     } else {
-        kprint("SmokeTestA: PASSED - No stack corruption\n");
+        kprint(name);
+        kprint(": PASSED - No stack corruption\n");
     }
 }
 
 /*
- * Smoke test task B - yields repeatedly and tracks stack pointer
+ * Smoke test task A - wrapper for generic implementation
+ */
+void smoke_test_task_a(void *arg) {
+    smoke_test_context_t *ctx = (smoke_test_context_t *)arg;
+    ctx->task_name = "SmokeTestA";
+    smoke_test_task_impl(ctx);
+}
+
+/*
+ * Smoke test task B - wrapper for generic implementation
  */
 void smoke_test_task_b(void *arg) {
     smoke_test_context_t *ctx = (smoke_test_context_t *)arg;
-    uint32_t iteration = 0;
-    const uint32_t target_yields = 100;  /* Reduced for testing - will verify stack discipline */
-    uint64_t stack_base = 0;
-
-    /* Get initial stack pointer */
-    __asm__ volatile ("movq %%rsp, %0" : "=r"(stack_base));
-    ctx->initial_stack_top = stack_base;
-    ctx->min_stack_pointer = stack_base;
-    ctx->max_stack_pointer = stack_base;
-    ctx->yield_count = 0;
-    ctx->test_failed = 0;
-
-    kprint("SmokeTestB: Starting (initial RSP=0x");
-    kprint_hex(stack_base);
-    kprint(")\n");
-
-    while (ctx->yield_count < target_yields) {
-        uint64_t current_rsp = 0;
-        __asm__ volatile ("movq %%rsp, %0" : "=r"(current_rsp));
-
-        /* Track stack pointer bounds */
-        if (current_rsp < ctx->min_stack_pointer) {
-            ctx->min_stack_pointer = current_rsp;
-        }
-        if (current_rsp > ctx->max_stack_pointer) {
-            ctx->max_stack_pointer = current_rsp;
-        }
-
-        /* Check for excessive stack growth (more than 4KB indicates corruption) */
-        uint64_t stack_growth = ctx->initial_stack_top - ctx->min_stack_pointer;
-        if (stack_growth > 0x1000) {
-            kprint("SmokeTestB: ERROR - Stack growth exceeds 4KB: ");
-            kprint_hex(stack_growth);
-            kprint(" bytes\n");
-            ctx->test_failed = 1;
-            break;
-        }
-
-        iteration++;
-        if (iteration % 50 == 0) {
-            kprint("SmokeTestB: Iteration ");
-            kprint_decimal(iteration);
-            kprint(" (yields: ");
-            kprint_decimal(ctx->yield_count);
-            kprint(", RSP=0x");
-            kprint_hex(current_rsp);
-            kprint(")\n");
-        }
-
-        yield();
-        ctx->yield_count++;
-    }
-
-    kprint("SmokeTestB: Completed ");
-    kprint_decimal(ctx->yield_count);
-    kprint(" yields\n");
-    kprint("SmokeTestB: Stack range: min=0x");
-    kprint_hex(ctx->min_stack_pointer);
-    kprint(" max=0x");
-    kprint_hex(ctx->max_stack_pointer);
-    kprint(" growth=");
-    kprint_hex(ctx->initial_stack_top - ctx->min_stack_pointer);
-    kprint(" bytes\n");
-
-    if (ctx->test_failed) {
-        kprint("SmokeTestB: FAILED - Stack corruption detected\n");
-    } else {
-        kprint("SmokeTestB: PASSED - No stack corruption\n");
-    }
+    ctx->task_name = "SmokeTestB";
+    smoke_test_task_impl(ctx);
 }
 
 /*
@@ -465,46 +416,6 @@ void test_task_function(int *completed_flag) {
     // Switch back to kernel
     task_context_t dummy;
     simple_context_switch(&dummy, kernel_return_context);
-}
-
-/* Direct test function for task A - simulates the yield loop */
-void smoke_test_task_a_direct(void *arg) {
-    smoke_test_context_t *ctx = (smoke_test_context_t *)arg;
-    uint32_t iteration = 0;
-    const uint32_t target_yields = 10;  /* Reduced for direct testing */
-
-    kprint("Task A started, running yield loop...\n");
-
-    while (iteration < target_yields) {
-        iteration++;
-        ctx->yield_count = iteration;
-
-        /* Simulate yield by switching back to kernel context */
-        /* In a real scheduler, this would switch to the next task */
-        task_context_t ctx_kernel;
-
-        /* Save current context */
-        init_kernel_context(&ctx_kernel);
-
-        /* Create a dummy context to switch to (back to kernel) */
-        /* For this test, we'll just return */
-        kprint("Task A yield ");
-        kprint_decimal(iteration);
-        kprint("\n");
-
-        /* Simulate the yield by just continuing (no actual switch needed for this test) */
-    }
-
-    ctx->test_failed = 0;  /* Success */
-    kprint("Task A completed successfully\n");
-
-    /* Return to kernel context */
-    task_context_t ctx_kernel;
-    init_kernel_context(&ctx_kernel);
-    context_switch(NULL, &ctx_kernel);
-
-    /* Should not reach here */
-    kprint("ERROR: Task A failed to return\n");
 }
 
 /* ========================================================================

@@ -62,6 +62,25 @@ static uint32_t bytes_per_pixel(uint8_t bpp) {
 }
 
 /*
+ * Convert color from RGB to hardware pixel format
+ * Swaps red and blue channels for BGR/BGRA framebuffers
+ */
+uint32_t framebuffer_convert_color(uint32_t color) {
+    if (!fb_info.initialized) {
+        return color;
+    }
+    if (fb_info.pixel_format == PIXEL_FORMAT_BGR ||
+        fb_info.pixel_format == PIXEL_FORMAT_BGRA) {
+        /* Swap R and B components */
+        return ((color & 0xFF0000) >> 16) |
+               (color & 0x00FF00) |
+               ((color & 0x0000FF) << 16) |
+               (color & 0xFF000000);
+    }
+    return color;
+}
+
+/*
  * Validate framebuffer dimensions
  */
 static int validate_dimensions(uint32_t width, uint32_t height) {
@@ -227,17 +246,7 @@ void framebuffer_clear(uint32_t color) {
 
     uint8_t *buffer = (uint8_t*)fb_info.virtual_addr;
     uint32_t bytes_pp = bytes_per_pixel(fb_info.bpp);
-
-    /* Convert color based on pixel format */
-    uint32_t pixel_value = color;
-    if (fb_info.pixel_format == PIXEL_FORMAT_BGR ||
-        fb_info.pixel_format == PIXEL_FORMAT_BGRA) {
-        /* Swap R and B components */
-        pixel_value = ((color & 0xFF0000) >> 16) |
-                     (color & 0x00FF00) |
-                     ((color & 0x0000FF) << 16) |
-                     (color & 0xFF000000);
-    }
+    uint32_t pixel_value = framebuffer_convert_color(color);
 
     /* Fill buffer */
     for (uint32_t y = 0; y < fb_info.height; y++) {
@@ -279,17 +288,7 @@ void framebuffer_set_pixel(uint32_t x, uint32_t y, uint32_t color) {
     uint8_t *buffer = (uint8_t*)fb_info.virtual_addr;
     uint32_t bytes_pp = bytes_per_pixel(fb_info.bpp);
     uint8_t *pixel = buffer + y * fb_info.pitch + x * bytes_pp;
-
-    /* Convert color based on pixel format */
-    uint32_t pixel_value = color;
-    if (fb_info.pixel_format == PIXEL_FORMAT_BGR ||
-        fb_info.pixel_format == PIXEL_FORMAT_BGRA) {
-        /* Swap R and B components */
-        pixel_value = ((color & 0xFF0000) >> 16) |
-                     (color & 0x00FF00) |
-                     ((color & 0x0000FF) << 16) |
-                     (color & 0xFF000000);
-    }
+    uint32_t pixel_value = framebuffer_convert_color(color);
 
     /* Set pixel */
     switch (bytes_pp) {
@@ -339,17 +338,8 @@ uint32_t framebuffer_get_pixel(uint32_t x, uint32_t y) {
             break;
     }
 
-    /* Convert color based on pixel format */
-    if (fb_info.pixel_format == PIXEL_FORMAT_BGR ||
-        fb_info.pixel_format == PIXEL_FORMAT_BGRA) {
-        /* Swap R and B components */
-        color = ((color & 0xFF0000) >> 16) |
-               (color & 0x00FF00) |
-               ((color & 0x0000FF) << 16) |
-               (color & 0xFF000000);
-    }
-
-    return color;
+    /* Convert color from hardware format to RGB */
+    return framebuffer_convert_color(color);
 }
 
 /* ========================================================================

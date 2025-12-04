@@ -7,6 +7,7 @@
 #include "log.h"
 #include "../drivers/serial.h"
 #include "../lib/cpu.h"
+#include "../lib/stacktrace.h"
 #include "../drivers/irq.h"
 #include "idt.h"
 #include <stddef.h>
@@ -367,57 +368,33 @@ void debug_dump_stack_trace(void) {
 }
 
 /*
- * Walk stack from given RBP
+ * Walk stack from given RBP and print each frame
  */
 void debug_dump_stack_trace_from_rbp(uint64_t rbp) {
-    int frame_count = 0;
-    uint64_t current_rbp = rbp;
+    struct stacktrace_entry entries[STACK_TRACE_DEPTH];
+    int frame_count = stacktrace_capture_from(rbp, entries, STACK_TRACE_DEPTH);
 
-    while (current_rbp != 0 && frame_count < STACK_TRACE_DEPTH) {
-        // Check if RBP looks valid
-        if (!debug_is_valid_memory_address(current_rbp) ||
-            !debug_is_valid_memory_address(current_rbp + 8)) {
-            kprint("Frame ");
-            kprint_dec(frame_count);
-            kprint(": Invalid RBP ");
-            kprint_hex(current_rbp);
-            kprintln("");
-            break;
-        }
+    if (frame_count == 0) {
+        kprintln("No stack frames found");
+        return;
+    }
 
-        // Read return address and previous RBP
-        uint64_t *stack_ptr = (uint64_t *)current_rbp;
-        uint64_t prev_rbp = stack_ptr[0];
-        uint64_t return_addr = stack_ptr[1];
-
+    for (int i = 0; i < frame_count; i++) {
         kprint("Frame ");
-        kprint_dec(frame_count);
+        kprint_dec(i);
         kprint(": RBP=");
-        kprint_hex(current_rbp);
+        kprint_hex(entries[i].frame_pointer);
         kprint(" RIP=");
-        kprint_hex(return_addr);
+        kprint_hex(entries[i].return_address);
 
         // Try to resolve symbol
-        const char *symbol = debug_get_symbol_name(return_addr);
+        const char *symbol = debug_get_symbol_name(entries[i].return_address);
         if (symbol) {
             kprint(" (");
             kprint(symbol);
             kprint(")");
         }
         kprintln("");
-
-        current_rbp = prev_rbp;
-        frame_count++;
-
-        // Sanity check to prevent infinite loops
-        if (current_rbp <= rbp) {
-            kprintln("Frame: Stack frame loop detected, stopping");
-            break;
-        }
-    }
-
-    if (frame_count == 0) {
-        kprintln("No stack frames found");
     }
 }
 

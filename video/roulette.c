@@ -13,6 +13,7 @@
 #include "splash.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
+#include "../lib/numfmt.h"
 
 extern void kernel_panic(const char *message);
 
@@ -311,30 +312,17 @@ static void draw_fate_number(int center_x, int y_pos, uint32_t fate_number, int 
         graphics_draw_rect_filled(center_x - 100, y_pos, 200, 60, box_color);
         graphics_draw_rect(center_x - 100, y_pos, 200, 60, ROULETTE_WHEEL_COLOR);
 
-        // Draw the fate number
-        char num_str[20];
-        int pos = 0;
-        uint32_t temp = fate_number;
-
-        // Convert to string
-        if (temp == 0) {
-            num_str[pos++] = '0';
-        } else {
-            char digits[20];
-            int digit_count = 0;
-            while (temp > 0) {
-                digits[digit_count++] = '0' + (temp % 10);
-                temp /= 10;
-            }
-            // Reverse digits
-            for (int i = digit_count - 1; i >= 0; i--) {
-                num_str[pos++] = digits[i];
-            }
+        // Convert fate number to displayable string
+        char num_str[21];
+        size_t len = numfmt_u64_to_decimal((uint64_t)fate_number, num_str, sizeof(num_str));
+        if (len == 0) {
+            num_str[0] = '0';
+            num_str[1] = '\0';
+            len = 1;
         }
-        num_str[pos] = '\0';
 
         // Center the number
-        int text_x = center_x - (pos * 8) / 2;
+        int text_x = center_x - ((int)len * 8) / 2;
         font_draw_string(text_x, y_pos + 20, num_str, 0x000000FF, 0x00000000);
     }
 }
