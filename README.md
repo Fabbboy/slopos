@@ -14,7 +14,5 @@ Artifacts land in `builddir/`, and `test_output.log` captures non-interactive bo
 
 ## MCP Quick Start
 
-- `cd mcp && bun install`
-- `codex mcp add slopos-shell bun run src/server.ts`
 
 That’s all you need to get started; everything else (style, lore, subsystem breakdowns, and MCP details) lives in `AGENTS.md`. Go spin the wheel.
