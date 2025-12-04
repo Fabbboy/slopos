@@ -120,11 +120,6 @@ void debug_analyze_page_fault(struct interrupt_frame *frame);
 void debug_analyze_general_protection(struct interrupt_frame *frame);
 void debug_analyze_double_fault(struct interrupt_frame *frame);
 
-// Symbol resolution (basic)
-const char *debug_get_symbol_name(uint64_t address);
-uint64_t debug_get_symbol_address(const char *name);
-int debug_add_symbol(const char *name, uint64_t address);
-
 // Memory regions for debugging
 void debug_register_memory_region(uint64_t start, uint64_t end, uint32_t flags, const char *name);
 struct memory_region *debug_find_memory_region(uint64_t address);

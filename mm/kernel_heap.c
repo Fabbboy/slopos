@@ -13,6 +13,7 @@
 #include "page_alloc.h"
 #include "paging.h"
 #include "../boot/kernel_panic.h"
+#include "../lib/memory.h"
 
 /* ========================================================================
  * KERNEL HEAP CONSTANTS
@@ -492,10 +493,7 @@ void *kzalloc(size_t size) {
     }
 
     /* Zero the allocated memory */
-    uint8_t *data = (uint8_t*)ptr;
-    for (size_t i = 0; i < size; i++) {
-        data[i] = 0;
-    }
+    memset(ptr, 0, size);
 
     return ptr;
 }

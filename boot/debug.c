@@ -20,18 +20,13 @@ static struct debug_context debug_ctx = {
     .initialized = 0
 };
 
-// Simple symbol table (for kernel symbols)
-#define MAX_SYMBOLS 256
-static struct {
-    char name[32];
-    uint64_t address;
-} symbol_table[MAX_SYMBOLS];
-static int symbol_count = 0;
-
 // Memory regions
 #define MAX_MEMORY_REGIONS 64
 static struct memory_region memory_regions[MAX_MEMORY_REGIONS];
 static int memory_region_count = 0;
+
+/* Symbol resolution stub */
+static const char *debug_get_symbol_name(uint64_t address);
 
 static inline uint64_t debug_read_tsc(void) {
     return cpu_read_tsc();
@@ -563,31 +558,9 @@ void debug_analyze_page_fault(struct interrupt_frame *frame) {
 /*
  * Simple symbol resolution
  */
-const char *debug_get_symbol_name(uint64_t address) {
-    for (int i = 0; i < symbol_count; i++) {
-        if (symbol_table[i].address == address) {
-            return symbol_table[i].name;
-        }
-    }
+static const char *debug_get_symbol_name(uint64_t address) {
+    (void)address;
     return NULL;
-}
-
-/*
- * Add symbol to table
- */
-int debug_add_symbol(const char *name, uint64_t address) {
-    if (symbol_count >= MAX_SYMBOLS) return -1;
-
-    int i = 0;
-    while (name && name[i] && i < 31) {
-        symbol_table[symbol_count].name[i] = name[i];
-        i++;
-    }
-    symbol_table[symbol_count].name[i] = '\0';
-    symbol_table[symbol_count].address = address;
-    symbol_count++;
-
-    return 0;
 }
 
 /*

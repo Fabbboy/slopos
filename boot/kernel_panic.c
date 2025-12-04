@@ -30,25 +30,6 @@ static void panic_output_string(const char *str) {
 }
 
 /*
- * Output hexadecimal number for debugging
- */
-static void panic_output_hex(uint64_t value) {
-    serial_emergency_put_hex(value);
-}
-
-/*
- * Output decimal number for debugging
- */
-static void panic_output_decimal(uint64_t value) {
-    char buffer[32];
-    if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
-        buffer[0] = '0';
-        buffer[1] = '\0';
-    }
-    panic_output_string(buffer);
-}
-
-/*
  * Get current instruction pointer for debugging
  */
 static uint64_t get_current_rip(void) {
@@ -89,11 +70,11 @@ void kernel_panic(const char *message) {
 
     // Output debugging information
     panic_output_string("RIP: ");
-    panic_output_hex(get_current_rip());
+    serial_emergency_put_hex(get_current_rip());
     panic_output_string("\n");
 
     panic_output_string("RSP: ");
-    panic_output_hex(get_current_rsp());
+    serial_emergency_put_hex(get_current_rsp());
     panic_output_string("\n");
 
     // Output CPU state information
@@ -103,15 +84,15 @@ void kernel_panic(const char *message) {
     __asm__ volatile ("movq %%cr4, %0" : "=r" (cr4));
 
     panic_output_string("CR0: ");
-    panic_output_hex(cr0);
+    serial_emergency_put_hex(cr0);
     panic_output_string("\n");
 
     panic_output_string("CR3: ");
-    panic_output_hex(cr3);
+    serial_emergency_put_hex(cr3);
     panic_output_string("\n");
 
     panic_output_string("CR4: ");
-    panic_output_hex(cr4);
+    serial_emergency_put_hex(cr4);
     panic_output_string("\n");
 
     panic_output_string("===================\n");
@@ -166,11 +147,11 @@ void kernel_panic_with_context(const char *message, const char *function,
 
     // Continue with standard panic procedure
     panic_output_string("RIP: ");
-    panic_output_hex(get_current_rip());
+    serial_emergency_put_hex(get_current_rip());
     panic_output_string("\n");
 
     panic_output_string("RSP: ");
-    panic_output_hex(get_current_rsp());
+    serial_emergency_put_hex(get_current_rsp());
     panic_output_string("\n");
 
     panic_output_string("===================\n");
@@ -225,9 +206,14 @@ void kernel_roulette(void) {
     /* Display the spin to the world (serial output for logs) */
     panic_output_string("\n=== KERNEL ROULETTE: Spinning the Wheel of Fate ===\n");
     panic_output_string("Random number: 0x");
-    panic_output_hex(fate);
+    serial_emergency_put_hex(fate);
     panic_output_string(" (");
-    panic_output_decimal(fate);
+    char decimal_buffer[32];
+    if (numfmt_u64_to_decimal(fate, decimal_buffer, sizeof(decimal_buffer)) == 0) {
+        decimal_buffer[0] = '0';
+        decimal_buffer[1] = '\0';
+    }
+    serial_emergency_puts(decimal_buffer);
     panic_output_string(")\n");
 
     /* Show the visual roulette screen with spinning animation */

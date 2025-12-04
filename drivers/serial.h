@@ -204,38 +204,8 @@ void kprint_decimal(uint64_t value);
  */
 void kprint_hex_byte(uint8_t value);
 
-/* ========================================================================
- * ADVANCED SERIAL FUNCTIONS
- * ======================================================================== */
-
-/*
- * Get the current configuration of a serial port
- * Returns 0 on success, non-zero if port not initialized
- */
 int serial_get_config(uint16_t port, serial_config_t *config);
-
-/*
- * Set hardware flow control (RTS/CTS)
- * enable: non-zero to enable, zero to disable
- */
-void serial_set_flow_control(uint16_t port, int enable);
-
-/*
- * Set break signal
- * enable: non-zero to enable break, zero to disable
- */
-void serial_set_break(uint16_t port, int enable);
-
-/*
- * Get line status register value
- * Returns the LSR value for diagnostics
- */
 uint8_t serial_get_line_status(uint16_t port);
-
-/*
- * Get modem status register value
- * Returns the MSR value for diagnostics
- */
 uint8_t serial_get_modem_status(uint16_t port);
 
 /* ========================================================================
@@ -260,12 +230,6 @@ int serial_get_last_error(uint16_t port);
  * Get error description string
  */
 const char *serial_get_error_string(int error_code);
-
-/*
- * Test serial port functionality
- * Performs self-test and returns 0 on success
- */
-int serial_self_test(uint16_t port);
 
 /* ========================================================================
  * EMERGENCY OUTPUT FUNCTIONS

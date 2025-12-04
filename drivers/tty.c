@@ -45,12 +45,7 @@ static task_t *tty_wait_queue_pop(void) {
 static int tty_input_available(void) {
     tty_service_serial_input();
 
-    int kbd_has_input = keyboard_has_input();
-    kprint("[TTY] keyboard_has_input() = ");
-    kprint_decimal((uint64_t)kbd_has_input);
-    kprint("\n");
-
-    if (kbd_has_input) {
+    if (keyboard_has_input()) {
         return 1;
     }
 
@@ -66,7 +61,6 @@ static void tty_block_until_input_ready(void) {
     while (1) {
         /* Check for input first */
         if (tty_input_available()) {
-            kprint("[TTY] Input now available, breaking from block\n");
             break;
         }
 
@@ -74,9 +68,7 @@ static void tty_block_until_input_ready(void) {
 
         if (scheduler_is_enabled()) {
             /* Yield to other tasks while waiting */
-            kprint("[TTY] Yielding to scheduler...\n");
             yield();
-            kprint("[TTY] Resumed from yield, rechecking...\n");
         } else {
             /* Fallback to CPU relaxation if scheduler not ready */
             tty_cpu_relax();
@@ -190,16 +182,10 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
     while (1) {
         /* Block until character is available from keyboard or serial */
         char c = 0;
-        kprint("[TTY] Checking for input...\n");
         if (!tty_dequeue_input_char(&c)) {
-            kprint("[TTY] No input available, blocking...\n");
             tty_block_until_input_ready();
             continue;
         }
-
-        kprint("[TTY] Got character: 0x");
-        kprint_hex((uint64_t)c);
-        kprint("\n");
 
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {

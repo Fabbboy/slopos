@@ -14,6 +14,7 @@
 #include "../mm/phys_virt.h"
 #include "../lib/cpu.h"
 #include "../lib/io.h"
+#include "../lib/memory.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -112,10 +113,7 @@ static void zero_interrupt_frame(struct interrupt_frame *frame) {
         return;
     }
 
-    uint8_t *bytes = (uint8_t *)frame;
-    for (size_t i = 0; i < sizeof(struct interrupt_frame); i++) {
-        bytes[i] = 0;
-    }
+    memset(frame, 0, sizeof(struct interrupt_frame));
 }
 
 static void copy_interrupt_frame(struct interrupt_frame *dst,
@@ -124,11 +122,7 @@ static void copy_interrupt_frame(struct interrupt_frame *dst,
         return;
     }
 
-    uint8_t *d = (uint8_t *)dst;
-    const uint8_t *s = (const uint8_t *)src;
-    for (size_t i = 0; i < sizeof(struct interrupt_frame); i++) {
-        d[i] = s[i];
-    }
+    memcpy(dst, src, sizeof(struct interrupt_frame));
 }
 
 static void copy_saved_exception_state(struct saved_exception_state *dst,
@@ -705,10 +699,7 @@ void *allocate_test_memory(size_t size, int flags) {
     header->size = aligned_size;
 
     if (flags & TEST_MEM_FLAG_ZERO) {
-        uint8_t *buffer = (uint8_t*)aligned_addr;
-        for (size_t i = 0; i < aligned_size; i++) {
-            buffer[i] = 0;
-        }
+        memset((void *)aligned_addr, 0, aligned_size);
     }
 
     return (void*)aligned_addr;
