@@ -36,6 +36,9 @@ typedef struct serial_rx_buffer {
 static serial_rx_buffer_t serial_rx_buffers[4];
 static uint8_t serial_irq_registered[4] = {0};
 
+/* Shared hex digit lookup table (DRY - used by multiple hex output functions) */
+static const char hex_digits[] = "0123456789ABCDEF";
+
 /* ========================================================================
  * LOW-LEVEL HARDWARE ACCESS
  * ======================================================================== */
@@ -448,16 +451,14 @@ void serial_puts_line_com1(const char *str) {
 }
 
 void serial_put_hex_com1(uint64_t value) {
-    const char hex_chars[] = "0123456789ABCDEF";
     char buffer[19];  /* "0x" + 16 hex digits + null terminator */
-    int i;
 
     buffer[0] = '0';
     buffer[1] = 'x';
 
     /* Convert to hex string (16 digits for 64-bit) */
-    for (i = 15; i >= 0; i--) {
-        buffer[2 + (15 - i)] = hex_chars[(value >> (i * 4)) & 0xF];
+    for (int i = 15; i >= 0; i--) {
+        buffer[2 + (15 - i)] = hex_digits[(value >> (i * 4)) & 0xF];
     }
 
     buffer[18] = '\0';
@@ -575,13 +576,11 @@ void serial_emergency_puts(const char *str) {
 }
 
 void serial_emergency_put_hex(uint64_t value) {
-    const char hex_chars[] = "0123456789ABCDEF";
-
     serial_emergency_putc('0');
     serial_emergency_putc('x');
 
     for (int i = 15; i >= 0; i--) {
-        serial_emergency_putc(hex_chars[(value >> (i * 4)) & 0xF]);
+        serial_emergency_putc(hex_digits[(value >> (i * 4)) & 0xF]);
     }
 }
 
@@ -655,7 +654,6 @@ int serial_self_test(uint16_t port) {
  * Print hex byte (2 digits)
  */
 void kprint_hex_byte(uint8_t value) {
-    static const char hex_chars[] = "0123456789ABCDEF";
-    serial_putc(SERIAL_COM1_PORT, hex_chars[(value >> 4) & 0xF]);
-    serial_putc(SERIAL_COM1_PORT, hex_chars[value & 0xF]);
+    serial_putc(SERIAL_COM1_PORT, hex_digits[(value >> 4) & 0xF]);
+    serial_putc(SERIAL_COM1_PORT, hex_digits[value & 0xF]);
 }

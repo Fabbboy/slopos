@@ -8,34 +8,7 @@
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "framebuffer.h"
-
-/* Forward declarations */
-void framebuffer_set_pixel(uint32_t x, uint32_t y, uint32_t color);
-uint32_t framebuffer_get_pixel(uint32_t x, uint32_t y);
-uint32_t framebuffer_get_width(void);
-uint32_t framebuffer_get_height(void);
-int framebuffer_is_initialized(void);
-
-/* ========================================================================
- * GRAPHICS CONSTANTS
- * ======================================================================== */
-
-/* Line drawing algorithms */
-#define LINE_ALGORITHM_BRESENHAM    0
-#define LINE_ALGORITHM_DDA          1
-
-/* Fill patterns */
-#define FILL_SOLID                  0x00
-#define FILL_HORIZONTAL_LINES       0x01
-#define FILL_VERTICAL_LINES         0x02
-#define FILL_DIAGONAL_LINES         0x03
-#define FILL_CHECKERBOARD           0x04
-
-/* Graphics error codes */
-#define GRAPHICS_SUCCESS            0
-#define GRAPHICS_ERROR_NO_FB        -1
-#define GRAPHICS_ERROR_BOUNDS       -2
-#define GRAPHICS_ERROR_INVALID      -3
+#include "graphics.h"
 
 /* ========================================================================
  * UTILITY FUNCTIONS

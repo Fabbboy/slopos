@@ -659,16 +659,6 @@ BOOT_INIT_STEP(services, "mark ready", boot_step_mark_kernel_ready);
 
 /* Optional/demo phase ---------------------------------------------------- */
 
-// Helper function for demo delay
-static void demo_delay_ms(uint32_t ms) {
-    uint32_t pit_freq = pit_get_frequency();
-    if (pit_freq > 0) {
-        uint64_t ticks_needed = ((uint64_t)ms * pit_freq) / 1000;
-        volatile uint64_t i = 0;
-        while (i < ticks_needed) { i++; }
-    }
-}
-
 static int boot_step_framebuffer_demo(void) {
     boot_log_debug("Graphics demo: framebuffer already initialized");
 

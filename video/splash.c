@@ -16,30 +16,7 @@
  * SPLASH SCREEN IMPLEMENTATION
  * ======================================================================== */
 
-// Helper function to read PIT counter
-static uint16_t read_pit_count(void) {
-    __asm__ volatile ("outb %0, %1" : : "a" ((uint8_t)0x00), "Nd" ((uint16_t)0x43)); // Latch count
-    uint8_t low, high;
-    __asm__ volatile ("inb %1, %0" : "=a" (low) : "Nd" ((uint16_t)0x40));
-    __asm__ volatile ("inb %1, %0" : "=a" (high) : "Nd" ((uint16_t)0x40));
-    return ((uint16_t)high << 8) | low;
-}
-
-/*
- * Simple busy-wait delay function for splash screen timing
- * Uses CPU cycles for approximate millisecond delays
- */
-static void splash_delay_ms(uint32_t milliseconds) {
-    // Very small cycle count for 4-second total timing
-    // Optimized for QEMU virtualization environment
-    volatile uint64_t cycles_per_ms = 50000; // Further reduced for faster timing
-
-    for (uint32_t ms = 0; ms < milliseconds; ms++) {
-        for (volatile uint64_t i = 0; i < cycles_per_ms; i++) {
-            __asm__ volatile ("nop");
-        }
-    }
-}
+#define splash_delay_ms(ms) pit_poll_delay_ms(ms)
 
 /*
  * Draw SlopOS logo as ASCII art using graphics primitives
@@ -48,10 +25,6 @@ static int splash_draw_logo(int center_x, int center_y) {
     if (!framebuffer_is_initialized()) {
         return -1;
     }
-
-    // Get framebuffer dimensions
-    uint32_t width = framebuffer_get_width();
-    uint32_t height = framebuffer_get_height();
 
     // Calculate logo dimensions and position
     int logo_width = 300;

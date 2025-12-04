@@ -86,6 +86,58 @@ void pit_disable_irq(void) {
     irq_disable_line(PIT_IRQ_LINE);
 }
 
+/* ========================================================================
+ * DELAY FUNCTIONS
+ * ======================================================================== */
+
+/*
+ * Read current PIT channel 0 counter value.
+ * The counter counts DOWN from the divisor toward 0.
+ */
+static uint16_t pit_read_count(void) {
+    /* Latch command: capture current count for channel 0 */
+    __asm__ volatile ("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)PIT_COMMAND_PORT));
+    
+    /* Read low byte first, then high byte (as per PIT protocol) */
+    uint8_t low, high;
+    __asm__ volatile ("inb %1, %0" : "=a"(low) : "Nd"((uint16_t)PIT_CHANNEL0_PORT));
+    __asm__ volatile ("inb %1, %0" : "=a"(high) : "Nd"((uint16_t)PIT_CHANNEL0_PORT));
+    
+    return ((uint16_t)high << 8) | low;
+}
+
+/*
+ * Polling-based delay using PIT counter (no interrupts required).
+ * Reads the 1.193182 MHz counter directly for accurate timing.
+ */
+void pit_poll_delay_ms(uint32_t ms) {
+    if (ms == 0) return;
+    
+    /* Calculate total ticks needed (1193 ticks ≈ 1ms) */
+    uint32_t ticks_needed = (uint32_t)(((uint64_t)ms * PIT_BASE_FREQUENCY_HZ) / 1000);
+    
+    uint16_t last = pit_read_count();
+    uint32_t elapsed = 0;
+    
+    while (elapsed < ticks_needed) {
+        uint16_t current = pit_read_count();
+        
+        /* Counter counts DOWN, so last - current = forward progress */
+        if (current <= last) {
+            elapsed += (last - current);
+        } else {
+            /* Counter wrapped past zero */
+            elapsed += last + (0xFFFF - current) + 1;
+        }
+        
+        last = current;
+    }
+}
+
+/*
+ * IRQ-based sleep (requires interrupts to be enabled).
+ * Uses HLT for power efficiency while waiting.
+ */
 void pit_sleep_ms(uint32_t ms) {
     if (ms == 0) return;
 

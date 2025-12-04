@@ -147,19 +147,6 @@ static inline int segment_center_angle(int segment_index) {
 static void draw_fate_number(int center_x, int y_pos, uint32_t fate_number, int revealed);
 
 /* ========================================================================
- * ANIMATION HELPERS
- * ======================================================================== */
-
-/*
- * Delay function for roulette animations
- * Uses busy-wait optimized for QEMU timing
- * MUCH SLOWER for visibility
- */
-static void roulette_delay_ms(uint32_t milliseconds) {
-    pit_sleep_ms(milliseconds);
-}
-
-/* ========================================================================
  * WHEEL DRAWING FUNCTIONS
  * ======================================================================== */
 
@@ -434,7 +421,7 @@ int roulette_show_spin(uint32_t fate_number) {
         start_segment = (start_segment + 3) % ROULETTE_SEGMENT_COUNT;
     }
 
-    roulette_delay_ms(300);
+    pit_sleep_ms(300);
 
     int start_angle = segment_center_angle(start_segment);
     int target_angle = segment_center_angle(target_segment);
@@ -459,7 +446,7 @@ int roulette_show_spin(uint32_t fate_number) {
         render_wheel_frame(width, height, center_x, center_y, radius,
                            -1, pointer_angle_frame, &last_pointer_angle,
                            fate_number, false, false);
-        roulette_delay_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
+        pit_sleep_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
     }
 
     int pointer_angle = start_angle + total_rotation;
@@ -467,27 +454,27 @@ int roulette_show_spin(uint32_t fate_number) {
     render_wheel_frame(width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
                        fate_number, false, true);
-    roulette_delay_ms(500);
+    pit_sleep_ms(500);
 
     kprintln("ROULETTE: Revealing fate number...");
-    roulette_delay_ms(400);
+    pit_sleep_ms(400);
 
     for (int flash = 0; flash < 5; flash++) {
         render_wheel_frame(width, height, center_x, center_y, radius,
                            landing_segment, pointer_angle, &last_pointer_angle,
                            fate_number, true, false);
-        roulette_delay_ms(250);
+        pit_sleep_ms(250);
         if (flash < 4) {
             render_wheel_frame(width, height, center_x, center_y, radius,
                                landing_segment, pointer_angle, &last_pointer_angle,
                                fate_number, false, false);
-            roulette_delay_ms(150);
+            pit_sleep_ms(150);
         }
     }
     render_wheel_frame(width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
                        fate_number, true, false);
-    roulette_delay_ms(600);
+    pit_sleep_ms(600);
 
     kprintln("ROULETTE: Displaying result...");
     int info_y = center_y + radius + 60;
@@ -509,7 +496,7 @@ int roulette_show_spin(uint32_t fate_number) {
         font_draw_string(center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
     }
 
-    roulette_delay_ms(ROULETTE_RESULT_DELAY_MS);
+    pit_sleep_ms(ROULETTE_RESULT_DELAY_MS);
 
     kprintln("ROULETTE: Wheel of fate complete");
 
@@ -521,7 +508,7 @@ int roulette_show_spin(uint32_t fate_number) {
         int msg_y = cur_height / 2 - 20;
 
         font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
-        roulette_delay_ms(1000);
+        pit_sleep_ms(1000);
         splash_draw_graphics_demo();
         kprintln("ROULETTE: Graphics demo restored, returning to OS");
     }
@@ -543,7 +530,7 @@ void roulette_show_spin_fallback(uint32_t fate_number) {
     // Simple text animation
     for (int i = 0; i < 5; i++) {
         kprint(".");
-        roulette_delay_ms(200);
+        pit_sleep_ms(200);
     }
     kprintln("");
 
@@ -567,5 +554,5 @@ void roulette_show_spin_fallback(uint32_t fate_number) {
     }
 
     kprintln("");
-    roulette_delay_ms(1000);
+    pit_sleep_ms(1000);
 }

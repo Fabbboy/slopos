@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
+#include "../drivers/pit.h"
 #include "task.h"
 
 /* Forward declarations from scheduler and task modules */
@@ -597,10 +598,8 @@ void monitor_scheduler(uint32_t duration_seconds) {
 
     /* Simple monitoring loop */
     for (uint32_t i = 0; i < duration_seconds; i++) {
-        /* Wait roughly 1 second (crude delay) */
-        for (volatile uint32_t j = 0; j < 1000000; j++) {
-            /* Busy wait */
-        }
+        /* Wait 1 second using PIT (interrupts are enabled at this point) */
+        pit_sleep_ms(1000);
 
         kprint("Monitor: ");
         kprint_decimal(i + 1);

@@ -14,6 +14,7 @@
 #include "../sched/scheduler.h"
 #include "../drivers/serial.h"
 #include "../drivers/apic.h"
+#include "../drivers/pit.h"
 #include "../mm/page_alloc.h"
 
 #include <stdint.h>
@@ -121,10 +122,8 @@ void kernel_reboot(const char *reason) {
 
     kprintln("Rebooting via keyboard controller...");
 
-    // Give serial a moment to flush
-    for (volatile int i = 0; i < 1000000; i++) {
-        __asm__ volatile ("nop");
-    }
+    /* Brief delay to let serial output flush before reset */
+    pit_poll_delay_ms(50);
 
     // Keyboard controller reset (port 0x64, command 0xFE)
     // This is the standard x86 reboot mechanism
