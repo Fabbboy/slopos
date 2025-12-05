@@ -287,7 +287,10 @@ static void switch_to_task(task_t *new_task) {
         process_page_dir_t *page_dir = process_vm_get_page_dir(new_task->process_id);
         if (page_dir && page_dir->pml4_phys) {
             new_task->context.cr3 = page_dir->pml4_phys;
+            paging_set_current_directory(page_dir);
         }
+    } else {
+        paging_set_current_directory(paging_get_kernel_directory());
     }
 
     /* Check W/L balance before switching - user must not be bankrupt */

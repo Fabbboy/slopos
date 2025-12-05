@@ -24,21 +24,23 @@
 #define PAGE_FRAME_KERNEL             0x03   /* Kernel-only page */
 #define PAGE_FRAME_DMA                0x04   /* DMA-capable page */
 
-/* Maximum physical pages we can track (4GB / 4KB = 1M pages) */
-#define MAX_PHYSICAL_PAGES            1048576
-#define INVALID_PAGE_FRAME            0xFFFFFFFF
+#define INVALID_PAGE_FRAME            0xFFFFFFFFu
 #define DMA_MEMORY_LIMIT              0x01000000ULL
+
+/* Buddy allocator max order (2^24 pages = 64GB coverage) */
+#define MAX_ORDER                     24
 
 /* Page frame allocation flags */
 #define ALLOC_FLAG_ZERO               0x01   /* Zero the page after allocation */
-#define ALLOC_FLAG_DMA                0x02   /* Allocate DMA-capable page */
+#define ALLOC_FLAG_DMA                0x02   /* Allocate DMA-capable page (must fit under 16MB) */
 #define ALLOC_FLAG_KERNEL             0x04   /* Kernel-only allocation */
+#define ALLOC_FLAG_ORDER_SHIFT        8      /* Optional encoded order for multi-page requests */
+#define ALLOC_FLAG_ORDER_MASK         (0x1Fu << ALLOC_FLAG_ORDER_SHIFT)
 
 /* ========================================================================
  * PAGE FRAME TRACKING STRUCTURES
  * ======================================================================== */
 
-/* Physical page frame descriptor */
 typedef struct page_frame {
     uint32_t ref_count;           /* Reference count for sharing */
     uint8_t state;                /* Page frame state */
@@ -47,7 +49,6 @@ typedef struct page_frame {
     uint32_t next_free;           /* Next free page frame (for free lists) */
 } page_frame_t;
 
-/* Physical memory region information */
 typedef struct phys_region {
     uint64_t start_addr;          /* Start physical address */
     uint64_t size;                /* Size in bytes */
@@ -57,49 +58,37 @@ typedef struct phys_region {
     uint8_t available;            /* Available for allocation */
 } phys_region_t;
 
-/* Page frame allocator state */
 typedef struct page_allocator {
     page_frame_t *frames;         /* Array of page frame descriptors */
     uint32_t total_frames;        /* Total number of page frames */
+    uint32_t max_supported_frames;/* Descriptor backing size */
     uint32_t free_frames;         /* Number of free page frames */
     uint32_t allocated_frames;    /* Number of allocated page frames */
     uint32_t reserved_frames;     /* Number of reserved page frames */
     phys_region_t regions[MAX_MEMORY_REGIONS];  /* Physical memory regions */
     uint32_t num_regions;         /* Number of memory regions */
-    uint32_t free_list_head;      /* Head of free page list */
+    uint32_t free_lists[MAX_ORDER + 1]; /* Per-order free list heads */
+    uint32_t max_order;           /* Highest usable order derived from total frames */
 } page_allocator_t;
 
-/* Global page allocator instance */
 static page_allocator_t page_allocator = {0};
 
 /* ========================================================================
  * UTILITY FUNCTIONS
  * ======================================================================== */
 
-/*
- * Convert physical address to page frame number
- */
 static inline uint32_t phys_to_frame(uint64_t phys_addr) {
     return (uint32_t)(phys_addr >> 12);  /* Divide by 4KB */
 }
 
-/*
- * Convert page frame number to physical address
- */
 static inline uint64_t frame_to_phys(uint32_t frame_num) {
     return (uint64_t)frame_num << 12;  /* Multiply by 4KB */
 }
 
-/*
- * Check if a page frame number is valid
- */
 static inline int is_valid_frame(uint32_t frame_num) {
     return frame_num < page_allocator.total_frames;
 }
 
-/*
- * Get page frame descriptor for frame number
- */
 static inline page_frame_t *get_frame_desc(uint32_t frame_num) {
     if (!is_valid_frame(frame_num)) {
         return NULL;
@@ -107,12 +96,17 @@ static inline page_frame_t *get_frame_desc(uint32_t frame_num) {
     return &page_allocator.frames[frame_num];
 }
 
-/* Forward declarations for helpers used before definition */
-static void add_to_free_list(uint32_t frame_num);
+static inline uint32_t order_block_pages(uint32_t order) {
+    return 1u << order;
+}
 
-/* ========================================================================
- * INTERNAL HELPERS
- * ======================================================================== */
+static inline uint32_t flags_to_order(uint32_t flags) {
+    uint32_t requested = (flags & ALLOC_FLAG_ORDER_MASK) >> ALLOC_FLAG_ORDER_SHIFT;
+    if (requested > page_allocator.max_order) {
+        requested = page_allocator.max_order;
+    }
+    return requested;
+}
 
 static uint8_t page_state_for_flags(uint32_t flags) {
     if (flags & ALLOC_FLAG_DMA) {
@@ -130,96 +124,202 @@ static int frame_state_is_allocated(uint8_t state) {
            state == PAGE_FRAME_DMA;
 }
 
-/* ========================================================================
- * FREE LIST MANAGEMENT
- * ======================================================================== */
-
-/*
- * Add page frame to free list
- */
-static void add_to_free_list(uint32_t frame_num) {
-    if (!is_valid_frame(frame_num)) {
-        boot_log_info("add_to_free_list: Invalid frame number");
-        return;
+static void free_lists_reset(void) {
+    for (uint32_t i = 0; i <= MAX_ORDER; i++) {
+        page_allocator.free_lists[i] = INVALID_PAGE_FRAME;
     }
-
-    page_frame_t *frame = get_frame_desc(frame_num);
-    frame->next_free = page_allocator.free_list_head;
-    page_allocator.free_list_head = frame_num;
-    frame->state = PAGE_FRAME_FREE;
-    frame->flags = 0;
-    frame->order = 0;
-    frame->ref_count = 0;
-    page_allocator.free_frames++;
 }
 
-/*
- * Remove page frame from free list
- * Returns frame number, or INVALID_PAGE_FRAME if list is empty
- */
-static uint32_t remove_from_free_list(void) {
-    if (page_allocator.free_list_head == INVALID_PAGE_FRAME) {
-        return INVALID_PAGE_FRAME;
+/* ========================================================================
+ * FREE LIST MANAGEMENT (BUDDY)
+ * ======================================================================== */
+
+static void free_list_push(uint32_t order, uint32_t frame_num) {
+    page_frame_t *frame = get_frame_desc(frame_num);
+    frame->next_free = page_allocator.free_lists[order];
+    frame->order = order;
+    frame->state = PAGE_FRAME_FREE;
+    frame->flags = 0;
+    frame->ref_count = 0;
+    page_allocator.free_lists[order] = frame_num;
+}
+
+static int free_list_detach(uint32_t order, uint32_t target_frame) {
+    uint32_t *head = &page_allocator.free_lists[order];
+    uint32_t prev = INVALID_PAGE_FRAME;
+    uint32_t current = *head;
+
+    while (current != INVALID_PAGE_FRAME) {
+        if (current == target_frame) {
+            page_frame_t *curr_desc = get_frame_desc(current);
+            uint32_t next = curr_desc ? curr_desc->next_free : INVALID_PAGE_FRAME;
+            if (prev == INVALID_PAGE_FRAME) {
+                *head = next;
+            } else {
+                page_frame_t *prev_desc = get_frame_desc(prev);
+                if (prev_desc) {
+                    prev_desc->next_free = next;
+                }
+            }
+            if (curr_desc) {
+                curr_desc->next_free = INVALID_PAGE_FRAME;
+            }
+            return 1;
+        }
+        prev = current;
+        page_frame_t *curr_desc = get_frame_desc(current);
+        current = curr_desc ? curr_desc->next_free : INVALID_PAGE_FRAME;
+    }
+    return 0;
+}
+
+static int block_meets_flags(uint32_t frame_num, uint32_t order, uint32_t flags) {
+    uint64_t phys = frame_to_phys(frame_num);
+    uint64_t span = (uint64_t)order_block_pages(order) * PAGE_SIZE_4KB;
+    if ((flags & ALLOC_FLAG_DMA) && (phys + span) > DMA_MEMORY_LIMIT) {
+        return 0;
+    }
+    return 1;
+}
+
+static uint32_t free_list_take_matching(uint32_t order, uint32_t flags) {
+    uint32_t *head = &page_allocator.free_lists[order];
+    uint32_t prev = INVALID_PAGE_FRAME;
+    uint32_t current = *head;
+
+    while (current != INVALID_PAGE_FRAME) {
+        if (block_meets_flags(current, order, flags)) {
+            /* Detach this block */
+            page_frame_t *curr_desc = get_frame_desc(current);
+            uint32_t next = curr_desc ? curr_desc->next_free : INVALID_PAGE_FRAME;
+            if (prev == INVALID_PAGE_FRAME) {
+                *head = next;
+            } else {
+                page_frame_t *prev_desc = get_frame_desc(prev);
+                if (prev_desc) {
+                    prev_desc->next_free = next;
+                }
+            }
+            if (curr_desc) {
+                curr_desc->next_free = INVALID_PAGE_FRAME;
+            }
+
+            uint32_t pages = order_block_pages(order);
+            if (page_allocator.free_frames >= pages) {
+                page_allocator.free_frames -= pages;
+            }
+            return current;
+        }
+        prev = current;
+        page_frame_t *curr_desc = get_frame_desc(current);
+        current = curr_desc ? curr_desc->next_free : INVALID_PAGE_FRAME;
     }
 
-    uint32_t frame_num = page_allocator.free_list_head;
-    page_frame_t *frame = get_frame_desc(frame_num);
+    return INVALID_PAGE_FRAME;
+}
 
-    page_allocator.free_list_head = frame->next_free;
-    frame->next_free = INVALID_PAGE_FRAME;
-    frame->state = PAGE_FRAME_ALLOCATED;
-    frame->ref_count = 0;
-    page_allocator.free_frames--;
-    page_allocator.allocated_frames++;
+static void insert_block_coalescing(uint32_t frame_num, uint32_t order) {
+    uint32_t curr_frame = frame_num;
+    uint32_t curr_order = order;
 
-    return frame_num;
+    while (curr_order < page_allocator.max_order) {
+        uint32_t buddy = curr_frame ^ order_block_pages(curr_order);
+        page_frame_t *buddy_desc = get_frame_desc(buddy);
+
+        if (!buddy_desc || buddy_desc->state != PAGE_FRAME_FREE || buddy_desc->order != curr_order) {
+            break;
+        }
+
+        if (!free_list_detach(curr_order, buddy)) {
+            break;
+        }
+
+        uint32_t lower = (curr_frame < buddy) ? curr_frame : buddy;
+        curr_frame = lower;
+        curr_order++;
+    }
+
+    free_list_push(curr_order, curr_frame);
+    page_allocator.free_frames += order_block_pages(curr_order);
 }
 
 /* ========================================================================
  * PAGE FRAME ALLOCATION AND DEALLOCATION
  * ======================================================================== */
 
-/*
- * Allocate a single physical page frame
- * Returns physical address of allocated page, 0 on failure
- */
-uint64_t alloc_page_frame(uint32_t flags) {
-    uint32_t frame_num = remove_from_free_list();
+static uint32_t allocate_block(uint32_t order, uint32_t flags) {
+    for (uint32_t current_order = order; current_order <= page_allocator.max_order; current_order++) {
+        uint32_t block = free_list_take_matching(current_order, flags);
+        if (block == INVALID_PAGE_FRAME) {
+            continue;
+        }
 
-    if (frame_num == INVALID_PAGE_FRAME) {
-        boot_log_info("alloc_page_frame: No free pages available");
+        /* Split down to requested order */
+        while (current_order > order) {
+            current_order--;
+            uint32_t buddy = block + order_block_pages(current_order);
+            free_list_push(current_order, buddy);
+            page_allocator.free_frames += order_block_pages(current_order);
+        }
+
+        page_frame_t *desc = get_frame_desc(block);
+        if (desc) {
+            desc->ref_count = 1;
+            desc->flags = flags;
+            desc->order = order;
+            desc->state = page_state_for_flags(flags);
+        }
+
+        page_allocator.allocated_frames += order_block_pages(order);
+        return block;
+    }
+
+    return INVALID_PAGE_FRAME;
+}
+
+uint64_t alloc_page_frames(uint32_t count, uint32_t flags) {
+    if (count == 0) {
         return 0;
     }
 
-    page_frame_t *frame = get_frame_desc(frame_num);
-    frame->ref_count = 1;
-    frame->flags = flags;
-    frame->order = 0;  /* Single page */
-    frame->state = page_state_for_flags(flags);
+    uint32_t order = 0;
+    uint32_t pages = 1;
+    while (pages < count && order < page_allocator.max_order) {
+        pages <<= 1;
+        order++;
+    }
+
+    /* Allow caller to override order explicitly */
+    uint32_t flag_order = flags_to_order(flags);
+    if (flag_order > order) {
+        order = flag_order;
+    }
+
+    uint32_t frame_num = allocate_block(order, flags);
+    if (frame_num == INVALID_PAGE_FRAME) {
+        boot_log_info("alloc_page_frames: No suitable block available");
+        return 0;
+    }
 
     uint64_t phys_addr = frame_to_phys(frame_num);
-
-    /* Zero page if requested */
     if (flags & ALLOC_FLAG_ZERO) {
-        if (mm_zero_physical_page(phys_addr) != 0) {
-            frame->ref_count = 0;
-            frame->flags = 0;
-            frame->order = 0;
-            add_to_free_list(frame_num);
-            if (page_allocator.allocated_frames > 0) {
-                page_allocator.allocated_frames--;
+        uint64_t span_pages = order_block_pages(order);
+        for (uint64_t i = 0; i < span_pages; i++) {
+            if (mm_zero_physical_page(phys_addr + (i * PAGE_SIZE_4KB)) != 0) {
+                /* Roll back on failure */
+                free_page_frame(phys_addr);
+                return 0;
             }
-            return 0;
         }
     }
 
     return phys_addr;
 }
 
-/*
- * Free a physical page frame
- * Returns 0 on success, -1 on failure
- */
+uint64_t alloc_page_frame(uint32_t flags) {
+    return alloc_page_frames(1, flags);
+}
+
 int free_page_frame(uint64_t phys_addr) {
     uint32_t frame_num = phys_to_frame(phys_addr);
 
@@ -229,28 +329,27 @@ int free_page_frame(uint64_t phys_addr) {
     }
 
     page_frame_t *frame = get_frame_desc(frame_num);
-
     if (!frame_state_is_allocated(frame->state)) {
         boot_log_info("free_page_frame: Page not allocated");
         return -1;
     }
 
     if (frame->ref_count > 1) {
-        /* Decrease reference count but don't free yet */
         frame->ref_count--;
         return 0;
     }
 
-    /* Free the page frame */
+    uint32_t order = frame->order;
+    uint32_t pages = order_block_pages(order);
+
     frame->ref_count = 0;
     frame->flags = 0;
-    frame->order = 0;
+    frame->state = PAGE_FRAME_FREE;
 
-    add_to_free_list(frame_num);
-    if (page_allocator.allocated_frames > 0) {
-        page_allocator.allocated_frames--;
-    }
+    page_allocator.allocated_frames =
+        (page_allocator.allocated_frames > pages) ? page_allocator.allocated_frames - pages : 0;
 
+    insert_block_coalescing(frame_num, order);
     return 0;
 }
 
@@ -258,17 +357,12 @@ int free_page_frame(uint64_t phys_addr) {
  * MEMORY REGION MANAGEMENT
  * ======================================================================== */
 
-/*
- * Add a physical memory region to the page allocator
- * Called during system initialization
- */
 int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
     if (page_allocator.num_regions >= MAX_MEMORY_REGIONS) {
         boot_log_info("add_page_alloc_region: Too many memory regions");
         return -1;
     }
 
-    /* Align to page boundaries */
     uint64_t aligned_start = (start_addr + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
     uint64_t aligned_end = (start_addr + size) & ~(PAGE_SIZE_4KB - 1);
 
@@ -308,10 +402,17 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
  * INITIALIZATION AND QUERY FUNCTIONS
  * ======================================================================== */
 
-/*
- * Initialize the physical page frame allocator
- * Must be called after EFI memory map is parsed
- */
+static uint32_t derive_max_order(uint32_t total_frames) {
+    uint32_t order = 0;
+    while (order < MAX_ORDER && order_block_pages(order) <= total_frames) {
+        order++;
+    }
+    if (order > 0) {
+        order--; /* last valid */
+    }
+    return order;
+}
+
 int init_page_allocator(void *frame_array, uint32_t max_frames) {
     page_frame_t *frames = (page_frame_t *)frame_array;
 
@@ -323,13 +424,15 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
 
     page_allocator.frames = frames;
     page_allocator.total_frames = max_frames;
+    page_allocator.max_supported_frames = max_frames;
     page_allocator.free_frames = 0;
     page_allocator.allocated_frames = 0;
     page_allocator.reserved_frames = 0;
     page_allocator.num_regions = 0;
-    page_allocator.free_list_head = INVALID_PAGE_FRAME;
+    page_allocator.max_order = derive_max_order(max_frames);
 
-    /* Initialize all frame descriptors */
+    free_lists_reset();
+
     for (uint32_t i = 0; i < max_frames; i++) {
         frames[i].ref_count = 0;
         frames[i].state = PAGE_FRAME_RESERVED;
@@ -341,52 +444,66 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("Page frame allocator initialized with ");
         kprint_decimal(max_frames);
-        kprint(" frame descriptors\n");
+        kprint(" frame descriptors (max order ");
+        kprint_decimal(page_allocator.max_order);
+        kprint(")\n");
     });
 
     return 0;
 }
 
-/*
- * Finalize page allocator setup after all regions are added
- * Builds free lists from available memory regions
- */
+static void add_region_blocks(const phys_region_t *region) {
+    if (!region || !region->available) {
+        return;
+    }
+
+    uint32_t remaining = region->num_frames;
+    uint32_t frame = region->start_frame;
+
+    while (remaining > 0) {
+        uint32_t order = 0;
+        while (order < page_allocator.max_order) {
+            uint32_t block_pages = order_block_pages(order);
+            if ((frame & (block_pages - 1)) != 0) {
+                break;
+            }
+            if (block_pages > remaining) {
+                break;
+            }
+            order++;
+        }
+
+        if (order > 0) {
+            order--;
+        }
+
+        insert_block_coalescing(frame, order);
+        uint32_t block_pages = order_block_pages(order);
+        frame += block_pages;
+        remaining -= block_pages;
+    }
+}
+
 int finalize_page_allocator(void) {
     boot_log_debug("Finalizing page frame allocator");
 
-    uint32_t total_available = 0;
+    free_lists_reset();
+    page_allocator.free_frames = 0;
+    page_allocator.allocated_frames = 0;
 
-    /* Process all memory regions */
     for (uint32_t i = 0; i < page_allocator.num_regions; i++) {
-        phys_region_t *region = &page_allocator.regions[i];
-
-        if (!region->available) {
-            continue;  /* Skip non-available regions */
-        }
-
-        /* Add all frames in this region to free list */
-        for (uint32_t j = 0; j < region->num_frames; j++) {
-            uint32_t frame_num = region->start_frame + j;
-
-            if (is_valid_frame(frame_num)) {
-                add_to_free_list(frame_num);
-                total_available++;
-            }
-        }
+        add_region_blocks(&page_allocator.regions[i]);
     }
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("Page allocator ready: ");
-        kprint_decimal(total_available);
+        kprint_decimal(page_allocator.free_frames);
         kprint(" pages available\n");
     });
 
     return 0;
 }
 
-/*
- * Get page allocator statistics
- */
 void get_page_allocator_stats(uint32_t *total, uint32_t *free, uint32_t *allocated) {
     if (total) *total = page_allocator.total_frames;
     if (free) *free = page_allocator.free_frames;
@@ -398,7 +515,7 @@ size_t page_allocator_descriptor_size(void) {
 }
 
 uint32_t page_allocator_max_supported_frames(void) {
-    return MAX_PHYSICAL_PAGES;
+    return page_allocator.max_supported_frames;
 }
 
 /*

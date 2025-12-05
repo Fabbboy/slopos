@@ -10,25 +10,12 @@
 #include "../drivers/serial.h"
 #include "../boot/log.h"
 #include "../boot/integration.h"
+#include "memory_layout.h"
 #include "kernel_heap.h"
 #include "page_alloc.h"
 #include "paging.h"
 #include "phys_virt.h"
 #include "../boot/kernel_panic.h"
-
-/* ========================================================================
- * PROCESS VIRTUAL MEMORY CONSTANTS
- * ======================================================================== */
-
-/* Process virtual memory layout */
-#define PROCESS_CODE_START            0x400000        /* Process code segment (4MB) */
-#define PROCESS_DATA_START            0x800000        /* Process data segment (8MB) */
-#define PROCESS_HEAP_START            0x1000000       /* Process heap start (16MB) */
-#define PROCESS_HEAP_MAX              0x40000000      /* Maximum heap size (1GB) */
-#define PROCESS_STACK_TOP             0x7FFFFF000000ULL /* User stack top */
-#define PROCESS_STACK_SIZE            0x100000        /* Default stack size (1MB) */
-
-/* Process limits are defined in boot/constants.h */
 
 /* Process memory allocation flags */
 #define VM_FLAG_READ                  0x01   /* Page is readable */
@@ -111,18 +98,21 @@ static void free_vma(vm_area_t *vma) {
     kfree(vma);
 }
 
-static int map_user_range(uint64_t start_addr, uint64_t end_addr, uint64_t map_flags, uint32_t *pages_mapped_out) {
-    extern process_page_dir_t *get_current_page_directory(void);
-    extern int switch_page_directory(process_page_dir_t *page_dir);
-    
+static int map_user_range(process_page_dir_t *page_dir,
+                          uint64_t start_addr,
+                          uint64_t end_addr,
+                          uint64_t map_flags,
+                          uint32_t *pages_mapped_out) {
+    if (!page_dir) {
+        kprint("map_user_range: Missing page directory\n");
+        return -1;
+    }
+
     if (start_addr & (PAGE_SIZE_4KB - 1) || end_addr & (PAGE_SIZE_4KB - 1) || end_addr <= start_addr) {
         kprint("map_user_range: Unaligned or invalid range\n");
         return -1;
     }
 
-    /* This function should be called with the target process's page directory already active */
-    /* But if not, we'll use the current one (which should be the process's during creation) */
-    
     uint64_t current = start_addr;
     uint32_t mapped = 0;
 
@@ -133,7 +123,7 @@ static int map_user_range(uint64_t start_addr, uint64_t end_addr, uint64_t map_f
             goto rollback;
         }
 
-        if (map_page_4kb(current, phys, map_flags) != 0) {
+        if (map_page_4kb_in_dir(page_dir, current, phys, map_flags) != 0) {
             kprint("map_user_range: Virtual mapping failed\n");
             free_page_frame(phys);
             goto rollback;
@@ -151,9 +141,9 @@ static int map_user_range(uint64_t start_addr, uint64_t end_addr, uint64_t map_f
 rollback:
     while (mapped > 0) {
         current -= PAGE_SIZE_4KB;
-        uint64_t phys = mm_virt_to_phys(current);
+        uint64_t phys = virt_to_phys_in_dir(page_dir, current);
         if (phys) {
-            unmap_page(current);
+            unmap_page_in_dir(page_dir, current);
             free_page_frame(phys);
         }
         mapped--;
@@ -165,15 +155,15 @@ rollback:
     return -1;
 }
 
-static void unmap_user_range(uint64_t start_addr, uint64_t end_addr) {
-    if (end_addr <= start_addr) {
+static void unmap_user_range(process_page_dir_t *page_dir, uint64_t start_addr, uint64_t end_addr) {
+    if (end_addr <= start_addr || !page_dir) {
         return;
     }
 
     for (uint64_t addr = start_addr; addr < end_addr; addr += PAGE_SIZE_4KB) {
-        uint64_t phys = mm_virt_to_phys(addr);
+        uint64_t phys = virt_to_phys_in_dir(page_dir, addr);
         if (phys) {
-            unmap_page(addr);
+            unmap_page_in_dir(page_dir, addr);
             free_page_frame(phys);
         }
     }
@@ -268,6 +258,8 @@ static int remove_vma_from_process(process_vm_t *process, uint64_t start, uint64
  * Returns process ID, INVALID_PROCESS_ID on failure
  */
 uint32_t create_process_vm(void) {
+    const process_memory_layout_t *layout = mm_get_process_layout();
+
     if (vm_manager.num_processes >= MAX_PROCESSES) {
         kprint("create_process_vm: Maximum processes reached\n");
         return INVALID_PROCESS_ID;
@@ -328,12 +320,12 @@ uint32_t create_process_vm(void) {
     process->process_id = process_id;
     process->page_dir = page_dir;
     process->vma_list = NULL;
-    process->code_start = PROCESS_CODE_START;
-    process->data_start = PROCESS_DATA_START;
-    process->heap_start = PROCESS_HEAP_START;
-    process->heap_end = PROCESS_HEAP_START;
-    process->stack_start = PROCESS_STACK_TOP - PROCESS_STACK_SIZE;
-    process->stack_end = PROCESS_STACK_TOP;
+    process->code_start = layout->code_start;
+    process->data_start = layout->data_start;
+    process->heap_start = layout->heap_start;
+    process->heap_end = layout->heap_start;
+    process->stack_start = layout->stack_top - layout->stack_size;
+    process->stack_end = layout->stack_top;
     process->total_pages = 1;  /* PML4 page */
     process->flags = 0;
     process->next = vm_manager.process_list;
@@ -346,39 +338,16 @@ uint32_t create_process_vm(void) {
     add_vma_to_process(process, process->stack_start, process->stack_end,
                        VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER);
 
-    /* Map initial stack pages eagerly */
-    /* Temporarily switch to process page directory for mapping */
-    extern process_page_dir_t *get_current_page_directory(void);
-    extern int switch_page_directory(process_page_dir_t *page_dir);
-    process_page_dir_t *saved_page_dir = get_current_page_directory();
-    
-    /* Switch to process's page directory */
-    if (switch_page_directory(page_dir) != 0) {
-        kprint("create_process_vm: Failed to switch to process page directory\n");
-        free_page_frame(page_dir->pml4_phys);
-        kfree(page_dir);
-        return INVALID_PROCESS_ID;
-    }
-    
     uint64_t stack_map_flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
     uint32_t stack_pages = 0;
-    if (map_user_range(process->stack_start, process->stack_end, stack_map_flags, &stack_pages) != 0) {
+    if (map_user_range(process->page_dir, process->stack_start, process->stack_end, stack_map_flags, &stack_pages) != 0) {
         kprint("create_process_vm: Failed to map process stack\n");
-        /* Switch back before cleanup */
-        if (saved_page_dir) {
-            switch_page_directory(saved_page_dir);
-        }
-        unmap_user_range(process->stack_start, process->stack_end);
+        unmap_user_range(process->page_dir, process->stack_start, process->stack_end);
         free_page_frame(process->page_dir->pml4_phys);
         kfree(process->page_dir);
         process->page_dir = NULL;
         process->process_id = INVALID_PROCESS_ID;
         return INVALID_PROCESS_ID;
-    }
-    
-    /* Switch back to kernel page directory */
-    if (saved_page_dir) {
-        switch_page_directory(saved_page_dir);
     }
 
     process->total_pages += stack_pages;
@@ -415,32 +384,16 @@ int destroy_process_vm(uint32_t process_id) {
     kprint_decimal(process_id);
     kprint("\n");
 
-    /* Switch to process's page directory for unmapping */
-    extern process_page_dir_t *get_current_page_directory(void);
-    extern int switch_page_directory(process_page_dir_t *page_dir);
-    process_page_dir_t *saved_page_dir = get_current_page_directory();
-    
-    if (process->page_dir && switch_page_directory(process->page_dir) != 0) {
-        kprint("destroy_process_vm: Failed to switch to process page directory\n");
-        /* Continue with cleanup even if switch fails */
-    }
-
     /* Free all VMAs */
     vm_area_t *vma = process->vma_list;
     while (vma) {
-        if (vma->flags & VM_FLAG_USER) {
-            unmap_user_range(vma->start_addr, vma->end_addr);
-        }
         vm_area_t *next = vma->next;
         free_vma(vma);
         vma = next;
     }
     process->vma_list = NULL;
 
-    /* Switch back to kernel page directory */
-    if (saved_page_dir && saved_page_dir != process->page_dir) {
-        switch_page_directory(saved_page_dir);
-    }
+    paging_free_user_space(process->page_dir);
 
     /* Free page directory structures */
     if (process->page_dir) {
@@ -489,13 +442,12 @@ int destroy_process_vm(uint32_t process_id) {
  * Returns virtual address, 0 on failure
  */
 uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
-    extern process_page_dir_t *get_current_page_directory(void);
-    extern int switch_page_directory(process_page_dir_t *page_dir);
-    
     process_vm_t *process = find_process_vm(process_id);
     if (!process) {
         return 0;
     }
+
+    const process_memory_layout_t *layout = mm_get_process_layout();
 
     /* Align size to page boundary */
     size = (size + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
@@ -504,7 +456,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
     uint64_t start_addr = process->heap_end;
     uint64_t end_addr = start_addr + size;
 
-    if (end_addr > PROCESS_HEAP_MAX) {
+    if (end_addr > layout->heap_max) {
         kprint("process_vm_alloc: Heap overflow\n");
         return 0;
     }
@@ -520,38 +472,16 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
         map_flags |= PAGE_WRITABLE;
     }
 
-    /* Switch to process's page directory for mapping */
-    process_page_dir_t *saved_page_dir = get_current_page_directory();
-    if (switch_page_directory(process->page_dir) != 0) {
-        kprint("process_vm_alloc: Failed to switch to process page directory\n");
-        return 0;
-    }
-
     uint32_t pages_mapped = 0;
-    if (map_user_range(start_addr, end_addr, map_flags, &pages_mapped) != 0) {
-        /* Switch back on failure */
-        if (saved_page_dir) {
-            switch_page_directory(saved_page_dir);
-        }
+    if (map_user_range(process->page_dir, start_addr, end_addr, map_flags, &pages_mapped) != 0) {
         return 0;
-    }
-
-    /* Switch back to kernel page directory */
-    if (saved_page_dir) {
-        switch_page_directory(saved_page_dir);
     }
 
     process->heap_end = end_addr;
 
     if (add_vma_to_process(process, start_addr, end_addr, protection_flags | VM_FLAG_USER) != 0) {
         kprint("process_vm_alloc: Failed to record VMA\n");
-        /* Need to unmap with process page directory active */
-        if (switch_page_directory(process->page_dir) == 0) {
-            unmap_user_range(start_addr, end_addr);
-            if (saved_page_dir) {
-                switch_page_directory(saved_page_dir);
-            }
-        }
+        unmap_user_range(process->page_dir, start_addr, end_addr);
         process->heap_end = start_addr;
         return 0;
     }

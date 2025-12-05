@@ -30,10 +30,16 @@ void paging_copy_kernel_mappings(page_table_t *dest_pml4);
 
 /* Virtual memory management primitives */
 uint64_t virt_to_phys(uint64_t vaddr);
+uint64_t virt_to_phys_in_dir(process_page_dir_t *page_dir, uint64_t vaddr);
+int map_page_4kb_in_dir(process_page_dir_t *page_dir, uint64_t vaddr, uint64_t paddr, uint64_t flags);
 int map_page_4kb(uint64_t vaddr, uint64_t paddr, uint64_t flags);
 int map_page_2mb(uint64_t vaddr, uint64_t paddr, uint64_t flags);
+int unmap_page_in_dir(process_page_dir_t *page_dir, uint64_t vaddr);
 int unmap_page(uint64_t vaddr);
 int switch_page_directory(process_page_dir_t *page_dir);
+void paging_set_current_directory(process_page_dir_t *page_dir);
+process_page_dir_t *paging_get_kernel_directory(void);
+void paging_free_user_space(process_page_dir_t *page_dir);
 process_page_dir_t *get_current_page_directory(void);
 void init_paging(void);
 int is_mapped(uint64_t vaddr);

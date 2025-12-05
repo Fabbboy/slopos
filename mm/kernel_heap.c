@@ -14,15 +14,11 @@
 #include "paging.h"
 #include "../boot/kernel_panic.h"
 #include "../lib/memory.h"
+#include "memory_layout.h"
 
 /* ========================================================================
  * KERNEL HEAP CONSTANTS
  * ======================================================================== */
-
-/* Kernel heap configuration */
-#define KERNEL_HEAP_START             0xFFFFFFFF90000000ULL  /* Kernel heap virtual base */
-#define KERNEL_HEAP_SIZE              0x10000000             /* 256MB initial heap */
-#define KERNEL_HEAP_PAGE_COUNT        (KERNEL_HEAP_SIZE / PAGE_SIZE_4KB)
 
 /* Allocation size constants */
 #define MIN_ALLOC_SIZE                16        /* Minimum allocation size */
@@ -636,9 +632,9 @@ void kfree(void *ptr) {
 int init_kernel_heap(void) {
     boot_log_debug("Initializing kernel heap");
 
-    kernel_heap.start_addr = KERNEL_HEAP_START;
-    kernel_heap.end_addr = KERNEL_HEAP_START + KERNEL_HEAP_SIZE;
-    kernel_heap.current_break = KERNEL_HEAP_START;
+    kernel_heap.start_addr = mm_get_kernel_heap_start();
+    kernel_heap.end_addr = mm_get_kernel_heap_end();
+    kernel_heap.current_break = kernel_heap.start_addr;
 
     /* Initialize free lists */
     for (uint32_t i = 0; i < 16; i++) {
@@ -666,7 +662,7 @@ int init_kernel_heap(void) {
 
     BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
         kprint("Kernel heap initialized at ");
-        kprint_hex(KERNEL_HEAP_START);
+        kprint_hex(kernel_heap.start_addr);
         kprint("\n");
     });
 
