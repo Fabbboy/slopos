@@ -598,7 +598,10 @@ static void roulette_gatekeeper_task(void *arg) {
     
     task_t *shell_task;
     if (task_get_info(shell_task_id, &shell_task) == 0) {
-        schedule_task(shell_task);
+        if (schedule_task(shell_task) != 0) {
+            task_terminate(shell_task_id);
+            kernel_panic("Failed to schedule shell after roulette win");
+        }
     }
 
     /* We are done. The shell is now running. */
@@ -624,6 +627,7 @@ static int boot_step_roulette_task(void) {
 
     if (schedule_task(roulette_task_info) != 0) {
         boot_info("ERROR: Failed to schedule roulette task");
+        task_terminate(roulette_task_id);
         return -1;
     }
 

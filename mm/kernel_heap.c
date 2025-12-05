@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
+#include "../drivers/wl_currency.h"
 #include "../boot/log.h"
 #include "kernel_heap.h"
 #include "page_alloc.h"
@@ -343,8 +344,14 @@ static int expand_heap(uint32_t min_size) {
     });
 
     uint64_t expansion_start = kernel_heap.current_break;
-    uint32_t total_bytes = pages_needed * PAGE_SIZE_4KB;
+    uint64_t total_bytes = (uint64_t)pages_needed * (uint64_t)PAGE_SIZE_4KB;
     uint32_t mapped_pages = 0;
+
+    if (expansion_start >= kernel_heap.end_addr || expansion_start + total_bytes > kernel_heap.end_addr) {
+        boot_log_info("expand_heap: Heap growth denied - would exceed heap window");
+        take_l();
+        return -1;
+    }
 
     /* Allocate physical pages and map them */
     for (uint32_t i = 0; i < pages_needed; i++) {

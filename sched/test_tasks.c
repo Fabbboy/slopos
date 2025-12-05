@@ -21,6 +21,7 @@ extern int create_idle_task(void);
 extern int start_scheduler(void);
 extern int schedule_task(void *task);
 extern int task_get_info(uint32_t task_id, void **task_info);
+extern int task_terminate(uint32_t task_id);
 extern void init_kernel_context(task_context_t *context);
 extern void context_switch(task_context_t *old_context, task_context_t *new_context);
 
@@ -171,11 +172,15 @@ int run_scheduler_test(void) {
 
     if (schedule_task(task_a_info) != 0) {
         kprint("Failed to schedule task A\n");
+        task_terminate(task_a_id);
+        task_terminate(task_b_id);
         return -1;
     }
 
     if (schedule_task(task_b_info) != 0) {
         kprint("Failed to schedule task B\n");
+        task_terminate(task_a_id);
+        task_terminate(task_b_id);
         return -1;
     }
 

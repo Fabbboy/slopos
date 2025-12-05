@@ -98,6 +98,31 @@ static void free_vma(vm_area_t *vma) {
     kfree(vma);
 }
 
+static int vma_range_valid(uint64_t start, uint64_t end) {
+    if (start >= end) {
+        return 0;
+    }
+    if ((start & (PAGE_SIZE_4KB - 1)) != 0 || (end & (PAGE_SIZE_4KB - 1)) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+static int vma_overlaps_range(const vm_area_t *vma, uint64_t start, uint64_t end) {
+    if (!vma) {
+        return 0;
+    }
+    return (start < vma->end_addr) && (end > vma->start_addr);
+}
+
+static vm_area_t **find_vma_insert_slot(process_vm_t *process, uint64_t start) {
+    vm_area_t **link = &process->vma_list;
+    while (*link && (*link)->start_addr < start) {
+        link = &(*link)->next;
+    }
+    return link;
+}
+
 static int map_user_range(process_page_dir_t *page_dir,
                           uint64_t start_addr,
                           uint64_t end_addr,
@@ -117,7 +142,7 @@ static int map_user_range(process_page_dir_t *page_dir,
     uint32_t mapped = 0;
 
     while (current < end_addr) {
-        uint64_t phys = alloc_page_frame(0);
+        uint64_t phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if (!phys) {
             kprint("map_user_range: Physical allocation failed\n");
             goto rollback;
@@ -144,7 +169,9 @@ rollback:
         uint64_t phys = virt_to_phys_in_dir(page_dir, current);
         if (phys) {
             unmap_page_in_dir(page_dir, current);
-            free_page_frame(phys);
+            if (page_frame_can_free(phys)) {
+                free_page_frame(phys);
+            }
         }
         mapped--;
     }
@@ -201,7 +228,7 @@ process_page_dir_t *process_vm_get_page_dir(uint32_t process_id) {
  * Add a virtual memory area to a process
  */
 static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t end, uint32_t flags) {
-    if (!process || start >= end) {
+    if (!process || !vma_range_valid(start, end)) {
         return -1;
     }
 
@@ -215,9 +242,28 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
     vma->end_addr = end;
     vma->flags = flags;
 
-    /* Add to process VMA list */
-    vma->next = process->vma_list;
-    process->vma_list = vma;
+    /* Insert ordered by start, rejecting overlaps with neighbors */
+    vm_area_t **insert_pos = find_vma_insert_slot(process, start);
+    vm_area_t *next = *insert_pos;
+    vm_area_t *prev = NULL;
+
+    /* Discover previous by walking from head to the insert position */
+    if (insert_pos != &process->vma_list) {
+        prev = process->vma_list;
+        while (prev && prev->next != next) {
+            prev = prev->next;
+        }
+    }
+
+    if ((prev && vma_overlaps_range(prev, start, end)) ||
+        (next && vma_overlaps_range(next, start, end))) {
+        kprint("add_vma_to_process: Overlapping VMA request rejected\n");
+        free_vma(vma);
+        return -1;
+    }
+
+    vma->next = next;
+    *insert_pos = vma;
 
     return 0;
 }
@@ -227,6 +273,10 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
  */
 static int remove_vma_from_process(process_vm_t *process, uint64_t start, uint64_t end) {
     if (!process) {
+        return -1;
+    }
+
+    if (!vma_range_valid(start, end)) {
         return -1;
     }
 
@@ -247,6 +297,63 @@ static int remove_vma_from_process(process_vm_t *process, uint64_t start, uint64
     }
 
     return -1;  /* VMA not found */
+}
+
+static vm_area_t *find_vma_covering(process_vm_t *process, uint64_t start, uint64_t end) {
+    if (!process || !vma_range_valid(start, end)) {
+        return NULL;
+    }
+
+    vm_area_t *cursor = process->vma_list;
+    while (cursor) {
+        if (cursor->start_addr <= start && cursor->end_addr >= end) {
+            return cursor;
+        }
+        cursor = cursor->next;
+    }
+    return NULL;
+}
+
+static uint32_t unmap_and_free_range(process_vm_t *process, uint64_t start, uint64_t end) {
+    if (!process || !process->page_dir || !vma_range_valid(start, end)) {
+        return 0;
+    }
+
+    uint32_t freed = 0;
+    for (uint64_t addr = start; addr < end; addr += PAGE_SIZE_4KB) {
+        uint64_t phys = virt_to_phys_in_dir(process->page_dir, addr);
+        if (phys) {
+            unmap_page_in_dir(process->page_dir, addr);
+            if (page_frame_can_free(phys)) {
+                if (free_page_frame(phys) == 0) {
+                    freed++;
+                }
+            }
+        }
+    }
+    return freed;
+}
+
+static void teardown_process_mappings(process_vm_t *process) {
+    if (!process || !process->page_dir) {
+        return;
+    }
+
+    vm_area_t *cursor = process->vma_list;
+    while (cursor) {
+        vm_area_t *next = cursor->next;
+        uint32_t freed = unmap_and_free_range(process, cursor->start_addr, cursor->end_addr);
+        if (process->total_pages >= freed) {
+            process->total_pages -= freed;
+        } else {
+            process->total_pages = 0;
+        }
+        free_vma(cursor);
+        cursor = next;
+    }
+
+    process->vma_list = NULL;
+    process->heap_end = process->heap_start;
 }
 
 /* ========================================================================
@@ -331,18 +438,26 @@ uint32_t create_process_vm(void) {
     process->next = vm_manager.process_list;
 
     /* Add standard VMA regions */
-    add_vma_to_process(process, process->code_start, process->data_start,
-                       VM_FLAG_READ | VM_FLAG_EXEC | VM_FLAG_USER);
-    add_vma_to_process(process, process->data_start, process->heap_start,
-                       VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER);
-    add_vma_to_process(process, process->stack_start, process->stack_end,
-                       VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER);
+    if (add_vma_to_process(process, process->code_start, process->data_start,
+                           VM_FLAG_READ | VM_FLAG_EXEC | VM_FLAG_USER) != 0 ||
+        add_vma_to_process(process, process->data_start, process->heap_start,
+                           VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER) != 0 ||
+        add_vma_to_process(process, process->stack_start, process->stack_end,
+                           VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER) != 0) {
+        kprint("create_process_vm: Failed to seed initial VMAs\n");
+        teardown_process_mappings(process);
+        free_page_frame(process->page_dir->pml4_phys);
+        kfree(process->page_dir);
+        process->page_dir = NULL;
+        process->process_id = INVALID_PROCESS_ID;
+        return INVALID_PROCESS_ID;
+    }
 
     uint64_t stack_map_flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
     uint32_t stack_pages = 0;
     if (map_user_range(process->page_dir, process->stack_start, process->stack_end, stack_map_flags, &stack_pages) != 0) {
         kprint("create_process_vm: Failed to map process stack\n");
-        unmap_user_range(process->page_dir, process->stack_start, process->stack_end);
+        teardown_process_mappings(process);
         free_page_frame(process->page_dir->pml4_phys);
         kfree(process->page_dir);
         process->page_dir = NULL;
@@ -384,14 +499,8 @@ int destroy_process_vm(uint32_t process_id) {
     kprint_decimal(process_id);
     kprint("\n");
 
-    /* Free all VMAs */
-    vm_area_t *vma = process->vma_list;
-    while (vma) {
-        vm_area_t *next = vma->next;
-        free_vma(vma);
-        vma = next;
-    }
-    process->vma_list = NULL;
+    /* Free all mappings owned by the process */
+    teardown_process_mappings(process);
 
     paging_free_user_space(process->page_dir);
 
@@ -495,7 +604,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
  */
 int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
     process_vm_t *process = find_process_vm(process_id);
-    if (!process) {
+    if (!process || !process->page_dir || size == 0) {
         return -1;
     }
 
@@ -503,8 +612,34 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
     uint64_t start = vaddr & ~(PAGE_SIZE_4KB - 1);
     uint64_t end = (vaddr + size + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
 
-    /* Remove VMA */
-    return remove_vma_from_process(process, start, end);
+    if (!vma_range_valid(start, end)) {
+        kprint("process_vm_free: Invalid or unaligned range\n");
+        return -1;
+    }
+
+    vm_area_t *vma = find_vma_covering(process, start, end);
+    if (!vma || vma->start_addr != start || vma->end_addr != end) {
+        kprint("process_vm_free: Range does not match existing VMA\n");
+        return -1;
+    }
+
+    uint32_t freed = unmap_and_free_range(process, start, end);
+    if (remove_vma_from_process(process, start, end) != 0) {
+        kprint("process_vm_free: Failed to unlink VMA\n");
+        return -1;
+    }
+
+    if (process->total_pages >= freed) {
+        process->total_pages -= freed;
+    } else {
+        process->total_pages = 0;
+    }
+
+    if (process->heap_end == end && end > process->heap_start) {
+        process->heap_end = start;
+    }
+
+    return 0;
 }
 
 /* ========================================================================

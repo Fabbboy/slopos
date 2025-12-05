@@ -385,7 +385,7 @@ static int map_page_4kb_in_directory(process_page_dir_t *page_dir,
 
     uint64_t pml4_entry = pml4->entries[pml4_idx];
     if (!pte_present(pml4_entry)) {
-        pdpt_phys = alloc_page_frame(0);
+        pdpt_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if (!pdpt_phys) {
             kprint("map_page_4kb: Failed to allocate PDPT\n");
             return -1;
@@ -414,7 +414,7 @@ static int map_page_4kb_in_directory(process_page_dir_t *page_dir,
 
     uint64_t pdpt_entry = pdpt->entries[pdpt_idx];
     if (!pte_present(pdpt_entry)) {
-        pd_phys = alloc_page_frame(0);
+        pd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if (!pd_phys) {
             kprint("map_page_4kb: Failed to allocate PD\n");
             goto failure;
@@ -448,7 +448,7 @@ static int map_page_4kb_in_directory(process_page_dir_t *page_dir,
 
     uint64_t pd_entry = pd->entries[pd_idx];
     if (!pte_present(pd_entry)) {
-        pt_phys = alloc_page_frame(0);
+        pt_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if (!pt_phys) {
             kprint("map_page_4kb: Failed to allocate PT\n");
             goto failure;

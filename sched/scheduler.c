@@ -215,6 +215,8 @@ int schedule_task(task_t *task) {
     }
 
     if (ready_queue_enqueue(&scheduler.ready_queue, task) != 0) {
+        kprint("schedule_task: ready queue full, request rejected\n");
+        take_l();
         return -1;
     }
 
