@@ -38,6 +38,11 @@ typedef struct allocator_buffer_plan {
     int prepared;
 } allocator_buffer_plan_t;
 
+typedef struct reserved_span {
+    uint64_t base;
+    uint64_t length;
+} reserved_span_t;
+
 typedef struct memory_init_state {
     int early_paging_done;
     int memory_layout_done;
@@ -60,6 +65,8 @@ typedef struct memory_init_state {
 static memory_init_state_t init_state = {0};
 static allocator_buffer_plan_t allocator_buffers = {0};
 static uint32_t usable_overlap_skips = 0;
+static reserved_span_t early_reserved[8];
+static uint32_t early_reserved_count = 0;
 
 /* ========================================================================
  * KERNEL CORE RESERVATIONS
@@ -104,6 +111,95 @@ static void record_kernel_core_reservations(void) {
                         MM_RESERVATION_FIRMWARE_OTHER,
                         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
                         "Early PD");
+}
+
+static void track_early_reserved_span(uint64_t base, uint64_t length) {
+    if (length == 0 || early_reserved_count >= (uint32_t)(sizeof(early_reserved) / sizeof(early_reserved[0]))) {
+        return;
+    }
+    early_reserved[early_reserved_count].base = align_down_u64(base, PAGE_SIZE_4KB);
+    uint64_t end = base + length;
+    uint64_t aligned_end = align_up_u64(end, PAGE_SIZE_4KB);
+    if (aligned_end > early_reserved[early_reserved_count].base) {
+        early_reserved[early_reserved_count].length = aligned_end - early_reserved[early_reserved_count].base;
+        early_reserved_count++;
+    }
+}
+
+static void build_early_reserved_spans(void) {
+    early_reserved_count = 0;
+    const kernel_memory_layout_t *layout = get_kernel_memory_layout();
+    if (layout) {
+        track_early_reserved_span(layout->kernel_start_phys,
+                                  layout->kernel_end_phys - layout->kernel_start_phys);
+    }
+    track_early_reserved_span(BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE);
+    track_early_reserved_span(EARLY_PML4_PHYS_ADDR, PAGE_SIZE_4KB);
+    track_early_reserved_span(EARLY_PDPT_PHYS_ADDR, PAGE_SIZE_4KB);
+    track_early_reserved_span(EARLY_PD_PHYS_ADDR, PAGE_SIZE_4KB);
+}
+
+static int span_overlaps_reserved(uint64_t base, uint64_t length) {
+    if (length == 0) {
+        return 0;
+    }
+    uint64_t end = base + length;
+    for (uint32_t i = 0; i < early_reserved_count; i++) {
+        uint64_t r_base = early_reserved[i].base;
+        uint64_t r_end = r_base + early_reserved[i].length;
+        if (end <= r_base || base >= r_end) {
+            continue;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static uint64_t choose_allocator_window(uint64_t usable_base, uint64_t usable_end, uint64_t required_bytes) {
+    if (required_bytes == 0 || usable_end <= usable_base) {
+        return 0;
+    }
+
+    /* Sort reserved spans by base (small count, simple insertion sort) */
+    for (uint32_t i = 1; i < early_reserved_count; i++) {
+        reserved_span_t key = early_reserved[i];
+        int j = (int)i - 1;
+        while (j >= 0 && early_reserved[j].base > key.base) {
+            early_reserved[j + 1] = early_reserved[j];
+            j--;
+        }
+        early_reserved[j + 1] = key;
+    }
+
+    uint64_t cursor_end = usable_end;
+
+    for (int i = (int)early_reserved_count - 1; i >= 0; i--) {
+        uint64_t r_base = early_reserved[i].base;
+        uint64_t r_end = r_base + early_reserved[i].length;
+
+        if (r_end <= usable_base || r_base >= usable_end) {
+            continue;
+        }
+
+        uint64_t gap_start = (r_end > usable_base) ? r_end : usable_base;
+        uint64_t gap_end = cursor_end;
+        if (gap_end > gap_start && (gap_end - gap_start) >= required_bytes) {
+            uint64_t candidate = align_down_u64(gap_end - required_bytes, PAGE_SIZE_4KB);
+            if (candidate >= gap_start) {
+                return candidate;
+            }
+        }
+
+        if (r_base < cursor_end) {
+            cursor_end = r_base;
+        }
+    }
+
+    if (cursor_end > usable_base && (cursor_end - usable_base) >= required_bytes) {
+        return align_down_u64(cursor_end - required_bytes, PAGE_SIZE_4KB);
+    }
+
+    return 0;
 }
 
 /* ========================================================================
@@ -471,7 +567,14 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
         return -1;
     }
 
-    uint64_t reserve_phys_base = usable_end_aligned - reserved_bytes;
+    build_early_reserved_spans();
+
+    uint64_t reserve_phys_base = choose_allocator_window(usable_start, usable_end_aligned, reserved_bytes);
+    if (reserve_phys_base == 0 || span_overlaps_reserved(reserve_phys_base, reserved_bytes)) {
+        boot_log_info("MM: ERROR - Failed to find non-overlapping window for allocator metadata");
+        return -1;
+    }
+
     uintptr_t reserve_virt_base = (uintptr_t)(reserve_phys_base + hhdm_offset);
     uintptr_t reserve_virt_end = reserve_virt_base + reserved_bytes;
 

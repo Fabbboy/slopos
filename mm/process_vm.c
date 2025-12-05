@@ -242,7 +242,7 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
     vma->end_addr = end;
     vma->flags = flags;
 
-    /* Insert ordered by start, rejecting overlaps with neighbors */
+    /* Insert ordered by start, merge with compatible neighbors */
     vm_area_t **insert_pos = find_vma_insert_slot(process, start);
     vm_area_t *next = *insert_pos;
     vm_area_t *prev = NULL;
@@ -255,15 +255,35 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
         }
     }
 
-    if ((prev && vma_overlaps_range(prev, start, end)) ||
-        (next && vma_overlaps_range(next, start, end))) {
-        kprint("add_vma_to_process: Overlapping VMA request rejected\n");
+    if (prev && vma_overlaps_range(prev, start, end) && prev->flags != flags) {
+        kprint("add_vma_to_process: Overlap with incompatible VMA\n");
         free_vma(vma);
         return -1;
     }
 
-    vma->next = next;
-    *insert_pos = vma;
+    if (next && vma_overlaps_range(next, start, end) && next->flags != flags) {
+        kprint("add_vma_to_process: Overlap with incompatible next VMA\n");
+        free_vma(vma);
+        return -1;
+    }
+
+    /* Merge with previous if compatible */
+    if (prev && prev->end_addr == start && prev->flags == flags) {
+        prev->end_addr = end;
+        free_vma(vma);
+        vma = prev;
+    } else {
+        vma->next = next;
+        *insert_pos = vma;
+    }
+
+    /* Merge with next if compatible */
+    if (vma->next && vma->next->start_addr == vma->end_addr && vma->next->flags == vma->flags) {
+        vm_area_t *to_merge = vma->next;
+        vma->end_addr = to_merge->end_addr;
+        vma->next = to_merge->next;
+        free_vma(to_merge);
+    }
 
     return 0;
 }
@@ -325,13 +345,38 @@ static uint32_t unmap_and_free_range(process_vm_t *process, uint64_t start, uint
         if (phys) {
             unmap_page_in_dir(process->page_dir, addr);
             if (page_frame_can_free(phys)) {
-                if (free_page_frame(phys) == 0) {
-                    freed++;
-                }
+                freed++;
             }
         }
     }
     return freed;
+}
+
+static void merge_adjacent(process_vm_t *process, vm_area_t *vma) {
+    if (!process || !vma) {
+        return;
+    }
+
+    vm_area_t *cursor = process->vma_list;
+    vm_area_t *prev = NULL;
+    while (cursor && cursor != vma) {
+        prev = cursor;
+        cursor = cursor->next;
+    }
+
+    if (prev && prev->end_addr == vma->start_addr && prev->flags == vma->flags) {
+        prev->end_addr = vma->end_addr;
+        prev->next = vma->next;
+        free_vma(vma);
+        vma = prev;
+    }
+
+    if (vma->next && vma->next->start_addr == vma->end_addr && vma->next->flags == vma->flags) {
+        vm_area_t *n = vma->next;
+        vma->end_addr = n->end_addr;
+        vma->next = n->next;
+        free_vma(n);
+    }
 }
 
 static void teardown_process_mappings(process_vm_t *process) {
@@ -618,16 +663,34 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
     }
 
     vm_area_t *vma = find_vma_covering(process, start, end);
-    if (!vma || vma->start_addr != start || vma->end_addr != end) {
-        kprint("process_vm_free: Range does not match existing VMA\n");
+    if (!vma) {
+        kprint("process_vm_free: Range not covered by a VMA\n");
         return -1;
     }
 
     uint32_t freed = unmap_and_free_range(process, start, end);
-    if (remove_vma_from_process(process, start, end) != 0) {
-        kprint("process_vm_free: Failed to unlink VMA\n");
-        return -1;
+
+    /* Adjust or remove VMA based on free range position */
+    if (start == vma->start_addr && end == vma->end_addr) {
+        remove_vma_from_process(process, vma->start_addr, vma->end_addr);
+    } else if (start == vma->start_addr) {
+        /* Trim from front */
+        vma->start_addr = end;
+    } else if (end == vma->end_addr) {
+        /* Trim from back */
+        vma->end_addr = start;
+    } else {
+        /* Split into two ranges */
+        uint64_t right_start = end;
+        uint64_t right_end = vma->end_addr;
+        vma->end_addr = start;
+        if (add_vma_to_process(process, right_start, right_end, vma->flags) != 0) {
+            kprint("process_vm_free: Failed to create right split VMA\n");
+            return -1;
+        }
     }
+
+    merge_adjacent(process, vma);
 
     if (process->total_pages >= freed) {
         process->total_pages -= freed;
