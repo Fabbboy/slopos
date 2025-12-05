@@ -515,7 +515,12 @@ size_t page_allocator_descriptor_size(void) {
 }
 
 uint32_t page_allocator_max_supported_frames(void) {
-    return page_allocator.max_supported_frames;
+    if (page_allocator.max_supported_frames != 0) {
+        return page_allocator.max_supported_frames;
+    }
+
+    /* Fallback before allocator initialization: cover up to the maximum buddy order */
+    return 1u << MAX_ORDER;
 }
 
 /*
