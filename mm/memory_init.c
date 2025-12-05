@@ -313,6 +313,12 @@ static void register_usable_region(uint64_t base, uint64_t length) {
 
 static uint32_t clamp_required_frames(uint64_t required_frames_64) {
     uint32_t max_supported = page_allocator_max_supported_frames();
+
+    /* If allocator has not been initialized yet, do not cap. */
+    if (max_supported == 0) {
+        return (uint32_t)required_frames_64;
+    }
+
     if (required_frames_64 > (uint64_t)max_supported) {
         BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
             kprint("MM: WARNING - Limiting tracked page frames to allocator maximum\n");
@@ -373,6 +379,14 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     }
 
     uint32_t required_frames = clamp_required_frames(required_frames_64);
+
+    uint64_t max_fit_frames = largest_usable->length / PAGE_SIZE_4KB;
+    if (required_frames > max_fit_frames) {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            kprint("MM: WARNING - Reducing tracked frames to fit largest usable region\n");
+        });
+        required_frames = (uint32_t)max_fit_frames;
+    }
 
     size_t page_desc_size = page_allocator_descriptor_size();
 

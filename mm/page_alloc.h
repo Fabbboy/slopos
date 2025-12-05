@@ -17,6 +17,8 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type);
 uint64_t alloc_page_frames(uint32_t count, uint32_t flags);
 uint64_t alloc_page_frame(uint32_t flags);
 int free_page_frame(uint64_t phys_addr);
+int page_frame_is_tracked(uint64_t phys_addr);
+int page_frame_can_free(uint64_t phys_addr);
 
 size_t page_allocator_descriptor_size(void);
 uint32_t page_allocator_max_supported_frames(void);

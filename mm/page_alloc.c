@@ -136,6 +136,10 @@ static void free_lists_reset(void) {
 
 static void free_list_push(uint32_t order, uint32_t frame_num) {
     page_frame_t *frame = get_frame_desc(frame_num);
+    if (!frame) {
+        return;
+    }
+
     frame->next_free = page_allocator.free_lists[order];
     frame->order = order;
     frame->state = PAGE_FRAME_FREE;
@@ -219,6 +223,10 @@ static uint32_t free_list_take_matching(uint32_t order, uint32_t flags) {
 }
 
 static void insert_block_coalescing(uint32_t frame_num, uint32_t order) {
+    if (!is_valid_frame(frame_num)) {
+        return;
+    }
+
     uint32_t curr_frame = frame_num;
     uint32_t curr_order = order;
 
@@ -330,8 +338,8 @@ int free_page_frame(uint64_t phys_addr) {
 
     page_frame_t *frame = get_frame_desc(frame_num);
     if (!frame_state_is_allocated(frame->state)) {
-        boot_log_info("free_page_frame: Page not allocated");
-        return -1;
+        /* Quietly ignore duplicates or reserved frames */
+        return 0;
     }
 
     if (frame->ref_count > 1) {
@@ -457,8 +465,16 @@ static void add_region_blocks(const phys_region_t *region) {
         return;
     }
 
-    uint32_t remaining = region->num_frames;
     uint32_t frame = region->start_frame;
+    if (frame >= page_allocator.total_frames) {
+        return;
+    }
+
+    uint32_t max_frames = page_allocator.total_frames - frame;
+    uint32_t remaining = region->num_frames;
+    if (remaining > max_frames) {
+        remaining = max_frames;
+    }
 
     while (remaining > 0) {
         uint32_t order = 0;
@@ -516,6 +532,23 @@ size_t page_allocator_descriptor_size(void) {
 
 uint32_t page_allocator_max_supported_frames(void) {
     return page_allocator.max_supported_frames;
+}
+
+int page_frame_is_tracked(uint64_t phys_addr) {
+    uint32_t frame_num = phys_to_frame(phys_addr);
+    return frame_num < page_allocator.total_frames;
+}
+
+int page_frame_can_free(uint64_t phys_addr) {
+    uint32_t frame_num = phys_to_frame(phys_addr);
+    if (!is_valid_frame(frame_num)) {
+        return 0;
+    }
+    page_frame_t *frame = get_frame_desc(frame_num);
+    if (!frame) {
+        return 0;
+    }
+    return frame_state_is_allocated(frame->state);
 }
 
 /*

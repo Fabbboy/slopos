@@ -328,6 +328,7 @@ int test_user_mode_paging_access(void) {
         destroy_process_vm(pid);
         return -1;
     }
+    kprint("VM_TEST: Allocated test phys page\n");
 
     uint64_t user_flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
     if (map_page_4kb(test_vaddr, test_paddr, user_flags) != 0) {
@@ -338,6 +339,7 @@ int test_user_mode_paging_access(void) {
         destroy_process_vm(pid);
         return -1;
     }
+    kprint("VM_TEST: Mapped test page\n");
 
     /* Verify mapping exists by reading/writing */
     volatile uint32_t *test_ptr = (volatile uint32_t *)test_vaddr;
@@ -345,6 +347,7 @@ int test_user_mode_paging_access(void) {
     
     /* Write test value */
     *test_ptr = test_value;
+    kprint("VM_TEST: Wrote test value\n");
     
     /* Verify read */
     if (*test_ptr != test_value) {
@@ -355,6 +358,7 @@ int test_user_mode_paging_access(void) {
         destroy_process_vm(pid);
         return -1;
     }
+    kprint("VM_TEST: Readback matched\n");
 
     /* Switch back to kernel page directory */
     if (saved_page_dir) {

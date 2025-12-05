@@ -64,11 +64,12 @@ void paging_copy_kernel_mappings(page_table_t *dest_pml4) {
         return;
     }
 
+    /* Copy kernel mappings, then clear the user half (indices 0-255). */
     for (uint32_t i = 0; i < ENTRIES_PER_PAGE_TABLE; i++) {
-        uint64_t entry = kernel_page_dir.pml4->entries[i];
-        if (entry) {
-            dest_pml4->entries[i] = entry;
-        }
+        dest_pml4->entries[i] = kernel_page_dir.pml4->entries[i];
+    }
+    for (uint32_t i = 0; i < (ENTRIES_PER_PAGE_TABLE / 2); i++) {
+        dest_pml4->entries[i] = 0;
     }
 }
 
@@ -641,7 +642,10 @@ static void free_page_table_tree(process_page_dir_t *page_dir) {
             }
 
             if (pte_huge(pdpte)) {
-                free_page_frame(pte_address(pdpte));
+                uint64_t phys = pte_address(pdpte);
+                if (page_frame_is_tracked(phys)) {
+                    free_page_frame(phys);
+                }
                 continue;
             }
 
@@ -653,25 +657,40 @@ static void free_page_table_tree(process_page_dir_t *page_dir) {
                 }
 
                 if (pte_huge(pde)) {
-                    free_page_frame(pte_address(pde));
+                    uint64_t phys = pte_address(pde);
+                    if (page_frame_is_tracked(phys)) {
+                        free_page_frame(phys);
+                    }
                     continue;
                 }
 
                 page_table_t *pt = phys_to_page_table_ptr(pte_address(pde));
                 for (uint32_t pt_idx = 0; pt_idx < ENTRIES_PER_PAGE_TABLE; pt_idx++) {
                     uint64_t pte = pt->entries[pt_idx];
-                    if (pte_present(pte)) {
-                        free_page_frame(pte_address(pte));
+                if (pte_present(pte)) {
+                    uint64_t phys = pte_address(pte);
+                    if (page_frame_can_free(phys)) {
+                        free_page_frame(phys);
                     }
                 }
+                }
 
-                free_page_frame(pte_address(pde));
+                uint64_t phys_pd = pte_address(pde);
+            if (page_frame_can_free(phys_pd)) {
+                    free_page_frame(phys_pd);
+                }
             }
 
-            free_page_frame(pte_address(pdpte));
+            uint64_t phys_pdpt = pte_address(pdpte);
+        if (page_frame_can_free(phys_pdpt)) {
+                free_page_frame(phys_pdpt);
+            }
         }
 
-        free_page_frame(pte_address(pml4e));
+        uint64_t phys_pml4e = pte_address(pml4e);
+    if (page_frame_can_free(phys_pml4e)) {
+            free_page_frame(phys_pml4e);
+        }
         pml4->entries[pml4_idx] = 0;
     }
 }

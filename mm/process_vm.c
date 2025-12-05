@@ -162,7 +162,7 @@ static void unmap_user_range(process_page_dir_t *page_dir, uint64_t start_addr, 
 
     for (uint64_t addr = start_addr; addr < end_addr; addr += PAGE_SIZE_4KB) {
         uint64_t phys = virt_to_phys_in_dir(page_dir, addr);
-        if (phys) {
+        if (phys && page_frame_can_free(phys)) {
             unmap_page_in_dir(page_dir, addr);
             free_page_frame(phys);
         }
