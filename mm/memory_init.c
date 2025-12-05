@@ -13,6 +13,7 @@
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 #include "../third_party/limine/limine.h"
+#include "memory_layout.h"
 #include "memory_reservations.h"
 #include "page_alloc.h"
 #include "phys_virt.h"
@@ -58,6 +59,52 @@ typedef struct memory_init_state {
 
 static memory_init_state_t init_state = {0};
 static allocator_buffer_plan_t allocator_buffers = {0};
+static uint32_t usable_overlap_skips = 0;
+
+/* ========================================================================
+ * KERNEL CORE RESERVATIONS
+ * ======================================================================== */
+
+static void record_kernel_core_reservations(void) {
+    const kernel_memory_layout_t *layout = get_kernel_memory_layout();
+
+    if (!layout) {
+        boot_log_info("MM: kernel layout unavailable; cannot reserve kernel image");
+        return;
+    }
+
+    uint64_t kernel_phys = layout->kernel_start_phys;
+    uint64_t kernel_size = (layout->kernel_end_phys > layout->kernel_start_phys) ?
+        (layout->kernel_end_phys - layout->kernel_start_phys) : 0;
+
+    if (kernel_size > 0) {
+        mm_reservations_add(kernel_phys, kernel_size,
+                            MM_RESERVATION_FIRMWARE_OTHER,
+                            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                            MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+                            "Kernel image");
+    }
+
+    mm_reservations_add(BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE,
+                        MM_RESERVATION_FIRMWARE_OTHER,
+                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                        "Boot stack");
+
+    mm_reservations_add(EARLY_PML4_PHYS_ADDR, PAGE_SIZE_4KB,
+                        MM_RESERVATION_FIRMWARE_OTHER,
+                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                        "Early PML4");
+
+    mm_reservations_add(EARLY_PDPT_PHYS_ADDR, PAGE_SIZE_4KB,
+                        MM_RESERVATION_FIRMWARE_OTHER,
+                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                        "Early PDPT");
+
+    mm_reservations_add(EARLY_PD_PHYS_ADDR, PAGE_SIZE_4KB,
+                        MM_RESERVATION_FIRMWARE_OTHER,
+                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                        "Early PD");
+}
 
 /* ========================================================================
  * DEVICE MEMORY RESERVATIONS
@@ -219,6 +266,7 @@ static void initialize_reserved_regions(const struct limine_memmap_response *mem
     mm_reservations_reset();
 
     record_allocator_metadata_reservation();
+    record_kernel_core_reservations();
     record_memmap_reservations(memmap);
     record_framebuffer_reservation();
     record_apic_reservation();
@@ -246,6 +294,19 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
     }
 
     uint64_t aligned_size = aligned_end - aligned_start;
+
+    if (mm_is_range_reserved(aligned_start, aligned_size)) {
+        usable_overlap_skips++;
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("MM: Skipping usable subrange overlapping reservation: 0x");
+            kprint_hex(aligned_start);
+            kprint(" - 0x");
+            kprint_hex(aligned_end - 1);
+            kprint("\n");
+        });
+        return;
+    }
+
     init_state.available_memory_bytes += aligned_size;
 
     if (add_page_alloc_region(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
@@ -524,6 +585,16 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
         });
     }
 
+    if (usable_overlap_skips == 0) {
+        boot_log_debug("MM: Reserved overlap check passed (no usable subranges skipped)");
+    } else {
+        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            kprint("MM: Reserved overlap guard skipped ");
+            kprint_decimal(usable_overlap_skips);
+            kprint(" subrange(s)\n");
+        });
+    }
+
     boot_log_info("MM: Memory discovery completed successfully");
     return 0;
 }
@@ -560,10 +631,6 @@ static int initialize_physical_allocators(void) {
  */
 static int initialize_virtual_memory(void) {
     boot_log_debug("MM: Initializing virtual memory management...");
-
-    /* Initialize kernel memory layout constants */
-    init_kernel_memory_layout();
-    init_state.memory_layout_done = 1;
 
     /* Initialize full paging system */
     init_paging();
@@ -696,14 +763,19 @@ int init_memory_system(const struct limine_memmap_response *memmap,
         kprint("\n");
     });
 
+    usable_overlap_skips = 0;
+
+    /* Establish kernel layout before any reservations or helpers */
+    init_kernel_memory_layout();
+    init_state.memory_layout_done = 1;
+    mm_init_phys_virt_helpers();
+
     if (prepare_allocator_buffers(memmap, hhdm_offset) != 0) {
         kernel_panic("MM: Failed to size allocator metadata buffers");
         return -1;
     }
 
     initialize_reserved_regions(memmap);
-
-    mm_init_phys_virt_helpers();
 
     /* Phase 1: Early paging for basic memory access */
     if (initialize_early_memory() != 0) {
