@@ -29,6 +29,8 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
                         mm_reservation_type_t type, uint32_t flags,
                         const char *label);
 uint32_t mm_reservations_count(void);
+uint32_t mm_reservations_capacity(void);
+uint32_t mm_reservations_overflow_count(void);
 const mm_reserved_region_t *mm_reservations_get(uint32_t index);
 const mm_reserved_region_t *mm_reservations_find(uint64_t phys_addr);
 int mm_is_reserved(uint64_t phys_addr);

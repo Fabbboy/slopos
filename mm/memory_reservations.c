@@ -7,10 +7,17 @@
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 
-#define MM_MAX_RESERVED_REGIONS 32
+/*
+ * Reservation storage:
+ * - Backed by a static pool large enough for typical ACPI + firmware layouts.
+ * - We track overflows explicitly so callers can fail hard instead of silently
+ *   dropping regions.
+ */
+#define MM_MAX_RESERVED_REGIONS 256
 
 static mm_reserved_region_t reserved_regions[MM_MAX_RESERVED_REGIONS];
 static uint32_t reserved_region_count = 0;
+static uint32_t reservation_overflows = 0;
 
 static void clear_region(mm_reserved_region_t *region) {
     region->phys_base = 0;
@@ -40,13 +47,22 @@ void mm_reservations_reset(void) {
         clear_region(&reserved_regions[i]);
     }
     reserved_region_count = 0;
+    reservation_overflows = 0;
 }
 
 int mm_reservations_add(uint64_t phys_base, uint64_t length,
                         mm_reservation_type_t type, uint32_t flags,
                         const char *label) {
-    if (length == 0 || reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
-        klog_info("MM: WARNING - Failed to track reserved region (capacity or length)");
+    if (length == 0) {
+        klog_info("MM: WARNING - Failed to track reserved region (zero length)");
+        return -1;
+    }
+
+    if (reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
+        reservation_overflows++;
+        klog_printf(KLOG_INFO,
+                    "MM: WARNING - Reserved region capacity exceeded (%u)",
+                    MM_MAX_RESERVED_REGIONS);
         return -1;
     }
 
@@ -127,6 +143,14 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
 
 uint32_t mm_reservations_count(void) {
     return reserved_region_count;
+}
+
+uint32_t mm_reservations_capacity(void) {
+    return MM_MAX_RESERVED_REGIONS;
+}
+
+uint32_t mm_reservations_overflow_count(void) {
+    return reservation_overflows;
 }
 
 const mm_reserved_region_t *mm_reservations_get(uint32_t index) {

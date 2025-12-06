@@ -58,6 +58,15 @@ static memory_init_state_t init_state = {0};
 static allocator_buffer_plan_t allocator_buffers = {0};
 static uint32_t usable_overlap_skips = 0;
 
+static void add_reservation_or_panic(uint64_t base, uint64_t length,
+                                     mm_reservation_type_t type,
+                                     uint32_t flags,
+                                     const char *label) {
+    if (mm_reservations_add(base, length, type, flags, label) != 0) {
+        kernel_panic("MM: Failed to record reserved region");
+    }
+}
+
 /* ========================================================================
  * KERNEL CORE RESERVATIONS
  * ======================================================================== */
@@ -75,32 +84,32 @@ static void record_kernel_core_reservations(void) {
         (layout->kernel_end_phys - layout->kernel_start_phys) : 0;
 
     if (kernel_size > 0) {
-        mm_reservations_add(kernel_phys, kernel_size,
-                            MM_RESERVATION_FIRMWARE_OTHER,
-                            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
-                            MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-                            "Kernel image");
+        add_reservation_or_panic(kernel_phys, kernel_size,
+                                 MM_RESERVATION_FIRMWARE_OTHER,
+                                 MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                                 MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+                                 "Kernel image");
     }
 
-    mm_reservations_add(BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE,
-                        MM_RESERVATION_FIRMWARE_OTHER,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                        "Boot stack");
+    add_reservation_or_panic(BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE,
+                             MM_RESERVATION_FIRMWARE_OTHER,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                             "Boot stack");
 
-    mm_reservations_add(EARLY_PML4_PHYS_ADDR, PAGE_SIZE_4KB,
-                        MM_RESERVATION_FIRMWARE_OTHER,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                        "Early PML4");
+    add_reservation_or_panic(EARLY_PML4_PHYS_ADDR, PAGE_SIZE_4KB,
+                             MM_RESERVATION_FIRMWARE_OTHER,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                             "Early PML4");
 
-    mm_reservations_add(EARLY_PDPT_PHYS_ADDR, PAGE_SIZE_4KB,
-                        MM_RESERVATION_FIRMWARE_OTHER,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                        "Early PDPT");
+    add_reservation_or_panic(EARLY_PDPT_PHYS_ADDR, PAGE_SIZE_4KB,
+                             MM_RESERVATION_FIRMWARE_OTHER,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                             "Early PDPT");
 
-    mm_reservations_add(EARLY_PD_PHYS_ADDR, PAGE_SIZE_4KB,
-                        MM_RESERVATION_FIRMWARE_OTHER,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                        "Early PD");
+    add_reservation_or_panic(EARLY_PD_PHYS_ADDR, PAGE_SIZE_4KB,
+                             MM_RESERVATION_FIRMWARE_OTHER,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                             "Early PD");
 }
 
 /* ========================================================================
@@ -112,11 +121,11 @@ static void record_allocator_metadata_reservation(void) {
         return;
     }
 
-    mm_reservations_add(allocator_buffers.reserved_phys_base,
-                        allocator_buffers.reserved_phys_size,
-                        MM_RESERVATION_ALLOCATOR_METADATA,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                        "Allocator metadata");
+    add_reservation_or_panic(allocator_buffers.reserved_phys_base,
+                             allocator_buffers.reserved_phys_size,
+                             MM_RESERVATION_ALLOCATOR_METADATA,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                             "Allocator metadata");
 }
 
 static void record_memmap_reservations(const struct limine_memmap_response *memmap) {
@@ -132,24 +141,24 @@ static void record_memmap_reservations(const struct limine_memmap_response *memm
 
         switch (entry->type) {
             case LIMINE_MEMMAP_ACPI_RECLAIMABLE:
-                mm_reservations_add(entry->base, entry->length,
-                                    MM_RESERVATION_ACPI_RECLAIMABLE,
-                                    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                                    "ACPI reclaimable");
+                add_reservation_or_panic(entry->base, entry->length,
+                                         MM_RESERVATION_ACPI_RECLAIMABLE,
+                                         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                                         "ACPI reclaimable");
                 break;
             case LIMINE_MEMMAP_ACPI_NVS:
-                mm_reservations_add(entry->base, entry->length,
-                                    MM_RESERVATION_ACPI_NVS,
-                                    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                                    "ACPI NVS");
+                add_reservation_or_panic(entry->base, entry->length,
+                                         MM_RESERVATION_ACPI_NVS,
+                                         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+                                         "ACPI NVS");
                 break;
             case LIMINE_MEMMAP_FRAMEBUFFER:
-                mm_reservations_add(entry->base, entry->length,
-                                    MM_RESERVATION_FRAMEBUFFER,
-                                    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
-                                    MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
-                                    MM_RESERVATION_FLAG_MMIO,
-                                    "Framebuffer");
+                add_reservation_or_panic(entry->base, entry->length,
+                                         MM_RESERVATION_FRAMEBUFFER,
+                                         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                                         MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
+                                         MM_RESERVATION_FLAG_MMIO,
+                                         "Framebuffer");
                 break;
             default:
                 break;
@@ -185,12 +194,12 @@ static void record_framebuffer_reservation(void) {
         return;
     }
 
-    mm_reservations_add(phys_base, length,
-                        MM_RESERVATION_FRAMEBUFFER,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
-                        MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
-                        MM_RESERVATION_FLAG_MMIO,
-                        "Framebuffer");
+    add_reservation_or_panic(phys_base, length,
+                             MM_RESERVATION_FRAMEBUFFER,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                             MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
+                             MM_RESERVATION_FLAG_MMIO,
+                             "Framebuffer");
 }
 
 static void record_apic_reservation(void) {
@@ -211,11 +220,11 @@ static void record_apic_reservation(void) {
         return;
     }
 
-    mm_reservations_add(apic_phys, 0x1000,
-                        MM_RESERVATION_APIC,
-                        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
-                        MM_RESERVATION_FLAG_MMIO,
-                        "Local APIC");
+    add_reservation_or_panic(apic_phys, 0x1000,
+                             MM_RESERVATION_APIC,
+                             MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                             MM_RESERVATION_FLAG_MMIO,
+                             "Local APIC");
 }
 
 static void log_reserved_regions(void) {
@@ -248,6 +257,11 @@ static void log_reserved_regions(void) {
         klog_printf(KLOG_INFO, "  Total reserved:      %u KB\n",
                     (uint32_t)(total_bytes / 1024));
     }
+    if (mm_reservations_overflow_count() > 0) {
+        klog_printf(KLOG_INFO, "  Reservation drops:   %u (capacity %u)\n",
+                    mm_reservations_overflow_count(),
+                    mm_reservations_capacity());
+    }
 }
 
 static void finalize_reserved_regions(void) {
@@ -255,6 +269,10 @@ static void finalize_reserved_regions(void) {
     init_state.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
     log_reserved_regions();
+
+    if (mm_reservations_overflow_count() > 0) {
+        kernel_panic("MM: Reserved region capacity exceeded");
+    }
 }
 
 /* ========================================================================
@@ -375,8 +393,8 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     klog_debug("MM: Planning allocator metadata buffers...");
 
-    uint64_t highest_phys_addr = 0;
     const struct limine_memmap_entry *largest_usable = NULL;
+    uint64_t total_usable_bytes = 0;
 
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         const struct limine_memmap_entry *entry = memmap->entries[i];
@@ -384,30 +402,21 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
             continue;
         }
 
-        uint64_t entry_end = entry->base + entry->length;
-        if (entry_end > highest_phys_addr) {
-            highest_phys_addr = entry_end;
-        }
-
         if (entry->type == LIMINE_MEMMAP_USABLE) {
+            total_usable_bytes += entry->length;
             if (!largest_usable || entry->length > largest_usable->length) {
                 largest_usable = entry;
             }
         }
     }
 
-    if (!largest_usable) {
+    if (!largest_usable || total_usable_bytes == 0) {
         klog_info("MM: ERROR - No usable memory regions available for allocator metadata");
         return -1;
     }
 
-    if (highest_phys_addr == 0) {
-        klog_info("MM: ERROR - Limine reported zero physical memory");
-        return -1;
-    }
-
-    uint64_t aligned_highest_phys = align_up_u64(highest_phys_addr, PAGE_SIZE_4KB);
-    uint64_t required_frames_64 = aligned_highest_phys / PAGE_SIZE_4KB;
+    /* Size descriptor array from total usable RAM instead of highest phys addr. */
+    uint64_t required_frames_64 = total_usable_bytes / PAGE_SIZE_4KB;
     if (required_frames_64 == 0) {
         required_frames_64 = 1;
     }
