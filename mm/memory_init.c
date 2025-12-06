@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 #include "mm_constants.h"
 #include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
@@ -362,6 +363,82 @@ static void register_usable_region(uint64_t base, uint64_t length) {
 }
 
 /* ========================================================================
+ * ALLOCATOR COVERAGE CALCULATION
+ * ======================================================================== */
+
+static uint64_t highest_usable_frame_index(const struct limine_memmap_response *memmap) {
+    if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
+        return 0;
+    }
+
+    uint64_t highest_frame = 0;
+    uint32_t res_count = mm_reservations_count();
+
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        const struct limine_memmap_entry *entry = memmap->entries[i];
+        if (!entry || entry->length == 0 || entry->type != LIMINE_MEMMAP_USABLE) {
+            continue;
+        }
+
+        uint64_t entry_end = entry->base + entry->length;
+        if (entry_end <= entry->base) {
+            continue;
+        }
+
+        uint64_t aligned_start = align_up_u64(entry->base, PAGE_SIZE_4KB);
+        uint64_t aligned_end = align_down_u64(entry_end, PAGE_SIZE_4KB);
+        if (aligned_end <= aligned_start) {
+            continue;
+        }
+
+        uint64_t cursor = aligned_start;
+        for (uint32_t r = 0; r < res_count; r++) {
+            const mm_reserved_region_t *res = mm_reservations_get(r);
+            if (!res || res->length == 0) {
+                continue;
+            }
+            if ((res->flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS) == 0) {
+                continue;
+            }
+
+            uint64_t res_end = res->phys_base + res->length;
+            if (res_end <= res->phys_base) {
+                continue;
+            }
+
+            if (res->phys_base >= aligned_end) {
+                break;
+            }
+
+            if (res_end <= cursor) {
+                continue;
+            }
+
+            if (res->phys_base > cursor) {
+                uint64_t frame = (res->phys_base - 1) >> 12;
+                if (frame > highest_frame) {
+                    highest_frame = frame;
+                }
+            }
+
+            cursor = res_end;
+            if (cursor >= aligned_end) {
+                break;
+            }
+        }
+
+        if (cursor < aligned_end) {
+            uint64_t frame = (aligned_end - 1) >> 12;
+            if (frame > highest_frame) {
+                highest_frame = frame;
+            }
+        }
+    }
+
+    return highest_frame;
+}
+
+/* ========================================================================
  * ALLOCATOR BUFFER PREPARATION
  * ======================================================================== */
 
@@ -393,41 +470,14 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     klog_debug("MM: Planning allocator metadata buffers...");
 
-    const struct limine_memmap_entry *largest_usable = NULL;
-    uint64_t total_usable_bytes = 0;
-
-    for (uint64_t i = 0; i < memmap->entry_count; i++) {
-        const struct limine_memmap_entry *entry = memmap->entries[i];
-        if (!entry || entry->length == 0) {
-            continue;
-        }
-
-        if (entry->type == LIMINE_MEMMAP_USABLE) {
-            total_usable_bytes += entry->length;
-            if (!largest_usable || entry->length > largest_usable->length) {
-                largest_usable = entry;
-            }
-        }
-    }
-
-    if (!largest_usable || total_usable_bytes == 0) {
-        klog_info("MM: ERROR - No usable memory regions available for allocator metadata");
+    uint64_t highest_frame = highest_usable_frame_index(memmap);
+    uint64_t required_frames_64 = highest_frame + 1;
+    if (required_frames_64 == 0 || required_frames_64 > UINT32_MAX) {
+        klog_info("MM: ERROR - Required frame count exceeds supported range");
         return -1;
     }
 
-    /* Size descriptor array from total usable RAM instead of highest phys addr. */
-    uint64_t required_frames_64 = total_usable_bytes / PAGE_SIZE_4KB;
-    if (required_frames_64 == 0) {
-        required_frames_64 = 1;
-    }
-
     uint32_t required_frames = clamp_required_frames(required_frames_64);
-
-    uint64_t max_fit_frames = largest_usable->length / PAGE_SIZE_4KB;
-    if (required_frames > max_fit_frames) {
-        klog_printf(KLOG_DEBUG, "MM: WARNING - Reducing tracked frames to fit largest usable region\n");
-        required_frames = (uint32_t)max_fit_frames;
-    }
 
     size_t page_desc_size = page_allocator_descriptor_size();
 
@@ -441,15 +491,6 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     const size_t descriptor_alignment = 64;
     size_t page_bytes_aligned = (size_t)align_up_u64(page_bytes_u64, descriptor_alignment);
     uint64_t reserved_bytes = align_up_u64((uint64_t)page_bytes_aligned, PAGE_SIZE_4KB);
-
-    uint64_t usable_start = largest_usable->base;
-    uint64_t usable_end = largest_usable->base + largest_usable->length;
-    uint64_t usable_end_aligned = align_down_u64(usable_end, PAGE_SIZE_4KB);
-
-    if (usable_end_aligned <= usable_start || reserved_bytes > (usable_end_aligned - usable_start)) {
-        klog_info("MM: ERROR - Largest usable region too small for allocator metadata");
-        return -1;
-    }
 
     uint64_t reserve_phys_base = 0;
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
@@ -593,6 +634,32 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
 
     klog_info("MM: Memory discovery completed successfully");
     return 0;
+}
+
+static void validate_allocator_coverage(const struct limine_memmap_response *memmap) {
+    if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
+        kernel_panic("MM: Missing memmap for allocator coverage validation");
+    }
+
+    if (init_state.tracked_page_frames == 0) {
+        kernel_panic("MM: Allocator coverage validation missing tracked frames");
+    }
+
+    uint64_t highest_frame = highest_usable_frame_index(memmap);
+    uint64_t needed_frames = highest_frame + 1;
+
+    if (needed_frames > init_state.tracked_page_frames) {
+        klog_printf(KLOG_INFO,
+                    "MM: Allocator coverage insufficient (need %llu frames, tracking %u)\n",
+                    (unsigned long long)needed_frames,
+                    init_state.tracked_page_frames);
+        kernel_panic("MM: Frame descriptor coverage truncated usable memory");
+    }
+
+    klog_printf(KLOG_DEBUG,
+                "MM: Allocator coverage verified (tracked %u frames, highest frame %llu)\n",
+                init_state.tracked_page_frames,
+                (unsigned long long)highest_frame);
 }
 
 /**
@@ -766,6 +833,8 @@ int init_memory_system(const struct limine_memmap_response *memmap,
     if (initialize_memory_discovery(memmap, hhdm_offset) != 0) {
         return -1;
     }
+
+    validate_allocator_coverage(memmap);
 
     /* Phase 4: Set up virtual memory management */
     if (initialize_virtual_memory() != 0) {

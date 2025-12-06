@@ -376,6 +376,20 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
     uint32_t start_frame = phys_to_frame(aligned_start);
     uint32_t num_frames = (uint32_t)(aligned_size >> 12);
 
+    if (!page_allocator.frames || page_allocator.total_frames == 0) {
+        klog_info("add_page_alloc_region: Page allocator not initialized");
+        return -1;
+    }
+
+    uint64_t last_frame = (uint64_t)start_frame + (uint64_t)num_frames;
+    if (start_frame >= page_allocator.total_frames || last_frame > page_allocator.total_frames) {
+        klog_printf(KLOG_INFO,
+                    "add_page_alloc_region: Region exceeds descriptor coverage (frame %u of %u)\n",
+                    (start_frame >= page_allocator.total_frames) ? start_frame : (uint32_t)(last_frame - 1),
+                    page_allocator.total_frames);
+        return -1;
+    }
+
     phys_region_t *region = &page_allocator.regions[page_allocator.num_regions];
     region->start_addr = aligned_start;
     region->size = aligned_size;
