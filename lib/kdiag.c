@@ -9,6 +9,7 @@
 #include "../boot/idt.h"
 #include "../lib/cpu.h"
 #include "../lib/stacktrace.h"
+#include "klog.h"
 
 uint64_t kdiag_timestamp(void) {
     static uint64_t monotonic_time = 0;
@@ -34,7 +35,7 @@ uint64_t kdiag_timestamp(void) {
 }
 
 void kdiag_dump_cpu_state(void) {
-    kprintln("=== CPU STATE DUMP ===");
+    klog(KLOG_INFO, "=== CPU STATE DUMP ===");
 
     uint64_t rsp, rbp, rax, rbx, rcx, rdx, rsi, rdi;
     uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
@@ -72,62 +73,62 @@ void kdiag_dump_cpu_state(void) {
     __asm__ volatile ("movq %%cr3, %0" : "=r" (cr3));
     __asm__ volatile ("movq %%cr4, %0" : "=r" (cr4));
 
-    kprintln("General Purpose Registers:");
-    kprint("  RAX: "); kprint_hex(rax);
-    kprint("  RBX: "); kprint_hex(rbx);
-    kprint("  RCX: "); kprint_hex(rcx);
-    kprint("  RDX: "); kprint_hex(rdx);
-    kprintln("");
+    klog(KLOG_INFO, "General Purpose Registers:");
+    klog_raw(KLOG_INFO, "  RAX: "); klog_hex(KLOG_INFO, rax);
+    klog_raw(KLOG_INFO, "  RBX: "); klog_hex(KLOG_INFO, rbx);
+    klog_raw(KLOG_INFO, "  RCX: "); klog_hex(KLOG_INFO, rcx);
+    klog_raw(KLOG_INFO, "  RDX: "); klog_hex(KLOG_INFO, rdx);
+    klog(KLOG_INFO, "");
 
-    kprint("  RSI: "); kprint_hex(rsi);
-    kprint("  RDI: "); kprint_hex(rdi);
-    kprint("  RBP: "); kprint_hex(rbp);
-    kprint("  RSP: "); kprint_hex(rsp);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  RSI: "); klog_hex(KLOG_INFO, rsi);
+    klog_raw(KLOG_INFO, "  RDI: "); klog_hex(KLOG_INFO, rdi);
+    klog_raw(KLOG_INFO, "  RBP: "); klog_hex(KLOG_INFO, rbp);
+    klog_raw(KLOG_INFO, "  RSP: "); klog_hex(KLOG_INFO, rsp);
+    klog(KLOG_INFO, "");
 
-    kprint("  R8:  "); kprint_hex(r8);
-    kprint("  R9:  "); kprint_hex(r9);
-    kprint("  R10: "); kprint_hex(r10);
-    kprint("  R11: "); kprint_hex(r11);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  R8:  "); klog_hex(KLOG_INFO, r8);
+    klog_raw(KLOG_INFO, "  R9:  "); klog_hex(KLOG_INFO, r9);
+    klog_raw(KLOG_INFO, "  R10: "); klog_hex(KLOG_INFO, r10);
+    klog_raw(KLOG_INFO, "  R11: "); klog_hex(KLOG_INFO, r11);
+    klog(KLOG_INFO, "");
 
-    kprint("  R12: "); kprint_hex(r12);
-    kprint("  R13: "); kprint_hex(r13);
-    kprint("  R14: "); kprint_hex(r14);
-    kprint("  R15: "); kprint_hex(r15);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  R12: "); klog_hex(KLOG_INFO, r12);
+    klog_raw(KLOG_INFO, "  R13: "); klog_hex(KLOG_INFO, r13);
+    klog_raw(KLOG_INFO, "  R14: "); klog_hex(KLOG_INFO, r14);
+    klog_raw(KLOG_INFO, "  R15: "); klog_hex(KLOG_INFO, r15);
+    klog(KLOG_INFO, "");
 
-    kprintln("Flags Register:");
-    kprint("  RFLAGS: "); kprint_hex(rflags); kprint(" [");
-    if (rflags & (1 << 0)) kprint("CF ");
-    if (rflags & (1 << 2)) kprint("PF ");
-    if (rflags & (1 << 4)) kprint("AF ");
-    if (rflags & (1 << 6)) kprint("ZF ");
-    if (rflags & (1 << 7)) kprint("SF ");
-    if (rflags & (1 << 8)) kprint("TF ");
-    if (rflags & (1 << 9)) kprint("IF ");
-    if (rflags & (1 << 10)) kprint("DF ");
-    if (rflags & (1 << 11)) kprint("OF ");
-    kprintln("]");
+    klog(KLOG_INFO, "Flags Register:");
+    klog_raw(KLOG_INFO, "  RFLAGS: "); klog_hex(KLOG_INFO, rflags); klog_raw(KLOG_INFO, " [");
+    if (rflags & (1 << 0)) klog_raw(KLOG_INFO, "CF ");
+    if (rflags & (1 << 2)) klog_raw(KLOG_INFO, "PF ");
+    if (rflags & (1 << 4)) klog_raw(KLOG_INFO, "AF ");
+    if (rflags & (1 << 6)) klog_raw(KLOG_INFO, "ZF ");
+    if (rflags & (1 << 7)) klog_raw(KLOG_INFO, "SF ");
+    if (rflags & (1 << 8)) klog_raw(KLOG_INFO, "TF ");
+    if (rflags & (1 << 9)) klog_raw(KLOG_INFO, "IF ");
+    if (rflags & (1 << 10)) klog_raw(KLOG_INFO, "DF ");
+    if (rflags & (1 << 11)) klog_raw(KLOG_INFO, "OF ");
+    klog(KLOG_INFO, "]");
 
-    kprintln("Segment Registers:");
-    kprint("  CS: "); kprint_hex(cs);
-    kprint("  DS: "); kprint_hex(ds);
-    kprint("  ES: "); kprint_hex(es);
-    kprint("  FS: "); kprint_hex(fs);
-    kprint("  GS: "); kprint_hex(gs);
-    kprint("  SS: "); kprint_hex(ss);
-    kprintln("");
+    klog(KLOG_INFO, "Segment Registers:");
+    klog_raw(KLOG_INFO, "  CS: "); klog_hex(KLOG_INFO, cs);
+    klog_raw(KLOG_INFO, "  DS: "); klog_hex(KLOG_INFO, ds);
+    klog_raw(KLOG_INFO, "  ES: "); klog_hex(KLOG_INFO, es);
+    klog_raw(KLOG_INFO, "  FS: "); klog_hex(KLOG_INFO, fs);
+    klog_raw(KLOG_INFO, "  GS: "); klog_hex(KLOG_INFO, gs);
+    klog_raw(KLOG_INFO, "  SS: "); klog_hex(KLOG_INFO, ss);
+    klog(KLOG_INFO, "");
 
-    kprintln("Control Registers:");
-    kprint("  CR0: "); kprint_hex(cr0);
-    kprint("  CR2: "); kprint_hex(cr2);
-    kprintln("");
-    kprint("  CR3: "); kprint_hex(cr3);
-    kprint("  CR4: "); kprint_hex(cr4);
-    kprintln("");
+    klog(KLOG_INFO, "Control Registers:");
+    klog_raw(KLOG_INFO, "  CR0: "); klog_hex(KLOG_INFO, cr0);
+    klog_raw(KLOG_INFO, "  CR2: "); klog_hex(KLOG_INFO, cr2);
+    klog(KLOG_INFO, "");
+    klog_raw(KLOG_INFO, "  CR3: "); klog_hex(KLOG_INFO, cr3);
+    klog_raw(KLOG_INFO, "  CR4: "); klog_hex(KLOG_INFO, cr4);
+    klog(KLOG_INFO, "");
 
-    kprintln("=== END CPU STATE DUMP ===");
+    klog(KLOG_INFO, "=== END CPU STATE DUMP ===");
 }
 
 void kdiag_dump_interrupt_frame(struct interrupt_frame *frame) {
@@ -135,55 +136,55 @@ void kdiag_dump_interrupt_frame(struct interrupt_frame *frame) {
         return;
     }
 
-    kprintln("=== INTERRUPT FRAME DUMP ===");
+    klog(KLOG_INFO, "=== INTERRUPT FRAME DUMP ===");
 
-    kprint("Vector: "); kprint_decimal(frame->vector);
-    kprint(" ("); kprint(get_exception_name((uint8_t)frame->vector)); kprint(")");
-    kprint(" Error Code: "); kprint_hex(frame->error_code);
-    kprintln("");
+    klog_raw(KLOG_INFO, "Vector: "); klog_decimal(KLOG_INFO, frame->vector);
+    klog_raw(KLOG_INFO, " ("); klog_raw(KLOG_INFO, get_exception_name((uint8_t)frame->vector)); klog_raw(KLOG_INFO, ")");
+    klog_raw(KLOG_INFO, " Error Code: "); klog_hex(KLOG_INFO, frame->error_code);
+    klog(KLOG_INFO, "");
 
-    kprint("RIP: "); kprint_hex(frame->rip);
-    kprint(" CS: "); kprint_hex(frame->cs);
-    kprint(" RFLAGS: "); kprint_hex(frame->rflags);
-    kprintln("");
+    klog_raw(KLOG_INFO, "RIP: "); klog_hex(KLOG_INFO, frame->rip);
+    klog_raw(KLOG_INFO, " CS: "); klog_hex(KLOG_INFO, frame->cs);
+    klog_raw(KLOG_INFO, " RFLAGS: "); klog_hex(KLOG_INFO, frame->rflags);
+    klog(KLOG_INFO, "");
 
-    kprint("RSP: "); kprint_hex(frame->rsp);
-    kprint(" SS: "); kprint_hex(frame->ss);
-    kprintln("");
+    klog_raw(KLOG_INFO, "RSP: "); klog_hex(KLOG_INFO, frame->rsp);
+    klog_raw(KLOG_INFO, " SS: "); klog_hex(KLOG_INFO, frame->ss);
+    klog(KLOG_INFO, "");
 
-    kprint("RAX: "); kprint_hex(frame->rax);
-    kprint(" RBX: "); kprint_hex(frame->rbx);
-    kprint(" RCX: "); kprint_hex(frame->rcx);
-    kprintln("");
+    klog_raw(KLOG_INFO, "RAX: "); klog_hex(KLOG_INFO, frame->rax);
+    klog_raw(KLOG_INFO, " RBX: "); klog_hex(KLOG_INFO, frame->rbx);
+    klog_raw(KLOG_INFO, " RCX: "); klog_hex(KLOG_INFO, frame->rcx);
+    klog(KLOG_INFO, "");
 
-    kprint("RDX: "); kprint_hex(frame->rdx);
-    kprint(" RSI: "); kprint_hex(frame->rsi);
-    kprint(" RDI: "); kprint_hex(frame->rdi);
-    kprintln("");
+    klog_raw(KLOG_INFO, "RDX: "); klog_hex(KLOG_INFO, frame->rdx);
+    klog_raw(KLOG_INFO, " RSI: "); klog_hex(KLOG_INFO, frame->rsi);
+    klog_raw(KLOG_INFO, " RDI: "); klog_hex(KLOG_INFO, frame->rdi);
+    klog(KLOG_INFO, "");
 
-    kprint("RBP: "); kprint_hex(frame->rbp);
-    kprint(" R8: "); kprint_hex(frame->r8);
-    kprint(" R9: "); kprint_hex(frame->r9);
-    kprintln("");
+    klog_raw(KLOG_INFO, "RBP: "); klog_hex(KLOG_INFO, frame->rbp);
+    klog_raw(KLOG_INFO, " R8: "); klog_hex(KLOG_INFO, frame->r8);
+    klog_raw(KLOG_INFO, " R9: "); klog_hex(KLOG_INFO, frame->r9);
+    klog(KLOG_INFO, "");
 
-    kprint("R10: "); kprint_hex(frame->r10);
-    kprint(" R11: "); kprint_hex(frame->r11);
-    kprint(" R12: "); kprint_hex(frame->r12);
-    kprintln("");
+    klog_raw(KLOG_INFO, "R10: "); klog_hex(KLOG_INFO, frame->r10);
+    klog_raw(KLOG_INFO, " R11: "); klog_hex(KLOG_INFO, frame->r11);
+    klog_raw(KLOG_INFO, " R12: "); klog_hex(KLOG_INFO, frame->r12);
+    klog(KLOG_INFO, "");
 
-    kprint("R13: "); kprint_hex(frame->r13);
-    kprint(" R14: "); kprint_hex(frame->r14);
-    kprint(" R15: "); kprint_hex(frame->r15);
-    kprintln("");
+    klog_raw(KLOG_INFO, "R13: "); klog_hex(KLOG_INFO, frame->r13);
+    klog_raw(KLOG_INFO, " R14: "); klog_hex(KLOG_INFO, frame->r14);
+    klog_raw(KLOG_INFO, " R15: "); klog_hex(KLOG_INFO, frame->r15);
+    klog(KLOG_INFO, "");
 
-    kprintln("=== END INTERRUPT FRAME DUMP ===");
+    klog(KLOG_INFO, "=== END INTERRUPT FRAME DUMP ===");
 }
 
 void kdiag_dump_stack_trace(void) {
     uint64_t rbp = cpu_read_rbp();
-    kprintln("=== STACK TRACE ===");
+    klog(KLOG_INFO, "=== STACK TRACE ===");
     kdiag_dump_stack_trace_from_rbp(rbp);
-    kprintln("=== END STACK TRACE ===");
+    klog(KLOG_INFO, "=== END STACK TRACE ===");
 }
 
 void kdiag_dump_stack_trace_from_rbp(uint64_t rbp) {
@@ -191,25 +192,25 @@ void kdiag_dump_stack_trace_from_rbp(uint64_t rbp) {
     int frame_count = stacktrace_capture_from(rbp, entries, KDIAG_STACK_TRACE_DEPTH);
 
     if (frame_count == 0) {
-        kprintln("No stack frames found");
+        klog(KLOG_INFO, "No stack frames found");
         return;
     }
 
     for (int i = 0; i < frame_count; i++) {
-        kprint("Frame "); kprint_decimal(i);
-        kprint(": RBP="); kprint_hex(entries[i].frame_pointer);
-        kprint(" RIP="); kprint_hex(entries[i].return_address);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Frame "); klog_decimal(KLOG_INFO, i);
+        klog_raw(KLOG_INFO, ": RBP="); klog_hex(KLOG_INFO, entries[i].frame_pointer);
+        klog_raw(KLOG_INFO, " RIP="); klog_hex(KLOG_INFO, entries[i].return_address);
+        klog(KLOG_INFO, "");
     }
 }
 
 void kdiag_dump_stack_trace_from_frame(struct interrupt_frame *frame) {
-    kprintln("=== STACK TRACE FROM EXCEPTION ===");
-    kprint("Exception occurred at RIP: "); kprint_hex(frame->rip);
-    kprintln("");
+    klog(KLOG_INFO, "=== STACK TRACE FROM EXCEPTION ===");
+    klog_raw(KLOG_INFO, "Exception occurred at RIP: "); klog_hex(KLOG_INFO, frame->rip);
+    klog(KLOG_INFO, "");
 
     kdiag_dump_stack_trace_from_rbp(frame->rbp);
-    kprintln("=== END STACK TRACE ===");
+    klog(KLOG_INFO, "=== END STACK TRACE ===");
 }
 
 void kdiag_hexdump(const void *data, size_t length, uint64_t base_address) {
@@ -217,30 +218,31 @@ void kdiag_hexdump(const void *data, size_t length, uint64_t base_address) {
     size_t i, j;
 
     for (i = 0; i < length; i += 16) {
-        kprint_hex(base_address + i);
-        kprint(": ");
+        klog_hex(KLOG_INFO, base_address + i);
+        klog_raw(KLOG_INFO, ": ");
 
         for (j = 0; j < 16 && i + j < length; j++) {
-            if (j == 8) kprint(" ");
-            kprint_hex_byte(bytes[i + j]);
-            kprint(" ");
+            if (j == 8) klog_raw(KLOG_INFO, " ");
+            klog_hex_byte(KLOG_INFO, bytes[i + j]);
+            klog_raw(KLOG_INFO, " ");
         }
 
         for (; j < 16; j++) {
-            if (j == 8) kprint(" ");
-            kprint("   ");
+            if (j == 8) klog_raw(KLOG_INFO, " ");
+            klog_raw(KLOG_INFO, "   ");
         }
 
-        kprint(" |");
+        klog_raw(KLOG_INFO, " |");
+        uint16_t port = SERIAL_COM1_PORT;
         for (j = 0; j < 16 && i + j < length; j++) {
             uint8_t c = bytes[i + j];
             if (c >= 32 && c <= 126) {
-                serial_putc(serial_get_kernel_output(), c);
+                serial_putc(port, c);
             } else {
-                serial_putc(serial_get_kernel_output(), '.');
+                serial_putc(port, '.');
             }
         }
-        kprintln("|");
+        klog(KLOG_INFO, "|");
     }
 }
 

@@ -28,6 +28,7 @@ void klog(enum klog_level level, const char *msg);      /* Prints with newline *
 void klog_raw(enum klog_level level, const char *msg);  /* Prints without newline */
 void klog_hex(enum klog_level level, uint64_t value);
 void klog_decimal(enum klog_level level, uint64_t value);
+void klog_hex_byte(enum klog_level level, uint8_t value);
 
 /* Convenience wrappers */
 static inline void klog_error(const char *msg) { klog(KLOG_ERROR, msg); }

@@ -11,6 +11,7 @@
 #include "font.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
+#include "../lib/klog.h"
 
 /* ========================================================================
  * SPLASH SCREEN IMPLEMENTATION
@@ -107,11 +108,11 @@ static int current_progress = 0;
  */
 int splash_show_boot_screen(void) {
     if (!framebuffer_is_initialized()) {
-        kprintln("SPLASH: Framebuffer not initialized");
+        klog(KLOG_INFO, "SPLASH: Framebuffer not initialized");
         return -1;
     }
 
-    kprintln("SPLASH: Displaying boot splash screen...");
+    klog(KLOG_INFO, "SPLASH: Displaying boot splash screen...");
 
     // Clear screen with splash background color
     framebuffer_clear(SPLASH_BG_COLOR);
@@ -144,7 +145,7 @@ int splash_show_boot_screen(void) {
     splash_active = 1;
     current_progress = 0;
 
-    kprintln("SPLASH: Boot splash screen initialized");
+    klog(KLOG_INFO, "SPLASH: Boot splash screen initialized");
 
     // No initial delay - let the boot process drive the timing
 
@@ -163,13 +164,13 @@ int splash_report_progress(int progress, const char *message) {
     current_progress = progress;
     if (current_progress > 100) current_progress = 100;
 
-    kprint("SPLASH: Progress ");
-    kprint_decimal(current_progress);
-    kprint("% - ");
+    klog_raw(KLOG_INFO, "SPLASH: Progress ");
+    klog_decimal(KLOG_INFO, current_progress);
+    klog_raw(KLOG_INFO, "% - ");
     if (message) {
-        kprintln(message);
+        klog(KLOG_INFO, message);
     } else {
-        kprintln("...");
+        klog(KLOG_INFO, "...");
     }
 
     // Update the visual progress bar and message
@@ -245,7 +246,7 @@ int splash_finish(void) {
         pit_poll_delay_ms(250);
 
         splash_active = 0;
-        kprintln("SPLASH: Boot splash screen complete");
+        klog(KLOG_INFO, "SPLASH: Boot splash screen complete");
 
         // Draw the graphics demo screen
         splash_draw_graphics_demo();

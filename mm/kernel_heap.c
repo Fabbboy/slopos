@@ -160,7 +160,7 @@ static uint32_t round_up_size(uint32_t size) {
  */
 static void add_to_free_list(heap_block_t *block) {
     if (!validate_block(block)) {
-        kprint("add_to_free_list: Invalid block\n");
+        klog_raw(KLOG_INFO, "add_to_free_list: Invalid block\n");
         return;
     }
 
@@ -191,7 +191,7 @@ static void add_to_free_list(heap_block_t *block) {
  */
 static void remove_from_free_list(heap_block_t *block) {
     if (!validate_block(block)) {
-        kprint("remove_from_free_list: Invalid block\n");
+        klog_raw(KLOG_INFO, "remove_from_free_list: Invalid block\n");
         return;
     }
 
@@ -326,9 +326,9 @@ static int expand_heap(uint32_t min_size) {
     }
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Expanding heap by ");
-        kprint_decimal(pages_needed);
-        kprint(" pages\n");
+        klog_raw(KLOG_INFO, "Expanding heap by ");
+        klog_decimal(KLOG_INFO, pages_needed);
+        klog_raw(KLOG_INFO, " pages\n");
     });
 
     uint64_t expansion_start = kernel_heap.current_break;
@@ -405,7 +405,7 @@ rollback:
  */
 void *kmalloc(size_t size) {
     if (!kernel_heap.initialized) {
-        kprint("kmalloc: Heap not initialized\n");
+        klog_raw(KLOG_INFO, "kmalloc: Heap not initialized\n");
         take_l();
         return NULL;
     }
@@ -432,7 +432,7 @@ void *kmalloc(size_t size) {
     }
 
     if (!block) {
-        kprint("kmalloc: No suitable block found after expansion\n");
+        klog_raw(KLOG_INFO, "kmalloc: No suitable block found after expansion\n");
         take_l();
         return NULL;
     }
@@ -597,7 +597,7 @@ void kfree(void *ptr) {
     heap_block_t *block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
 
     if (!validate_block(block) || block->magic != BLOCK_MAGIC_ALLOCATED) {
-        kprint("kfree: Invalid block or double free detected\n");
+        klog_raw(KLOG_INFO, "kfree: Invalid block or double free detected\n");
         take_l();
         return;
     }
@@ -653,9 +653,9 @@ int init_kernel_heap(void) {
     kernel_heap.initialized = 1;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Kernel heap initialized at ");
-        kprint_hex(kernel_heap.start_addr);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Kernel heap initialized at ");
+        klog_hex(KLOG_INFO, kernel_heap.start_addr);
+        klog_raw(KLOG_INFO, "\n");
     });
 
     return 0;
@@ -678,28 +678,28 @@ void kernel_heap_enable_diagnostics(int enable) {
  * Print heap statistics for debugging
  */
 void print_heap_stats(void) {
-    kprint("=== Kernel Heap Statistics ===\n");
-    kprint("Total size: ");
-    kprint_decimal(kernel_heap.stats.total_size);
-    kprint(" bytes\n");
-    kprint("Allocated: ");
-    kprint_decimal(kernel_heap.stats.allocated_size);
-    kprint(" bytes\n");
-    kprint("Free: ");
-    kprint_decimal(kernel_heap.stats.free_size);
-    kprint(" bytes\n");
-    kprint("Allocations: ");
-    kprint_decimal(kernel_heap.stats.allocation_count);
-    kprint("\n");
-    kprint("Frees: ");
-    kprint_decimal(kernel_heap.stats.free_count);
-    kprint("\n");
+    klog_raw(KLOG_INFO, "=== Kernel Heap Statistics ===\n");
+    klog_raw(KLOG_INFO, "Total size: ");
+    klog_decimal(KLOG_INFO, kernel_heap.stats.total_size);
+    klog_raw(KLOG_INFO, " bytes\n");
+    klog_raw(KLOG_INFO, "Allocated: ");
+    klog_decimal(KLOG_INFO, kernel_heap.stats.allocated_size);
+    klog_raw(KLOG_INFO, " bytes\n");
+    klog_raw(KLOG_INFO, "Free: ");
+    klog_decimal(KLOG_INFO, kernel_heap.stats.free_size);
+    klog_raw(KLOG_INFO, " bytes\n");
+    klog_raw(KLOG_INFO, "Allocations: ");
+    klog_decimal(KLOG_INFO, kernel_heap.stats.allocation_count);
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Frees: ");
+    klog_decimal(KLOG_INFO, kernel_heap.stats.free_count);
+    klog_raw(KLOG_INFO, "\n");
 
     if (!heap_diagnostics_enabled) {
         return;
     }
 
-    kprint("Free blocks by class:\n");
+    klog_raw(KLOG_INFO, "Free blocks by class:\n");
 
     uint64_t total_free_blocks = 0;
     uint64_t largest_free_block = 0;
@@ -721,35 +721,35 @@ void print_heap_stats(void) {
             continue;
         }
 
-        kprint("  ");
+        klog_raw(KLOG_INFO, "  ");
         if (i < 15) {
-            kprint("<= ");
-            kprint_decimal((uint64_t)size_class_thresholds[i]);
+            klog_raw(KLOG_INFO, "<= ");
+            klog_decimal(KLOG_INFO, (uint64_t)size_class_thresholds[i]);
         } else {
-            kprint("> ");
-            kprint_decimal((uint64_t)size_class_thresholds[14]);
+            klog_raw(KLOG_INFO, "> ");
+            klog_decimal(KLOG_INFO, (uint64_t)size_class_thresholds[14]);
         }
-        kprint(": ");
-        kprint_decimal((uint64_t)class_count);
-        kprint(" blocks\n");
+        klog_raw(KLOG_INFO, ": ");
+        klog_decimal(KLOG_INFO, (uint64_t)class_count);
+        klog_raw(KLOG_INFO, " blocks\n");
     }
 
-    kprint("Total free blocks: ");
-    kprint_decimal(total_free_blocks);
-    kprint("\n");
+    klog_raw(KLOG_INFO, "Total free blocks: ");
+    klog_decimal(KLOG_INFO, total_free_blocks);
+    klog_raw(KLOG_INFO, "\n");
 
-    kprint("Largest free block: ");
-    kprint_decimal(largest_free_block);
-    kprint(" bytes\n");
+    klog_raw(KLOG_INFO, "Largest free block: ");
+    klog_decimal(KLOG_INFO, largest_free_block);
+    klog_raw(KLOG_INFO, " bytes\n");
 
     if (total_free_blocks > 0) {
         uint64_t average_free = 0;
         if (kernel_heap.stats.free_size > 0) {
             average_free = kernel_heap.stats.free_size / total_free_blocks;
         }
-        kprint("Average free block: ");
-        kprint_decimal(average_free);
-        kprint(" bytes\n");
+        klog_raw(KLOG_INFO, "Average free block: ");
+        klog_decimal(KLOG_INFO, average_free);
+        klog_raw(KLOG_INFO, " bytes\n");
     }
 
     if (kernel_heap.stats.free_size > 0) {
@@ -765,10 +765,10 @@ void print_heap_stats(void) {
             fragmentation_percent = (fragmented_bytes * 100) / kernel_heap.stats.free_size;
         }
 
-        kprint("Fragmented bytes: ");
-        kprint_decimal(fragmented_bytes);
-        kprint(" (");
-        kprint_decimal(fragmentation_percent);
-        kprint("%)\n");
+        klog_raw(KLOG_INFO, "Fragmented bytes: ");
+        klog_decimal(KLOG_INFO, fragmented_bytes);
+        klog_raw(KLOG_INFO, " (");
+        klog_decimal(KLOG_INFO, fragmentation_percent);
+        klog_raw(KLOG_INFO, "%)\n");
     }
 }

@@ -114,9 +114,9 @@ int framebuffer_init(void) {
     }
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Framebuffer address from bootloader: ");
-        kprint_hex(phys_addr);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Framebuffer address from bootloader: ");
+        klog_hex(KLOG_INFO, phys_addr);
+        klog(KLOG_INFO, "");
     });
 
     /* Validate parameters */
@@ -176,19 +176,19 @@ int framebuffer_init(void) {
     
     if (virtual_addr_uint == 0) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("ERROR: No virtual mapping available for framebuffer at address ");
-            kprint_hex(phys_addr);
-            kprintln("");
-            kprintln("Framebuffer requires HHDM (Higher-Half Direct Mapping) or identity mapping");
+            klog_raw(KLOG_INFO, "ERROR: No virtual mapping available for framebuffer at address ");
+            klog_hex(KLOG_INFO, phys_addr);
+            klog(KLOG_INFO, "");
+            klog(KLOG_INFO, "Framebuffer requires HHDM (Higher-Half Direct Mapping) or identity mapping");
         });
         return -1;
     }
     void *virtual_addr = (void*)virtual_addr_uint;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Framebuffer virtual address: ");
-        kprint_hex(virtual_addr_uint);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Framebuffer virtual address: ");
+        klog_hex(KLOG_INFO, virtual_addr_uint);
+        klog(KLOG_INFO, "");
     });
 
     /* Initialize framebuffer info */
@@ -203,13 +203,13 @@ int framebuffer_init(void) {
     fb_info.initialized = 1;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Framebuffer initialized: ");
-        kprint_decimal(width);
-        kprint("x");
-        kprint_decimal(height);
-        kprint(" @ ");
-        kprint_decimal(bpp);
-        kprintln(" bpp");
+        klog_raw(KLOG_INFO, "Framebuffer initialized: ");
+        klog_decimal(KLOG_INFO, width);
+        klog_raw(KLOG_INFO, "x");
+        klog_decimal(KLOG_INFO, height);
+        klog_raw(KLOG_INFO, " @ ");
+        klog_decimal(KLOG_INFO, bpp);
+        klog(KLOG_INFO, " bpp");
     });
 
     return 0;

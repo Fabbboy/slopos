@@ -53,17 +53,17 @@ void pit_set_frequency(uint32_t frequency_hz) {
     pit_io_wait();
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("PIT: frequency set to ");
-        kprint_decimal(current_frequency_hz);
-        kprintln(" Hz");
+        klog_raw(KLOG_INFO, "PIT: frequency set to ");
+        klog_decimal(KLOG_INFO, current_frequency_hz);
+        klog(KLOG_INFO, " Hz");
     });
 }
 
 void pit_init(uint32_t frequency_hz) {
     KLOG_BLOCK(KLOG_INFO, {
-        kprint("PIT: Initializing timer at ");
-        kprint_decimal(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
-        kprintln(" Hz");
+        klog_raw(KLOG_INFO, "PIT: Initializing timer at ");
+        klog_decimal(KLOG_INFO, frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
+        klog(KLOG_INFO, " Hz");
     });
 
     pit_set_frequency(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);

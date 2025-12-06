@@ -90,9 +90,9 @@ void idt_init(void) {
     initialize_handler_tables();
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("IDT: Configured ");
-        kprint_decimal(IDT_ENTRIES);
-        kprintln(" interrupt vectors");
+        klog_raw(KLOG_INFO, "IDT: Configured ");
+        klog_decimal(KLOG_INFO, IDT_ENTRIES);
+        klog(KLOG_INFO, " interrupt vectors");
     });
 }
 
@@ -112,18 +112,18 @@ void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t t
 void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     if ((uint16_t)vector >= IDT_ENTRIES) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("IDT: Invalid IST assignment for vector ");
-            kprint_decimal(vector);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Invalid IST assignment for vector ");
+            klog_decimal(KLOG_INFO, vector);
+            klog(KLOG_INFO, "");
         });
         return;
     }
 
     if (ist_index > 7) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("IDT: Invalid IST index ");
-            kprint_decimal(ist_index);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Invalid IST index ");
+            klog_decimal(KLOG_INFO, ist_index);
+            klog(KLOG_INFO, "");
         });
         return;
     }
@@ -137,18 +137,18 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
 void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) {
     if (vector >= 32) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("IDT: Ignoring handler install for non-exception vector ");
-            kprint_decimal(vector);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Ignoring handler install for non-exception vector ");
+            klog_decimal(KLOG_INFO, vector);
+            klog(KLOG_INFO, "");
         });
         return;
     }
 
     if (handler != NULL && is_critical_exception_internal(vector)) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("IDT: Refusing to override critical exception ");
-            kprint_decimal(vector);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Refusing to override critical exception ");
+            klog_decimal(KLOG_INFO, vector);
+            klog(KLOG_INFO, "");
         });
         return;
     }
@@ -161,15 +161,15 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
 
     if (handler != NULL) {
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("IDT: Registered override handler for exception ");
-            kprint_decimal(vector);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Registered override handler for exception ");
+            klog_decimal(KLOG_INFO, vector);
+            klog(KLOG_INFO, "");
         });
     } else {
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("IDT: Cleared override handler for exception ");
-            kprint_decimal(vector);
-            kprintln("");
+            klog_raw(KLOG_INFO, "IDT: Cleared override handler for exception ");
+            klog_decimal(KLOG_INFO, vector);
+            klog(KLOG_INFO, "");
         });
     }
 }
@@ -225,11 +225,11 @@ int exception_is_critical(uint8_t vector) {
  */
 void idt_load(void) {
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("IDT: Loading IDT at address ");
-        kprint_hex(idt_pointer.base);
-        kprint(" with limit ");
-        kprint_hex(idt_pointer.limit);
-        kprintln("");
+        klog_raw(KLOG_INFO, "IDT: Loading IDT at address ");
+        klog_hex(KLOG_INFO, idt_pointer.base);
+        klog_raw(KLOG_INFO, " with limit ");
+        klog_hex(KLOG_INFO, idt_pointer.limit);
+        klog(KLOG_INFO, "");
     });
 
     // Load the IDT using assembly
@@ -252,20 +252,20 @@ void common_exception_handler(struct interrupt_frame *frame) {
     }
 
     if (vector >= 32) {
-        kprint("EXCEPTION: Unknown vector ");
-        kprint_decimal(vector);
-        kprintln("");
+        klog_raw(KLOG_INFO, "EXCEPTION: Unknown vector ");
+        klog_decimal(KLOG_INFO, vector);
+        klog(KLOG_INFO, "");
         exception_default_panic(frame);
         return;
     }
 
     int critical = is_critical_exception_internal(vector);
     if (critical || current_exception_mode != EXCEPTION_MODE_TEST) {
-        kprint("EXCEPTION: Vector ");
-        kprint_decimal(vector);
-        kprint(" (");
-        kprint(get_exception_name(vector));
-        kprintln(")");
+        klog_raw(KLOG_INFO, "EXCEPTION: Vector ");
+        klog_decimal(KLOG_INFO, vector);
+        klog_raw(KLOG_INFO, " (");
+        klog_raw(KLOG_INFO, get_exception_name(vector));
+        klog(KLOG_INFO, ")");
     }
 
     exception_handler_t handler = panic_handlers[vector];
@@ -319,7 +319,7 @@ const char *get_exception_name(uint8_t vector) {
 }
 
 static void exception_default_panic(struct interrupt_frame *frame) {
-    kprintln("FATAL: Unhandled exception");
+    klog(KLOG_INFO, "FATAL: Unhandled exception");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Unhandled exception");
 }
@@ -329,74 +329,74 @@ static void exception_default_panic(struct interrupt_frame *frame) {
  */
 
 void exception_divide_error(struct interrupt_frame *frame) {
-    kprintln("FATAL: Divide by zero error");
+    klog(KLOG_INFO, "FATAL: Divide by zero error");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Divide by zero error");
 }
 
 void exception_debug(struct interrupt_frame *frame) {
-    kprintln("DEBUG: Debug exception occurred");
+    klog(KLOG_INFO, "DEBUG: Debug exception occurred");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_nmi(struct interrupt_frame *frame) {
-    kprintln("FATAL: Non-maskable interrupt");
+    klog(KLOG_INFO, "FATAL: Non-maskable interrupt");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Non-maskable interrupt");
 }
 
 void exception_breakpoint(struct interrupt_frame *frame) {
-    kprintln("DEBUG: Breakpoint exception");
+    klog(KLOG_INFO, "DEBUG: Breakpoint exception");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_overflow(struct interrupt_frame *frame) {
-    kprintln("ERROR: Overflow exception");
+    klog(KLOG_INFO, "ERROR: Overflow exception");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_bound_range(struct interrupt_frame *frame) {
-    kprintln("ERROR: Bound range exceeded");
+    klog(KLOG_INFO, "ERROR: Bound range exceeded");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_invalid_opcode(struct interrupt_frame *frame) {
-    kprintln("FATAL: Invalid opcode");
+    klog(KLOG_INFO, "FATAL: Invalid opcode");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid opcode");
 }
 
 void exception_device_not_available(struct interrupt_frame *frame) {
-    kprintln("ERROR: Device not available");
+    klog(KLOG_INFO, "ERROR: Device not available");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_double_fault(struct interrupt_frame *frame) {
-    kprintln("FATAL: Double fault");
+    klog(KLOG_INFO, "FATAL: Double fault");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Double fault");
 }
 
 void exception_invalid_tss(struct interrupt_frame *frame) {
-    kprintln("FATAL: Invalid TSS");
+    klog(KLOG_INFO, "FATAL: Invalid TSS");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid TSS");
 }
 
 void exception_segment_not_present(struct interrupt_frame *frame) {
-    kprintln("FATAL: Segment not present");
+    klog(KLOG_INFO, "FATAL: Segment not present");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Segment not present");
 }
 
 void exception_stack_fault(struct interrupt_frame *frame) {
-    kprintln("FATAL: Stack segment fault");
+    klog(KLOG_INFO, "FATAL: Stack segment fault");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Stack segment fault");
 }
 
 void exception_general_protection(struct interrupt_frame *frame) {
-    kprintln("FATAL: General protection fault");
+    klog(KLOG_INFO, "FATAL: General protection fault");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("General protection fault");
 }
@@ -407,57 +407,57 @@ void exception_page_fault(struct interrupt_frame *frame) {
 
     const char *stack_name = NULL;
     if (safe_stack_guard_fault(fault_addr, &stack_name)) {
-        kprintln("FATAL: Exception stack overflow detected via guard page");
+        klog(KLOG_INFO, "FATAL: Exception stack overflow detected via guard page");
         if (stack_name) {
-            kprint("Guard page owner: ");
-            kprint(stack_name);
-            kprintln("");
+            klog_raw(KLOG_INFO, "Guard page owner: ");
+            klog_raw(KLOG_INFO, stack_name);
+            klog(KLOG_INFO, "");
         }
-        kprint("Fault address: ");
-        kprint_hex(fault_addr);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Fault address: ");
+        klog_hex(KLOG_INFO, fault_addr);
+        klog(KLOG_INFO, "");
 
         kdiag_dump_interrupt_frame(frame);
         kernel_panic("Exception stack overflow");
         return;
     }
 
-    kprintln("FATAL: Page fault");
-    kprint("Fault address: ");
-    kprint_hex(fault_addr);
-    kprintln("");
+    klog(KLOG_INFO, "FATAL: Page fault");
+    klog_raw(KLOG_INFO, "Fault address: ");
+    klog_hex(KLOG_INFO, fault_addr);
+    klog(KLOG_INFO, "");
 
-    kprint("Error code: ");
-    kprint_hex(frame->error_code);
-    if (frame->error_code & 1) kprint(" (Page present)");
-    else kprint(" (Page not present)");
-    if (frame->error_code & 2) kprint(" (Write)");
-    else kprint(" (Read)");
-    if (frame->error_code & 4) kprint(" (User)");
-    else kprint(" (Supervisor)");
-    kprintln("");
+    klog_raw(KLOG_INFO, "Error code: ");
+    klog_hex(KLOG_INFO, frame->error_code);
+    if (frame->error_code & 1) klog_raw(KLOG_INFO, " (Page present)");
+    else klog_raw(KLOG_INFO, " (Page not present)");
+    if (frame->error_code & 2) klog_raw(KLOG_INFO, " (Write)");
+    else klog_raw(KLOG_INFO, " (Read)");
+    if (frame->error_code & 4) klog_raw(KLOG_INFO, " (User)");
+    else klog_raw(KLOG_INFO, " (Supervisor)");
+    klog(KLOG_INFO, "");
 
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Page fault");
 }
 
 void exception_fpu_error(struct interrupt_frame *frame) {
-    kprintln("ERROR: x87 FPU error");
+    klog(KLOG_INFO, "ERROR: x87 FPU error");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_alignment_check(struct interrupt_frame *frame) {
-    kprintln("ERROR: Alignment check");
+    klog(KLOG_INFO, "ERROR: Alignment check");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_machine_check(struct interrupt_frame *frame) {
-    kprintln("FATAL: Machine check");
+    klog(KLOG_INFO, "FATAL: Machine check");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Machine check");
 }
 
 void exception_simd_fp_exception(struct interrupt_frame *frame) {
-    kprintln("ERROR: SIMD floating-point exception");
+    klog(KLOG_INFO, "ERROR: SIMD floating-point exception");
     kdiag_dump_interrupt_frame(frame);
 }

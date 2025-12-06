@@ -12,8 +12,6 @@
 static enum klog_level current_level = KLOG_INFO;
 static int serial_ready = 0;
 
-static const char hex_digits[] = "0123456789ABCDEF";
-
 static void klog_early_putc(char c) {
     io_outb(COM1_BASE, c);
 }
@@ -24,7 +22,7 @@ static void klog_emit(const char *text) {
     }
 
     if (serial_ready) {
-        kprint(text);
+        serial_puts(COM1_BASE, text);
         return;
     }
 
@@ -39,7 +37,7 @@ static void klog_emit_line(const char *text) {
         klog_emit(text);
     }
     if (serial_ready) {
-        kprint("\n");
+        serial_putc(COM1_BASE, '\n');
     } else {
         klog_early_putc('\n');
     }
@@ -89,13 +87,13 @@ void klog_hex(enum klog_level level, uint64_t value) {
         return;
     }
 
-    char buffer[19];
-    buffer[0] = '0';
-    buffer[1] = 'x';
-    for (int i = 0; i < 16; i++) {
-        buffer[2 + i] = hex_digits[(value >> ((15 - i) * 4)) & 0xF];
+    char buffer[32];
+    if (numfmt_u64_to_hex(value, buffer, sizeof(buffer), 1) == 0) {
+        buffer[0] = '0';
+        buffer[1] = 'x';
+        buffer[2] = '0';
+        buffer[3] = '\0';
     }
-    buffer[18] = '\0';
     klog_raw(level, buffer);
 }
 
@@ -109,6 +107,21 @@ void klog_decimal(enum klog_level level, uint64_t value) {
         buffer[0] = '0';
         buffer[1] = '\0';
     }
+    klog_raw(level, buffer);
+}
+
+void klog_hex_byte(enum klog_level level, uint8_t value) {
+    if (!klog_is_enabled(level)) {
+        return;
+    }
+
+    char buffer[4];
+    if (numfmt_u8_to_hex(value, buffer, sizeof(buffer)) == 0) {
+        buffer[0] = '0';
+        buffer[1] = '0';
+        buffer[2] = '\0';
+    }
+
     klog_raw(level, buffer);
 }
 

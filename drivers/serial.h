@@ -145,58 +145,6 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line);
  */
 void serial_putc_com1(char c);
 
-/*
- * Send formatted hex value to COM1
- * Outputs "0x" followed by hex digits
- */
-void serial_put_hex_com1(uint64_t value);
-
-/*
- * Send formatted decimal value to COM1
- */
-void serial_put_decimal_com1(uint64_t value);
-
-/* ========================================================================
- * KERNEL OUTPUT INTERFACE
- * ======================================================================== */
-
-/*
- * Set the default serial port for kernel output
- * All kernel print functions will use this port
- */
-void serial_set_kernel_output(uint16_t port);
-
-/*
- * Get the current kernel output port
- */
-uint16_t serial_get_kernel_output(void);
-
-/*
- * Kernel print function - outputs to default kernel serial port
- * Simple alternative to printf for kernel debugging
- */
-void kprint(const char *str);
-
-/*
- * Kernel print with newline
- */
-void kprintln(const char *str);
-
-/*
- * Kernel print hex value
- */
-void kprint_hex(uint64_t value);
-
-/*
- * Kernel print decimal value
- */
-void kprint_decimal(uint64_t value);
-
-/*
- * Kernel print hex byte
- */
-void kprint_hex_byte(uint8_t value);
-
 int serial_get_config(uint16_t port, serial_config_t *config);
 uint8_t serial_get_line_status(uint16_t port);
 uint8_t serial_get_modem_status(uint16_t port);

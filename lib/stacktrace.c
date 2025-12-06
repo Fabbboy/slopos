@@ -1,6 +1,7 @@
 #include "stacktrace.h"
 #include "../drivers/serial.h"
 #include "cpu.h"
+#include "klog.h"
 
 #define STACKTRACE_MAX_LOCAL 32
 
@@ -65,13 +66,13 @@ int stacktrace_capture(struct stacktrace_entry *entries, int max_entries) {
 }
 
 static void print_entry(int index, const struct stacktrace_entry *entry) {
-    kprint("  #");
-    kprint_decimal((uint64_t)index);
-    kprint(" rbp=0x");
-    kprint_hex(entry->frame_pointer);
-    kprint(" rip=0x");
-    kprint_hex(entry->return_address);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  #");
+    klog_decimal(KLOG_INFO, (uint64_t)index);
+    klog_raw(KLOG_INFO, " rbp=0x");
+    klog_hex(KLOG_INFO, entry->frame_pointer);
+    klog_raw(KLOG_INFO, " rip=0x");
+    klog_hex(KLOG_INFO, entry->return_address);
+    klog(KLOG_INFO, "");
 }
 
 void stacktrace_dump_from(uint64_t rbp, int max_frames) {
@@ -87,11 +88,11 @@ void stacktrace_dump_from(uint64_t rbp, int max_frames) {
     int captured = stacktrace_capture_from(rbp, entries, max_frames);
 
     if (captured <= 0) {
-        kprintln("STACKTRACE: <empty>");
+        klog(KLOG_INFO, "STACKTRACE: <empty>");
         return;
     }
 
-    kprintln("STACKTRACE:");
+    klog(KLOG_INFO, "STACKTRACE:");
     for (int i = 0; i < captured; i++) {
         print_entry(i, &entries[i]);
     }

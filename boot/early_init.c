@@ -338,14 +338,14 @@ static int boot_step_memory_verify(void) {
 
     if (klog_is_enabled(KLOG_DEBUG)) {
         boot_debug("Stack pointer read successfully!");
-        kprint("Current Stack Pointer: ");
-        kprint_hex(stack_ptr);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Current Stack Pointer: ");
+        klog_hex(KLOG_INFO, stack_ptr);
+        klog(KLOG_INFO, "");
 
         void *current_ip = __builtin_return_address(0);
-        kprint("Kernel Code Address: ");
-        kprint_hex((uint64_t)current_ip);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Kernel Code Address: ");
+        klog_hex(KLOG_INFO, (uint64_t)current_ip);
+        klog(KLOG_INFO, "");
 
         if ((uint64_t)current_ip >= KERNEL_VIRTUAL_BASE) {
             boot_debug("Running in higher-half virtual memory - CORRECT");
@@ -451,21 +451,21 @@ static int boot_step_pci_init(void) {
         const pci_gpu_info_t *gpu = pci_get_primary_gpu();
         if (gpu && gpu->present) {
             KLOG_BLOCK(KLOG_DEBUG, {
-                kprint("PCI: Primary GPU detected (bus ");
-                kprint_decimal(gpu->device.bus);
-                kprint(", device ");
-                kprint_decimal(gpu->device.device);
-                kprint(", function ");
-                kprint_decimal(gpu->device.function);
-                kprintln(")");
+                klog_raw(KLOG_INFO, "PCI: Primary GPU detected (bus ");
+                klog_decimal(KLOG_INFO, gpu->device.bus);
+                klog_raw(KLOG_INFO, ", device ");
+                klog_decimal(KLOG_INFO, gpu->device.device);
+                klog_raw(KLOG_INFO, ", function ");
+                klog_decimal(KLOG_INFO, gpu->device.function);
+                klog(KLOG_INFO, ")");
                 if (gpu->mmio_virt_base) {
-                    kprint("PCI: GPU MMIO virtual base 0x");
-                    kprint_hex((uint64_t)(uintptr_t)gpu->mmio_virt_base);
-                    kprint(", size 0x");
-                    kprint_hex(gpu->mmio_size);
-                    kprintln("");
+                    klog_raw(KLOG_INFO, "PCI: GPU MMIO virtual base 0x");
+                    klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)gpu->mmio_virt_base);
+                    klog_raw(KLOG_INFO, ", size 0x");
+                    klog_hex(KLOG_INFO, gpu->mmio_size);
+                    klog(KLOG_INFO, "");
                 } else {
-                    kprintln("PCI: WARNING GPU MMIO mapping unavailable");
+                    klog(KLOG_INFO, "PCI: WARNING GPU MMIO mapping unavailable");
                 }
             });
         } else {
@@ -501,15 +501,15 @@ static int boot_step_interrupt_tests(void) {
     splash_report_progress(75, "Running interrupt tests...");
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        kprint("INTERRUPT_TEST: Suites -> ");
-        kprintln(interrupt_test_suite_string(test_config.suite_mask));
+        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Suites -> ");
+        klog(KLOG_INFO, interrupt_test_suite_string(test_config.suite_mask));
 
-        kprint("INTERRUPT_TEST: Verbosity -> ");
-        kprintln(interrupt_test_verbosity_string(test_config.verbosity));
+        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Verbosity -> ");
+        klog(KLOG_INFO, interrupt_test_verbosity_string(test_config.verbosity));
 
-        kprint("INTERRUPT_TEST: Timeout (ms) -> ");
-        kprint_decimal(test_config.timeout_ms);
-        kprintln("");
+        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Timeout (ms) -> ");
+        klog_decimal(KLOG_INFO, test_config.timeout_ms);
+        klog(KLOG_INFO, "");
     }
 
     interrupt_test_init(&test_config);
@@ -519,9 +519,9 @@ static int boot_step_interrupt_tests(void) {
     interrupt_test_cleanup();
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        kprint("INTERRUPT_TEST: Boot run passed tests -> ");
-        kprint_decimal(passed);
-        kprintln("");
+        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Boot run passed tests -> ");
+        klog_decimal(KLOG_INFO, passed);
+        klog(KLOG_INFO, "");
     }
 
     if (test_config.shutdown_on_complete) {
@@ -586,7 +586,7 @@ static void roulette_gatekeeper_task(void *arg) {
     kernel_roulette();
 
     /* If we return, we won. Spawn the shell. */
-    kprintln("ROULETTE: You survived. Spawning shell...");
+    klog(KLOG_INFO, "ROULETTE: You survived. Spawning shell...");
 
     /* Create shell task */
     uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, 0x02);
@@ -671,9 +671,9 @@ static int boot_step_framebuffer_demo(void) {
     framebuffer_info_t *fb_info = framebuffer_get_info();
     if (fb_info && fb_info->virtual_addr && fb_info->virtual_addr != (void*)fb_info->physical_addr) {
         if (klog_is_enabled(KLOG_DEBUG)) {
-            kprint("Graphics: Framebuffer using translated virtual address ");
-            kprint_hex((uint64_t)fb_info->virtual_addr);
-            kprintln(" (translation verified)");
+            klog_raw(KLOG_INFO, "Graphics: Framebuffer using translated virtual address ");
+            klog_hex(KLOG_INFO, (uint64_t)fb_info->virtual_addr);
+            klog(KLOG_INFO, " (translation verified)");
         }
     }
 
@@ -719,12 +719,12 @@ void kernel_main(void) {
 
     // Start scheduler (this will switch to shell task and run it)
     if (start_scheduler() != 0) {
-        kprintln("ERROR: Scheduler startup failed");
+        klog(KLOG_INFO, "ERROR: Scheduler startup failed");
         kernel_panic("Scheduler startup failed");
     }
     
     // If we get here, scheduler has exited (shouldn't happen in normal operation)
-    kprintln("WARNING: Scheduler exited unexpectedly");
+    klog(KLOG_INFO, "WARNING: Scheduler exited unexpectedly");
     while (1) {
         __asm__ volatile ("hlt");  // Halt until next interrupt
     }

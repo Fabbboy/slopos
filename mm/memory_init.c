@@ -232,9 +232,9 @@ static void log_reserved_regions(void) {
     uint64_t total_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
     KLOG_BLOCK(KLOG_INFO, {
-        kprint("MM: Reserved device regions (");
-        kprint_decimal(count);
-        kprint(")\n");
+        klog_raw(KLOG_INFO, "MM: Reserved device regions (");
+        klog_decimal(KLOG_INFO, count);
+        klog_raw(KLOG_INFO, ")\n");
         for (uint32_t i = 0; i < count; i++) {
             const mm_reserved_region_t *region = mm_reservations_get(i);
             if (!region) {
@@ -244,20 +244,20 @@ static void log_reserved_regions(void) {
             const char *label = region->label[0] ? region->label : mm_reservation_type_name(region->type);
             uint64_t region_end = region->phys_base + region->length;
 
-            kprint("  ");
-            kprint(label);
-            kprint(": 0x");
-            kprint_hex(region->phys_base);
-            kprint(" - 0x");
-            kprint_hex(region_end - 1);
-            kprint(" (");
-            kprint_decimal((uint32_t)(region->length / 1024));
-            kprint(" KB)\n");
+            klog_raw(KLOG_INFO, "  ");
+            klog_raw(KLOG_INFO, label);
+            klog_raw(KLOG_INFO, ": 0x");
+            klog_hex(KLOG_INFO, region->phys_base);
+            klog_raw(KLOG_INFO, " - 0x");
+            klog_hex(KLOG_INFO, region_end - 1);
+            klog_raw(KLOG_INFO, " (");
+            klog_decimal(KLOG_INFO, (uint32_t)(region->length / 1024));
+            klog_raw(KLOG_INFO, " KB)\n");
         }
         if (total_bytes > 0) {
-            kprint("  Total reserved:      ");
-            kprint_decimal((uint32_t)(total_bytes / 1024));
-            kprint(" KB\n");
+            klog_raw(KLOG_INFO, "  Total reserved:      ");
+            klog_decimal(KLOG_INFO, (uint32_t)(total_bytes / 1024));
+            klog_raw(KLOG_INFO, " KB\n");
         }
     });
 }
@@ -290,11 +290,11 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
     if (mm_is_range_reserved(aligned_start, aligned_size)) {
         usable_overlap_skips++;
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("MM: Skipping usable subrange overlapping reservation: 0x");
-            kprint_hex(aligned_start);
-            kprint(" - 0x");
-            kprint_hex(aligned_end - 1);
-            kprint("\n");
+            klog_raw(KLOG_INFO, "MM: Skipping usable subrange overlapping reservation: 0x");
+            klog_hex(KLOG_INFO, aligned_start);
+            klog_raw(KLOG_INFO, " - 0x");
+            klog_hex(KLOG_INFO, aligned_end - 1);
+            klog_raw(KLOG_INFO, "\n");
         });
         return;
     }
@@ -303,7 +303,7 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
 
     if (add_page_alloc_region(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("MM: WARNING - failed to register page allocator region\n");
+            klog_raw(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
         });
     }
 }
@@ -374,7 +374,7 @@ static uint32_t clamp_required_frames(uint64_t required_frames_64) {
 
     if (required_frames_64 > (uint64_t)max_supported) {
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("MM: WARNING - Limiting tracked page frames to allocator maximum\n");
+            klog_raw(KLOG_INFO, "MM: WARNING - Limiting tracked page frames to allocator maximum\n");
         });
         return max_supported;
     }
@@ -436,7 +436,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     uint64_t max_fit_frames = largest_usable->length / PAGE_SIZE_4KB;
     if (required_frames > max_fit_frames) {
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("MM: WARNING - Reducing tracked frames to fit largest usable region\n");
+            klog_raw(KLOG_INFO, "MM: WARNING - Reducing tracked frames to fit largest usable region\n");
         });
         required_frames = (uint32_t)max_fit_frames;
     }
@@ -516,11 +516,11 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     init_state.allocator_metadata_bytes = page_bytes_u64;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("MM: Page allocator metadata reserved at phys 0x");
-        kprint_hex(reserve_phys_base);
-        kprint(" (");
-        kprint_decimal((uint32_t)(reserved_bytes / 1024));
-        kprint(" KB)\n");
+        klog_raw(KLOG_INFO, "MM: Page allocator metadata reserved at phys 0x");
+        klog_hex(KLOG_INFO, reserve_phys_base);
+        klog_raw(KLOG_INFO, " (");
+        klog_decimal(KLOG_INFO, (uint32_t)(reserved_bytes / 1024));
+        klog_raw(KLOG_INFO, " KB)\n");
     });
 
     return 0;
@@ -564,9 +564,9 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
     }
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("MM: Limine memory entries: ");
-        kprint_decimal(memmap->entry_count);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "MM: Limine memory entries: ");
+        klog_decimal(KLOG_INFO, memmap->entry_count);
+        klog_raw(KLOG_INFO, "\n");
     });
 
     int processed_entries = 0;
@@ -597,14 +597,14 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
     init_state.hhdm_received = 1;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("MM: HHDM offset: 0x");
-        kprint_hex(hhdm_offset);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "MM: HHDM offset: 0x");
+        klog_hex(KLOG_INFO, hhdm_offset);
+        klog_raw(KLOG_INFO, "\n");
     });
 
     if (finalize_page_allocator() != 0) {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("MM: WARNING - page allocator finalization reported issues\n");
+            klog_raw(KLOG_INFO, "MM: WARNING - page allocator finalization reported issues\n");
         });
     }
 
@@ -612,9 +612,9 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
         klog_debug("MM: Reserved overlap check passed (no usable subranges skipped)");
     } else {
         KLOG_BLOCK(KLOG_INFO, {
-            kprint("MM: Reserved overlap guard skipped ");
-            kprint_decimal(usable_overlap_skips);
-            kprint(" subrange(s)\n");
+            klog_raw(KLOG_INFO, "MM: Reserved overlap guard skipped ");
+            klog_decimal(KLOG_INFO, usable_overlap_skips);
+            klog_raw(KLOG_INFO, " subrange(s)\n");
         });
     }
 
@@ -696,68 +696,68 @@ static void display_memory_summary(void) {
         return;
     }
 
-    kprint("\n========== SlopOS Memory System Initialized ==========\n");
-    kprint("Early Paging:          ");
-    kprint(init_state.early_paging_done ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("Memory Layout:         ");
-    kprint(init_state.memory_layout_done ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("Limine Memmap:         ");
-    kprint(init_state.limine_memmap_parsed ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("HHDM Response:         ");
-    kprint(init_state.hhdm_received ? "OK" : "MISSING");
-    kprint("\n");
-    kprint("Page Allocator:        ");
-    kprint(init_state.page_allocator_done ? "OK" : "FAILED");
-    kprint("\n");
+    klog_raw(KLOG_INFO, "\n========== SlopOS Memory System Initialized ==========\n");
+    klog_raw(KLOG_INFO, "Early Paging:          ");
+    klog_raw(KLOG_INFO, init_state.early_paging_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Memory Layout:         ");
+    klog_raw(KLOG_INFO, init_state.memory_layout_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Limine Memmap:         ");
+    klog_raw(KLOG_INFO, init_state.limine_memmap_parsed ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "HHDM Response:         ");
+    klog_raw(KLOG_INFO, init_state.hhdm_received ? "OK" : "MISSING");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Page Allocator:        ");
+    klog_raw(KLOG_INFO, init_state.page_allocator_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
     if (init_state.tracked_page_frames) {
-        kprint("Tracked Frames:        ");
-        kprint_decimal(init_state.tracked_page_frames);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Tracked Frames:        ");
+        klog_decimal(KLOG_INFO, init_state.tracked_page_frames);
+        klog_raw(KLOG_INFO, "\n");
     }
     if (init_state.allocator_metadata_bytes) {
-        kprint("Allocator Metadata:    ");
-        kprint_decimal((uint32_t)(init_state.allocator_metadata_bytes / 1024));
-        kprint(" KB\n");
+        klog_raw(KLOG_INFO, "Allocator Metadata:    ");
+        klog_decimal(KLOG_INFO, (uint32_t)(init_state.allocator_metadata_bytes / 1024));
+        klog_raw(KLOG_INFO, " KB\n");
     }
     if (init_state.reserved_region_count) {
-        kprint("Reserved Regions:      ");
-        kprint_decimal(init_state.reserved_region_count);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Reserved Regions:      ");
+        klog_decimal(KLOG_INFO, init_state.reserved_region_count);
+        klog_raw(KLOG_INFO, "\n");
     }
     if (init_state.reserved_device_bytes) {
-        kprint("Reserved Device Mem:   ");
-        kprint_decimal((uint32_t)(init_state.reserved_device_bytes / 1024));
-        kprint(" KB\n");
+        klog_raw(KLOG_INFO, "Reserved Device Mem:   ");
+        klog_decimal(KLOG_INFO, (uint32_t)(init_state.reserved_device_bytes / 1024));
+        klog_raw(KLOG_INFO, " KB\n");
     }
-    kprint("Kernel Heap:           ");
-    kprint(init_state.kernel_heap_done ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("Process VM:            ");
-    kprint(init_state.process_vm_done ? "OK" : "FAILED");
-    kprint("\n");
-    kprint("Full Paging:           ");
-    kprint(init_state.paging_done ? "OK" : "FAILED");
-    kprint("\n");
+    klog_raw(KLOG_INFO, "Kernel Heap:           ");
+    klog_raw(KLOG_INFO, init_state.kernel_heap_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Process VM:            ");
+    klog_raw(KLOG_INFO, init_state.process_vm_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
+    klog_raw(KLOG_INFO, "Full Paging:           ");
+    klog_raw(KLOG_INFO, init_state.paging_done ? "OK" : "FAILED");
+    klog_raw(KLOG_INFO, "\n");
 
     KLOG_BLOCK(KLOG_DEBUG, {
         if (init_state.total_memory_bytes > 0) {
-            kprint("Total Memory:          ");
-            kprint_decimal(init_state.total_memory_bytes / (1024 * 1024));
-            kprint(" MB\n");
-            kprint("Available Memory:      ");
-            kprint_decimal(init_state.available_memory_bytes / (1024 * 1024));
-            kprint(" MB\n");
+            klog_raw(KLOG_INFO, "Total Memory:          ");
+            klog_decimal(KLOG_INFO, init_state.total_memory_bytes / (1024 * 1024));
+            klog_raw(KLOG_INFO, " MB\n");
+            klog_raw(KLOG_INFO, "Available Memory:      ");
+            klog_decimal(KLOG_INFO, init_state.available_memory_bytes / (1024 * 1024));
+            klog_raw(KLOG_INFO, " MB\n");
         }
-        kprint("Memory Regions:        ");
-        kprint_decimal(init_state.memory_regions_count);
-        kprint(" regions\n");
-        kprint("HHDM Offset:           0x");
-        kprint_hex(init_state.hhdm_offset);
-        kprint("\n");
-        kprint("=====================================================\n\n");
+        klog_raw(KLOG_INFO, "Memory Regions:        ");
+        klog_decimal(KLOG_INFO, init_state.memory_regions_count);
+        klog_raw(KLOG_INFO, " regions\n");
+        klog_raw(KLOG_INFO, "HHDM Offset:           0x");
+        klog_hex(KLOG_INFO, init_state.hhdm_offset);
+        klog_raw(KLOG_INFO, "\n");
+        klog_raw(KLOG_INFO, "=====================================================\n\n");
     });
 }
 
@@ -778,12 +778,12 @@ int init_memory_system(const struct limine_memmap_response *memmap,
     klog_debug("========== SlopOS Memory System Initialization ==========");
     klog_debug("Initializing complete memory management system...");
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Limine memmap response at: 0x");
-        kprint_hex((uint64_t)(uintptr_t)memmap);
-        kprint("\n");
-        kprint("Reported HHDM offset: 0x");
-        kprint_hex(hhdm_offset);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Limine memmap response at: 0x");
+        klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)memmap);
+        klog_raw(KLOG_INFO, "\n");
+        klog_raw(KLOG_INFO, "Reported HHDM offset: 0x");
+        klog_hex(KLOG_INFO, hhdm_offset);
+        klog_raw(KLOG_INFO, "\n");
     });
 
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
@@ -842,7 +842,7 @@ int init_memory_system(const struct limine_memmap_response *memmap,
 
     klog_info("MM: Complete memory system initialization successful!");
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("MM: Ready for scheduler and video subsystem initialization\n\n");
+        klog_raw(KLOG_INFO, "MM: Ready for scheduler and video subsystem initialization\n\n");
     });
 
     return 0;

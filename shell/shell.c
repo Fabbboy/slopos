@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../lib/klog.h"
 
 /* ========================================================================
  * HELPER UTILITIES
@@ -107,24 +108,24 @@ void shell_execute_command(const char *line) {
 
     const shell_builtin_t *cmd = shell_builtin_lookup(tokens[0]);
     if (!cmd) {
-        kprint("Unknown command: ");
-        kprintln(tokens[0]);
-        kprintln("Type 'help' to list available commands.");
+        klog_raw(KLOG_INFO, "Unknown command: ");
+        klog(KLOG_INFO, tokens[0]);
+        klog(KLOG_INFO, "Type 'help' to list available commands.");
         return;
     }
 
     int result = cmd->handler(token_count, tokens);
     if (result != 0) {
-        kprint("Command '");
-        kprint(cmd->name);
-        kprint("' returned error code ");
+        klog_raw(KLOG_INFO, "Command '");
+        klog_raw(KLOG_INFO, cmd->name);
+        klog_raw(KLOG_INFO, "' returned error code ");
         if (result < 0) {
-            kprint("-");
-            kprint_decimal((uint64_t)(-result));
+            klog_raw(KLOG_INFO, "-");
+            klog_decimal(KLOG_INFO, (uint64_t)(-result));
         } else {
-            kprint_decimal((uint64_t)result);
+            klog_decimal(KLOG_INFO, (uint64_t)result);
         }
-        kprintln("");
+        klog(KLOG_INFO, "");
     }
 }
 
@@ -140,33 +141,33 @@ void shell_main(void *arg) {
     (void)arg;  /* Unused parameter */
     
     /* Print welcome message (optional) */
-    kprintln("");
-    kprintln("SlopOS Shell v0.1");
-    kprintln("");
+    klog(KLOG_INFO, "");
+    klog(KLOG_INFO, "SlopOS Shell v0.1");
+    klog(KLOG_INFO, "");
     
     /* REPL loop */
     while (1) {
         /* Display prompt */
-        kprint("$ ");
+        klog_raw(KLOG_INFO, "$ ");
         
         /* Read line from keyboard */
         char line_buffer[256];
-        kprint("[DEBUG] Calling tty_read_line...\n");
+        klog_raw(KLOG_INFO, "[DEBUG] Calling tty_read_line...\n");
         size_t line_length = tty_read_line(line_buffer, sizeof(line_buffer));
-        kprint("[DEBUG] Got line_length: ");
-        kprint_decimal(line_length);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "[DEBUG] Got line_length: ");
+        klog_decimal(KLOG_INFO, line_length);
+        klog_raw(KLOG_INFO, "\n");
 
         /* Handle empty lines */
         if (line_length == 0) {
             /* Empty line - just re-prompt */
-            kprint("[DEBUG] Empty line, continuing...\n");
+            klog_raw(KLOG_INFO, "[DEBUG] Empty line, continuing...\n");
             continue;
         }
 
-        kprint("[DEBUG] Executing command: '");
-        kprint(line_buffer);
-        kprint("'\n");
+        klog_raw(KLOG_INFO, "[DEBUG] Executing command: '");
+        klog_raw(KLOG_INFO, line_buffer);
+        klog_raw(KLOG_INFO, "'\n");
 
         /* Execute command */
         shell_execute_command(line_buffer);

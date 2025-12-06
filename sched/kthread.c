@@ -8,6 +8,7 @@
 #include "../drivers/serial.h"
 #include "kthread.h"
 #include "scheduler.h"
+#include "../lib/klog.h"
 
 kthread_id_t kthread_spawn(const char *name, task_entry_t entry_point, void *arg) {
     return kthread_spawn_ex(name, entry_point, arg, TASK_PRIORITY_NORMAL, 0);
@@ -16,7 +17,7 @@ kthread_id_t kthread_spawn(const char *name, task_entry_t entry_point, void *arg
 kthread_id_t kthread_spawn_ex(const char *name, task_entry_t entry_point, void *arg,
                               uint8_t priority, uint16_t flags) {
     if (!name || !entry_point) {
-        kprintln("kthread_spawn_ex: invalid parameters");
+        klog(KLOG_INFO, "kthread_spawn_ex: invalid parameters");
         return INVALID_TASK_ID;
     }
 
@@ -24,9 +25,9 @@ kthread_id_t kthread_spawn_ex(const char *name, task_entry_t entry_point, void *
     kthread_id_t id = task_create(name, entry_point, arg, priority, combined_flags);
 
     if (id == INVALID_TASK_ID) {
-        kprint("kthread_spawn_ex: failed to create thread '");
-        kprint(name);
-        kprintln("'");
+        klog_raw(KLOG_INFO, "kthread_spawn_ex: failed to create thread '");
+        klog_raw(KLOG_INFO, name);
+        klog(KLOG_INFO, "'");
     }
 
     return id;

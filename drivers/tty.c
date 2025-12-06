@@ -187,10 +187,12 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
             continue;
         }
 
+        uint16_t port = SERIAL_COM1_PORT;
+
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {
             buffer[pos] = '\0';
-            serial_putc(serial_get_kernel_output(), '\n');  /* Echo newline */
+            serial_putc(port, '\n');  /* Echo newline */
             return pos;
         }
         
@@ -201,7 +203,6 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
                 pos--;
                 
                 /* Erase character visually: backspace, space, backspace */
-                uint16_t port = serial_get_kernel_output();
                 serial_putc(port, '\b');
                 serial_putc(port, ' ');
                 serial_putc(port, '\b');
@@ -219,7 +220,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         /* Handle printable characters */
         if (is_printable(c)) {
             buffer[pos++] = c;
-            serial_putc(serial_get_kernel_output(), c);  /* Echo character */
+            serial_putc(port, c);  /* Echo character */
             continue;
         }
         
@@ -232,7 +233,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         /* For any other character, store and echo if it's in printable range */
         if (pos < max_pos) {
             buffer[pos++] = c;
-            serial_putc(serial_get_kernel_output(), c);
+            serial_putc(port, c);
         }
     }
 }

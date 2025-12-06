@@ -104,7 +104,7 @@ static void release_task_dependents(uint32_t completed_task_id) {
         dependent->waiting_on_task_id = INVALID_TASK_ID;
 
         if (unblock_task(dependent) != 0) {
-            kprint("task_terminate: Failed to unblock dependent task\n");
+            klog_raw(KLOG_INFO, "task_terminate: Failed to unblock dependent task\n");
         }
     }
 }
@@ -170,19 +170,19 @@ static void init_task_context(task_t *task) {
 uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
                      uint8_t priority, uint16_t flags) {
     if (!name || !entry_point) {
-        kprint("task_create: Invalid parameters\n");
+        klog_raw(KLOG_INFO, "task_create: Invalid parameters\n");
         return INVALID_TASK_ID;
     }
 
     if (task_manager.num_tasks >= MAX_TASKS) {
-        kprint("task_create: Maximum tasks reached\n");
+        klog_raw(KLOG_INFO, "task_create: Maximum tasks reached\n");
         return INVALID_TASK_ID;
     }
 
     /* Find free task slot */
     task_t *task = find_free_task_slot();
     if (!task) {
-        kprint("task_create: No free task slots\n");
+        klog_raw(KLOG_INFO, "task_create: No free task slots\n");
         return INVALID_TASK_ID;
     }
 
@@ -194,7 +194,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         /* Kernel tasks use kernel page directory and kernel heap */
         void *stack = kmalloc(TASK_STACK_SIZE);
         if (!stack) {
-            kprint("task_create: Failed to allocate kernel stack\n");
+            klog_raw(KLOG_INFO, "task_create: Failed to allocate kernel stack\n");
             return INVALID_TASK_ID;
         }
 
@@ -203,7 +203,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         /* User mode tasks get their own process VM space */
         process_id = create_process_vm();
         if (process_id == INVALID_PROCESS_ID) {
-            kprint("task_create: Failed to create process VM\n");
+            klog_raw(KLOG_INFO, "task_create: Failed to create process VM\n");
             return INVALID_TASK_ID;
         }
 
@@ -213,7 +213,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
                                       PROCESS_VM_FLAG_WRITE |
                                       PROCESS_VM_FLAG_USER);
         if (!stack_base) {
-            kprint("task_create: Failed to allocate stack\n");
+            klog_raw(KLOG_INFO, "task_create: Failed to allocate stack\n");
             destroy_process_vm(process_id);
             return INVALID_TASK_ID;
         }
@@ -270,11 +270,11 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task_manager.tasks_created++;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("Created task '");
-        kprint(name);
-        kprint("' with ID ");
-        kprint_decimal(task_id);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Created task '");
+        klog_raw(KLOG_INFO, name);
+        klog_raw(KLOG_INFO, "' with ID ");
+        klog_decimal(KLOG_INFO, task_id);
+        klog_raw(KLOG_INFO, "\n");
     });
 
     return task_id;
@@ -290,7 +290,7 @@ int task_terminate(uint32_t task_id) {
     if ((int32_t)task_id == -1) {
         task = scheduler_get_current_task();
         if (!task) {
-            kprint("task_terminate: No current task to terminate\n");
+            klog_raw(KLOG_INFO, "task_terminate: No current task to terminate\n");
             return -1;
         }
         resolved_id = task->task_id;
@@ -299,15 +299,15 @@ int task_terminate(uint32_t task_id) {
     }
 
     if (!task || task->state == TASK_STATE_INVALID) {
-        kprint("task_terminate: Task not found\n");
+        klog_raw(KLOG_INFO, "task_terminate: Task not found\n");
         return -1;
     }
 
-    kprint("Terminating task '");
-    kprint(task->name);
-    kprint("' (ID ");
-    kprint_decimal(resolved_id);
-    kprint(")\n");
+    klog_raw(KLOG_INFO, "Terminating task '");
+    klog_raw(KLOG_INFO, task->name);
+    klog_raw(KLOG_INFO, "' (ID ");
+    klog_decimal(KLOG_INFO, resolved_id);
+    klog_raw(KLOG_INFO, ")\n");
 
     /* Ensure task is removed from scheduler structures */
     unschedule_task(task);
@@ -454,25 +454,25 @@ int task_set_state(uint32_t task_id, uint8_t new_state) {
     uint8_t old_state = task->state;
 
     if (!task_state_transition_allowed(old_state, new_state)) {
-        kprint("task_set_state: invalid transition for task ");
-        kprint_decimal(task_id);
-        kprint(" (");
-        kprint(task_state_to_string(old_state));
-        kprint(" -> ");
-        kprint(task_state_to_string(new_state));
-        kprint(")\n");
+        klog_raw(KLOG_INFO, "task_set_state: invalid transition for task ");
+        klog_decimal(KLOG_INFO, task_id);
+        klog_raw(KLOG_INFO, " (");
+        klog_raw(KLOG_INFO, task_state_to_string(old_state));
+        klog_raw(KLOG_INFO, " -> ");
+        klog_raw(KLOG_INFO, task_state_to_string(new_state));
+        klog_raw(KLOG_INFO, ")\n");
     }
 
     task->state = new_state;
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        kprint("Task ");
-        kprint_decimal(task_id);
-        kprint(" state: ");
-        kprint_decimal(old_state);
-        kprint(" -> ");
-        kprint_decimal(new_state);
-        kprint("\n");
+        klog_raw(KLOG_INFO, "Task ");
+        klog_decimal(KLOG_INFO, task_id);
+        klog_raw(KLOG_INFO, " state: ");
+        klog_decimal(KLOG_INFO, old_state);
+        klog_raw(KLOG_INFO, " -> ");
+        klog_decimal(KLOG_INFO, new_state);
+        klog_raw(KLOG_INFO, "\n");
     }
 
     return 0;
@@ -629,11 +629,11 @@ void task_set_current(task_t *task) {
     }
 
     if (task->state != TASK_STATE_READY && task->state != TASK_STATE_RUNNING) {
-        kprint("task_set_current: unexpected state transition for task ");
-        kprint_decimal(task->task_id);
-        kprint(" (state ");
-        kprint_decimal(task->state);
-        kprint(")\n");
+        klog_raw(KLOG_INFO, "task_set_current: unexpected state transition for task ");
+        klog_decimal(KLOG_INFO, task->task_id);
+        klog_raw(KLOG_INFO, " (state ");
+        klog_decimal(KLOG_INFO, task->state);
+        klog_raw(KLOG_INFO, ")\n");
     }
 
     task->state = TASK_STATE_RUNNING;

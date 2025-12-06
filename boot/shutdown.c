@@ -16,6 +16,7 @@
 #include "../drivers/pit.h"
 #include "../mm/page_alloc.h"
 #include "../lib/io.h"
+#include "../lib/klog.h"
 #include "../lib/cpu.h"
 
 #include <stdint.h>
@@ -36,7 +37,7 @@ void kernel_quiesce_interrupts(void) {
         return;
     }
 
-    kprintln("Kernel shutdown: quiescing interrupt controllers");
+    klog(KLOG_INFO, "Kernel shutdown: quiescing interrupt controllers");
 
     if (apic_is_available()) {
         apic_send_eoi();
@@ -55,14 +56,9 @@ void kernel_drain_serial_output(void) {
         return;
     }
 
-    kprintln("Kernel shutdown: draining serial output");
+    klog(KLOG_INFO, "Kernel shutdown: draining serial output");
 
-    serial_flush(serial_get_kernel_output());
-
-    uint16_t kernel_port = serial_get_kernel_output();
-    if (kernel_port != COM1_BASE) {
-        serial_flush(COM1_BASE);
-    }
+    serial_flush(SERIAL_COM1_PORT);
 
     serial_drained = 1;
 }
@@ -81,16 +77,16 @@ void kernel_shutdown(const char *reason) {
 
     shutdown_in_progress = 1;
 
-    kprintln("=== Kernel Shutdown Requested ===");
+    klog(KLOG_INFO, "=== Kernel Shutdown Requested ===");
     if (reason) {
-        kprint("Reason: ");
-        kprintln(reason);
+        klog_raw(KLOG_INFO, "Reason: ");
+        klog(KLOG_INFO, reason);
     }
 
     scheduler_shutdown();
 
     if (task_shutdown_all() != 0) {
-        kprintln("Warning: Failed to terminate one or more tasks");
+        klog(KLOG_INFO, "Warning: Failed to terminate one or more tasks");
     }
 
     task_set_current(NULL);
@@ -98,7 +94,7 @@ void kernel_shutdown(const char *reason) {
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();
 
-    kprintln("Kernel shutdown complete. Halting processors.");
+    klog(KLOG_INFO, "Kernel shutdown complete. Halting processors.");
 
 halt:
     while (1) {
@@ -113,15 +109,15 @@ halt:
 void kernel_reboot(const char *reason) {
     cpu_cli();
 
-    kprintln("=== Kernel Reboot Requested ===");
+    klog(KLOG_INFO, "=== Kernel Reboot Requested ===");
     if (reason) {
-        kprint("Reason: ");
-        kprintln(reason);
+        klog_raw(KLOG_INFO, "Reason: ");
+        klog(KLOG_INFO, reason);
     }
 
     kernel_drain_serial_output();
 
-    kprintln("Rebooting via keyboard controller...");
+    klog(KLOG_INFO, "Rebooting via keyboard controller...");
 
     /* Brief delay to let serial output flush before reset */
     pit_poll_delay_ms(50);
@@ -131,7 +127,7 @@ void kernel_reboot(const char *reason) {
     io_outb(0x64, 0xFE);
 
     // If that didn't work, try triple fault (should never get here)
-    kprintln("Keyboard reset failed, attempting triple fault...");
+    klog(KLOG_INFO, "Keyboard reset failed, attempting triple fault...");
 
     // Load invalid IDT to cause triple fault
     struct {
@@ -160,10 +156,10 @@ void kernel_reboot(const char *reason) {
  * not empty zeros, but the vibrant evidence of what once was.
  */
 void execute_kernel(void) {
-    kprintln("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
-    kprintln("Painting memory with the essence of slop (0x69)...");
+    klog(KLOG_INFO, "=== EXECUTING KERNEL PURIFICATION RITUAL ===");
+    klog(KLOG_INFO, "Painting memory with the essence of slop (0x69)...");
 
     page_allocator_paint_all(0x69);
 
-    kprintln("Memory purification complete. The slop has been painted eternal.");
+    klog(KLOG_INFO, "Memory purification complete. The slop has been painted eternal.");
 }

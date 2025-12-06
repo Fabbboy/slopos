@@ -10,6 +10,7 @@
 #include "../mm/kernel_heap.h"
 #include "../mm/page_alloc.h"
 #include "../sched/scheduler.h"
+#include "../lib/klog.h"
 
 static const shell_builtin_t builtin_table[] = {
     { "help",  builtin_help,  "List available commands" },
@@ -81,16 +82,16 @@ int builtin_help(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    kprintln("Available commands:");
+    klog(KLOG_INFO, "Available commands:");
 
     for (size_t i = 0; i < builtin_count; i++) {
-        kprint("  ");
-        kprint(builtin_table[i].name);
-        kprint(" - ");
+        klog_raw(KLOG_INFO, "  ");
+        klog_raw(KLOG_INFO, builtin_table[i].name);
+        klog_raw(KLOG_INFO, " - ");
         if (builtin_table[i].description) {
-            kprintln(builtin_table[i].description);
+            klog(KLOG_INFO, builtin_table[i].description);
         } else {
-            kprintln("(no description)");
+            klog(KLOG_INFO, "(no description)");
         }
     }
 
@@ -100,14 +101,14 @@ int builtin_help(int argc, char **argv) {
 int builtin_echo(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (argv[i]) {
-            kprint(argv[i]);
+            klog_raw(KLOG_INFO, argv[i]);
         }
         if (i + 1 < argc) {
-            kprint(" ");
+            klog_raw(KLOG_INFO, " ");
         }
     }
 
-    kprintln("");
+    klog(KLOG_INFO, "");
     return 0;
 }
 
@@ -116,7 +117,7 @@ int builtin_clear(int argc, char **argv) {
     (void)argv;
 
     /* ANSI escape sequence: clear screen and move cursor home */
-    kprint("\x1B[2J\x1B[H");
+    klog_raw(KLOG_INFO, "\x1B[2J\x1B[H");
     return 0;
 }
 
@@ -124,7 +125,7 @@ int builtin_halt(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    kprintln("Shell requested shutdown. Halting kernel...");
+    klog(KLOG_INFO, "Shell requested shutdown. Halting kernel...");
     kernel_shutdown("shell halt");
 
     return 0;  /* Not reached */
@@ -151,40 +152,40 @@ int builtin_info(int argc, char **argv) {
     get_scheduler_stats(&scheduler_context_switches, &scheduler_yields,
                         &ready_tasks, &schedule_calls);
 
-    kprintln("Kernel information:");
+    klog(KLOG_INFO, "Kernel information:");
 
-    kprint("  Memory: total pages=");
-    kprint_decimal(total_pages);
-    kprint(", free pages=");
-    kprint_decimal(free_pages);
-    kprint(", allocated pages=");
-    kprint_decimal(allocated_pages);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  Memory: total pages=");
+    klog_decimal(KLOG_INFO, total_pages);
+    klog_raw(KLOG_INFO, ", free pages=");
+    klog_decimal(KLOG_INFO, free_pages);
+    klog_raw(KLOG_INFO, ", allocated pages=");
+    klog_decimal(KLOG_INFO, allocated_pages);
+    klog(KLOG_INFO, "");
 
-    kprint("  Tasks: total=");
-    kprint_decimal(total_tasks);
-    kprint(", active=");
-    kprint_decimal(active_tasks);
-    kprint(", ctx switches=");
-    kprint_decimal(task_context_switches);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  Tasks: total=");
+    klog_decimal(KLOG_INFO, total_tasks);
+    klog_raw(KLOG_INFO, ", active=");
+    klog_decimal(KLOG_INFO, active_tasks);
+    klog_raw(KLOG_INFO, ", ctx switches=");
+    klog_decimal(KLOG_INFO, task_context_switches);
+    klog(KLOG_INFO, "");
 
-    kprint("  Scheduler: switches=");
-    kprint_decimal(scheduler_context_switches);
-    kprint(", yields=");
-    kprint_decimal(scheduler_yields);
-    kprint(", ready=");
-    kprint_decimal(ready_tasks);
-    kprint(", schedule() calls=");
-    kprint_decimal(schedule_calls);
-    kprintln("");
+    klog_raw(KLOG_INFO, "  Scheduler: switches=");
+    klog_decimal(KLOG_INFO, scheduler_context_switches);
+    klog_raw(KLOG_INFO, ", yields=");
+    klog_decimal(KLOG_INFO, scheduler_yields);
+    klog_raw(KLOG_INFO, ", ready=");
+    klog_decimal(KLOG_INFO, ready_tasks);
+    klog_raw(KLOG_INFO, ", schedule() calls=");
+    klog_decimal(KLOG_INFO, schedule_calls);
+    klog(KLOG_INFO, "");
 
     return 0;
 }
 
 int builtin_ls(int argc, char **argv) {
     if (argc > 2) {
-        kprintln("ls: too many arguments");
+        klog(KLOG_INFO, "ls: too many arguments");
         return 1;
     }
 
@@ -194,7 +195,7 @@ int builtin_ls(int argc, char **argv) {
     if (argc == 2) {
         const char *normalized = shell_normalize_path(argv[1], path_buffer, sizeof(path_buffer));
         if (!normalized) {
-            kprintln("ls: path too long");
+            klog(KLOG_INFO, "ls: path too long");
             return 1;
         }
         path = normalized;
@@ -202,33 +203,33 @@ int builtin_ls(int argc, char **argv) {
 
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node) {
-        kprint("ls: cannot access '");
-        kprint(path);
-        kprintln("': No such file or directory");
+        klog_raw(KLOG_INFO, "ls: cannot access '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': No such file or directory");
         return 1;
     }
 
     if (node->type == RAMFS_TYPE_FILE) {
-        kprint(node->name);
-        kprint(" (");
-        kprint_decimal((uint64_t)node->size);
-        kprintln(" bytes)");
+        klog_raw(KLOG_INFO, node->name);
+        klog_raw(KLOG_INFO, " (");
+        klog_decimal(KLOG_INFO, (uint64_t)node->size);
+        klog(KLOG_INFO, " bytes)");
         return 0;
     }
 
     if (node->type != RAMFS_TYPE_DIRECTORY) {
-        kprint("ls: cannot access '");
-        kprint(path);
-        kprintln("': Not a directory");
+        klog_raw(KLOG_INFO, "ls: cannot access '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': Not a directory");
         return 1;
     }
 
     ramfs_node_t **entries = NULL;
     int count = 0;
     if (ramfs_list_directory(path, &entries, &count) != 0) {
-        kprint("ls: cannot access '");
-        kprint(path);
-        kprintln("': Failed to list directory");
+        klog_raw(KLOG_INFO, "ls: cannot access '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': Failed to list directory");
         return 1;
     }
 
@@ -239,16 +240,16 @@ int builtin_ls(int argc, char **argv) {
         }
 
         if (entry->type == RAMFS_TYPE_DIRECTORY) {
-            kprint("[");
-            kprint(entry->name);
-            kprintln("]");
+            klog_raw(KLOG_INFO, "[");
+            klog_raw(KLOG_INFO, entry->name);
+            klog(KLOG_INFO, "]");
         } else if (entry->type == RAMFS_TYPE_FILE) {
-            kprint(entry->name);
-            kprint(" (");
-            kprint_decimal((uint64_t)entry->size);
-            kprintln(" bytes)");
+            klog_raw(KLOG_INFO, entry->name);
+            klog_raw(KLOG_INFO, " (");
+            klog_decimal(KLOG_INFO, (uint64_t)entry->size);
+            klog(KLOG_INFO, " bytes)");
         } else {
-            kprintln(entry->name);
+            klog(KLOG_INFO, entry->name);
         }
     }
 
@@ -261,56 +262,56 @@ int builtin_ls(int argc, char **argv) {
 
 int builtin_cat(int argc, char **argv) {
     if (argc < 2) {
-        kprintln("cat: missing file operand");
+        klog(KLOG_INFO, "cat: missing file operand");
         return 1;
     }
     if (argc > 2) {
-        kprintln("cat: too many arguments");
+        klog(KLOG_INFO, "cat: too many arguments");
         return 1;
     }
 
     char path_buffer[128];
     const char *path = shell_normalize_path(argv[1], path_buffer, sizeof(path_buffer));
     if (!path) {
-        kprintln("cat: path too long");
+        klog(KLOG_INFO, "cat: path too long");
         return 1;
     }
 
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node) {
-        kprint("cat: '");
-        kprint(path);
-        kprintln("': No such file or directory");
+        klog_raw(KLOG_INFO, "cat: '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': No such file or directory");
         return 1;
     }
 
     if (node->type != RAMFS_TYPE_FILE) {
-        kprint("cat: '");
-        kprint(path);
-        kprintln("': Is a directory");
+        klog_raw(KLOG_INFO, "cat: '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': Is a directory");
         return 1;
     }
 
     int fd = file_open(path, FILE_OPEN_READ);
     if (fd < 0) {
-        kprint("cat: cannot open '");
-        kprint(path);
-        kprintln("'");
+        klog_raw(KLOG_INFO, "cat: cannot open '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "'");
         return 1;
     }
 
     char buffer[128];
     int saw_data = 0;
     int last_was_newline = 0;
-    uint16_t port = serial_get_kernel_output();
+    uint16_t port = SERIAL_COM1_PORT;
 
     while (1) {
         ssize_t bytes_read = file_read(fd, buffer, sizeof(buffer));
         if (bytes_read < 0) {
             file_close(fd);
-            kprint("cat: error reading '");
-            kprint(path);
-            kprintln("'");
+            klog_raw(KLOG_INFO, "cat: error reading '");
+            klog_raw(KLOG_INFO, path);
+            klog(KLOG_INFO, "'");
             return 1;
         }
         if (bytes_read == 0) {
@@ -325,7 +326,7 @@ int builtin_cat(int argc, char **argv) {
     file_close(fd);
 
     if (!saw_data || !last_was_newline) {
-        kprintln("");
+        klog(KLOG_INFO, "");
     }
 
     return 0;
@@ -333,22 +334,22 @@ int builtin_cat(int argc, char **argv) {
 
 int builtin_write(int argc, char **argv) {
     if (argc < 2) {
-        kprintln("write: missing file operand");
+        klog(KLOG_INFO, "write: missing file operand");
         return 1;
     }
     if (argc < 3) {
-        kprintln("write: missing text operand");
+        klog(KLOG_INFO, "write: missing text operand");
         return 1;
     }
     if (argc > 3) {
-        kprintln("write: too many arguments");
+        klog(KLOG_INFO, "write: too many arguments");
         return 1;
     }
 
     char path_buffer[128];
     const char *path = shell_normalize_path(argv[1], path_buffer, sizeof(path_buffer));
     if (!path) {
-        kprintln("write: path too long");
+        klog(KLOG_INFO, "write: path too long");
         return 1;
     }
 
@@ -357,9 +358,9 @@ int builtin_write(int argc, char **argv) {
 
     int fd = file_open(path, FILE_OPEN_WRITE | FILE_OPEN_CREAT);
     if (fd < 0) {
-        kprint("write: cannot open '");
-        kprint(path);
-        kprintln("'");
+        klog_raw(KLOG_INFO, "write: cannot open '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "'");
         return 1;
     }
 
@@ -367,17 +368,17 @@ int builtin_write(int argc, char **argv) {
         ssize_t written = file_write(fd, text, length);
         if (written < 0 || (size_t)written != length) {
             file_close(fd);
-            kprint("write: failed to write to '");
-            kprint(path);
-            kprintln("'");
+            klog_raw(KLOG_INFO, "write: failed to write to '");
+            klog_raw(KLOG_INFO, path);
+            klog(KLOG_INFO, "'");
             return 1;
         }
     } else {
         file_close(fd);
         if (ramfs_write_file(path, NULL, 0) != 0) {
-            kprint("write: failed to truncate '");
-            kprint(path);
-            kprintln("'");
+            klog_raw(KLOG_INFO, "write: failed to truncate '");
+            klog_raw(KLOG_INFO, path);
+            klog(KLOG_INFO, "'");
             return 1;
         }
         return 0;
@@ -389,31 +390,31 @@ int builtin_write(int argc, char **argv) {
 
 int builtin_mkdir(int argc, char **argv) {
     if (argc < 2) {
-        kprintln("mkdir: missing operand");
+        klog(KLOG_INFO, "mkdir: missing operand");
         return 1;
     }
     if (argc > 2) {
-        kprintln("mkdir: too many arguments");
+        klog(KLOG_INFO, "mkdir: too many arguments");
         return 1;
     }
 
     char path_buffer[128];
     const char *path = shell_normalize_path(argv[1], path_buffer, sizeof(path_buffer));
     if (!path) {
-        kprintln("mkdir: path too long");
+        klog(KLOG_INFO, "mkdir: path too long");
         return 1;
     }
 
     ramfs_node_t *created = ramfs_create_directory(path);
     if (!created) {
         ramfs_node_t *existing = ramfs_find_node(path);
-        kprint("mkdir: cannot create directory '");
-        kprint(path);
-        kprint("': ");
+        klog_raw(KLOG_INFO, "mkdir: cannot create directory '");
+        klog_raw(KLOG_INFO, path);
+        klog_raw(KLOG_INFO, "': ");
         if (existing && existing->type == RAMFS_TYPE_FILE) {
-            kprintln("File exists");
+            klog(KLOG_INFO, "File exists");
         } else {
-            kprintln("Failed");
+            klog(KLOG_INFO, "Failed");
         }
         return 1;
     }
@@ -423,40 +424,40 @@ int builtin_mkdir(int argc, char **argv) {
 
 int builtin_rm(int argc, char **argv) {
     if (argc < 2) {
-        kprintln("rm: missing operand");
+        klog(KLOG_INFO, "rm: missing operand");
         return 1;
     }
     if (argc > 2) {
-        kprintln("rm: too many arguments");
+        klog(KLOG_INFO, "rm: too many arguments");
         return 1;
     }
 
     char path_buffer[128];
     const char *path = shell_normalize_path(argv[1], path_buffer, sizeof(path_buffer));
     if (!path) {
-        kprintln("rm: path too long");
+        klog(KLOG_INFO, "rm: path too long");
         return 1;
     }
 
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node) {
-        kprint("rm: cannot remove '");
-        kprint(path);
-        kprintln("': No such file or directory");
+        klog_raw(KLOG_INFO, "rm: cannot remove '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': No such file or directory");
         return 1;
     }
 
     if (node->type != RAMFS_TYPE_FILE) {
-        kprint("rm: cannot remove '");
-        kprint(path);
-        kprintln("': Is a directory");
+        klog_raw(KLOG_INFO, "rm: cannot remove '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "': Is a directory");
         return 1;
     }
 
     if (file_unlink(path) != 0) {
-        kprint("rm: cannot remove '");
-        kprint(path);
-        kprintln("'");
+        klog_raw(KLOG_INFO, "rm: cannot remove '");
+        klog_raw(KLOG_INFO, path);
+        klog(KLOG_INFO, "'");
         return 1;
     }
 

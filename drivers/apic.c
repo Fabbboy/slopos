@@ -74,9 +74,9 @@ int apic_detect(void) {
         apic_base_physical = apic_base_msr & APIC_BASE_ADDR_MASK;
 
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("APIC: Physical base: ");
-            kprint_hex(apic_base_physical);
-            kprintln("");
+            klog_raw(KLOG_INFO, "APIC: Physical base: ");
+            klog_hex(KLOG_INFO, apic_base_physical);
+            klog(KLOG_INFO, "");
         });
 
         if (is_hhdm_available()) {
@@ -84,9 +84,9 @@ int apic_detect(void) {
             apic_base_address = apic_base_physical + hhdm_offset;
 
             KLOG_BLOCK(KLOG_DEBUG, {
-                kprint("APIC: Virtual base (HHDM): ");
-                kprint_hex(apic_base_address);
-                kprintln("");
+                klog_raw(KLOG_INFO, "APIC: Virtual base (HHDM): ");
+                klog_hex(KLOG_INFO, apic_base_address);
+                klog(KLOG_INFO, "");
             });
         } else {
             klog_info("APIC: ERROR - HHDM not available, cannot map APIC registers");
@@ -95,11 +95,11 @@ int apic_detect(void) {
         }
 
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("APIC: MSR flags: ");
-            if (apic_base_msr & APIC_BASE_BSP) kprint("BSP ");
-            if (apic_base_msr & APIC_BASE_X2APIC) kprint("X2APIC ");
-            if (apic_base_msr & APIC_BASE_GLOBAL_ENABLE) kprint("ENABLED ");
-            kprintln("");
+            klog_raw(KLOG_INFO, "APIC: MSR flags: ");
+            if (apic_base_msr & APIC_BASE_BSP) klog_raw(KLOG_INFO, "BSP ");
+            if (apic_base_msr & APIC_BASE_X2APIC) klog_raw(KLOG_INFO, "X2APIC ");
+            if (apic_base_msr & APIC_BASE_GLOBAL_ENABLE) klog_raw(KLOG_INFO, "ENABLED ");
+            klog(KLOG_INFO, "");
         });
 
         return 1;
@@ -114,7 +114,7 @@ int apic_detect(void) {
  */
 int apic_init(void) {
     if (!apic_available) {
-        kprintln("APIC: Cannot initialize - APIC not available");
+        klog(KLOG_INFO, "APIC: Cannot initialize - APIC not available");
         return -1;
     }
 
@@ -153,11 +153,11 @@ int apic_init(void) {
     uint32_t apic_version = apic_get_version();
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("APIC: ID: ");
-        kprint_hex(apic_id);
-        kprint(", Version: ");
-        kprint_hex(apic_version);
-        kprintln("");
+        klog_raw(KLOG_INFO, "APIC: ID: ");
+        klog_hex(KLOG_INFO, apic_id);
+        klog_raw(KLOG_INFO, ", Version: ");
+        klog_hex(KLOG_INFO, apic_version);
+        klog(KLOG_INFO, "");
     });
 
     apic_enabled = 1;
@@ -256,11 +256,11 @@ void apic_timer_init(uint32_t vector, uint32_t frequency) {
     if (!apic_enabled) return;
 
     KLOG_BLOCK(KLOG_DEBUG, {
-        kprint("APIC: Initializing timer with vector ");
-        kprint_hex(vector);
-        kprint(" and frequency ");
-        kprint_decimal(frequency);
-        kprintln("");
+        klog_raw(KLOG_INFO, "APIC: Initializing timer with vector ");
+        klog_hex(KLOG_INFO, vector);
+        klog_raw(KLOG_INFO, " and frequency ");
+        klog_decimal(KLOG_INFO, frequency);
+        klog(KLOG_INFO, "");
     });
 
     // Set timer divisor to 16
@@ -362,57 +362,57 @@ void apic_write_register(uint32_t reg, uint32_t value) {
  * Dump APIC state for debugging
  */
 void apic_dump_state(void) {
-    kprintln("=== APIC STATE DUMP ===");
+    klog(KLOG_INFO, "=== APIC STATE DUMP ===");
 
     if (!apic_available) {
-        kprintln("APIC: Not available");
-        kprintln("=== END APIC STATE DUMP ===");
+        klog(KLOG_INFO, "APIC: Not available");
+        klog(KLOG_INFO, "=== END APIC STATE DUMP ===");
         return;
     }
 
-    kprint("APIC Available: Yes, x2APIC: ");
-    kprintln(x2apic_available ? "Yes" : "No");
+    klog_raw(KLOG_INFO, "APIC Available: Yes, x2APIC: ");
+    klog(KLOG_INFO, x2apic_available ? "Yes" : "No");
 
-    kprint("APIC Enabled: ");
-    kprintln(apic_enabled ? "Yes" : "No");
+    klog_raw(KLOG_INFO, "APIC Enabled: ");
+    klog(KLOG_INFO, apic_enabled ? "Yes" : "No");
 
-    kprint("Bootstrap Processor: ");
-    kprintln(apic_is_bsp() ? "Yes" : "No");
+    klog_raw(KLOG_INFO, "Bootstrap Processor: ");
+    klog(KLOG_INFO, apic_is_bsp() ? "Yes" : "No");
 
-    kprint("Base Address: ");
-    kprint_hex(apic_base_address);
-    kprintln("");
+    klog_raw(KLOG_INFO, "Base Address: ");
+    klog_hex(KLOG_INFO, apic_base_address);
+    klog(KLOG_INFO, "");
 
     if (apic_enabled) {
-        kprint("APIC ID: ");
-        kprint_hex(apic_get_id());
-        kprintln("");
+        klog_raw(KLOG_INFO, "APIC ID: ");
+        klog_hex(KLOG_INFO, apic_get_id());
+        klog(KLOG_INFO, "");
 
-        kprint("APIC Version: ");
-        kprint_hex(apic_get_version());
-        kprintln("");
+        klog_raw(KLOG_INFO, "APIC Version: ");
+        klog_hex(KLOG_INFO, apic_get_version());
+        klog(KLOG_INFO, "");
 
         uint32_t spurious = apic_read_register(LAPIC_SPURIOUS);
-        kprint("Spurious Vector Register: ");
-        kprint_hex(spurious);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Spurious Vector Register: ");
+        klog_hex(KLOG_INFO, spurious);
+        klog(KLOG_INFO, "");
 
         uint32_t esr = apic_read_register(LAPIC_ESR);
-        kprint("Error Status Register: ");
-        kprint_hex(esr);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Error Status Register: ");
+        klog_hex(KLOG_INFO, esr);
+        klog(KLOG_INFO, "");
 
         uint32_t lvt_timer = apic_read_register(LAPIC_LVT_TIMER);
-        kprint("Timer LVT: ");
-        kprint_hex(lvt_timer);
-        if (lvt_timer & LAPIC_LVT_MASKED) kprint(" (MASKED)");
-        kprintln("");
+        klog_raw(KLOG_INFO, "Timer LVT: ");
+        klog_hex(KLOG_INFO, lvt_timer);
+        if (lvt_timer & LAPIC_LVT_MASKED) klog_raw(KLOG_INFO, " (MASKED)");
+        klog(KLOG_INFO, "");
 
         uint32_t timer_count = apic_timer_get_current_count();
-        kprint("Timer Current Count: ");
-        kprint_hex(timer_count);
-        kprintln("");
+        klog_raw(KLOG_INFO, "Timer Current Count: ");
+        klog_hex(KLOG_INFO, timer_count);
+        klog(KLOG_INFO, "");
     }
 
-    kprintln("=== END APIC STATE DUMP ===");
+    klog(KLOG_INFO, "=== END APIC STATE DUMP ===");
 }

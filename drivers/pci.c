@@ -1,6 +1,7 @@
 #include "pci.h"
 #include "serial.h"
 #include "../mm/phys_virt.h"
+#include "../lib/klog.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -134,51 +135,51 @@ static uint64_t pci_probe_bar_size(uint8_t bus, uint8_t device,
 }
 
 static void pci_log_device_header(const pci_device_info_t *info) {
-    kprint("PCI: [Bus ");
-    kprint_decimal(info->bus);
-    kprint(" Dev ");
-    kprint_decimal(info->device);
-    kprint(" Func ");
-    kprint_decimal(info->function);
-    kprint("] VID=");
-    kprint_hex(info->vendor_id);
-    kprint(" DID=");
-    kprint_hex(info->device_id);
-    kprint(" Class=");
-    kprint_hex(info->class_code);
-    kprint(":");
-    kprint_hex(info->subclass);
-    kprint(" ProgIF=");
-    kprint_hex(info->prog_if);
-    kprint(" Rev=");
-    kprint_hex(info->revision);
-    kprintln("");
+    klog_raw(KLOG_INFO, "PCI: [Bus ");
+    klog_decimal(KLOG_INFO, info->bus);
+    klog_raw(KLOG_INFO, " Dev ");
+    klog_decimal(KLOG_INFO, info->device);
+    klog_raw(KLOG_INFO, " Func ");
+    klog_decimal(KLOG_INFO, info->function);
+    klog_raw(KLOG_INFO, "] VID=");
+    klog_hex(KLOG_INFO, info->vendor_id);
+    klog_raw(KLOG_INFO, " DID=");
+    klog_hex(KLOG_INFO, info->device_id);
+    klog_raw(KLOG_INFO, " Class=");
+    klog_hex(KLOG_INFO, info->class_code);
+    klog_raw(KLOG_INFO, ":");
+    klog_hex(KLOG_INFO, info->subclass);
+    klog_raw(KLOG_INFO, " ProgIF=");
+    klog_hex(KLOG_INFO, info->prog_if);
+    klog_raw(KLOG_INFO, " Rev=");
+    klog_hex(KLOG_INFO, info->revision);
+    klog(KLOG_INFO, "");
 }
 
 static void pci_log_bar(const pci_bar_info_t *bar, uint8_t index) {
-    kprint("    BAR");
-    kprint_decimal(index);
-    kprint(": ");
+    klog_raw(KLOG_INFO, "    BAR");
+    klog_decimal(KLOG_INFO, index);
+    klog_raw(KLOG_INFO, ": ");
     if (bar->is_io) {
-        kprint("IO base=0x");
-        kprint_hex(bar->base);
+        klog_raw(KLOG_INFO, "IO base=0x");
+        klog_hex(KLOG_INFO, bar->base);
         if (bar->size) {
-            kprint(" size=");
-            kprint_decimal(bar->size);
+            klog_raw(KLOG_INFO, " size=");
+            klog_decimal(KLOG_INFO, bar->size);
         }
     } else {
-        kprint("MMIO base=0x");
-        kprint_hex(bar->base);
+        klog_raw(KLOG_INFO, "MMIO base=0x");
+        klog_hex(KLOG_INFO, bar->base);
         if (bar->size) {
-            kprint(" size=0x");
-            kprint_hex(bar->size);
+            klog_raw(KLOG_INFO, " size=0x");
+            klog_hex(KLOG_INFO, bar->size);
         }
-        kprint(bar->prefetchable ? " prefetch" : " non-prefetch");
+        klog_raw(KLOG_INFO, bar->prefetchable ? " prefetch" : " non-prefetch");
         if (bar->is_64bit) {
-            kprint(" 64bit");
+            klog_raw(KLOG_INFO, " 64bit");
         }
     }
-    kprintln("");
+    klog(KLOG_INFO, "");
 }
 
 static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
@@ -203,21 +204,21 @@ static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
         primary_gpu.mmio_virt_base = mm_map_mmio_region(primary_gpu.mmio_phys_base,
                                                         (size_t)primary_gpu.mmio_size);
 
-        kprint("PCI: Selected GPU candidate at MMIO phys=0x");
-        kprint_hex(primary_gpu.mmio_phys_base);
-        kprint(" size=0x");
-        kprint_hex(primary_gpu.mmio_size);
+        klog_raw(KLOG_INFO, "PCI: Selected GPU candidate at MMIO phys=0x");
+        klog_hex(KLOG_INFO, primary_gpu.mmio_phys_base);
+        klog_raw(KLOG_INFO, " size=0x");
+        klog_hex(KLOG_INFO, primary_gpu.mmio_size);
         if (primary_gpu.mmio_virt_base) {
-            kprint(" virt=0x");
-            kprint_hex((uint64_t)(uintptr_t)primary_gpu.mmio_virt_base);
-            kprintln("");
+            klog_raw(KLOG_INFO, " virt=0x");
+            klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)primary_gpu.mmio_virt_base);
+            klog(KLOG_INFO, "");
         } else {
-            kprintln(" (mapping failed)");
+            klog(KLOG_INFO, " (mapping failed)");
         }
 
-        kprintln("PCI: GPU acceleration groundwork ready (MMIO mapped)");
+        klog(KLOG_INFO, "PCI: GPU acceleration groundwork ready (MMIO mapped)");
         if (!primary_gpu.mmio_virt_base) {
-            kprintln("PCI: WARNING GPU MMIO not accessible; check paging support");
+            klog(KLOG_INFO, "PCI: WARNING GPU MMIO not accessible; check paging support");
         }
         return;
     }
@@ -284,7 +285,7 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
 
     if (device_count >= PCI_MAX_DEVICES) {
         if (device_count == PCI_MAX_DEVICES) {
-            kprintln("PCI: Device buffer full, additional devices will not be tracked");
+            klog(KLOG_INFO, "PCI: Device buffer full, additional devices will not be tracked");
         }
         return;
     }
@@ -312,9 +313,9 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
     if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
         uint8_t secondary_bus = pci_config_read8(bus, device, function, 0x19);
         if (secondary_bus != 0 && !bus_visited[secondary_bus]) {
-            kprint("PCI: Traversing to secondary bus ");
-            kprint_decimal(secondary_bus);
-            kprintln("");
+            klog_raw(KLOG_INFO, "PCI: Traversing to secondary bus ");
+            klog_decimal(KLOG_INFO, secondary_bus);
+            klog(KLOG_INFO, "");
             bus_visited[secondary_bus] = 1;
             // Recursive scan of downstream bus
             for (uint8_t dev = 0; dev < 32; ++dev) {
@@ -373,7 +374,7 @@ int pci_init(void) {
         return 0;
     }
 
-    kprintln("PCI: Initializing PCI subsystem");
+    klog(KLOG_INFO, "PCI: Initializing PCI subsystem");
     device_count = 0;
     primary_gpu.present = 0;
     primary_gpu.mmio_phys_base = 0;
@@ -387,12 +388,12 @@ int pci_init(void) {
     pci_enumerate_bus(0);
 
     if (!primary_gpu.present) {
-        kprintln("PCI: No GPU-class device detected on primary bus");
+        klog(KLOG_INFO, "PCI: No GPU-class device detected on primary bus");
     }
 
-    kprint("PCI: Enumeration complete. Devices discovered: ");
-    kprint_decimal(device_count);
-    kprintln("");
+    klog_raw(KLOG_INFO, "PCI: Enumeration complete. Devices discovered: ");
+    klog_decimal(KLOG_INFO, device_count);
+    klog(KLOG_INFO, "");
 
     pci_initialized = 1;
     return 0;

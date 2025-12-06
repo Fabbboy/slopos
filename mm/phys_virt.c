@@ -47,11 +47,11 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
     const mm_reserved_region_t *reservation = mm_reservations_find(phys_addr);
     if (reservation && (reservation->flags & MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT) == 0) {
         KLOG_BLOCK(KLOG_DEBUG, {
-            kprint("mm_phys_to_virt: rejected reserved phys 0x");
-            kprint_hex(phys_addr);
-            kprint(" (");
-            kprint(mm_reservation_type_name(reservation->type));
-            kprint(")\n");
+            klog_raw(KLOG_INFO, "mm_phys_to_virt: rejected reserved phys 0x");
+            klog_hex(KLOG_INFO, phys_addr);
+            klog_raw(KLOG_INFO, " (");
+            klog_raw(KLOG_INFO, mm_reservation_type_name(reservation->type));
+            klog_raw(KLOG_INFO, ")\n");
         });
         return 0;
     }
@@ -70,7 +70,7 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
         }
     }
 
-    kprint("mm_phys_to_virt: No mapping available for physical address\n");
+    klog_raw(KLOG_INFO, "mm_phys_to_virt: No mapping available for physical address\n");
     return 0;
 }
 
@@ -103,7 +103,7 @@ void *mm_map_mmio_region(uint64_t phys_addr, size_t size) {
 
     uint64_t end_addr = phys_addr + (uint64_t)size - 1;
     if (end_addr < phys_addr) {
-        kprintln("MM: mm_map_mmio_region overflow detected");
+        klog(KLOG_INFO, "MM: mm_map_mmio_region overflow detected");
         return NULL;
     }
 
@@ -116,7 +116,7 @@ void *mm_map_mmio_region(uint64_t phys_addr, size_t size) {
         return (void *)(uintptr_t)phys_addr;
     }
 
-    kprintln("MM: mm_map_mmio_region requires explicit paging support (unavailable)");
+    klog(KLOG_INFO, "MM: mm_map_mmio_region requires explicit paging support (unavailable)");
     return NULL;
 }
 

@@ -19,9 +19,6 @@
 /* Serial port configurations for each COM port */
 static serial_config_t port_configs[4] = {0};
 
-/* Default kernel output port */
-static uint16_t kernel_output_port = COM1_BASE;
-
 /* Last error for each port */
 static int port_errors[4] = {0};
 
@@ -36,15 +33,6 @@ typedef struct serial_rx_buffer {
 
 static serial_rx_buffer_t serial_rx_buffers[4];
 static uint8_t serial_irq_registered[4] = {0};
-
-/* Shared hex digit lookup table (DRY - used by multiple hex output functions) */
-static const char hex_digits[] = "0123456789ABCDEF";
-
-static void format_hex64(uint64_t value, char *out16) {
-    for (int i = 15; i >= 0; i--) {
-        out16[15 - i] = hex_digits[(value >> (i * 4)) & 0xF];
-    }
-}
 
 /* ========================================================================
  * LOW-LEVEL HARDWARE ACCESS
@@ -430,56 +418,6 @@ void serial_putc_com1(char c) {
     serial_putc(COM1_BASE, c);
 }
 
-void serial_put_hex_com1(uint64_t value) {
-    char buffer[19];  /* "0x" + 16 hex digits + null terminator */
-
-    buffer[0] = '0';
-    buffer[1] = 'x';
-    format_hex64(value, buffer + 2);
-    buffer[18] = '\0';
-    serial_puts(COM1_BASE, buffer);
-}
-
-void serial_put_decimal_com1(uint64_t value) {
-    char buffer[21];
-    if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
-        return;
-    }
-    serial_puts(COM1_BASE, buffer);
-}
-
-/* ========================================================================
- * KERNEL OUTPUT INTERFACE
- * ======================================================================== */
-
-void serial_set_kernel_output(uint16_t port) {
-    kernel_output_port = port;
-}
-
-uint16_t serial_get_kernel_output(void) {
-    return kernel_output_port;
-}
-
-void kprint(const char *str) {
-    serial_puts(kernel_output_port, str);
-}
-
-void kprintln(const char *str) {
-    serial_puts_line(kernel_output_port, str);
-}
-
-void kprint_hex(uint64_t value) {
-    serial_put_hex_com1(value);
-}
-
-void kprint_decimal(uint64_t value) {
-    serial_put_decimal_com1(value);
-}
-
-/* ========================================================================
- * CONFIGURATION AND DIAGNOSTICS
- * ======================================================================== */
-
 int serial_get_config(uint16_t port, serial_config_t *config) {
     int port_index = get_port_index(port);
     if (port_index < 0 || !config) {
@@ -541,20 +479,18 @@ void serial_emergency_puts(const char *str) {
 }
 
 void serial_emergency_put_hex(uint64_t value) {
-    char digits[16];
-    format_hex64(value, digits);
+    char buffer[24];
+    size_t len = numfmt_u64_to_hex(value, buffer, sizeof(buffer), 1);
 
-    serial_emergency_putc('0');
-    serial_emergency_putc('x');
-    for (int i = 0; i < 16; i++) {
-        serial_emergency_putc(digits[i]);
+    if (len == 0) {
+        buffer[0] = '0';
+        buffer[1] = 'x';
+        buffer[2] = '0';
+        buffer[3] = '\0';
+        len = 3;
     }
-}
 
-/*
- * Print hex byte (2 digits)
- */
-void kprint_hex_byte(uint8_t value) {
-    serial_putc(SERIAL_COM1_PORT, hex_digits[(value >> 4) & 0xF]);
-    serial_putc(SERIAL_COM1_PORT, hex_digits[value & 0xF]);
+    for (size_t i = 0; i < len; i++) {
+        serial_emergency_putc(buffer[i]);
+    }
 }
