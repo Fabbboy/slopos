@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
+#include "../boot/init.h"
 #include "../lib/kdiag.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"
@@ -518,11 +519,8 @@ static void idle_task_function(void *arg) {
 
         /* Check if we should exit (for testing purposes) */
         /* If there are no user tasks and we're in a test environment, exit */
-        extern int is_kernel_initialized(void);
         if (is_kernel_initialized() && scheduler.idle_time > 1000) {
             /* Count active tasks */
-            extern void get_task_stats(uint32_t *total_tasks, uint32_t *active_tasks,
-                                     uint64_t *context_switches);
             uint32_t active_tasks = 0;
             get_task_stats(NULL, &active_tasks, NULL);
             if (active_tasks <= 1) {  /* Only idle task remains */
@@ -576,10 +574,6 @@ int init_scheduler(void) {
  */
 int create_idle_task(void) {
     /* Create idle task using task management functions */
-    extern uint32_t task_create(const char *name, void (*entry_point)(void *),
-                               void *arg, uint8_t priority, uint16_t flags);
-    extern int task_get_info(uint32_t task_id, task_t **task_info);
-
     uint32_t idle_task_id = task_create("idle", idle_task_function, NULL,
                                        3, 0x02);  /* Low priority, kernel mode */
 
@@ -608,7 +602,6 @@ int start_scheduler(void) {
     scheduler.enabled = 1;
 
     /* Save current context as return context for testing */
-    extern void init_kernel_context(task_context_t *context);
     init_kernel_context(&scheduler.return_context);
 
     scheduler_set_preemption_enabled(1);

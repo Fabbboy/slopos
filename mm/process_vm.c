@@ -10,19 +10,13 @@
 #include "../drivers/serial.h"
 #include "../lib/klog.h"
 #include "../boot/integration.h"
+#include "process_vm.h"
 #include "memory_layout.h"
 #include "kernel_heap.h"
 #include "page_alloc.h"
 #include "paging.h"
 #include "phys_virt.h"
 #include "../boot/kernel_panic.h"
-
-/* Process memory allocation flags */
-#define VM_FLAG_READ                  0x01   /* Page is readable */
-#define VM_FLAG_WRITE                 0x02   /* Page is writable */
-#define VM_FLAG_EXEC                  0x04   /* Page is executable */
-#define VM_FLAG_USER                  0x08   /* Page accessible from user mode */
-#define VM_FLAG_SHARED                0x10   /* Page is shared between processes */
 
 /* ========================================================================
  * PROCESS VIRTUAL MEMORY STRUCTURES

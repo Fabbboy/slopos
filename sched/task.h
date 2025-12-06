@@ -100,6 +100,7 @@ typedef struct task {
 } task_t;
 
 void task_entry_wrapper(void);
+void init_kernel_context(task_context_t *context);
 
 /*
  * Scheduler instrumentation helpers

@@ -18,12 +18,6 @@
 #include "scheduler.h"
 #include "../boot/kernel_panic.h"
 
-/* Process VM allocation flags (mirror mm/process_vm.c definitions) */
-#define PROCESS_VM_FLAG_READ                  0x01
-#define PROCESS_VM_FLAG_WRITE                 0x02
-#define PROCESS_VM_FLAG_EXEC                  0x04
-#define PROCESS_VM_FLAG_USER                  0x08
-
 /* Task manager structure */
 typedef struct task_manager {
     task_t tasks[MAX_TASKS];             /* Task pool */
@@ -196,9 +190,9 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
 
         /* Allocate stack for task */
         stack_base = process_vm_alloc(process_id, TASK_STACK_SIZE,
-                                      PROCESS_VM_FLAG_READ |
-                                      PROCESS_VM_FLAG_WRITE |
-                                      PROCESS_VM_FLAG_USER);
+                                      VM_FLAG_READ |
+                                      VM_FLAG_WRITE |
+                                      VM_FLAG_USER);
         if (!stack_base) {
             klog_raw(KLOG_INFO, "task_create: Failed to allocate stack\n");
             destroy_process_vm(process_id);

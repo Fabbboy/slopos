@@ -40,6 +40,7 @@ void boot_init_set_optional_enabled(int enabled);
 int boot_init_optional_enabled(void);
 int boot_init_run_all(void);
 int boot_init_run_phase(enum boot_init_phase phase);
+int is_kernel_initialized(void);
 
 #define BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, flag_value) \
     static const struct boot_init_step boot_init_step_##fn \
