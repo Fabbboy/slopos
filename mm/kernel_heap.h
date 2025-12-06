@@ -13,6 +13,7 @@ void *kmalloc(size_t size);
 void kfree(void *ptr);
 void print_heap_stats(void);
 void kernel_heap_enable_diagnostics(int enable);
+int init_kernel_heap(void);
 
 /* Heap statistics structure for test access */
 typedef struct {

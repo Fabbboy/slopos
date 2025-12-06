@@ -8,22 +8,9 @@
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "paging.h"
+#include "process_vm.h"
+#include "page_alloc.h"
 #include "../lib/klog.h"
-
-/* Forward declarations from process_vm module */
-extern uint32_t create_process_vm(void);
-extern int destroy_process_vm(uint32_t process_id);
-extern void get_process_vm_stats(uint32_t *total_processes, uint32_t *active_processes);
-extern process_page_dir_t *process_vm_get_page_dir(uint32_t process_id);
-
-/* Forward declarations from paging module */
-extern int switch_page_directory(process_page_dir_t *page_dir);
-extern process_page_dir_t *get_current_page_directory(void);
-extern uint64_t virt_to_phys(uint64_t vaddr);
-extern int map_page_4kb(uint64_t vaddr, uint64_t paddr, uint64_t flags);
-
-/* Forward declarations from page_alloc module */
-extern uint64_t alloc_page_frame(uint32_t flags);
 
 /* ========================================================================
  * VM MANAGER REGRESSION TESTS

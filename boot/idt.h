@@ -105,6 +105,7 @@ void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t t
 void idt_install_exception_handler(uint8_t vector, exception_handler_t handler);
 void idt_set_ist(uint8_t vector, uint8_t ist_index);
 void idt_load(void);
+void dump_idt(void);
 
 // Exception handlers
 void exception_divide_error(struct interrupt_frame *frame);

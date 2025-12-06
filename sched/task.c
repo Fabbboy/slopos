@@ -12,30 +12,17 @@
 #include "../drivers/serial.h"
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"
+#include "../mm/process_vm.h"
+#include "../lib/cpu.h"
 #include "task.h"
 #include "scheduler.h"
 #include "../boot/kernel_panic.h"
-
-extern void task_entry_wrapper(void);
 
 /* Process VM allocation flags (mirror mm/process_vm.c definitions) */
 #define PROCESS_VM_FLAG_READ                  0x01
 #define PROCESS_VM_FLAG_WRITE                 0x02
 #define PROCESS_VM_FLAG_EXEC                  0x04
 #define PROCESS_VM_FLAG_USER                  0x08
-
-static inline uint64_t read_cr3(void) {
-    uint64_t value;
-    __asm__ volatile ("movq %%cr3, %0" : "=r"(value));
-    return value;
-}
-
-/* Forward declarations */
-uint32_t create_process_vm(void);
-int destroy_process_vm(uint32_t process_id);
-uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags);
-int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size);
-process_page_dir_t *process_vm_get_page_dir(uint32_t process_id);
 
 /* Task manager structure */
 typedef struct task_manager {

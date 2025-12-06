@@ -6,10 +6,8 @@
 #include "apic.h"
 #include "serial.h"
 #include "../lib/klog.h"
-
-// Limine boot protocol exports
-extern uint64_t get_hhdm_offset(void);
-extern int is_hhdm_available(void);
+#include "../lib/cpu.h"
+#include "../boot/limine_protocol.h"
 
 // Global APIC state
 static int apic_available = 0;
@@ -17,33 +15,6 @@ static int x2apic_available = 0;
 static uint64_t apic_base_address = 0;
 static uint64_t apic_base_physical = 0;
 static int apic_enabled = 0;
-
-/*
- * Read MSR (Model Specific Register)
- */
-uint64_t read_msr(uint32_t msr) {
-    uint32_t low, high;
-    __asm__ volatile ("rdmsr" : "=a" (low), "=d" (high) : "c" (msr));
-    return ((uint64_t)high << 32) | low;
-}
-
-/*
- * Write MSR (Model Specific Register)
- */
-void write_msr(uint32_t msr, uint64_t value) {
-    uint32_t low = value & 0xFFFFFFFF;
-    uint32_t high = value >> 32;
-    __asm__ volatile ("wrmsr" : : "a" (low), "d" (high), "c" (msr));
-}
-
-/*
- * Execute CPUID instruction
- */
-void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
-    __asm__ volatile ("cpuid"
-                      : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
-                      : "a" (leaf));
-}
 
 /*
  * Detect APIC availability

@@ -14,9 +14,6 @@
 #include "../lib/numfmt.h"
 #include "../lib/cpu.h"
 
-/* Declare execute_kernel for the purification ritual */
-extern void execute_kernel(void);
-
 static void panic_output_string(const char *str) {
     serial_emergency_puts(str);
 }

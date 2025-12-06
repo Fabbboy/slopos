@@ -25,11 +25,6 @@
  * PAGE TABLE STRUCTURES AND MANAGEMENT
  * ======================================================================== */
 
-/* External references to early boot page tables from linker */
-extern page_table_t early_pml4;
-extern page_table_t early_pdpt;
-extern page_table_t early_pd;
-
 /* Kernel page directory - always active in higher-half */
 static process_page_dir_t kernel_page_dir = {
     .pml4 = &early_pml4,

@@ -14,4 +14,7 @@ void gdt_init(void);
 /* Configure Interrupt Stack Table entry (1-based index) */
 void gdt_set_ist(uint8_t index, uint64_t stack_top);
 
+/* Boot stack symbol exported from assembly */
+extern uint8_t kernel_stack_top;
+
 #endif /* GDT_H */

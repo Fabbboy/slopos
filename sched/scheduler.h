@@ -10,6 +10,10 @@
 #include <stddef.h>
 #include "task.h"
 
+/* Low-level context switch helpers implemented in assembly */
+void context_switch(void *old_context, void *new_context);
+void simple_context_switch(void *old_context, void *new_context);
+
 /* ========================================================================
  * TASK MANAGEMENT FUNCTIONS
  * ======================================================================== */

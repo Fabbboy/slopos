@@ -99,6 +99,8 @@ typedef struct task {
 
 } task_t;
 
+void task_entry_wrapper(void);
+
 /*
  * Scheduler instrumentation helpers
  */

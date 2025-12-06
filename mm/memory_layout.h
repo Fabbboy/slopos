@@ -45,6 +45,7 @@ typedef struct process_memory_layout {
 #define PROCESS_STACK_SIZE_BYTES 0x0000000000100000ULL   /* 1MB */
 
 const kernel_memory_layout_t *get_kernel_memory_layout(void);
+void init_kernel_memory_layout(void);
 uint64_t mm_get_kernel_phys_start(void);
 uint64_t mm_get_kernel_phys_end(void);
 uint64_t mm_get_kernel_virt_start(void);

@@ -14,15 +14,9 @@
 #include "../drivers/pit.h"
 #include "../drivers/wl_currency.h"
 #include "../mm/paging.h"
+#include "../mm/process_vm.h"
 #include "../lib/ring_buffer.h"
 #include "scheduler.h"
-
-/* Forward declarations from context_switch.s */
-extern void context_switch(void *old_context, void *new_context);
-extern void simple_context_switch(void *old_context, void *new_context);
-
-/* Forward declarations from process_vm.c */
-extern process_page_dir_t *process_vm_get_page_dir(uint32_t process_id);
 
 /* ========================================================================
  * SCHEDULER CONSTANTS

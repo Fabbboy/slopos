@@ -45,5 +45,8 @@ void init_paging(void);
 int is_mapped(uint64_t vaddr);
 uint64_t get_page_size(uint64_t vaddr);
 void get_memory_layout_info(uint64_t *kernel_virt_base, uint64_t *kernel_phys_base);
+extern page_table_t early_pml4;
+extern page_table_t early_pdpt;
+extern page_table_t early_pd;
 
 #endif /* MM_PAGING_H */

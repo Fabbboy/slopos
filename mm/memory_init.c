@@ -13,17 +13,14 @@
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 #include "../third_party/limine/limine.h"
+#include "memory_init.h"
 #include "memory_layout.h"
 #include "memory_reservations.h"
 #include "page_alloc.h"
 #include "phys_virt.h"
+#include "kernel_heap.h"
+#include "process_vm.h"
 #include "../boot/kernel_panic.h"
-
-/* Memory subsystem initialization functions */
-void init_kernel_memory_layout(void);
-int init_kernel_heap(void);
-int init_process_vm(void);
-void init_paging(void);
 
 /* ========================================================================
  * MEMORY INITIALIZATION STATE TRACKING

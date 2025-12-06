@@ -12,9 +12,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Symbols exported from boot/limine_entry.s */
-extern uint8_t kernel_stack_top;
-
 /* 64-bit Task State Segment definition */
 struct tss64 {
     uint32_t reserved0;

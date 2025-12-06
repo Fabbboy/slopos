@@ -10,21 +10,8 @@
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
 #include "task.h"
+#include "scheduler.h"
 #include "../lib/klog.h"
-
-/* Forward declarations from scheduler and task modules */
-extern void yield(void);
-extern uint32_t task_create(const char *name, void (*entry_point)(void *),
-                           void *arg, uint8_t priority, uint16_t flags);
-extern int init_task_manager(void);
-extern int init_scheduler(void);
-extern int create_idle_task(void);
-extern int start_scheduler(void);
-extern int schedule_task(void *task);
-extern int task_get_info(uint32_t task_id, void **task_info);
-extern int task_terminate(uint32_t task_id);
-extern void init_kernel_context(task_context_t *context);
-extern void context_switch(task_context_t *old_context, task_context_t *new_context);
 
 /* Forward declaration for test function */
 void test_task_function(int *completed_flag);
@@ -159,7 +146,8 @@ int run_scheduler_test(void) {
     klog_raw(KLOG_INFO, "\n");
 
     /* Add tasks to scheduler */
-    void *task_a_info, *task_b_info;
+    task_t *task_a_info = NULL;
+    task_t *task_b_info = NULL;
 
     if (task_get_info(task_a_id, &task_a_info) != 0) {
         klog_raw(KLOG_INFO, "Failed to get task A info\n");
@@ -377,7 +365,6 @@ int run_context_switch_smoke_test(void) {
             kernel_return_context->rflags = 0x202;  /* IF=1 */
 
     /* Switch to test context using simple switch (no IRET for testing) */
-    extern void simple_context_switch(task_context_t *old_context, task_context_t *new_context);
     task_context_t dummy_old;
     simple_context_switch(&dummy_old, &test_ctx);
 
@@ -401,8 +388,6 @@ void test_task_function(int *completed_flag) {
     *completed_flag = 1;
 
     /* Switch back to kernel */
-    extern void simple_context_switch(task_context_t *old_context, task_context_t *new_context);
-
     // Switch back to kernel
     task_context_t dummy;
     simple_context_switch(&dummy, kernel_return_context);

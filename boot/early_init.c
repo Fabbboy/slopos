@@ -31,21 +31,9 @@
 #include "../drivers/pci.h"
 #include "../drivers/wl_currency.h"
 #include "kernel_panic.h"
+#include "cpu_verify.h"
+#include "../mm/memory_init.h"
 #include <string.h>
-
-// Forward declarations for other modules
-extern void verify_cpu_state(void);
-extern void verify_memory_layout(void);
-extern void check_stack_health(void);
-extern void init_paging(void);
-extern void init_kernel_memory_layout(void);
-extern int init_memory_system(const struct limine_memmap_response *memmap,
-                              uint64_t hhdm_offset);
-
-// IDT and interrupt handling
-extern void init_idt(void);
-extern void dump_idt(void);
-extern void load_idt(void);
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;

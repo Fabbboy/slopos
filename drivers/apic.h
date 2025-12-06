@@ -7,6 +7,7 @@
 #define APIC_H
 
 #include <stdint.h>
+#include "../lib/cpu.h"
 
 // CPUID feature flags for APIC detection
 #define CPUID_FEAT_EDX_APIC     (1 << 9)   // Local APIC present
@@ -109,12 +110,5 @@ void apic_set_base_address(uint64_t base);
 // Low-level register access
 uint32_t apic_read_register(uint32_t reg);
 void apic_write_register(uint32_t reg, uint32_t value);
-
-// MSR access utilities
-uint64_t read_msr(uint32_t msr);
-void write_msr(uint32_t msr, uint64_t value);
-
-// CPUID utilities
-void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
 
 #endif // APIC_H
