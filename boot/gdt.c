@@ -4,7 +4,7 @@
  */
 
 #include "gdt.h"
-#include "constants.h"
+#include "gdt_defs.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../lib/memory.h"

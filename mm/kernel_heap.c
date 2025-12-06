@@ -6,7 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
+#include "mm_constants.h"
 #include "../drivers/serial.h"
 #include "../drivers/wl_currency.h"
 #include "../lib/klog.h"

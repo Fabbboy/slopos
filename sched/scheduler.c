@@ -6,7 +6,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
 #include "../boot/init.h"
 #include "../lib/kdiag.h"
 #include "../lib/klog.h"
@@ -503,7 +502,7 @@ static void idle_task_function(void *arg) {
     while (1) {
         /* Wake interactive tasks if serial input arrived */
         int serviced_serial = 0;
-        uint16_t kernel_port = SERIAL_COM1_PORT;
+        uint16_t kernel_port = COM1_BASE;
 
         if (serial_buffer_pending(kernel_port)) {
             serviced_serial = 1;

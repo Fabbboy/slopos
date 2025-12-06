@@ -5,7 +5,6 @@
 #include "kdiag.h"
 #include "../drivers/serial.h"
 #include "../drivers/irq.h"
-#include "../boot/constants.h"
 #include "../boot/idt.h"
 #include "../lib/cpu.h"
 #include "../lib/stacktrace.h"
@@ -233,7 +232,7 @@ void kdiag_hexdump(const void *data, size_t length, uint64_t base_address) {
         }
 
         klog_raw(KLOG_INFO, " |");
-        uint16_t port = SERIAL_COM1_PORT;
+        uint16_t port = COM1_BASE;
         for (j = 0; j < 16 && i + j < length; j++) {
             uint8_t c = bytes[i + j];
             if (c >= 32 && c <= 126) {

@@ -6,7 +6,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
 #include "task.h"

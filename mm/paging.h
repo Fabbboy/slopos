@@ -9,7 +9,7 @@
  * Exposes paging data structures and helpers across the kernel
  */
 
-#include "../boot/constants.h"
+#include "mm_constants.h"
 
 /* Page table structure - aligned as required by x86_64 */
 typedef struct {

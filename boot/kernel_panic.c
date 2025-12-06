@@ -5,7 +5,6 @@
  */
 
 #include <stdint.h>
-#include "constants.h"
 #include "shutdown.h"
 #include "../drivers/serial.h"
 #include "../drivers/random.h"

@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../drivers/serial.h"
-#include "constants.h"
+#include "../mm/mm_constants.h"
 #include "idt.h"
 #include "gdt.h"
 #include "limine_protocol.h"
@@ -373,7 +373,7 @@ static int boot_step_idt_setup(void) {
 static int boot_step_irq_setup(void) {
     boot_debug("Configuring IRQ dispatcher...");
     irq_init();
-    if (serial_enable_interrupts(SERIAL_COM1_PORT, SERIAL_COM1_IRQ) != 0) {
+    if (serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) != 0) {
         boot_info("WARNING: Failed to enable COM1 serial interrupts");
     } else {
         boot_debug("COM1 serial interrupts armed.");

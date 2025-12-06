@@ -303,7 +303,7 @@ int builtin_cat(int argc, char **argv) {
     char buffer[128];
     int saw_data = 0;
     int last_was_newline = 0;
-    uint16_t port = SERIAL_COM1_PORT;
+    uint16_t port = COM1_BASE;
 
     while (1) {
         ssize_t bytes_read = file_read(fd, buffer, sizeof(buffer));

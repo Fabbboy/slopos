@@ -4,7 +4,6 @@
  */
 
 #include "idt.h"
-#include "constants.h"
 #include "safe_stack.h"
 #include "../lib/klog.h"
 #include "../lib/kdiag.h"

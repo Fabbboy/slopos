@@ -4,7 +4,6 @@
  */
 
 #include "klog.h"
-#include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "../lib/io.h"
 #include "../lib/numfmt.h"

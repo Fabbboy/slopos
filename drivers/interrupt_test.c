@@ -7,7 +7,7 @@
 #include "serial.h"
 #include "apic.h"
 #include "../boot/idt.h"
-#include "../boot/constants.h"
+#include "../mm/mm_constants.h"
 #include "../boot/shutdown.h"
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"

@@ -9,7 +9,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "../boot/constants.h"
 
 /* ========================================================================
  * TASK CONSTANTS

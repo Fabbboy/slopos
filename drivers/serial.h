@@ -9,8 +9,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Include boot constants for serial port definitions */
-#include "../boot/constants.h"
+#include "serial_hw.h"
 
 /* ========================================================================
  * SERIAL PORT CONFIGURATION
@@ -40,12 +39,6 @@ typedef struct {
 /* Stop bits settings */
 #define SERIAL_STOP_BITS_1    1   /* 1 stop bit */
 #define SERIAL_STOP_BITS_2    2   /* 2 stop bits */
-
-/* Standard COM port addresses - use canonical definitions from constants.h */
-#define SERIAL_COM1_PORT      COM1_BASE   /* COM1 port */
-#define SERIAL_COM2_PORT      COM2_BASE   /* COM2 port */
-#define SERIAL_COM3_PORT      COM3_BASE   /* COM3 port */
-#define SERIAL_COM4_PORT      COM4_BASE   /* COM4 port */
 
 #define SERIAL_COM1_IRQ       4       /* Legacy PIC line for COM1 */
 

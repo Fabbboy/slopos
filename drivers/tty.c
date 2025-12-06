@@ -29,7 +29,7 @@ static inline void tty_cpu_relax(void) {
 }
 
 static inline void tty_service_serial_input(void) {
-    serial_poll_receive(SERIAL_COM1_PORT);
+    serial_poll_receive(COM1_BASE);
 }
 
 static task_t *tty_wait_queue_pop(void) {
@@ -49,7 +49,7 @@ static int tty_input_available(void) {
         return 1;
     }
 
-    if (serial_buffer_pending(SERIAL_COM1_PORT)) {
+    if (serial_buffer_pending(COM1_BASE)) {
         return 1;
     }
 
@@ -146,7 +146,7 @@ static int tty_dequeue_input_char(char *out_char) {
     tty_service_serial_input();
 
     char raw = 0;
-    if (serial_buffer_read(SERIAL_COM1_PORT, &raw)) {
+    if (serial_buffer_read(COM1_BASE, &raw)) {
         if (raw == '\r') {
             raw = '\n';
         } else if (raw == 0x7F) {
@@ -187,7 +187,7 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
             continue;
         }
 
-        uint16_t port = SERIAL_COM1_PORT;
+        uint16_t port = COM1_BASE;
 
         /* Handle Enter key - finish line input */
         if (c == '\n' || c == '\r') {

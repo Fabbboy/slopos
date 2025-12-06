@@ -6,7 +6,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
+#include "../boot/gdt_defs.h"
+#include "../mm/mm_constants.h"
 #include "../lib/kdiag.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"

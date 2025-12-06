@@ -13,7 +13,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
 #include "../boot/limine_protocol.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"

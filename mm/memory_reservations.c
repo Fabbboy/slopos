@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-#include "../boot/constants.h"
+#include "mm_constants.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"

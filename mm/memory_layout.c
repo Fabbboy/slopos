@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../boot/constants.h"
+#include "mm_constants.h"
 #include "../lib/klog.h"
 #include "memory_layout.h"
 

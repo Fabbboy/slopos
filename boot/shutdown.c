@@ -9,7 +9,6 @@
  */
 
 #include "shutdown.h"
-#include "constants.h"
 #include "../sched/scheduler.h"
 #include "../drivers/serial.h"
 #include "../drivers/apic.h"
@@ -58,7 +57,7 @@ void kernel_drain_serial_output(void) {
 
     klog(KLOG_INFO, "Kernel shutdown: draining serial output");
 
-    serial_flush(SERIAL_COM1_PORT);
+    serial_flush(COM1_BASE);
 
     serial_drained = 1;
 }

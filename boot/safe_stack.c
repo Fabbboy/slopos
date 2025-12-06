@@ -4,7 +4,7 @@
  */
 
 #include "safe_stack.h"
-#include "constants.h"
+#include "../mm/mm_constants.h"
 #include "idt.h"
 #include "gdt.h"
 #include "../lib/klog.h"

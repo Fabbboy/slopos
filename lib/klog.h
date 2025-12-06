@@ -37,11 +37,13 @@ static inline void klog_info(const char *msg)  { klog(KLOG_INFO, msg); }
 static inline void klog_debug(const char *msg) { klog(KLOG_DEBUG, msg); }
 static inline void klog_trace(const char *msg) { klog(KLOG_TRACE, msg); }
 
-#define KLOG_BLOCK(level, code) \
-    do { \
-        if (klog_is_enabled(level)) { \
-            code; \
-        } \
+#define KLOG_BLOCK(level, code)                                     \
+    do {                                                            \
+        enum klog_level __klog_block_level = (level);               \
+        if (klog_is_enabled(__klog_block_level)) {                  \
+            (void)__klog_block_level;                               \
+            code;                                                   \
+        }                                                           \
     } while (0)
 
 #endif /* LIB_KLOG_H */
