@@ -121,12 +121,18 @@ build: $(BUILD_DIR)/build.ninja
 	@meson compile -C $(BUILD_DIR)
 
 iso: build
+	@meson configure $(BUILD_DIR) -Denable_builtin_tests=false
+	@meson compile -C $(BUILD_DIR)
 	@$(call build_iso,$(ISO),)
 
 iso-notests: build
+	@meson configure $(BUILD_DIR) -Denable_builtin_tests=false
+	@meson compile -C $(BUILD_DIR)
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE))
 
 iso-tests: build
+	@meson configure $(BUILD_DIR) -Denable_builtin_tests=true
+	@meson compile -C $(BUILD_DIR)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
 boot: iso-notests

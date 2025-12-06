@@ -9,7 +9,6 @@
 #include "mm_constants.h"
 #include "../drivers/serial.h"
 #include "../lib/klog.h"
-#include "../boot/integration.h"
 #include "process_vm.h"
 #include "memory_layout.h"
 #include "kernel_heap.h"

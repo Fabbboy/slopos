@@ -25,3 +25,8 @@ option('interrupt_tests_default_shutdown',
        type : 'boolean',
        value : false,
        description : 'Automatically shut down after interrupt tests complete')
+
+option('enable_builtin_tests',
+       type : 'boolean',
+       value : false,
+       description : 'Compile built-in test sources into the kernel (off by default)')

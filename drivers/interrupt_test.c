@@ -19,6 +19,9 @@
 #include <stdint.h>
 #include "../lib/klog.h"
 
+#ifndef ENABLE_BUILTIN_TESTS
+#define ENABLE_BUILTIN_TESTS 0
+#endif
 // Global test state
 static struct test_context test_ctx = {0};
 static struct test_stats test_statistics = {0};
@@ -1195,6 +1198,7 @@ int run_control_flow_tests(void) {
     return execute_test_suite("Control Flow", control_tests, count);
 }
 
+#if ENABLE_BUILTIN_TESTS
 /*
  * Test: Context switch balance verification
  * Runs the smoke test and verifies balanced context switch transitions
@@ -1267,6 +1271,17 @@ int run_scheduler_tests(void) {
 
     return total_passed;
 }
+#else
+__attribute__((noinline)) int test_context_switch_balance(void) {
+    klog_raw(KLOG_INFO, "CONTEXT_SWITCH_TEST: Built-in tests disabled\n");
+    return TEST_SUCCESS;
+}
+
+int run_scheduler_tests(void) {
+    klog_raw(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests skipped (built-in tests disabled)\n");
+    return 0;
+}
+#endif
 
 /*
  * Run all interrupt tests

@@ -22,6 +22,8 @@ interrupt_tests_default_verbosity_define = '"' + interrupt_tests_default_verbosi
 interrupt_tests_default_timeout_define = interrupt_tests_default_timeout_opt.to_string()
 interrupt_tests_default_shutdown_define = interrupt_tests_default_shutdown_opt ? '1' : '0'
 
+builtin_tests_enabled = get_option('enable_builtin_tests')
+
 add_project_arguments([
     '-ffreestanding',
     '-fno-stack-protector',
@@ -40,6 +42,8 @@ add_project_arguments([
     '-Wall',
     '-Wextra',
     '-Wno-unused-parameter',
+    '-Wno-unused-command-line-argument',
+    '-DENABLE_BUILTIN_TESTS=' + (builtin_tests_enabled ? '1' : '0'),
     '-DINTERRUPT_TESTS_DEFAULT_ENABLED=' + interrupt_tests_default_enabled_define,
     '-DINTERRUPT_TESTS_DEFAULT_SUITE=' + interrupt_tests_default_suite_define,
     '-DINTERRUPT_TESTS_DEFAULT_TIMEOUT_MS=' + interrupt_tests_default_timeout_define,
@@ -83,9 +87,7 @@ mm_sources += files(
   'mm/kernel_heap.c',
   'mm/memory_reservations.c',
   'mm/memory_init.c',
-  'mm/phys_virt.c',
-  'mm/test_process_vm.c',
-  'mm/test_kernel_heap.c'
+  'mm/phys_virt.c'
 )
 
 # Video/framebuffer directory
@@ -133,7 +135,6 @@ sched_sources += files(
   'sched/scheduler.c',
   'sched/kthread.c',
   'sched/task.c',
-  'sched/test_tasks.c',
   'sched/context_switch.s'
 )
 
@@ -148,9 +149,15 @@ shell_sources = files(
 fs_dir = meson.current_source_dir() / 'fs'
 fs_sources += files(
   'fs/ramfs.c',
-  'fs/fileio.c',
-  'fs/test_ramfs.c'
+  'fs/fileio.c'
 )
+
+# Optional in-kernel test sources
+if builtin_tests_enabled
+  mm_sources += files('mm/test_process_vm.c', 'mm/test_kernel_heap.c')
+  sched_sources += files('sched/test_tasks.c')
+  fs_sources += files('fs/test_ramfs.c')
+endif
 
 # Kernel main sources (root directory)
 kernel_sources += files()  # Will be populated when source files exist
