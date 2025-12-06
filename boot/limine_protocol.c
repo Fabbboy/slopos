@@ -6,9 +6,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "limine_protocol.h"
-#include "constants.h"
 #include "../lib/klog.h"
 #include "../drivers/serial.h"
+
+#define BOOT_CMDLINE_MAX_LEN 512
 
 /* ========================================================================
  * LIMINE PROTOCOL REQUESTS

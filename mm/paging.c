@@ -15,7 +15,7 @@
 #include "phys_virt.h"
 #include "memory_layout.h"
 /* ========================================================================
- * PAGE TABLE CONSTANTS - Using boot/constants.h definitions
+ * PAGE TABLE CONSTANTS - Using mm/mm_constants.h definitions
  * ======================================================================== */
 
 /* Page table entry mask for extracting physical address */
