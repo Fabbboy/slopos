@@ -5,7 +5,8 @@
 #include "ioapic.h"
 #include "legacy_irq.h"
 #include "../boot/idt.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
+#include "../lib/kdiag.h"
 #include "../sched/scheduler.h"
 #include "../lib/cpu.h"
 #include "../lib/io.h"
@@ -59,7 +60,7 @@ static void mask_irq_line(uint8_t irq) {
         if (irq_line_has_ioapic_route(irq)) {
             ioapic_mask_gsi(irq_route_table[irq].gsi);
         } else {
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            KLOG_BLOCK(KLOG_INFO, {
                 kprint("IRQ: Mask request ignored for line ");
                 kprint_decimal(irq);
                 kprintln(" (no IOAPIC route)");
@@ -84,7 +85,7 @@ static void unmask_irq_line(uint8_t irq) {
         return;
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("IRQ: Cannot unmask line ");
         kprint_decimal(irq);
         kprintln(" (no IOAPIC route configured)");
@@ -93,7 +94,7 @@ static void unmask_irq_line(uint8_t irq) {
 
 static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
     if (irq >= IRQ_LINES) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IRQ: Spurious vector ");
             kprint_decimal(vector);
             kprintln(" received");
@@ -107,7 +108,7 @@ static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
 
     irq_table[irq].reported_unhandled = 1;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("IRQ: Unhandled IRQ ");
         kprint_decimal(irq);
         kprint(" (vector ");
@@ -124,7 +125,7 @@ static void timer_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *
     timer_tick_counter++;
 
     if (timer_tick_counter <= 3) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("IRQ: Timer tick #");
             kprint_decimal(timer_tick_counter);
             kprintln("");
@@ -183,7 +184,7 @@ static void irq_program_ioapic_route(uint8_t irq) {
     const char *polarity = (legacy_flags & IOAPIC_FLAG_POLARITY_LOW) ? "active-low" : "active-high";
     const char *trigger = (legacy_flags & IOAPIC_FLAG_TRIGGER_LEVEL) ? "level" : "edge";
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("IRQ: IOAPIC route IRQ ");
         kprint_decimal(irq);
         kprint(" -> GSI ");
@@ -244,12 +245,12 @@ void irq_init(void) {
 
 int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, const char *name) {
     if (irq >= IRQ_LINES) {
-        boot_log_info("IRQ: Attempted to register handler for invalid line");
+        klog_info("IRQ: Attempted to register handler for invalid line");
         return -1;
     }
 
     if (handler == NULL) {
-        boot_log_info("IRQ: Attempted to register NULL handler");
+        klog_info("IRQ: Attempted to register NULL handler");
         return -1;
     }
 
@@ -258,7 +259,7 @@ int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, cons
     irq_table[irq].name = name;
     irq_table[irq].reported_unhandled = 0;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IRQ: Registered handler for line ");
         kprint_decimal(irq);
         if (name != NULL) {
@@ -284,7 +285,7 @@ void irq_unregister_handler(uint8_t irq) {
     irq_table[irq].reported_unhandled = 0;
     mask_irq_line(irq);
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IRQ: Unregistered handler for line ");
         kprint_decimal(irq);
         kprintln("");
@@ -310,7 +311,7 @@ void irq_disable_line(uint8_t irq) {
 
 void irq_dispatch(struct interrupt_frame *frame) {
     if (!frame) {
-        boot_log_info("IRQ: Received null frame");
+        klog_info("IRQ: Received null frame");
         return;
     }
 
@@ -319,7 +320,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     const uint64_t expected_rip = frame->rip;
 
     if (!irq_system_initialized) {
-        boot_log_info("IRQ: Dispatch received before initialization");
+        klog_info("IRQ: Dispatch received before initialization");
         if (vector >= IRQ_BASE_VECTOR) {
             acknowledge_irq();
         }
@@ -327,7 +328,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     }
 
     if (vector < IRQ_BASE_VECTOR) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IRQ: Received non-IRQ vector ");
             kprint_decimal(vector);
             kprintln("");
@@ -358,12 +359,12 @@ void irq_dispatch(struct interrupt_frame *frame) {
     entry->handler(irq, frame, entry->context);
 
     if (frame->cs != expected_cs || frame->rip != expected_rip) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IRQ: Frame corruption detected on IRQ ");
             kprint_decimal(irq);
             kprintln(" - aborting");
         });
-        dump_interrupt_frame(frame);
+            kdiag_dump_interrupt_frame(frame);
         kernel_panic("IRQ: frame corrupted");
     }
 

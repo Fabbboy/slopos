@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "memory_layout.h"
 
 static struct kernel_memory_layout kernel_layout = {0};
@@ -43,7 +43,7 @@ void init_kernel_memory_layout(void) {
     kernel_layout.user_space_end = USER_SPACE_END_VA;
 
     layout_initialized = 1;
-    boot_log_debug("SlopOS: Kernel memory layout initialized");
+    klog_debug("SlopOS: Kernel memory layout initialized");
 }
 
 const struct kernel_memory_layout *get_kernel_memory_layout(void) {

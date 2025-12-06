@@ -9,7 +9,6 @@
  */
 
 #include "shutdown.h"
-#include "debug.h"
 #include "constants.h"
 #include "../sched/scheduler.h"
 #include "../drivers/serial.h"
@@ -58,7 +57,7 @@ void kernel_drain_serial_output(void) {
 
     kprintln("Kernel shutdown: draining serial output");
 
-    debug_flush();
+    serial_flush(serial_get_kernel_output());
 
     uint16_t kernel_port = serial_get_kernel_output();
     if (kernel_port != COM1_BASE) {

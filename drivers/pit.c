@@ -1,7 +1,7 @@
 #include "pit.h"
 #include "serial.h"
 #include "irq.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../lib/io.h"
 #include <stdint.h>
 
@@ -52,7 +52,7 @@ void pit_set_frequency(uint32_t frequency_hz) {
     io_outb(PIT_CHANNEL0_PORT, (uint8_t)((divisor >> 8) & 0xFF));
     pit_io_wait();
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("PIT: frequency set to ");
         kprint_decimal(current_frequency_hz);
         kprintln(" Hz");
@@ -60,7 +60,7 @@ void pit_set_frequency(uint32_t frequency_hz) {
 }
 
 void pit_init(uint32_t frequency_hz) {
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("PIT: Initializing timer at ");
         kprint_decimal(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
         kprintln(" Hz");

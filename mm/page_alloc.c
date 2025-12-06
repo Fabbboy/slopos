@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "page_alloc.h"
 #include "phys_virt.h"
@@ -298,7 +298,7 @@ uint64_t alloc_page_frames(uint32_t count, uint32_t flags) {
 
     uint32_t frame_num = allocate_block(order, flags);
     if (frame_num == INVALID_PAGE_FRAME) {
-        boot_log_info("alloc_page_frames: No suitable block available");
+        klog_info("alloc_page_frames: No suitable block available");
         return 0;
     }
 
@@ -325,7 +325,7 @@ int free_page_frame(uint64_t phys_addr) {
     uint32_t frame_num = phys_to_frame(phys_addr);
 
     if (!is_valid_frame(frame_num)) {
-        boot_log_info("free_page_frame: Invalid physical address");
+        klog_info("free_page_frame: Invalid physical address");
         return -1;
     }
 
@@ -360,7 +360,7 @@ int free_page_frame(uint64_t phys_addr) {
 
 int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
     if (page_allocator.num_regions >= MAX_MEMORY_REGIONS) {
-        boot_log_info("add_page_alloc_region: Too many memory regions");
+        klog_info("add_page_alloc_region: Too many memory regions");
         return -1;
     }
 
@@ -368,7 +368,7 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
     uint64_t aligned_end = (start_addr + size) & ~(PAGE_SIZE_4KB - 1);
 
     if (aligned_end <= aligned_start) {
-        boot_log_info("add_page_alloc_region: Region too small after alignment");
+        klog_info("add_page_alloc_region: Region too small after alignment");
         return -1;
     }
 
@@ -386,7 +386,7 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
 
     page_allocator.num_regions++;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Added memory region: ");
         kprint_hex(aligned_start);
         kprint(" - ");
@@ -421,7 +421,7 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
         kernel_panic("init_page_allocator: Invalid parameters");
     }
 
-    boot_log_debug("Initializing page frame allocator");
+    klog_debug("Initializing page frame allocator");
 
     page_allocator.frames = frames;
     page_allocator.total_frames = max_frames;
@@ -442,7 +442,7 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
         frames[i].next_free = INVALID_PAGE_FRAME;
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Page frame allocator initialized with ");
         kprint_decimal(max_frames);
         kprint(" frame descriptors (max order ");
@@ -494,7 +494,7 @@ static void add_region_blocks(const phys_region_t *region) {
 }
 
 int finalize_page_allocator(void) {
-    boot_log_debug("Finalizing page frame allocator");
+    klog_debug("Finalizing page frame allocator");
 
     free_lists_reset();
     page_allocator.free_frames = 0;
@@ -504,7 +504,7 @@ int finalize_page_allocator(void) {
         add_region_blocks(&page_allocator.regions[i]);
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Page allocator ready: ");
         kprint_decimal(page_allocator.free_frames);
         kprint(" pages available\n");

@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #include "../boot/constants.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 
@@ -46,13 +46,13 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
                         mm_reservation_type_t type, uint32_t flags,
                         const char *label) {
     if (length == 0 || reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
-        boot_log_info("MM: WARNING - Failed to track reserved region (capacity or length)");
+        klog_info("MM: WARNING - Failed to track reserved region (capacity or length)");
         return -1;
     }
 
     uint64_t end = phys_base + length;
     if (end < phys_base) {
-        boot_log_info("MM: WARNING - Reserved region overflow detected");
+        klog_info("MM: WARNING - Reserved region overflow detected");
         return -1;
     }
 
@@ -60,7 +60,7 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
     uint64_t aligned_end = align_up_u64(end, PAGE_SIZE_4KB);
 
     if (aligned_end <= aligned_base) {
-        boot_log_info("MM: WARNING - Reserved region collapsed during alignment");
+        klog_info("MM: WARNING - Reserved region collapsed during alignment");
         return -1;
     }
 

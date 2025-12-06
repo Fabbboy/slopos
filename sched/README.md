@@ -26,15 +26,11 @@ termination handling. A quick recap of the metrics printed by
 
 ## Timestamp and runtime units
 
-`debug_get_timestamp()` now sources its base clock from the PIT/APIC timer
-interrupt (via `irq_get_timer_ticks()`), falling back to the TSC only until the
-first tick arrives. As a result:
-
-- Debug prints show `[+<ticks> ticks]` prefixes that correspond to hardware
-  timer ticks since the debug subsystem initialised.
-- Task runtime and scheduling deltas use the same tick units, so a value of 1
-  means “the task held the CPU for one timer interrupt interval”. Multiply by
-  your configured PIT frequency to convert to real time.
+`kdiag_timestamp()` now sources its base clock from the PIT/APIC timer
+interrupt (via `irq_get_timer_ticks()`), falling back to the TSC until the
+first tick arrives. Task runtime and scheduling deltas use the same tick units,
+so a value of 1 means “the task held the CPU for one timer interrupt interval”.
+Multiply by your configured PIT frequency to convert to real time.
 
 Because tasks that return now funnel through `scheduler_task_exit()`, the
 statistics stay consistent: terminating tasks record their final runtime slice,

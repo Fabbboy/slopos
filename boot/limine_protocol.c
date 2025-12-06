@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include "limine_protocol.h"
 #include "constants.h"
-#include "log.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 
 /* ========================================================================
@@ -120,21 +120,21 @@ static struct {
  * Parse all Limine responses and populate system information
  */
 int init_limine_protocol(void) {
-    boot_log_debug("Limine Protocol: Initializing...");
+    klog_debug("Limine Protocol: Initializing...");
 
     /* Check base revision */
     if (!LIMINE_BASE_REVISION_SUPPORTED) {
-        boot_log_info("ERROR: Limine base revision not supported!");
+        klog_info("ERROR: Limine base revision not supported!");
         return -1;
     }
-    boot_log_debug("Limine Protocol: Base revision supported");
+    klog_debug("Limine Protocol: Base revision supported");
 
     /* Parse bootloader info */
     if (bootloader_info_request.response != NULL) {
         struct limine_bootloader_info_response *bi = 
             (struct limine_bootloader_info_response *)bootloader_info_request.response;
 
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("Bootloader: ");
             if (bi->name) kprint((const char *)bi->name);
             kprint(" version ");
@@ -151,7 +151,7 @@ int init_limine_protocol(void) {
         system_info.hhdm_offset = hhdm->offset;
         system_info.hhdm_available = 1;
         
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("HHDM offset: ");
             kprint_hex(hhdm->offset);
             kprintln("");
@@ -166,7 +166,7 @@ int init_limine_protocol(void) {
         system_info.kernel_phys_base = ka->physical_base;
         system_info.kernel_virt_base = ka->virtual_base;
         
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("Kernel physical base: ");
             kprint_hex(ka->physical_base);
             kprintln("");
@@ -188,16 +188,16 @@ int init_limine_protocol(void) {
         if (rsdp_ptr != 0) {
             system_info.rsdp_available = 1;
 
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            KLOG_BLOCK(KLOG_DEBUG, {
                 kprint("ACPI: RSDP pointer: ");
                 kprint_hex(system_info.rsdp_virt_addr);
                 kprintln("");
             });
         } else {
-            boot_log_info("ACPI: Limine returned null RSDP pointer");
+            klog_info("ACPI: Limine returned null RSDP pointer");
         }
     } else {
-        boot_log_debug("ACPI: RSDP request unavailable from Limine");
+        klog_debug("ACPI: RSDP request unavailable from Limine");
     }
 
     /* Parse kernel command line */
@@ -217,18 +217,18 @@ int init_limine_protocol(void) {
             system_info.kernel_cmdline_available = 1;
 
             if (index > 0) {
-                BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+                KLOG_BLOCK(KLOG_DEBUG, {
                     kprint("Kernel command line: ");
                     kprintln(system_info.kernel_cmdline);
                 });
             } else {
-                boot_log_debug("Kernel command line: <empty>");
+                klog_debug("Kernel command line: <empty>");
             }
         } else {
-            boot_log_debug("Kernel command line: <not provided>");
+            klog_debug("Kernel command line: <not provided>");
         }
     } else {
-        boot_log_debug("Kernel command line request unavailable");
+        klog_debug("Kernel command line request unavailable");
     }
 
     /* Parse memory map */
@@ -239,7 +239,7 @@ int init_limine_protocol(void) {
         uint64_t total = 0;
         uint64_t available = 0;
 
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("Memory map: ");
             kprint_decimal(memmap->entry_count);
             kprintln(" entries");
@@ -260,7 +260,7 @@ int init_limine_protocol(void) {
         system_info.available_memory = available;
         system_info.memory_map_available = 1;
         
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("Total memory: ");
             kprint_decimal(total / (1024 * 1024));
             kprintln(" MB");
@@ -269,7 +269,7 @@ int init_limine_protocol(void) {
             kprintln(" MB");
         });
     } else {
-        boot_log_info("WARNING: No memory map available from Limine");
+        klog_info("WARNING: No memory map available from Limine");
     }
 
     /* Parse framebuffer */
@@ -288,7 +288,7 @@ int init_limine_protocol(void) {
             system_info.framebuffer_bpp = (uint8_t)fb->bpp;
             system_info.framebuffer_available = 1;
             
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            KLOG_BLOCK(KLOG_DEBUG, {
                 kprint("Framebuffer: ");
                 kprint_decimal(fb->width);
                 kprint("x");
@@ -304,15 +304,15 @@ int init_limine_protocol(void) {
                 kprintln(" bytes");
             });
         } else {
-            boot_log_info("WARNING: No framebuffer provided by Limine");
+            klog_info("WARNING: No framebuffer provided by Limine");
             return -1;
         }
     } else {
-        boot_log_info("ERROR: No framebuffer response from Limine");
+        klog_info("ERROR: No framebuffer response from Limine");
         return -1;
     }
 
-    boot_log_debug("Limine Protocol: Initialization complete");
+    klog_debug("Limine Protocol: Initialization complete");
     return 0;
 }
 

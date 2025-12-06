@@ -9,7 +9,7 @@
 #include "../boot/constants.h"
 #include "../drivers/serial.h"
 #include "../drivers/wl_currency.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "kernel_heap.h"
 #include "page_alloc.h"
 #include "paging.h"
@@ -325,7 +325,7 @@ static int expand_heap(uint32_t min_size) {
         pages_needed = 4;
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Expanding heap by ");
         kprint_decimal(pages_needed);
         kprint(" pages\n");
@@ -336,7 +336,7 @@ static int expand_heap(uint32_t min_size) {
     uint32_t mapped_pages = 0;
 
     if (expansion_start >= kernel_heap.end_addr || expansion_start + total_bytes > kernel_heap.end_addr) {
-        boot_log_info("expand_heap: Heap growth denied - would exceed heap window");
+        klog_info("expand_heap: Heap growth denied - would exceed heap window");
         take_l();
         return -1;
     }
@@ -345,14 +345,14 @@ static int expand_heap(uint32_t min_size) {
     for (uint32_t i = 0; i < pages_needed; i++) {
         uint64_t phys_page = alloc_page_frame(0);
         if (!phys_page) {
-            boot_log_info("expand_heap: Failed to allocate physical page");
+            klog_info("expand_heap: Failed to allocate physical page");
             goto rollback;
         }
 
         uint64_t virt_page = expansion_start + (uint64_t)i * PAGE_SIZE_4KB;
 
         if (map_page_4kb(virt_page, phys_page, PAGE_KERNEL_RW) != 0) {
-            boot_log_info("expand_heap: Failed to map heap page");
+            klog_info("expand_heap: Failed to map heap page");
             free_page_frame(phys_page);
             goto rollback;
         }
@@ -622,7 +622,7 @@ void kfree(void *ptr) {
  * Sets up initial heap area and free lists
  */
 int init_kernel_heap(void) {
-    boot_log_debug("Initializing kernel heap");
+    klog_debug("Initializing kernel heap");
 
     kernel_heap.start_addr = mm_get_kernel_heap_start();
     kernel_heap.end_addr = mm_get_kernel_heap_end();
@@ -652,7 +652,7 @@ int init_kernel_heap(void) {
 
     kernel_heap.initialized = 1;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Kernel heap initialized at ");
         kprint_hex(kernel_heap.start_addr);
         kprint("\n");

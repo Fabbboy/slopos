@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 #include "../drivers/serial.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
 #include "../lib/memory.h"
 #include "memory_layout.h"
@@ -46,7 +46,7 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
 
     const mm_reserved_region_t *reservation = mm_reservations_find(phys_addr);
     if (reservation && (reservation->flags & MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT) == 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("mm_phys_to_virt: rejected reserved phys 0x");
             kprint_hex(phys_addr);
             kprint(" (");

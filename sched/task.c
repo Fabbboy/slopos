@@ -7,8 +7,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
-#include "../boot/debug.h"
-#include "../boot/log.h"
+#include "../lib/kdiag.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"
@@ -245,7 +245,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->time_slice = 10;  /* Default time slice */
     task->time_slice_remaining = task->time_slice;
     task->total_runtime = 0;
-    task->creation_time = debug_get_timestamp();
+    task->creation_time = kdiag_timestamp();
     task->yield_count = 0;
     task->last_run_timestamp = 0;
     task->waiting_on_task_id = INVALID_TASK_ID;
@@ -269,7 +269,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task_manager.num_tasks++;
     task_manager.tasks_created++;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Created task '");
         kprint(name);
         kprint("' with ID ");
@@ -314,7 +314,7 @@ int task_terminate(uint32_t task_id) {
 
     /* Finalize runtime statistics if task was running */
     if (task->last_run_timestamp != 0) {
-        uint64_t now = debug_get_timestamp();
+        uint64_t now = kdiag_timestamp();
         if (now >= task->last_run_timestamp) {
             task->total_runtime += now - task->last_run_timestamp;
         }
@@ -465,7 +465,7 @@ int task_set_state(uint32_t task_id, uint8_t new_state) {
 
     task->state = new_state;
 
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (klog_is_enabled(KLOG_DEBUG)) {
         kprint("Task ");
         kprint_decimal(task_id);
         kprint(" state: ");

@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include "../boot/constants.h"
 #include "../boot/limine_protocol.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../mm/phys_virt.h"
 #include "../boot/kernel_panic.h"
@@ -105,15 +105,15 @@ int framebuffer_init(void) {
     uint32_t width, height, pitch;
     uint8_t bpp;
 
-    boot_log_debug("Initializing framebuffer...");
+    klog_debug("Initializing framebuffer...");
 
     /* Get framebuffer info from Multiboot2 */
     if (!get_framebuffer_info(&phys_addr, &width, &height, &pitch, &bpp)) {
-        boot_log_info("ERROR: No framebuffer available from bootloader");
+        klog_info("ERROR: No framebuffer available from bootloader");
         return -1;
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Framebuffer address from bootloader: ");
         kprint_hex(phys_addr);
         kprintln("");
@@ -121,24 +121,24 @@ int framebuffer_init(void) {
 
     /* Validate parameters */
     if (phys_addr == 0) {
-        boot_log_info("ERROR: Invalid framebuffer address");
+        klog_info("ERROR: Invalid framebuffer address");
         return -1;
     }
 
     if (!validate_dimensions(width, height)) {
-        boot_log_info("ERROR: Invalid framebuffer dimensions");
+        klog_info("ERROR: Invalid framebuffer dimensions");
         return -1;
     }
 
     if (bpp != 16 && bpp != 24 && bpp != 32) {
-        boot_log_info("ERROR: Unsupported color depth");
+        klog_info("ERROR: Unsupported color depth");
         return -1;
     }
 
     /* Calculate buffer size */
     uint32_t buffer_size = pitch * height;
     if (buffer_size == 0 || buffer_size > 64 * 1024 * 1024) {  /* Max 64MB */
-        boot_log_info("ERROR: Invalid framebuffer size");
+        klog_info("ERROR: Invalid framebuffer size");
         return -1;
     }
 
@@ -175,7 +175,7 @@ int framebuffer_init(void) {
     }
     
     if (virtual_addr_uint == 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("ERROR: No virtual mapping available for framebuffer at address ");
             kprint_hex(phys_addr);
             kprintln("");
@@ -185,7 +185,7 @@ int framebuffer_init(void) {
     }
     void *virtual_addr = (void*)virtual_addr_uint;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Framebuffer virtual address: ");
         kprint_hex(virtual_addr_uint);
         kprintln("");
@@ -202,7 +202,7 @@ int framebuffer_init(void) {
     fb_info.buffer_size = buffer_size;
     fb_info.initialized = 1;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Framebuffer initialized: ");
         kprint_decimal(width);
         kprint("x");

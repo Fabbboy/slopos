@@ -7,8 +7,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
-#include "../boot/debug.h"
-#include "../boot/log.h"
+#include "../lib/kdiag.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../drivers/tty.h"
 #include "../drivers/pit.h"
@@ -275,7 +275,7 @@ static void switch_to_task(task_t *new_task) {
         return;
     }
 
-    uint64_t timestamp = debug_get_timestamp();
+    uint64_t timestamp = kdiag_timestamp();
     task_record_context_switch(old_task, new_task, timestamp);
 
     /* Update scheduler state */
@@ -477,7 +477,7 @@ void scheduler_task_exit(void) {
         }
     }
 
-    uint64_t timestamp = debug_get_timestamp();
+    uint64_t timestamp = kdiag_timestamp();
     task_record_context_switch(current, NULL, timestamp);
 
     if (task_terminate((uint32_t)-1) != 0) {

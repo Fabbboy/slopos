@@ -7,7 +7,7 @@
 #include "tty.h"
 #include "irq.h"
 #include "../sched/scheduler.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../lib/io.h"
 #include "../lib/numfmt.h"
 #include "../lib/ring_buffer.h"
@@ -352,7 +352,7 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {
 
     if (irq_register_handler(irq_line, serial_irq_handler,
                              (void *)(uintptr_t)port, "serial") != 0) {
-        boot_log_info("Serial: Failed to register IRQ handler");
+        klog_info("Serial: Failed to register IRQ handler");
         return -1;
     }
 
@@ -370,7 +370,7 @@ int serial_enable_interrupts(uint16_t port, uint8_t irq_line) {
     /* Drain any bytes that arrived before interrupts were armed */
     serial_poll_receive(port);
 
-    boot_log_info("Serial: COM port interrupts armed");
+    klog_info("Serial: COM port interrupts armed");
 
     return 0;
 }

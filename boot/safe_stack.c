@@ -7,7 +7,7 @@
 #include "constants.h"
 #include "idt.h"
 #include "gdt.h"
-#include "log.h"
+#include "../lib/klog.h"
 
 #include "../drivers/serial.h"
 #include "../mm/page_alloc.h"
@@ -95,7 +95,7 @@ static void map_stack_pages(struct exception_stack_info *stack) {
 }
 
 void safe_stack_init(void) {
-    boot_log_debug("SAFE STACK: Initializing dedicated IST stacks");
+    klog_debug("SAFE STACK: Initializing dedicated IST stacks");
 
     for (size_t i = 0; i < sizeof(stack_table) / sizeof(stack_table[0]); i++) {
         struct exception_stack_info *stack = &stack_table[i];
@@ -115,7 +115,7 @@ void safe_stack_init(void) {
         gdt_set_ist(stack->ist_index, stack->stack_top);
         idt_set_ist(stack->vector, stack->ist_index);
 
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("SAFE STACK: Vector ");
             kprint_decimal(stack->vector);
             kprint(" uses IST");
@@ -128,7 +128,7 @@ void safe_stack_init(void) {
         });
     }
 
-    boot_log_debug("SAFE STACK: IST stacks ready");
+    klog_debug("SAFE STACK: IST stacks ready");
 }
 
 void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
@@ -139,7 +139,7 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
 
     if (frame_ptr < stack->stack_base || frame_ptr > stack->stack_top) {
         if (!stack->out_of_bounds_reported) {
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            KLOG_BLOCK(KLOG_INFO, {
                 kprint("SAFE STACK WARNING: RSP outside managed stack for vector ");
                 kprint_decimal(vector);
                 kprintln("");
@@ -153,7 +153,7 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
     if (usage > stack->peak_usage) {
         stack->peak_usage = usage;
 
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("SAFE STACK: New peak usage on ");
             kprint(stack->name);
             kprint(" stack: ");
@@ -163,7 +163,7 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
         });
 
         if (usage > stack->stack_size - PAGE_SIZE_4KB) {
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+            KLOG_BLOCK(KLOG_INFO, {
                 kprint("SAFE STACK WARNING: ");
                 kprint(stack->name);
                 kprintln(" stack within one page of guard");

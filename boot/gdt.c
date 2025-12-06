@@ -5,7 +5,7 @@
 
 #include "gdt.h"
 #include "constants.h"
-#include "log.h"
+#include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "../lib/memory.h"
 
@@ -83,7 +83,7 @@ static void load_tss(void) {
 }
 
 void gdt_init(void) {
-    boot_log_debug("GDT: Initializing descriptor tables");
+    klog_debug("GDT: Initializing descriptor tables");
 
     memset(&gdt_table, 0, sizeof(gdt_table));
     memset(&kernel_tss, 0, sizeof(kernel_tss));
@@ -116,7 +116,7 @@ void gdt_init(void) {
     load_gdt(&descriptor);
     load_tss();
 
-    boot_log_debug("GDT: Initialized with TSS loaded");
+    klog_debug("GDT: Initialized with TSS loaded");
 }
 
 void gdt_set_ist(uint8_t index, uint64_t stack_top) {

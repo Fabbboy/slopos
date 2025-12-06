@@ -6,7 +6,8 @@
 #include "idt.h"
 #include "constants.h"
 #include "safe_stack.h"
-#include "log.h"
+#include "../lib/klog.h"
+#include "../lib/kdiag.h"
 #include "../drivers/serial.h"
 #include "../drivers/irq.h"
 #include "kernel_panic.h"
@@ -28,7 +29,7 @@ static enum exception_mode current_exception_mode = EXCEPTION_MODE_NORMAL;
  * Initialize the IDT with default exception handlers
  */
 void idt_init(void) {
-    boot_log_debug("IDT: Initializing Interrupt Descriptor Table");
+    klog_debug("IDT: Initializing Interrupt Descriptor Table");
 
     // Clear the IDT using byte-level access
     // NOTE: Direct struct member access in loops caused page faults due to
@@ -42,11 +43,11 @@ void idt_init(void) {
     idt_pointer.limit = (sizeof(struct idt_entry) * IDT_ENTRIES) - 1;
     idt_pointer.base = (uint64_t)&idt;
 
-    boot_log_debug("IDT: Set up IDT pointer");
+    klog_debug("IDT: Set up IDT pointer");
 
     // Install exception handlers
     // Exceptions 0-19 are defined by Intel
-    boot_log_debug("IDT: Installing exception handlers...");
+    klog_debug("IDT: Installing exception handlers...");
     idt_set_gate(0, (uint64_t)isr0, 0x08, IDT_GATE_INTERRUPT);   // Divide Error
     idt_set_gate(1, (uint64_t)isr1, 0x08, IDT_GATE_INTERRUPT);   // Debug
     idt_set_gate(2, (uint64_t)isr2, 0x08, IDT_GATE_INTERRUPT);   // NMI
@@ -88,7 +89,7 @@ void idt_init(void) {
 
     initialize_handler_tables();
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IDT: Configured ");
         kprint_decimal(IDT_ENTRIES);
         kprintln(" interrupt vectors");
@@ -110,7 +111,7 @@ void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t t
 
 void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     if ((uint16_t)vector >= IDT_ENTRIES) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IDT: Invalid IST assignment for vector ");
             kprint_decimal(vector);
             kprintln("");
@@ -119,7 +120,7 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     }
 
     if (ist_index > 7) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IDT: Invalid IST index ");
             kprint_decimal(ist_index);
             kprintln("");
@@ -135,7 +136,7 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
  */
 void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) {
     if (vector >= 32) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IDT: Ignoring handler install for non-exception vector ");
             kprint_decimal(vector);
             kprintln("");
@@ -144,7 +145,7 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     }
 
     if (handler != NULL && is_critical_exception_internal(vector)) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("IDT: Refusing to override critical exception ");
             kprint_decimal(vector);
             kprintln("");
@@ -159,13 +160,13 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     override_handlers[vector] = handler;
 
     if (handler != NULL) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("IDT: Registered override handler for exception ");
             kprint_decimal(vector);
             kprintln("");
         });
     } else {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("IDT: Cleared override handler for exception ");
             kprint_decimal(vector);
             kprintln("");
@@ -223,7 +224,7 @@ int exception_is_critical(uint8_t vector) {
  * Load the IDT
  */
 void idt_load(void) {
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IDT: Loading IDT at address ");
         kprint_hex(idt_pointer.base);
         kprint(" with limit ");
@@ -234,7 +235,7 @@ void idt_load(void) {
     // Load the IDT using assembly
     __asm__ volatile ("lidt %0" : : "m" (idt_pointer));
 
-    boot_log_debug("IDT: Successfully loaded");
+    klog_debug("IDT: Successfully loaded");
 }
 
 /*
@@ -317,78 +318,9 @@ const char *get_exception_name(uint8_t vector) {
     }
 }
 
-/*
- * Dump interrupt frame for debugging
- */
-void dump_interrupt_frame(struct interrupt_frame *frame) {
-    kprintln("=== INTERRUPT FRAME DUMP ===");
-
-    kprint("Vector: ");
-    kprint_decimal(frame->vector);
-    kprint(" Error Code: ");
-    kprint_hex(frame->error_code);
-    kprintln("");
-
-    kprint("RIP: ");
-    kprint_hex(frame->rip);
-    kprint(" CS: ");
-    kprint_hex(frame->cs);
-    kprintln("");
-
-    kprint("RFLAGS: ");
-    kprint_hex(frame->rflags);
-    kprint(" RSP: ");
-    kprint_hex(frame->rsp);
-    kprint(" SS: ");
-    kprint_hex(frame->ss);
-    kprintln("");
-
-    kprint("RAX: ");
-    kprint_hex(frame->rax);
-    kprint(" RBX: ");
-    kprint_hex(frame->rbx);
-    kprint(" RCX: ");
-    kprint_hex(frame->rcx);
-    kprintln("");
-
-    kprint("RDX: ");
-    kprint_hex(frame->rdx);
-    kprint(" RSI: ");
-    kprint_hex(frame->rsi);
-    kprint(" RDI: ");
-    kprint_hex(frame->rdi);
-    kprintln("");
-
-    kprint("RBP: ");
-    kprint_hex(frame->rbp);
-    kprint(" R8: ");
-    kprint_hex(frame->r8);
-    kprint(" R9: ");
-    kprint_hex(frame->r9);
-    kprintln("");
-
-    kprint("R10: ");
-    kprint_hex(frame->r10);
-    kprint(" R11: ");
-    kprint_hex(frame->r11);
-    kprint(" R12: ");
-    kprint_hex(frame->r12);
-    kprintln("");
-
-    kprint("R13: ");
-    kprint_hex(frame->r13);
-    kprint(" R14: ");
-    kprint_hex(frame->r14);
-    kprint(" R15: ");
-    kprint_hex(frame->r15);
-    kprintln("");
-
-    kprintln("=== END FRAME DUMP ===");
-}
-
 static void exception_default_panic(struct interrupt_frame *frame) {
     kprintln("FATAL: Unhandled exception");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Unhandled exception");
 }
 
@@ -398,74 +330,74 @@ static void exception_default_panic(struct interrupt_frame *frame) {
 
 void exception_divide_error(struct interrupt_frame *frame) {
     kprintln("FATAL: Divide by zero error");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Divide by zero error");
 }
 
 void exception_debug(struct interrupt_frame *frame) {
     kprintln("DEBUG: Debug exception occurred");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_nmi(struct interrupt_frame *frame) {
     kprintln("FATAL: Non-maskable interrupt");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Non-maskable interrupt");
 }
 
 void exception_breakpoint(struct interrupt_frame *frame) {
     kprintln("DEBUG: Breakpoint exception");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_overflow(struct interrupt_frame *frame) {
     kprintln("ERROR: Overflow exception");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_bound_range(struct interrupt_frame *frame) {
     kprintln("ERROR: Bound range exceeded");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_invalid_opcode(struct interrupt_frame *frame) {
     kprintln("FATAL: Invalid opcode");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid opcode");
 }
 
 void exception_device_not_available(struct interrupt_frame *frame) {
     kprintln("ERROR: Device not available");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_double_fault(struct interrupt_frame *frame) {
     kprintln("FATAL: Double fault");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Double fault");
 }
 
 void exception_invalid_tss(struct interrupt_frame *frame) {
     kprintln("FATAL: Invalid TSS");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid TSS");
 }
 
 void exception_segment_not_present(struct interrupt_frame *frame) {
     kprintln("FATAL: Segment not present");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Segment not present");
 }
 
 void exception_stack_fault(struct interrupt_frame *frame) {
     kprintln("FATAL: Stack segment fault");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Stack segment fault");
 }
 
 void exception_general_protection(struct interrupt_frame *frame) {
     kprintln("FATAL: General protection fault");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("General protection fault");
 }
 
@@ -485,7 +417,7 @@ void exception_page_fault(struct interrupt_frame *frame) {
         kprint_hex(fault_addr);
         kprintln("");
 
-        dump_interrupt_frame(frame);
+        kdiag_dump_interrupt_frame(frame);
         kernel_panic("Exception stack overflow");
         return;
     }
@@ -505,27 +437,27 @@ void exception_page_fault(struct interrupt_frame *frame) {
     else kprint(" (Supervisor)");
     kprintln("");
 
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Page fault");
 }
 
 void exception_fpu_error(struct interrupt_frame *frame) {
     kprintln("ERROR: x87 FPU error");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_alignment_check(struct interrupt_frame *frame) {
     kprintln("ERROR: Alignment check");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_machine_check(struct interrupt_frame *frame) {
     kprintln("FATAL: Machine check");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
     kernel_panic("Machine check");
 }
 
 void exception_simd_fp_exception(struct interrupt_frame *frame) {
     kprintln("ERROR: SIMD floating-point exception");
-    dump_interrupt_frame(frame);
+    kdiag_dump_interrupt_frame(frame);
 }

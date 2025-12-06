@@ -17,7 +17,6 @@
 #define PIXEL_FORMAT_RGB    0x01   /* Red-Green-Blue */
 #define PIXEL_FORMAT_BGR    0x02   /* Blue-Green-Red */
 #define PIXEL_FORMAT_RGBA   0x03   /* Red-Green-Blue-Alpha */
-#define PIXEL_FORMAT_RGBA   0x03   /* Red-Green-Blue-Alpha */
 #define PIXEL_FORMAT_BGRA   0x04   /* Blue-Green-Red-Alpha */
 
 /* Maximum framebuffer dimensions */

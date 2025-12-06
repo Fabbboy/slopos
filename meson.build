@@ -64,13 +64,11 @@ boot_sources += files(
   'boot/limine_entry.s',
   'boot/idt_handlers.s',
   'boot/early_init.c',
-  'boot/log.c',
   'boot/cpu_verify.c',
   'boot/kernel_panic.c',
   'boot/idt.c',
   'boot/gdt.c',
   'boot/safe_stack.c',
-  'boot/debug.c',
   'boot/shutdown.c',
   'boot/limine_protocol.c'
 )
@@ -106,7 +104,9 @@ lib_sources += files(
   'lib/memory.c',
   'lib/string.c',
   'lib/stacktrace.c',
-  'lib/numfmt.c'
+  'lib/numfmt.c',
+  'lib/klog.c',
+  'lib/kdiag.c'
 )
 
 # Drivers directory

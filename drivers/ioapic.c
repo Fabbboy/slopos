@@ -6,7 +6,7 @@
 #include "ioapic.h"
 #include "apic.h"
 #include "serial.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
 #include "../lib/memory.h"
 
@@ -186,7 +186,7 @@ static const struct acpi_sdt_header *acpi_scan_table(const struct acpi_sdt_heade
             continue;
         }
         if (!acpi_validate_table(candidate)) {
-            boot_log_info("ACPI: Found table with invalid checksum, skipping");
+            klog_info("ACPI: Found table with invalid checksum, skipping");
             continue;
         }
         return candidate;
@@ -265,7 +265,7 @@ static uint32_t ioapic_entry_high_index(uint32_t pin) {
 
 static void ioapic_log_controller(const struct ioapic_controller *ctrl) {
     if (!ctrl) return;
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("IOAPIC: ID ");
         kprint_hex(ctrl->id);
         kprint(" @ phys ");
@@ -282,7 +282,7 @@ static void ioapic_log_controller(const struct ioapic_controller *ctrl) {
 
 static void ioapic_log_iso(const struct ioapic_iso *iso) {
     if (!iso) return;
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IOAPIC: ISO bus ");
         kprint_decimal(iso->bus_source);
         kprint(", IRQ ");
@@ -342,13 +342,13 @@ static const struct ioapic_iso *ioapic_find_iso(uint8_t irq) {
 static int ioapic_update_mask(uint32_t gsi, bool mask) {
     struct ioapic_controller *ctrl = ioapic_find_controller(gsi);
     if (!ctrl) {
-        boot_log_info("IOAPIC: No controller for requested GSI");
+        klog_info("IOAPIC: No controller for requested GSI");
         return -1;
     }
 
     uint32_t pin = gsi - ctrl->gsi_base;
     if (pin >= ctrl->gsi_count) {
-        boot_log_info("IOAPIC: Pin out of range for mask request");
+        klog_info("IOAPIC: Pin out of range for mask request");
         return -1;
     }
 
@@ -363,7 +363,7 @@ static int ioapic_update_mask(uint32_t gsi, bool mask) {
 
     ioapic_write(ctrl, reg, value);
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("IOAPIC: ");
         kprint(mask ? "Masked" : "Unmasked");
         kprint(" GSI ");
@@ -403,7 +403,7 @@ static void ioapic_parse_madt(const struct acpi_madt *madt) {
                     break;
                 }
                 if (ioapic_count >= IOAPIC_MAX_CONTROLLERS) {
-                    boot_log_info("IOAPIC: Too many controllers, ignoring extra entries");
+                    klog_info("IOAPIC: Too many controllers, ignoring extra entries");
                     break;
                 }
                 const struct acpi_madt_ioapic_entry *entry =
@@ -424,7 +424,7 @@ static void ioapic_parse_madt(const struct acpi_madt *madt) {
                     break;
                 }
                 if (iso_count >= IOAPIC_MAX_ISO_ENTRIES) {
-                    boot_log_info("IOAPIC: Too many source overrides, ignoring extras");
+                    klog_info("IOAPIC: Too many source overrides, ignoring extras");
                     break;
                 }
                 const struct acpi_madt_iso_entry *entry =
@@ -451,31 +451,31 @@ int ioapic_init(void) {
     }
 
     if (!is_hhdm_available()) {
-        boot_log_info("IOAPIC: HHDM unavailable, cannot map MMIO registers");
+        klog_info("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         return -1;
     }
 
     if (!is_rsdp_available()) {
-        boot_log_info("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
+        klog_info("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         return -1;
     }
 
     const struct acpi_rsdp *rsdp =
         (const struct acpi_rsdp *)get_rsdp_address();
     if (!acpi_validate_rsdp(rsdp)) {
-        boot_log_info("IOAPIC: ACPI RSDP checksum failed");
+        klog_info("IOAPIC: ACPI RSDP checksum failed");
         return -1;
     }
 
     const struct acpi_sdt_header *madt_header =
         acpi_find_table(rsdp, "APIC");
     if (!madt_header) {
-        boot_log_info("IOAPIC: MADT not found in ACPI tables");
+        klog_info("IOAPIC: MADT not found in ACPI tables");
         return -1;
     }
 
     if (!acpi_validate_table(madt_header)) {
-        boot_log_info("IOAPIC: MADT checksum invalid");
+        klog_info("IOAPIC: MADT checksum invalid");
         return -1;
     }
 
@@ -483,30 +483,30 @@ int ioapic_init(void) {
     ioapic_parse_madt(madt);
 
     if (ioapic_count == 0) {
-        boot_log_info("IOAPIC: No controllers discovered");
+        klog_info("IOAPIC: No controllers discovered");
         return -1;
     }
 
-    boot_log_info("IOAPIC: Discovery complete");
+    klog_info("IOAPIC: Discovery complete");
     ioapic_ready = 1;
     return 0;
 }
 
 int ioapic_config_irq(uint32_t gsi, uint8_t vector, uint8_t lapic_id, uint32_t flags) {
     if (!ioapic_ready) {
-        boot_log_info("IOAPIC: Driver not initialized");
+        klog_info("IOAPIC: Driver not initialized");
         return -1;
     }
 
     struct ioapic_controller *ctrl = ioapic_find_controller(gsi);
     if (!ctrl) {
-        boot_log_info("IOAPIC: No IOAPIC handles requested GSI");
+        klog_info("IOAPIC: No IOAPIC handles requested GSI");
         return -1;
     }
 
     uint32_t pin = gsi - ctrl->gsi_base;
     if (pin >= ctrl->gsi_count) {
-        boot_log_info("IOAPIC: Calculated pin outside controller range");
+        klog_info("IOAPIC: Calculated pin outside controller range");
         return -1;
     }
 
@@ -517,7 +517,7 @@ int ioapic_config_irq(uint32_t gsi, uint8_t vector, uint8_t lapic_id, uint32_t f
     ioapic_write(ctrl, ioapic_entry_high_index(pin), high);
     ioapic_write(ctrl, ioapic_entry_low_index(pin), low);
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("IOAPIC: Configured GSI ");
         kprint_decimal(gsi);
         kprint(" (pin ");
@@ -554,7 +554,7 @@ int ioapic_legacy_irq_info(uint8_t legacy_irq, uint32_t *out_gsi, uint32_t *out_
     }
 
     if (!ioapic_ready) {
-        boot_log_info("IOAPIC: Legacy route query before initialization");
+        klog_info("IOAPIC: Legacy route query before initialization");
         return -1;
     }
 

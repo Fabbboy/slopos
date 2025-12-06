@@ -8,11 +8,10 @@
 #include "../drivers/serial.h"
 #include "constants.h"
 #include "idt.h"
-#include "debug.h"
 #include "gdt.h"
 #include "limine_protocol.h"
 #include "init.h"
-#include "log.h"
+#include "../lib/klog.h"
 #include "safe_stack.h"
 #include "shutdown.h"
 #include "../drivers/apic.h"
@@ -62,11 +61,11 @@ static struct boot_runtime_context boot_ctx = {0};
 static int optional_steps_enabled = 1;
 
 static void boot_info(const char *text) {
-    boot_log_info(text);
+    klog_info(text);
 }
 
 static void boot_debug(const char *text) {
-    boot_log_debug(text);
+    klog_debug(text);
 }
 
 void boot_init_set_optional_enabled(int enabled) {
@@ -97,48 +96,48 @@ static const struct boot_init_phase_desc boot_phase_table[BOOT_INIT_PHASE_COUNT]
 #undef PHASE_ENTRY
 };
 
-static void boot_init_report_phase(enum boot_log_level level,
+static void boot_init_report_phase(enum klog_level level,
                                    const char *prefix,
                                    const char *value) {
-    if (!boot_log_is_enabled(level)) {
+    if (!klog_is_enabled(level)) {
         return;
     }
-    boot_log_raw(level, "[boot:init] ");
-    boot_log_raw(level, prefix);
+    klog_raw(level, "[boot:init] ");
+    klog_raw(level, prefix);
     if (value) {
-        boot_log_raw(level, value);
+        klog_raw(level, value);
     }
-    boot_log_newline();
+    klog_newline();
 }
 
-static void boot_init_report_step(enum boot_log_level level,
+static void boot_init_report_step(enum klog_level level,
                                   const char *label,
                                   const char *value) {
-    if (!boot_log_is_enabled(level)) {
+    if (!klog_is_enabled(level)) {
         return;
     }
-    boot_log_raw(level, "    ");
-    boot_log_raw(level, label);
-    boot_log_raw(level, ": ");
-    boot_log_raw(level, value ? value : "(unnamed)");
-    boot_log_newline();
+    klog_raw(level, "    ");
+    klog_raw(level, label);
+    klog_raw(level, ": ");
+    klog_raw(level, value ? value : "(unnamed)");
+    klog_newline();
 }
 
 static void boot_init_report_skip(const char *value) {
-    if (!boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (!klog_is_enabled(KLOG_DEBUG)) {
         return;
     }
-    boot_log_raw(BOOT_LOG_LEVEL_DEBUG, "    skip -> ");
-    boot_log_raw(BOOT_LOG_LEVEL_DEBUG, value ? value : "(unnamed)");
-    boot_log_newline();
+    klog_raw(KLOG_DEBUG, "    skip -> ");
+    klog_raw(KLOG_DEBUG, value ? value : "(unnamed)");
+    klog_newline();
 }
 
 static void boot_init_report_failure(const char *phase, const char *step_name) {
-    boot_log_raw(BOOT_LOG_LEVEL_INFO, "[boot:init] FAILURE in ");
-    boot_log_raw(BOOT_LOG_LEVEL_INFO, phase ? phase : "(unknown)");
-    boot_log_raw(BOOT_LOG_LEVEL_INFO, " -> ");
-    boot_log_raw(BOOT_LOG_LEVEL_INFO, step_name ? step_name : "(unnamed)");
-    boot_log_newline();
+    klog_raw(KLOG_INFO, "[boot:init] FAILURE in ");
+    klog_raw(KLOG_INFO, phase ? phase : "(unknown)");
+    klog_raw(KLOG_INFO, " -> ");
+    klog_raw(KLOG_INFO, step_name ? step_name : "(unnamed)");
+    klog_newline();
 }
 
 static int boot_run_step(const char *phase_name, const struct boot_init_step *step) {
@@ -151,7 +150,7 @@ static int boot_run_step(const char *phase_name, const struct boot_init_step *st
         return 0;
     }
 
-    boot_init_report_step(BOOT_LOG_LEVEL_DEBUG, "step", step->name);
+    boot_init_report_step(KLOG_DEBUG, "step", step->name);
     int rc = step->fn();
     if (rc != 0) {
         boot_init_report_failure(phase_name, step->name);
@@ -170,13 +169,13 @@ int boot_init_run_phase(enum boot_init_phase phase) {
         return 0;
     }
 
-    boot_init_report_phase(BOOT_LOG_LEVEL_DEBUG, "phase start -> ", desc->name);
+    boot_init_report_phase(KLOG_DEBUG, "phase start -> ", desc->name);
     const struct boot_init_step *cursor = desc->start;
     while (cursor < desc->end) {
         boot_run_step(desc->name, cursor);
         cursor++;
     }
-    boot_init_report_phase(BOOT_LOG_LEVEL_INFO, "phase complete -> ", desc->name);
+    boot_init_report_phase(KLOG_INFO, "phase complete -> ", desc->name);
     return 0;
 }
 
@@ -229,7 +228,7 @@ static int boot_step_serial_init(void) {
         boot_info("ERROR: Serial initialization failed");
         return -1;
     }
-    boot_log_attach_serial();
+    klog_attach_serial();
     boot_debug("Serial console ready on COM1");
     return 0;
 }
@@ -287,13 +286,13 @@ static int boot_step_boot_config(void) {
         command_line_has_token(boot_ctx.cmdline, "boot.debug=1") ||
         command_line_has_token(boot_ctx.cmdline, "boot.debug=true") ||
         command_line_has_token(boot_ctx.cmdline, "bootdebug=on")) {
-        boot_log_set_level(BOOT_LOG_LEVEL_DEBUG);
+        klog_set_level(KLOG_DEBUG);
         boot_info("Boot option: debug logging enabled");
     } else if (command_line_has_token(boot_ctx.cmdline, "boot.debug=off") ||
                command_line_has_token(boot_ctx.cmdline, "boot.debug=0") ||
                command_line_has_token(boot_ctx.cmdline, "boot.debug=false") ||
                command_line_has_token(boot_ctx.cmdline, "bootdebug=off")) {
-        boot_log_set_level(BOOT_LOG_LEVEL_INFO);
+        klog_set_level(KLOG_INFO);
         boot_debug("Boot option: debug logging disabled");
     }
 
@@ -337,7 +336,7 @@ static int boot_step_memory_verify(void) {
     uint64_t stack_ptr;
     __asm__ volatile ("movq %%rsp, %0" : "=r" (stack_ptr));
 
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (klog_is_enabled(KLOG_DEBUG)) {
         boot_debug("Stack pointer read successfully!");
         kprint("Current Stack Pointer: ");
         kprint_hex(stack_ptr);
@@ -363,8 +362,7 @@ BOOT_INIT_STEP(memory, "address verification", boot_step_memory_verify);
 
 /* Driver phase ----------------------------------------------------------- */
 static int boot_step_debug_subsystem(void) {
-    debug_init();
-    boot_debug("Debug subsystem initialized.");
+    boot_debug("Debug/logging subsystem initialized.");
     return 0;
 }
 
@@ -452,7 +450,7 @@ static int boot_step_pci_init(void) {
         boot_debug("PCI subsystem initialized");
         const pci_gpu_info_t *gpu = pci_get_primary_gpu();
         if (gpu && gpu->present) {
-            BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+            KLOG_BLOCK(KLOG_DEBUG, {
                 kprint("PCI: Primary GPU detected (bus ");
                 kprint_decimal(gpu->device.bus);
                 kprint(", device ");
@@ -502,7 +500,7 @@ static int boot_step_interrupt_tests(void) {
     boot_info("INTERRUPT_TEST: Running interrupt harness");
     splash_report_progress(75, "Running interrupt tests...");
 
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (klog_is_enabled(KLOG_DEBUG)) {
         kprint("INTERRUPT_TEST: Suites -> ");
         kprintln(interrupt_test_suite_string(test_config.suite_mask));
 
@@ -520,7 +518,7 @@ static int boot_step_interrupt_tests(void) {
     uint32_t failed_tests = stats ? stats->failed_cases : 0;
     interrupt_test_cleanup();
 
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (klog_is_enabled(KLOG_DEBUG)) {
         kprint("INTERRUPT_TEST: Boot run passed tests -> ");
         kprint_decimal(passed);
         kprintln("");
@@ -663,16 +661,16 @@ BOOT_INIT_STEP(services, "mark ready", boot_step_mark_kernel_ready);
 /* Optional/demo phase ---------------------------------------------------- */
 
 static int boot_step_framebuffer_demo(void) {
-    boot_log_debug("Graphics demo: framebuffer already initialized");
+    klog_debug("Graphics demo: framebuffer already initialized");
 
     if (!framebuffer_is_initialized()) {
-        boot_log_debug("WARNING: Framebuffer not available for demo");
+        klog_debug("WARNING: Framebuffer not available for demo");
         return 0;
     }
 
     framebuffer_info_t *fb_info = framebuffer_get_info();
     if (fb_info && fb_info->virtual_addr && fb_info->virtual_addr != (void*)fb_info->physical_addr) {
-        if (boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+        if (klog_is_enabled(KLOG_DEBUG)) {
             kprint("Graphics: Framebuffer using translated virtual address ");
             kprint_hex((uint64_t)fb_info->virtual_addr);
             kprintln(" (translation verified)");
@@ -680,7 +678,7 @@ static int boot_step_framebuffer_demo(void) {
     }
 
     // Splash screen is already running - this step just validates graphics work
-    boot_log_debug("Graphics demo: framebuffer validation complete");
+    klog_debug("Graphics demo: framebuffer validation complete");
     return 0;
 }
 
@@ -698,8 +696,8 @@ void kernel_main(void) {
         kernel_panic("Boot initialization failed");
     }
 
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_INFO)) {
-        boot_log_newline();
+    if (klog_is_enabled(KLOG_INFO)) {
+        klog_newline();
     }
     boot_info("=== KERNEL BOOT SUCCESSFUL ===");
     boot_info("Operational subsystems: serial, interrupts, memory, scheduler, shell");
@@ -715,8 +713,8 @@ void kernel_main(void) {
     boot_info("The kernel has initialized. Handing over to scheduler...");
 
     boot_info("Starting scheduler...");
-    if (boot_log_is_enabled(BOOT_LOG_LEVEL_INFO)) {
-        boot_log_newline();
+    if (klog_is_enabled(KLOG_INFO)) {
+        klog_newline();
     }
 
     // Start scheduler (this will switch to shell task and run it)
@@ -763,8 +761,8 @@ int get_initialization_progress(void) {
  */
 void report_kernel_status(void) {
     if (is_kernel_initialized()) {
-        boot_log_info("SlopOS: Kernel status - INITIALIZED");
+        klog_info("SlopOS: Kernel status - INITIALIZED");
     } else {
-        boot_log_info("SlopOS: Kernel status - INITIALIZING");
+        klog_info("SlopOS: Kernel status - INITIALIZING");
     }
 }

@@ -126,8 +126,6 @@ void exception_alignment_check(struct interrupt_frame *frame);
 void exception_machine_check(struct interrupt_frame *frame);
 void exception_simd_fp_exception(struct interrupt_frame *frame);
 
-// Debug utilities
-void dump_interrupt_frame(struct interrupt_frame *frame);
 const char *get_exception_name(uint8_t vector);
 
 // Assembly interrupt handlers (defined in idt_handlers.s)

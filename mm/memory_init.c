@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../boot/constants.h"
-#include "../boot/log.h"
+#include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
 #include "../drivers/apic.h"
 #include "../drivers/serial.h"
@@ -69,7 +69,7 @@ static void record_kernel_core_reservations(void) {
     const kernel_memory_layout_t *layout = get_kernel_memory_layout();
 
     if (!layout) {
-        boot_log_info("MM: kernel layout unavailable; cannot reserve kernel image");
+        klog_info("MM: kernel layout unavailable; cannot reserve kernel image");
         return;
     }
 
@@ -225,13 +225,13 @@ static void log_reserved_regions(void) {
     uint32_t count = mm_reservations_count();
 
     if (count == 0) {
-        boot_log_info("MM: No device memory reservations detected");
+        klog_info("MM: No device memory reservations detected");
         return;
     }
 
     uint64_t total_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+    KLOG_BLOCK(KLOG_INFO, {
         kprint("MM: Reserved device regions (");
         kprint_decimal(count);
         kprint(")\n");
@@ -289,7 +289,7 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
 
     if (mm_is_range_reserved(aligned_start, aligned_size)) {
         usable_overlap_skips++;
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("MM: Skipping usable subrange overlapping reservation: 0x");
             kprint_hex(aligned_start);
             kprint(" - 0x");
@@ -302,7 +302,7 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
     init_state.available_memory_bytes += aligned_size;
 
     if (add_page_alloc_region(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("MM: WARNING - failed to register page allocator region\n");
         });
     }
@@ -373,7 +373,7 @@ static uint32_t clamp_required_frames(uint64_t required_frames_64) {
     }
 
     if (required_frames_64 > (uint64_t)max_supported) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("MM: WARNING - Limiting tracked page frames to allocator maximum\n");
         });
         return max_supported;
@@ -388,11 +388,11 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     }
 
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
-        boot_log_info("MM: ERROR - Cannot prepare allocator buffers without Limine memmap");
+        klog_info("MM: ERROR - Cannot prepare allocator buffers without Limine memmap");
         return -1;
     }
 
-    boot_log_debug("MM: Planning allocator metadata buffers...");
+    klog_debug("MM: Planning allocator metadata buffers...");
 
     uint64_t highest_phys_addr = 0;
     const struct limine_memmap_entry *largest_usable = NULL;
@@ -416,12 +416,12 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     }
 
     if (!largest_usable) {
-        boot_log_info("MM: ERROR - No usable memory regions available for allocator metadata");
+        klog_info("MM: ERROR - No usable memory regions available for allocator metadata");
         return -1;
     }
 
     if (highest_phys_addr == 0) {
-        boot_log_info("MM: ERROR - Limine reported zero physical memory");
+        klog_info("MM: ERROR - Limine reported zero physical memory");
         return -1;
     }
 
@@ -435,7 +435,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     uint64_t max_fit_frames = largest_usable->length / PAGE_SIZE_4KB;
     if (required_frames > max_fit_frames) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+        KLOG_BLOCK(KLOG_DEBUG, {
             kprint("MM: WARNING - Reducing tracked frames to fit largest usable region\n");
         });
         required_frames = (uint32_t)max_fit_frames;
@@ -446,7 +446,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     uint64_t page_bytes_u64 = (uint64_t)required_frames * (uint64_t)page_desc_size;
 
     if (page_bytes_u64 == 0) {
-        boot_log_info("MM: ERROR - Calculated zero-sized allocator metadata buffer");
+        klog_info("MM: ERROR - Calculated zero-sized allocator metadata buffer");
         return -1;
     }
 
@@ -459,7 +459,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     uint64_t usable_end_aligned = align_down_u64(usable_end, PAGE_SIZE_4KB);
 
     if (usable_end_aligned <= usable_start || reserved_bytes > (usable_end_aligned - usable_start)) {
-        boot_log_info("MM: ERROR - Largest usable region too small for allocator metadata");
+        klog_info("MM: ERROR - Largest usable region too small for allocator metadata");
         return -1;
     }
 
@@ -491,7 +491,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     }
 
     if (reserve_phys_base == 0) {
-        boot_log_info("MM: ERROR - Failed to find non-overlapping window for allocator metadata");
+        klog_info("MM: ERROR - Failed to find non-overlapping window for allocator metadata");
         return -1;
     }
 
@@ -502,7 +502,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     uintptr_t page_buffer_virtual = cursor;
     cursor += page_bytes_aligned;
     if (cursor > reserve_virt_end) {
-        boot_log_info("MM: ERROR - Allocator metadata alignment exceeded reserved window");
+        klog_info("MM: ERROR - Allocator metadata alignment exceeded reserved window");
         return -1;
     }
 
@@ -515,7 +515,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     init_state.allocator_metadata_bytes = page_bytes_u64;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("MM: Page allocator metadata reserved at phys 0x");
         kprint_hex(reserve_phys_base);
         kprint(" (");
@@ -541,7 +541,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
  * Must be called first before any other memory operations
  */
 static int initialize_early_memory(void) {
-    boot_log_debug("MM: Skipping early paging reinitialization (already configured by bootloader)");
+    klog_debug("MM: Skipping early paging reinitialization (already configured by bootloader)");
     init_state.early_paging_done = 1;
     return 0;
 }
@@ -552,18 +552,18 @@ static int initialize_early_memory(void) {
  */
 static int initialize_memory_discovery(const struct limine_memmap_response *memmap,
                                        uint64_t hhdm_offset) {
-    boot_log_debug("MM: Processing Limine memory map...");
+    klog_debug("MM: Processing Limine memory map...");
 
     init_state.total_memory_bytes = 0;
     init_state.available_memory_bytes = 0;
     init_state.memory_regions_count = 0;
 
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
-        boot_log_info("MM: ERROR - Limine memory map response missing");
+        klog_info("MM: ERROR - Limine memory map response missing");
         return -1;
     }
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("MM: Limine memory entries: ");
         kprint_decimal(memmap->entry_count);
         kprint("\n");
@@ -588,7 +588,7 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
     }
 
     if (processed_entries == 0) {
-        boot_log_info("MM: ERROR - Limine memory map contained no valid entries");
+        klog_info("MM: ERROR - Limine memory map contained no valid entries");
         return -1;
     }
 
@@ -596,29 +596,29 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
     init_state.hhdm_offset = hhdm_offset;
     init_state.hhdm_received = 1;
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("MM: HHDM offset: 0x");
         kprint_hex(hhdm_offset);
         kprint("\n");
     });
 
     if (finalize_page_allocator() != 0) {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("MM: WARNING - page allocator finalization reported issues\n");
         });
     }
 
     if (usable_overlap_skips == 0) {
-        boot_log_debug("MM: Reserved overlap check passed (no usable subranges skipped)");
+        klog_debug("MM: Reserved overlap check passed (no usable subranges skipped)");
     } else {
-        BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_INFO, {
+        KLOG_BLOCK(KLOG_INFO, {
             kprint("MM: Reserved overlap guard skipped ");
             kprint_decimal(usable_overlap_skips);
             kprint(" subrange(s)\n");
         });
     }
 
-    boot_log_info("MM: Memory discovery completed successfully");
+    klog_info("MM: Memory discovery completed successfully");
     return 0;
 }
 
@@ -627,10 +627,10 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
  * Sets up page allocator and buddy allocator with discovered memory
  */
 static int initialize_physical_allocators(void) {
-    boot_log_debug("MM: Initializing physical memory allocators...");
+    klog_debug("MM: Initializing physical memory allocators...");
 
     if (!allocator_buffers.prepared) {
-        boot_log_info("MM: ERROR - Allocator buffers not prepared before initialization");
+        klog_info("MM: ERROR - Allocator buffers not prepared before initialization");
         return -1;
     }
 
@@ -644,7 +644,7 @@ static int initialize_physical_allocators(void) {
 
     init_state.tracked_page_frames = allocator_buffers.page_capacity;
 
-    boot_log_debug("MM: Physical memory allocator initialized successfully");
+    klog_debug("MM: Physical memory allocator initialized successfully");
     return 0;
 }
 
@@ -653,7 +653,7 @@ static int initialize_physical_allocators(void) {
  * Sets up higher-half mapping and kernel heap
  */
 static int initialize_virtual_memory(void) {
-    boot_log_debug("MM: Initializing virtual memory management...");
+    klog_debug("MM: Initializing virtual memory management...");
 
     /* Initialize full paging system */
     init_paging();
@@ -666,7 +666,7 @@ static int initialize_virtual_memory(void) {
     }
     init_state.kernel_heap_done = 1;
 
-    boot_log_debug("MM: Virtual memory management initialized successfully");
+    klog_debug("MM: Virtual memory management initialized successfully");
     return 0;
 }
 
@@ -675,7 +675,7 @@ static int initialize_virtual_memory(void) {
  * Sets up per-process virtual memory and region management
  */
 static int initialize_process_memory(void) {
-    boot_log_debug("MM: Initializing process memory management...");
+    klog_debug("MM: Initializing process memory management...");
 
     /* Initialize process virtual memory management */
     if (init_process_vm() != 0) {
@@ -684,7 +684,7 @@ static int initialize_process_memory(void) {
     }
     init_state.process_vm_done = 1;
 
-    boot_log_debug("MM: Process memory management initialized successfully");
+    klog_debug("MM: Process memory management initialized successfully");
     return 0;
 }
 
@@ -692,7 +692,7 @@ static int initialize_process_memory(void) {
  * Display memory initialization summary
  */
 static void display_memory_summary(void) {
-    if (!boot_log_is_enabled(BOOT_LOG_LEVEL_DEBUG)) {
+    if (!klog_is_enabled(KLOG_DEBUG)) {
         return;
     }
 
@@ -742,7 +742,7 @@ static void display_memory_summary(void) {
     kprint(init_state.paging_done ? "OK" : "FAILED");
     kprint("\n");
 
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    KLOG_BLOCK(KLOG_DEBUG, {
         if (init_state.total_memory_bytes > 0) {
             kprint("Total Memory:          ");
             kprint_decimal(init_state.total_memory_bytes / (1024 * 1024));
@@ -775,9 +775,9 @@ static void display_memory_summary(void) {
  */
 int init_memory_system(const struct limine_memmap_response *memmap,
                        uint64_t hhdm_offset) {
-    boot_log_debug("========== SlopOS Memory System Initialization ==========");
-    boot_log_debug("Initializing complete memory management system...");
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    klog_debug("========== SlopOS Memory System Initialization ==========");
+    klog_debug("Initializing complete memory management system...");
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("Limine memmap response at: 0x");
         kprint_hex((uint64_t)(uintptr_t)memmap);
         kprint("\n");
@@ -840,8 +840,8 @@ int init_memory_system(const struct limine_memmap_response *memmap,
     /* Display final summary */
     display_memory_summary();
 
-    boot_log_info("MM: Complete memory system initialization successful!");
-    BOOT_LOG_BLOCK(BOOT_LOG_LEVEL_DEBUG, {
+    klog_info("MM: Complete memory system initialization successful!");
+    KLOG_BLOCK(KLOG_DEBUG, {
         kprint("MM: Ready for scheduler and video subsystem initialization\n\n");
     });
 
