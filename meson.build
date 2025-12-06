@@ -39,8 +39,6 @@ add_project_arguments([
     '-mno-avx',
     '-mno-avx2',
     '-msoft-float',
-    '-Wall',
-    '-Wextra',
     '-Wno-unused-parameter',
     '-Wno-unused-command-line-argument',
     '-DENABLE_BUILTIN_TESTS=' + (builtin_tests_enabled ? '1' : '0'),
