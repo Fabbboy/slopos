@@ -3,6 +3,7 @@
 #include "tty.h"
 #include "../sched/scheduler.h"
 #include "../lib/cpu.h"
+#include "../lib/ring_buffer.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -88,68 +89,25 @@ static const char scancode_shifted[] = {
  * BUFFER OPERATIONS
  * ======================================================================== */
 
-/*
- * Check if buffer is full
- */
-static inline int buffer_full(keyboard_buffer_t *buf) {
-    return buf->count >= KEYBOARD_BUFFER_SIZE;
+static inline void kb_buffer_push_overwrite(keyboard_buffer_t *buf, char c) {
+    RING_BUFFER_PUSH_OVERWRITE(buf, data, c);
 }
 
-/*
- * Check if buffer is empty
- */
-static inline int buffer_empty(keyboard_buffer_t *buf) {
-    return buf->count == 0;
-}
+static char kb_buffer_pop(keyboard_buffer_t *buf) {
+    char out = 0;
+    int success = 0;
 
-/*
- * Push character to buffer (called from IRQ context)
- * Returns 0 on success, -1 if buffer is full
- */
-static int buffer_push(keyboard_buffer_t *buf, char c) {
-    
-    if (buffer_full(buf)) {
-        /* Buffer full - drop oldest character (overwrite tail) */
-        buf->tail = (buf->tail + 1) % KEYBOARD_BUFFER_SIZE;
-    } else {
-        buf->count++;
-    }
-    
-    buf->data[buf->head] = c;
-    buf->head = (buf->head + 1) % KEYBOARD_BUFFER_SIZE;
-    
-    return 0;
-}
-
-/*
- * Pop character from buffer (called from task context)
- * Returns character if available, 0 if buffer empty
- */
-static char buffer_pop(keyboard_buffer_t *buf) {
-    /* Disable interrupts during critical section */
     cpu_cli();
-    
-    if (buffer_empty(buf)) {
-        cpu_sti();
-        return 0;
-    }
-    
-    char c = buf->data[buf->tail];
-    buf->tail = (buf->tail + 1) % KEYBOARD_BUFFER_SIZE;
-    buf->count--;
-    
-    /* Re-enable interrupts */
+    RING_BUFFER_TRY_POP(buf, data, &out, success);
     cpu_sti();
-    
-    return c;
+
+    return success ? out : 0;
 }
 
-/*
- * Check if buffer has data (non-destructive)
- */
-static int buffer_has_data(keyboard_buffer_t *buf) {
+static int kb_buffer_has_data(keyboard_buffer_t *buf) {
+    int has_data = 0;
     cpu_cli();
-    int has_data = buf->count > 0;
+    has_data = !RING_BUFFER_IS_EMPTY(buf);
     cpu_sti();
     return has_data;
 }
@@ -312,21 +270,25 @@ void keyboard_init(void) {
 }
 
 void keyboard_handle_scancode(uint8_t scancode) {
-    klog_raw(KLOG_INFO, "[KBD] Scancode: 0x");
-    klog_hex(KLOG_INFO, (uint64_t)scancode);
-    klog_raw(KLOG_INFO, "\n");
+    KLOG_BLOCK(KLOG_DEBUG, {
+        klog_raw(KLOG_DEBUG, "[KBD] Scancode: 0x");
+        klog_hex(KLOG_DEBUG, (uint64_t)scancode);
+        klog_raw(KLOG_DEBUG, "\n");
+    });
 
     int is_press = !is_break_code(scancode);
     uint8_t make_code = get_make_code(scancode);
 
-    klog_raw(KLOG_INFO, "[KBD] Make code: 0x");
-    klog_hex(KLOG_INFO, (uint64_t)make_code);
-    klog_raw(KLOG_INFO, " is_press: ");
-    klog_decimal(KLOG_INFO, (uint64_t)is_press);
-    klog_raw(KLOG_INFO, "\n");
+    KLOG_BLOCK(KLOG_DEBUG, {
+        klog_raw(KLOG_DEBUG, "[KBD] Make code: 0x");
+        klog_hex(KLOG_DEBUG, (uint64_t)make_code);
+        klog_raw(KLOG_DEBUG, " is_press: ");
+        klog_decimal(KLOG_DEBUG, (uint64_t)is_press);
+        klog_raw(KLOG_DEBUG, "\n");
+    });
 
     /* Store scancode for debugging */
-    buffer_push(&scancode_buffer, (char)scancode);
+    kb_buffer_push_overwrite(&scancode_buffer, (char)scancode);
     
     /* Handle modifier keys */
     if (make_code == 0x2A || make_code == 0x36 || /* Shift */
@@ -344,28 +306,34 @@ void keyboard_handle_scancode(uint8_t scancode) {
     
     /* Translate scancode to ASCII */
     char ascii = translate_scancode(scancode);
-    klog_raw(KLOG_INFO, "[KBD] ASCII: 0x");
-    klog_hex(KLOG_INFO, (uint64_t)ascii);
-    klog_raw(KLOG_INFO, "\n");
+    KLOG_BLOCK(KLOG_DEBUG, {
+        klog_raw(KLOG_DEBUG, "[KBD] ASCII: 0x");
+        klog_hex(KLOG_DEBUG, (uint64_t)ascii);
+        klog_raw(KLOG_DEBUG, "\n");
+    });
 
     if (ascii != 0) {
-        klog_raw(KLOG_INFO, "[KBD] Adding to buffer\n");
-        buffer_push(&char_buffer, ascii);
+        KLOG_BLOCK(KLOG_DEBUG, {
+            klog_raw(KLOG_DEBUG, "[KBD] Adding to buffer\n");
+        });
+        kb_buffer_push_overwrite(&char_buffer, ascii);
         scheduler_request_reschedule_from_interrupt();
     }
 }
 
 char keyboard_getchar(void) {
-    return buffer_pop(&char_buffer);
+    return kb_buffer_pop(&char_buffer);
 }
 
 int keyboard_has_input(void) {
-    int has_data = buffer_has_data(&char_buffer);
-    klog_raw(KLOG_INFO, "[KBD] buffer_has_data() = ");
-    klog_decimal(KLOG_INFO, (uint64_t)has_data);
-    klog_raw(KLOG_INFO, " (count=");
-    klog_decimal(KLOG_INFO, (uint64_t)char_buffer.count);
-    klog_raw(KLOG_INFO, ")\n");
+    int has_data = kb_buffer_has_data(&char_buffer);
+    KLOG_BLOCK(KLOG_DEBUG, {
+        klog_raw(KLOG_DEBUG, "[KBD] buffer_has_data() = ");
+        klog_decimal(KLOG_DEBUG, (uint64_t)has_data);
+        klog_raw(KLOG_DEBUG, " (count=");
+        klog_decimal(KLOG_DEBUG, (uint64_t)char_buffer.count);
+        klog_raw(KLOG_DEBUG, ")\n");
+    });
     return has_data;
 }
 
@@ -374,5 +342,5 @@ int keyboard_buffer_pending(void) {
 }
 
 uint8_t keyboard_get_scancode(void) {
-    return (uint8_t)buffer_pop(&scancode_buffer);
+    return (uint8_t)kb_buffer_pop(&scancode_buffer);
 }

@@ -152,22 +152,12 @@ void shell_main(void *arg) {
         
         /* Read line from keyboard */
         char line_buffer[256];
-        klog_raw(KLOG_INFO, "[DEBUG] Calling tty_read_line...\n");
         size_t line_length = tty_read_line(line_buffer, sizeof(line_buffer));
-        klog_raw(KLOG_INFO, "[DEBUG] Got line_length: ");
-        klog_decimal(KLOG_INFO, line_length);
-        klog_raw(KLOG_INFO, "\n");
 
         /* Handle empty lines */
         if (line_length == 0) {
-            /* Empty line - just re-prompt */
-            klog_raw(KLOG_INFO, "[DEBUG] Empty line, continuing...\n");
             continue;
         }
-
-        klog_raw(KLOG_INFO, "[DEBUG] Executing command: '");
-        klog_raw(KLOG_INFO, line_buffer);
-        klog_raw(KLOG_INFO, "'\n");
 
         /* Execute command */
         shell_execute_command(line_buffer);
