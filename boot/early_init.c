@@ -90,12 +90,7 @@ static void boot_init_report_phase(enum klog_level level,
     if (!klog_is_enabled(level)) {
         return;
     }
-    klog_raw(level, "[boot:init] ");
-    klog_raw(level, prefix);
-    if (value) {
-        klog_raw(level, value);
-    }
-    klog_newline();
+    klog_printf(level, "[boot:init] %s%s\n", prefix, value ? value : "");
 }
 
 static void boot_init_report_step(enum klog_level level,
@@ -104,28 +99,20 @@ static void boot_init_report_step(enum klog_level level,
     if (!klog_is_enabled(level)) {
         return;
     }
-    klog_raw(level, "    ");
-    klog_raw(level, label);
-    klog_raw(level, ": ");
-    klog_raw(level, value ? value : "(unnamed)");
-    klog_newline();
+    klog_printf(level, "    %s: %s\n", label, value ? value : "(unnamed)");
 }
 
 static void boot_init_report_skip(const char *value) {
     if (!klog_is_enabled(KLOG_DEBUG)) {
         return;
     }
-    klog_raw(KLOG_DEBUG, "    skip -> ");
-    klog_raw(KLOG_DEBUG, value ? value : "(unnamed)");
-    klog_newline();
+    klog_printf(KLOG_DEBUG, "    skip -> %s\n", value ? value : "(unnamed)");
 }
 
 static void boot_init_report_failure(const char *phase, const char *step_name) {
-    klog_raw(KLOG_INFO, "[boot:init] FAILURE in ");
-    klog_raw(KLOG_INFO, phase ? phase : "(unknown)");
-    klog_raw(KLOG_INFO, " -> ");
-    klog_raw(KLOG_INFO, step_name ? step_name : "(unnamed)");
-    klog_newline();
+    klog_printf(KLOG_INFO, "[boot:init] FAILURE in %s -> %s\n",
+                phase ? phase : "(unknown)",
+                step_name ? step_name : "(unnamed)");
 }
 
 static int boot_run_step(const char *phase_name, const struct boot_init_step *step) {
@@ -293,14 +280,10 @@ static int boot_step_memory_verify(void) {
 
     if (klog_is_enabled(KLOG_DEBUG)) {
         boot_debug("Stack pointer read successfully!");
-        klog_raw(KLOG_INFO, "Current Stack Pointer: ");
-        klog_hex(KLOG_INFO, stack_ptr);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "Current Stack Pointer: 0x%lx\n", stack_ptr);
 
         void *current_ip = __builtin_return_address(0);
-        klog_raw(KLOG_INFO, "Kernel Code Address: ");
-        klog_hex(KLOG_INFO, (uint64_t)current_ip);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "Kernel Code Address: 0x%lx\n", (uint64_t)current_ip);
 
         if ((uint64_t)current_ip >= KERNEL_VIRTUAL_BASE) {
             boot_debug("Running in higher-half virtual memory - CORRECT");
@@ -449,15 +432,13 @@ static int boot_step_interrupt_tests(void) {
     splash_report_progress(75, "Running interrupt tests...");
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Suites -> ");
-        klog(KLOG_INFO, interrupt_test_suite_string(test_config.suite_mask));
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Suites -> %s\n",
+                    interrupt_test_suite_string(test_config.suite_mask));
 
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Verbosity -> ");
-        klog(KLOG_INFO, interrupt_test_verbosity_string(test_config.verbosity));
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Verbosity -> %s\n",
+                    interrupt_test_verbosity_string(test_config.verbosity));
 
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Timeout (ms) -> ");
-        klog_decimal(KLOG_INFO, test_config.timeout_ms);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout (ms) -> %u\n", test_config.timeout_ms);
     }
 
     interrupt_test_init(&test_config);
@@ -467,9 +448,7 @@ static int boot_step_interrupt_tests(void) {
     interrupt_test_cleanup();
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Boot run passed tests -> ");
-        klog_decimal(KLOG_INFO, passed);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Boot run passed tests -> %d\n", passed);
     }
 
     if (test_config.shutdown_on_complete) {
@@ -534,7 +513,7 @@ static void roulette_gatekeeper_task(void *arg) {
     kernel_roulette();
 
     /* If we return, we won. Spawn the shell. */
-    klog(KLOG_INFO, "ROULETTE: You survived. Spawning shell...");
+    klog_printf(KLOG_INFO, "ROULETTE: You survived. Spawning shell...\n");
 
     /* Create shell task */
     uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, 0x02);
@@ -619,9 +598,8 @@ static int boot_step_framebuffer_demo(void) {
     framebuffer_info_t *fb_info = framebuffer_get_info();
     if (fb_info && fb_info->virtual_addr && fb_info->virtual_addr != (void*)fb_info->physical_addr) {
         if (klog_is_enabled(KLOG_DEBUG)) {
-            klog_raw(KLOG_INFO, "Graphics: Framebuffer using translated virtual address ");
-            klog_hex(KLOG_INFO, (uint64_t)fb_info->virtual_addr);
-            klog(KLOG_INFO, " (translation verified)");
+            klog_printf(KLOG_INFO, "Graphics: Framebuffer using translated virtual address 0x%lx (translation verified)\n",
+                        (uint64_t)fb_info->virtual_addr);
         }
     }
 
@@ -667,12 +645,12 @@ void kernel_main(void) {
 
     // Start scheduler (this will switch to shell task and run it)
     if (start_scheduler() != 0) {
-        klog(KLOG_INFO, "ERROR: Scheduler startup failed");
+        klog_printf(KLOG_INFO, "ERROR: Scheduler startup failed\n");
         kernel_panic("Scheduler startup failed");
     }
     
     // If we get here, scheduler has exited (shouldn't happen in normal operation)
-    klog(KLOG_INFO, "WARNING: Scheduler exited unexpectedly");
+    klog_printf(KLOG_INFO, "WARNING: Scheduler exited unexpectedly\n");
     while (1) {
         __asm__ volatile ("hlt");  // Halt until next interrupt
     }

@@ -196,11 +196,8 @@ int schedule_task(task_t *task) {
     }
 
     if (!task_is_ready(task)) {
-        klog_raw(KLOG_INFO, "schedule_task: task ");
-        klog_decimal(KLOG_INFO, task->task_id);
-        klog_raw(KLOG_INFO, " not ready (state ");
-        klog_raw(KLOG_INFO, task_state_to_string(task_get_state(task)));
-        klog_raw(KLOG_INFO, ")\n");
+        klog_printf(KLOG_INFO, "schedule_task: task %u not ready (state %s)\n",
+                    task->task_id, task_state_to_string(task_get_state(task)));
         return -1;
     }
 
@@ -209,7 +206,7 @@ int schedule_task(task_t *task) {
     }
 
     if (ready_queue_enqueue(&scheduler.ready_queue, task) != 0) {
-        klog_raw(KLOG_INFO, "schedule_task: ready queue full, request rejected\n");
+        klog_printf(KLOG_INFO, "schedule_task: ready queue full, request rejected\n");
         take_l();
         return -1;
     }
@@ -322,22 +319,16 @@ void schedule(void) {
     if (current && current != scheduler.idle_task) {
         if (task_is_running(current)) {
             if (task_set_state(current->task_id, TASK_STATE_READY) != 0) {
-                klog_raw(KLOG_INFO, "schedule: failed to mark task ");
-                klog_decimal(KLOG_INFO, current->task_id);
-                klog_raw(KLOG_INFO, " ready\n");
+                klog_printf(KLOG_INFO, "schedule: failed to mark task %u ready\n", current->task_id);
             } else if (ready_queue_enqueue(&scheduler.ready_queue, current) != 0) {
-                klog_raw(KLOG_INFO, "schedule: ready queue full when re-queuing task ");
-                klog_decimal(KLOG_INFO, current->task_id);
-                klog_raw(KLOG_INFO, "\n");
+                klog_printf(KLOG_INFO, "schedule: ready queue full when re-queuing task %u\n",
+                            current->task_id);
             } else {
                 scheduler_reset_task_quantum(current);
             }
         } else if (!task_is_blocked(current) && !task_is_terminated(current)) {
-            klog_raw(KLOG_INFO, "schedule: skipping requeue for task ");
-            klog_decimal(KLOG_INFO, current->task_id);
-            klog_raw(KLOG_INFO, " in state ");
-            klog_raw(KLOG_INFO, task_state_to_string(task_get_state(current)));
-            klog_raw(KLOG_INFO, "\n");
+            klog_printf(KLOG_INFO, "schedule: skipping requeue for task %u in state %s\n",
+                        current->task_id, task_state_to_string(task_get_state(current)));
         }
     }
 
@@ -400,9 +391,8 @@ void block_current_task(void) {
 
     /* Mark task as blocked */
     if (task_set_state(current->task_id, TASK_STATE_BLOCKED) != 0) {
-        klog_raw(KLOG_INFO, "block_current_task: invalid state transition for task ");
-        klog_decimal(KLOG_INFO, current->task_id);
-        klog_raw(KLOG_INFO, "\n");
+        klog_printf(KLOG_INFO, "block_current_task: invalid state transition for task %u\n",
+                    current->task_id);
     }
 
     /* Remove from ready queue and schedule next task */
@@ -448,9 +438,8 @@ int unblock_task(task_t *task) {
 
     /* Mark task as ready */
     if (task_set_state(task->task_id, TASK_STATE_READY) != 0) {
-        klog_raw(KLOG_INFO, "unblock_task: invalid state transition for task ");
-        klog_decimal(KLOG_INFO, task->task_id);
-        klog_raw(KLOG_INFO, "\n");
+        klog_printf(KLOG_INFO, "unblock_task: invalid state transition for task %u\n",
+                    task->task_id);
     }
 
     /* Add back to ready queue */
@@ -464,7 +453,7 @@ void scheduler_task_exit(void) {
     task_t *current = scheduler.current_task;
 
     if (!current) {
-        klog(KLOG_INFO, "scheduler_task_exit: No current task");
+        klog_printf(KLOG_INFO, "scheduler_task_exit: No current task\n");
         schedule();
         for (;;) {
             __asm__ volatile ("hlt");
@@ -475,7 +464,7 @@ void scheduler_task_exit(void) {
     task_record_context_switch(current, NULL, timestamp);
 
     if (task_terminate((uint32_t)-1) != 0) {
-        klog(KLOG_INFO, "scheduler_task_exit: Failed to terminate current task");
+        klog_printf(KLOG_INFO, "scheduler_task_exit: Failed to terminate current task\n");
     }
 
     scheduler.current_task = NULL;
@@ -483,7 +472,7 @@ void scheduler_task_exit(void) {
 
     schedule();
 
-    klog(KLOG_INFO, "scheduler_task_exit: Schedule returned unexpectedly");
+    klog_printf(KLOG_INFO, "scheduler_task_exit: Schedule returned unexpectedly\n");
     for (;;) {
         __asm__ volatile ("hlt");
     }

@@ -287,11 +287,9 @@ static void handle_exception_recovery(enum test_recovery_reason reason,
     test_ctx.resume_rip = 0;
 
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Recovery triggered (");
-        klog_raw(KLOG_INFO, recovery_reason_string(reason));
-        klog_raw(KLOG_INFO, ") for vector ");
-        klog_decimal(KLOG_INFO, (int)(active_frame->vector & 0xFF));
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Recovery triggered (%s) for vector %d\n",
+                    recovery_reason_string(reason),
+                    (int)(active_frame->vector & 0xFF));
     }
 }
 static void interrupt_test_apply_config(const struct interrupt_test_config *config) {
@@ -335,7 +333,7 @@ void interrupt_test_init(const struct interrupt_test_config *config) {
     interrupt_test_apply_config(config);
 
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Initializing test framework");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Initializing test framework\n");
     }
 
     exception_set_mode(EXCEPTION_MODE_TEST);
@@ -366,7 +364,7 @@ void interrupt_test_init(const struct interrupt_test_config *config) {
     }
 
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Framework initialized");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Framework initialized\n");
     }
 }
 
@@ -375,7 +373,7 @@ void interrupt_test_init(const struct interrupt_test_config *config) {
  */
 void interrupt_test_cleanup(void) {
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Cleaning up test framework");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Cleaning up test framework\n");
     }
 
     // Remove our exception handlers
@@ -395,7 +393,7 @@ void interrupt_test_cleanup(void) {
     exception_set_mode(EXCEPTION_MODE_NORMAL);
 
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Framework cleanup complete");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Framework cleanup complete\n");
     }
 }
 
@@ -428,14 +426,12 @@ void test_start(const char *name, int expected_exception) {
     test_statistics.total_cases++;
 
     if (test_flags & TEST_FLAG_VERBOSE) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Starting test '");
-        klog_raw(KLOG_INFO, test_ctx.test_name);
         if (expected_exception >= 0) {
-            klog_raw(KLOG_INFO, "' (expecting exception ");
-            klog_decimal(KLOG_INFO, expected_exception);
-            klog(KLOG_INFO, ")");
+            klog_printf(KLOG_INFO, "INTERRUPT_TEST: Starting test '%s' (expecting exception %d)\n",
+                        test_ctx.test_name, expected_exception);
         } else {
-            klog(KLOG_INFO, "' (no exception expected)");
+            klog_printf(KLOG_INFO, "INTERRUPT_TEST: Starting test '%s' (no exception expected)\n",
+                        test_ctx.test_name);
         }
     }
 }
@@ -475,23 +471,18 @@ int test_end(void) {
 
     // Log test results (safe to do here after handler has completed)
     if (test_flags & TEST_FLAG_VERBOSE) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Test '");
-        klog_raw(KLOG_INFO, test_ctx.test_name);
-        klog_raw(KLOG_INFO, "' ");
-        klog_raw(KLOG_INFO, get_test_result_string(result));
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Test '%s' %s",
+                    test_ctx.test_name, get_test_result_string(result));
 
         if (test_ctx.exception_occurred) {
-            klog_raw(KLOG_INFO, " - exception ");
-            klog_decimal(KLOG_INFO, test_ctx.exception_vector);
-            klog_raw(KLOG_INFO, " at RIP ");
-            klog_hex(KLOG_INFO, test_ctx.test_rip);
+            klog_printf(KLOG_INFO, " - exception %d at RIP 0x%lx",
+                        test_ctx.exception_vector, test_ctx.test_rip);
         }
         if (recovery_failure) {
-            klog_raw(KLOG_INFO, " (recovery: ");
-            klog_raw(KLOG_INFO, recovery_reason_string((enum test_recovery_reason)last_reason));
-            klog_raw(KLOG_INFO, ")");
+            klog_printf(KLOG_INFO, " (recovery: %s)",
+                        recovery_reason_string((enum test_recovery_reason)last_reason));
         }
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "\n");
     }
 
     if (result == TEST_SUCCESS || result == TEST_EXCEPTION_CAUGHT) {
@@ -622,9 +613,7 @@ static int execute_test_suite(const char *suite_name,
     }
 
     if (suite_name && (test_flags & TEST_FLAG_VERBOSE)) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Running suite '");
-        klog_raw(KLOG_INFO, suite_name);
-        klog(KLOG_INFO, "'");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Running suite '%s'\n", suite_name);
     }
 
     int passed = 0;
@@ -637,22 +626,16 @@ static int execute_test_suite(const char *suite_name,
             passed++;
         } else if (!(test_flags & TEST_FLAG_CONTINUE_ON_FAIL)) {
             if (suite_name) {
-                klog_raw(KLOG_INFO, "INTERRUPT_TEST: Aborting suite '");
-                klog_raw(KLOG_INFO, suite_name);
-                klog(KLOG_INFO, "' due to failure");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Aborting suite '%s' due to failure\n", suite_name);
             }
             break;
         }
     }
 
     if (suite_name && (test_flags & TEST_FLAG_VERBOSE)) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Suite '");
-        klog_raw(KLOG_INFO, suite_name);
-        klog_raw(KLOG_INFO, "' - ");
-        klog_decimal(KLOG_INFO, passed);
-        klog_raw(KLOG_INFO, " / ");
-        klog_decimal(KLOG_INFO, (int)count);
-        klog(KLOG_INFO, " tests passed");
+        klog_printf(KLOG_INFO,
+                    "INTERRUPT_TEST: Suite '%s' - %d / %zu tests passed\n",
+                    suite_name, passed, count);
     }
 
     return passed;
@@ -692,7 +675,7 @@ void *allocate_test_memory(size_t size, int flags) {
 
     uint8_t *raw = kmalloc(total_size);
     if (!raw) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: allocate_test_memory failed");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: allocate_test_memory failed\n");
         return NULL;
     }
 
@@ -975,7 +958,7 @@ resume_point:
  * Used to exercise stack trace reporting on unexpected failures
  */
 __attribute__((noinline)) static int test_stacktrace_demo_fault(void) {
-    klog(KLOG_INFO, "INTERRUPT_TEST: Stacktrace demo triggering divide-by-zero");
+    klog_printf(KLOG_INFO, "INTERRUPT_TEST: Stacktrace demo triggering divide-by-zero\n");
     return test_divide_by_zero();
 }
 
@@ -1209,12 +1192,12 @@ __attribute__((noinline)) int test_context_switch_balance(void) {
     /* Run the smoke test */
     int smoke_result = run_context_switch_smoke_test();
     if (smoke_result != 0) {
-        klog_raw(KLOG_INFO, "CONTEXT_SWITCH_TEST: Smoke test failed\n");
+        klog_printf(KLOG_INFO, "CONTEXT_SWITCH_TEST: Smoke test failed\n");
         return TEST_FAILED;
     }
 
     /* For now, just verify the smoke test passed - full scheduler balance test TODO */
-    klog_raw(KLOG_INFO, "CONTEXT_SWITCH_TEST: PASSED - Basic context switch test completed\n");
+    klog_printf(KLOG_INFO, "CONTEXT_SWITCH_TEST: PASSED - Basic context switch test completed\n");
     return TEST_SUCCESS;
 }
 
@@ -1222,7 +1205,7 @@ __attribute__((noinline)) int test_context_switch_balance(void) {
  * Run scheduler tests (context switch discipline)
  */
 int run_scheduler_tests(void) {
-    klog_raw(KLOG_INFO, "INTERRUPT_TEST: Running scheduler tests\n");
+    klog_printf(KLOG_INFO, "INTERRUPT_TEST: Running scheduler tests\n");
 
     int total_passed = 0;
 
@@ -1232,7 +1215,7 @@ int run_scheduler_tests(void) {
     if (result == 0) {
         total_passed++;
     } else {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Context switch smoke test failed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Context switch smoke test failed\n");
     }
 
     /* Run VM manager regression tests */
@@ -1241,7 +1224,7 @@ int run_scheduler_tests(void) {
     if (vm_tests_passed > 0) {
         total_passed += vm_tests_passed;
     } else {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: VM manager tests failed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: VM manager tests failed\n");
     }
 
     /* Run kernel heap regression tests */
@@ -1250,7 +1233,7 @@ int run_scheduler_tests(void) {
     if (heap_tests_passed > 0) {
         total_passed += heap_tests_passed;
     } else {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Kernel heap tests failed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Kernel heap tests failed\n");
     }
 
     extern int run_ramfs_tests(void);
@@ -1258,27 +1241,26 @@ int run_scheduler_tests(void) {
     if (ramfs_tests_passed > 0) {
         total_passed += ramfs_tests_passed;
     } else {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: RamFS tests failed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: RamFS tests failed\n");
     }
 
     if (total_passed > 0) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests completed: ");
-        klog_decimal(KLOG_INFO, total_passed);
-        klog_raw(KLOG_INFO, " tests passed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests completed: %d tests passed\n",
+                    total_passed);
     } else {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests failed\n");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests failed\n");
     }
 
     return total_passed;
 }
 #else
 __attribute__((noinline)) int test_context_switch_balance(void) {
-    klog_raw(KLOG_INFO, "CONTEXT_SWITCH_TEST: Built-in tests disabled\n");
+    klog_printf(KLOG_INFO, "CONTEXT_SWITCH_TEST: Built-in tests disabled\n");
     return TEST_SUCCESS;
 }
 
 int run_scheduler_tests(void) {
-    klog_raw(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests skipped (built-in tests disabled)\n");
+    klog_printf(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests skipped (built-in tests disabled)\n");
     return 0;
 }
 #endif
@@ -1290,7 +1272,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
     interrupt_test_apply_config(config);
 
     if (!active_config.enabled) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Skipping interrupt tests (disabled)");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Skipping interrupt tests (disabled)\n");
         return 0;
     }
 
@@ -1302,7 +1284,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
     }
 
     if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Starting interrupt test suites");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Starting interrupt test suites\n");
     }
 
     int total_passed = 0;
@@ -1317,7 +1299,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
             if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-                klog(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during basic exception tests");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during basic exception tests\n");
             }
             goto finish_execution;
         }
@@ -1329,7 +1311,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
             if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-                klog(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during memory access tests");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during memory access tests\n");
             }
             goto finish_execution;
         }
@@ -1341,7 +1323,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
             if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-                klog(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during control flow tests");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during control flow tests\n");
             }
             goto finish_execution;
         }
@@ -1353,7 +1335,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
             if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-                klog(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during scheduler tests");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during scheduler tests\n");
             }
             goto finish_execution;
         }
@@ -1361,7 +1343,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
 
     if (active_config.stacktrace_demo) {
         if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-            klog(KLOG_INFO, "INTERRUPT_TEST: Running stacktrace demonstration");
+            klog_printf(KLOG_INFO, "INTERRUPT_TEST: Running stacktrace demonstration\n");
         }
         safe_execute_test(test_stacktrace_demo_fault,
                           "stacktrace_demo_unexpected_divide",
@@ -1371,7 +1353,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
             (end_cycles - start_cycles) > test_timeout_cycles) {
             timed_out = 1;
             if (active_config.verbosity != INTERRUPT_TEST_VERBOSITY_QUIET) {
-                klog(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during stacktrace demo");
+                klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout reached during stacktrace demo\n");
             }
             goto finish_execution;
         }
@@ -1379,9 +1361,7 @@ int run_all_interrupt_tests(const struct interrupt_test_config *config) {
 
 finish_execution:
     if (test_flags & TEST_FLAG_VERBOSE) {
-        klog_raw(KLOG_INFO, "INTERRUPT_TEST: Aggregate passed tests: ");
-        klog_decimal(KLOG_INFO, total_passed);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Aggregate passed tests: %d\n", total_passed);
     }
 
     uint64_t elapsed_cycles = end_cycles - start_cycles;
@@ -1393,7 +1373,7 @@ finish_execution:
     test_statistics.timed_out = timed_out;
 
     if (timed_out) {
-        klog(KLOG_INFO, "INTERRUPT_TEST: Execution aborted due to timeout");
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Execution aborted due to timeout\n");
     }
 
     test_report_results();
@@ -1427,48 +1407,28 @@ void test_clear_resume_point(void) {
  * Report test results
  */
 void test_report_results(void) {
-    klog(KLOG_INFO, "=== INTERRUPT TEST RESULTS ===");
-    klog_raw(KLOG_INFO, "Total tests: ");
-    klog_decimal(KLOG_INFO, test_statistics.total_cases);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Passed: ");
-    klog_decimal(KLOG_INFO, test_statistics.passed_cases);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Failed: ");
-    klog_decimal(KLOG_INFO, test_statistics.failed_cases);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Exceptions caught: ");
-    klog_decimal(KLOG_INFO, test_statistics.exceptions_caught);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Unexpected exceptions: ");
-    klog_decimal(KLOG_INFO, test_statistics.unexpected_exceptions);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "=== INTERRUPT TEST RESULTS ===\n");
+    klog_printf(KLOG_INFO, "Total tests: %u\n", test_statistics.total_cases);
+    klog_printf(KLOG_INFO, "Passed: %u\n", test_statistics.passed_cases);
+    klog_printf(KLOG_INFO, "Failed: %u\n", test_statistics.failed_cases);
+    klog_printf(KLOG_INFO, "Exceptions caught: %u\n", test_statistics.exceptions_caught);
+    klog_printf(KLOG_INFO, "Unexpected exceptions: %u\n", test_statistics.unexpected_exceptions);
 
     if (test_statistics.total_cases > 0) {
         int success_rate = (int)((test_statistics.passed_cases * 100) /
                                  test_statistics.total_cases);
-        klog_raw(KLOG_INFO, "Success rate: ");
-        klog_decimal(KLOG_INFO, success_rate);
-        klog(KLOG_INFO, "%");
+        klog_printf(KLOG_INFO, "Success rate: %d%%\n", success_rate);
     }
 
-    klog_raw(KLOG_INFO, "Elapsed (ms): ");
-    klog_decimal(KLOG_INFO, test_statistics.elapsed_ms);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "Elapsed (ms): %u\n", test_statistics.elapsed_ms);
+    klog_printf(KLOG_INFO, "Timeout triggered: %s\n", test_statistics.timed_out ? "Yes" : "No");
 
-    klog_raw(KLOG_INFO, "Timeout triggered: ");
-    klog(KLOG_INFO, test_statistics.timed_out ? "Yes" : "No");
-
-    klog(KLOG_INFO, "=== END TEST RESULTS ===");
+    klog_printf(KLOG_INFO, "=== END TEST RESULTS ===\n");
 }
 
 
 void interrupt_test_request_shutdown(int failed_tests) {
-    klog(KLOG_INFO, "INTERRUPT_TEST: Auto shutdown requested");
+    klog_printf(KLOG_INFO, "INTERRUPT_TEST: Auto shutdown requested\n");
 
     uint8_t exit_value = failed_tests == 0 ? 0 : 1;
     io_outb(0xF4, exit_value);  /* QEMU debug-exit port */
@@ -1511,61 +1471,40 @@ const char *get_test_result_string(int result) {
  * Dump test context for debugging
  */
 void dump_test_context(void) {
-    klog(KLOG_INFO, "=== TEST CONTEXT DUMP ===");
-    klog_raw(KLOG_INFO, "Test active: ");
-    klog(KLOG_INFO, test_ctx.test_active ? "Yes" : "No");
+    klog_printf(KLOG_INFO, "=== TEST CONTEXT DUMP ===\n");
+    klog_printf(KLOG_INFO, "Test active: %s\n", test_ctx.test_active ? "Yes" : "No");
 
     if (test_ctx.test_active) {
-        klog_raw(KLOG_INFO, "Test name: ");
-        klog_raw(KLOG_INFO, test_ctx.test_name);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "Test name: %s\n", test_ctx.test_name);
 
-        klog_raw(KLOG_INFO, "Expected exception: ");
         if (test_ctx.expected_exception >= 0) {
-            klog_decimal(KLOG_INFO, test_ctx.expected_exception);
+            klog_printf(KLOG_INFO, "Expected exception: %d\n", test_ctx.expected_exception);
         } else {
-            klog_raw(KLOG_INFO, "None");
+            klog_printf(KLOG_INFO, "Expected exception: None\n");
         }
-        klog(KLOG_INFO, "");
 
-        klog_raw(KLOG_INFO, "Exception occurred: ");
-        klog(KLOG_INFO, test_ctx.exception_occurred ? "Yes" : "No");
+        klog_printf(KLOG_INFO, "Exception occurred: %s\n",
+                    test_ctx.exception_occurred ? "Yes" : "No");
 
         if (test_ctx.exception_occurred) {
-            klog_raw(KLOG_INFO, "Exception vector: ");
-            klog_decimal(KLOG_INFO, test_ctx.exception_vector);
-            klog(KLOG_INFO, "");
+            klog_printf(KLOG_INFO, "Exception vector: %d\n", test_ctx.exception_vector);
         }
     }
 
-    klog_raw(KLOG_INFO, "Abort requested: ");
-    klog(KLOG_INFO, test_ctx.abort_requested ? "Yes" : "No");
+    klog_printf(KLOG_INFO, "Abort requested: %s\n", test_ctx.abort_requested ? "Yes" : "No");
+    klog_printf(KLOG_INFO, "Context corrupted: %s\n", test_ctx.context_corrupted ? "Yes" : "No");
+    klog_printf(KLOG_INFO, "Exception depth: %d\n", test_ctx.exception_depth);
+    klog_printf(KLOG_INFO, "Recovery anchor: 0x%lx\n", test_ctx.recovery_rip);
+    klog_printf(KLOG_INFO, "Last recovery reason: %s\n",
+                recovery_reason_string((enum test_recovery_reason)test_ctx.last_recovery_reason));
 
-    klog_raw(KLOG_INFO, "Context corrupted: ");
-    klog(KLOG_INFO, test_ctx.context_corrupted ? "Yes" : "No");
-
-    klog_raw(KLOG_INFO, "Exception depth: ");
-    klog_decimal(KLOG_INFO, test_ctx.exception_depth);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Recovery anchor: ");
-    klog_hex(KLOG_INFO, test_ctx.recovery_rip);
-    klog(KLOG_INFO, "");
-
-    klog_raw(KLOG_INFO, "Last recovery reason: ");
-    klog_raw(KLOG_INFO, recovery_reason_string((enum test_recovery_reason)test_ctx.last_recovery_reason));
-    klog(KLOG_INFO, "");
-
-    klog(KLOG_INFO, "=== END TEST CONTEXT DUMP ===");
+    klog_printf(KLOG_INFO, "=== END TEST CONTEXT DUMP ===\n");
 }
 
 /*
  * Log test exception
  */
 void log_test_exception(struct interrupt_frame *frame) {
-    klog_raw(KLOG_INFO, "TEST_EXCEPTION: Vector ");
-    klog_decimal(KLOG_INFO, frame->vector);
-    klog_raw(KLOG_INFO, " at RIP ");
-    klog_hex(KLOG_INFO, frame->rip);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "TEST_EXCEPTION: Vector %u at RIP 0x%lx\n",
+                (unsigned)frame->vector, frame->rip);
 }

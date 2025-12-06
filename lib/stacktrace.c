@@ -66,13 +66,8 @@ int stacktrace_capture(struct stacktrace_entry *entries, int max_entries) {
 }
 
 static void print_entry(int index, const struct stacktrace_entry *entry) {
-    klog_raw(KLOG_INFO, "  #");
-    klog_decimal(KLOG_INFO, (uint64_t)index);
-    klog_raw(KLOG_INFO, " rbp=0x");
-    klog_hex(KLOG_INFO, entry->frame_pointer);
-    klog_raw(KLOG_INFO, " rip=0x");
-    klog_hex(KLOG_INFO, entry->return_address);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "  #%d rbp=0x%lx rip=0x%lx\n",
+                index, entry->frame_pointer, entry->return_address);
 }
 
 void stacktrace_dump_from(uint64_t rbp, int max_frames) {
@@ -88,11 +83,11 @@ void stacktrace_dump_from(uint64_t rbp, int max_frames) {
     int captured = stacktrace_capture_from(rbp, entries, max_frames);
 
     if (captured <= 0) {
-        klog(KLOG_INFO, "STACKTRACE: <empty>");
+        klog_printf(KLOG_INFO, "STACKTRACE: <empty>\n");
         return;
     }
 
-    klog(KLOG_INFO, "STACKTRACE:");
+    klog_printf(KLOG_INFO, "STACKTRACE:\n");
     for (int i = 0; i < captured; i++) {
         print_entry(i, &entries[i]);
     }

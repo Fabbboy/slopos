@@ -69,7 +69,7 @@ static vm_manager_t vm_manager = {0};
 static vm_area_t *alloc_vma(void) {
     vm_area_t *vma = (vm_area_t *)kmalloc(sizeof(vm_area_t));
     if (!vma) {
-        klog_raw(KLOG_INFO, "alloc_vma: Failed to allocate VMA structure\n");
+        klog_printf(KLOG_INFO, "alloc_vma: Failed to allocate VMA structure\n");
         return NULL;
     }
 
@@ -122,12 +122,12 @@ static int map_user_range(process_page_dir_t *page_dir,
                           uint64_t map_flags,
                           uint32_t *pages_mapped_out) {
     if (!page_dir) {
-        klog_raw(KLOG_INFO, "map_user_range: Missing page directory\n");
+        klog_printf(KLOG_INFO, "map_user_range: Missing page directory\n");
         return -1;
     }
 
     if (start_addr & (PAGE_SIZE_4KB - 1) || end_addr & (PAGE_SIZE_4KB - 1) || end_addr <= start_addr) {
-        klog_raw(KLOG_INFO, "map_user_range: Unaligned or invalid range\n");
+        klog_printf(KLOG_INFO, "map_user_range: Unaligned or invalid range\n");
         return -1;
     }
 
@@ -137,12 +137,12 @@ static int map_user_range(process_page_dir_t *page_dir,
     while (current < end_addr) {
         uint64_t phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if (!phys) {
-            klog_raw(KLOG_INFO, "map_user_range: Physical allocation failed\n");
+            klog_printf(KLOG_INFO, "map_user_range: Physical allocation failed\n");
             goto rollback;
         }
 
         if (map_page_4kb_in_dir(page_dir, current, phys, map_flags) != 0) {
-            klog_raw(KLOG_INFO, "map_user_range: Virtual mapping failed\n");
+            klog_printf(KLOG_INFO, "map_user_range: Virtual mapping failed\n");
             free_page_frame(phys);
             goto rollback;
         }
@@ -227,7 +227,7 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
 
     vm_area_t *vma = alloc_vma();
     if (!vma) {
-        klog_raw(KLOG_INFO, "add_vma_to_process: Failed to allocate VMA\n");
+        klog_printf(KLOG_INFO, "add_vma_to_process: Failed to allocate VMA\n");
         return -1;
     }
 
@@ -249,13 +249,13 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
     }
 
     if (prev && vma_overlaps_range(prev, start, end) && prev->flags != flags) {
-        klog_raw(KLOG_INFO, "add_vma_to_process: Overlap with incompatible VMA\n");
+        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible VMA\n");
         free_vma(vma);
         return -1;
     }
 
     if (next && vma_overlaps_range(next, start, end) && next->flags != flags) {
-        klog_raw(KLOG_INFO, "add_vma_to_process: Overlap with incompatible next VMA\n");
+        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible next VMA\n");
         free_vma(vma);
         return -1;
     }
@@ -406,7 +406,7 @@ uint32_t create_process_vm(void) {
     const process_memory_layout_t *layout = mm_get_process_layout();
 
     if (vm_manager.num_processes >= MAX_PROCESSES) {
-        klog_raw(KLOG_INFO, "create_process_vm: Maximum processes reached\n");
+        klog_printf(KLOG_INFO, "create_process_vm: Maximum processes reached\n");
         return INVALID_PROCESS_ID;
     }
 
@@ -420,21 +420,21 @@ uint32_t create_process_vm(void) {
     }
 
     if (!process) {
-        klog_raw(KLOG_INFO, "create_process_vm: No free process slots available\n");
+        klog_printf(KLOG_INFO, "create_process_vm: No free process slots available\n");
         return INVALID_PROCESS_ID;
     }
 
     /* Allocate new page directory */
     uint64_t pml4_phys = alloc_page_frame(0);
     if (!pml4_phys) {
-        klog_raw(KLOG_INFO, "create_process_vm: Failed to allocate PML4\n");
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to allocate PML4\n");
         return INVALID_PROCESS_ID;
     }
 
     /* Prepare new page table */
     page_table_t *pml4 = (page_table_t *)mm_phys_to_virt(pml4_phys);
     if (!pml4) {
-        klog_raw(KLOG_INFO, "create_process_vm: No HHDM/identity map available for PML4\n");
+        klog_printf(KLOG_INFO, "create_process_vm: No HHDM/identity map available for PML4\n");
         free_page_frame(pml4_phys);
         return INVALID_PROCESS_ID;
     }
@@ -447,7 +447,7 @@ uint32_t create_process_vm(void) {
     /* Allocate process page directory descriptor */
     process_page_dir_t *page_dir = (process_page_dir_t*)kmalloc(sizeof(process_page_dir_t));
     if (!page_dir) {
-        klog_raw(KLOG_INFO, "create_process_vm: Failed to allocate page directory\n");
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to allocate page directory\n");
         free_page_frame(pml4_phys);
         return INVALID_PROCESS_ID;
     }
@@ -482,7 +482,7 @@ uint32_t create_process_vm(void) {
                            VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER) != 0 ||
         add_vma_to_process(process, process->stack_start, process->stack_end,
                            VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER) != 0) {
-        klog_raw(KLOG_INFO, "create_process_vm: Failed to seed initial VMAs\n");
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to seed initial VMAs\n");
         teardown_process_mappings(process);
         free_page_frame(process->page_dir->pml4_phys);
         kfree(process->page_dir);
@@ -494,7 +494,7 @@ uint32_t create_process_vm(void) {
     uint64_t stack_map_flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
     uint32_t stack_pages = 0;
     if (map_user_range(process->page_dir, process->stack_start, process->stack_end, stack_map_flags, &stack_pages) != 0) {
-        klog_raw(KLOG_INFO, "create_process_vm: Failed to map process stack\n");
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to map process stack\n");
         teardown_process_mappings(process);
         free_page_frame(process->page_dir->pml4_phys);
         kfree(process->page_dir);
@@ -509,9 +509,7 @@ uint32_t create_process_vm(void) {
     vm_manager.process_list = process;
     vm_manager.num_processes++;
 
-    klog_raw(KLOG_INFO, "Created process VM space for PID ");
-    klog_decimal(KLOG_INFO, process_id);
-    klog_raw(KLOG_INFO, "\n");
+    klog_printf(KLOG_INFO, "Created process VM space for PID %u\n", process_id);
 
     return process_id;
 }
@@ -533,9 +531,7 @@ int destroy_process_vm(uint32_t process_id) {
         return 0;
     }
 
-    klog_raw(KLOG_INFO, "Destroying process VM space for PID ");
-    klog_decimal(KLOG_INFO, process_id);
-    klog_raw(KLOG_INFO, "\n");
+    klog_printf(KLOG_INFO, "Destroying process VM space for PID %u\n", process_id);
 
     /* Free all mappings owned by the process */
     teardown_process_mappings(process);
@@ -604,7 +600,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
     uint64_t end_addr = start_addr + size;
 
     if (end_addr > layout->heap_max) {
-        klog_raw(KLOG_INFO, "process_vm_alloc: Heap overflow\n");
+        klog_printf(KLOG_INFO, "process_vm_alloc: Heap overflow\n");
         return 0;
     }
 
@@ -627,7 +623,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
     process->heap_end = end_addr;
 
     if (add_vma_to_process(process, start_addr, end_addr, protection_flags | VM_FLAG_USER) != 0) {
-        klog_raw(KLOG_INFO, "process_vm_alloc: Failed to record VMA\n");
+        klog_printf(KLOG_INFO, "process_vm_alloc: Failed to record VMA\n");
         unmap_user_range(process->page_dir, start_addr, end_addr);
         process->heap_end = start_addr;
         return 0;
@@ -651,13 +647,13 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
     uint64_t end = (vaddr + size + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
 
     if (!vma_range_valid(start, end)) {
-        klog_raw(KLOG_INFO, "process_vm_free: Invalid or unaligned range\n");
+        klog_printf(KLOG_INFO, "process_vm_free: Invalid or unaligned range\n");
         return -1;
     }
 
     vm_area_t *vma = find_vma_covering(process, start, end);
     if (!vma) {
-        klog_raw(KLOG_INFO, "process_vm_free: Range not covered by a VMA\n");
+        klog_printf(KLOG_INFO, "process_vm_free: Range not covered by a VMA\n");
         return -1;
     }
 
@@ -678,7 +674,7 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
         uint64_t right_end = vma->end_addr;
         vma->end_addr = start;
         if (add_vma_to_process(process, right_start, right_end, vma->flags) != 0) {
-            klog_raw(KLOG_INFO, "process_vm_free: Failed to create right split VMA\n");
+            klog_printf(KLOG_INFO, "process_vm_free: Failed to create right split VMA\n");
             return -1;
         }
     }

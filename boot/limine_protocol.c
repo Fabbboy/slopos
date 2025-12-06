@@ -264,11 +264,14 @@ int init_limine_protocol(void) {
             system_info.framebuffer_bpp = (uint8_t)fb->bpp;
             system_info.framebuffer_available = 1;
             
-            klog_printf(KLOG_DEBUG, "Framebuffer: %ux%u @ %u bpp\n",
-                        fb->width, fb->height, fb->bpp);
+            klog_printf(KLOG_DEBUG, "Framebuffer: %lux%lu @ %lu bpp\n",
+                        (unsigned long)fb->width,
+                        (unsigned long)fb->height,
+                        (unsigned long)fb->bpp);
             klog_printf(KLOG_DEBUG, "Framebuffer address: 0x%llx\n",
                         (unsigned long long)(uint64_t)fb->address);
-            klog_printf(KLOG_DEBUG, "Framebuffer pitch: %u bytes\n", fb->pitch);
+            klog_printf(KLOG_DEBUG, "Framebuffer pitch: %lu bytes\n",
+                        (unsigned long)fb->pitch);
         } else {
             klog_info("WARNING: No framebuffer provided by Limine");
             return -1;

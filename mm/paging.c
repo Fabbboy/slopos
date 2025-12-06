@@ -90,7 +90,7 @@ void paging_copy_kernel_mappings(page_table_t *dest_pml4) {
     }
 
     if (!kernel_page_dir.pml4) {
-        klog_raw(KLOG_INFO, "paging_copy_kernel_mappings: Kernel PML4 unavailable\n");
+        klog_printf(KLOG_INFO, "paging_copy_kernel_mappings: Kernel PML4 unavailable\n");
         return;
     }
 
@@ -219,7 +219,7 @@ static inline void set_cr3(uint64_t pml4_phys) {
  */
 static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vaddr) {
     if (!page_dir || !page_dir->pml4) {
-        klog_raw(KLOG_INFO, "virt_to_phys: No page directory\n");
+        klog_printf(KLOG_INFO, "virt_to_phys: No page directory\n");
         return 0;
     }
 
@@ -237,7 +237,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     /* Get PDPT table */
     page_table_t *pdpt = phys_to_page_table_ptr(pte_address(pml4_entry));
     if (!pdpt) {
-        klog_raw(KLOG_INFO, "virt_to_phys: Invalid PDPT address\n");
+        klog_printf(KLOG_INFO, "virt_to_phys: Invalid PDPT address\n");
         return 0;
     }
 
@@ -255,7 +255,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     /* Traverse PDPT -> PD */
     page_table_t *pd = phys_to_page_table_ptr(pte_address(pdpt_entry));
     if (!pd) {
-        klog_raw(KLOG_INFO, "virt_to_phys: Invalid PD address\n");
+        klog_printf(KLOG_INFO, "virt_to_phys: Invalid PD address\n");
         return 0;
     }
 
@@ -273,7 +273,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     /* Traverse PD -> PT */
     page_table_t *pt = phys_to_page_table_ptr(pte_address(pd_entry));
     if (!pt) {
-        klog_raw(KLOG_INFO, "virt_to_phys: Invalid PT address\n");
+        klog_printf(KLOG_INFO, "virt_to_phys: Invalid PT address\n");
         return 0;
     }
 
@@ -301,7 +301,7 @@ uint64_t virt_to_phys(uint64_t vaddr) {
  */
 uint64_t virt_to_phys_process(uint64_t vaddr, process_page_dir_t *page_dir) {
     if (!page_dir || !page_dir->pml4) {
-        klog_raw(KLOG_INFO, "virt_to_phys_process: Invalid page directory\n");
+        klog_printf(KLOG_INFO, "virt_to_phys_process: Invalid page directory\n");
         return 0;
     }
 
@@ -327,12 +327,12 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
                                  uint64_t flags,
                                  uint64_t page_size) {
     if (!page_dir || !page_dir->pml4) {
-        klog_raw(KLOG_INFO, "map_page: No page directory provided\n");
+        klog_printf(KLOG_INFO, "map_page: No page directory provided\n");
         return -1;
     }
 
     if ((vaddr & (page_size - 1)) || (paddr & (page_size - 1))) {
-        klog_raw(KLOG_INFO, "map_page: Addresses not aligned to requested size\n");
+        klog_printf(KLOG_INFO, "map_page: Addresses not aligned to requested size\n");
         return -1;
     }
 
@@ -352,13 +352,13 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
     if (!pte_present(pml4_entry)) {
         pdpt = alloc_page_table(&pdpt_phys);
         if (!pdpt) {
-            klog_raw(KLOG_INFO, "map_page: Failed to allocate PDPT\n");
+            klog_printf(KLOG_INFO, "map_page: Failed to allocate PDPT\n");
             return -1;
         }
         pml4->entries[pml4_idx] = pdpt_phys | inter_flags;
     } else {
         if (pte_huge(pml4_entry)) {
-            klog_raw(KLOG_INFO, "map_page: PML4 entry is huge (unexpected)\n");
+            klog_printf(KLOG_INFO, "map_page: PML4 entry is huge (unexpected)\n");
             return -1;
         }
         pdpt_phys = pte_address(pml4_entry);
@@ -369,7 +369,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
     }
 
     if (!pdpt) {
-        klog_raw(KLOG_INFO, "map_page: Invalid PDPT pointer\n");
+        klog_printf(KLOG_INFO, "map_page: Invalid PDPT pointer\n");
         return -1;
     }
 
@@ -379,7 +379,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
 
     if (page_size == PAGE_SIZE_1GB) {
         if (pte_present(pdpt_entry)) {
-            klog_raw(KLOG_INFO, "map_page: PDPT entry already present for 1GB mapping\n");
+            klog_printf(KLOG_INFO, "map_page: PDPT entry already present for 1GB mapping\n");
             return -1;
         }
         pdpt->entries[pdpt_idx] = paddr | flags | PAGE_SIZE | PAGE_PRESENT;
@@ -390,13 +390,13 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
     if (!pte_present(pdpt_entry)) {
         pd = alloc_page_table(&pd_phys);
         if (!pd) {
-            klog_raw(KLOG_INFO, "map_page: Failed to allocate PD\n");
+            klog_printf(KLOG_INFO, "map_page: Failed to allocate PD\n");
             return -1;
         }
         pdpt->entries[pdpt_idx] = pd_phys | inter_flags;
     } else {
         if (pte_huge(pdpt_entry)) {
-            klog_raw(KLOG_INFO, "map_page: PDPT entry is a huge page\n");
+            klog_printf(KLOG_INFO, "map_page: PDPT entry is a huge page\n");
             return -1;
         }
         pd_phys = pte_address(pdpt_entry);
@@ -407,14 +407,14 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
     }
 
     if (!pd) {
-        klog_raw(KLOG_INFO, "map_page: Invalid PD pointer\n");
+        klog_printf(KLOG_INFO, "map_page: Invalid PD pointer\n");
         return -1;
     }
 
     uint64_t pd_entry = pd->entries[pd_idx];
     if (page_size == PAGE_SIZE_2MB) {
         if (pte_present(pd_entry)) {
-            klog_raw(KLOG_INFO, "map_page: PD entry already present for 2MB mapping\n");
+            klog_printf(KLOG_INFO, "map_page: PD entry already present for 2MB mapping\n");
             return -1;
         }
         pd->entries[pd_idx] = paddr | flags | PAGE_SIZE | PAGE_PRESENT;
@@ -426,7 +426,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
         uint64_t pt_phys = 0;
         page_table_t *pt = alloc_page_table(&pt_phys);
         if (!pt) {
-            klog_raw(KLOG_INFO, "map_page: Failed to allocate PT\n");
+            klog_printf(KLOG_INFO, "map_page: Failed to allocate PT\n");
             return -1;
         }
         pd->entries[pd_idx] = pt_phys | inter_flags;
@@ -434,18 +434,18 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
     }
 
     if (pte_huge(pd_entry)) {
-        klog_raw(KLOG_INFO, "map_page: PD entry is a large page\n");
+        klog_printf(KLOG_INFO, "map_page: PD entry is a large page\n");
         return -1;
     }
 
     page_table_t *pt = phys_to_page_table_ptr(pte_address(pd_entry));
     if (!pt) {
-        klog_raw(KLOG_INFO, "map_page: Invalid PT pointer\n");
+        klog_printf(KLOG_INFO, "map_page: Invalid PT pointer\n");
         return -1;
     }
 
     if (pt->entries[pt_idx] & PAGE_PRESENT) {
-        klog_raw(KLOG_INFO, "map_page: Virtual address already mapped\n");
+        klog_printf(KLOG_INFO, "map_page: Virtual address already mapped\n");
         return -1;
     }
 
@@ -472,7 +472,7 @@ int map_page_2mb(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
 
 static int unmap_page_in_directory(process_page_dir_t *page_dir, uint64_t vaddr) {
     if (!page_dir || !page_dir->pml4) {
-        klog_raw(KLOG_INFO, "unmap_page: No page directory provided\n");
+        klog_printf(KLOG_INFO, "unmap_page: No page directory provided\n");
         return -1;
     }
 
@@ -582,7 +582,7 @@ int unmap_page(uint64_t vaddr) {
  */
 int switch_page_directory(process_page_dir_t *page_dir) {
     if (!page_dir || !page_dir->pml4) {
-        klog_raw(KLOG_INFO, "switch_page_directory: Invalid page directory\n");
+        klog_printf(KLOG_INFO, "switch_page_directory: Invalid page directory\n");
         return -1;
     }
 

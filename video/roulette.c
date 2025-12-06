@@ -369,12 +369,12 @@ static void draw_result_banner(int center_x, int y_pos, uint32_t fate_number) {
  */
 int roulette_show_spin(uint32_t fate_number) {
     if (!framebuffer_is_initialized()) {
-        klog(KLOG_INFO, "ROULETTE: Framebuffer not available, using fallback");
+        klog_printf(KLOG_INFO, "ROULETTE: Framebuffer not available, using fallback\n");
         roulette_show_spin_fallback(fate_number);
         return -1;
     }
 
-    klog(KLOG_INFO, "ROULETTE: Displaying visual wheel of fate...");
+    klog_printf(KLOG_INFO, "ROULETTE: Displaying visual wheel of fate...\n");
 
     uint32_t width = framebuffer_get_width();
     uint32_t height = framebuffer_get_height();
@@ -428,7 +428,7 @@ int roulette_show_spin(uint32_t fate_number) {
         total_frames = 1;
     }
 
-    klog(KLOG_INFO, "ROULETTE: Animating pointer sweep");
+    klog_printf(KLOG_INFO, "ROULETTE: Animating pointer sweep\n");
     for (int frame = 1; frame <= total_frames; frame++) {
         int pointer_angle_frame = start_angle + (total_rotation * frame) / total_frames;
         render_wheel_frame(width, height, center_x, center_y, radius,
@@ -444,7 +444,7 @@ int roulette_show_spin(uint32_t fate_number) {
                        fate_number, false, true);
     pit_sleep_ms(500);
 
-    klog(KLOG_INFO, "ROULETTE: Revealing fate number...");
+    klog_printf(KLOG_INFO, "ROULETTE: Revealing fate number...\n");
     pit_sleep_ms(400);
 
     for (int flash = 0; flash < 5; flash++) {
@@ -464,7 +464,7 @@ int roulette_show_spin(uint32_t fate_number) {
                        fate_number, true, false);
     pit_sleep_ms(600);
 
-    klog(KLOG_INFO, "ROULETTE: Displaying result...");
+    klog_printf(KLOG_INFO, "ROULETTE: Displaying result...\n");
     int info_y = center_y + radius + 60;
     if (info_y < 0) {
         info_y = 0;
@@ -486,7 +486,7 @@ int roulette_show_spin(uint32_t fate_number) {
 
     pit_sleep_ms(ROULETTE_RESULT_DELAY_MS);
 
-    klog(KLOG_INFO, "ROULETTE: Wheel of fate complete");
+    klog_printf(KLOG_INFO, "ROULETTE: Wheel of fate complete\n");
 
     if (fate_number & 1) {
         graphics_draw_rect_filled_fast(0, 0, width, height, 0x001122FF);
@@ -498,7 +498,7 @@ int roulette_show_spin(uint32_t fate_number) {
         font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
         pit_sleep_ms(1000);
         splash_draw_graphics_demo();
-        klog(KLOG_INFO, "ROULETTE: Graphics demo restored, returning to OS");
+        klog_printf(KLOG_INFO, "ROULETTE: Graphics demo restored, returning to OS\n");
     }
 
     return want_colored ? 0 : 1;
@@ -508,39 +508,30 @@ int roulette_show_spin(uint32_t fate_number) {
  * Fallback roulette display for when framebuffer is not available
  */
 void roulette_show_spin_fallback(uint32_t fate_number) {
-    klog(KLOG_INFO, "ROULETTE: Using text-only fallback display");
-    klog(KLOG_INFO, "");
-    klog(KLOG_INFO, "========================================");
-    klog(KLOG_INFO, "    THE WHEEL OF FATE IS SPINNING     ");
-    klog(KLOG_INFO, "========================================");
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "ROULETTE: Using text-only fallback display\n");
+    klog_printf(KLOG_INFO, "\n========================================\n");
+    klog_printf(KLOG_INFO, "    THE WHEEL OF FATE IS SPINNING     \n");
+    klog_printf(KLOG_INFO, "========================================\n\n");
 
     // Simple text animation
     for (int i = 0; i < 5; i++) {
-        klog_raw(KLOG_INFO, ".");
+        klog_printf(KLOG_INFO, ".");
         pit_sleep_ms(200);
     }
-    klog(KLOG_INFO, "");
-
-    klog(KLOG_INFO, "");
-    klog_raw(KLOG_INFO, "Fate number: ");
-    klog_decimal(KLOG_INFO, fate_number);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "\n\nFate number: %u\n", fate_number);
 
     if (fate_number & 1) {
-        klog(KLOG_INFO, "");
-        klog(KLOG_INFO, "========================================");
-        klog(KLOG_INFO, "           W I N !                      ");
-        klog(KLOG_INFO, "    Fortune smiles upon the slop!      ");
-        klog(KLOG_INFO, "========================================");
+        klog_printf(KLOG_INFO, "\n========================================\n");
+        klog_printf(KLOG_INFO, "           W I N !                      \n");
+        klog_printf(KLOG_INFO, "    Fortune smiles upon the slop!      \n");
+        klog_printf(KLOG_INFO, "========================================\n");
     } else {
-        klog(KLOG_INFO, "");
-        klog(KLOG_INFO, "========================================");
-        klog(KLOG_INFO, "           L O S E                      ");
-        klog(KLOG_INFO, "      L bozzo lol - try again!         ");
-        klog(KLOG_INFO, "========================================");
+        klog_printf(KLOG_INFO, "\n========================================\n");
+        klog_printf(KLOG_INFO, "           L O S E                      \n");
+        klog_printf(KLOG_INFO, "      L bozzo lol - try again!         \n");
+        klog_printf(KLOG_INFO, "========================================\n");
     }
 
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "\n");
     pit_sleep_ms(1000);
 }

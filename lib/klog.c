@@ -79,63 +79,6 @@ void klog_newline(void) {
     klog_emit_line(NULL);
 }
 
-void klog(enum klog_level level, const char *msg) {
-    if (!klog_is_enabled(level)) {
-        return;
-    }
-    klog_emit_line(msg);
-}
-
-void klog_raw(enum klog_level level, const char *msg) {
-    if (!klog_is_enabled(level) || !msg) {
-        return;
-    }
-    klog_emit(msg);
-}
-
-void klog_hex(enum klog_level level, uint64_t value) {
-    if (!klog_is_enabled(level)) {
-        return;
-    }
-
-    char buffer[32];
-    if (numfmt_u64_to_hex(value, buffer, sizeof(buffer), 1) == 0) {
-        buffer[0] = '0';
-        buffer[1] = 'x';
-        buffer[2] = '0';
-        buffer[3] = '\0';
-    }
-    klog_raw(level, buffer);
-}
-
-void klog_decimal(enum klog_level level, uint64_t value) {
-    if (!klog_is_enabled(level)) {
-        return;
-    }
-
-    char buffer[32];
-    if (numfmt_u64_to_decimal(value, buffer, sizeof(buffer)) == 0) {
-        buffer[0] = '0';
-        buffer[1] = '\0';
-    }
-    klog_raw(level, buffer);
-}
-
-void klog_hex_byte(enum klog_level level, uint8_t value) {
-    if (!klog_is_enabled(level)) {
-        return;
-    }
-
-    char buffer[4];
-    if (numfmt_u8_to_hex(value, buffer, sizeof(buffer)) == 0) {
-        buffer[0] = '0';
-        buffer[1] = '0';
-        buffer[2] = '\0';
-    }
-
-    klog_raw(level, buffer);
-}
-
 /* ========================================================================
  * FORMATTED LOGGING
  * ======================================================================== */

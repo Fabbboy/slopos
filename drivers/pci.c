@@ -135,51 +135,39 @@ static uint64_t pci_probe_bar_size(uint8_t bus, uint8_t device,
 }
 
 static void pci_log_device_header(const pci_device_info_t *info) {
-    klog_raw(KLOG_INFO, "PCI: [Bus ");
-    klog_decimal(KLOG_INFO, info->bus);
-    klog_raw(KLOG_INFO, " Dev ");
-    klog_decimal(KLOG_INFO, info->device);
-    klog_raw(KLOG_INFO, " Func ");
-    klog_decimal(KLOG_INFO, info->function);
-    klog_raw(KLOG_INFO, "] VID=");
-    klog_hex(KLOG_INFO, info->vendor_id);
-    klog_raw(KLOG_INFO, " DID=");
-    klog_hex(KLOG_INFO, info->device_id);
-    klog_raw(KLOG_INFO, " Class=");
-    klog_hex(KLOG_INFO, info->class_code);
-    klog_raw(KLOG_INFO, ":");
-    klog_hex(KLOG_INFO, info->subclass);
-    klog_raw(KLOG_INFO, " ProgIF=");
-    klog_hex(KLOG_INFO, info->prog_if);
-    klog_raw(KLOG_INFO, " Rev=");
-    klog_hex(KLOG_INFO, info->revision);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO,
+                "PCI: [Bus %u Dev %u Func %u] VID=0x%04x DID=0x%04x Class=0x%02x:%02x ProgIF=0x%02x Rev=0x%02x\n",
+                info->bus,
+                info->device,
+                info->function,
+                info->vendor_id,
+                info->device_id,
+                info->class_code,
+                info->subclass,
+                info->prog_if,
+                info->revision);
 }
 
 static void pci_log_bar(const pci_bar_info_t *bar, uint8_t index) {
-    klog_raw(KLOG_INFO, "    BAR");
-    klog_decimal(KLOG_INFO, index);
-    klog_raw(KLOG_INFO, ": ");
+    klog_printf(KLOG_INFO, "    BAR%u: ", index);
     if (bar->is_io) {
-        klog_raw(KLOG_INFO, "IO base=0x");
-        klog_hex(KLOG_INFO, bar->base);
+        klog_printf(KLOG_INFO, "IO base=0x%lx", bar->base);
         if (bar->size) {
-            klog_raw(KLOG_INFO, " size=");
-            klog_decimal(KLOG_INFO, bar->size);
+            klog_printf(KLOG_INFO, " size=%lu", bar->size);
         }
     } else {
-        klog_raw(KLOG_INFO, "MMIO base=0x");
-        klog_hex(KLOG_INFO, bar->base);
+        klog_printf(KLOG_INFO, "MMIO base=0x%lx", bar->base);
         if (bar->size) {
-            klog_raw(KLOG_INFO, " size=0x");
-            klog_hex(KLOG_INFO, bar->size);
+            klog_printf(KLOG_INFO, " size=0x%lx", bar->size);
         }
-        klog_raw(KLOG_INFO, bar->prefetchable ? " prefetch" : " non-prefetch");
+        klog_printf(KLOG_INFO, "%s", bar->prefetchable ? " prefetch" : " non-prefetch");
         if (bar->is_64bit) {
-            klog_raw(KLOG_INFO, " 64bit");
+            klog_printf(KLOG_INFO, " 64bit");
+        } else {
+            klog_printf(KLOG_INFO, " 32bit");
         }
     }
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "\n");
 }
 
 static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
@@ -204,21 +192,18 @@ static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
         primary_gpu.mmio_virt_base = mm_map_mmio_region(primary_gpu.mmio_phys_base,
                                                         (size_t)primary_gpu.mmio_size);
 
-        klog_raw(KLOG_INFO, "PCI: Selected GPU candidate at MMIO phys=0x");
-        klog_hex(KLOG_INFO, primary_gpu.mmio_phys_base);
-        klog_raw(KLOG_INFO, " size=0x");
-        klog_hex(KLOG_INFO, primary_gpu.mmio_size);
+        klog_printf(KLOG_INFO, "PCI: Selected GPU candidate at MMIO phys=0x%lx size=0x%lx",
+                    primary_gpu.mmio_phys_base, primary_gpu.mmio_size);
         if (primary_gpu.mmio_virt_base) {
-            klog_raw(KLOG_INFO, " virt=0x");
-            klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)primary_gpu.mmio_virt_base);
-            klog(KLOG_INFO, "");
+            klog_printf(KLOG_INFO, " virt=0x%lx\n",
+                        (uint64_t)(uintptr_t)primary_gpu.mmio_virt_base);
         } else {
-            klog(KLOG_INFO, " (mapping failed)");
+            klog_printf(KLOG_INFO, " (mapping failed)\n");
         }
 
-        klog(KLOG_INFO, "PCI: GPU acceleration groundwork ready (MMIO mapped)");
+        klog_printf(KLOG_INFO, "PCI: GPU acceleration groundwork ready (MMIO mapped)\n");
         if (!primary_gpu.mmio_virt_base) {
-            klog(KLOG_INFO, "PCI: WARNING GPU MMIO not accessible; check paging support");
+            klog_printf(KLOG_INFO, "PCI: WARNING GPU MMIO not accessible; check paging support\n");
         }
         return;
     }
@@ -285,7 +270,7 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
 
     if (device_count >= PCI_MAX_DEVICES) {
         if (device_count == PCI_MAX_DEVICES) {
-            klog(KLOG_INFO, "PCI: Device buffer full, additional devices will not be tracked");
+            klog_printf(KLOG_INFO, "PCI: Device buffer full, additional devices will not be tracked\n");
         }
         return;
     }
@@ -313,9 +298,7 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
     if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
         uint8_t secondary_bus = pci_config_read8(bus, device, function, 0x19);
         if (secondary_bus != 0 && !bus_visited[secondary_bus]) {
-            klog_raw(KLOG_INFO, "PCI: Traversing to secondary bus ");
-            klog_decimal(KLOG_INFO, secondary_bus);
-            klog(KLOG_INFO, "");
+            klog_printf(KLOG_INFO, "PCI: Traversing to secondary bus %u\n", secondary_bus);
             bus_visited[secondary_bus] = 1;
             // Recursive scan of downstream bus
             for (uint8_t dev = 0; dev < 32; ++dev) {
@@ -374,7 +357,7 @@ int pci_init(void) {
         return 0;
     }
 
-    klog(KLOG_INFO, "PCI: Initializing PCI subsystem");
+    klog_printf(KLOG_INFO, "PCI: Initializing PCI subsystem\n");
     device_count = 0;
     primary_gpu.present = 0;
     primary_gpu.mmio_phys_base = 0;
@@ -388,12 +371,10 @@ int pci_init(void) {
     pci_enumerate_bus(0);
 
     if (!primary_gpu.present) {
-        klog(KLOG_INFO, "PCI: No GPU-class device detected on primary bus");
+        klog_printf(KLOG_INFO, "PCI: No GPU-class device detected on primary bus\n");
     }
 
-    klog_raw(KLOG_INFO, "PCI: Enumeration complete. Devices discovered: ");
-    klog_decimal(KLOG_INFO, device_count);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "PCI: Enumeration complete. Devices discovered: %zu\n", device_count);
 
     pci_initialized = 1;
     return 0;

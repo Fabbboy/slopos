@@ -281,7 +281,7 @@ const char *get_exception_name(uint8_t vector) {
 }
 
 static void exception_default_panic(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Unhandled exception");
+    klog_printf(KLOG_INFO, "FATAL: Unhandled exception\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Unhandled exception");
 }
@@ -291,74 +291,74 @@ static void exception_default_panic(struct interrupt_frame *frame) {
  */
 
 void exception_divide_error(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Divide by zero error");
+    klog_printf(KLOG_INFO, "FATAL: Divide by zero error\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Divide by zero error");
 }
 
 void exception_debug(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "DEBUG: Debug exception occurred");
+    klog_printf(KLOG_INFO, "DEBUG: Debug exception occurred\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_nmi(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Non-maskable interrupt");
+    klog_printf(KLOG_INFO, "FATAL: Non-maskable interrupt\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Non-maskable interrupt");
 }
 
 void exception_breakpoint(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "DEBUG: Breakpoint exception");
+    klog_printf(KLOG_INFO, "DEBUG: Breakpoint exception\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_overflow(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: Overflow exception");
+    klog_printf(KLOG_INFO, "ERROR: Overflow exception\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_bound_range(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: Bound range exceeded");
+    klog_printf(KLOG_INFO, "ERROR: Bound range exceeded\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_invalid_opcode(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Invalid opcode");
+    klog_printf(KLOG_INFO, "FATAL: Invalid opcode\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid opcode");
 }
 
 void exception_device_not_available(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: Device not available");
+    klog_printf(KLOG_INFO, "ERROR: Device not available\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_double_fault(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Double fault");
+    klog_printf(KLOG_INFO, "FATAL: Double fault\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Double fault");
 }
 
 void exception_invalid_tss(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Invalid TSS");
+    klog_printf(KLOG_INFO, "FATAL: Invalid TSS\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Invalid TSS");
 }
 
 void exception_segment_not_present(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Segment not present");
+    klog_printf(KLOG_INFO, "FATAL: Segment not present\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Segment not present");
 }
 
 void exception_stack_fault(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Stack segment fault");
+    klog_printf(KLOG_INFO, "FATAL: Stack segment fault\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Stack segment fault");
 }
 
 void exception_general_protection(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: General protection fault");
+    klog_printf(KLOG_INFO, "FATAL: General protection fault\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("General protection fault");
 }
@@ -369,57 +369,47 @@ void exception_page_fault(struct interrupt_frame *frame) {
 
     const char *stack_name = NULL;
     if (safe_stack_guard_fault(fault_addr, &stack_name)) {
-        klog(KLOG_INFO, "FATAL: Exception stack overflow detected via guard page");
+        klog_printf(KLOG_INFO, "FATAL: Exception stack overflow detected via guard page\n");
         if (stack_name) {
-            klog_raw(KLOG_INFO, "Guard page owner: ");
-            klog_raw(KLOG_INFO, stack_name);
-            klog(KLOG_INFO, "");
+            klog_printf(KLOG_INFO, "Guard page owner: %s\n", stack_name);
         }
-        klog_raw(KLOG_INFO, "Fault address: ");
-        klog_hex(KLOG_INFO, fault_addr);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "Fault address: 0x%lx\n", fault_addr);
 
         kdiag_dump_interrupt_frame(frame);
         kernel_panic("Exception stack overflow");
         return;
     }
 
-    klog(KLOG_INFO, "FATAL: Page fault");
-    klog_raw(KLOG_INFO, "Fault address: ");
-    klog_hex(KLOG_INFO, fault_addr);
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "FATAL: Page fault\n");
+    klog_printf(KLOG_INFO, "Fault address: 0x%lx\n", fault_addr);
 
-    klog_raw(KLOG_INFO, "Error code: ");
-    klog_hex(KLOG_INFO, frame->error_code);
-    if (frame->error_code & 1) klog_raw(KLOG_INFO, " (Page present)");
-    else klog_raw(KLOG_INFO, " (Page not present)");
-    if (frame->error_code & 2) klog_raw(KLOG_INFO, " (Write)");
-    else klog_raw(KLOG_INFO, " (Read)");
-    if (frame->error_code & 4) klog_raw(KLOG_INFO, " (User)");
-    else klog_raw(KLOG_INFO, " (Supervisor)");
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "Error code: 0x%lx (%s) (%s) (%s)\n",
+                frame->error_code,
+                (frame->error_code & 1) ? "Page present" : "Page not present",
+                (frame->error_code & 2) ? "Write" : "Read",
+                (frame->error_code & 4) ? "User" : "Supervisor");
 
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Page fault");
 }
 
 void exception_fpu_error(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: x87 FPU error");
+    klog_printf(KLOG_INFO, "ERROR: x87 FPU error\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_alignment_check(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: Alignment check");
+    klog_printf(KLOG_INFO, "ERROR: Alignment check\n");
     kdiag_dump_interrupt_frame(frame);
 }
 
 void exception_machine_check(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "FATAL: Machine check");
+    klog_printf(KLOG_INFO, "FATAL: Machine check\n");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic("Machine check");
 }
 
 void exception_simd_fp_exception(struct interrupt_frame *frame) {
-    klog(KLOG_INFO, "ERROR: SIMD floating-point exception");
+    klog_printf(KLOG_INFO, "ERROR: SIMD floating-point exception\n");
     kdiag_dump_interrupt_frame(frame);
 }

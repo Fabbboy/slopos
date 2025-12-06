@@ -108,24 +108,14 @@ void shell_execute_command(const char *line) {
 
     const shell_builtin_t *cmd = shell_builtin_lookup(tokens[0]);
     if (!cmd) {
-        klog_raw(KLOG_INFO, "Unknown command: ");
-        klog(KLOG_INFO, tokens[0]);
-        klog(KLOG_INFO, "Type 'help' to list available commands.");
+        klog_printf(KLOG_INFO, "Unknown command: %s\n", tokens[0]);
+        klog_printf(KLOG_INFO, "Type 'help' to list available commands.\n");
         return;
     }
 
     int result = cmd->handler(token_count, tokens);
     if (result != 0) {
-        klog_raw(KLOG_INFO, "Command '");
-        klog_raw(KLOG_INFO, cmd->name);
-        klog_raw(KLOG_INFO, "' returned error code ");
-        if (result < 0) {
-            klog_raw(KLOG_INFO, "-");
-            klog_decimal(KLOG_INFO, (uint64_t)(-result));
-        } else {
-            klog_decimal(KLOG_INFO, (uint64_t)result);
-        }
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "Command '%s' returned error code %d\n", cmd->name, result);
     }
 }
 
@@ -141,14 +131,12 @@ void shell_main(void *arg) {
     (void)arg;  /* Unused parameter */
     
     /* Print welcome message (optional) */
-    klog(KLOG_INFO, "");
-    klog(KLOG_INFO, "SlopOS Shell v0.1");
-    klog(KLOG_INFO, "");
+    klog_printf(KLOG_INFO, "\nSlopOS Shell v0.1\n\n");
     
     /* REPL loop */
     while (1) {
         /* Display prompt */
-        klog_raw(KLOG_INFO, "$ ");
+        klog_printf(KLOG_INFO, "$ ");
         
         /* Read line from keyboard */
         char line_buffer[256];

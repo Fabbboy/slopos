@@ -76,7 +76,7 @@ int apic_detect(void) {
  */
 int apic_init(void) {
     if (!apic_available) {
-        klog(KLOG_INFO, "APIC: Cannot initialize - APIC not available");
+        klog_printf(KLOG_INFO, "APIC: Cannot initialize - APIC not available\n");
         return -1;
     }
 

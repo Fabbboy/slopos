@@ -99,7 +99,7 @@ void *mm_map_mmio_region(uint64_t phys_addr, size_t size) {
 
     uint64_t end_addr = phys_addr + (uint64_t)size - 1;
     if (end_addr < phys_addr) {
-        klog(KLOG_INFO, "MM: mm_map_mmio_region overflow detected");
+        klog_printf(KLOG_INFO, "MM: mm_map_mmio_region overflow detected\n");
         return NULL;
     }
 
@@ -112,7 +112,7 @@ void *mm_map_mmio_region(uint64_t phys_addr, size_t size) {
         return (void *)(uintptr_t)phys_addr;
     }
 
-    klog(KLOG_INFO, "MM: mm_map_mmio_region requires explicit paging support (unavailable)");
+    klog_printf(KLOG_INFO, "MM: mm_map_mmio_region requires explicit paging support (unavailable)\n");
     return NULL;
 }
 

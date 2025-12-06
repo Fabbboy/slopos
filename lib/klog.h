@@ -24,11 +24,6 @@ enum klog_level klog_get_level(void);
 int klog_is_enabled(enum klog_level level);
 
 void klog_newline(void);
-void klog(enum klog_level level, const char *msg) __attribute__((deprecated("Use klog_printf instead")));      /* Prints with newline */
-void klog_raw(enum klog_level level, const char *msg) __attribute__((deprecated("Use klog_printf instead")));  /* Prints without newline */
-void klog_hex(enum klog_level level, uint64_t value) __attribute__((deprecated("Use klog_printf instead")));
-void klog_decimal(enum klog_level level, uint64_t value) __attribute__((deprecated("Use klog_printf instead")));
-void klog_hex_byte(enum klog_level level, uint8_t value) __attribute__((deprecated("Use klog_printf instead")));
 void klog_printf(enum klog_level level, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 

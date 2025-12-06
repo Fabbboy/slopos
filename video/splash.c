@@ -108,11 +108,11 @@ static int current_progress = 0;
  */
 int splash_show_boot_screen(void) {
     if (!framebuffer_is_initialized()) {
-        klog(KLOG_INFO, "SPLASH: Framebuffer not initialized");
+        klog_printf(KLOG_INFO, "SPLASH: Framebuffer not initialized\n");
         return -1;
     }
 
-    klog(KLOG_INFO, "SPLASH: Displaying boot splash screen...");
+    klog_printf(KLOG_INFO, "SPLASH: Displaying boot splash screen...\n");
 
     // Clear screen with splash background color
     framebuffer_clear(SPLASH_BG_COLOR);
@@ -145,7 +145,7 @@ int splash_show_boot_screen(void) {
     splash_active = 1;
     current_progress = 0;
 
-    klog(KLOG_INFO, "SPLASH: Boot splash screen initialized");
+    klog_printf(KLOG_INFO, "SPLASH: Boot splash screen initialized\n");
 
     // No initial delay - let the boot process drive the timing
 
@@ -164,14 +164,9 @@ int splash_report_progress(int progress, const char *message) {
     current_progress = progress;
     if (current_progress > 100) current_progress = 100;
 
-    klog_raw(KLOG_INFO, "SPLASH: Progress ");
-    klog_decimal(KLOG_INFO, current_progress);
-    klog_raw(KLOG_INFO, "% - ");
-    if (message) {
-        klog(KLOG_INFO, message);
-    } else {
-        klog(KLOG_INFO, "...");
-    }
+    klog_printf(KLOG_INFO, "SPLASH: Progress %d%% - %s\n",
+                current_progress,
+                message ? message : "...");
 
     // Update the visual progress bar and message
     int result = splash_update_progress(current_progress, message);
@@ -246,7 +241,7 @@ int splash_finish(void) {
         pit_poll_delay_ms(250);
 
         splash_active = 0;
-        klog(KLOG_INFO, "SPLASH: Boot splash screen complete");
+        klog_printf(KLOG_INFO, "SPLASH: Boot splash screen complete\n");
 
         // Draw the graphics demo screen
         splash_draw_graphics_demo();
