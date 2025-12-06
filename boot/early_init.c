@@ -337,6 +337,17 @@ static int boot_step_timer_setup(void) {
     pit_init(PIT_DEFAULT_FREQUENCY_HZ);
     boot_debug("Programmable interval timer configured.");
 
+    /* Observe early PIT IRQ health: count ticks after a short polling delay. */
+    uint64_t ticks_before = irq_get_timer_ticks();
+    pit_poll_delay_ms(100);
+    uint64_t ticks_after = irq_get_timer_ticks();
+    klog_printf(KLOG_INFO, "BOOT: PIT ticks after 100ms poll: %llu -> %llu\n",
+                (unsigned long long)ticks_before,
+                (unsigned long long)ticks_after);
+    if (ticks_after == ticks_before) {
+        klog_printf(KLOG_INFO, "BOOT: WARNING - no PIT IRQs observed in 100ms window\n");
+    }
+
     // Initialize framebuffer and splash screen right after PIT is ready
     if (framebuffer_init() == 0) {
         splash_show_boot_screen();

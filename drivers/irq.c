@@ -210,6 +210,9 @@ void irq_init(void) {
 
     irq_register_handler(0, timer_irq_handler, NULL, "timer");
     irq_register_handler(1, keyboard_irq_handler, NULL, "keyboard");
+
+    /* Enable interrupts globally once IDT/APIC/IOAPIC routes and handlers are ready. */
+    cpu_sti();
 }
 
 int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, const char *name) {

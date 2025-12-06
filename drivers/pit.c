@@ -60,8 +60,8 @@ void pit_init(uint32_t frequency_hz) {
                 frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
 
     pit_set_frequency(frequency_hz ? frequency_hz : PIT_DEFAULT_FREQUENCY_HZ);
-
-    irq_disable_line(PIT_IRQ_LINE);
+    /* Ensure timer IRQ line is unmasked after programming. */
+    irq_enable_line(PIT_IRQ_LINE);
 }
 
 uint32_t pit_get_frequency(void) {

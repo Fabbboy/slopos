@@ -26,7 +26,9 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
     }
 
     const mm_reserved_region_t *reservation = mm_reservations_find(phys_addr);
-    if (reservation && (reservation->flags & MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT) == 0) {
+    if (reservation &&
+        (reservation->flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
+                               MM_RESERVATION_FLAG_MMIO)) == 0) {
         klog_printf(KLOG_DEBUG, "mm_phys_to_virt: rejected reserved phys 0x%llx (%s)\n",
                     (unsigned long long)phys_addr,
                     mm_reservation_type_name(reservation->type));
