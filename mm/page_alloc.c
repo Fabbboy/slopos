@@ -386,15 +386,10 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
 
     page_allocator.num_regions++;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Added memory region: ");
-        klog_hex(KLOG_INFO, aligned_start);
-        klog_raw(KLOG_INFO, " - ");
-        klog_hex(KLOG_INFO, aligned_end);
-        klog_raw(KLOG_INFO, " (");
-        klog_decimal(KLOG_INFO, num_frames);
-        klog_raw(KLOG_INFO, " frames)\n");
-    });
+    klog_printf(KLOG_DEBUG, "Added memory region: 0x%llx - 0x%llx (%u frames)\n",
+                (unsigned long long)aligned_start,
+                (unsigned long long)aligned_end,
+                num_frames);
 
     return 0;
 }
@@ -442,13 +437,10 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
         frames[i].next_free = INVALID_PAGE_FRAME;
     }
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Page frame allocator initialized with ");
-        klog_decimal(KLOG_INFO, max_frames);
-        klog_raw(KLOG_INFO, " frame descriptors (max order ");
-        klog_decimal(KLOG_INFO, page_allocator.max_order);
-        klog_raw(KLOG_INFO, ")\n");
-    });
+    klog_printf(KLOG_DEBUG,
+                "Page frame allocator initialized with %u frame descriptors (max order %u)\n",
+                max_frames,
+                page_allocator.max_order);
 
     return 0;
 }
@@ -504,11 +496,8 @@ int finalize_page_allocator(void) {
         add_region_blocks(&page_allocator.regions[i]);
     }
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Page allocator ready: ");
-        klog_decimal(KLOG_INFO, page_allocator.free_frames);
-        klog_raw(KLOG_INFO, " pages available\n");
-    });
+    klog_printf(KLOG_DEBUG, "Page allocator ready: %u pages available\n",
+                page_allocator.free_frames);
 
     return 0;
 }

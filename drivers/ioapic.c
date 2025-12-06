@@ -265,34 +265,21 @@ static uint32_t ioapic_entry_high_index(uint32_t pin) {
 
 static void ioapic_log_controller(const struct ioapic_controller *ctrl) {
     if (!ctrl) return;
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "IOAPIC: ID ");
-        klog_hex(KLOG_INFO, ctrl->id);
-        klog_raw(KLOG_INFO, " @ phys ");
-        klog_hex(KLOG_INFO, ctrl->phys_addr);
-        klog_raw(KLOG_INFO, ", GSIs ");
-        klog_decimal(KLOG_INFO, ctrl->gsi_base);
-        klog_raw(KLOG_INFO, "-");
-        klog_decimal(KLOG_INFO, ctrl->gsi_base + ctrl->gsi_count - 1);
-        klog_raw(KLOG_INFO, ", version 0x");
-        klog_hex(KLOG_INFO, ctrl->version & 0xFF);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_INFO, "IOAPIC: ID 0x%x @ phys 0x%llx, GSIs %u-%u, version 0x%x\n",
+                ctrl->id,
+                (unsigned long long)ctrl->phys_addr,
+                ctrl->gsi_base,
+                ctrl->gsi_base + ctrl->gsi_count - 1,
+                ctrl->version & 0xFF);
 }
 
 static void ioapic_log_iso(const struct ioapic_iso *iso) {
     if (!iso) return;
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IOAPIC: ISO bus ");
-        klog_decimal(KLOG_INFO, iso->bus_source);
-        klog_raw(KLOG_INFO, ", IRQ ");
-        klog_decimal(KLOG_INFO, iso->irq_source);
-        klog_raw(KLOG_INFO, " -> GSI ");
-        klog_decimal(KLOG_INFO, iso->gsi);
-        klog_raw(KLOG_INFO, ", flags 0x");
-        klog_hex(KLOG_INFO, iso->flags);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "IOAPIC: ISO bus %u, IRQ %u -> GSI %u, flags 0x%x\n",
+                iso->bus_source,
+                iso->irq_source,
+                iso->gsi,
+                iso->flags);
 }
 
 static uint32_t ioapic_flags_from_acpi(uint8_t bus_source, uint16_t flags) {
@@ -363,17 +350,11 @@ static int ioapic_update_mask(uint32_t gsi, bool mask) {
 
     ioapic_write(ctrl, reg, value);
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IOAPIC: ");
-        klog_raw(KLOG_INFO, mask ? "Masked" : "Unmasked");
-        klog_raw(KLOG_INFO, " GSI ");
-        klog_decimal(KLOG_INFO, gsi);
-        klog_raw(KLOG_INFO, " (pin ");
-        klog_decimal(KLOG_INFO, pin);
-        klog_raw(KLOG_INFO, ") -> low=0x");
-        klog_hex(KLOG_INFO, value);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "IOAPIC: %s GSI %u (pin %u) -> low=0x%x\n",
+                mask ? "Masked" : "Unmasked",
+                gsi,
+                pin,
+                value);
 
     return 0;
 }
@@ -517,21 +498,9 @@ int ioapic_config_irq(uint32_t gsi, uint8_t vector, uint8_t lapic_id, uint32_t f
     ioapic_write(ctrl, ioapic_entry_high_index(pin), high);
     ioapic_write(ctrl, ioapic_entry_low_index(pin), low);
 
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "IOAPIC: Configured GSI ");
-        klog_decimal(KLOG_INFO, gsi);
-        klog_raw(KLOG_INFO, " (pin ");
-        klog_decimal(KLOG_INFO, pin);
-        klog_raw(KLOG_INFO, ") -> vector ");
-        klog_hex(KLOG_INFO, vector);
-        klog_raw(KLOG_INFO, ", LAPIC ");
-        klog_hex(KLOG_INFO, lapic_id);
-        klog_raw(KLOG_INFO, ", low=0x");
-        klog_hex(KLOG_INFO, low);
-        klog_raw(KLOG_INFO, ", high=0x");
-        klog_hex(KLOG_INFO, high);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_INFO,
+                "IOAPIC: Configured GSI %u (pin %u) -> vector 0x%x, LAPIC 0x%x, low=0x%x, high=0x%x\n",
+                gsi, pin, vector, lapic_id, low, high);
 
     return 0;
 }

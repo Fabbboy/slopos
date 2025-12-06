@@ -135,13 +135,9 @@ int init_limine_protocol(void) {
         struct limine_bootloader_info_response *bi = 
             (struct limine_bootloader_info_response *)bootloader_info_request.response;
 
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "Bootloader: ");
-            if (bi->name) klog_raw(KLOG_INFO, (const char *)bi->name);
-            klog_raw(KLOG_INFO, " version ");
-            if (bi->version) klog_raw(KLOG_INFO, (const char *)bi->version);
-            klog(KLOG_INFO, "");
-        });
+        const char *loader_name = bi->name ? (const char *)bi->name : "<unknown>";
+        const char *loader_version = bi->version ? (const char *)bi->version : "<unknown>";
+        klog_printf(KLOG_DEBUG, "Bootloader: %s version %s\n", loader_name, loader_version);
     }
 
     /* Parse HHDM (Higher Half Direct Mapping) */
@@ -152,11 +148,7 @@ int init_limine_protocol(void) {
         system_info.hhdm_offset = hhdm->offset;
         system_info.hhdm_available = 1;
         
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "HHDM offset: ");
-            klog_hex(KLOG_INFO, hhdm->offset);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "HHDM offset: 0x%llx\n", (unsigned long long)hhdm->offset);
     }
 
     /* Parse kernel address */
@@ -167,14 +159,10 @@ int init_limine_protocol(void) {
         system_info.kernel_phys_base = ka->physical_base;
         system_info.kernel_virt_base = ka->virtual_base;
         
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "Kernel physical base: ");
-            klog_hex(KLOG_INFO, ka->physical_base);
-            klog(KLOG_INFO, "");
-            klog_raw(KLOG_INFO, "Kernel virtual base: ");
-            klog_hex(KLOG_INFO, ka->virtual_base);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "Kernel physical base: 0x%llx\n",
+                    (unsigned long long)ka->physical_base);
+        klog_printf(KLOG_DEBUG, "Kernel virtual base: 0x%llx\n",
+                    (unsigned long long)ka->virtual_base);
     }
 
     /* Parse ACPI RSDP pointer */
@@ -189,11 +177,8 @@ int init_limine_protocol(void) {
         if (rsdp_ptr != 0) {
             system_info.rsdp_available = 1;
 
-            KLOG_BLOCK(KLOG_DEBUG, {
-                klog_raw(KLOG_INFO, "ACPI: RSDP pointer: ");
-                klog_hex(KLOG_INFO, system_info.rsdp_virt_addr);
-                klog(KLOG_INFO, "");
-            });
+            klog_printf(KLOG_DEBUG, "ACPI: RSDP pointer: 0x%llx\n",
+                        (unsigned long long)system_info.rsdp_virt_addr);
         } else {
             klog_info("ACPI: Limine returned null RSDP pointer");
         }
@@ -218,10 +203,7 @@ int init_limine_protocol(void) {
             system_info.kernel_cmdline_available = 1;
 
             if (index > 0) {
-                KLOG_BLOCK(KLOG_DEBUG, {
-                    klog_raw(KLOG_INFO, "Kernel command line: ");
-                    klog(KLOG_INFO, system_info.kernel_cmdline);
-                });
+                klog_printf(KLOG_DEBUG, "Kernel command line: %s\n", system_info.kernel_cmdline);
             } else {
                 klog_debug("Kernel command line: <empty>");
             }
@@ -240,11 +222,8 @@ int init_limine_protocol(void) {
         uint64_t total = 0;
         uint64_t available = 0;
 
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "Memory map: ");
-            klog_decimal(KLOG_INFO, memmap->entry_count);
-            klog(KLOG_INFO, " entries");
-        });
+        klog_printf(KLOG_DEBUG, "Memory map: %llu entries\n",
+                    (unsigned long long)memmap->entry_count);
 
         for (uint64_t i = 0; i < memmap->entry_count; i++) {
             struct limine_memmap_entry *entry = 
@@ -261,14 +240,10 @@ int init_limine_protocol(void) {
         system_info.available_memory = available;
         system_info.memory_map_available = 1;
         
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "Total memory: ");
-            klog_decimal(KLOG_INFO, total / (1024 * 1024));
-            klog(KLOG_INFO, " MB");
-            klog_raw(KLOG_INFO, "Available memory: ");
-            klog_decimal(KLOG_INFO, available / (1024 * 1024));
-            klog(KLOG_INFO, " MB");
-        });
+        klog_printf(KLOG_DEBUG, "Total memory: %llu MB\n",
+                    (unsigned long long)(total / (1024 * 1024)));
+        klog_printf(KLOG_DEBUG, "Available memory: %llu MB\n",
+                    (unsigned long long)(available / (1024 * 1024)));
     } else {
         klog_info("WARNING: No memory map available from Limine");
     }
@@ -289,21 +264,11 @@ int init_limine_protocol(void) {
             system_info.framebuffer_bpp = (uint8_t)fb->bpp;
             system_info.framebuffer_available = 1;
             
-            KLOG_BLOCK(KLOG_DEBUG, {
-                klog_raw(KLOG_INFO, "Framebuffer: ");
-                klog_decimal(KLOG_INFO, fb->width);
-                klog_raw(KLOG_INFO, "x");
-                klog_decimal(KLOG_INFO, fb->height);
-                klog_raw(KLOG_INFO, " @ ");
-                klog_decimal(KLOG_INFO, fb->bpp);
-                klog(KLOG_INFO, " bpp");
-                klog_raw(KLOG_INFO, "Framebuffer address: ");
-                klog_hex(KLOG_INFO, (uint64_t)fb->address);
-                klog(KLOG_INFO, "");
-                klog_raw(KLOG_INFO, "Framebuffer pitch: ");
-                klog_decimal(KLOG_INFO, fb->pitch);
-                klog(KLOG_INFO, " bytes");
-            });
+            klog_printf(KLOG_DEBUG, "Framebuffer: %ux%u @ %u bpp\n",
+                        fb->width, fb->height, fb->bpp);
+            klog_printf(KLOG_DEBUG, "Framebuffer address: 0x%llx\n",
+                        (unsigned long long)(uint64_t)fb->address);
+            klog_printf(KLOG_DEBUG, "Framebuffer pitch: %u bytes\n", fb->pitch);
         } else {
             klog_info("WARNING: No framebuffer provided by Limine");
             return -1;

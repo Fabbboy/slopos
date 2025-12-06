@@ -112,11 +112,8 @@ int framebuffer_init(void) {
         return -1;
     }
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Framebuffer address from bootloader: ");
-        klog_hex(KLOG_INFO, phys_addr);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "Framebuffer address from bootloader: 0x%llx\n",
+                (unsigned long long)phys_addr);
 
     /* Validate parameters */
     if (phys_addr == 0) {
@@ -174,21 +171,17 @@ int framebuffer_init(void) {
     }
     
     if (virtual_addr_uint == 0) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "ERROR: No virtual mapping available for framebuffer at address ");
-            klog_hex(KLOG_INFO, phys_addr);
-            klog(KLOG_INFO, "");
-            klog(KLOG_INFO, "Framebuffer requires HHDM (Higher-Half Direct Mapping) or identity mapping");
-        });
+        klog_printf(KLOG_INFO,
+                    "ERROR: No virtual mapping available for framebuffer at address 0x%llx\n",
+                    (unsigned long long)phys_addr);
+        klog_printf(KLOG_INFO,
+                    "Framebuffer requires HHDM (Higher-Half Direct Mapping) or identity mapping\n");
         return -1;
     }
     void *virtual_addr = (void*)virtual_addr_uint;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Framebuffer virtual address: ");
-        klog_hex(KLOG_INFO, virtual_addr_uint);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "Framebuffer virtual address: 0x%llx\n",
+                (unsigned long long)virtual_addr_uint);
 
     /* Initialize framebuffer info */
     fb_info.physical_addr = physical_addr_for_storage;
@@ -201,15 +194,8 @@ int framebuffer_init(void) {
     fb_info.buffer_size = buffer_size;
     fb_info.initialized = 1;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Framebuffer initialized: ");
-        klog_decimal(KLOG_INFO, width);
-        klog_raw(KLOG_INFO, "x");
-        klog_decimal(KLOG_INFO, height);
-        klog_raw(KLOG_INFO, " @ ");
-        klog_decimal(KLOG_INFO, bpp);
-        klog(KLOG_INFO, " bpp");
-    });
+    klog_printf(KLOG_DEBUG, "Framebuffer initialized: %ux%u @ %u bpp\n",
+                width, height, bpp);
 
     return 0;
 }

@@ -717,11 +717,8 @@ void init_paging(void) {
         kernel_panic("Higher-half kernel mapping not found");
     }
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Higher-half kernel mapping verified at ");
-        klog_hex(KLOG_INFO, kernel_phys);
-        klog_raw(KLOG_INFO, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "Higher-half kernel mapping verified at 0x%llx\n",
+                (unsigned long long)kernel_phys);
 
     /* Verify identity mapping exists for early boot hardware access */
     uint64_t identity_phys = virt_to_phys(0x100000); /* 1MB mark */

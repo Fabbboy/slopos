@@ -46,13 +46,9 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
 
     const mm_reserved_region_t *reservation = mm_reservations_find(phys_addr);
     if (reservation && (reservation->flags & MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT) == 0) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "mm_phys_to_virt: rejected reserved phys 0x");
-            klog_hex(KLOG_INFO, phys_addr);
-            klog_raw(KLOG_INFO, " (");
-            klog_raw(KLOG_INFO, mm_reservation_type_name(reservation->type));
-            klog_raw(KLOG_INFO, ")\n");
-        });
+        klog_printf(KLOG_DEBUG, "mm_phys_to_virt: rejected reserved phys 0x%llx (%s)\n",
+                    (unsigned long long)phys_addr,
+                    mm_reservation_type_name(reservation->type));
         return 0;
     }
 
@@ -70,7 +66,7 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
         }
     }
 
-    klog_raw(KLOG_INFO, "mm_phys_to_virt: No mapping available for physical address\n");
+    klog_printf(KLOG_INFO, "mm_phys_to_virt: No mapping available for physical address\n");
     return 0;
 }
 

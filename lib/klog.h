@@ -24,18 +24,20 @@ enum klog_level klog_get_level(void);
 int klog_is_enabled(enum klog_level level);
 
 void klog_newline(void);
-void klog(enum klog_level level, const char *msg);      /* Prints with newline */
-void klog_raw(enum klog_level level, const char *msg);  /* Prints without newline */
-void klog_hex(enum klog_level level, uint64_t value);
-void klog_decimal(enum klog_level level, uint64_t value);
-void klog_hex_byte(enum klog_level level, uint8_t value);
+void klog(enum klog_level level, const char *msg) __attribute__((deprecated("Use klog_printf instead")));      /* Prints with newline */
+void klog_raw(enum klog_level level, const char *msg) __attribute__((deprecated("Use klog_printf instead")));  /* Prints without newline */
+void klog_hex(enum klog_level level, uint64_t value) __attribute__((deprecated("Use klog_printf instead")));
+void klog_decimal(enum klog_level level, uint64_t value) __attribute__((deprecated("Use klog_printf instead")));
+void klog_hex_byte(enum klog_level level, uint8_t value) __attribute__((deprecated("Use klog_printf instead")));
+void klog_printf(enum klog_level level, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 /* Convenience wrappers */
-static inline void klog_error(const char *msg) { klog(KLOG_ERROR, msg); }
-static inline void klog_warn(const char *msg)  { klog(KLOG_WARN, msg); }
-static inline void klog_info(const char *msg)  { klog(KLOG_INFO, msg); }
-static inline void klog_debug(const char *msg) { klog(KLOG_DEBUG, msg); }
-static inline void klog_trace(const char *msg) { klog(KLOG_TRACE, msg); }
+static inline void klog_error(const char *msg) { klog_printf(KLOG_ERROR, "%s\n", msg); }
+static inline void klog_warn(const char *msg)  { klog_printf(KLOG_WARN, "%s\n", msg); }
+static inline void klog_info(const char *msg)  { klog_printf(KLOG_INFO, "%s\n", msg); }
+static inline void klog_debug(const char *msg) { klog_printf(KLOG_DEBUG, "%s\n", msg); }
+static inline void klog_trace(const char *msg) { klog_printf(KLOG_TRACE, "%s\n", msg); }
 
 #define KLOG_BLOCK(level, code)                                     \
     do {                                                            \

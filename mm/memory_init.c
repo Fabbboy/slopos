@@ -228,35 +228,26 @@ static void log_reserved_regions(void) {
 
     uint64_t total_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "MM: Reserved device regions (");
-        klog_decimal(KLOG_INFO, count);
-        klog_raw(KLOG_INFO, ")\n");
-        for (uint32_t i = 0; i < count; i++) {
-            const mm_reserved_region_t *region = mm_reservations_get(i);
-            if (!region) {
-                continue;
-            }
-
-            const char *label = region->label[0] ? region->label : mm_reservation_type_name(region->type);
-            uint64_t region_end = region->phys_base + region->length;
-
-            klog_raw(KLOG_INFO, "  ");
-            klog_raw(KLOG_INFO, label);
-            klog_raw(KLOG_INFO, ": 0x");
-            klog_hex(KLOG_INFO, region->phys_base);
-            klog_raw(KLOG_INFO, " - 0x");
-            klog_hex(KLOG_INFO, region_end - 1);
-            klog_raw(KLOG_INFO, " (");
-            klog_decimal(KLOG_INFO, (uint32_t)(region->length / 1024));
-            klog_raw(KLOG_INFO, " KB)\n");
+    klog_printf(KLOG_INFO, "MM: Reserved device regions (%u)\n", count);
+    for (uint32_t i = 0; i < count; i++) {
+        const mm_reserved_region_t *region = mm_reservations_get(i);
+        if (!region) {
+            continue;
         }
-        if (total_bytes > 0) {
-            klog_raw(KLOG_INFO, "  Total reserved:      ");
-            klog_decimal(KLOG_INFO, (uint32_t)(total_bytes / 1024));
-            klog_raw(KLOG_INFO, " KB\n");
-        }
-    });
+
+        const char *label = region->label[0] ? region->label : mm_reservation_type_name(region->type);
+        uint64_t region_end = region->phys_base + region->length;
+
+        klog_printf(KLOG_INFO, "  %s: 0x%llx - 0x%llx (%u KB)\n",
+                    label,
+                    (unsigned long long)region->phys_base,
+                    (unsigned long long)(region_end - 1),
+                    (uint32_t)(region->length / 1024));
+    }
+    if (total_bytes > 0) {
+        klog_printf(KLOG_INFO, "  Total reserved:      %u KB\n",
+                    (uint32_t)(total_bytes / 1024));
+    }
 }
 
 static void finalize_reserved_regions(void) {
@@ -286,22 +277,17 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
 
     if (mm_is_range_reserved(aligned_start, aligned_size)) {
         usable_overlap_skips++;
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "MM: Skipping usable subrange overlapping reservation: 0x");
-            klog_hex(KLOG_INFO, aligned_start);
-            klog_raw(KLOG_INFO, " - 0x");
-            klog_hex(KLOG_INFO, aligned_end - 1);
-            klog_raw(KLOG_INFO, "\n");
-        });
+        klog_printf(KLOG_INFO,
+                    "MM: Skipping usable subrange overlapping reservation: 0x%llx - 0x%llx\n",
+                    (unsigned long long)aligned_start,
+                    (unsigned long long)(aligned_end - 1));
         return;
     }
 
     init_state.available_memory_bytes += aligned_size;
 
     if (add_page_alloc_region(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
-        });
+        klog_printf(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
     }
 }
 
@@ -370,9 +356,7 @@ static uint32_t clamp_required_frames(uint64_t required_frames_64) {
     }
 
     if (required_frames_64 > (uint64_t)max_supported) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "MM: WARNING - Limiting tracked page frames to allocator maximum\n");
-        });
+        klog_printf(KLOG_DEBUG, "MM: WARNING - Limiting tracked page frames to allocator maximum\n");
         return max_supported;
     }
     return (uint32_t)required_frames_64;
@@ -432,9 +416,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     uint64_t max_fit_frames = largest_usable->length / PAGE_SIZE_4KB;
     if (required_frames > max_fit_frames) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "MM: WARNING - Reducing tracked frames to fit largest usable region\n");
-        });
+        klog_printf(KLOG_DEBUG, "MM: WARNING - Reducing tracked frames to fit largest usable region\n");
         required_frames = (uint32_t)max_fit_frames;
     }
 
@@ -512,13 +494,9 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
 
     init_state.allocator_metadata_bytes = page_bytes_u64;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "MM: Page allocator metadata reserved at phys 0x");
-        klog_hex(KLOG_INFO, reserve_phys_base);
-        klog_raw(KLOG_INFO, " (");
-        klog_decimal(KLOG_INFO, (uint32_t)(reserved_bytes / 1024));
-        klog_raw(KLOG_INFO, " KB)\n");
-    });
+    klog_printf(KLOG_DEBUG, "MM: Page allocator metadata reserved at phys 0x%llx (%u KB)\n",
+                (unsigned long long)reserve_phys_base,
+                (uint32_t)(reserved_bytes / 1024));
 
     return 0;
 }
@@ -560,11 +538,8 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
         return -1;
     }
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "MM: Limine memory entries: ");
-        klog_decimal(KLOG_INFO, memmap->entry_count);
-        klog_raw(KLOG_INFO, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "MM: Limine memory entries: %llu\n",
+                (unsigned long long)memmap->entry_count);
 
     int processed_entries = 0;
 
@@ -593,26 +568,18 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
     init_state.hhdm_offset = hhdm_offset;
     init_state.hhdm_received = 1;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "MM: HHDM offset: 0x");
-        klog_hex(KLOG_INFO, hhdm_offset);
-        klog_raw(KLOG_INFO, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "MM: HHDM offset: 0x%llx\n",
+                (unsigned long long)hhdm_offset);
 
     if (finalize_page_allocator() != 0) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "MM: WARNING - page allocator finalization reported issues\n");
-        });
+        klog_printf(KLOG_INFO, "MM: WARNING - page allocator finalization reported issues\n");
     }
 
     if (usable_overlap_skips == 0) {
         klog_debug("MM: Reserved overlap check passed (no usable subranges skipped)");
     } else {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "MM: Reserved overlap guard skipped ");
-            klog_decimal(KLOG_INFO, usable_overlap_skips);
-            klog_raw(KLOG_INFO, " subrange(s)\n");
-        });
+        klog_printf(KLOG_INFO, "MM: Reserved overlap guard skipped %u subrange(s)\n",
+                    (uint32_t)usable_overlap_skips);
     }
 
     klog_info("MM: Memory discovery completed successfully");
@@ -693,69 +660,40 @@ static void display_memory_summary(void) {
         return;
     }
 
-    klog_raw(KLOG_INFO, "\n========== SlopOS Memory System Initialized ==========\n");
-    klog_raw(KLOG_INFO, "Early Paging:          ");
-    klog_raw(KLOG_INFO, init_state.early_paging_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "Memory Layout:         ");
-    klog_raw(KLOG_INFO, init_state.memory_layout_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "Limine Memmap:         ");
-    klog_raw(KLOG_INFO, init_state.limine_memmap_parsed ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "HHDM Response:         ");
-    klog_raw(KLOG_INFO, init_state.hhdm_received ? "OK" : "MISSING");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "Page Allocator:        ");
-    klog_raw(KLOG_INFO, init_state.page_allocator_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
+    klog_printf(KLOG_INFO, "\n========== SlopOS Memory System Initialized ==========\n");
+    klog_printf(KLOG_INFO, "Early Paging:          %s\n", init_state.early_paging_done ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Memory Layout:         %s\n", init_state.memory_layout_done ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Limine Memmap:         %s\n", init_state.limine_memmap_parsed ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "HHDM Response:         %s\n", init_state.hhdm_received ? "OK" : "MISSING");
+    klog_printf(KLOG_INFO, "Page Allocator:        %s\n", init_state.page_allocator_done ? "OK" : "FAILED");
     if (init_state.tracked_page_frames) {
-        klog_raw(KLOG_INFO, "Tracked Frames:        ");
-        klog_decimal(KLOG_INFO, init_state.tracked_page_frames);
-        klog_raw(KLOG_INFO, "\n");
+        klog_printf(KLOG_INFO, "Tracked Frames:        %u\n", init_state.tracked_page_frames);
     }
     if (init_state.allocator_metadata_bytes) {
-        klog_raw(KLOG_INFO, "Allocator Metadata:    ");
-        klog_decimal(KLOG_INFO, (uint32_t)(init_state.allocator_metadata_bytes / 1024));
-        klog_raw(KLOG_INFO, " KB\n");
+        klog_printf(KLOG_INFO, "Allocator Metadata:    %u KB\n",
+                    (uint32_t)(init_state.allocator_metadata_bytes / 1024));
     }
     if (init_state.reserved_region_count) {
-        klog_raw(KLOG_INFO, "Reserved Regions:      ");
-        klog_decimal(KLOG_INFO, init_state.reserved_region_count);
-        klog_raw(KLOG_INFO, "\n");
+        klog_printf(KLOG_INFO, "Reserved Regions:      %u\n", init_state.reserved_region_count);
     }
     if (init_state.reserved_device_bytes) {
-        klog_raw(KLOG_INFO, "Reserved Device Mem:   ");
-        klog_decimal(KLOG_INFO, (uint32_t)(init_state.reserved_device_bytes / 1024));
-        klog_raw(KLOG_INFO, " KB\n");
+        klog_printf(KLOG_INFO, "Reserved Device Mem:   %u KB\n",
+                    (uint32_t)(init_state.reserved_device_bytes / 1024));
     }
-    klog_raw(KLOG_INFO, "Kernel Heap:           ");
-    klog_raw(KLOG_INFO, init_state.kernel_heap_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "Process VM:            ");
-    klog_raw(KLOG_INFO, init_state.process_vm_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
-    klog_raw(KLOG_INFO, "Full Paging:           ");
-    klog_raw(KLOG_INFO, init_state.paging_done ? "OK" : "FAILED");
-    klog_raw(KLOG_INFO, "\n");
+    klog_printf(KLOG_INFO, "Kernel Heap:           %s\n", init_state.kernel_heap_done ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Process VM:            %s\n", init_state.process_vm_done ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Full Paging:           %s\n", init_state.paging_done ? "OK" : "FAILED");
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        if (init_state.total_memory_bytes > 0) {
-            klog_raw(KLOG_INFO, "Total Memory:          ");
-            klog_decimal(KLOG_INFO, init_state.total_memory_bytes / (1024 * 1024));
-            klog_raw(KLOG_INFO, " MB\n");
-            klog_raw(KLOG_INFO, "Available Memory:      ");
-            klog_decimal(KLOG_INFO, init_state.available_memory_bytes / (1024 * 1024));
-            klog_raw(KLOG_INFO, " MB\n");
-        }
-        klog_raw(KLOG_INFO, "Memory Regions:        ");
-        klog_decimal(KLOG_INFO, init_state.memory_regions_count);
-        klog_raw(KLOG_INFO, " regions\n");
-        klog_raw(KLOG_INFO, "HHDM Offset:           0x");
-        klog_hex(KLOG_INFO, init_state.hhdm_offset);
-        klog_raw(KLOG_INFO, "\n");
-        klog_raw(KLOG_INFO, "=====================================================\n\n");
-    });
+    if (init_state.total_memory_bytes > 0) {
+        klog_printf(KLOG_INFO, "Total Memory:          %llu MB\n",
+                    (unsigned long long)(init_state.total_memory_bytes / (1024 * 1024)));
+        klog_printf(KLOG_INFO, "Available Memory:      %llu MB\n",
+                    (unsigned long long)(init_state.available_memory_bytes / (1024 * 1024)));
+    }
+    klog_printf(KLOG_INFO, "Memory Regions:        %u regions\n", init_state.memory_regions_count);
+    klog_printf(KLOG_INFO, "HHDM Offset:           0x%llx\n",
+                (unsigned long long)init_state.hhdm_offset);
+    klog_printf(KLOG_INFO, "=====================================================\n\n");
 }
 
 /* ========================================================================
@@ -774,14 +712,10 @@ int init_memory_system(const struct limine_memmap_response *memmap,
                        uint64_t hhdm_offset) {
     klog_debug("========== SlopOS Memory System Initialization ==========");
     klog_debug("Initializing complete memory management system...");
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "Limine memmap response at: 0x");
-        klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)memmap);
-        klog_raw(KLOG_INFO, "\n");
-        klog_raw(KLOG_INFO, "Reported HHDM offset: 0x");
-        klog_hex(KLOG_INFO, hhdm_offset);
-        klog_raw(KLOG_INFO, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "Limine memmap response at: 0x%llx\n",
+                (unsigned long long)(uintptr_t)memmap);
+    klog_printf(KLOG_DEBUG, "Reported HHDM offset: 0x%llx\n",
+                (unsigned long long)hhdm_offset);
 
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
         kernel_panic("MM: Missing Limine memory map");
@@ -838,9 +772,7 @@ int init_memory_system(const struct limine_memmap_response *memmap,
     display_memory_summary();
 
     klog_info("MM: Complete memory system initialization successful!");
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "MM: Ready for scheduler and video subsystem initialization\n\n");
-    });
+    klog_printf(KLOG_DEBUG, "MM: Ready for scheduler and video subsystem initialization\n\n");
 
     return 0;
 }

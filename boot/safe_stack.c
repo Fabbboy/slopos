@@ -115,17 +115,11 @@ void safe_stack_init(void) {
         gdt_set_ist(stack->ist_index, stack->stack_top);
         idt_set_ist(stack->vector, stack->ist_index);
 
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "SAFE STACK: Vector ");
-            klog_decimal(KLOG_INFO, stack->vector);
-            klog_raw(KLOG_INFO, " uses IST");
-            klog_decimal(KLOG_INFO, stack->ist_index);
-            klog_raw(KLOG_INFO, " @ ");
-            klog_hex(KLOG_INFO, stack->stack_base);
-            klog_raw(KLOG_INFO, " - ");
-            klog_hex(KLOG_INFO, stack->stack_top);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "SAFE STACK: Vector %u uses IST%u @ 0x%llx - 0x%llx\n",
+                    stack->vector,
+                    stack->ist_index,
+                    (unsigned long long)stack->stack_base,
+                    (unsigned long long)stack->stack_top);
     }
 
     klog_debug("SAFE STACK: IST stacks ready");
@@ -139,11 +133,9 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
 
     if (frame_ptr < stack->stack_base || frame_ptr > stack->stack_top) {
         if (!stack->out_of_bounds_reported) {
-            KLOG_BLOCK(KLOG_INFO, {
-                klog_raw(KLOG_INFO, "SAFE STACK WARNING: RSP outside managed stack for vector ");
-                klog_decimal(KLOG_INFO, vector);
-                klog(KLOG_INFO, "");
-            });
+            klog_printf(KLOG_INFO,
+                        "SAFE STACK WARNING: RSP outside managed stack for vector %u\n",
+                        vector);
             stack->out_of_bounds_reported = 1;
         }
         return;
@@ -153,21 +145,14 @@ void safe_stack_record_usage(uint8_t vector, uint64_t frame_ptr) {
     if (usage > stack->peak_usage) {
         stack->peak_usage = usage;
 
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "SAFE STACK: New peak usage on ");
-            klog_raw(KLOG_INFO, stack->name);
-            klog_raw(KLOG_INFO, " stack: ");
-            klog_decimal(KLOG_INFO, usage);
-            klog_raw(KLOG_INFO, " bytes");
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "SAFE STACK: New peak usage on %s stack: %llu bytes\n",
+                    stack->name,
+                    (unsigned long long)usage);
 
         if (usage > stack->stack_size - PAGE_SIZE_4KB) {
-            KLOG_BLOCK(KLOG_INFO, {
-                klog_raw(KLOG_INFO, "SAFE STACK WARNING: ");
-                klog_raw(KLOG_INFO, stack->name);
-                klog(KLOG_INFO, " stack within one page of guard");
-            });
+            klog_printf(KLOG_INFO,
+                        "SAFE STACK WARNING: %s stack within one page of guard\n",
+                        stack->name);
         }
     }
 }

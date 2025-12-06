@@ -270,22 +270,13 @@ void keyboard_init(void) {
 }
 
 void keyboard_handle_scancode(uint8_t scancode) {
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_DEBUG, "[KBD] Scancode: 0x");
-        klog_hex(KLOG_DEBUG, (uint64_t)scancode);
-        klog_raw(KLOG_DEBUG, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "[KBD] Scancode: 0x%02x\n", scancode);
 
     int is_press = !is_break_code(scancode);
     uint8_t make_code = get_make_code(scancode);
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_DEBUG, "[KBD] Make code: 0x");
-        klog_hex(KLOG_DEBUG, (uint64_t)make_code);
-        klog_raw(KLOG_DEBUG, " is_press: ");
-        klog_decimal(KLOG_DEBUG, (uint64_t)is_press);
-        klog_raw(KLOG_DEBUG, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "[KBD] Make code: 0x%02x is_press: %u\n",
+                make_code, (unsigned int)is_press);
 
     /* Store scancode for debugging */
     kb_buffer_push_overwrite(&scancode_buffer, (char)scancode);
@@ -306,16 +297,10 @@ void keyboard_handle_scancode(uint8_t scancode) {
     
     /* Translate scancode to ASCII */
     char ascii = translate_scancode(scancode);
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_DEBUG, "[KBD] ASCII: 0x");
-        klog_hex(KLOG_DEBUG, (uint64_t)ascii);
-        klog_raw(KLOG_DEBUG, "\n");
-    });
+    klog_printf(KLOG_DEBUG, "[KBD] ASCII: 0x%02x\n", (unsigned int)(uint8_t)ascii);
 
     if (ascii != 0) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_DEBUG, "[KBD] Adding to buffer\n");
-        });
+        klog_printf(KLOG_DEBUG, "[KBD] Adding to buffer\n");
         kb_buffer_push_overwrite(&char_buffer, ascii);
         scheduler_request_reschedule_from_interrupt();
     }
@@ -327,13 +312,8 @@ char keyboard_getchar(void) {
 
 int keyboard_has_input(void) {
     int has_data = kb_buffer_has_data(&char_buffer);
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_DEBUG, "[KBD] buffer_has_data() = ");
-        klog_decimal(KLOG_DEBUG, (uint64_t)has_data);
-        klog_raw(KLOG_DEBUG, " (count=");
-        klog_decimal(KLOG_DEBUG, (uint64_t)char_buffer.count);
-        klog_raw(KLOG_DEBUG, ")\n");
-    });
+    klog_printf(KLOG_DEBUG, "[KBD] buffer_has_data() = %d (count=%u)\n",
+                has_data, (unsigned int)char_buffer.count);
     return has_data;
 }
 

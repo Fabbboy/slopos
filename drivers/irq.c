@@ -60,11 +60,8 @@ static void mask_irq_line(uint8_t irq) {
         if (irq_line_has_ioapic_route(irq)) {
             ioapic_mask_gsi(irq_route_table[irq].gsi);
         } else {
-            KLOG_BLOCK(KLOG_INFO, {
-                klog_raw(KLOG_INFO, "IRQ: Mask request ignored for line ");
-                klog_decimal(KLOG_INFO, irq);
-                klog(KLOG_INFO, " (no IOAPIC route)");
-            });
+            klog_printf(KLOG_INFO, "IRQ: Mask request ignored for line %u (no IOAPIC route)\n",
+                        irq);
         }
         irq_table[irq].masked = 1;
     }
@@ -85,20 +82,12 @@ static void unmask_irq_line(uint8_t irq) {
         return;
     }
 
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "IRQ: Cannot unmask line ");
-        klog_decimal(KLOG_INFO, irq);
-        klog(KLOG_INFO, " (no IOAPIC route configured)");
-    });
+    klog_printf(KLOG_INFO, "IRQ: Cannot unmask line %u (no IOAPIC route configured)\n", irq);
 }
 
 static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
     if (irq >= IRQ_LINES) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IRQ: Spurious vector ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, " received");
-        });
+        klog_printf(KLOG_INFO, "IRQ: Spurious vector %u received\n", vector);
         return;
     }
 
@@ -108,13 +97,7 @@ static void log_unhandled_irq(uint8_t irq, uint8_t vector) {
 
     irq_table[irq].reported_unhandled = 1;
 
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "IRQ: Unhandled IRQ ");
-        klog_decimal(KLOG_INFO, irq);
-        klog_raw(KLOG_INFO, " (vector ");
-        klog_decimal(KLOG_INFO, vector);
-        klog(KLOG_INFO, ") - masking line");
-    });
+    klog_printf(KLOG_INFO, "IRQ: Unhandled IRQ %u (vector %u) - masking line\n", irq, vector);
 }
 
 static void timer_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *context) {
@@ -125,11 +108,8 @@ static void timer_irq_handler(uint8_t irq, struct interrupt_frame *frame, void *
     timer_tick_counter++;
 
     if (timer_tick_counter <= 3) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "IRQ: Timer tick #");
-            klog_decimal(KLOG_INFO, timer_tick_counter);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "IRQ: Timer tick #%llu\n",
+                    (unsigned long long)timer_tick_counter);
     }
 
     scheduler_timer_tick();
@@ -184,19 +164,8 @@ static void irq_program_ioapic_route(uint8_t irq) {
     const char *polarity = (legacy_flags & IOAPIC_FLAG_POLARITY_LOW) ? "active-low" : "active-high";
     const char *trigger = (legacy_flags & IOAPIC_FLAG_TRIGGER_LEVEL) ? "level" : "edge";
 
-    KLOG_BLOCK(KLOG_INFO, {
-        klog_raw(KLOG_INFO, "IRQ: IOAPIC route IRQ ");
-        klog_decimal(KLOG_INFO, irq);
-        klog_raw(KLOG_INFO, " -> GSI ");
-        klog_decimal(KLOG_INFO, gsi);
-        klog_raw(KLOG_INFO, ", vector 0x");
-        klog_hex(KLOG_INFO, vector);
-        klog_raw(KLOG_INFO, " (");
-        klog_raw(KLOG_INFO, polarity);
-        klog_raw(KLOG_INFO, ", ");
-        klog_raw(KLOG_INFO, trigger);
-        klog(KLOG_INFO, ")");
-    });
+    klog_printf(KLOG_INFO, "IRQ: IOAPIC route IRQ %u -> GSI %u, vector 0x%x (%s, %s)\n",
+                irq, gsi, vector, polarity, trigger);
 
     if (irq_table[irq].masked) {
         ioapic_mask_gsi(gsi);
@@ -259,16 +228,11 @@ int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context, cons
     irq_table[irq].name = name;
     irq_table[irq].reported_unhandled = 0;
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IRQ: Registered handler for line ");
-        klog_decimal(KLOG_INFO, irq);
-        if (name != NULL) {
-            klog_raw(KLOG_INFO, " (");
-            klog_raw(KLOG_INFO, name);
-            klog_raw(KLOG_INFO, ")");
-        }
-        klog(KLOG_INFO, "");
-    });
+    if (name != NULL) {
+        klog_printf(KLOG_DEBUG, "IRQ: Registered handler for line %u (%s)\n", irq, name);
+    } else {
+        klog_printf(KLOG_DEBUG, "IRQ: Registered handler for line %u\n", irq);
+    }
 
     unmask_irq_line(irq);
     return 0;
@@ -285,11 +249,7 @@ void irq_unregister_handler(uint8_t irq) {
     irq_table[irq].reported_unhandled = 0;
     mask_irq_line(irq);
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IRQ: Unregistered handler for line ");
-        klog_decimal(KLOG_INFO, irq);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "IRQ: Unregistered handler for line %u\n", irq);
 }
 
 void irq_enable_line(uint8_t irq) {
@@ -328,11 +288,7 @@ void irq_dispatch(struct interrupt_frame *frame) {
     }
 
     if (vector < IRQ_BASE_VECTOR) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IRQ: Received non-IRQ vector ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_INFO, "IRQ: Received non-IRQ vector %u\n", vector);
         return;
     }
 
@@ -359,12 +315,8 @@ void irq_dispatch(struct interrupt_frame *frame) {
     entry->handler(irq, frame, entry->context);
 
     if (frame->cs != expected_cs || frame->rip != expected_rip) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IRQ: Frame corruption detected on IRQ ");
-            klog_decimal(KLOG_INFO, irq);
-            klog(KLOG_INFO, " - aborting");
-        });
-            kdiag_dump_interrupt_frame(frame);
+        klog_printf(KLOG_INFO, "IRQ: Frame corruption detected on IRQ %u - aborting\n", irq);
+        kdiag_dump_interrupt_frame(frame);
         kernel_panic("IRQ: frame corrupted");
     }
 

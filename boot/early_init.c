@@ -405,24 +405,17 @@ static int boot_step_pci_init(void) {
         boot_debug("PCI subsystem initialized");
         const pci_gpu_info_t *gpu = pci_get_primary_gpu();
         if (gpu && gpu->present) {
-            KLOG_BLOCK(KLOG_DEBUG, {
-                klog_raw(KLOG_INFO, "PCI: Primary GPU detected (bus ");
-                klog_decimal(KLOG_INFO, gpu->device.bus);
-                klog_raw(KLOG_INFO, ", device ");
-                klog_decimal(KLOG_INFO, gpu->device.device);
-                klog_raw(KLOG_INFO, ", function ");
-                klog_decimal(KLOG_INFO, gpu->device.function);
-                klog(KLOG_INFO, ")");
-                if (gpu->mmio_virt_base) {
-                    klog_raw(KLOG_INFO, "PCI: GPU MMIO virtual base 0x");
-                    klog_hex(KLOG_INFO, (uint64_t)(uintptr_t)gpu->mmio_virt_base);
-                    klog_raw(KLOG_INFO, ", size 0x");
-                    klog_hex(KLOG_INFO, gpu->mmio_size);
-                    klog(KLOG_INFO, "");
-                } else {
-                    klog(KLOG_INFO, "PCI: WARNING GPU MMIO mapping unavailable");
-                }
-            });
+            klog_printf(KLOG_DEBUG, "PCI: Primary GPU detected (bus %u, device %u, function %u)\n",
+                        gpu->device.bus,
+                        gpu->device.device,
+                        gpu->device.function);
+            if (gpu->mmio_virt_base) {
+                klog_printf(KLOG_DEBUG, "PCI: GPU MMIO virtual base 0x%llx, size 0x%llx\n",
+                            (unsigned long long)(uintptr_t)gpu->mmio_virt_base,
+                            (unsigned long long)gpu->mmio_size);
+            } else {
+                klog_printf(KLOG_DEBUG, "PCI: WARNING GPU MMIO mapping unavailable\n");
+            }
         } else {
             boot_debug("PCI: No GPU-class device discovered during enumeration");
         }

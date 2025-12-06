@@ -88,11 +88,7 @@ void idt_init(void) {
 
     initialize_handler_tables();
 
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IDT: Configured ");
-        klog_decimal(KLOG_INFO, IDT_ENTRIES);
-        klog(KLOG_INFO, " interrupt vectors");
-    });
+    klog_printf(KLOG_DEBUG, "IDT: Configured %u interrupt vectors\n", IDT_ENTRIES);
 }
 
 /*
@@ -110,20 +106,12 @@ void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t t
 
 void idt_set_ist(uint8_t vector, uint8_t ist_index) {
     if ((uint16_t)vector >= IDT_ENTRIES) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IDT: Invalid IST assignment for vector ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_INFO, "IDT: Invalid IST assignment for vector %u\n", vector);
         return;
     }
 
     if (ist_index > 7) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IDT: Invalid IST index ");
-            klog_decimal(KLOG_INFO, ist_index);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_INFO, "IDT: Invalid IST index %u\n", ist_index);
         return;
     }
 
@@ -135,20 +123,12 @@ void idt_set_ist(uint8_t vector, uint8_t ist_index) {
  */
 void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) {
     if (vector >= 32) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IDT: Ignoring handler install for non-exception vector ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_INFO, "IDT: Ignoring handler install for non-exception vector %u\n", vector);
         return;
     }
 
     if (handler != NULL && is_critical_exception_internal(vector)) {
-        KLOG_BLOCK(KLOG_INFO, {
-            klog_raw(KLOG_INFO, "IDT: Refusing to override critical exception ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_INFO, "IDT: Refusing to override critical exception %u\n", vector);
         return;
     }
 
@@ -159,17 +139,9 @@ void idt_install_exception_handler(uint8_t vector, exception_handler_t handler) 
     override_handlers[vector] = handler;
 
     if (handler != NULL) {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "IDT: Registered override handler for exception ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "IDT: Registered override handler for exception %u\n", vector);
     } else {
-        KLOG_BLOCK(KLOG_DEBUG, {
-            klog_raw(KLOG_INFO, "IDT: Cleared override handler for exception ");
-            klog_decimal(KLOG_INFO, vector);
-            klog(KLOG_INFO, "");
-        });
+        klog_printf(KLOG_DEBUG, "IDT: Cleared override handler for exception %u\n", vector);
     }
 }
 
@@ -223,13 +195,9 @@ int exception_is_critical(uint8_t vector) {
  * Load the IDT
  */
 void idt_load(void) {
-    KLOG_BLOCK(KLOG_DEBUG, {
-        klog_raw(KLOG_INFO, "IDT: Loading IDT at address ");
-        klog_hex(KLOG_INFO, idt_pointer.base);
-        klog_raw(KLOG_INFO, " with limit ");
-        klog_hex(KLOG_INFO, idt_pointer.limit);
-        klog(KLOG_INFO, "");
-    });
+    klog_printf(KLOG_DEBUG, "IDT: Loading IDT at address 0x%llx with limit 0x%llx\n",
+                (unsigned long long)idt_pointer.base,
+                (unsigned long long)idt_pointer.limit);
 
     // Load the IDT using assembly
     __asm__ volatile ("lidt %0" : : "m" (idt_pointer));
@@ -251,20 +219,15 @@ void common_exception_handler(struct interrupt_frame *frame) {
     }
 
     if (vector >= 32) {
-        klog_raw(KLOG_INFO, "EXCEPTION: Unknown vector ");
-        klog_decimal(KLOG_INFO, vector);
-        klog(KLOG_INFO, "");
+        klog_printf(KLOG_INFO, "EXCEPTION: Unknown vector %u\n", vector);
         exception_default_panic(frame);
         return;
     }
 
     int critical = is_critical_exception_internal(vector);
     if (critical || current_exception_mode != EXCEPTION_MODE_TEST) {
-        klog_raw(KLOG_INFO, "EXCEPTION: Vector ");
-        klog_decimal(KLOG_INFO, vector);
-        klog_raw(KLOG_INFO, " (");
-        klog_raw(KLOG_INFO, get_exception_name(vector));
-        klog(KLOG_INFO, ")");
+        klog_printf(KLOG_INFO, "EXCEPTION: Vector %u (%s)\n",
+                    vector, get_exception_name(vector));
     }
 
     exception_handler_t handler = panic_handlers[vector];
