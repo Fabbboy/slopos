@@ -41,7 +41,7 @@ int apic_detect(void) {
         }
 
         // Get APIC base address from MSR
-        uint64_t apic_base_msr = read_msr(MSR_APIC_BASE);
+        uint64_t apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
         apic_base_physical = apic_base_msr & APIC_BASE_ADDR_MASK;
 
         klog_printf(KLOG_DEBUG, "APIC: Physical base: 0x%llx\n",
@@ -83,7 +83,7 @@ int apic_init(void) {
     klog_debug("APIC: Initializing Local APIC");
 
     // Enable APIC globally in MSR if not already enabled
-    uint64_t apic_base_msr = read_msr(MSR_APIC_BASE);
+    uint64_t apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
     if (!(apic_base_msr & APIC_BASE_GLOBAL_ENABLE)) {
         apic_base_msr |= APIC_BASE_GLOBAL_ENABLE;
         write_msr(MSR_APIC_BASE, apic_base_msr);
@@ -141,7 +141,7 @@ int apic_is_x2apic_available(void) {
  */
 int apic_is_bsp(void) {
     if (!apic_available) return 0;
-    uint64_t apic_base_msr = read_msr(MSR_APIC_BASE);
+    uint64_t apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
     return (apic_base_msr & APIC_BASE_BSP) != 0;
 }
 
@@ -275,7 +275,7 @@ void apic_set_base_address(uint64_t base) {
     if (!apic_available) return;
 
     uint64_t masked_base = base & APIC_BASE_ADDR_MASK;
-    uint64_t apic_base_msr = read_msr(MSR_APIC_BASE);
+    uint64_t apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
     apic_base_msr = (apic_base_msr & ~APIC_BASE_ADDR_MASK) | masked_base;
     write_msr(MSR_APIC_BASE, apic_base_msr);
 

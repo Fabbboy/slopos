@@ -238,7 +238,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     /* Record page directory for context switches */
     if (flags & TASK_FLAG_KERNEL_MODE) {
         /* Kernel tasks use kernel page directory */
-        task->context.cr3 = read_cr3() & ~0xFFFULL;
+        task->context.cr3 = cpu_read_cr3() & ~0xFFFULL;
     } else {
         /* User mode tasks use their process page directory */
         process_page_dir_t *page_dir = process_vm_get_page_dir(process_id);

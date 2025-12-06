@@ -32,6 +32,17 @@ static inline void tty_service_serial_input(void) {
     serial_poll_receive(COM1_BASE);
 }
 
+static int tty_input_available(void);
+
+static void tty_register_idle_callback(void) {
+    static int registered = 0;
+    if (registered) {
+        return;
+    }
+    scheduler_register_idle_wakeup_callback(tty_input_available);
+    registered = 1;
+}
+
 static task_t *tty_wait_queue_pop(void) {
     task_t *task = NULL;
     int success = 0;
@@ -169,6 +180,8 @@ size_t tty_read_line(char *buffer, size_t buffer_size) {
         return 0;
     }
     
+    tty_register_idle_callback();
+
     /* Ensure we have at least space for null terminator */
     if (buffer_size < 2) {
         buffer[0] = '\0';

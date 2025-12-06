@@ -29,18 +29,10 @@ static inline uint64_t cpu_read_cr3(void) {
     return value;
 }
 
-static inline uint64_t read_cr3(void) {
-    return cpu_read_cr3();
-}
-
 static inline uint64_t cpu_read_msr(uint32_t msr) {
     uint32_t low, high;
     __asm__ volatile ("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
     return ((uint64_t)high << 32) | low;
-}
-
-static inline uint64_t read_msr(uint32_t msr) {
-    return cpu_read_msr(msr);
 }
 
 static inline void write_msr(uint32_t msr, uint64_t value) {

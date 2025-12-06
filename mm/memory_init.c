@@ -204,7 +204,7 @@ static void record_apic_reservation(void) {
         return;
     }
 
-    uint64_t apic_base_msr = read_msr(MSR_APIC_BASE);
+    uint64_t apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
     uint64_t apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
 
     if (apic_phys == 0) {

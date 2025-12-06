@@ -112,6 +112,25 @@ const char *task_state_to_string(uint8_t state);
 typedef void (*task_iterate_cb)(task_t *task, void *context);
 void task_iterate_active(task_iterate_cb callback, void *context);
 
+/* ========================================================================
+ * TASK MANAGEMENT API
+ * ======================================================================== */
+/* Unless otherwise specified, functions return 0 on success and a negative
+ * error code on failure. */
+
+int init_task_manager(void);
+uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
+                     uint8_t priority, uint16_t flags);
+int task_terminate(uint32_t task_id);
+int task_get_info(uint32_t task_id, task_t **task_info);
+int task_set_state(uint32_t task_id, uint8_t new_state);
+uint32_t task_get_current_id(void);
+task_t *task_get_current(void);
+void task_set_current(task_t *task);
+int task_shutdown_all(void);
+void get_task_stats(uint32_t *total_tasks, uint32_t *active_tasks,
+                   uint64_t *context_switches);
+
 /*
  * Task state helpers for scheduler coordination
  */

@@ -9,8 +9,6 @@
 #include "../boot/init.h"
 #include "../lib/kdiag.h"
 #include "../lib/klog.h"
-#include "../drivers/serial.h"
-#include "../drivers/tty.h"
 #include "../drivers/pit.h"
 #include "../drivers/wl_currency.h"
 #include "../mm/paging.h"
@@ -72,6 +70,7 @@ typedef struct scheduler {
 
 /* Global scheduler instance */
 static scheduler_t scheduler = {0};
+static scheduler_idle_wakeup_cb_t idle_wakeup_cb = NULL;
 
 static uint32_t scheduler_get_default_time_slice(void) {
     return scheduler.time_slice ? scheduler.time_slice : SCHED_DEFAULT_TIME_SLICE;
@@ -489,15 +488,8 @@ static void idle_task_function(void *arg) {
     (void)arg;  /* Unused parameter */
 
     while (1) {
-        /* Wake interactive tasks if serial input arrived */
-        int serviced_serial = 0;
-        uint16_t kernel_port = COM1_BASE;
-
-        if (serial_buffer_pending(kernel_port)) {
-            serviced_serial = 1;
-        }
-
-        if (serviced_serial) {
+        /* Wake interactive tasks if an input source reports pending data */
+        if (idle_wakeup_cb && idle_wakeup_cb()) {
             yield();
             continue;
         }
@@ -555,6 +547,10 @@ int init_scheduler(void) {
     scheduler.in_schedule = 0;
 
     return 0;
+}
+
+void scheduler_register_idle_wakeup_callback(scheduler_idle_wakeup_cb_t callback) {
+    idle_wakeup_cb = callback;
 }
 
 /*
