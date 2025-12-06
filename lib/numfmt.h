@@ -9,5 +9,8 @@ size_t numfmt_i64_to_decimal(int64_t value, char *buffer, size_t buffer_len);
 size_t numfmt_u64_to_hex(uint64_t value, char *buffer, size_t buffer_len, int with_prefix);
 size_t numfmt_u8_to_hex(uint8_t value, char *buffer, size_t buffer_len);
 
+int numfmt_parse_u32(const char *str, uint32_t *out, uint32_t fallback);
+int numfmt_parse_u64(const char *str, uint64_t *out, uint64_t fallback);
+
 #endif /* LIB_NUMFMT_H */
 

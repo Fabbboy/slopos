@@ -3,6 +3,7 @@
 #include <limits.h>
 
 #include "memory.h"
+#include "string.h"
 
 static const char hex_digits[] = "0123456789ABCDEF";
 
@@ -106,5 +107,96 @@ size_t numfmt_u8_to_hex(uint8_t value, char *buffer, size_t buffer_len) {
     buffer[1] = hex_digits[value & 0xF];
     buffer[2] = '\0';
     return 2;
+}
+
+int numfmt_parse_u32(const char *str, uint32_t *out, uint32_t fallback) {
+    if (!out) {
+        return -1;
+    }
+
+    if (!str) {
+        *out = fallback;
+        return -1;
+    }
+
+    while (*str && isspace_k((int)*str)) {
+        str++;
+    }
+
+    uint64_t value = 0;
+    int seen_digit = 0;
+
+    while (*str && isdigit_k((int)*str)) {
+        seen_digit = 1;
+        value = (value * 10u) + (uint64_t)(*str - '0');
+        if (value > UINT32_MAX) {
+            value = UINT32_MAX;
+        }
+        str++;
+    }
+
+    if (*str) {
+        if ((*str == 'm' || *str == 'M') && (str[1] == 's' || str[1] == 'S')) {
+            str += 2;
+        }
+    }
+
+    while (*str && isspace_k((int)*str)) {
+        str++;
+    }
+
+    if (!seen_digit || *str != '\0') {
+        *out = fallback;
+        return -1;
+    }
+
+    *out = (uint32_t)value;
+    return 0;
+}
+
+int numfmt_parse_u64(const char *str, uint64_t *out, uint64_t fallback) {
+    if (!out) {
+        return -1;
+    }
+
+    if (!str) {
+        *out = fallback;
+        return -1;
+    }
+
+    while (*str && isspace_k((int)*str)) {
+        str++;
+    }
+
+    uint64_t value = 0;
+    int seen_digit = 0;
+
+    while (*str && isdigit_k((int)*str)) {
+        seen_digit = 1;
+        if (value > (UINT64_MAX / 10u)) {
+            value = UINT64_MAX;
+        } else {
+            value = (value * 10u) + (uint64_t)(*str - '0');
+        }
+        str++;
+    }
+
+    if (*str) {
+        if ((*str == 'm' || *str == 'M') && (str[1] == 's' || str[1] == 'S')) {
+            str += 2;
+        }
+    }
+
+    while (*str && isspace_k((int)*str)) {
+        str++;
+    }
+
+    if (!seen_digit || *str != '\0') {
+        *out = fallback;
+        return -1;
+    }
+
+    *out = value;
+    return 0;
 }
 

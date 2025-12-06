@@ -33,7 +33,7 @@
 #include "kernel_panic.h"
 #include "cpu_verify.h"
 #include "../mm/memory_init.h"
-#include <string.h>
+#include "../lib/string.h"
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;
@@ -177,39 +177,6 @@ int boot_init_run_all(void) {
     return 0;
 }
 
-static int command_line_has_token(const char *cmdline, const char *token) {
-    if (!cmdline || !token) {
-        return 0;
-    }
-
-    size_t token_len = strlen(token);
-    if (token_len == 0) {
-        return 0;
-    }
-
-    const char *cursor = cmdline;
-    while (*cursor) {
-        while (*cursor == ' ') {
-            cursor++;
-        }
-        if (*cursor == '\0') {
-            break;
-        }
-
-        const char *start = cursor;
-        while (*cursor && *cursor != ' ') {
-            cursor++;
-        }
-
-        size_t len = (size_t)(cursor - start);
-        if (len == token_len && strncmp(start, token, token_len) == 0) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
 /* Early hardware phase --------------------------------------------------- */
 static int boot_step_serial_init(void) {
     if (serial_init_com1() != 0) {
@@ -270,28 +237,28 @@ static int boot_step_boot_config(void) {
         return 0;
     }
 
-    if (command_line_has_token(boot_ctx.cmdline, "boot.debug=on") ||
-        command_line_has_token(boot_ctx.cmdline, "boot.debug=1") ||
-        command_line_has_token(boot_ctx.cmdline, "boot.debug=true") ||
-        command_line_has_token(boot_ctx.cmdline, "bootdebug=on")) {
+    if (str_has_token(boot_ctx.cmdline, "boot.debug=on") ||
+        str_has_token(boot_ctx.cmdline, "boot.debug=1") ||
+        str_has_token(boot_ctx.cmdline, "boot.debug=true") ||
+        str_has_token(boot_ctx.cmdline, "bootdebug=on")) {
         klog_set_level(KLOG_DEBUG);
         boot_info("Boot option: debug logging enabled");
-    } else if (command_line_has_token(boot_ctx.cmdline, "boot.debug=off") ||
-               command_line_has_token(boot_ctx.cmdline, "boot.debug=0") ||
-               command_line_has_token(boot_ctx.cmdline, "boot.debug=false") ||
-               command_line_has_token(boot_ctx.cmdline, "bootdebug=off")) {
+    } else if (str_has_token(boot_ctx.cmdline, "boot.debug=off") ||
+               str_has_token(boot_ctx.cmdline, "boot.debug=0") ||
+               str_has_token(boot_ctx.cmdline, "boot.debug=false") ||
+               str_has_token(boot_ctx.cmdline, "bootdebug=off")) {
         klog_set_level(KLOG_INFO);
         boot_debug("Boot option: debug logging disabled");
     }
 
-    if (command_line_has_token(boot_ctx.cmdline, "demo=off") ||
-        command_line_has_token(boot_ctx.cmdline, "demo=disabled") ||
-        command_line_has_token(boot_ctx.cmdline, "video=off") ||
-        command_line_has_token(boot_ctx.cmdline, "no-demo")) {
+    if (str_has_token(boot_ctx.cmdline, "demo=off") ||
+        str_has_token(boot_ctx.cmdline, "demo=disabled") ||
+        str_has_token(boot_ctx.cmdline, "video=off") ||
+        str_has_token(boot_ctx.cmdline, "no-demo")) {
         boot_init_set_optional_enabled(0);
         boot_info("Boot option: framebuffer demo disabled");
-    } else if (command_line_has_token(boot_ctx.cmdline, "demo=on") ||
-               command_line_has_token(boot_ctx.cmdline, "demo=enabled")) {
+    } else if (str_has_token(boot_ctx.cmdline, "demo=on") ||
+               str_has_token(boot_ctx.cmdline, "demo=enabled")) {
         boot_init_set_optional_enabled(1);
         boot_info("Boot option: framebuffer demo enabled");
     }
