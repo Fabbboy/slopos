@@ -10,7 +10,8 @@
 #include "mm_constants.h"
 #include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
-#include "../drivers/apic.h"
+#include "../boot/cpu_defs.h"
+#include "../lib/cpu.h"
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 #include "../third_party/limine/limine.h"
@@ -36,15 +37,106 @@ typedef struct allocator_buffer_plan {
     int prepared;
 } allocator_buffer_plan_t;
 
-typedef struct memory_init_state {
-    int early_paging_done;
-    int memory_layout_done;
-    int limine_memmap_parsed;
-    int hhdm_received;
-    int page_allocator_done;
-    int kernel_heap_done;
-    int process_vm_done;
-    int paging_done;
+static allocator_buffer_plan_t allocator_buffers = {0};
+static uint32_t usable_overlap_skips = 0;
+
+/* ========================================================================
+ * KERNEL MEMORY LAYOUT
+ * ======================================================================== */
+
+static kernel_memory_layout_t kernel_layout = {0};
+static int layout_initialized = 0;
+static const process_memory_layout_t process_layout = {
+    .code_start = PROCESS_CODE_START_VA,
+    .data_start = PROCESS_DATA_START_VA,
+    .heap_start = PROCESS_HEAP_START_VA,
+    .heap_max = PROCESS_HEAP_MAX_VA,
+    .stack_top = PROCESS_STACK_TOP_VA,
+    .stack_size = PROCESS_STACK_SIZE_BYTES,
+    .user_space_start = USER_SPACE_START_VA,
+    .user_space_end = USER_SPACE_END_VA,
+};
+
+void init_kernel_memory_layout(void) {
+    extern char _kernel_start[], _kernel_end[];
+
+    kernel_layout.kernel_start_phys = (uint64_t)_kernel_start;
+    kernel_layout.kernel_end_phys = (uint64_t)_kernel_end;
+
+    kernel_layout.kernel_start_virt = KERNEL_VIRTUAL_BASE;
+    kernel_layout.kernel_end_virt = KERNEL_VIRTUAL_BASE +
+        (kernel_layout.kernel_end_phys - kernel_layout.kernel_start_phys);
+
+    kernel_layout.kernel_heap_start = KERNEL_HEAP_VBASE;
+    kernel_layout.kernel_heap_end = KERNEL_HEAP_VBASE + KERNEL_HEAP_SIZE;
+
+    kernel_layout.kernel_stack_start = BOOT_STACK_PHYS_ADDR;
+    kernel_layout.kernel_stack_end = BOOT_STACK_PHYS_ADDR + BOOT_STACK_SIZE;
+
+    kernel_layout.identity_map_end = PAGE_SIZE_1GB;
+    kernel_layout.user_space_start = USER_SPACE_START_VA;
+    kernel_layout.user_space_end = USER_SPACE_END_VA;
+
+    layout_initialized = 1;
+    klog_debug("SlopOS: Kernel memory layout initialized");
+}
+
+const kernel_memory_layout_t *get_kernel_memory_layout(void) {
+    return layout_initialized ? &kernel_layout : NULL;
+}
+
+uint64_t mm_get_kernel_phys_start(void) {
+    return kernel_layout.kernel_start_phys;
+}
+
+uint64_t mm_get_kernel_phys_end(void) {
+    return kernel_layout.kernel_end_phys;
+}
+
+uint64_t mm_get_kernel_virt_start(void) {
+    return kernel_layout.kernel_start_virt;
+}
+
+uint64_t mm_get_identity_map_limit(void) {
+    return kernel_layout.identity_map_end;
+}
+
+uint64_t mm_get_kernel_heap_start(void) {
+    return kernel_layout.kernel_heap_start;
+}
+
+uint64_t mm_get_kernel_heap_end(void) {
+    return kernel_layout.kernel_heap_end;
+}
+
+uint64_t mm_get_user_space_start(void) {
+    return kernel_layout.user_space_start;
+}
+
+uint64_t mm_get_user_space_end(void) {
+    return kernel_layout.user_space_end;
+}
+
+const process_memory_layout_t *mm_get_process_layout(void) {
+    return &process_layout;
+}
+
+/* ========================================================================
+ * INITIALIZATION PHASE TRACKING
+ * ======================================================================== */
+
+typedef enum mm_init_phase {
+    MM_PHASE_UNINITIALIZED = 0,
+    MM_PHASE_LAYOUT_READY,
+    MM_PHASE_RESERVATIONS_DONE,
+    MM_PHASE_PAGE_ALLOC_READY,
+    MM_PHASE_MEMORY_DISCOVERY_DONE,
+    MM_PHASE_VIRTUAL_READY,
+    MM_PHASE_PROCESS_READY,
+    MM_PHASE_COMPLETE
+} mm_init_phase_t;
+
+typedef struct memory_init_stats {
     uint64_t total_memory_bytes;
     uint64_t available_memory_bytes;
     uint64_t reserved_device_bytes;
@@ -53,11 +145,11 @@ typedef struct memory_init_state {
     uint64_t hhdm_offset;
     uint32_t tracked_page_frames;
     uint64_t allocator_metadata_bytes;
-} memory_init_state_t;
+} memory_init_stats_t;
 
-static memory_init_state_t init_state = {0};
-static allocator_buffer_plan_t allocator_buffers = {0};
-static uint32_t usable_overlap_skips = 0;
+static mm_init_phase_t init_phase = MM_PHASE_UNINITIALIZED;
+static memory_init_stats_t init_stats = {0};
+static int early_paging_ok = 0;
 
 static void add_reservation_or_panic(uint64_t base, uint64_t length,
                                      mm_reservation_type_t type,
@@ -266,8 +358,8 @@ static void log_reserved_regions(void) {
 }
 
 static void finalize_reserved_regions(void) {
-    init_state.reserved_region_count = mm_reservations_count();
-    init_state.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+    init_stats.reserved_region_count = mm_reservations_count();
+    init_stats.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
     log_reserved_regions();
 
@@ -303,7 +395,7 @@ static void register_usable_subrange(uint64_t start, uint64_t end) {
         return;
     }
 
-    init_state.available_memory_bytes += aligned_size;
+    init_stats.available_memory_bytes += aligned_size;
 
     if (add_page_alloc_region(aligned_start, aligned_size, EFI_CONVENTIONAL_MEMORY) != 0) {
         klog_printf(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
@@ -542,7 +634,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
     allocator_buffers.reserved_phys_size = reserved_bytes;
     allocator_buffers.prepared = 1;
 
-    init_state.allocator_metadata_bytes = page_bytes_u64;
+    init_stats.allocator_metadata_bytes = page_bytes_u64;
 
     klog_printf(KLOG_DEBUG, "MM: Page allocator metadata reserved at phys 0x%llx (%u KB)\n",
                 (unsigned long long)reserve_phys_base,
@@ -567,7 +659,7 @@ static int prepare_allocator_buffers(const struct limine_memmap_response *memmap
  */
 static int initialize_early_memory(void) {
     klog_debug("MM: Skipping early paging reinitialization (already configured by bootloader)");
-    init_state.early_paging_done = 1;
+    early_paging_ok = 1;
     return 0;
 }
 
@@ -579,9 +671,9 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
                                        uint64_t hhdm_offset) {
     klog_debug("MM: Processing Limine memory map...");
 
-    init_state.total_memory_bytes = 0;
-    init_state.available_memory_bytes = 0;
-    init_state.memory_regions_count = 0;
+    init_stats.total_memory_bytes = 0;
+    init_stats.available_memory_bytes = 0;
+    init_stats.memory_regions_count = 0;
 
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
         klog_info("MM: ERROR - Limine memory map response missing");
@@ -601,8 +693,8 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
         }
 
         processed_entries++;
-        init_state.memory_regions_count++;
-        init_state.total_memory_bytes += entry->length;
+        init_stats.memory_regions_count++;
+        init_stats.total_memory_bytes += entry->length;
 
         if (entry->type == LIMINE_MEMMAP_USABLE) {
             register_usable_region(entry->base, entry->length);
@@ -614,9 +706,8 @@ static int initialize_memory_discovery(const struct limine_memmap_response *memm
         return -1;
     }
 
-    init_state.limine_memmap_parsed = 1;
-    init_state.hhdm_offset = hhdm_offset;
-    init_state.hhdm_received = 1;
+    init_phase = MM_PHASE_MEMORY_DISCOVERY_DONE;
+    init_stats.hhdm_offset = hhdm_offset;
 
     klog_printf(KLOG_DEBUG, "MM: HHDM offset: 0x%llx\n",
                 (unsigned long long)hhdm_offset);
@@ -641,24 +732,24 @@ static void validate_allocator_coverage(const struct limine_memmap_response *mem
         kernel_panic("MM: Missing memmap for allocator coverage validation");
     }
 
-    if (init_state.tracked_page_frames == 0) {
+    if (init_stats.tracked_page_frames == 0) {
         kernel_panic("MM: Allocator coverage validation missing tracked frames");
     }
 
     uint64_t highest_frame = highest_usable_frame_index(memmap);
     uint64_t needed_frames = highest_frame + 1;
 
-    if (needed_frames > init_state.tracked_page_frames) {
+    if (needed_frames > init_stats.tracked_page_frames) {
         klog_printf(KLOG_INFO,
                     "MM: Allocator coverage insufficient (need %llu frames, tracking %u)\n",
                     (unsigned long long)needed_frames,
-                    init_state.tracked_page_frames);
+                    init_stats.tracked_page_frames);
         kernel_panic("MM: Frame descriptor coverage truncated usable memory");
     }
 
     klog_printf(KLOG_DEBUG,
                 "MM: Allocator coverage verified (tracked %u frames, highest frame %llu)\n",
-                init_state.tracked_page_frames,
+                init_stats.tracked_page_frames,
                 (unsigned long long)highest_frame);
 }
 
@@ -680,9 +771,9 @@ static int initialize_physical_allocators(void) {
         kernel_panic("MM: Page allocator initialization failed");
         return -1;
     }
-    init_state.page_allocator_done = 1;
+    init_phase = MM_PHASE_PAGE_ALLOC_READY;
 
-    init_state.tracked_page_frames = allocator_buffers.page_capacity;
+    init_stats.tracked_page_frames = allocator_buffers.page_capacity;
 
     klog_debug("MM: Physical memory allocator initialized successfully");
     return 0;
@@ -697,14 +788,13 @@ static int initialize_virtual_memory(void) {
 
     /* Initialize full paging system */
     init_paging();
-    init_state.paging_done = 1;
 
     /* Initialize kernel heap for dynamic allocation */
     if (init_kernel_heap() != 0) {
         kernel_panic("MM: Kernel heap initialization failed");
         return -1;
     }
-    init_state.kernel_heap_done = 1;
+    init_phase = MM_PHASE_VIRTUAL_READY;
 
     klog_debug("MM: Virtual memory management initialized successfully");
     return 0;
@@ -722,7 +812,7 @@ static int initialize_process_memory(void) {
         kernel_panic("MM: Process VM initialization failed");
         return -1;
     }
-    init_state.process_vm_done = 1;
+    init_phase = MM_PHASE_PROCESS_READY;
 
     klog_debug("MM: Process memory management initialized successfully");
     return 0;
@@ -736,39 +826,47 @@ static void display_memory_summary(void) {
         return;
     }
 
-    klog_printf(KLOG_INFO, "\n========== SlopOS Memory System Initialized ==========\n");
-    klog_printf(KLOG_INFO, "Early Paging:          %s\n", init_state.early_paging_done ? "OK" : "FAILED");
-    klog_printf(KLOG_INFO, "Memory Layout:         %s\n", init_state.memory_layout_done ? "OK" : "FAILED");
-    klog_printf(KLOG_INFO, "Limine Memmap:         %s\n", init_state.limine_memmap_parsed ? "OK" : "FAILED");
-    klog_printf(KLOG_INFO, "HHDM Response:         %s\n", init_state.hhdm_received ? "OK" : "MISSING");
-    klog_printf(KLOG_INFO, "Page Allocator:        %s\n", init_state.page_allocator_done ? "OK" : "FAILED");
-    if (init_state.tracked_page_frames) {
-        klog_printf(KLOG_INFO, "Tracked Frames:        %u\n", init_state.tracked_page_frames);
-    }
-    if (init_state.allocator_metadata_bytes) {
-        klog_printf(KLOG_INFO, "Allocator Metadata:    %u KB\n",
-                    (uint32_t)(init_state.allocator_metadata_bytes / 1024));
-    }
-    if (init_state.reserved_region_count) {
-        klog_printf(KLOG_INFO, "Reserved Regions:      %u\n", init_state.reserved_region_count);
-    }
-    if (init_state.reserved_device_bytes) {
-        klog_printf(KLOG_INFO, "Reserved Device Mem:   %u KB\n",
-                    (uint32_t)(init_state.reserved_device_bytes / 1024));
-    }
-    klog_printf(KLOG_INFO, "Kernel Heap:           %s\n", init_state.kernel_heap_done ? "OK" : "FAILED");
-    klog_printf(KLOG_INFO, "Process VM:            %s\n", init_state.process_vm_done ? "OK" : "FAILED");
-    klog_printf(KLOG_INFO, "Full Paging:           %s\n", init_state.paging_done ? "OK" : "FAILED");
+    const int layout_ok = init_phase >= MM_PHASE_LAYOUT_READY;
+    const int reservations_ok = init_phase >= MM_PHASE_RESERVATIONS_DONE;
+    const int page_alloc_ok = init_phase >= MM_PHASE_PAGE_ALLOC_READY;
+    const int discovery_ok = init_phase >= MM_PHASE_MEMORY_DISCOVERY_DONE;
+    const int virtual_ok = init_phase >= MM_PHASE_VIRTUAL_READY;
+    const int process_ok = init_phase >= MM_PHASE_PROCESS_READY;
 
-    if (init_state.total_memory_bytes > 0) {
-        klog_printf(KLOG_INFO, "Total Memory:          %llu MB\n",
-                    (unsigned long long)(init_state.total_memory_bytes / (1024 * 1024)));
-        klog_printf(KLOG_INFO, "Available Memory:      %llu MB\n",
-                    (unsigned long long)(init_state.available_memory_bytes / (1024 * 1024)));
+    klog_printf(KLOG_INFO, "\n========== SlopOS Memory System Initialized ==========\n");
+    klog_printf(KLOG_INFO, "Early Paging:          %s\n", early_paging_ok ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Memory Layout:         %s\n", layout_ok ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Reservations:          %s\n", reservations_ok ? "OK" : "PENDING");
+    klog_printf(KLOG_INFO, "Limine Memmap:         %s\n", discovery_ok ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "HHDM Response:         %s\n", (init_stats.hhdm_offset != 0) ? "OK" : "MISSING");
+    klog_printf(KLOG_INFO, "Page Allocator:        %s\n", page_alloc_ok ? "OK" : "FAILED");
+    if (init_stats.tracked_page_frames) {
+        klog_printf(KLOG_INFO, "Tracked Frames:        %u\n", init_stats.tracked_page_frames);
     }
-    klog_printf(KLOG_INFO, "Memory Regions:        %u regions\n", init_state.memory_regions_count);
+    if (init_stats.allocator_metadata_bytes) {
+        klog_printf(KLOG_INFO, "Allocator Metadata:    %u KB\n",
+                    (uint32_t)(init_stats.allocator_metadata_bytes / 1024));
+    }
+    if (init_stats.reserved_region_count) {
+        klog_printf(KLOG_INFO, "Reserved Regions:      %u\n", init_stats.reserved_region_count);
+    }
+    if (init_stats.reserved_device_bytes) {
+        klog_printf(KLOG_INFO, "Reserved Device Mem:   %u KB\n",
+                    (uint32_t)(init_stats.reserved_device_bytes / 1024));
+    }
+    klog_printf(KLOG_INFO, "Kernel Heap:           %s\n", virtual_ok ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Process VM:            %s\n", process_ok ? "OK" : "FAILED");
+    klog_printf(KLOG_INFO, "Full Paging:           %s\n", virtual_ok ? "OK" : "FAILED");
+
+    if (init_stats.total_memory_bytes > 0) {
+        klog_printf(KLOG_INFO, "Total Memory:          %llu MB\n",
+                    (unsigned long long)(init_stats.total_memory_bytes / (1024 * 1024)));
+        klog_printf(KLOG_INFO, "Available Memory:      %llu MB\n",
+                    (unsigned long long)(init_stats.available_memory_bytes / (1024 * 1024)));
+    }
+    klog_printf(KLOG_INFO, "Memory Regions:        %u regions\n", init_stats.memory_regions_count);
     klog_printf(KLOG_INFO, "HHDM Offset:           0x%llx\n",
-                (unsigned long long)init_state.hhdm_offset);
+                (unsigned long long)init_stats.hhdm_offset);
     klog_printf(KLOG_INFO, "=====================================================\n\n");
 }
 
@@ -802,8 +900,8 @@ int init_memory_system(const struct limine_memmap_response *memmap,
 
     /* Establish kernel layout before any reservations or helpers */
     init_kernel_memory_layout();
-    init_state.memory_layout_done = 1;
     mm_init_phys_virt_helpers();
+    init_phase = MM_PHASE_LAYOUT_READY;
 
     mm_reservations_reset();
     record_kernel_core_reservations();
@@ -818,6 +916,7 @@ int init_memory_system(const struct limine_memmap_response *memmap,
 
     record_allocator_metadata_reservation();
     finalize_reserved_regions();
+    init_phase = MM_PHASE_RESERVATIONS_DONE;
 
     /* Phase 1: Early paging for basic memory access */
     if (initialize_early_memory() != 0) {
@@ -846,6 +945,8 @@ int init_memory_system(const struct limine_memmap_response *memmap,
         return -1;
     }
 
+    init_phase = MM_PHASE_COMPLETE;
+
     /* Display final summary */
     display_memory_summary();
 
@@ -860,14 +961,7 @@ int init_memory_system(const struct limine_memmap_response *memmap,
  * @return 1 if fully initialized, 0 otherwise
  */
 int is_memory_system_initialized(void) {
-    return (init_state.early_paging_done &&
-            init_state.memory_layout_done &&
-            init_state.limine_memmap_parsed &&
-            init_state.hhdm_received &&
-            init_state.page_allocator_done &&
-            init_state.kernel_heap_done &&
-            init_state.process_vm_done &&
-            init_state.paging_done);
+    return (init_phase == MM_PHASE_COMPLETE);
 }
 
 /**
@@ -879,7 +973,7 @@ int is_memory_system_initialized(void) {
 void get_memory_statistics(uint64_t *total_memory_out,
                           uint64_t *available_memory_out,
                           uint32_t *regions_count_out) {
-    if (total_memory_out) *total_memory_out = init_state.total_memory_bytes;
-    if (available_memory_out) *available_memory_out = init_state.available_memory_bytes;
-    if (regions_count_out) *regions_count_out = init_state.memory_regions_count;
+    if (total_memory_out) *total_memory_out = init_stats.total_memory_bytes;
+    if (available_memory_out) *available_memory_out = init_stats.available_memory_bytes;
+    if (regions_count_out) *regions_count_out = init_stats.memory_regions_count;
 }

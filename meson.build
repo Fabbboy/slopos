@@ -79,7 +79,6 @@ boot_sources += files(
 mm_dir = meson.current_source_dir() / 'mm'
 mm_sources += files(
   'mm/paging.c',
-  'mm/memory_layout.c',
   'mm/page_alloc.c',
   'mm/process_vm.c',
   'mm/kernel_heap.c',

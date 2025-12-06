@@ -24,5 +24,18 @@
 #define CPUID_EXTENDED_FEATURE_INFO   0x80000001  /* Extended feature information */
 #define CPUID_LONG_MODE_BIT           0x20000000  /* Long mode bit in EDX (bit 29) */
 
+/* CPUID feature flags (standard leaf 1) */
+#define CPUID_FEAT_EDX_APIC           (1u << 9)   /* Local APIC present */
+#define CPUID_FEAT_ECX_X2APIC         (1u << 21)  /* x2APIC mode available */
+
+/* APIC MSRs */
+#define MSR_APIC_BASE                 0x1B
+
+/* APIC base register flags */
+#define APIC_BASE_BSP                 (1u << 8)   /* Bootstrap Processor */
+#define APIC_BASE_X2APIC              (1u << 10)  /* x2APIC mode enabled */
+#define APIC_BASE_GLOBAL_ENABLE       (1u << 11)  /* APIC globally enabled */
+#define APIC_BASE_ADDR_MASK           0xFFFFF000u /* Physical base address mask */
+
 #endif /* BOOT_CPU_DEFS_H */
 

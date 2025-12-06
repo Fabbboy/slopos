@@ -37,10 +37,6 @@ static process_page_dir_t kernel_page_dir = {
 /* Current active page directory for running process */
 static process_page_dir_t *current_page_dir = &kernel_page_dir;
 
-static inline page_table_t *phys_to_page_table_ptr(uint64_t phys_addr) {
-    return (page_table_t *)mm_phys_to_virt(phys_addr);
-}
-
 static inline int table_empty(const page_table_t *table) {
     if (!table) {
         return 1;
@@ -58,7 +54,7 @@ static page_table_t *alloc_page_table(uint64_t *phys_out) {
     if (!phys) {
         return NULL;
     }
-    page_table_t *virt = phys_to_page_table_ptr(phys);
+    page_table_t *virt = (page_table_t *)mm_phys_to_virt(phys);
     if (!virt) {
         free_page_frame(phys);
         return NULL;
@@ -235,7 +231,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     }
 
     /* Get PDPT table */
-    page_table_t *pdpt = phys_to_page_table_ptr(pte_address(pml4_entry));
+    page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4_entry));
     if (!pdpt) {
         klog_printf(KLOG_INFO, "virt_to_phys: Invalid PDPT address\n");
         return 0;
@@ -253,7 +249,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     }
 
     /* Traverse PDPT -> PD */
-    page_table_t *pd = phys_to_page_table_ptr(pte_address(pdpt_entry));
+    page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpt_entry));
     if (!pd) {
         klog_printf(KLOG_INFO, "virt_to_phys: Invalid PD address\n");
         return 0;
@@ -271,7 +267,7 @@ static uint64_t virt_to_phys_for_dir(process_page_dir_t *page_dir, uint64_t vadd
     }
 
     /* Traverse PD -> PT */
-    page_table_t *pt = phys_to_page_table_ptr(pte_address(pd_entry));
+    page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pd_entry));
     if (!pt) {
         klog_printf(KLOG_INFO, "virt_to_phys: Invalid PT address\n");
         return 0;
@@ -362,7 +358,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
             return -1;
         }
         pdpt_phys = pte_address(pml4_entry);
-        pdpt = phys_to_page_table_ptr(pdpt_phys);
+        pdpt = (page_table_t *)mm_phys_to_virt(pdpt_phys);
         if (user_mapping && !(pml4_entry & PAGE_USER)) {
             pml4->entries[pml4_idx] = (pml4_entry & ~0xFFF) | inter_flags;
         }
@@ -400,7 +396,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
             return -1;
         }
         pd_phys = pte_address(pdpt_entry);
-        pd = phys_to_page_table_ptr(pd_phys);
+        pd = (page_table_t *)mm_phys_to_virt(pd_phys);
         if (user_mapping && !(pdpt_entry & PAGE_USER)) {
             pdpt->entries[pdpt_idx] = (pdpt_entry & ~0xFFF) | inter_flags;
         }
@@ -438,7 +434,7 @@ static int map_page_in_directory(process_page_dir_t *page_dir,
         return -1;
     }
 
-    page_table_t *pt = phys_to_page_table_ptr(pte_address(pd_entry));
+    page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pd_entry));
     if (!pt) {
         klog_printf(KLOG_INFO, "map_page: Invalid PT pointer\n");
         return -1;
@@ -486,7 +482,7 @@ static int unmap_page_in_directory(process_page_dir_t *page_dir, uint64_t vaddr)
         return 0;
     }
 
-    page_table_t *pdpt = phys_to_page_table_ptr(pte_address(pml4_entry));
+    page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4_entry));
     uint64_t pdpt_entry = pdpt->entries[pdpt_idx];
     if (!pte_present(pdpt_entry)) {
         return 0;
@@ -509,7 +505,7 @@ static int unmap_page_in_directory(process_page_dir_t *page_dir, uint64_t vaddr)
         return 0;
     }
 
-    page_table_t *pd = phys_to_page_table_ptr(pte_address(pdpt_entry));
+    page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpt_entry));
     uint64_t pd_entry = pd->entries[pd_idx];
     if (!pte_present(pd_entry)) {
         return 0;
@@ -523,7 +519,7 @@ static int unmap_page_in_directory(process_page_dir_t *page_dir, uint64_t vaddr)
         }
         invlpg(vaddr);
     } else {
-        page_table_t *pt = phys_to_page_table_ptr(pte_address(pd_entry));
+        page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pd_entry));
         if (!pt) {
             return -1;
         }
@@ -624,7 +620,7 @@ static void free_page_table_tree(process_page_dir_t *page_dir) {
             continue;
         }
 
-        page_table_t *pdpt = phys_to_page_table_ptr(pte_address(pml4e));
+        page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4e));
         for (uint32_t pdpt_idx = 0; pdpt_idx < ENTRIES_PER_PAGE_TABLE; pdpt_idx++) {
             uint64_t pdpte = pdpt->entries[pdpt_idx];
             if (!pte_present(pdpte)) {
@@ -639,7 +635,7 @@ static void free_page_table_tree(process_page_dir_t *page_dir) {
                 continue;
             }
 
-            page_table_t *pd = phys_to_page_table_ptr(pte_address(pdpte));
+            page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpte));
             for (uint32_t pd_idx = 0; pd_idx < ENTRIES_PER_PAGE_TABLE; pd_idx++) {
                 uint64_t pde = pd->entries[pd_idx];
                 if (!pte_present(pde)) {
@@ -654,7 +650,7 @@ static void free_page_table_tree(process_page_dir_t *page_dir) {
                     continue;
                 }
 
-                page_table_t *pt = phys_to_page_table_ptr(pte_address(pde));
+                page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pde));
                 for (uint32_t pt_idx = 0; pt_idx < ENTRIES_PER_PAGE_TABLE; pt_idx++) {
                     uint64_t pte = pt->entries[pt_idx];
                 if (pte_present(pte)) {
@@ -705,7 +701,7 @@ void init_paging(void) {
     kernel_page_dir.pml4_phys = cr3 & ~0xFFF;
 
     /* Ensure kernel PML4 pointer references the mapped table */
-    page_table_t *pml4_ptr = phys_to_page_table_ptr(kernel_page_dir.pml4_phys);
+    page_table_t *pml4_ptr = (page_table_t *)mm_phys_to_virt(kernel_page_dir.pml4_phys);
     if (!pml4_ptr) {
         kernel_panic("Failed to translate kernel PML4 physical address");
     }
@@ -775,7 +771,7 @@ uint64_t get_page_size(uint64_t vaddr) {
     }
 
     /* Get PDPT table */
-    page_table_t *pdpt = phys_to_page_table_ptr(pte_address(pml4_entry));
+    page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4_entry));
     uint64_t pdpt_entry = pdpt->entries[pdpt_idx];
     if (!pte_present(pdpt_entry)) {
         return 0;
@@ -787,7 +783,7 @@ uint64_t get_page_size(uint64_t vaddr) {
     }
 
     /* Get PD table */
-    page_table_t *pd = phys_to_page_table_ptr(pte_address(pdpt_entry));
+    page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpt_entry));
     uint64_t pd_entry = pd->entries[pd_idx];
     if (!pte_present(pd_entry)) {
         return 0;

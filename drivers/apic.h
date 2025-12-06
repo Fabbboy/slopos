@@ -8,13 +8,9 @@
 
 #include <stdint.h>
 #include "../lib/cpu.h"
-
-// CPUID feature flags for APIC detection
-#define CPUID_FEAT_EDX_APIC     (1 << 9)   // Local APIC present
-#define CPUID_FEAT_ECX_X2APIC   (1 << 21)  // x2APIC mode available
+#include "../boot/cpu_defs.h"
 
 // MSR addresses for APIC
-#define MSR_APIC_BASE           0x1B
 #define MSR_X2APIC_APICID       0x802
 #define MSR_X2APIC_VERSION      0x803
 #define MSR_X2APIC_LVT_TIMER    0x832
@@ -22,12 +18,6 @@
 #define MSR_X2APIC_LVT_LINT1    0x836
 #define MSR_X2APIC_LVT_ERROR    0x837
 #define MSR_X2APIC_SPURIOUS     0x80F
-
-// APIC base register flags
-#define APIC_BASE_BSP           (1 << 8)   // Bootstrap Processor
-#define APIC_BASE_X2APIC        (1 << 10)  // x2APIC mode enabled
-#define APIC_BASE_GLOBAL_ENABLE (1 << 11)  // APIC globally enabled
-#define APIC_BASE_ADDR_MASK     0xFFFFF000 // Physical base address mask
 
 // Local APIC register offsets (for memory-mapped APIC)
 #define LAPIC_ID                0x020

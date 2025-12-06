@@ -9,34 +9,15 @@
 #include "../lib/klog.h"
 #include "../boot/limine_protocol.h"
 #include "../lib/memory.h"
-#include "memory_layout.h"
 #include "memory_reservations.h"
 #include "paging.h"
 #include "phys_virt.h"
-
-static uint64_t cached_identity_limit;
-static uint64_t kernel_phys_start;
-static uint64_t kernel_phys_end;
-static uint64_t kernel_virt_start;
-static int translation_initialized;
+#include "../boot/kernel_panic.h"
 
 void mm_init_phys_virt_helpers(void) {
-    const kernel_memory_layout_t *layout = get_kernel_memory_layout();
-    if (!layout) {
-        cached_identity_limit = 0;
-        kernel_phys_start = 0;
-        kernel_phys_end = 0;
-        kernel_virt_start = 0;
-        translation_initialized = 0;
-        return;
+    if (!is_hhdm_available()) {
+        kernel_panic("MM: HHDM unavailable; cannot translate physical addresses");
     }
-
-    kernel_phys_start = layout->kernel_start_phys;
-    kernel_phys_end = layout->kernel_end_phys;
-    kernel_virt_start = layout->kernel_start_virt;
-    cached_identity_limit = layout->identity_map_end;
-
-    translation_initialized = (kernel_phys_end > kernel_phys_start);
 }
 
 uint64_t mm_phys_to_virt(uint64_t phys_addr) {
@@ -52,22 +33,13 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
         return 0;
     }
 
-    if (is_hhdm_available()) {
-        return phys_addr + get_hhdm_offset();
+    if (!is_hhdm_available()) {
+        klog_printf(KLOG_INFO, "mm_phys_to_virt: HHDM unavailable for 0x%llx\n",
+                    (unsigned long long)phys_addr);
+        return 0;
     }
 
-    if (translation_initialized) {
-        if (phys_addr >= kernel_phys_start && phys_addr < kernel_phys_end) {
-            return kernel_virt_start + (phys_addr - kernel_phys_start);
-        }
-
-        if (phys_addr < cached_identity_limit) {
-            return phys_addr;
-        }
-    }
-
-    klog_printf(KLOG_INFO, "mm_phys_to_virt: No mapping available for physical address\n");
-    return 0;
+    return phys_addr + get_hhdm_offset();
 }
 
 uint64_t mm_virt_to_phys(uint64_t virt_addr) {
@@ -103,17 +75,12 @@ void *mm_map_mmio_region(uint64_t phys_addr, size_t size) {
         return NULL;
     }
 
-    if (is_hhdm_available()) {
-        uint64_t hhdm_offset = get_hhdm_offset();
-        return (void *)(phys_addr + hhdm_offset);
+    if (!is_hhdm_available()) {
+        klog_printf(KLOG_INFO, "MM: mm_map_mmio_region requires HHDM (unavailable)\n");
+        return NULL;
     }
 
-    if (translation_initialized && phys_addr < cached_identity_limit) {
-        return (void *)(uintptr_t)phys_addr;
-    }
-
-    klog_printf(KLOG_INFO, "MM: mm_map_mmio_region requires explicit paging support (unavailable)\n");
-    return NULL;
+    return (void *)(phys_addr + get_hhdm_offset());
 }
 
 int mm_unmap_mmio_region(void *virt_addr, size_t size) {

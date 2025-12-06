@@ -58,14 +58,6 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
         return -1;
     }
 
-    if (reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
-        reservation_overflows++;
-        klog_printf(KLOG_INFO,
-                    "MM: WARNING - Reserved region capacity exceeded (%u)",
-                    MM_MAX_RESERVED_REGIONS);
-        return -1;
-    }
-
     uint64_t end = phys_base + length;
     if (end < phys_base) {
         klog_info("MM: WARNING - Reserved region overflow detected");
@@ -80,62 +72,22 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
         return -1;
     }
 
+    if (reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
+        reservation_overflows++;
+        klog_printf(KLOG_INFO,
+                    "MM: WARNING - Reserved region capacity exceeded (%u)",
+                    MM_MAX_RESERVED_REGIONS);
+        return -1;
+    }
+
     uint64_t aligned_length = aligned_end - aligned_base;
 
-    for (uint32_t i = 0; i < reserved_region_count; i++) {
-        mm_reserved_region_t *existing = &reserved_regions[i];
-        if (existing->length == 0) {
-            continue;
-        }
-
-        uint64_t existing_end = existing->phys_base + existing->length;
-
-        if (aligned_base >= existing->phys_base && aligned_end <= existing_end) {
-            existing->flags |= flags;
-            if (existing->label[0] == '\0' && label) {
-                copy_label(existing->label, label);
-            }
-            return 0;
-        }
-
-        if (aligned_base <= existing->phys_base && aligned_end >= existing_end) {
-            existing->phys_base = aligned_base;
-            existing->length = aligned_length;
-            existing->flags |= flags;
-            return 0;
-        }
-
-        if (aligned_base < existing_end && aligned_end > existing->phys_base) {
-            uint64_t merged_start = (aligned_base < existing->phys_base) ? aligned_base : existing->phys_base;
-            uint64_t merged_end = (aligned_end > existing_end) ? aligned_end : existing_end;
-
-            existing->phys_base = merged_start;
-            existing->length = merged_end - merged_start;
-            existing->flags |= flags;
-            if (existing->label[0] == '\0' && label) {
-                copy_label(existing->label, label);
-            }
-            return 0;
-        }
-    }
-
-    uint32_t insert_index = reserved_region_count;
-    for (uint32_t i = 0; i < reserved_region_count; i++) {
-        if (aligned_base < reserved_regions[i].phys_base) {
-            insert_index = i;
-            break;
-        }
-    }
-
-    for (uint32_t i = reserved_region_count; i > insert_index; i--) {
-        reserved_regions[i] = reserved_regions[i - 1];
-    }
-
-    reserved_regions[insert_index].phys_base = aligned_base;
-    reserved_regions[insert_index].length = aligned_length;
-    reserved_regions[insert_index].type = type;
-    reserved_regions[insert_index].flags = flags;
-    copy_label(reserved_regions[insert_index].label, label);
+    mm_reserved_region_t *slot = &reserved_regions[reserved_region_count];
+    slot->phys_base = aligned_base;
+    slot->length = aligned_length;
+    slot->type = type;
+    slot->flags = flags;
+    copy_label(slot->label, label);
 
     reserved_region_count++;
     return 0;
@@ -196,13 +148,9 @@ int mm_is_range_reserved(uint64_t phys_base, uint64_t length) {
         }
 
         uint64_t region_end = region->phys_base + region->length;
-        if (region->phys_base >= end) {
-            break;
+        if (region->phys_base < end && region_end > phys_base) {
+            return 1;
         }
-        if (region_end <= phys_base) {
-            continue;
-        }
-        return 1;
     }
 
     return 0;
