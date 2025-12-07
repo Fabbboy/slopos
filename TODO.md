@@ -6,14 +6,10 @@
 - [ ] Define kernel ABI for returning from user space (interrupt frame, syscall gate).
 
 ## Scheduling Enhancements
-- [ ] Add preemption hooks once LAPIC timer calibration lands.
-- [ ] Support per-task time slices and basic load accounting across kthreads.
+- [ ] Calibrate/use LAPIC timer for preemption (PIT-based preemption exists).
 
 ## Async Coordination
 - [ ] Extend join/wait primitives with timeout and cancellation support.
 - [ ] Provide a lightweight async completion primitive for cross-task signaling.
-
-## Hardware interrupts
-- [ ] ABSOLUTE PRIORITY: Add Hardware Interrupts instead of polling for devices.
 
 _Pending:_ A detailed execution plan will be pushed to elaborate on each item before implementation starts.
