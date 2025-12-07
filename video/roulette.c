@@ -31,7 +31,7 @@
 #define ROULETTE_DEGREE_STEPS            360
 #define ROULETTE_SEGMENT_DEGREES         (360 / ROULETTE_SEGMENT_COUNT)
 #define ROULETTE_SPIN_LOOPS                4
-#define ROULETTE_SPIN_DURATION_MS       4200
+#define ROULETTE_SPIN_DURATION_MS       8400
 #define ROULETTE_SPIN_FRAME_DELAY_MS      16
 
 /* Alternating colored vs “blank” wedges */
@@ -439,7 +439,10 @@ int roulette_show_spin(uint32_t fate_number) {
 
     klog_printf(KLOG_INFO, "ROULETTE: Animating pointer sweep\n");
     for (int frame = 1; frame <= total_frames; frame++) {
-        int pointer_angle_frame = start_angle + (total_rotation * frame) / total_frames;
+        /* Ease-out interpolation: fast start, slow finish (quadratic). */
+        uint32_t p_q16 = ((uint32_t)frame << 16) / (uint32_t)total_frames;              // progress in Q16
+        uint32_t eased_q16 = (p_q16 * (131072u - p_q16)) >> 16;                         // p * (2 - p)
+        int pointer_angle_frame = start_angle + (int)(((uint64_t)total_rotation * eased_q16) >> 16);
         render_wheel_frame(width, height, center_x, center_y, radius,
                            -1, pointer_angle_frame, &last_pointer_angle,
                            fate_number, false, false, false);
