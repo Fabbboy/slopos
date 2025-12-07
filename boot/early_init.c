@@ -629,6 +629,9 @@ BOOT_INIT_OPTIONAL_STEP(optional, "framebuffer demo", boot_step_framebuffer_demo
  * Limine provides boot information via static request structures.
  */
 void kernel_main(void) {
+    /* Initialize the gambling ledger before any subsystem records wins/losses. */
+    wl_init();
+
     if (boot_init_run_all() != 0) {
         kernel_panic("Boot initialization failed");
     }

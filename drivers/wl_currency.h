@@ -3,7 +3,7 @@
  * The Ledger of Destiny: Tracks individual Wins (W) and Losses (L)
  *
  * Users start with 10 currency units.
- * Each W earned = +1 unit, each L earned = -1 unit
+ * Each W earned = +10 units, each L earned = -10 units
  * When balance reaches 0 or negative, scheduler triggers panic
  *
  * This is not a bug. This is the beating heart of SlopOS gambling addiction.
@@ -14,23 +14,14 @@
 
 #include <stdint.h>
 
-/*
- * Initialize the W/L currency system
- * Sets balance to 10 (starting currency)
- */
+/* Initialize the W/L currency system (call once during early boot). */
 void wl_init(void);
 
-/*
- * Award a single win: +1 currency
- * Called when operations succeed
- */
-void take_w(void);
+/* Award a win: +10 currency units (for successful operations). */
+void wl_award_win(void);
 
-/*
- * Award a single loss: -1 currency
- * Called when recoverable errors occur
- */
-void take_l(void);
+/* Award a loss: -10 currency units (for recoverable errors). */
+void wl_award_loss(void);
 
 /*
  * Get current currency balance

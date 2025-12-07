@@ -207,7 +207,7 @@ int schedule_task(task_t *task) {
 
     if (ready_queue_enqueue(&scheduler.ready_queue, task) != 0) {
         klog_printf(KLOG_INFO, "schedule_task: ready queue full, request rejected\n");
-        take_l();
+        wl_award_loss();
         return -1;
     }
 
@@ -323,6 +323,11 @@ void schedule(void) {
             } else if (ready_queue_enqueue(&scheduler.ready_queue, current) != 0) {
                 klog_printf(KLOG_INFO, "schedule: ready queue full when re-queuing task %u\n",
                             current->task_id);
+                /* Backpressure: keep running the current task instead of dropping it. */
+                task_set_state(current->task_id, TASK_STATE_RUNNING);
+                scheduler_reset_task_quantum(current);
+                scheduler.in_schedule--;
+                return;
             } else {
                 scheduler_reset_task_quantum(current);
             }

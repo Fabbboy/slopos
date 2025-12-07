@@ -2,7 +2,7 @@
  * SlopOS W/L Currency System Implementation
  * The Ledger of Destiny: Every win and loss recorded in kernel memory
  *
- * Start with 10 currency. Each W = +1, each L = -1.
+ * Start with 10 currency. Each W = +10, each L = -10.
  * Reach 0 or below and the scheduler ends you.
  */
 
@@ -15,40 +15,45 @@
  * GLOBAL W/L STATE
  * ======================================================================== */
 
-static int64_t w_balance = 10;  /* Start with 10 currency */
-static int is_initialized = 0;
+#define WL_STARTING_BALANCE 10
+#define WL_UNIT_DELTA       10
+
+static int64_t w_balance = WL_STARTING_BALANCE;  /* Start with 10 currency */
+static int w_initialized = 0;
 
 /* ========================================================================
  * INITIALIZATION
  * ======================================================================== */
 
 void wl_init(void) {
-    if (is_initialized) {
+    if (w_initialized) {
         return;
     }
 
-    w_balance = 10;  /* Reset to starting balance */
-    is_initialized = 1;
+    w_balance = WL_STARTING_BALANCE;
+    w_initialized = 1;
 }
 
 /* ========================================================================
  * AWARD FUNCTIONS
  * ======================================================================== */
 
-void take_w(void) {
-    if (!is_initialized) {
-        wl_init();
+void wl_award_win(void) {
+    if (!w_initialized) {
+        serial_emergency_puts("[WL] award_win before wl_init\n");
+        return;
     }
 
-    w_balance += 1;
+    w_balance += WL_UNIT_DELTA;
 }
 
-void take_l(void) {
-    if (!is_initialized) {
-        wl_init();
+void wl_award_loss(void) {
+    if (!w_initialized) {
+        serial_emergency_puts("[WL] award_loss before wl_init\n");
+        return;
     }
 
-    w_balance -= 1;
+    w_balance -= WL_UNIT_DELTA;
 }
 
 /* ========================================================================
@@ -56,8 +61,8 @@ void take_l(void) {
  * ======================================================================== */
 
 int64_t wl_get_balance(void) {
-    if (!is_initialized) {
-        wl_init();
+    if (!w_initialized) {
+        return WL_STARTING_BALANCE;
     }
 
     return w_balance;
@@ -81,7 +86,7 @@ static void wl_output_decimal(int64_t value) {
  * ======================================================================== */
 
 void wl_check_balance(void) {
-    if (!is_initialized) {
+    if (!w_initialized) {
         return;
     }
 

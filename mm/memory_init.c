@@ -81,6 +81,8 @@ static memory_init_stats_t init_stats = {0};
 static int early_paging_ok = 0;
 static int memory_system_initialized = 0;
 
+static uint64_t highest_usable_frame(void);
+
 /* ========================================================================
  * LAYOUT HELPERS
  * ======================================================================== */
@@ -213,6 +215,92 @@ static void canonical_add(uint64_t base, uint64_t length,
     slot->type = type;
     slot->flags = flags;
     copy_label(slot->label, label);
+}
+
+static void canonical_recompute_stats(void) {
+    init_stats.available_memory_bytes = 0;
+
+    int has_usable = 0;
+    for (uint32_t i = 0; i < canonical_count; i++) {
+        if (canonical_map[i].type == CANONICAL_USABLE) {
+            has_usable = 1;
+            init_stats.available_memory_bytes += canonical_map[i].length;
+        }
+    }
+
+    if (!has_usable) {
+        init_stats.tracked_page_frames = 0;
+        return;
+    }
+
+    uint64_t highest_frame = highest_usable_frame();
+    init_stats.tracked_page_frames = (highest_frame >= UINT32_MAX) ? 0 : (uint32_t)(highest_frame + 1);
+}
+
+static int canonical_insert_slot(uint32_t index) {
+    if (canonical_count >= MAX_CANONICAL_REGIONS) {
+        return -1;
+    }
+    for (uint32_t i = canonical_count; i > index; i--) {
+        canonical_map[i] = canonical_map[i - 1];
+    }
+    canonical_count++;
+    return 0;
+}
+
+static void canonical_reserve_range(uint64_t phys_base,
+                                    uint64_t length,
+                                    uint32_t flags,
+                                    const char *label) {
+    if (length == 0) {
+        return;
+    }
+
+    uint64_t end = phys_base + length;
+    for (uint32_t i = 0; i < canonical_count; i++) {
+        canonical_region_t *region = &canonical_map[i];
+        uint64_t region_end = region->base + region->length;
+
+        if (region->type != CANONICAL_USABLE) {
+            continue;
+        }
+        if (phys_base < region->base || end > region_end) {
+            continue;
+        }
+
+        /* Split left usable chunk if needed. */
+        if (phys_base > region->base) {
+            if (canonical_insert_slot(i) != 0) {
+                kernel_panic("MM: Canonical map capacity exceeded during reserve");
+            }
+            canonical_map[i] = *region;
+            canonical_map[i].length = phys_base - region->base;
+            region = &canonical_map[i + 1];
+            region->base = phys_base;
+            region->length = region_end - phys_base;
+        }
+
+        /* Split right usable chunk if needed. */
+        if (end < region->base + region->length) {
+            if (canonical_insert_slot(i + 1) != 0) {
+                kernel_panic("MM: Canonical map capacity exceeded during reserve");
+            }
+            canonical_map[i + 1] = *region;
+            canonical_map[i + 1].base = end;
+            canonical_map[i + 1].length = region_end - end;
+            region->length = end - region->base;
+        }
+
+        /* Convert overlapping chunk to reserved. */
+        region->type = CANONICAL_RESERVED;
+        region->flags = flags;
+        copy_label(region->label, label);
+
+        canonical_recompute_stats();
+        return;
+    }
+
+    kernel_panic("MM: Failed to project reservation into canonical map");
 }
 
 /* ========================================================================
@@ -463,17 +551,10 @@ static void build_canonical_map(const struct limine_memmap_response *memmap,
         res_idx++;
     }
 
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        if (canonical_map[i].type == CANONICAL_USABLE) {
-            init_stats.available_memory_bytes += canonical_map[i].length;
-        }
-    }
-
-    uint64_t highest_frame = highest_usable_frame();
-    if (highest_frame >= UINT32_MAX) {
+    canonical_recompute_stats();
+    if (init_stats.tracked_page_frames == 0 && init_stats.available_memory_bytes > 0) {
         kernel_panic("MM: Usable memory exceeds supported frame range");
     }
-    init_stats.tracked_page_frames = (uint32_t)(highest_frame + 1);
     init_stats.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
     init_stats.reserved_region_count = mm_reservations_count();
 }
@@ -537,8 +618,12 @@ static allocator_plan_t plan_allocator_metadata(const struct limine_memmap_respo
     plan.capacity_frames = init_stats.tracked_page_frames;
     plan.buffer = (void *)(phys_base + hhdm_offset);
 
-    /* Rebuild canonical map to reflect the newly reserved metadata window. */
-    build_canonical_map(memmap, hhdm_offset);
+    /* Project the metadata reservation into the canonical map in-place. */
+    canonical_reserve_range(phys_base,
+                            aligned_bytes,
+                            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
+                            MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+                            "Allocator metadata");
 
     return plan;
 }

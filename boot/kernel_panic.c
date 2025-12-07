@@ -211,7 +211,7 @@ void kernel_roulette(void) {
     /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
     if ((fate & 1) == 0) {
         /* Even: The wheel has decided your fate - user takes an L */
-        take_l();
+        wl_award_loss();
         panic_output_string("Even number. The wheel has spoken. You have lost.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
@@ -224,7 +224,7 @@ void kernel_roulette(void) {
         /* Never reached */
     } else {
         /* Odd: The kernel survives another day - user takes a W */
-        take_w();
+        wl_award_win();
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
         panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
         /* Return normally - kernel continues to scheduler */

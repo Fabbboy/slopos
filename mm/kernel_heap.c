@@ -264,7 +264,7 @@ static int expand_heap(uint32_t min_size) {
 
     if (expansion_start >= kernel_heap.end_addr || expansion_start + total_bytes > kernel_heap.end_addr) {
         klog_info("expand_heap: Heap growth denied - would exceed heap window");
-        take_l();
+        wl_award_loss();
         return -1;
     }
 
@@ -333,12 +333,12 @@ rollback:
 void *kmalloc(size_t size) {
     if (!kernel_heap.initialized) {
         klog_printf(KLOG_INFO, "kmalloc: Heap not initialized\n");
-        take_l();
+        wl_award_loss();
         return NULL;
     }
 
     if (size == 0 || size > MAX_ALLOC_SIZE) {
-        take_l();
+        wl_award_loss();
         return NULL;
     }
 
@@ -352,7 +352,7 @@ void *kmalloc(size_t size) {
     /* Expand heap if no suitable block found */
     if (!block) {
         if (expand_heap(total_size) != 0) {
-            take_l();
+            wl_award_loss();
             return NULL;
         }
         block = find_free_block(total_size);
@@ -360,7 +360,7 @@ void *kmalloc(size_t size) {
 
     if (!block) {
         klog_printf(KLOG_INFO, "kmalloc: No suitable block found after expansion\n");
-        take_l();
+        wl_award_loss();
         return NULL;
     }
 
@@ -392,7 +392,7 @@ void *kmalloc(size_t size) {
     kernel_heap.stats.allocation_count++;
 
     /* Return pointer to data area */
-    take_w();
+    wl_award_win();
     return (void*)((uint8_t*)block + sizeof(heap_block_t));
 }
 
@@ -424,7 +424,7 @@ void kfree(void *ptr) {
 
     if (!validate_block(block) || block->magic != BLOCK_MAGIC_ALLOCATED) {
         klog_printf(KLOG_INFO, "kfree: Invalid block or double free detected\n");
-        take_l();
+        wl_award_loss();
         return;
     }
 
@@ -435,7 +435,7 @@ void kfree(void *ptr) {
 
     /* Add to free list */
     add_to_free_list(block);
-    take_w();
+    wl_award_win();
 }
 
 /* ========================================================================
