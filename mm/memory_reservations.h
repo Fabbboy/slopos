@@ -2,6 +2,7 @@
 #define MM_MEMORY_RESERVATIONS_H
 
 #include <stdint.h>
+#include "../lib/klog.h"
 
 typedef enum mm_reservation_type {
     MM_RESERVATION_ALLOCATOR_METADATA = 0,
@@ -53,6 +54,7 @@ const char *mm_reservation_type_name(mm_reservation_type_t type);
 uint64_t mm_reservations_total_bytes(uint32_t required_flags);
 uint64_t mm_region_total_bytes(mm_region_kind_t kind);
 uint64_t mm_region_highest_usable_frame(void);
+void mm_region_dump(enum klog_level level);
 
 #endif /* MM_MEMORY_RESERVATIONS_H */
 

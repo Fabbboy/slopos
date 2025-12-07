@@ -18,6 +18,10 @@
 #define KERNEL_PML4_INDEX             511      /* PML4[511] for higher-half */
 #define KERNEL_PDPT_INDEX             510      /* PDPT[510] for 0x80000000 part */
 
+/* Higher-half direct map base (HHDM). Limine provides the offset; we place the
+ * mapping at this base in the virtual address space. */
+#define HHDM_VIRT_BASE                0xFFFF800000000000ULL
+
 /* Page sizes and alignment */
 #define PAGE_SIZE_4KB                 0x1000   /* 4KB page */
 #define PAGE_SIZE_2MB                 0x200000 /* 2MB page */

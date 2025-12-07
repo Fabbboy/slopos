@@ -9,6 +9,7 @@
 #include "../boot/kernel_panic.h"
 #include "../lib/memory.h"
 #include "../lib/string.h"
+#include "mm_constants.h"
 
 /* Fallback storage if caller does not provide a buffer. */
 #define MM_REGION_STATIC_CAP 1024
@@ -191,6 +192,13 @@ static void overlay_region(uint64_t phys_base, uint64_t length,
         return;
     }
 
+    /* Reject obvious virtual/HHDM addresses that are not physical. */
+    if (phys_base >= KERNEL_VIRTUAL_BASE || phys_base >= HHDM_VIRT_BASE) {
+        klog_printf(KLOG_INFO, "MM: rejecting virtual overlay base 0x%llx\n",
+                    (unsigned long long)phys_base);
+        kernel_panic("MM: region overlay received virtual address");
+    }
+
     uint64_t end = phys_base + length;
     if (end <= phys_base) {
         kernel_panic("MM: region overlay overflow");
@@ -260,6 +268,21 @@ int mm_region_reserve(uint64_t phys_base, uint64_t length,
     return 0;
 }
 
+/* Debug helper: emit all regions with physical ranges. */
+void mm_region_dump(enum klog_level level) {
+    for (uint32_t i = 0; i < region_store.count; i++) {
+        const mm_region_t *region = &region_store.regions[i];
+        const char *kind = (region->kind == MM_REGION_USABLE) ? "usable" : "reserved";
+        klog_printf(level, "[MM] %s: 0x%llx - 0x%llx (%llu KB) label=%s flags=0x%x\n",
+                    kind,
+                    (unsigned long long)region->phys_base,
+                    (unsigned long long)(region->phys_base + region->length - 1),
+                    (unsigned long long)(region->length / 1024),
+                    region->label[0] ? region->label : "-",
+                    region->flags);
+    }
+}
+
 uint32_t mm_region_count(void) {
     return region_store.count;
 }
@@ -291,6 +314,7 @@ uint32_t mm_reservations_overflow_count(void) {
 }
 
 const mm_region_t *mm_reservations_get(uint32_t index) {
+    /* Iterate deterministic by physical order; skip unusable. */
     uint32_t seen = 0;
     for (uint32_t i = 0; i < region_store.count; i++) {
         const mm_region_t *region = &region_store.regions[i];

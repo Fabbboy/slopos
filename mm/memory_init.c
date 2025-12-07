@@ -169,6 +169,18 @@ static void add_usable_or_panic(uint64_t base, uint64_t length, const char *labe
     }
 }
 
+static uint64_t virt_to_phys_kernel(uint64_t virt) {
+    /* Kernel is linked at higher half; convert to physical when passed in. */
+    if (virt >= KERNEL_VIRTUAL_BASE) {
+        return virt - KERNEL_VIRTUAL_BASE;
+    }
+    /* HHDM mappings are phys + HHDM offset; convert back. */
+    if (virt >= HHDM_VIRT_BASE) {
+        return virt - HHDM_VIRT_BASE;
+    }
+    return virt;
+}
+
 static void record_memmap_usable(const struct limine_memmap_response *memmap) {
     if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
         kernel_panic("MM: Missing Limine memmap for usable regions");
@@ -231,9 +243,10 @@ static void record_kernel_core_reservations(void) {
         return;
     }
 
-    uint64_t kernel_phys = layout->kernel_start_phys;
-    uint64_t kernel_size = (layout->kernel_end_phys > layout->kernel_start_phys) ?
-        (layout->kernel_end_phys - layout->kernel_start_phys) : 0;
+    uint64_t kernel_phys = virt_to_phys_kernel(layout->kernel_start_phys);
+    uint64_t kernel_end_phys = virt_to_phys_kernel(layout->kernel_end_phys);
+    uint64_t kernel_size = (kernel_end_phys > kernel_phys) ?
+        (kernel_end_phys - kernel_phys) : 0;
 
     if (kernel_size > 0) {
         add_reservation_or_panic(kernel_phys, kernel_size,
