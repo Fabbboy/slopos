@@ -1,6 +1,25 @@
 /*
  * SlopOS Global Descriptor Table (GDT) and Task State Segment (TSS)
  * Sets up segmentation for long mode and exposes IST configuration helpers
+ *
+ * PRIVILEGE SEPARATION:
+ * This module establishes the foundation for Ring 0 (kernel) and Ring 3 (user mode)
+ * privilege separation on x86-64. The GDT contains both kernel (DPL=0) and user (DPL=3)
+ * code/data segments, while the TSS holds the RSP0 pointer used for automatic stack
+ * switching during privilege elevation (Ring 3 → Ring 0 on interrupts/syscalls).
+ *
+ * Key selectors:
+ *  - 0x08 (GDT_CODE_SELECTOR): Kernel code segment (Ring 0)
+ *  - 0x10 (GDT_DATA_SELECTOR): Kernel data segment (Ring 0)
+ *  - 0x1B (GDT_USER_DATA_SELECTOR): User data segment (Ring 3, RPL=3)
+ *  - 0x23 (GDT_USER_CODE_SELECTOR): User code segment (Ring 3, RPL=3)
+ *  - 0x28 (GDT_TSS_SELECTOR): Task State Segment
+ *
+ * The TSS.RSP0 field is updated before each user task execution via gdt_set_kernel_rsp0(),
+ * ensuring the CPU has a valid kernel stack when handling syscalls or exceptions from
+ * user mode.
+ *
+ * See docs/PRIVILEGE_SEPARATION.md for architecture details.
  */
 
 #include "gdt.h"

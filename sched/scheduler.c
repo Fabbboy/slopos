@@ -298,6 +298,29 @@ static void switch_to_task(task_t *new_task) {
     /* Check W/L balance before switching - user must not be bankrupt */
     wl_check_balance();
 
+    /*
+     * PRIVILEGE-AWARE CONTEXT SWITCHING:
+     * 
+     * User mode tasks (TASK_FLAG_USER_MODE):
+     *  1. Update TSS.RSP0 to point to the task's kernel stack
+     *     - This stack will be used when the task triggers a syscall or exception
+     *     - The CPU automatically switches to RSP0 on Ring 3 → Ring 0 transitions
+     *  2. Call context_switch_user() which uses IRETQ to enter Ring 3
+     *     - The task's CS/SS are set to user selectors (0x23/0x1B, DPL=3, RPL=3)
+     *     - The task executes with CPL=3 (Current Privilege Level)
+     *     - Memory accesses are validated against U/S bits in page tables
+     *
+     * Kernel mode tasks (TASK_FLAG_KERNEL_MODE):
+     *  1. Set RSP0 to the default kernel stack (not used since we stay in Ring 0)
+     *  2. Use context_switch() which performs a simple JMP to the new RIP
+     *     - No privilege change occurs (stays at CPL=0)
+     *     - CS/SS remain at kernel selectors (0x08/0x10)
+     *     - Full access to kernel memory
+     *
+     * Security note: The TSS.RSP0 update MUST occur before entering user mode,
+     * otherwise the next interrupt/syscall will use an invalid kernel stack,
+     * leading to a triple fault or privilege escalation vulnerability.
+     */
     if (new_task->flags & TASK_FLAG_USER_MODE) {
         uint64_t rsp0 = new_task->kernel_stack_top ? new_task->kernel_stack_top : (uint64_t)&kernel_stack_top;
         gdt_set_kernel_rsp0(rsp0);

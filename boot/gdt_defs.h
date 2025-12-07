@@ -1,6 +1,20 @@
 /*
  * SlopOS GDT Definitions
  * Segment selectors and descriptor values for 64-bit mode.
+ *
+ * PRIVILEGE LEVEL ENCODING:
+ * The lowest 2 bits of segment selectors encode the Requested Privilege Level (RPL):
+ *  - RPL=00b (0x0): Ring 0 (kernel mode)
+ *  - RPL=11b (0x3): Ring 3 (user mode)
+ *
+ * Selectors ending in 0x8/0x0 are Ring 0, selectors ending in 0xB/0x3 are Ring 3.
+ *
+ * The segment descriptors encode the Descriptor Privilege Level (DPL) in bits 45-46:
+ *  - DPL=0 (kernel segments): Only accessible from Ring 0-2
+ *  - DPL=3 (user segments): Accessible from any privilege level
+ *
+ * The CPU enforces that CS.DPL must equal the Current Privilege Level (CPL), while
+ * data segment DPLs must be ≥ CPL. This prevents user code from loading kernel segments.
  */
 
 #ifndef BOOT_GDT_DEFS_H

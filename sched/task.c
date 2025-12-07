@@ -123,7 +123,31 @@ static void init_task_context(task_t *task) {
     /* Set default flags register */
     task->context.rflags = 0x202;  /* IF=1 (interrupts enabled), reserved bit 1 */
 
-    /* Set segment registers for kernel mode */
+    /*
+     * PRIVILEGE LEVEL INITIALIZATION:
+     * 
+     * Segment selectors determine the task's privilege level when scheduled.
+     * The CPU's Current Privilege Level (CPL) is derived from CS.RPL.
+     *
+     * Kernel mode tasks (TASK_FLAG_KERNEL_MODE):
+     *  - CS = 0x08 (GDT_CODE_SELECTOR): Kernel code segment, DPL=0, RPL=0 → CPL=0 (Ring 0)
+     *  - DS/ES/SS = 0x10 (GDT_DATA_SELECTOR): Kernel data segments, DPL=0
+     *  - Task executes with full kernel privileges
+     *  - Can access all memory (U/S bit ignored at CPL=0)
+     *  - Can execute privileged instructions (cli, sti, lgdt, lidt, etc.)
+     *
+     * User mode tasks (TASK_FLAG_USER_MODE):
+     *  - CS = 0x23 (GDT_USER_CODE_SELECTOR): User code segment, DPL=3, RPL=3 → CPL=3 (Ring 3)
+     *  - DS/ES/SS = 0x1B (GDT_USER_DATA_SELECTOR): User data segments, DPL=3
+     *  - Task executes with restricted user privileges
+     *  - Can only access memory marked with U/S=1 in page tables
+     *  - Cannot execute privileged instructions (#GP exception if attempted)
+     *  - Must use syscalls (int 0x80) to request kernel services
+     *
+     * The scheduler uses context_switch_user() for user tasks, which performs an IRETQ
+     * with these selectors to transition from Ring 0 to Ring 3. The CPU validates that
+     * CS.DPL == CS.RPL before allowing the transition.
+     */
     if (task->flags & TASK_FLAG_KERNEL_MODE) {
         task->context.cs = GDT_CODE_SELECTOR;
         task->context.ds = GDT_DATA_SELECTOR;

@@ -1,6 +1,35 @@
 /*
  * SlopOS Syscall Gateway (int 0x80)
  * Provides a narrow ABI for user-mode tasks to enter the kernel.
+ *
+ * PRIVILEGE ELEVATION (Ring 3 → Ring 0):
+ * When a user task executes `int 0x80`, the CPU automatically:
+ *  1. Validates that IDT[0x80].DPL (3) ≥ CPL (3) ✓
+ *  2. Saves the user's SS and RSP
+ *  3. Loads kernel SS from the code segment descriptor
+ *  4. Loads kernel RSP from TSS.RSP0 (set by scheduler before user task execution)
+ *  5. Pushes user SS, user RSP, RFLAGS, user CS, user RIP onto the kernel stack
+ *  6. Sets CPL to the target segment's DPL (Ring 0)
+ *  7. Jumps to the interrupt handler (isr128 → syscall_handle)
+ *
+ * The kernel handler then:
+ *  - Receives an interrupt_frame with the user's full CPU state
+ *  - Validates all user pointers before dereferencing (see user_copy.c)
+ *  - Executes the requested kernel operation
+ *  - Returns via IRETQ, which automatically demotes back to Ring 3
+ *
+ * Security guarantees:
+ *  - User code cannot directly access kernel memory (enforced by page table U/S bits)
+ *  - User code cannot execute privileged instructions (enforced by CPL checks)
+ *  - All kernel←→user data transfers use safe copy primitives (user_copy_*)
+ *  - Separate stacks prevent user stack overflow from corrupting kernel state
+ *
+ * Syscall ABI:
+ *  - rax: syscall number (SYSCALL_YIELD, SYSCALL_WRITE, etc.)
+ *  - rdi, rsi, rdx, rcx, r8, r9: syscall arguments
+ *  - Return value in rax
+ *
+ * See docs/PRIVILEGE_SEPARATION.md for architecture details.
  */
 
 #include "syscall.h"
