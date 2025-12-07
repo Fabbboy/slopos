@@ -9,10 +9,9 @@
 #include "../boot/kernel_panic.h"
 #include "../lib/memory.h"
 #include "../lib/string.h"
-#include "mm_constants.h"
 
 /* Fallback storage if caller does not provide a buffer. */
-#define MM_REGION_STATIC_CAP 1024
+#define MM_REGION_STATIC_CAP 4096
 static mm_region_t static_region_store[MM_REGION_STATIC_CAP];
 
 typedef struct mm_region_store {
@@ -88,11 +87,11 @@ void mm_region_map_reset(void) {
     clear_store();
 }
 
-static void insert_slot(uint32_t index) {
+static int insert_slot(uint32_t index) {
     ensure_storage();
     if (region_store.count >= region_store.capacity) {
         region_store.overflows++;
-        kernel_panic("MM: region map capacity exceeded");
+        return -1;
     }
 
     if (index > region_store.count) {
@@ -106,6 +105,7 @@ static void insert_slot(uint32_t index) {
     }
     region_store.count++;
     clear_region(&region_store.regions[index]);
+    return 0;
 }
 
 static int regions_equivalent(const mm_region_t *a, const mm_region_t *b) {
@@ -167,47 +167,50 @@ static uint32_t find_region_index(uint64_t phys_base) {
     return idx;
 }
 
-static void split_region(uint32_t index, uint64_t split_base) {
+static int split_region(uint32_t index, uint64_t split_base) {
     if (index >= region_store.count) {
-        return;
+        return -1;
     }
     mm_region_t *region = &region_store.regions[index];
     uint64_t region_end = region->phys_base + region->length;
     if (split_base <= region->phys_base || split_base >= region_end) {
-        return;
+        return 0;
     }
 
-    insert_slot(index + 1);
+    if (insert_slot(index + 1) != 0) {
+        return -1;
+    }
     mm_region_t *right = &region_store.regions[index + 1];
     *right = *region;
     right->phys_base = split_base;
     right->length = region_end - split_base;
     region->length = split_base - region->phys_base;
+    return 0;
 }
 
-static void overlay_region(uint64_t phys_base, uint64_t length,
-                           mm_region_kind_t kind, mm_reservation_type_t type,
-                           uint32_t flags, const char *label) {
+static int overlay_region(uint64_t phys_base, uint64_t length,
+                          mm_region_kind_t kind, mm_reservation_type_t type,
+                          uint32_t flags, const char *label) {
     if (length == 0) {
-        return;
+        return -1;
     }
 
     /* Reject obvious virtual/HHDM addresses that are not physical. */
     if (phys_base >= KERNEL_VIRTUAL_BASE || phys_base >= HHDM_VIRT_BASE) {
         klog_printf(KLOG_INFO, "MM: rejecting virtual overlay base 0x%llx\n",
                     (unsigned long long)phys_base);
-        kernel_panic("MM: region overlay received virtual address");
+        return -1;
     }
 
     uint64_t end = phys_base + length;
     if (end <= phys_base) {
-        kernel_panic("MM: region overlay overflow");
+        return -1;
     }
 
     uint64_t aligned_base = align_down_u64(phys_base, PAGE_SIZE_4KB);
     uint64_t aligned_end = align_up_u64(end, PAGE_SIZE_4KB);
     if (aligned_end <= aligned_base) {
-        kernel_panic("MM: region overlay collapsed");
+        return -1;
     }
 
     uint64_t cursor = aligned_base;
@@ -216,7 +219,9 @@ static void overlay_region(uint64_t phys_base, uint64_t length,
 
         if (idx >= region_store.count || region_store.regions[idx].phys_base > cursor) {
             /* Insert new gap before existing region or append at end. */
-            insert_slot(idx);
+            if (insert_slot(idx) != 0) {
+                return -1;
+            }
             region_store.regions[idx].phys_base = cursor;
             region_store.regions[idx].length = aligned_end - cursor;
             region_store.regions[idx].kind = kind;
@@ -231,12 +236,16 @@ static void overlay_region(uint64_t phys_base, uint64_t length,
         uint64_t region_end = region->phys_base + region->length;
 
         /* Split so that [cursor, aligned_end) aligns with region boundaries. */
-        split_region(idx, cursor);
+        if (split_region(idx, cursor) != 0) {
+            return -1;
+        }
         region = &region_store.regions[idx];
         region_end = region->phys_base + region->length;
 
         uint64_t apply_end = (aligned_end < region_end) ? aligned_end : region_end;
-        split_region(idx, apply_end);
+        if (split_region(idx, apply_end) != 0) {
+            return -1;
+        }
         region = &region_store.regions[idx];
 
         /* Overwrite region slice with new attributes. */
@@ -248,14 +257,14 @@ static void overlay_region(uint64_t phys_base, uint64_t length,
 
         cursor = apply_end;
     }
+    return 0;
 }
 
 int mm_region_add_usable(uint64_t phys_base, uint64_t length, const char *label) {
     if (length == 0) {
         return -1;
     }
-    overlay_region(phys_base, length, MM_REGION_USABLE, MM_RESERVATION_FIRMWARE_OTHER, 0, label);
-    return 0;
+    return overlay_region(phys_base, length, MM_REGION_USABLE, MM_RESERVATION_FIRMWARE_OTHER, 0, label);
 }
 
 int mm_region_reserve(uint64_t phys_base, uint64_t length,
@@ -264,8 +273,7 @@ int mm_region_reserve(uint64_t phys_base, uint64_t length,
     if (length == 0) {
         return -1;
     }
-    overlay_region(phys_base, length, MM_REGION_RESERVED, type, flags, label);
-    return 0;
+    return overlay_region(phys_base, length, MM_REGION_RESERVED, type, flags, label);
 }
 
 /* Debug helper: emit all regions with physical ranges. */

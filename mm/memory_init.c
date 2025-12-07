@@ -47,7 +47,7 @@ static const process_memory_layout_t process_layout = {
  * REGION MAP AND STATS
  * ======================================================================== */
 
-#define BOOT_REGION_STATIC_CAP 2048
+#define BOOT_REGION_STATIC_CAP 4096
 
 typedef struct memory_init_stats {
     uint64_t total_memory_bytes;
@@ -140,17 +140,25 @@ const process_memory_layout_t *mm_get_process_layout(void) {
  * ======================================================================== */
 
 static void configure_region_store(const struct limine_memmap_response *memmap) {
-    uint32_t needed = 128; /* headroom for overlays */
+    uint32_t needed = 64; /* base headroom */
     if (memmap && memmap->entry_count < UINT32_MAX) {
-        /* Usable entries + potential reserved overlays from memmap. */
-        needed += (uint32_t)memmap->entry_count * 2;
+        /* Allow multiple overlays per entry (usable + carveouts). */
+        uint64_t estimate = 4ULL * (uint64_t)memmap->entry_count + 64ULL;
+        if (estimate > UINT32_MAX) {
+            estimate = UINT32_MAX;
+        }
+        needed = (uint32_t)estimate;
     }
 
     if (needed > BOOT_REGION_STATIC_CAP) {
-        kernel_panic("MM: region map capacity insufficient for memmap");
+        klog_printf(KLOG_INFO,
+                    "MM: region map estimate %u exceeds capacity %u, clamping\n",
+                    needed, BOOT_REGION_STATIC_CAP);
+        needed = BOOT_REGION_STATIC_CAP;
     }
 
-    mm_region_map_configure(region_boot_buffer, BOOT_REGION_STATIC_CAP);
+    uint32_t capacity = (needed < BOOT_REGION_STATIC_CAP) ? needed : BOOT_REGION_STATIC_CAP;
+    mm_region_map_configure(region_boot_buffer, capacity);
     mm_region_map_reset();
 }
 
@@ -545,16 +553,6 @@ int init_memory_system(const struct limine_memmap_response *memmap,
 
     if (init_page_allocator(allocator_plan.buffer, allocator_plan.capacity_frames) != 0) {
         kernel_panic("MM: Page allocator initialization failed");
-    }
-
-    for (uint32_t i = 0; i < mm_region_count(); i++) {
-        const mm_region_t *region = mm_region_get(i);
-        if (!region || region->kind != MM_REGION_USABLE) {
-            continue;
-        }
-        if (add_page_alloc_region(region->phys_base, region->length, EFI_CONVENTIONAL_MEMORY) != 0) {
-            klog_printf(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
-        }
     }
 
     if (finalize_page_allocator() != 0) {

@@ -10,7 +10,9 @@
 #include "../lib/klog.h"
 #include "../drivers/serial.h"
 #include "page_alloc.h"
+#include "memory_reservations.h"
 #include "phys_virt.h"
+#include "../lib/alignment.h"
 #include "../boot/kernel_panic.h"
 
 /* ========================================================================
@@ -44,25 +46,12 @@ typedef struct page_frame {
     uint32_t next_free;           /* Next free page frame (for free lists) */
 } page_frame_t;
 
-typedef struct phys_region {
-    uint64_t start_addr;          /* Start physical address */
-    uint64_t size;                /* Size in bytes */
-    uint32_t start_frame;         /* First page frame number */
-    uint32_t num_frames;          /* Number of page frames */
-    uint8_t type;                 /* Memory type (from EFI) */
-    uint8_t available;            /* Available for allocation */
-    uint16_t region_id;           /* Region identifier */
-} phys_region_t;
-
 typedef struct page_allocator {
     page_frame_t *frames;         /* Array of page frame descriptors */
     uint32_t total_frames;        /* Total number of page frames */
     uint32_t max_supported_frames;/* Descriptor backing size */
     uint32_t free_frames;         /* Number of free page frames */
     uint32_t allocated_frames;    /* Number of allocated page frames */
-    uint32_t reserved_frames;     /* Number of reserved page frames */
-    phys_region_t regions[MAX_MEMORY_REGIONS];  /* Physical memory regions */
-    uint32_t num_regions;         /* Number of memory regions */
     uint32_t free_lists[MAX_ORDER + 1]; /* Per-order free list heads */
     uint32_t max_order;           /* Highest usable order derived from total frames */
 } page_allocator_t;
@@ -366,78 +355,6 @@ int free_page_frame(uint64_t phys_addr) {
     return 0;
 }
 
-/* ========================================================================
- * MEMORY REGION MANAGEMENT
- * ======================================================================== */
-
-int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
-    if (page_allocator.num_regions >= MAX_MEMORY_REGIONS) {
-        klog_info("add_page_alloc_region: Too many memory regions");
-        return -1;
-    }
-
-    uint64_t aligned_start = (start_addr + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
-    uint64_t aligned_end = (start_addr + size) & ~(PAGE_SIZE_4KB - 1);
-
-    if (aligned_end <= aligned_start) {
-        klog_info("add_page_alloc_region: Region too small after alignment");
-        return -1;
-    }
-
-    uint64_t aligned_size = aligned_end - aligned_start;
-    uint32_t start_frame = phys_to_frame(aligned_start);
-    uint32_t num_frames = (uint32_t)(aligned_size >> 12);
-
-    if (!page_allocator.frames || page_allocator.total_frames == 0) {
-        klog_info("add_page_alloc_region: Page allocator not initialized");
-        return -1;
-    }
-
-    uint64_t last_frame = (uint64_t)start_frame + (uint64_t)num_frames;
-    if (start_frame >= page_allocator.total_frames || last_frame > page_allocator.total_frames) {
-        klog_printf(KLOG_INFO,
-                    "add_page_alloc_region: Region exceeds descriptor coverage (frame %u of %u)\n",
-                    (start_frame >= page_allocator.total_frames) ? start_frame : (uint32_t)(last_frame - 1),
-                    page_allocator.total_frames);
-        return -1;
-    }
-
-    /* Prevent overlapping regions from being registered. */
-    for (uint32_t i = 0; i < page_allocator.num_regions; i++) {
-        const phys_region_t *existing = &page_allocator.regions[i];
-        uint64_t exist_start = existing->start_frame;
-        uint64_t exist_end = existing->start_frame + existing->num_frames;
-        uint64_t new_start = start_frame;
-        uint64_t new_end = start_frame + num_frames;
-        if (new_start < exist_end && new_end > exist_start) {
-            klog_info("add_page_alloc_region: Overlapping region rejected");
-            return -1;
-        }
-    }
-
-    phys_region_t *region = &page_allocator.regions[page_allocator.num_regions];
-    region->start_addr = aligned_start;
-    region->size = aligned_size;
-    region->start_frame = start_frame;
-    region->num_frames = num_frames;
-    region->type = type;
-    region->available = (type == EFI_CONVENTIONAL_MEMORY) ? 1 : 0;
-    region->region_id = (uint16_t)page_allocator.num_regions;
-
-    page_allocator.num_regions++;
-
-    klog_printf(KLOG_DEBUG, "Added memory region: 0x%llx - 0x%llx (%u frames)\n",
-                (unsigned long long)aligned_start,
-                (unsigned long long)aligned_end,
-                num_frames);
-
-    return 0;
-}
-
-/* ========================================================================
- * INITIALIZATION AND QUERY FUNCTIONS
- * ======================================================================== */
-
 static uint32_t derive_max_order(uint32_t total_frames) {
     uint32_t order = 0;
     while (order < MAX_ORDER && order_block_pages(order) <= total_frames) {
@@ -463,8 +380,6 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
     page_allocator.max_supported_frames = max_frames;
     page_allocator.free_frames = 0;
     page_allocator.allocated_frames = 0;
-    page_allocator.reserved_frames = 0;
-    page_allocator.num_regions = 0;
     page_allocator.max_order = derive_max_order(max_frames);
 
     free_lists_reset();
@@ -486,21 +401,30 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
     return 0;
 }
 
-static void add_region_blocks(const phys_region_t *region) {
-    if (!region || !region->available) {
+static void seed_region_from_map(const mm_region_t *region, uint16_t region_id) {
+    if (!region || region->kind != MM_REGION_USABLE || region->length == 0) {
         return;
     }
 
-    uint32_t frame = region->start_frame;
-    if (frame >= page_allocator.total_frames) {
+    uint64_t aligned_start = align_up_u64(region->phys_base, PAGE_SIZE_4KB);
+    uint64_t aligned_end = align_down_u64(region->phys_base + region->length, PAGE_SIZE_4KB);
+    if (aligned_end <= aligned_start) {
         return;
     }
 
-    uint32_t max_frames = page_allocator.total_frames - frame;
-    uint32_t remaining = region->num_frames;
-    if (remaining > max_frames) {
-        remaining = max_frames;
+    uint32_t start_frame = phys_to_frame(aligned_start);
+    uint32_t end_frame = phys_to_frame(aligned_end);
+    if (start_frame >= page_allocator.total_frames) {
+        return;
     }
+
+    if (end_frame > page_allocator.total_frames) {
+        end_frame = page_allocator.total_frames;
+    }
+
+    uint32_t remaining = end_frame - start_frame;
+    uint32_t frame = start_frame;
+    uint16_t seeded_id = (region_id == INVALID_REGION_ID) ? 0 : region_id;
 
     while (remaining > 0) {
         uint32_t order = 0;
@@ -523,7 +447,7 @@ static void add_region_blocks(const phys_region_t *region) {
         for (uint32_t i = 0; i < block_pages; i++) {
             page_frame_t *f = get_frame_desc(frame + i);
             if (f) {
-                f->region_id = region->region_id;
+                f->region_id = seeded_id;
             }
         }
         insert_block_coalescing(frame, order);
@@ -539,8 +463,10 @@ int finalize_page_allocator(void) {
     page_allocator.free_frames = 0;
     page_allocator.allocated_frames = 0;
 
-    for (uint32_t i = 0; i < page_allocator.num_regions; i++) {
-        add_region_blocks(&page_allocator.regions[i]);
+    uint32_t region_count = mm_region_count();
+    for (uint32_t i = 0; i < region_count; i++) {
+        const mm_region_t *region = mm_region_get(i);
+        seed_region_from_map(region, (uint16_t)i);
     }
 
     klog_printf(KLOG_DEBUG, "Page allocator ready: %u pages available\n",

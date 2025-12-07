@@ -19,7 +19,6 @@
 
 int init_page_allocator(void *frame_array, uint32_t max_frames);
 int finalize_page_allocator(void);
-int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type);
 
 uint64_t alloc_page_frames(uint32_t count, uint32_t flags);
 uint64_t alloc_page_frame(uint32_t flags);
