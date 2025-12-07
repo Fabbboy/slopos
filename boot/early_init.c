@@ -31,6 +31,9 @@
 #include "../video/splash.h"
 #include "../drivers/pci.h"
 #include "../drivers/wl_currency.h"
+#include "../tests/core.h"
+#include "../tests/interrupt_suite.h"
+#include "../tests/system_suites.h"
 #include "kernel_panic.h"
 #include "cpu_verify.h"
 #include "../mm/memory_init.h"
@@ -444,7 +447,7 @@ static int boot_step_interrupt_tests(void) {
         return 0;
     }
 
-    boot_info("INTERRUPT_TEST: Running interrupt harness");
+    boot_info("INTERRUPT_TEST: Running orchestrated harness");
     splash_report_progress(75, "Running interrupt tests...");
 
     if (klog_is_enabled(KLOG_DEBUG)) {
@@ -457,47 +460,24 @@ static int boot_step_interrupt_tests(void) {
         klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout (ms) -> %u\n", test_config.timeout_ms);
     }
 
-    interrupt_test_init(&test_config);
-    int passed = run_all_interrupt_tests(&test_config);
-    const struct test_stats *stats = test_get_stats();
-    uint32_t failed_tests = stats ? stats->failed_cases : 0;
-    interrupt_test_cleanup();
+    tests_reset_registry();
+    tests_register_suite(&interrupt_suite_desc);
+    tests_register_system_suites();
 
-    if (stats) {
-        const char *timeout_str = stats->timed_out ? "yes" : "no";
-        klog_printf(KLOG_INFO, "TEST SUMMARY\n");
-        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
-        klog_printf(KLOG_INFO, "| Metric               | Value                     |\n");
-        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
-        klog_printf(KLOG_INFO, "| Total tests          | %u\n", stats->total_cases);
-        klog_printf(KLOG_INFO, "| Passed               | %u\n", stats->passed_cases);
-        klog_printf(KLOG_INFO, "| Failed               | %u\n", stats->failed_cases);
-        klog_printf(KLOG_INFO, "| Exceptions caught    | %u\n", stats->exceptions_caught);
-        klog_printf(KLOG_INFO, "| Unexpected exceptions| %u\n", stats->unexpected_exceptions);
-        klog_printf(KLOG_INFO, "| Timeout              | %s\n", timeout_str);
-        klog_printf(KLOG_INFO, "| Elapsed (ms)         | %u\n", stats->elapsed_ms);
-        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
-
-        if (stats->failed_cases > 0) {
-            klog_printf(KLOG_INFO, "Failed tests listed above (see log for names)\n");
-        }
-    }
-
-    if (klog_is_enabled(KLOG_DEBUG)) {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Boot run passed tests -> %d\n", passed);
-    }
+    struct test_run_summary summary = {0};
+    int rc = tests_run_all(&test_config, &summary);
 
     if (test_config.shutdown_on_complete) {
         boot_debug("INTERRUPT_TEST: Auto shutdown enabled after harness");
-        interrupt_test_request_shutdown((int)failed_tests);
+        interrupt_test_request_shutdown((int)summary.failed);
     }
 
-    if (failed_tests > 0) {
+    if (summary.failed > 0) {
         boot_info("INTERRUPT_TEST: Failures detected");
     } else {
         boot_info("INTERRUPT_TEST: Completed successfully");
     }
-    return 0;
+    return rc;
 }
 
 BOOT_INIT_STEP(drivers, "debug", boot_step_debug_subsystem);

@@ -110,6 +110,14 @@ lib_sources += files(
   'lib/kdiag.c'
 )
 
+# Tests orchestrator directory
+tests_dir = meson.current_source_dir() / 'tests'
+tests_sources = files(
+  'tests/core.c',
+  'tests/interrupt_suite.c',
+  'tests/system_suites.c'
+)
+
 # Drivers directory
 drivers_dir = meson.current_source_dir() / 'drivers'
 drivers_sources += files(
@@ -164,10 +172,10 @@ endif
 kernel_sources += files()  # Will be populated when source files exist
 
 # Combine all source files
-all_sources = boot_sources + mm_sources + video_sources + drivers_sources + sched_sources + shell_sources + fs_sources + kernel_sources + lib_sources
+all_sources = boot_sources + mm_sources + video_sources + drivers_sources + sched_sources + shell_sources + fs_sources + kernel_sources + lib_sources + tests_sources
 
 # Include directories
-inc_dirs = include_directories('.', 'boot', 'mm', 'video', 'drivers', 'sched', 'shell', 'fs', 'lib')
+inc_dirs = include_directories('.', 'boot', 'mm', 'video', 'drivers', 'sched', 'shell', 'fs', 'lib', 'tests')
 
 # Custom target for assembly files (when they exist)
 # This will be used for boot assembly code that needs special handling
