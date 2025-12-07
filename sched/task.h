@@ -16,6 +16,7 @@
 
 #define MAX_TASKS                     32        /* Maximum number of tasks */
 #define TASK_STACK_SIZE               0x8000    /* 32KB default stack size */
+#define TASK_KERNEL_STACK_SIZE        0x8000    /* 32KB kernel stacks for user tasks */
 #define TASK_NAME_MAX_LEN             32        /* Maximum task name length */
 #define INVALID_TASK_ID               0xFFFFFFFF /* Invalid task ID */
 
@@ -79,6 +80,9 @@ typedef struct task {
     uint64_t stack_base;                 /* Stack base address */
     uint64_t stack_size;                 /* Stack size in bytes */
     uint64_t stack_pointer;              /* Current stack pointer */
+    uint64_t kernel_stack_base;          /* Kernel-mode stack base (RSP0 target) */
+    uint64_t kernel_stack_top;           /* Kernel-mode stack top */
+    uint64_t kernel_stack_size;          /* Kernel-mode stack size */
 
     /* Task entry point */
     task_entry_t entry_point;            /* Task function entry point */
@@ -95,6 +99,8 @@ typedef struct task {
     uint32_t yield_count;                /* Number of voluntary yields */
     uint64_t last_run_timestamp;         /* Timestamp when task was last scheduled */
     uint32_t waiting_on_task_id;         /* Task this task is waiting on, if any */
+    uint8_t user_started;                /* User task has executed in ring3 */
+    uint8_t context_from_user;           /* Context saved from user frame */
 
 } task_t;
 

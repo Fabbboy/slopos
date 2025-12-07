@@ -52,6 +52,8 @@
 #define IRQ_ATA_PRIMARY (IRQ_BASE_VECTOR + 14)
 #define IRQ_ATA_SECONDARY (IRQ_BASE_VECTOR + 15)
 
+#define SYSCALL_VECTOR 0x80
+
 #define IDT_ENTRIES 256
 
 enum exception_mode {
@@ -102,6 +104,8 @@ int exception_is_critical(uint8_t vector);
 // IDT management functions
 void idt_init(void);
 void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t type);
+void idt_set_gate_priv(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t type, uint8_t dpl);
+int idt_get_gate(uint8_t vector, struct idt_entry *out_entry);
 void idt_install_exception_handler(uint8_t vector, exception_handler_t handler);
 void idt_set_ist(uint8_t vector, uint8_t ist_index);
 void idt_load(void);
@@ -166,5 +170,7 @@ extern void irq12(void);  // Mouse
 extern void irq13(void);  // FPU
 extern void irq14(void);  // ATA Primary
 extern void irq15(void);  // ATA Secondary
+
+extern void isr128(void); // Syscall (int 0x80)
 
 #endif // IDT_H

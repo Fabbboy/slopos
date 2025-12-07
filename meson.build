@@ -123,7 +123,8 @@ drivers_sources += files(
   'drivers/interrupt_test.c',
   'drivers/interrupt_test_config.c',
   'drivers/random.c',
-  'drivers/wl_currency.c'
+  'drivers/wl_currency.c',
+  'drivers/syscall.c'
 )
 
 # Scheduler directory
@@ -132,7 +133,8 @@ sched_sources += files(
   'sched/scheduler.c',
   'sched/kthread.c',
   'sched/task.c',
-  'sched/context_switch.s'
+  'sched/context_switch.s',
+  'sched/test_tasks.c'
 )
 
 # Shell directory

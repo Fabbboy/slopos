@@ -114,7 +114,11 @@ static void init_task_context(task_t *task) {
     task->context.r15 = 0;
 
     /* Set instruction pointer to task entry point */
-    task->context.rip = (uint64_t)task_entry_wrapper;
+    if (task->flags & TASK_FLAG_KERNEL_MODE) {
+        task->context.rip = (uint64_t)task_entry_wrapper;
+    } else {
+        task->context.rip = (uint64_t)task->entry_point;
+    }
 
     /* Set default flags register */
     task->context.rflags = 0x202;  /* IF=1 (interrupts enabled), reserved bit 1 */
@@ -128,13 +132,16 @@ static void init_task_context(task_t *task) {
         task->context.gs = 0;
         task->context.ss = GDT_DATA_SELECTOR;  /* Stack segment must match data segment for ring 0 */
     } else {
-        /* User mode tasks: segment registers will be set by user mode setup code */
-        task->context.cs = 0;
-        task->context.ds = 0;
-        task->context.es = 0;
+        /* User mode tasks: segment registers for ring3 entry */
+        task->context.cs = GDT_USER_CODE_SELECTOR;
+        task->context.ds = GDT_USER_DATA_SELECTOR;
+        task->context.es = GDT_USER_DATA_SELECTOR;
         task->context.fs = 0;
         task->context.gs = 0;
-        task->context.ss = 0;
+        task->context.ss = GDT_USER_DATA_SELECTOR;
+        /* Pass user argument via rdi */
+        task->context.rdi = (uint64_t)task->entry_arg;
+        task->context.rsi = 0;
     }
 
     /* Page directory will be set by scheduler when switching */
@@ -181,6 +188,9 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         }
 
         stack_base = (uint64_t)stack;
+        task->kernel_stack_base = stack_base;
+        task->kernel_stack_top = stack_base + TASK_STACK_SIZE;
+        task->kernel_stack_size = TASK_STACK_SIZE;
     } else {
         /* User mode tasks get their own process VM space */
         process_id = create_process_vm();
@@ -199,6 +209,17 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
             destroy_process_vm(process_id);
             return INVALID_TASK_ID;
         }
+
+        void *kstack = kmalloc(TASK_KERNEL_STACK_SIZE);
+        if (!kstack) {
+            klog_printf(KLOG_INFO, "task_create: Failed to allocate kernel RSP0 stack\n");
+            destroy_process_vm(process_id);
+            return INVALID_TASK_ID;
+        }
+
+        task->kernel_stack_base = (uint64_t)kstack;
+        task->kernel_stack_top = task->kernel_stack_base + TASK_KERNEL_STACK_SIZE;
+        task->kernel_stack_size = TASK_KERNEL_STACK_SIZE;
     }
 
     /* Assign task ID */
@@ -231,6 +252,8 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->yield_count = 0;
     task->last_run_timestamp = 0;
     task->waiting_on_task_id = INVALID_TASK_ID;
+    task->user_started = 0;
+    task->context_from_user = 0;
 
     /* Initialize CPU context */
     init_task_context(task);
@@ -303,6 +326,9 @@ int task_terminate(uint32_t task_id) {
     if (task->process_id != INVALID_PROCESS_ID) {
         /* User mode tasks: free process VM space */
         destroy_process_vm(task->process_id);
+        if (task->kernel_stack_base) {
+            kfree((void *)task->kernel_stack_base);
+        }
     } else if (task->stack_base) {
         /* Kernel tasks: free stack from kernel heap */
         kfree((void *)task->stack_base);
@@ -315,6 +341,9 @@ int task_terminate(uint32_t task_id) {
     task->stack_base = 0;
     task->stack_pointer = 0;
     task->stack_size = 0;
+    task->kernel_stack_base = 0;
+    task->kernel_stack_top = 0;
+    task->kernel_stack_size = 0;
     task->time_slice = 0;
     task->time_slice_remaining = 0;
     task->total_runtime = 0;
@@ -324,6 +353,8 @@ int task_terminate(uint32_t task_id) {
     task->creation_time = 0;
     task->waiting_on_task_id = INVALID_TASK_ID;
     task->last_run_timestamp = 0;
+    task->user_started = 0;
+    task->context_from_user = 0;
 
     /* Update task manager */
     if (task_manager.num_tasks > 0) {
@@ -467,6 +498,11 @@ int init_task_manager(void) {
         task_manager.tasks[i].last_run_timestamp = 0;
         task_manager.tasks[i].waiting_on_task_id = INVALID_TASK_ID;
         task_manager.tasks[i].time_slice_remaining = 0;
+        task_manager.tasks[i].kernel_stack_base = 0;
+        task_manager.tasks[i].kernel_stack_top = 0;
+        task_manager.tasks[i].kernel_stack_size = 0;
+        task_manager.tasks[i].user_started = 0;
+        task_manager.tasks[i].context_from_user = 0;
     }
 
     return 0;

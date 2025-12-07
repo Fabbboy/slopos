@@ -458,6 +458,26 @@ static int boot_step_interrupt_tests(void) {
     uint32_t failed_tests = stats ? stats->failed_cases : 0;
     interrupt_test_cleanup();
 
+    if (stats) {
+        const char *timeout_str = stats->timed_out ? "yes" : "no";
+        klog_printf(KLOG_INFO, "TEST SUMMARY\n");
+        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
+        klog_printf(KLOG_INFO, "| Metric               | Value                     |\n");
+        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
+        klog_printf(KLOG_INFO, "| Total tests          | %u\n", stats->total_cases);
+        klog_printf(KLOG_INFO, "| Passed               | %u\n", stats->passed_cases);
+        klog_printf(KLOG_INFO, "| Failed               | %u\n", stats->failed_cases);
+        klog_printf(KLOG_INFO, "| Exceptions caught    | %u\n", stats->exceptions_caught);
+        klog_printf(KLOG_INFO, "| Unexpected exceptions| %u\n", stats->unexpected_exceptions);
+        klog_printf(KLOG_INFO, "| Timeout              | %s\n", timeout_str);
+        klog_printf(KLOG_INFO, "| Elapsed (ms)         | %u\n", stats->elapsed_ms);
+        klog_printf(KLOG_INFO, "+----------------------+---------------------------+\n");
+
+        if (stats->failed_cases > 0) {
+            klog_printf(KLOG_INFO, "Failed tests listed above (see log for names)\n");
+        }
+    }
+
     if (klog_is_enabled(KLOG_DEBUG)) {
         klog_printf(KLOG_INFO, "INTERRUPT_TEST: Boot run passed tests -> %d\n", passed);
     }

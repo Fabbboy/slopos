@@ -149,6 +149,11 @@ isr18:
 isr19:
     INTERRUPT_HANDLER 19, 0   # SIMD FP Exception
 
+# Syscall entry (int 0x80) - user accessible
+.global isr128
+isr128:
+    INTERRUPT_HANDLER 128, 0
+
 # IRQ handlers (vectors 32-47)
 # These will be used after PIC is set up
 

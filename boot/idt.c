@@ -5,10 +5,12 @@
 
 #include "idt.h"
 #include "safe_stack.h"
+#include "gdt_defs.h"
 #include "../lib/klog.h"
 #include "../lib/kdiag.h"
 #include "../drivers/serial.h"
 #include "../drivers/irq.h"
+#include "../drivers/syscall.h"
 #include "kernel_panic.h"
 
 // Global IDT and pointer
@@ -86,6 +88,9 @@ void idt_init(void) {
     idt_set_gate(46, (uint64_t)irq14, 0x08, IDT_GATE_INTERRUPT); // ATA Primary
     idt_set_gate(47, (uint64_t)irq15, 0x08, IDT_GATE_INTERRUPT); // ATA Secondary
 
+    /* User-accessible syscall gate (int 0x80) */
+    idt_set_gate_priv(SYSCALL_VECTOR, (uint64_t)isr128, GDT_CODE_SELECTOR, IDT_GATE_TRAP, 3);
+
     initialize_handler_tables();
 
     klog_printf(KLOG_DEBUG, "IDT: Configured %u interrupt vectors\n", IDT_ENTRIES);
@@ -94,14 +99,29 @@ void idt_init(void) {
 /*
  * Set an IDT gate
  */
-void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t type) {
+void idt_set_gate_priv(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t type, uint8_t dpl) {
     idt[vector].offset_low = handler & 0xFFFF;
     idt[vector].selector = selector;
     idt[vector].ist = 0;  // No separate interrupt stacks for now
-    idt[vector].type_attr = type | 0x80;  // Present=1 (bit 7), DPL=0 for kernel only
+    idt[vector].type_attr = type | 0x80 | ((dpl & 0x3) << 5);  // Present=1, configurable DPL
     idt[vector].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vector].offset_high = (handler >> 32) & 0xFFFFFFFF;
     idt[vector].zero = 0;
+}
+
+void idt_set_gate(uint8_t vector, uint64_t handler, uint16_t selector, uint8_t type) {
+    idt_set_gate_priv(vector, handler, selector, type, 0);
+}
+
+int idt_get_gate(uint8_t vector, struct idt_entry *out_entry) {
+    if (!out_entry) {
+        return -1;
+    }
+    if ((unsigned int)vector >= IDT_ENTRIES) {
+        return -1;
+    }
+    *out_entry = idt[vector];
+    return 0;
 }
 
 void idt_set_ist(uint8_t vector, uint8_t ist_index) {
@@ -212,6 +232,11 @@ void common_exception_handler(struct interrupt_frame *frame) {
     uint8_t vector = (uint8_t)(frame->vector & 0xFF);
 
     safe_stack_record_usage(vector, (uint64_t)frame);
+
+    if (vector == SYSCALL_VECTOR) {
+        syscall_handle(frame);
+        return;
+    }
 
     if (vector >= IRQ_BASE_VECTOR) {
         irq_dispatch(frame);

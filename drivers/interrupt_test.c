@@ -66,6 +66,10 @@ static void handle_exception_recovery(enum test_recovery_reason reason,
                                       const struct saved_exception_state *slot);
 static const char *recovery_reason_string(enum test_recovery_reason reason);
 
+#define TEST_MAX_FAILED_TRACKED 16
+static char failed_tests[TEST_MAX_FAILED_TRACKED][64];
+static uint32_t failed_tests_count = 0;
+
 static void reset_test_statistics(void) {
     test_statistics.total_cases = 0;
     test_statistics.passed_cases = 0;
@@ -74,6 +78,10 @@ static void reset_test_statistics(void) {
     test_statistics.unexpected_exceptions = 0;
     test_statistics.elapsed_ms = 0;
     test_statistics.timed_out = 0;
+    failed_tests_count = 0;
+    for (uint32_t i = 0; i < TEST_MAX_FAILED_TRACKED; i++) {
+        failed_tests[i][0] = '\0';
+    }
 }
 
 static uint64_t estimate_cycles_per_ms(void) {
@@ -1209,40 +1217,35 @@ int run_scheduler_tests(void) {
 
     int total_passed = 0;
 
+    extern int run_privilege_separation_invariant_test(void);
+
     /* Run the smoke test directly to avoid test framework issues */
     extern int run_context_switch_smoke_test(void);
     int result = run_context_switch_smoke_test();
-    if (result == 0) {
-        total_passed++;
-    } else {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Context switch smoke test failed\n");
-    }
+    test_record_simple("context_switch_smoke_test", result);
+    if (result == 0) total_passed++;
 
     /* Run VM manager regression tests */
     extern int run_vm_manager_tests(void);
     int vm_tests_passed = run_vm_manager_tests();
-    if (vm_tests_passed > 0) {
-        total_passed += vm_tests_passed;
-    } else {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: VM manager tests failed\n");
-    }
+    test_record_bulk(5, (uint32_t)vm_tests_passed, 0, 0);
+    total_passed += vm_tests_passed;
 
     /* Run kernel heap regression tests */
     extern int run_kernel_heap_tests(void);
     int heap_tests_passed = run_kernel_heap_tests();
-    if (heap_tests_passed > 0) {
-        total_passed += heap_tests_passed;
-    } else {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Kernel heap tests failed\n");
-    }
+    test_record_bulk(2, (uint32_t)heap_tests_passed, 0, 0);
+    total_passed += heap_tests_passed;
 
     extern int run_ramfs_tests(void);
     int ramfs_tests_passed = run_ramfs_tests();
-    if (ramfs_tests_passed > 0) {
-        total_passed += ramfs_tests_passed;
-    } else {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: RamFS tests failed\n");
-    }
+    test_record_bulk(5, (uint32_t)ramfs_tests_passed, 0, 0);
+    total_passed += ramfs_tests_passed;
+
+    /* Privilege separation invariants */
+    int priv_result = run_privilege_separation_invariant_test();
+    test_record_simple("privilege_separation_invariants", priv_result);
+    if (priv_result == 0) total_passed++;
 
     if (total_passed > 0) {
         klog_printf(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests completed: %d tests passed\n",
@@ -1261,7 +1264,13 @@ __attribute__((noinline)) int test_context_switch_balance(void) {
 
 int run_scheduler_tests(void) {
     klog_printf(KLOG_INFO, "INTERRUPT_TEST: Scheduler tests skipped (built-in tests disabled)\n");
-    return 0;
+    /* Still run privilege separation invariants to catch regressions */
+    extern int run_privilege_separation_invariant_test(void);
+    int passed = 0;
+    int priv_result = run_privilege_separation_invariant_test();
+    test_record_simple("privilege_separation_invariants", priv_result);
+    if (priv_result == 0) passed++;
+    return passed;
 }
 #endif
 
@@ -1389,6 +1398,60 @@ void test_set_flags(uint32_t flags) {
 }
 
 /*
+ * Register a simple pass/fail result (no exception semantics)
+ */
+void test_record_simple(const char *name, int result) {
+    test_statistics.total_cases++;
+    if (result == 0) {
+        test_statistics.passed_cases++;
+    } else {
+        test_statistics.failed_cases++;
+        if (failed_tests_count < TEST_MAX_FAILED_TRACKED) {
+            size_t i = 0;
+            if (!name) {
+                name = "(unnamed)";
+            }
+            for (; i < sizeof(failed_tests[0]) - 1 && name[i]; i++) {
+                failed_tests[failed_tests_count][i] = name[i];
+            }
+            failed_tests[failed_tests_count][i] = '\0';
+            failed_tests_count++;
+        }
+    }
+
+    if (test_flags & TEST_FLAG_VERBOSE) {
+        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Test '%s' %s\n",
+                    name ? name : "(unnamed)",
+                    result == 0 ? "PASSED" : "FAILED");
+    }
+}
+
+/*
+ * Register bulk results (for suites that return counts)
+ */
+void test_record_bulk(uint32_t total, uint32_t passed,
+                      uint32_t exceptions_caught, uint32_t unexpected_exceptions) {
+    test_statistics.total_cases += total;
+    test_statistics.passed_cases += passed;
+    if (total > passed) {
+        uint32_t delta = total - passed;
+        test_statistics.failed_cases += delta;
+        /* Track bulk failure as an aggregate entry */
+        if (failed_tests_count < TEST_MAX_FAILED_TRACKED) {
+            const char *label = "bulk_suite_failures";
+            size_t i = 0;
+            for (; i < sizeof(failed_tests[0]) - 1 && label[i]; i++) {
+                failed_tests[failed_tests_count][i] = label[i];
+            }
+            failed_tests[failed_tests_count][i] = '\0';
+            failed_tests_count++;
+        }
+    }
+    test_statistics.exceptions_caught += exceptions_caught;
+    test_statistics.unexpected_exceptions += unexpected_exceptions;
+}
+
+/*
  * Check if exception is expected
  */
 int test_is_exception_expected(void) {
@@ -1407,12 +1470,10 @@ void test_clear_resume_point(void) {
  * Report test results
  */
 void test_report_results(void) {
-    klog_printf(KLOG_INFO, "=== INTERRUPT TEST RESULTS ===\n");
+    klog_printf(KLOG_INFO, "=== TEST RESULTS ===\n");
     klog_printf(KLOG_INFO, "Total tests: %u\n", test_statistics.total_cases);
     klog_printf(KLOG_INFO, "Passed: %u\n", test_statistics.passed_cases);
     klog_printf(KLOG_INFO, "Failed: %u\n", test_statistics.failed_cases);
-    klog_printf(KLOG_INFO, "Exceptions caught: %u\n", test_statistics.exceptions_caught);
-    klog_printf(KLOG_INFO, "Unexpected exceptions: %u\n", test_statistics.unexpected_exceptions);
 
     if (test_statistics.total_cases > 0) {
         int success_rate = (int)((test_statistics.passed_cases * 100) /
@@ -1422,6 +1483,13 @@ void test_report_results(void) {
 
     klog_printf(KLOG_INFO, "Elapsed (ms): %u\n", test_statistics.elapsed_ms);
     klog_printf(KLOG_INFO, "Timeout triggered: %s\n", test_statistics.timed_out ? "Yes" : "No");
+
+    if (failed_tests_count > 0) {
+        klog_printf(KLOG_INFO, "Failed tests (%u tracked):\n", failed_tests_count);
+        for (uint32_t i = 0; i < failed_tests_count; i++) {
+            klog_printf(KLOG_INFO, " - %s\n", failed_tests[i]);
+        }
+    }
 
     klog_printf(KLOG_INFO, "=== END TEST RESULTS ===\n");
 }

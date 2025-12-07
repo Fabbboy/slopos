@@ -14,6 +14,7 @@
 #include "../mm/paging.h"
 #include "../mm/process_vm.h"
 #include "../lib/ring_buffer.h"
+#include "../boot/gdt.h"
 #include "scheduler.h"
 
 /* ========================================================================
@@ -261,6 +262,7 @@ static void switch_to_task(task_t *new_task) {
     }
 
     task_t *old_task = scheduler.current_task;
+    task_context_t *old_ctx_ptr = NULL;
 
     if (old_task == new_task) {
         return;
@@ -274,6 +276,13 @@ static void switch_to_task(task_t *new_task) {
     task_set_current(new_task);
     scheduler_reset_task_quantum(new_task);
     scheduler.total_switches++;
+
+    /* Preserve old context unless it was captured from user mode already */
+    if (old_task && !old_task->context_from_user) {
+        old_ctx_ptr = &old_task->context;
+    } else if (old_task) {
+        old_task->context_from_user = 0;
+    }
 
     /* Ensure CR3 matches the task's process address space */
     if (new_task->process_id != INVALID_PROCESS_ID) {
@@ -289,12 +298,18 @@ static void switch_to_task(task_t *new_task) {
     /* Check W/L balance before switching - user must not be bankrupt */
     wl_check_balance();
 
-    /* Perform actual context switch */
-    if (old_task) {
-        context_switch(&old_task->context, &new_task->context);
+    if (new_task->flags & TASK_FLAG_USER_MODE) {
+        uint64_t rsp0 = new_task->kernel_stack_top ? new_task->kernel_stack_top : (uint64_t)&kernel_stack_top;
+        gdt_set_kernel_rsp0(rsp0);
+        context_switch_user(old_ctx_ptr, &new_task->context);
     } else {
-        /* First task - no old context to save */
-        context_switch(NULL, &new_task->context);
+        gdt_set_kernel_rsp0((uint64_t)&kernel_stack_top);
+        if (old_ctx_ptr) {
+            context_switch(old_ctx_ptr, &new_task->context);
+        } else {
+            /* First task or user-context-saved switch */
+            context_switch(NULL, &new_task->context);
+        }
     }
 }
 

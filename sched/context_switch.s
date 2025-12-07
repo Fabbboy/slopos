@@ -187,6 +187,110 @@ skip_cr3_load:
     jmpq    *%r13                    # Jump to new rip (stored in r13)
 
 #
+# context_switch_user(void *old_context, void *new_context)
+# Save current kernel context (if provided) and enter user mode with IRET.
+# Expects new_context->cs/ss to be user selectors.
+#
+.global context_switch_user
+context_switch_user:
+    movq    %rdi, %r8               # old_context pointer
+    movq    %rsi, %rdi              # new_context pointer (use rdi for addressing)
+
+    /* Save old context if present (same layout as context_switch) */
+    test    %r8, %r8
+    jz      csu_after_save
+
+    movq    %rax, 0x00(%r8)
+    movq    %rbx, 0x08(%r8)
+    movq    %rcx, 0x10(%r8)
+    movq    %rdx, 0x18(%r8)
+    movq    %rsi, 0x20(%r8)
+    movq    %rdi, 0x28(%r8)
+    movq    %rbp, 0x30(%r8)
+    movq    %rsp, 0x38(%r8)
+    movq    %r8,  0x40(%r8)
+    movq    %r9,  0x48(%r8)
+    movq    %r10, 0x50(%r8)
+    movq    %r11, 0x58(%r8)
+    movq    %r12, 0x60(%r8)
+    movq    %r13, 0x68(%r8)
+    movq    %r14, 0x70(%r8)
+    movq    %r15, 0x78(%r8)
+
+    movq    (%rsp), %rax
+    movq    %rax, 0x80(%r8)
+
+    pushfq
+    popq    %rax
+    movq    %rax, 0x88(%r8)
+
+    movw    %cs, %ax
+    movq    %rax, 0x90(%r8)
+    movw    %ds, %ax
+    movq    %rax, 0x98(%r8)
+    movw    %es, %ax
+    movq    %rax, 0xA0(%r8)
+    movw    %fs, %ax
+    movq    %rax, 0xA8(%r8)
+    movw    %gs, %ax
+    movq    %rax, 0xB0(%r8)
+    movw    %ss, %ax
+    movq    %rax, 0xB8(%r8)
+
+    movq    %cr3, %rax
+    movq    %rax, 0xC0(%r8)
+
+csu_after_save:
+    /* Switch CR3 if needed */
+    movq    0xC0(%rdi), %rax
+    movq    %cr3, %rdx
+    cmpq    %rax, %rdx
+    je      csu_skip_cr3
+    movq    %rax, %cr3
+csu_skip_cr3:
+
+    /* Load data segments for user mode */
+    movq    0x98(%rdi), %rax        # ds
+    movw    %ax, %ds
+    movq    0xA0(%rdi), %rax        # es
+    movw    %ax, %es
+    movq    0xA8(%rdi), %rax        # fs
+    movw    %ax, %fs
+    movq    0xB0(%rdi), %rax        # gs
+    movw    %ax, %gs
+
+    /* Build IRET frame on current (kernel) stack */
+    movq    0xB8(%rdi), %rax        # ss
+    pushq   %rax
+    movq    0x38(%rdi), %rax        # user rsp
+    pushq   %rax
+    movq    0x88(%rdi), %rax        # rflags
+    pushq   %rax
+    movq    0x90(%rdi), %rax        # cs
+    pushq   %rax
+    movq    0x80(%rdi), %rax        # rip
+    pushq   %rax
+
+    /* Load general-purpose registers from new context */
+    movq    0x00(%rdi), %rax
+    movq    0x08(%rdi), %rbx
+    movq    0x10(%rdi), %rcx
+    movq    0x18(%rdi), %rdx
+    movq    0x20(%rdi), %rsi
+    movq    0x28(%rdi), %rdi        # after this, rdi holds user value
+    movq    0x30(%rdi), %rbp
+    movq    0x40(%rdi), %r8
+    movq    0x48(%rdi), %r9
+    movq    0x50(%rdi), %r10
+    movq    0x58(%rdi), %r11
+    movq    0x60(%rdi), %r12
+    movq    0x68(%rdi), %r13
+    movq    0x70(%rdi), %r14
+    movq    0x78(%rdi), %r15
+
+    iretq
+
+#
 # Alternative simplified context switch for debugging
 # Uses simple jmp instead of full iret mechanism
 #

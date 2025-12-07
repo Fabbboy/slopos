@@ -8,12 +8,18 @@
 #include <stddef.h>
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
+#include "../boot/idt.h"
+#include "../boot/gdt_defs.h"
+#include "../mm/mm_constants.h"
 #include "task.h"
 #include "scheduler.h"
 #include "../lib/klog.h"
 
 /* Forward declaration for test function */
 void test_task_function(int *completed_flag);
+
+/* Forward declaration for privilege separation test */
+static void user_stub_task(void *arg);
 
 /* Global for context switch test */
 static task_context_t kernel_return_context_storage;
@@ -175,6 +181,90 @@ int run_scheduler_test(void) {
     /* If we reach here, scheduler is running tasks */
     klog_printf(KLOG_INFO, "Scheduler started successfully\n");
 
+    return 0;
+}
+
+/*
+ * Simple user-mode stub (never actually scheduled in tests)
+ */
+static void user_stub_task(void *arg) {
+    (void)arg;
+    /* If ever executed, yield then exit via syscall numbers */
+    __asm__ volatile (
+        "mov $0, %%rax\n\t"  /* SYSCALL_YIELD */
+        "int $0x80\n\t"
+        "mov $1, %%rax\n\t"  /* SYSCALL_EXIT */
+        "int $0x80\n\t"
+        :
+        :
+        : "rax"
+    );
+}
+
+/*
+ * Verify privilege separation invariants without entering ring3
+ */
+int run_privilege_separation_invariant_test(void) {
+    klog_printf(KLOG_INFO, "PRIVSEP_TEST: Checking privilege separation invariants\n");
+
+    if (init_task_manager() != 0 || init_scheduler() != 0 || create_idle_task() != 0) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: init failed\n");
+        return -1;
+    }
+
+    uint32_t user_task_id = task_create("UserStub", user_stub_task, NULL,
+                                        TASK_PRIORITY_NORMAL,
+                                        TASK_FLAG_USER_MODE);
+    if (user_task_id == INVALID_TASK_ID) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: user task creation failed\n");
+        return -1;
+    }
+
+    task_t *task_info = NULL;
+    if (task_get_info(user_task_id, &task_info) != 0 || !task_info) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: task lookup failed\n");
+        return -1;
+    }
+
+    int failed = 0;
+
+    if (task_info->process_id == INVALID_PROCESS_ID) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: user task missing process VM\n");
+        failed = 1;
+    }
+    if (task_info->kernel_stack_top == 0) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: user task missing kernel RSP0 stack\n");
+        failed = 1;
+    }
+    if (task_info->context.cs != GDT_USER_CODE_SELECTOR ||
+        task_info->context.ss != GDT_USER_DATA_SELECTOR) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: user task selectors incorrect (cs=0x%lx ss=0x%lx)\n",
+                    (unsigned long)task_info->context.cs,
+                    (unsigned long)task_info->context.ss);
+        failed = 1;
+    }
+
+    struct idt_entry gate;
+    if (idt_get_gate(SYSCALL_VECTOR, &gate) != 0) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: cannot read syscall gate\n");
+        failed = 1;
+    } else {
+        uint8_t dpl = (gate.type_attr >> 5) & 0x3;
+        if (dpl != 3) {
+            klog_printf(KLOG_INFO, "PRIVSEP_TEST: syscall gate DPL=%u expected 3\n", dpl);
+            failed = 1;
+        }
+    }
+
+    task_shutdown_all();
+    scheduler_shutdown();
+
+    if (failed) {
+        klog_printf(KLOG_INFO, "PRIVSEP_TEST: FAILED\n");
+        return -1;
+    }
+
+    klog_printf(KLOG_INFO, "PRIVSEP_TEST: PASSED\n");
     return 0;
 }
 

@@ -37,9 +37,9 @@ struct gdt_tss_entry {
     uint32_t reserved;
 } __attribute__((packed));
 
-/* GDT layout: null, code, data descriptors + TSS descriptor */
+/* GDT layout: null, kernel code, kernel data, user data, user code + TSS descriptor */
 struct gdt_layout {
-    uint64_t entries[3];
+    uint64_t entries[5];
     struct gdt_tss_entry tss_entry;
 } __attribute__((packed));
 
@@ -88,6 +88,8 @@ void gdt_init(void) {
     gdt_table.entries[0] = GDT_NULL_DESCRIPTOR;
     gdt_table.entries[1] = GDT_CODE_DESCRIPTOR_64;
     gdt_table.entries[2] = GDT_DATA_DESCRIPTOR_64;
+    gdt_table.entries[3] = GDT_USER_DATA_DESCRIPTOR_64;
+    gdt_table.entries[4] = GDT_USER_CODE_DESCRIPTOR_64;
 
     uint64_t tss_base = (uint64_t)&kernel_tss;
     uint16_t tss_limit = sizeof(kernel_tss) - 1;
@@ -114,6 +116,10 @@ void gdt_init(void) {
     load_tss();
 
     klog_debug("GDT: Initialized with TSS loaded");
+}
+
+void gdt_set_kernel_rsp0(uint64_t rsp0) {
+    kernel_tss.rsp0 = rsp0;
 }
 
 void gdt_set_ist(uint8_t index, uint64_t stack_top) {

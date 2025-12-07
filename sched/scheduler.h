@@ -12,6 +12,7 @@
 
 /* Low-level context switch helpers implemented in assembly */
 void context_switch(void *old_context, void *new_context);
+void context_switch_user(void *old_context, void *new_context);
 void simple_context_switch(void *old_context, void *new_context);
 
 typedef int (*scheduler_idle_wakeup_cb_t)(void);
@@ -153,6 +154,11 @@ void get_scheduler_stats(uint64_t *context_switches, uint64_t *yields,
  * Returns 0 on success, non-zero on failure
  */
 int run_scheduler_test(void);
+
+/*
+ * Verify privilege separation invariants (user task setup, syscall gate DPL)
+ */
+int run_privilege_separation_invariant_test(void);
 
 /*
  * Print current scheduler statistics

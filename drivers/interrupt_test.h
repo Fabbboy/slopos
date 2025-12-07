@@ -101,6 +101,11 @@ void test_exception_handler(struct interrupt_frame *frame);
 typedef int (*test_function_t)(void);
 int safe_execute_test(test_function_t test_func, const char *test_name, int expected_exception);
 
+/* Simple test bookkeeping helpers */
+void test_record_simple(const char *name, int result);
+void test_record_bulk(uint32_t total, uint32_t passed,
+                      uint32_t exceptions_caught, uint32_t unexpected_exceptions);
+
 // Test assertion macros
 #define ASSERT_EXCEPTION(vector) test_expect_exception(vector)
 #define ASSERT_NO_EXCEPTION() test_expect_exception(-1)
