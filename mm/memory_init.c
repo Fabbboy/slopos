@@ -44,21 +44,10 @@ static const process_memory_layout_t process_layout = {
 };
 
 /* ========================================================================
- * CANONICAL MAP AND STATS
+ * REGION MAP AND STATS
  * ======================================================================== */
 
-typedef enum canonical_region_type {
-    CANONICAL_USABLE = 0,
-    CANONICAL_RESERVED = 1,
-} canonical_region_type_t;
-
-typedef struct canonical_region {
-    uint64_t base;
-    uint64_t length;
-    canonical_region_type_t type;
-    uint32_t flags;
-    char label[32];
-} canonical_region_t;
+#define BOOT_REGION_STATIC_CAP 2048
 
 typedef struct memory_init_stats {
     uint64_t total_memory_bytes;
@@ -71,17 +60,12 @@ typedef struct memory_init_stats {
     uint64_t allocator_metadata_bytes;
 } memory_init_stats_t;
 
-#define MAX_CANONICAL_REGIONS   512
-#define MAX_RESERVATION_VIEWS   256
 #define DESC_ALIGN_BYTES        64
 
-static canonical_region_t canonical_map[MAX_CANONICAL_REGIONS];
-static uint32_t canonical_count = 0;
+static mm_region_t region_boot_buffer[BOOT_REGION_STATIC_CAP];
 static memory_init_stats_t init_stats = {0};
 static int early_paging_ok = 0;
 static int memory_system_initialized = 0;
-
-static uint64_t highest_usable_frame(void);
 
 /* ========================================================================
  * LAYOUT HELPERS
@@ -155,152 +139,84 @@ const process_memory_layout_t *mm_get_process_layout(void) {
  * UTILITIES
  * ======================================================================== */
 
+static void configure_region_store(const struct limine_memmap_response *memmap) {
+    uint32_t needed = 128; /* headroom for overlays */
+    if (memmap && memmap->entry_count < UINT32_MAX) {
+        /* Usable entries + potential reserved overlays from memmap. */
+        needed += (uint32_t)memmap->entry_count * 2;
+    }
+
+    if (needed > BOOT_REGION_STATIC_CAP) {
+        kernel_panic("MM: region map capacity insufficient for memmap");
+    }
+
+    mm_region_map_configure(region_boot_buffer, BOOT_REGION_STATIC_CAP);
+    mm_region_map_reset();
+}
+
 static void add_reservation_or_panic(uint64_t base, uint64_t length,
                                      mm_reservation_type_t type,
                                      uint32_t flags,
                                      const char *label) {
-    if (mm_reservations_add(base, length, type, flags, label) != 0) {
+    if (mm_region_reserve(base, length, type, flags, label) != 0) {
         kernel_panic("MM: Failed to record reserved region");
     }
 }
 
-static void copy_label(char dest[32], const char *src) {
-    if (!src) {
-        dest[0] = '\0';
-        return;
+static void add_usable_or_panic(uint64_t base, uint64_t length, const char *label) {
+    if (mm_region_add_usable(base, length, label) != 0) {
+        kernel_panic("MM: Failed to record usable region");
     }
-    size_t i = 0;
-    for (; i < 31 && src[i] != '\0'; i++) {
-        dest[i] = src[i];
-    }
-    dest[i] = '\0';
 }
 
-static void canonical_reset(void) {
-    for (uint32_t i = 0; i < MAX_CANONICAL_REGIONS; i++) {
-        canonical_map[i].base = 0;
-        canonical_map[i].length = 0;
-        canonical_map[i].type = CANONICAL_RESERVED;
-        canonical_map[i].flags = 0;
-        canonical_map[i].label[0] = '\0';
-    }
-    canonical_count = 0;
-}
-
-static void canonical_add(uint64_t base, uint64_t length,
-                          canonical_region_type_t type,
-                          uint32_t flags,
-                          const char *label) {
-    if (length == 0) {
-        return;
-    }
-    if (canonical_count >= MAX_CANONICAL_REGIONS) {
-        kernel_panic("MM: Canonical map capacity exceeded");
+static void record_memmap_usable(const struct limine_memmap_response *memmap) {
+    if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
+        kernel_panic("MM: Missing Limine memmap for usable regions");
     }
 
-    if (canonical_count > 0) {
-        canonical_region_t *prev = &canonical_map[canonical_count - 1];
-        uint64_t prev_end = prev->base + prev->length;
-        if (prev->type == type &&
-            prev->flags == flags &&
-            prev_end == base) {
-            prev->length += length;
-            return;
+    init_stats.total_memory_bytes = 0;
+
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        const struct limine_memmap_entry *entry = memmap->entries[i];
+        if (!entry || entry->length == 0) {
+            continue;
         }
-    }
 
-    canonical_region_t *slot = &canonical_map[canonical_count++];
-    slot->base = base;
-    slot->length = length;
-    slot->type = type;
-    slot->flags = flags;
-    copy_label(slot->label, label);
+        init_stats.total_memory_bytes += entry->length;
+        if (entry->type != LIMINE_MEMMAP_USABLE) {
+            continue;
+        }
+
+        uint64_t base = align_up_u64(entry->base, PAGE_SIZE_4KB);
+        uint64_t end = align_down_u64(entry->base + entry->length, PAGE_SIZE_4KB);
+        if (end <= base) {
+            continue;
+        }
+
+        add_usable_or_panic(base, end - base, "usable");
+    }
 }
 
-static void canonical_recompute_stats(void) {
-    init_stats.available_memory_bytes = 0;
+static void compute_memory_stats(const struct limine_memmap_response *memmap,
+                                 uint64_t hhdm_offset) {
+    (void)memmap;
+    init_stats.hhdm_offset = hhdm_offset;
+    init_stats.memory_regions_count = mm_region_count();
+    init_stats.available_memory_bytes = mm_region_total_bytes(MM_REGION_USABLE);
 
-    int has_usable = 0;
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        if (canonical_map[i].type == CANONICAL_USABLE) {
-            has_usable = 1;
-            init_stats.available_memory_bytes += canonical_map[i].length;
-        }
-    }
-
-    if (!has_usable) {
+    if (init_stats.available_memory_bytes == 0) {
         init_stats.tracked_page_frames = 0;
-        return;
+    } else {
+        uint64_t highest_frame = mm_region_highest_usable_frame();
+        init_stats.tracked_page_frames = (highest_frame >= UINT32_MAX) ? 0 : (uint32_t)(highest_frame + 1);
     }
 
-    uint64_t highest_frame = highest_usable_frame();
-    init_stats.tracked_page_frames = (highest_frame >= UINT32_MAX) ? 0 : (uint32_t)(highest_frame + 1);
-}
-
-static int canonical_insert_slot(uint32_t index) {
-    if (canonical_count >= MAX_CANONICAL_REGIONS) {
-        return -1;
-    }
-    for (uint32_t i = canonical_count; i > index; i--) {
-        canonical_map[i] = canonical_map[i - 1];
-    }
-    canonical_count++;
-    return 0;
-}
-
-static void canonical_reserve_range(uint64_t phys_base,
-                                    uint64_t length,
-                                    uint32_t flags,
-                                    const char *label) {
-    if (length == 0) {
-        return;
+    if (init_stats.tracked_page_frames == 0 && init_stats.available_memory_bytes > 0) {
+        kernel_panic("MM: Usable memory exceeds supported frame range");
     }
 
-    uint64_t end = phys_base + length;
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        canonical_region_t *region = &canonical_map[i];
-        uint64_t region_end = region->base + region->length;
-
-        if (region->type != CANONICAL_USABLE) {
-            continue;
-        }
-        if (phys_base < region->base || end > region_end) {
-            continue;
-        }
-
-        /* Split left usable chunk if needed. */
-        if (phys_base > region->base) {
-            if (canonical_insert_slot(i) != 0) {
-                kernel_panic("MM: Canonical map capacity exceeded during reserve");
-            }
-            canonical_map[i] = *region;
-            canonical_map[i].length = phys_base - region->base;
-            region = &canonical_map[i + 1];
-            region->base = phys_base;
-            region->length = region_end - phys_base;
-        }
-
-        /* Split right usable chunk if needed. */
-        if (end < region->base + region->length) {
-            if (canonical_insert_slot(i + 1) != 0) {
-                kernel_panic("MM: Canonical map capacity exceeded during reserve");
-            }
-            canonical_map[i + 1] = *region;
-            canonical_map[i + 1].base = end;
-            canonical_map[i + 1].length = region_end - end;
-            region->length = end - region->base;
-        }
-
-        /* Convert overlapping chunk to reserved. */
-        region->type = CANONICAL_RESERVED;
-        region->flags = flags;
-        copy_label(region->label, label);
-
-        canonical_recompute_stats();
-        return;
-    }
-
-    kernel_panic("MM: Failed to project reservation into canonical map");
+    init_stats.reserved_region_count = mm_reservations_count();
+    init_stats.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 }
 
 /* ========================================================================
@@ -448,118 +364,6 @@ static void record_apic_reservation(void) {
 }
 
 /* ========================================================================
- * CANONICAL MAP BUILDING
- * ======================================================================== */
-
-static uint64_t highest_usable_frame(void) {
-    uint64_t highest = 0;
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        if (canonical_map[i].type != CANONICAL_USABLE || canonical_map[i].length == 0) {
-            continue;
-        }
-        uint64_t end = canonical_map[i].base + canonical_map[i].length - 1;
-        uint64_t frame = end >> 12;
-        if (frame > highest) {
-            highest = frame;
-        }
-    }
-    return highest;
-}
-
-static void build_canonical_map(const struct limine_memmap_response *memmap,
-                                uint64_t hhdm_offset) {
-    canonical_reset();
-    init_stats.available_memory_bytes = 0;
-    init_stats.tracked_page_frames = 0;
-    init_stats.memory_regions_count = memmap ? (uint32_t)memmap->entry_count : 0;
-    init_stats.hhdm_offset = hhdm_offset;
-
-    if (!memmap || memmap->entry_count == 0 || !memmap->entries) {
-        kernel_panic("MM: Missing Limine memmap for canonical build");
-    }
-
-    init_stats.total_memory_bytes = 0;
-
-    uint32_t res_idx = 0;
-    uint32_t res_count = mm_reservations_count();
-
-    for (uint64_t i = 0; i < memmap->entry_count; i++) {
-        const struct limine_memmap_entry *entry = memmap->entries[i];
-        if (!entry || entry->length == 0) {
-            continue;
-        }
-
-        init_stats.total_memory_bytes += entry->length;
-        if (entry->type != LIMINE_MEMMAP_USABLE) {
-            continue;
-        }
-
-        uint64_t base = align_up_u64(entry->base, PAGE_SIZE_4KB);
-        uint64_t end = align_down_u64(entry->base + entry->length, PAGE_SIZE_4KB);
-        if (end <= base) {
-            continue;
-        }
-
-        uint64_t cursor = base;
-
-        /* Emit reservations that end before this usable range to keep map ordered. */
-        while (res_idx < res_count) {
-            const mm_reserved_region_t *res = mm_reservations_get(res_idx);
-            if (!res) {
-                res_idx++;
-                continue;
-            }
-            uint64_t res_end = res->phys_base + res->length;
-            if (res_end <= cursor) {
-                canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
-                res_idx++;
-                continue;
-            }
-            break;
-        }
-
-        while (cursor < end) {
-            const mm_reserved_region_t *res = (res_idx < res_count) ? mm_reservations_get(res_idx) : NULL;
-            uint64_t next_res_base = res ? res->phys_base : UINT64_MAX;
-            int res_excludes_alloc = res && (res->flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
-
-            /* Emit usable chunk up to next reservation or end of range. */
-            uint64_t next_cut = (next_res_base < end && res_excludes_alloc) ? next_res_base : end;
-            if (next_cut > cursor) {
-                canonical_add(cursor, next_cut - cursor, CANONICAL_USABLE, 0, "usable");
-                cursor = next_cut;
-            }
-
-            if (!res || next_res_base >= end) {
-                break;
-            }
-
-            /* Add reservation in-order and advance past it. */
-            canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
-            uint64_t res_end = res->phys_base + res->length;
-            cursor = (res_end > cursor) ? res_end : cursor;
-            res_idx++;
-        }
-    }
-
-    /* Append any remaining reservations that sit after the last usable range. */
-    while (res_idx < res_count) {
-        const mm_reserved_region_t *res = mm_reservations_get(res_idx);
-        if (res && res->length > 0) {
-            canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
-        }
-        res_idx++;
-    }
-
-    canonical_recompute_stats();
-    if (init_stats.tracked_page_frames == 0 && init_stats.available_memory_bytes > 0) {
-        kernel_panic("MM: Usable memory exceeds supported frame range");
-    }
-    init_stats.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
-    init_stats.reserved_region_count = mm_reservations_count();
-}
-
-/* ========================================================================
  * ALLOCATOR METADATA PLANNING
  * ======================================================================== */
 
@@ -571,16 +375,16 @@ typedef struct allocator_plan {
 } allocator_plan_t;
 
 static uint64_t select_allocator_window(uint64_t reserved_bytes) {
-    for (int32_t i = (int32_t)canonical_count - 1; i >= 0; i--) {
-        canonical_region_t *region = &canonical_map[i];
-        if (region->type != CANONICAL_USABLE || region->length < reserved_bytes) {
+    for (int32_t i = (int32_t)mm_region_count() - 1; i >= 0; i--) {
+        const mm_region_t *region = mm_region_get((uint32_t)i);
+        if (!region || region->kind != MM_REGION_USABLE || region->length < reserved_bytes) {
             continue;
         }
 
-        uint64_t region_end = region->base + region->length;
+        uint64_t region_end = region->phys_base + region->length;
         uint64_t candidate = align_down_u64(region_end - reserved_bytes, PAGE_SIZE_4KB);
-        if (candidate < region->base) {
-            candidate = region->base;
+        if (candidate < region->phys_base) {
+            candidate = region->phys_base;
         }
         return candidate;
     }
@@ -618,13 +422,6 @@ static allocator_plan_t plan_allocator_metadata(const struct limine_memmap_respo
     plan.capacity_frames = init_stats.tracked_page_frames;
     plan.buffer = (void *)(phys_base + hhdm_offset);
 
-    /* Project the metadata reservation into the canonical map in-place. */
-    canonical_reserve_range(phys_base,
-                            aligned_bytes,
-                            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS |
-                            MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-                            "Allocator metadata");
-
     return plan;
 }
 
@@ -644,7 +441,7 @@ static void log_reserved_regions(void) {
 
     klog_printf(KLOG_INFO, "MM: Reserved device regions (%u)\n", count);
     for (uint32_t i = 0; i < count; i++) {
-        const mm_reserved_region_t *region = mm_reservations_get(i);
+        const mm_region_t *region = mm_reservations_get(i);
         if (!region) {
             continue;
         }
@@ -715,16 +512,19 @@ int init_memory_system(const struct limine_memmap_response *memmap,
     init_kernel_memory_layout();
     mm_init_phys_virt_helpers();
 
-    mm_reservations_reset();
+    configure_region_store(memmap);
+    record_memmap_usable(memmap);
     record_kernel_core_reservations();
     record_memmap_reservations(memmap);
     record_framebuffer_reservation();
     record_apic_reservation();
 
-    build_canonical_map(memmap, hhdm_offset);
+    compute_memory_stats(memmap, hhdm_offset);
 
     allocator_plan_t allocator_plan = plan_allocator_metadata(memmap, hhdm_offset);
 
+    /* Recompute stats after carving out allocator metadata. */
+    compute_memory_stats(memmap, hhdm_offset);
     finalize_reserved_regions();
 
     /* Early paging is already set up by the loader; mark as acknowledged. */
@@ -734,12 +534,12 @@ int init_memory_system(const struct limine_memmap_response *memmap,
         kernel_panic("MM: Page allocator initialization failed");
     }
 
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        canonical_region_t *region = &canonical_map[i];
-        if (region->type != CANONICAL_USABLE) {
+    for (uint32_t i = 0; i < mm_region_count(); i++) {
+        const mm_region_t *region = mm_region_get(i);
+        if (!region || region->kind != MM_REGION_USABLE) {
             continue;
         }
-        if (add_page_alloc_region(region->base, region->length, EFI_CONVENTIONAL_MEMORY) != 0) {
+        if (add_page_alloc_region(region->phys_base, region->length, EFI_CONVENTIONAL_MEMORY) != 0) {
             klog_printf(KLOG_INFO, "MM: WARNING - failed to register page allocator region\n");
         }
     }

@@ -25,7 +25,7 @@ uint64_t mm_phys_to_virt(uint64_t phys_addr) {
         return 0;
     }
 
-    const mm_reserved_region_t *reservation = mm_reservations_find(phys_addr);
+    const mm_region_t *reservation = mm_reservations_find(phys_addr);
     if (reservation &&
         (reservation->flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT |
                                MM_RESERVATION_FLAG_MMIO)) == 0) {
