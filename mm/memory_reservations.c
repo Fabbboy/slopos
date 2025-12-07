@@ -7,12 +7,7 @@
 #include "../drivers/serial.h"
 #include "../lib/alignment.h"
 
-/*
- * Reservation storage:
- * - Backed by a static pool large enough for typical ACPI + firmware layouts.
- * - We track overflows explicitly so callers can fail hard instead of silently
- *   dropping regions.
- */
+/* Reservation storage is kept sorted by base to allow linear carving later. */
 #define MM_MAX_RESERVED_REGIONS 256
 
 static mm_reserved_region_t reserved_regions[MM_MAX_RESERVED_REGIONS];
@@ -40,6 +35,24 @@ static void copy_label(char dest[32], const char *src) {
         dest[i] = src[i];
     }
     dest[i] = '\0';
+}
+
+static uint32_t find_insert_index(uint64_t phys_base) {
+    uint32_t idx = 0;
+    while (idx < reserved_region_count &&
+           reserved_regions[idx].phys_base <= phys_base) {
+        idx++;
+    }
+    return idx;
+}
+
+static void shift_right_from(uint32_t index) {
+    if (reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
+        return;
+    }
+    for (uint32_t i = reserved_region_count; i > index; i--) {
+        reserved_regions[i] = reserved_regions[i - 1];
+    }
 }
 
 void mm_reservations_reset(void) {
@@ -72,6 +85,43 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
         return -1;
     }
 
+    /* Try to merge with existing regions to avoid capacity pressure. */
+    if (reserved_region_count > 0) {
+        /* Check previous region */
+        uint32_t prev_idx = reserved_region_count - 1;
+        for (uint32_t i = 0; i < reserved_region_count; i++) {
+            if (reserved_regions[i].phys_base > aligned_base) {
+                prev_idx = i > 0 ? i - 1 : 0;
+                break;
+            }
+        }
+
+        mm_reserved_region_t *prev = &reserved_regions[prev_idx];
+        uint64_t prev_end = prev->phys_base + prev->length;
+        if (prev_end >= aligned_base) {
+            if (prev_end < aligned_end) {
+                prev->length = aligned_end - prev->phys_base;
+            }
+            return 0;
+        }
+
+        /* Check next region for adjacency */
+        for (uint32_t i = 0; i < reserved_region_count; i++) {
+            mm_reserved_region_t *next = &reserved_regions[i];
+            if (next->phys_base >= aligned_end) {
+                if (next->phys_base == aligned_end) {
+                    next->phys_base = aligned_base;
+                    next->length += (aligned_end - aligned_base);
+                    copy_label(next->label, label);
+                    next->type = type;
+                    next->flags = flags;
+                    return 0;
+                }
+                break;
+            }
+        }
+    }
+
     if (reserved_region_count >= MM_MAX_RESERVED_REGIONS) {
         reservation_overflows++;
         klog_printf(KLOG_INFO,
@@ -80,11 +130,12 @@ int mm_reservations_add(uint64_t phys_base, uint64_t length,
         return -1;
     }
 
-    uint64_t aligned_length = aligned_end - aligned_base;
+    uint32_t insert_idx = find_insert_index(aligned_base);
+    shift_right_from(insert_idx);
 
-    mm_reserved_region_t *slot = &reserved_regions[reserved_region_count];
+    mm_reserved_region_t *slot = &reserved_regions[insert_idx];
     slot->phys_base = aligned_base;
-    slot->length = aligned_length;
+    slot->length = aligned_end - aligned_base;
     slot->type = type;
     slot->flags = flags;
     copy_label(slot->label, label);

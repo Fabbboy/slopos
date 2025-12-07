@@ -29,6 +29,7 @@
 
 /* Buddy allocator max order (2^24 pages = 64GB coverage) */
 #define MAX_ORDER                     24
+#define INVALID_REGION_ID             0xFFFF
 
 /* ========================================================================
  * PAGE FRAME TRACKING STRUCTURES
@@ -39,6 +40,7 @@ typedef struct page_frame {
     uint8_t state;                /* Page frame state */
     uint8_t flags;                /* Page frame flags */
     uint16_t order;               /* Buddy allocator order (for multi-page blocks) */
+    uint16_t region_id;           /* Owning region to prevent cross-region merges */
     uint32_t next_free;           /* Next free page frame (for free lists) */
 } page_frame_t;
 
@@ -49,6 +51,7 @@ typedef struct phys_region {
     uint32_t num_frames;          /* Number of page frames */
     uint8_t type;                 /* Memory type (from EFI) */
     uint8_t available;            /* Available for allocation */
+    uint16_t region_id;           /* Region identifier */
 } phys_region_t;
 
 typedef struct page_allocator {
@@ -87,6 +90,11 @@ static inline page_frame_t *get_frame_desc(uint32_t frame_num) {
         return NULL;
     }
     return &page_allocator.frames[frame_num];
+}
+
+static inline uint16_t frame_region_id(uint32_t frame_num) {
+    page_frame_t *frame = get_frame_desc(frame_num);
+    return frame ? frame->region_id : INVALID_REGION_ID;
 }
 
 static inline uint32_t order_block_pages(uint32_t order) {
@@ -222,12 +230,16 @@ static void insert_block_coalescing(uint32_t frame_num, uint32_t order) {
 
     uint32_t curr_frame = frame_num;
     uint32_t curr_order = order;
+    uint16_t region_id = frame_region_id(frame_num);
 
     while (curr_order < page_allocator.max_order) {
         uint32_t buddy = curr_frame ^ order_block_pages(curr_order);
         page_frame_t *buddy_desc = get_frame_desc(buddy);
 
-        if (!buddy_desc || buddy_desc->state != PAGE_FRAME_FREE || buddy_desc->order != curr_order) {
+        if (!buddy_desc ||
+            buddy_desc->state != PAGE_FRAME_FREE ||
+            buddy_desc->order != curr_order ||
+            buddy_desc->region_id != region_id) {
             break;
         }
 
@@ -390,6 +402,19 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
         return -1;
     }
 
+    /* Prevent overlapping regions from being registered. */
+    for (uint32_t i = 0; i < page_allocator.num_regions; i++) {
+        const phys_region_t *existing = &page_allocator.regions[i];
+        uint64_t exist_start = existing->start_frame;
+        uint64_t exist_end = existing->start_frame + existing->num_frames;
+        uint64_t new_start = start_frame;
+        uint64_t new_end = start_frame + num_frames;
+        if (new_start < exist_end && new_end > exist_start) {
+            klog_info("add_page_alloc_region: Overlapping region rejected");
+            return -1;
+        }
+    }
+
     phys_region_t *region = &page_allocator.regions[page_allocator.num_regions];
     region->start_addr = aligned_start;
     region->size = aligned_size;
@@ -397,6 +422,7 @@ int add_page_alloc_region(uint64_t start_addr, uint64_t size, uint8_t type) {
     region->num_frames = num_frames;
     region->type = type;
     region->available = (type == EFI_CONVENTIONAL_MEMORY) ? 1 : 0;
+    region->region_id = (uint16_t)page_allocator.num_regions;
 
     page_allocator.num_regions++;
 
@@ -448,6 +474,7 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
         frames[i].state = PAGE_FRAME_RESERVED;
         frames[i].flags = 0;
         frames[i].order = 0;
+        frames[i].region_id = INVALID_REGION_ID;
         frames[i].next_free = INVALID_PAGE_FRAME;
     }
 
@@ -492,8 +519,14 @@ static void add_region_blocks(const phys_region_t *region) {
             order--;
         }
 
-        insert_block_coalescing(frame, order);
         uint32_t block_pages = order_block_pages(order);
+        for (uint32_t i = 0; i < block_pages; i++) {
+            page_frame_t *f = get_frame_desc(frame + i);
+            if (f) {
+                f->region_id = region->region_id;
+            }
+        }
+        insert_block_coalescing(frame, order);
         frame += block_pages;
         remaining -= block_pages;
     }

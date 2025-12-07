@@ -312,8 +312,6 @@ char keyboard_getchar(void) {
 
 int keyboard_has_input(void) {
     int has_data = kb_buffer_has_data(&char_buffer);
-    klog_printf(KLOG_DEBUG, "[KBD] buffer_has_data() = %d (count=%u)\n",
-                has_data, (unsigned int)char_buffer.count);
     return has_data;
 }
 

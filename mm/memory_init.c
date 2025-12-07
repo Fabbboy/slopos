@@ -189,59 +189,30 @@ static void canonical_add(uint64_t base, uint64_t length,
                           canonical_region_type_t type,
                           uint32_t flags,
                           const char *label) {
-    if (length == 0 || canonical_count >= MAX_CANONICAL_REGIONS) {
+    if (length == 0) {
         return;
     }
+    if (canonical_count >= MAX_CANONICAL_REGIONS) {
+        kernel_panic("MM: Canonical map capacity exceeded");
+    }
+
+    if (canonical_count > 0) {
+        canonical_region_t *prev = &canonical_map[canonical_count - 1];
+        uint64_t prev_end = prev->base + prev->length;
+        if (prev->type == type &&
+            prev->flags == flags &&
+            prev_end == base) {
+            prev->length += length;
+            return;
+        }
+    }
+
     canonical_region_t *slot = &canonical_map[canonical_count++];
     slot->base = base;
     slot->length = length;
     slot->type = type;
     slot->flags = flags;
     copy_label(slot->label, label);
-}
-
-static void canonical_sort(void) {
-    for (uint32_t i = 0; i < canonical_count; i++) {
-        for (uint32_t j = i + 1; j < canonical_count; j++) {
-            if (canonical_map[j].base < canonical_map[i].base) {
-                canonical_region_t tmp = canonical_map[i];
-                canonical_map[i] = canonical_map[j];
-                canonical_map[j] = tmp;
-            }
-        }
-    }
-}
-
-static void canonical_sort_and_merge(void) {
-    if (canonical_count == 0) {
-        return;
-    }
-
-    canonical_sort();
-
-    uint32_t write = 0;
-    for (uint32_t read = 0; read < canonical_count; read++) {
-        canonical_region_t *curr = &canonical_map[read];
-        if (curr->length == 0) {
-            continue;
-        }
-
-        if (write == 0) {
-            canonical_map[write++] = *curr;
-            continue;
-        }
-
-        canonical_region_t *prev = &canonical_map[write - 1];
-        uint64_t prev_end = prev->base + prev->length;
-        if (prev->type == curr->type &&
-            prev->flags == curr->flags &&
-            prev_end == curr->base) {
-            prev->length += curr->length;
-        } else {
-            canonical_map[write++] = *curr;
-        }
-    }
-    canonical_count = write;
 }
 
 /* ========================================================================
@@ -392,63 +363,6 @@ static void record_apic_reservation(void) {
  * CANONICAL MAP BUILDING
  * ======================================================================== */
 
-typedef struct reservation_view {
-    uint64_t base;
-    uint64_t length;
-    uint32_t flags;
-    char label[32];
-    mm_reservation_type_t type;
-} reservation_view_t;
-
-static void sort_reservations(reservation_view_t *views, uint32_t count) {
-    for (uint32_t i = 0; i < count; i++) {
-        for (uint32_t j = i + 1; j < count; j++) {
-            if (views[j].base < views[i].base) {
-                reservation_view_t tmp = views[i];
-                views[i] = views[j];
-                views[j] = tmp;
-            }
-        }
-    }
-}
-
-static void carve_usable_range(uint64_t start, uint64_t end,
-                               const reservation_view_t *reservations,
-                               uint32_t reservation_count) {
-    uint64_t cursor = start;
-    for (uint32_t i = 0; i < reservation_count; i++) {
-        const reservation_view_t *res = &reservations[i];
-        if ((res->flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS) == 0) {
-            continue;
-        }
-
-        uint64_t res_start = res->base;
-        uint64_t res_end = res->base + res->length;
-        if (res_start >= end) {
-            break;
-        }
-        if (res_end <= cursor) {
-            continue;
-        }
-
-        if (res_start > cursor) {
-            canonical_add(cursor, res_start - cursor, CANONICAL_USABLE, 0, "usable");
-        }
-
-        if (res_end > cursor) {
-            cursor = res_end;
-        }
-
-        if (cursor >= end) {
-            break;
-        }
-    }
-
-    if (cursor < end) {
-        canonical_add(cursor, end - cursor, CANONICAL_USABLE, 0, "usable");
-    }
-}
-
 static uint64_t highest_usable_frame(void) {
     uint64_t highest = 0;
     for (uint32_t i = 0; i < canonical_count; i++) {
@@ -476,27 +390,10 @@ static void build_canonical_map(const struct limine_memmap_response *memmap,
         kernel_panic("MM: Missing Limine memmap for canonical build");
     }
 
-    uint32_t res_count = mm_reservations_count();
-    if (res_count > MAX_RESERVATION_VIEWS) {
-        kernel_panic("MM: Reservation view capacity exceeded");
-    }
-
-    reservation_view_t res_copy[MAX_RESERVATION_VIEWS];
-    memset(res_copy, 0, sizeof(res_copy));
-    for (uint32_t i = 0; i < res_count; i++) {
-        const mm_reserved_region_t *r = mm_reservations_get(i);
-        if (!r) {
-            continue;
-        }
-        res_copy[i].base = r->phys_base;
-        res_copy[i].length = r->length;
-        res_copy[i].flags = r->flags;
-        res_copy[i].type = r->type;
-        copy_label(res_copy[i].label, r->label);
-    }
-    sort_reservations(res_copy, res_count);
-
     init_stats.total_memory_bytes = 0;
+
+    uint32_t res_idx = 0;
+    uint32_t res_count = mm_reservations_count();
 
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         const struct limine_memmap_entry *entry = memmap->entries[i];
@@ -515,18 +412,56 @@ static void build_canonical_map(const struct limine_memmap_response *memmap,
             continue;
         }
 
-        carve_usable_range(base, end, res_copy, res_count);
-    }
+        uint64_t cursor = base;
 
-    for (uint32_t i = 0; i < res_count; i++) {
-        reservation_view_t *r = &res_copy[i];
-        if (r->length == 0) {
-            continue;
+        /* Emit reservations that end before this usable range to keep map ordered. */
+        while (res_idx < res_count) {
+            const mm_reserved_region_t *res = mm_reservations_get(res_idx);
+            if (!res) {
+                res_idx++;
+                continue;
+            }
+            uint64_t res_end = res->phys_base + res->length;
+            if (res_end <= cursor) {
+                canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
+                res_idx++;
+                continue;
+            }
+            break;
         }
-        canonical_add(r->base, r->length, CANONICAL_RESERVED, r->flags, r->label);
+
+        while (cursor < end) {
+            const mm_reserved_region_t *res = (res_idx < res_count) ? mm_reservations_get(res_idx) : NULL;
+            uint64_t next_res_base = res ? res->phys_base : UINT64_MAX;
+            int res_excludes_alloc = res && (res->flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+
+            /* Emit usable chunk up to next reservation or end of range. */
+            uint64_t next_cut = (next_res_base < end && res_excludes_alloc) ? next_res_base : end;
+            if (next_cut > cursor) {
+                canonical_add(cursor, next_cut - cursor, CANONICAL_USABLE, 0, "usable");
+                cursor = next_cut;
+            }
+
+            if (!res || next_res_base >= end) {
+                break;
+            }
+
+            /* Add reservation in-order and advance past it. */
+            canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
+            uint64_t res_end = res->phys_base + res->length;
+            cursor = (res_end > cursor) ? res_end : cursor;
+            res_idx++;
+        }
     }
 
-    canonical_sort_and_merge();
+    /* Append any remaining reservations that sit after the last usable range. */
+    while (res_idx < res_count) {
+        const mm_reserved_region_t *res = mm_reservations_get(res_idx);
+        if (res && res->length > 0) {
+            canonical_add(res->phys_base, res->length, CANONICAL_RESERVED, res->flags, res->label);
+        }
+        res_idx++;
+    }
 
     for (uint32_t i = 0; i < canonical_count; i++) {
         if (canonical_map[i].type == CANONICAL_USABLE) {
@@ -757,4 +692,5 @@ void get_memory_statistics(uint64_t *total_memory_out,
     if (available_memory_out) *available_memory_out = init_stats.available_memory_bytes;
     if (regions_count_out) *regions_count_out = init_stats.memory_regions_count;
 }
+
 

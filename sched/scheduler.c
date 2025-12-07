@@ -1,7 +1,7 @@
 /*
  * SlopOS Cooperative Round-Robin Scheduler
- * Implements fair task scheduling with voluntary yielding
- * Tasks must yield control voluntarily - no preemption
+ * Implements fair task scheduling with voluntary yielding.
+ * Preemption is opt-in; default mode is cooperative.
  */
 
 #include <stdint.h>
@@ -71,6 +71,7 @@ typedef struct scheduler {
 /* Global scheduler instance */
 static scheduler_t scheduler = {0};
 static scheduler_idle_wakeup_cb_t idle_wakeup_cb = NULL;
+static const uint8_t scheduler_preemption_default = 0; /* cooperative baseline */
 
 static uint32_t scheduler_get_default_time_slice(void) {
     return scheduler.time_slice ? scheduler.time_slice : SCHED_DEFAULT_TIME_SLICE;
@@ -542,7 +543,7 @@ int init_scheduler(void) {
     scheduler.schedule_calls = 0;
     scheduler.total_ticks = 0;
     scheduler.total_preemptions = 0;
-    scheduler.preemption_enabled = 0;
+    scheduler.preemption_enabled = scheduler_preemption_default;
     scheduler.reschedule_pending = 0;
     scheduler.in_schedule = 0;
 
@@ -588,7 +589,8 @@ int start_scheduler(void) {
     /* Save current context as return context for testing */
     init_kernel_context(&scheduler.return_context);
 
-    scheduler_set_preemption_enabled(1);
+    /* Stay cooperative unless explicitly requested. */
+    scheduler_set_preemption_enabled(scheduler_preemption_default);
 
     /* If we have tasks in ready queue, start scheduling */
     if (!ready_queue_empty(&scheduler.ready_queue)) {

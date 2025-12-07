@@ -13,9 +13,11 @@
 #include "splash.h"
 #include "../drivers/serial.h"
 #include "../drivers/pit.h"
+#include "../drivers/irq.h"
 #include "../lib/numfmt.h"
 #include "../boot/kernel_panic.h"
 #include "../lib/klog.h"
+#include "../lib/cpu.h"
 
 /* ========================================================================
  * GEOMETRY DEFINITIONS
@@ -242,7 +244,7 @@ static void render_wheel_frame(int screen_width, int screen_height,
                                int highlight_segment, int pointer_angle_deg,
                                int *last_pointer_angle,
                                uint32_t fate_number, bool reveal_number,
-                               bool clear_background) {
+                               bool clear_background, bool draw_wheel) {
     int region = radius + 80;
     int region_x = center_x - region;
     int region_y = center_y - region;
@@ -272,7 +274,9 @@ static void render_wheel_frame(int screen_width, int screen_height,
         graphics_draw_rect_filled_fast(region_x, region_y, region_w, region_h, ROULETTE_BG_COLOR);
     }
 
-    draw_roulette_wheel(center_x, center_y, radius, highlight_segment);
+    if (draw_wheel) {
+        draw_roulette_wheel(center_x, center_y, radius, highlight_segment);
+    }
     draw_pointer_ticks(center_x, center_y, radius, pointer_angle_deg, ROULETTE_POINTER_COLOR);
     draw_fate_number(center_x, center_y + radius + 30, fate_number, reveal_number ? 1 : 0);
 
@@ -376,6 +380,11 @@ int roulette_show_spin(uint32_t fate_number) {
 
     klog_printf(KLOG_INFO, "ROULETTE: Displaying visual wheel of fate...\n");
 
+    /* Ensure timer access is available; animation uses polling for consistent pacing. */
+    pit_enable_irq();
+    irq_enable_line(0);
+    cpu_sti();
+
     uint32_t width = framebuffer_get_width();
     uint32_t height = framebuffer_get_height();
     
@@ -409,7 +418,7 @@ int roulette_show_spin(uint32_t fate_number) {
         start_segment = (start_segment + 3) % ROULETTE_SEGMENT_COUNT;
     }
 
-    pit_sleep_ms(300);
+    pit_poll_delay_ms(300);
 
     int start_angle = segment_center_angle(start_segment);
     int target_angle = segment_center_angle(target_segment);
@@ -421,7 +430,7 @@ int roulette_show_spin(uint32_t fate_number) {
 
     int last_pointer_angle = -1;
     render_wheel_frame(width, height, center_x, center_y, radius,
-                       -1, start_angle, &last_pointer_angle, fate_number, false, true);
+                       -1, start_angle, &last_pointer_angle, fate_number, false, true, true);
 
     int total_frames = ROULETTE_SPIN_DURATION_MS / ROULETTE_SPIN_FRAME_DELAY_MS;
     if (total_frames < 1) {
@@ -433,35 +442,35 @@ int roulette_show_spin(uint32_t fate_number) {
         int pointer_angle_frame = start_angle + (total_rotation * frame) / total_frames;
         render_wheel_frame(width, height, center_x, center_y, radius,
                            -1, pointer_angle_frame, &last_pointer_angle,
-                           fate_number, false, false);
-        pit_sleep_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
+                           fate_number, false, false, false);
+        pit_poll_delay_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
     }
 
     int pointer_angle = start_angle + total_rotation;
     int landing_segment = target_segment;
     render_wheel_frame(width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
-                       fate_number, false, true);
-    pit_sleep_ms(500);
+                       fate_number, false, true, true);
+    pit_poll_delay_ms(500);
 
     klog_printf(KLOG_INFO, "ROULETTE: Revealing fate number...\n");
-    pit_sleep_ms(400);
+    pit_poll_delay_ms(400);
 
     for (int flash = 0; flash < 5; flash++) {
         render_wheel_frame(width, height, center_x, center_y, radius,
                            landing_segment, pointer_angle, &last_pointer_angle,
-                           fate_number, true, false);
-        pit_sleep_ms(250);
+                           fate_number, true, false, false);
+        pit_poll_delay_ms(250);
         if (flash < 4) {
             render_wheel_frame(width, height, center_x, center_y, radius,
                                landing_segment, pointer_angle, &last_pointer_angle,
-                               fate_number, false, false);
-            pit_sleep_ms(150);
+                               fate_number, false, false, false);
+            pit_poll_delay_ms(150);
         }
     }
     render_wheel_frame(width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
-                       fate_number, true, false);
+                       fate_number, true, false, true);
     pit_sleep_ms(600);
 
     klog_printf(KLOG_INFO, "ROULETTE: Displaying result...\n");
@@ -484,7 +493,7 @@ int roulette_show_spin(uint32_t fate_number) {
         font_draw_string(center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
     }
 
-    pit_sleep_ms(ROULETTE_RESULT_DELAY_MS);
+    pit_poll_delay_ms(ROULETTE_RESULT_DELAY_MS);
 
     klog_printf(KLOG_INFO, "ROULETTE: Wheel of fate complete\n");
 
@@ -496,7 +505,7 @@ int roulette_show_spin(uint32_t fate_number) {
         int msg_y = cur_height / 2 - 20;
 
         font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
-        pit_sleep_ms(1000);
+        pit_poll_delay_ms(1000);
         splash_draw_graphics_demo();
         klog_printf(KLOG_INFO, "ROULETTE: Graphics demo restored, returning to OS\n");
     }

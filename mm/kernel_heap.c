@@ -221,84 +221,15 @@ static void remove_from_free_list(heap_block_t *block) {
 }
 
 /*
- * Detach block from free list without altering allocation counters
- */
-static void unlink_free_block(heap_block_t *block) {
-    if (!block || block->magic != BLOCK_MAGIC_FREE) {
-        return;
-    }
-
-    uint32_t size_class = get_size_class(block->size);
-    free_list_t *list = &kernel_heap.free_lists[size_class];
-
-    if (block->prev) {
-        block->prev->next = block->next;
-    } else if (list->head == block) {
-        list->head = block->next;
-    }
-
-    if (block->next) {
-        block->next->prev = block->prev;
-    }
-
-    if (list->count > 0) {
-        list->count--;
-    }
-
-    block->next = NULL;
-    block->prev = NULL;
-
-    if (kernel_heap.stats.free_blocks > 0) {
-        kernel_heap.stats.free_blocks--;
-    }
-}
-
-/*
- * Reinsert block into appropriate free list as a free entry
- */
-static void reinsert_free_block(heap_block_t *block) {
-    if (!block) {
-        return;
-    }
-
-    uint32_t size_class = get_size_class(block->size);
-    free_list_t *list = &kernel_heap.free_lists[size_class];
-
-    block->magic = BLOCK_MAGIC_FREE;
-    block->checksum = calculate_checksum(block);
-    block->flags = 0;
-
-    block->prev = NULL;
-    block->next = list->head;
-
-    if (list->head) {
-        list->head->prev = block;
-    }
-
-    list->head = block;
-    list->count++;
-    kernel_heap.stats.free_blocks++;
-}
-
-/*
  * Find suitable block in free lists
- * Iterates through each size class list to find a block large enough,
- * not just checking the head node
  */
 static heap_block_t *find_free_block(uint32_t size) {
     uint32_t size_class = get_size_class(size);
 
-    /* Search from appropriate size class up to larger ones */
     for (uint32_t i = size_class; i < 16; i++) {
         free_list_t *list = &kernel_heap.free_lists[i];
-        heap_block_t *candidate = list->head;
-
-        /* Walk through the entire list for this size class */
-        while (candidate) {
-            if (candidate->size >= size) {
-                return candidate;
-            }
-            candidate = candidate->next;
+        if (list->head) {
+            return list->head;
         }
     }
 
@@ -481,107 +412,6 @@ void *kzalloc(size_t size) {
 }
 
 /*
- * Find free block that sits immediately before the given block in memory
- */
-static heap_block_t *find_adjacent_previous_block(heap_block_t *block) {
-    if (!block) {
-        return NULL;
-    }
-
-    uint8_t *block_addr = (uint8_t*)block;
-
-    for (uint32_t i = 0; i < 16; i++) {
-        heap_block_t *candidate = kernel_heap.free_lists[i].head;
-
-        while (candidate) {
-            if (candidate != block) {
-                uint8_t *candidate_end = (uint8_t*)candidate + sizeof(heap_block_t) + candidate->size;
-
-                if (candidate_end == block_addr) {
-                    return candidate;
-                }
-            }
-
-            candidate = candidate->next;
-        }
-    }
-
-    return NULL;
-}
-
-/*
- * Find free block that sits immediately after the given block in memory
- */
-static heap_block_t *find_adjacent_next_block(heap_block_t *block) {
-    if (!block) {
-        return NULL;
-    }
-
-    uint8_t *next_addr = (uint8_t*)block + sizeof(heap_block_t) + block->size;
-    uint64_t next_header_addr = (uint64_t)(uintptr_t)next_addr;
-
-    if (next_header_addr + sizeof(heap_block_t) > kernel_heap.current_break) {
-        return NULL;
-    }
-
-    heap_block_t *next = (heap_block_t*)next_addr;
-
-    if (!validate_block(next) || next->magic != BLOCK_MAGIC_FREE) {
-        return NULL;
-    }
-
-    return next;
-}
-
-/*
- * Attempt to merge the supplied free block with adjacent free blocks
- */
-static void coalesce_free_block(heap_block_t *block) {
-    if (!block || block->magic != BLOCK_MAGIC_FREE) {
-        return;
-    }
-
-    unlink_free_block(block);
-
-    heap_block_t *current = block;
-    uint32_t reclaimed_headers = 0;
-    const uint32_t header_size = sizeof(heap_block_t);
-
-    while (1) {
-        heap_block_t *prev = find_adjacent_previous_block(current);
-        if (prev) {
-            unlink_free_block(prev);
-            prev->size += header_size + current->size;
-            prev->flags = 0;
-            prev->checksum = calculate_checksum(prev);
-            reclaimed_headers++;
-            current = prev;
-            continue;
-        }
-
-        heap_block_t *next = find_adjacent_next_block(current);
-        if (next) {
-            unlink_free_block(next);
-            current->size += header_size + next->size;
-            current->flags = 0;
-            current->checksum = calculate_checksum(current);
-            reclaimed_headers++;
-            continue;
-        }
-
-        break;
-    }
-
-    current->flags = 0;
-    current->checksum = calculate_checksum(current);
-    reinsert_free_block(current);
-
-    if (reclaimed_headers > 0) {
-        kernel_heap.stats.free_size += (uint64_t)reclaimed_headers * header_size;
-    }
-}
-
-/*
  * Free memory to kernel heap
  */
 void kfree(void *ptr) {
@@ -603,9 +433,8 @@ void kfree(void *ptr) {
     kernel_heap.stats.free_size += block->size;
     kernel_heap.stats.free_count++;
 
-    /* Add to free list and attempt coalescing */
+    /* Add to free list */
     add_to_free_list(block);
-    coalesce_free_block(block);
     take_w();
 }
 

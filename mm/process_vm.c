@@ -108,14 +108,6 @@ static int vma_overlaps_range(const vm_area_t *vma, uint64_t start, uint64_t end
     return (start < vma->end_addr) && (end > vma->start_addr);
 }
 
-static vm_area_t **find_vma_insert_slot(process_vm_t *process, uint64_t start) {
-    vm_area_t **link = &process->vma_list;
-    while (*link && (*link)->start_addr < start) {
-        link = &(*link)->next;
-    }
-    return link;
-}
-
 static int map_user_range(process_page_dir_t *page_dir,
                           uint64_t start_addr,
                           uint64_t end_addr,
@@ -225,6 +217,25 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
         return -1;
     }
 
+    vm_area_t **link = &process->vma_list;
+    vm_area_t *prev = NULL;
+    while (*link && (*link)->start_addr < start) {
+        prev = *link;
+        link = &(*link)->next;
+    }
+
+    vm_area_t *next = *link;
+
+    if (prev && vma_overlaps_range(prev, start, end) && prev->flags != flags) {
+        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible VMA\n");
+        return -1;
+    }
+
+    if (next && vma_overlaps_range(next, start, end) && next->flags != flags) {
+        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible next VMA\n");
+        return -1;
+    }
+
     vm_area_t *vma = alloc_vma();
     if (!vma) {
         klog_printf(KLOG_INFO, "add_vma_to_process: Failed to allocate VMA\n");
@@ -235,31 +246,6 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
     vma->end_addr = end;
     vma->flags = flags;
 
-    /* Insert ordered by start, merge with compatible neighbors */
-    vm_area_t **insert_pos = find_vma_insert_slot(process, start);
-    vm_area_t *next = *insert_pos;
-    vm_area_t *prev = NULL;
-
-    /* Discover previous by walking from head to the insert position */
-    if (insert_pos != &process->vma_list) {
-        prev = process->vma_list;
-        while (prev && prev->next != next) {
-            prev = prev->next;
-        }
-    }
-
-    if (prev && vma_overlaps_range(prev, start, end) && prev->flags != flags) {
-        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible VMA\n");
-        free_vma(vma);
-        return -1;
-    }
-
-    if (next && vma_overlaps_range(next, start, end) && next->flags != flags) {
-        klog_printf(KLOG_INFO, "add_vma_to_process: Overlap with incompatible next VMA\n");
-        free_vma(vma);
-        return -1;
-    }
-
     /* Merge with previous if compatible */
     if (prev && prev->end_addr == start && prev->flags == flags) {
         prev->end_addr = end;
@@ -267,7 +253,7 @@ static int add_vma_to_process(process_vm_t *process, uint64_t start, uint64_t en
         vma = prev;
     } else {
         vma->next = next;
-        *insert_pos = vma;
+        *link = vma;
     }
 
     /* Merge with next if compatible */
