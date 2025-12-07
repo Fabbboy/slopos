@@ -197,40 +197,6 @@ int splash_report_progress(int progress, const char *message) {
 }
 
 /*
- * Draw the post-boot graphics demo screen
- * Shows colored rectangles, circle, border, and welcome text
- */
-int splash_draw_graphics_demo(void) {
-    if (!framebuffer_is_initialized()) {
-        return -1;
-    }
-
-    // Clear splash screen and show graphics demo (like in 8fe117b)
-    framebuffer_clear(0x001122FF);
-
-    // Initialize console with white text on dark background
-    font_console_init(0xFFFFFFFF, 0x00000000);
-
-    // Draw graphics demo
-    graphics_draw_rect_filled(20, 20, 300, 150, 0xFF0000FF);        // Red rectangle
-    graphics_draw_rect_filled(700, 20, 300, 150, 0x00FF00FF);       // Green rectangle
-    graphics_draw_circle(512, 384, 100, 0xFFFF00FF);                // Yellow circle
-
-    // White border around entire screen
-    graphics_draw_rect_filled(0, 0, 1024, 4, 0xFFFFFFFF);           // Top
-    graphics_draw_rect_filled(0, 764, 1024, 4, 0xFFFFFFFF);         // Bottom
-    graphics_draw_rect_filled(0, 0, 4, 768, 0xFFFFFFFF);            // Left
-    graphics_draw_rect_filled(1020, 0, 4, 768, 0xFFFFFFFF);         // Right
-
-    // Display welcome message using font_draw_string
-    font_draw_string(20, 600, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
-    font_draw_string(20, 616, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
-    font_draw_string(20, 632, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);
-
-    return 0;
-}
-
-/*
  * Mark splash screen as complete
  */
 int splash_finish(void) {
@@ -243,8 +209,7 @@ int splash_finish(void) {
         splash_active = 0;
         klog_printf(KLOG_INFO, "SPLASH: Boot splash screen complete\n");
 
-        // Draw the graphics demo screen
-        splash_draw_graphics_demo();
+        // Graphics demo rendering is now handled in userland (roulette handoff).
     }
     return 0;
 }

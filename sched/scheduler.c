@@ -72,7 +72,7 @@ typedef struct scheduler {
 /* Global scheduler instance */
 static scheduler_t scheduler = {0};
 static scheduler_idle_wakeup_cb_t idle_wakeup_cb = NULL;
-static const uint8_t scheduler_preemption_default = 0; /* cooperative baseline */
+static const uint8_t scheduler_preemption_default = 1; /* enable PIT IRQ preemption by default */
 
 static uint32_t scheduler_get_default_time_slice(void) {
     return scheduler.time_slice ? scheduler.time_slice : SCHED_DEFAULT_TIME_SLICE;

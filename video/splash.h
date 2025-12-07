@@ -57,10 +57,4 @@ int splash_report_progress(int progress, const char *message);
  */
 int splash_finish(void);
 
-/*
- * Draw the post-boot graphics demo screen
- * Shows colored rectangles, circle, border, and welcome text
- */
-int splash_draw_graphics_demo(void);
-
 #endif /* VIDEO_SPLASH_H */

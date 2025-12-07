@@ -19,6 +19,7 @@
 #include "../drivers/irq.h"
 #include "../drivers/ioapic.h"
 #include "../drivers/pic_quiesce.h"
+#include "../drivers/random.h"
 #include "../drivers/interrupt_test.h"
 #include "../sched/task.h"
 #include "../sched/scheduler.h"
@@ -35,6 +36,9 @@
 #include "../mm/memory_init.h"
 #include "../lib/string.h"
 #include "../lib/user_syscall.h"
+
+/* User-mode roulette entry point */
+extern void roulette_user_main(void *arg);
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;
@@ -503,6 +507,12 @@ BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
 BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
 BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
 BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
+static int boot_step_random_init(void) {
+    random_init();
+    boot_debug("Random driver initialized.");
+    return 0;
+}
+BOOT_INIT_STEP(drivers, "random", boot_step_random_init);
 BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
 
@@ -538,36 +548,9 @@ static int boot_step_scheduler_init(void) {
     return 0;
 }
 
-static void roulette_gatekeeper_task(void *arg) {
-    (void)arg;
-
-    /* Spin the wheel in kernel mode (visual + panic semantics) */
-    kernel_roulette();
-
-    /* If we return, we won. Spawn the shell. */
-    klog_printf(KLOG_INFO, "ROULETTE: You survived. Spawning shell...\n");
-
-    /* Create shell task */
-    uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, TASK_FLAG_USER_MODE);
-    if (shell_task_id == INVALID_TASK_ID) {
-        kernel_panic("Failed to spawn shell after roulette win");
-    }
-    
-    task_t *shell_task;
-    if (task_get_info(shell_task_id, &shell_task) == 0) {
-        if (schedule_task(shell_task) != 0) {
-            task_terminate(shell_task_id);
-            kernel_panic("Failed to schedule shell after roulette win");
-        }
-    }
-
-    /* We are done. The shell is now running. */
-    scheduler_task_exit();
-}
-
 static int boot_step_roulette_task(void) {
     boot_debug("Creating roulette gatekeeper task...");
-    uint32_t roulette_task_id = task_create("roulette", roulette_gatekeeper_task, NULL, 5, TASK_FLAG_KERNEL_MODE);
+    uint32_t roulette_task_id = task_create("roulette", roulette_user_main, NULL, 5, TASK_FLAG_USER_MODE);
     if (roulette_task_id == INVALID_TASK_ID) {
         boot_info("ERROR: Failed to create roulette task");
         return -1;

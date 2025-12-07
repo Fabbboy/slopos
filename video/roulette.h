@@ -29,30 +29,4 @@
 #define ROULETTE_FRAME_DELAY_MS 16           /* Delay between frames (ms) - ~60 FPS */
 #define ROULETTE_RESULT_DELAY_MS 5000        /* How long to show result - 5 seconds */
 
-/* ========================================================================
- * ROULETTE SCREEN FUNCTIONS
- * ======================================================================== */
-
-/*
- * Display the kernel roulette screen with spinning animation
- *
- * fate_number: The random number that determines destiny
- *
- * This function:
- * 1. Clears screen to dramatic black
- * 2. Shows "SPINNING THE WHEEL OF FATE" title
- * 3. Animates a spinning wheel
- * 4. Reveals the fate number
- * 5. Shows WIN (odd) or LOSE (even) result
- *
- * Returns 0 on success, negative on error
- */
-int roulette_show_spin(uint32_t fate_number);
-
-/*
- * Quick version for when framebuffer is not available
- * Falls back to serial-only output
- */
-void roulette_show_spin_fallback(uint32_t fate_number);
-
 #endif /* VIDEO_ROULETTE_H */

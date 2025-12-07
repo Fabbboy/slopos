@@ -95,7 +95,8 @@ video_sources += files(
   'video/graphics.c',
   'video/font.c',
   'video/splash.c',
-  'video/roulette.c'
+  'video/roulette_core.c',
+  'video/roulette_user.c'
 )
 
 # Lib directory - utility functions

@@ -1,27 +1,19 @@
 /*
- * SlopOS Kernel Roulette Visual Screen Implementation
- * The Wheel of Fate - Now with 100% more visual gambling addiction
+ * Shared roulette rendering core.
+ * This mirrors the original kernel roulette visuals but delegates drawing and
+ * timing to a backend so it can run in both kernel and user space.
  */
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include "roulette.h"
-#include "framebuffer.h"
-#include "graphics.h"
-#include "font.h"
-#include "splash.h"
-#include "../drivers/serial.h"
-#include "../drivers/pit.h"
-#include "../drivers/irq.h"
-#include "../lib/numfmt.h"
-#include "../boot/kernel_panic.h"
-#include "../lib/klog.h"
-#include "../lib/cpu.h"
+#include "roulette_core.h"
 
-/* ========================================================================
- * GEOMETRY DEFINITIONS
- * ======================================================================== */
+#define ROULETTE_BLANK_COLOR       0x181818FF
+#define ROULETTE_BLANK_HIGHLIGHT   0x444444FF
+#define ROULETTE_COLORED_HIGHLIGHT 0x66FF66FF
+#define ROULETTE_POINTER_COLOR     0xFFFF00FF
 
 #define ROULETTE_SEGMENT_COUNT            12
 #define ROULETTE_TRIG_SCALE             1024
@@ -31,10 +23,9 @@
 #define ROULETTE_DEGREE_STEPS            360
 #define ROULETTE_SEGMENT_DEGREES         (360 / ROULETTE_SEGMENT_COUNT)
 #define ROULETTE_SPIN_LOOPS                4
-#define ROULETTE_SPIN_DURATION_MS       8400
-#define ROULETTE_SPIN_FRAME_DELAY_MS      16
+#define ROULETTE_SPIN_DURATION_MS       3600
+#define ROULETTE_SPIN_FRAME_DELAY_MS      12
 
-/* Alternating colored vs “blank” wedges */
 struct roulette_segment_def {
     bool is_colored;
 };
@@ -52,7 +43,6 @@ static const int16_t roulette_sin_table[ROULETTE_SEGMENT_COUNT + 1] = {
        0,  512,  887, 1024,   887,  512,     0, -512, -887, -1024, -887, -512,    0
 };
 
-/* Midpoint directions (15, 45, ... degrees) for pointer ticks */
 static const int16_t roulette_cos360[ROULETTE_DEGREE_STEPS] = {
     1024, 1024, 1023, 1023, 1022, 1020, 1018, 1016, 1014, 1011, 1008, 1005,
     1002,  998,  994,  989,  984,  979,  974,  968,  962,  956,  949,  943,
@@ -122,11 +112,6 @@ static const int16_t roulette_sin360[ROULETTE_DEGREE_STEPS] = {
     -160,  -143,  -125,  -107,   -89,   -71,   -54,   -36,   -18
 };
 
-static const uint32_t ROULETTE_BLANK_COLOR = 0x181818FF;
-static const uint32_t ROULETTE_BLANK_HIGHLIGHT = 0x444444FF;
-static const uint32_t ROULETTE_COLORED_HIGHLIGHT = 0x66FF66FF;
-static const uint32_t ROULETTE_POINTER_COLOR = 0xFFFF00FF;
-
 static inline int roulette_normalize_angle(int degrees) {
     int angle = degrees % ROULETTE_DEGREE_STEPS;
     if (angle < 0) {
@@ -147,17 +132,11 @@ static inline int segment_center_angle(int segment_index) {
     return segment_index * ROULETTE_SEGMENT_DEGREES + (ROULETTE_SEGMENT_DEGREES / 2);
 }
 
-static void draw_fate_number(int center_x, int y_pos, uint32_t fate_number, int revealed);
-
-/* ========================================================================
- * WHEEL DRAWING FUNCTIONS
- * ======================================================================== */
-
 static inline int roulette_scale(int16_t value, int radius) {
     return (value * radius) / ROULETTE_TRIG_SCALE;
 }
 
-static void draw_segment_wedge(int center_x, int center_y, int start_idx,
+static void draw_segment_wedge(const struct roulette_backend *b, int cx, int cy, int start_idx,
                                int radius, uint32_t color) {
     int inner = ROULETTE_INNER_RADIUS;
     int16_t start_cos = roulette_cos_table[start_idx];
@@ -166,28 +145,24 @@ static void draw_segment_wedge(int center_x, int center_y, int start_idx,
     int16_t end_sin = roulette_sin_table[start_idx + 1];
 
     for (int r = inner; r <= radius; r++) {
-        int x1 = center_x + roulette_scale(start_cos, r);
-        int y1 = center_y + roulette_scale(start_sin, r);
-        int x2 = center_x + roulette_scale(end_cos, r);
-        int y2 = center_y + roulette_scale(end_sin, r);
-        graphics_draw_line(x1, y1, x2, y2, color);
+        int x1 = cx + roulette_scale(start_cos, r);
+        int y1 = cy + roulette_scale(start_sin, r);
+        int x2 = cx + roulette_scale(end_cos, r);
+        int y2 = cy + roulette_scale(end_sin, r);
+        b->draw_line(b->ctx, x1, y1, x2, y2, color);
     }
 }
 
-static void draw_segment_divider(int center_x, int center_y, int idx, int radius) {
-    int x_outer = center_x + roulette_scale(roulette_cos_table[idx], radius + 2);
-    int y_outer = center_y + roulette_scale(roulette_sin_table[idx], radius + 2);
-    graphics_draw_line(center_x, center_y, x_outer, y_outer, ROULETTE_WHEEL_COLOR);
+static void draw_segment_divider(const struct roulette_backend *b, int cx, int cy, int idx, int radius) {
+    int x_outer = cx + roulette_scale(roulette_cos_table[idx], radius + 2);
+    int y_outer = cy + roulette_scale(roulette_sin_table[idx], radius + 2);
+    b->draw_line(b->ctx, cx, cy, x_outer, y_outer, ROULETTE_WHEEL_COLOR);
 }
 
-/*
- * Draw a roulette wheel with alternating colored/blank wedges.
- * highlight_segment >= 0 draws a glow under the pointer location.
- */
-static void draw_roulette_wheel(int center_x, int center_y, int radius, int highlight_segment) {
-    // Outer ring
-    graphics_draw_circle_filled(center_x, center_y, radius + 8, 0x000000FF);
-    graphics_draw_circle(center_x, center_y, radius + 8, ROULETTE_WHEEL_COLOR);
+static void draw_roulette_wheel(const struct roulette_backend *b, int cx, int cy, int radius, int highlight_segment) {
+    /* Outer ring */
+    b->draw_circle_filled(b->ctx, cx, cy, radius + 8, 0x000000FF);
+    b->draw_circle(b->ctx, cx, cy, radius + 8, ROULETTE_WHEEL_COLOR);
 
     for (int i = 0; i < ROULETTE_SEGMENT_COUNT; i++) {
         bool is_colored = roulette_segments[i].is_colored;
@@ -195,17 +170,17 @@ static void draw_roulette_wheel(int center_x, int center_y, int radius, int high
         if (i == highlight_segment) {
             base_color = is_colored ? ROULETTE_COLORED_HIGHLIGHT : ROULETTE_BLANK_HIGHLIGHT;
         }
-        draw_segment_wedge(center_x, center_y, i, radius, base_color);
-        draw_segment_divider(center_x, center_y, i, radius);
+        draw_segment_wedge(b, cx, cy, i, radius, base_color);
+        draw_segment_divider(b, cx, cy, i, radius);
     }
-    draw_segment_divider(center_x, center_y, ROULETTE_SEGMENT_COUNT, radius);
+    draw_segment_divider(b, cx, cy, ROULETTE_SEGMENT_COUNT, radius);
 
-    // Center hub
-    graphics_draw_circle_filled(center_x, center_y, ROULETTE_INNER_RADIUS + 6, ROULETTE_WHEEL_COLOR);
-    graphics_draw_circle_filled(center_x, center_y, ROULETTE_INNER_RADIUS, 0x000000FF);
+    /* Center hub */
+    b->draw_circle_filled(b->ctx, cx, cy, ROULETTE_INNER_RADIUS + 6, ROULETTE_WHEEL_COLOR);
+    b->draw_circle_filled(b->ctx, cx, cy, ROULETTE_INNER_RADIUS, 0x000000FF);
 }
 
-static void draw_pointer_for_angle(int center_x, int center_y, int radius,
+static void draw_pointer_for_angle(const struct roulette_backend *b, int cx, int cy, int radius,
                                    int angle_deg, uint32_t color) {
     int16_t dir_x = roulette_cos_deg(angle_deg);
     int16_t dir_y = roulette_sin_deg(angle_deg);
@@ -215,10 +190,10 @@ static void draw_pointer_for_angle(int center_x, int center_y, int radius,
     int tip_radius = radius + 36;
     int base_radius = radius - 6;
 
-    int tip_x = center_x + roulette_scale(dir_x, tip_radius);
-    int tip_y = center_y + roulette_scale(dir_y, tip_radius);
-    int base_x = center_x + roulette_scale(dir_x, base_radius);
-    int base_y = center_y + roulette_scale(dir_y, base_radius);
+    int tip_x = cx + roulette_scale(dir_x, tip_radius);
+    int tip_y = cy + roulette_scale(dir_y, tip_radius);
+    int base_x = cx + roulette_scale(dir_x, base_radius);
+    int base_y = cy + roulette_scale(dir_y, base_radius);
 
     int offset_x = roulette_scale(perp_x, ROULETTE_POINTER_WIDTH);
     int offset_y = roulette_scale(perp_y, ROULETTE_POINTER_WIDTH);
@@ -228,31 +203,93 @@ static void draw_pointer_for_angle(int center_x, int center_y, int radius,
     int right_x = base_x - offset_x;
     int right_y = base_y - offset_y;
 
-    graphics_draw_line(tip_x, tip_y, left_x, left_y, color);
-    graphics_draw_line(tip_x, tip_y, right_x, right_y, color);
-    graphics_draw_line(left_x, left_y, right_x, right_y, color);
+    b->draw_line(b->ctx, tip_x, tip_y, left_x, left_y, color);
+    b->draw_line(b->ctx, tip_x, tip_y, right_x, right_y, color);
+    b->draw_line(b->ctx, left_x, left_y, right_x, right_y, color);
 }
 
-static void draw_pointer_ticks(int center_x, int center_y, int radius,
+static void draw_pointer_ticks(const struct roulette_backend *b, int cx, int cy, int radius,
                                int angle_deg, uint32_t color) {
-    draw_pointer_for_angle(center_x, center_y, radius, angle_deg, color);
-    draw_pointer_for_angle(center_x, center_y, radius, angle_deg + 180, color);
+    draw_pointer_for_angle(b, cx, cy, radius, angle_deg, color);
+    draw_pointer_for_angle(b, cx, cy, radius, angle_deg + 180, color);
 }
 
-static void render_wheel_frame(int screen_width, int screen_height,
-                               int center_x, int center_y, int radius,
+static void draw_fate_number(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number, int revealed) {
+    char num_str[21];
+
+    if (!revealed) {
+        b->fill_rect(b->ctx, cx - 100, y_pos, 200, 60, 0x333333FF);
+        b->draw_line(b->ctx, cx - 100, y_pos, cx + 100, y_pos, ROULETTE_WHEEL_COLOR);
+        b->draw_line(b->ctx, cx - 100, y_pos + 60, cx + 100, y_pos + 60, ROULETTE_WHEEL_COLOR);
+        b->draw_text(b->ctx, cx - 40, y_pos + 20, "? ? ?", ROULETTE_TEXT_COLOR, 0x00000000);
+        return;
+    }
+
+    uint32_t box_color = (fate_number & 1) ? ROULETTE_ODD_COLOR : ROULETTE_EVEN_COLOR;
+    b->fill_rect(b->ctx, cx - 100, y_pos, 200, 60, box_color);
+    b->draw_line(b->ctx, cx - 100, y_pos, cx + 100, y_pos, ROULETTE_WHEEL_COLOR);
+    b->draw_line(b->ctx, cx - 100, y_pos + 60, cx + 100, y_pos + 60, ROULETTE_WHEEL_COLOR);
+
+    /* decimal conversion */
+    uint64_t n = fate_number;
+    size_t len = 0;
+    if (n == 0) {
+        num_str[len++] = '0';
+    } else {
+        char tmp[21];
+        size_t t = 0;
+        while (n && t < sizeof(tmp)) {
+            tmp[t++] = (char)('0' + (n % 10));
+            n /= 10;
+        }
+        while (t > 0) {
+            num_str[len++] = tmp[--t];
+        }
+    }
+    num_str[len] = '\0';
+
+    int text_x = cx - ((int)len * 8) / 2;
+    b->draw_text(b->ctx, text_x, y_pos + 20, num_str, 0x000000FF, 0x00000000);
+}
+
+static void draw_result_banner(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number) {
+    const char *result_text;
+    const char *sub_text;
+    uint32_t banner_color;
+
+    if (fate_number & 1) {
+        result_text = "W I N !";
+        sub_text = "Fortune smiles upon the slop!";
+        banner_color = ROULETTE_WIN_COLOR;
+    } else {
+        result_text = "L O S E";
+        sub_text = "L bozzo lol - try again!";
+        banner_color = ROULETTE_LOSE_COLOR;
+    }
+
+    b->fill_rect(b->ctx, cx - 200, y_pos, 400, 80, banner_color);
+    b->draw_line(b->ctx, cx - 202, y_pos - 2, cx + 202, y_pos - 2, ROULETTE_WHEEL_COLOR);
+    b->draw_line(b->ctx, cx - 202, y_pos + 82, cx + 202, y_pos + 82, ROULETTE_WHEEL_COLOR);
+
+    b->draw_text(b->ctx, cx - 60, y_pos + 15, result_text, 0x000000FF, 0x00000000);
+    b->draw_text(b->ctx, cx - 140, y_pos + 50, sub_text, 0x000000FF, 0x00000000);
+}
+
+static void render_wheel_frame(const struct roulette_backend *b,
+                               int screen_width, int screen_height,
+                               int cx, int cy, int radius,
                                int highlight_segment, int pointer_angle_deg,
                                int *last_pointer_angle,
                                uint32_t fate_number, bool reveal_number,
                                bool clear_background, bool draw_wheel) {
     int region = radius + 80;
-    int region_x = center_x - region;
-    int region_y = center_y - region;
+    int region_x = cx - region;
+    int region_y = cy - region;
     int region_w = region * 2;
     int region_h = region * 2;
 
     if (!clear_background && last_pointer_angle && *last_pointer_angle >= 0) {
-        draw_pointer_ticks(center_x, center_y, radius, *last_pointer_angle, ROULETTE_BG_COLOR);
+        draw_pointer_ticks(b, cx, cy, radius, *last_pointer_angle, ROULETTE_BG_COLOR);
     }
 
     if (clear_background) {
@@ -271,14 +308,14 @@ static void render_wheel_frame(int screen_width, int screen_height,
             region_h = screen_height - region_y;
         }
 
-        graphics_draw_rect_filled_fast(region_x, region_y, region_w, region_h, ROULETTE_BG_COLOR);
+        b->fill_rect(b->ctx, region_x, region_y, region_w, region_h, ROULETTE_BG_COLOR);
     }
 
     if (draw_wheel) {
-        draw_roulette_wheel(center_x, center_y, radius, highlight_segment);
+        draw_roulette_wheel(b, cx, cy, radius, highlight_segment);
     }
-    draw_pointer_ticks(center_x, center_y, radius, pointer_angle_deg, ROULETTE_POINTER_COLOR);
-    draw_fate_number(center_x, center_y + radius + 30, fate_number, reveal_number ? 1 : 0);
+    draw_pointer_ticks(b, cx, cy, radius, pointer_angle_deg, ROULETTE_POINTER_COLOR);
+    draw_fate_number(b, cx, cy + radius + 30, fate_number, reveal_number ? 1 : 0);
 
     if (last_pointer_angle) {
         *last_pointer_angle = pointer_angle_deg;
@@ -301,106 +338,57 @@ static int choose_segment_for_parity(uint32_t fate_number, bool need_colored) {
     return start;
 }
 
-/*
- * Draw the fate number display
- */
-static void draw_fate_number(int center_x, int y_pos, uint32_t fate_number, int revealed) {
-    if (!revealed) {
-        // Draw mystery box
-        graphics_draw_rect_filled(center_x - 100, y_pos, 200, 60, 0x333333FF);
-        graphics_draw_rect(center_x - 100, y_pos, 200, 60, ROULETTE_WHEEL_COLOR);
-        font_draw_string(center_x - 40, y_pos + 20, "? ? ?", ROULETTE_TEXT_COLOR, 0x00000000);
-    } else {
-        // Draw number box
-        uint32_t box_color = (fate_number & 1) ? ROULETTE_ODD_COLOR : ROULETTE_EVEN_COLOR;
-        graphics_draw_rect_filled(center_x - 100, y_pos, 200, 60, box_color);
-        graphics_draw_rect(center_x - 100, y_pos, 200, 60, ROULETTE_WHEEL_COLOR);
+static void roulette_draw_demo_scene(const struct roulette_backend *b, int width, int height) {
+    /* Recreate the boot demo (rectangles, circle, border, text) from user mode. */
+    b->fill_rect(b->ctx, 0, 0, width, height, 0x001122FF);
 
-        // Convert fate number to displayable string
-        char num_str[21];
-        size_t len = numfmt_u64_to_decimal((uint64_t)fate_number, num_str, sizeof(num_str));
-        if (len == 0) {
-            num_str[0] = '0';
-            num_str[1] = '\0';
-            len = 1;
-        }
+    /* Colored rectangles */
+    b->fill_rect(b->ctx, 20, 20, 300, 150, 0xFF0000FF);   /* Red */
+    b->fill_rect(b->ctx, width - 320, 20, 300, 150, 0x00FF00FF); /* Green */
 
-        // Center the number
-        int text_x = center_x - ((int)len * 8) / 2;
-        font_draw_string(text_x, y_pos + 20, num_str, 0x000000FF, 0x00000000);
-    }
+    /* Yellow circle roughly centered */
+    int cx = width / 2;
+    int cy = height / 2;
+    int radius = (width < height ? width : height) / 8;
+    if (radius < 60) radius = 60;
+    b->draw_circle(b->ctx, cx, cy, radius, 0xFFFF00FF);
+
+    /* White border */
+    b->fill_rect(b->ctx, 0, 0, width, 4, 0xFFFFFFFF);
+    b->fill_rect(b->ctx, 0, height - 4, width, 4, 0xFFFFFFFF);
+    b->fill_rect(b->ctx, 0, 0, 4, height, 0xFFFFFFFF);
+    b->fill_rect(b->ctx, width - 4, 0, 4, height, 0xFFFFFFFF);
+
+    /* Text lines */
+    b->draw_text(b->ctx, 20, height - 140, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
+    b->draw_text(b->ctx, 20, height - 124, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
+    b->draw_text(b->ctx, 20, height - 108, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);
 }
 
-/*
- * Draw result banner (WIN or LOSE)
- */
-static void draw_result_banner(int center_x, int y_pos, uint32_t fate_number) {
-    const char *result_text;
-    const char *sub_text;
-    uint32_t banner_color;
-
-    if (fate_number & 1) {
-        // ODD = WIN
-        result_text = "W I N !";
-        sub_text = "Fortune smiles upon the slop!";
-        banner_color = ROULETTE_WIN_COLOR;
-    } else {
-        // EVEN = LOSE
-        result_text = "L O S E";
-        sub_text = "L bozzo lol - try again!";
-        banner_color = ROULETTE_LOSE_COLOR;
-    }
-
-    // Draw result banner
-    graphics_draw_rect_filled(center_x - 200, y_pos, 400, 80, banner_color);
-    graphics_draw_rect(center_x - 202, y_pos - 2, 404, 84, ROULETTE_WHEEL_COLOR);
-
-    // Draw text (centered)
-    int text_x = center_x - 60;
-    font_draw_string(text_x, y_pos + 15, result_text, 0x000000FF, 0x00000000);
-
-    // Draw subtext
-    int sub_x = center_x - 140;
-    font_draw_string(sub_x, y_pos + 50, sub_text, 0x000000FF, 0x00000000);
+static void roulette_handoff_to_demo(const struct roulette_backend *b, int width, int height) {
+    /* Clear to the boot/demo background so the OS can continue with a clean slate. */
+    b->fill_rect(b->ctx, 0, 0, width, height, ROULETTE_BG_COLOR);
+    b->draw_text(b->ctx, width / 2 - 140, height / 2 - 20, "Shell launching... enjoy the demo", ROULETTE_TEXT_COLOR, 0x00000000);
+    b->sleep_ms(b->ctx, 400);
+    roulette_draw_demo_scene(b, width, height);
 }
 
-/* ========================================================================
- * MAIN ROULETTE SCREEN FUNCTION
- * ======================================================================== */
-
-/*
- * Show the full roulette spinning animation and result
- */
-int roulette_show_spin(uint32_t fate_number) {
-    if (!framebuffer_is_initialized()) {
-        klog_printf(KLOG_INFO, "ROULETTE: Framebuffer not available, using fallback\n");
-        roulette_show_spin_fallback(fate_number);
+int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
+    if (!backend || !backend->get_size) {
         return -1;
     }
 
-    klog_printf(KLOG_INFO, "ROULETTE: Displaying visual wheel of fate...\n");
-
-    /* Ensure timer access is available; animation uses polling for consistent pacing. */
-    pit_enable_irq();
-    irq_enable_line(0);
-    cpu_sti();
-
-    uint32_t width = framebuffer_get_width();
-    uint32_t height = framebuffer_get_height();
-    
-    if (width == 0 || height == 0) {
-        kernel_panic("ROULETTE: Invalid framebuffer dimensions");
+    int width = 0, height = 0;
+    if (backend->get_size(backend->ctx, &width, &height) != 0 || width <= 0 || height <= 0) {
+        return -1;
     }
 
-    int center_x = width / 2;
-    int center_y = height / 2;
-
-    if (graphics_draw_rect_filled_fast(0, 0, width, height, ROULETTE_BG_COLOR) != 0) {
-        kernel_panic("ROULETTE: Failed to clear screen");
+    if (backend->fill_rect(backend->ctx, 0, 0, width, height, ROULETTE_BG_COLOR) != 0) {
+        return -1;
     }
 
-    font_draw_string(center_x - 150, 50, "=== THE WHEEL OF FATE ===", ROULETTE_WHEEL_COLOR, 0x00000000);
-    font_draw_string(center_x - 120, 80, "Pointers choose your destiny...", ROULETTE_TEXT_COLOR, 0x00000000);
+    backend->draw_text(backend->ctx, width / 2 - 150, 50, "=== THE WHEEL OF FATE ===", ROULETTE_WHEEL_COLOR, 0x00000000);
+    backend->draw_text(backend->ctx, width / 2 - 120, 80, "Pointers choose your destiny...", ROULETTE_TEXT_COLOR, 0x00000000);
 
     int radius = ROULETTE_WHEEL_RADIUS;
     int max_radius = ((width < height ? width : height) / 2) - 60;
@@ -418,8 +406,10 @@ int roulette_show_spin(uint32_t fate_number) {
         start_segment = (start_segment + 3) % ROULETTE_SEGMENT_COUNT;
     }
 
-    pit_poll_delay_ms(300);
+    backend->sleep_ms(backend->ctx, 300);
 
+    int center_x = width / 2;
+    int center_y = height / 2;
     int start_angle = segment_center_angle(start_segment);
     int target_angle = segment_center_angle(target_segment);
     int rotation_to_target = roulette_normalize_angle(target_angle - start_angle);
@@ -429,7 +419,7 @@ int roulette_show_spin(uint32_t fate_number) {
     }
 
     int last_pointer_angle = -1;
-    render_wheel_frame(width, height, center_x, center_y, radius,
+    render_wheel_frame(backend, width, height, center_x, center_y, radius,
                        -1, start_angle, &last_pointer_angle, fate_number, false, true, true);
 
     int total_frames = ROULETTE_SPIN_DURATION_MS / ROULETTE_SPIN_FRAME_DELAY_MS;
@@ -437,113 +427,73 @@ int roulette_show_spin(uint32_t fate_number) {
         total_frames = 1;
     }
 
-    klog_printf(KLOG_INFO, "ROULETTE: Animating pointer sweep\n");
     for (int frame = 1; frame <= total_frames; frame++) {
-        /* Ease-out interpolation: fast start, slow finish (quadratic). */
-        uint32_t p_q16 = ((uint32_t)frame << 16) / (uint32_t)total_frames;              // progress in Q16
-        uint32_t eased_q16 = (p_q16 * (131072u - p_q16)) >> 16;                         // p * (2 - p)
+        uint32_t p_q16 = ((uint32_t)frame << 16) / (uint32_t)total_frames;              /* progress in Q16 */
+        uint32_t eased_q16 = (p_q16 * (131072u - p_q16)) >> 16;                         /* p * (2 - p) */
         int pointer_angle_frame = start_angle + (int)(((uint64_t)total_rotation * eased_q16) >> 16);
-        render_wheel_frame(width, height, center_x, center_y, radius,
+        render_wheel_frame(backend, width, height, center_x, center_y, radius,
                            -1, pointer_angle_frame, &last_pointer_angle,
                            fate_number, false, false, false);
-        pit_poll_delay_ms(ROULETTE_SPIN_FRAME_DELAY_MS);
+        backend->sleep_ms(backend->ctx, ROULETTE_SPIN_FRAME_DELAY_MS);
     }
 
     int pointer_angle = start_angle + total_rotation;
     int landing_segment = target_segment;
-    render_wheel_frame(width, height, center_x, center_y, radius,
+    render_wheel_frame(backend, width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
                        fate_number, false, true, true);
-    pit_poll_delay_ms(500);
+    backend->sleep_ms(backend->ctx, 500);
 
-    klog_printf(KLOG_INFO, "ROULETTE: Revealing fate number...\n");
-    pit_poll_delay_ms(400);
+    backend->sleep_ms(backend->ctx, 400);
 
     for (int flash = 0; flash < 5; flash++) {
-        render_wheel_frame(width, height, center_x, center_y, radius,
+        render_wheel_frame(backend, width, height, center_x, center_y, radius,
                            landing_segment, pointer_angle, &last_pointer_angle,
                            fate_number, true, false, false);
-        pit_poll_delay_ms(250);
+        backend->sleep_ms(backend->ctx, 250);
         if (flash < 4) {
-            render_wheel_frame(width, height, center_x, center_y, radius,
+            render_wheel_frame(backend, width, height, center_x, center_y, radius,
                                landing_segment, pointer_angle, &last_pointer_angle,
                                fate_number, false, false, false);
-            pit_poll_delay_ms(150);
+            backend->sleep_ms(backend->ctx, 150);
         }
     }
-    render_wheel_frame(width, height, center_x, center_y, radius,
+    render_wheel_frame(backend, width, height, center_x, center_y, radius,
                        landing_segment, pointer_angle, &last_pointer_angle,
                        fate_number, true, false, true);
-    pit_sleep_ms(600);
+    backend->sleep_ms(backend->ctx, 600);
 
-    klog_printf(KLOG_INFO, "ROULETTE: Displaying result...\n");
     int info_y = center_y + radius + 60;
     if (info_y < 0) {
         info_y = 0;
     }
-    if (info_y > (int)height) {
+    if (info_y > height) {
         info_y = height;
     }
-    graphics_draw_rect_filled_fast(0, info_y, width, height - info_y, ROULETTE_BG_COLOR);
-    draw_result_banner(center_x, center_y + radius + 80, fate_number);
+    backend->fill_rect(backend->ctx, 0, info_y, width, height - info_y, ROULETTE_BG_COLOR);
+    draw_result_banner(backend, center_x, center_y + radius + 80, fate_number);
 
     const char *currency_text = (fate_number & 1) ? "+10 W's (currency units)" : "-10 W's (currency units)";
-    font_draw_string(center_x - 110, center_y + radius + 170, currency_text, ROULETTE_TEXT_COLOR, 0x00000000);
+    backend->draw_text(backend->ctx, center_x - 110, center_y + radius + 170, currency_text, ROULETTE_TEXT_COLOR, 0x00000000);
 
     if ((fate_number & 1) == 0) {
-        font_draw_string(center_x - 130, center_y + radius + 210, "Press RESET to try again...", 0xFFFF00FF, 0x00000000);
+        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, "Press RESET to try again...", 0xFFFF00FF, 0x00000000);
     } else {
-        font_draw_string(center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
+        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
     }
 
-    pit_poll_delay_ms(ROULETTE_RESULT_DELAY_MS);
-
-    klog_printf(KLOG_INFO, "ROULETTE: Wheel of fate complete\n");
+    backend->sleep_ms(backend->ctx, ROULETTE_RESULT_DELAY_MS);
 
     if (fate_number & 1) {
-        graphics_draw_rect_filled_fast(0, 0, width, height, 0x001122FF);
-        uint32_t cur_width = framebuffer_get_width();
-        uint32_t cur_height = framebuffer_get_height();
-        int msg_x = cur_width / 2 - 150;
-        int msg_y = cur_height / 2 - 20;
-
-        font_draw_string(msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
-        pit_poll_delay_ms(1000);
-        splash_draw_graphics_demo();
-        klog_printf(KLOG_INFO, "ROULETTE: Graphics demo restored, returning to OS\n");
+        backend->fill_rect(backend->ctx, 0, 0, width, height, 0x001122FF);
+        int msg_x = width / 2 - 150;
+        int msg_y = height / 2 - 20;
+        backend->draw_text(backend->ctx, msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
+        backend->sleep_ms(backend->ctx, 1000);
+        roulette_handoff_to_demo(backend, width, height);
     }
 
     return want_colored ? 0 : 1;
 }
 
-/*
- * Fallback roulette display for when framebuffer is not available
- */
-void roulette_show_spin_fallback(uint32_t fate_number) {
-    klog_printf(KLOG_INFO, "ROULETTE: Using text-only fallback display\n");
-    klog_printf(KLOG_INFO, "\n========================================\n");
-    klog_printf(KLOG_INFO, "    THE WHEEL OF FATE IS SPINNING     \n");
-    klog_printf(KLOG_INFO, "========================================\n\n");
 
-    // Simple text animation
-    for (int i = 0; i < 5; i++) {
-        klog_printf(KLOG_INFO, ".");
-        pit_sleep_ms(200);
-    }
-    klog_printf(KLOG_INFO, "\n\nFate number: %u\n", fate_number);
-
-    if (fate_number & 1) {
-        klog_printf(KLOG_INFO, "\n========================================\n");
-        klog_printf(KLOG_INFO, "           W I N !                      \n");
-        klog_printf(KLOG_INFO, "    Fortune smiles upon the slop!      \n");
-        klog_printf(KLOG_INFO, "========================================\n");
-    } else {
-        klog_printf(KLOG_INFO, "\n========================================\n");
-        klog_printf(KLOG_INFO, "           L O S E                      \n");
-        klog_printf(KLOG_INFO, "      L bozzo lol - try again!         \n");
-        klog_printf(KLOG_INFO, "========================================\n");
-    }
-
-    klog_printf(KLOG_INFO, "\n");
-    pit_sleep_ms(1000);
-}

@@ -205,9 +205,6 @@ void kernel_roulette(void) {
     serial_emergency_puts(decimal_buffer);
     panic_output_string(")\n");
 
-    /* Show the visual roulette screen with spinning animation */
-    roulette_show_spin(fate);
-
     /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
     if ((fate & 1) == 0) {
         /* Even: The wheel has decided your fate - user takes an L */
