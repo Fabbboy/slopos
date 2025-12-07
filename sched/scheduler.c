@@ -580,7 +580,7 @@ void scheduler_register_idle_wakeup_callback(scheduler_idle_wakeup_cb_t callback
 int create_idle_task(void) {
     /* Create idle task using task management functions */
     uint32_t idle_task_id = task_create("idle", idle_task_function, NULL,
-                                       3, 0x02);  /* Low priority, kernel mode */
+                                       3, TASK_FLAG_KERNEL_MODE);  /* Low priority, kernel mode */
 
     if (idle_task_id == INVALID_TASK_ID) {
         return -1;

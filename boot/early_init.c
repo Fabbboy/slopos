@@ -34,6 +34,7 @@
 #include "cpu_verify.h"
 #include "../mm/memory_init.h"
 #include "../lib/string.h"
+#include "../lib/user_syscall.h"
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;
@@ -540,14 +541,14 @@ static int boot_step_scheduler_init(void) {
 static void roulette_gatekeeper_task(void *arg) {
     (void)arg;
 
-    /* Spin the wheel! */
+    /* Spin the wheel in kernel mode (visual + panic semantics) */
     kernel_roulette();
 
     /* If we return, we won. Spawn the shell. */
     klog_printf(KLOG_INFO, "ROULETTE: You survived. Spawning shell...\n");
 
     /* Create shell task */
-    uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, 0x02);
+    uint32_t shell_task_id = task_create("shell", shell_main, NULL, 5, TASK_FLAG_USER_MODE);
     if (shell_task_id == INVALID_TASK_ID) {
         kernel_panic("Failed to spawn shell after roulette win");
     }
@@ -561,15 +562,12 @@ static void roulette_gatekeeper_task(void *arg) {
     }
 
     /* We are done. The shell is now running. */
-    task_terminate(task_get_current_id());
-    
-    /* Should not be reached */
-    while(1) { yield(); }
+    scheduler_task_exit();
 }
 
 static int boot_step_roulette_task(void) {
     boot_debug("Creating roulette gatekeeper task...");
-    uint32_t roulette_task_id = task_create("roulette", roulette_gatekeeper_task, NULL, 5, 0x02);
+    uint32_t roulette_task_id = task_create("roulette", roulette_gatekeeper_task, NULL, 5, TASK_FLAG_KERNEL_MODE);
     if (roulette_task_id == INVALID_TASK_ID) {
         boot_info("ERROR: Failed to create roulette task");
         return -1;

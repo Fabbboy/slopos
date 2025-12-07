@@ -6,11 +6,12 @@
 #include "shell.h"
 #include "builtins.h"
 #include "../drivers/tty.h"
-#include "../drivers/serial.h"
 
 #include <stddef.h>
 #include <stdint.h>
 #include "../lib/klog.h"
+#include "../lib/user_syscall.h"
+#include "../lib/string.h"
 
 /* ========================================================================
  * HELPER UTILITIES
@@ -18,6 +19,13 @@
 
 static inline int shell_is_whitespace(char c) {
     return (c == ' ') || (c == '\t');
+}
+
+static void shell_write(const char *msg) {
+    if (!msg) {
+        return;
+    }
+    sys_write(msg, strlen(msg));
 }
 
 /* ========================================================================
@@ -131,16 +139,16 @@ void shell_main(void *arg) {
     (void)arg;  /* Unused parameter */
     
     /* Print welcome message (optional) */
-    klog_printf(KLOG_INFO, "\nSlopOS Shell v0.1\n\n");
+    shell_write("\nSlopOS Shell v0.1\n\n");
     
     /* REPL loop */
     while (1) {
         /* Display prompt */
-        klog_printf(KLOG_INFO, "$ ");
+        shell_write("$ ");
         
         /* Read line from keyboard */
         char line_buffer[256];
-        size_t line_length = tty_read_line(line_buffer, sizeof(line_buffer));
+        size_t line_length = (size_t)sys_read(line_buffer, sizeof(line_buffer));
 
         /* Handle empty lines */
         if (line_length == 0) {

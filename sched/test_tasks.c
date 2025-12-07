@@ -121,7 +121,7 @@ int run_scheduler_test(void) {
     /* Create test task A */
     uint32_t task_a_id = task_create("TestTaskA", test_task_a, NULL,
                                     1,    /* Normal priority */
-                                    0x02  /* Kernel mode */);
+                                    TASK_FLAG_KERNEL_MODE);
 
     if (task_a_id == INVALID_TASK_ID) {
         klog_printf(KLOG_INFO, "Failed to create test task A\n");
@@ -133,7 +133,7 @@ int run_scheduler_test(void) {
     /* Create test task B */
     uint32_t task_b_id = task_create("TestTaskB", test_task_b, NULL,
                                     1,    /* Normal priority */
-                                    0x02  /* Kernel mode */);
+                                    TASK_FLAG_KERNEL_MODE);
 
     if (task_b_id == INVALID_TASK_ID) {
         klog_printf(KLOG_INFO, "Failed to create test task B\n");

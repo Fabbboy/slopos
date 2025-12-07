@@ -194,7 +194,7 @@ skip_cr3_load:
 .global context_switch_user
 context_switch_user:
     movq    %rdi, %r8               # old_context pointer
-    movq    %rsi, %rdi              # new_context pointer (use rdi for addressing)
+    movq    %rsi, %rbx              # new_context pointer (keep in rbx until all loads done)
 
     /* Save old context if present (same layout as context_switch) */
     test    %r8, %r8
@@ -241,52 +241,52 @@ context_switch_user:
     movq    %rax, 0xC0(%r8)
 
 csu_after_save:
-    /* Switch CR3 if needed */
-    movq    0xC0(%rdi), %rax
+    /* Load data segments for user mode */
+    movq    0x98(%rbx), %rax        # ds
+    movw    %ax, %ds
+    movq    0xA0(%rbx), %rax        # es
+    movw    %ax, %es
+    movq    0xA8(%rbx), %rax        # fs
+    movw    %ax, %fs
+    movq    0xB0(%rbx), %rax        # gs
+    movw    %ax, %gs
+
+    /* Build IRET frame on current (kernel) stack */
+    movq    0xB8(%rbx), %rax        # ss
+    pushq   %rax
+    movq    0x38(%rbx), %rax        # user rsp
+    pushq   %rax
+    movq    0x88(%rbx), %rax        # rflags
+    pushq   %rax
+    movq    0x90(%rbx), %rax        # cs
+    pushq   %rax
+    movq    0x80(%rbx), %rax        # rip
+    pushq   %rax
+
+    /* Switch CR3 to target user page tables while context pointer is still valid */
+    movq    0xC0(%rbx), %rax
     movq    %cr3, %rdx
     cmpq    %rax, %rdx
     je      csu_skip_cr3
     movq    %rax, %cr3
 csu_skip_cr3:
 
-    /* Load data segments for user mode */
-    movq    0x98(%rdi), %rax        # ds
-    movw    %ax, %ds
-    movq    0xA0(%rdi), %rax        # es
-    movw    %ax, %es
-    movq    0xA8(%rdi), %rax        # fs
-    movw    %ax, %fs
-    movq    0xB0(%rdi), %rax        # gs
-    movw    %ax, %gs
-
-    /* Build IRET frame on current (kernel) stack */
-    movq    0xB8(%rdi), %rax        # ss
-    pushq   %rax
-    movq    0x38(%rdi), %rax        # user rsp
-    pushq   %rax
-    movq    0x88(%rdi), %rax        # rflags
-    pushq   %rax
-    movq    0x90(%rdi), %rax        # cs
-    pushq   %rax
-    movq    0x80(%rdi), %rax        # rip
-    pushq   %rax
-
     /* Load general-purpose registers from new context */
-    movq    0x00(%rdi), %rax
-    movq    0x08(%rdi), %rbx
-    movq    0x10(%rdi), %rcx
-    movq    0x18(%rdi), %rdx
-    movq    0x20(%rdi), %rsi
-    movq    0x28(%rdi), %rdi        # after this, rdi holds user value
-    movq    0x30(%rdi), %rbp
-    movq    0x40(%rdi), %r8
-    movq    0x48(%rdi), %r9
-    movq    0x50(%rdi), %r10
-    movq    0x58(%rdi), %r11
-    movq    0x60(%rdi), %r12
-    movq    0x68(%rdi), %r13
-    movq    0x70(%rdi), %r14
-    movq    0x78(%rdi), %r15
+    movq    0x00(%rbx), %rax
+    movq    0x10(%rbx), %rcx
+    movq    0x18(%rbx), %rdx
+    movq    0x20(%rbx), %rsi
+    movq    0x30(%rbx), %rbp
+    movq    0x40(%rbx), %r8
+    movq    0x48(%rbx), %r9
+    movq    0x50(%rbx), %r10
+    movq    0x58(%rbx), %r11
+    movq    0x60(%rbx), %r12
+    movq    0x68(%rbx), %r13
+    movq    0x70(%rbx), %r14
+    movq    0x78(%rbx), %r15
+    movq    0x28(%rbx), %rdi        # load user rdi near end
+    movq    0x08(%rbx), %rbx        # load user rbx last, pointer no longer needed
 
     iretq
 

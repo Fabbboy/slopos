@@ -163,6 +163,17 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         return INVALID_TASK_ID;
     }
 
+    /* Default to user mode unless explicitly marked as kernel. */
+    if (!(flags & TASK_FLAG_KERNEL_MODE) && !(flags & TASK_FLAG_USER_MODE)) {
+        flags |= TASK_FLAG_USER_MODE;
+    }
+
+    /* Do not allow both kernel and user mode flags simultaneously. */
+    if ((flags & TASK_FLAG_KERNEL_MODE) && (flags & TASK_FLAG_USER_MODE)) {
+        klog_printf(KLOG_INFO, "task_create: Conflicting mode flags\n");
+        return INVALID_TASK_ID;
+    }
+
     if (task_manager.num_tasks >= MAX_TASKS) {
         klog_printf(KLOG_INFO, "task_create: Maximum tasks reached\n");
         return INVALID_TASK_ID;
@@ -304,6 +315,9 @@ int task_terminate(uint32_t task_id) {
 
     klog_printf(KLOG_INFO, "Terminating task '%s' (ID %u)\n", task->name, resolved_id);
 
+    /* Detect self-termination so we avoid freeing the live stack. */
+    int is_current = (task == scheduler_get_current_task());
+
     /* Ensure task is removed from scheduler structures */
     unschedule_task(task);
 
@@ -322,42 +336,49 @@ int task_terminate(uint32_t task_id) {
     /* Wake any dependents waiting on this task */
     release_task_dependents(resolved_id);
 
-    /* Free resources based on task mode */
-    if (task->process_id != INVALID_PROCESS_ID) {
-        /* User mode tasks: free process VM space */
-        destroy_process_vm(task->process_id);
-        if (task->kernel_stack_base) {
-            kfree((void *)task->kernel_stack_base);
+    /*
+     * If the current task is exiting, do NOT free its stack or zero the TCB
+     * while still running on that stack. Defer cleanup; the scheduler will
+     * no longer schedule this task after termination.
+     */
+    if (!is_current) {
+        /* Free resources based on task mode */
+        if (task->process_id != INVALID_PROCESS_ID) {
+            /* User mode tasks: free process VM space */
+            destroy_process_vm(task->process_id);
+            if (task->kernel_stack_base) {
+                kfree((void *)task->kernel_stack_base);
+            }
+        } else if (task->stack_base) {
+            /* Kernel tasks: free stack from kernel heap */
+            kfree((void *)task->stack_base);
         }
-    } else if (task->stack_base) {
-        /* Kernel tasks: free stack from kernel heap */
-        kfree((void *)task->stack_base);
+
+        /* Clear task control block */
+        task->task_id = INVALID_TASK_ID;
+        task->state = TASK_STATE_INVALID;
+        task->process_id = INVALID_PROCESS_ID;
+        task->stack_base = 0;
+        task->stack_pointer = 0;
+        task->stack_size = 0;
+        task->kernel_stack_base = 0;
+        task->kernel_stack_top = 0;
+        task->kernel_stack_size = 0;
+        task->time_slice = 0;
+        task->time_slice_remaining = 0;
+        task->total_runtime = 0;
+        task->yield_count = 0;
+        task->entry_point = NULL;
+        task->entry_arg = NULL;
+        task->creation_time = 0;
+        task->waiting_on_task_id = INVALID_TASK_ID;
+        task->last_run_timestamp = 0;
+        task->user_started = 0;
+        task->context_from_user = 0;
     }
 
-    /* Clear task control block */
-    task->task_id = INVALID_TASK_ID;
-    task->state = TASK_STATE_INVALID;
-    task->process_id = INVALID_PROCESS_ID;
-    task->stack_base = 0;
-    task->stack_pointer = 0;
-    task->stack_size = 0;
-    task->kernel_stack_base = 0;
-    task->kernel_stack_top = 0;
-    task->kernel_stack_size = 0;
-    task->time_slice = 0;
-    task->time_slice_remaining = 0;
-    task->total_runtime = 0;
-    task->yield_count = 0;
-    task->entry_point = NULL;
-    task->entry_arg = NULL;
-    task->creation_time = 0;
-    task->waiting_on_task_id = INVALID_TASK_ID;
-    task->last_run_timestamp = 0;
-    task->user_started = 0;
-    task->context_from_user = 0;
-
     /* Update task manager */
-    if (task_manager.num_tasks > 0) {
+    if (!is_current && task_manager.num_tasks > 0) {
         task_manager.num_tasks--;
     }
     task_manager.tasks_terminated++;

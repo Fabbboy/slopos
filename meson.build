@@ -84,7 +84,8 @@ mm_sources += files(
   'mm/kernel_heap.c',
   'mm/memory_reservations.c',
   'mm/memory_init.c',
-  'mm/phys_virt.c'
+  'mm/phys_virt.c',
+  'mm/user_copy.c'
 )
 
 # Video/framebuffer directory

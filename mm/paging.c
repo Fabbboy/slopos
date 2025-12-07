@@ -72,6 +72,8 @@ static inline uint64_t intermediate_flags(int user_mapping) {
     return PAGE_PRESENT | PAGE_WRITABLE | (user_mapping ? PAGE_USER : 0);
 }
 
+static void mark_kernel_half_user(page_table_t *pml4);
+
 /* ========================================================================
  * SHARED HELPER IMPLEMENTATIONS
  * ======================================================================== */
@@ -97,6 +99,9 @@ void paging_copy_kernel_mappings(page_table_t *dest_pml4) {
     for (uint32_t i = 0; i < (ENTRIES_PER_PAGE_TABLE / 2); i++) {
         dest_pml4->entries[i] = 0;
     }
+
+    /* Allow user tasks to execute kernel-resident code/data mappings. */
+    mark_kernel_half_user(dest_pml4);
 }
 
 /* ========================================================================
@@ -143,6 +148,65 @@ static inline int pte_present(uint64_t pte) {
  */
 static inline int pte_huge(uint64_t pte) {
     return pte & PAGE_SIZE;
+}
+
+static void mark_kernel_half_user(page_table_t *pml4) {
+    if (!pml4) {
+        return;
+    }
+
+    for (uint32_t i = ENTRIES_PER_PAGE_TABLE / 2; i < ENTRIES_PER_PAGE_TABLE; i++) {
+        uint64_t pml4e = pml4->entries[i];
+        if (!pte_present(pml4e)) {
+            continue;
+        }
+
+        pml4->entries[i] |= PAGE_USER;
+        page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4e));
+        if (!pdpt) {
+            continue;
+        }
+
+        for (uint32_t j = 0; j < ENTRIES_PER_PAGE_TABLE; j++) {
+            uint64_t pdpte = pdpt->entries[j];
+            if (!pte_present(pdpte)) {
+                continue;
+            }
+
+            pdpt->entries[j] |= PAGE_USER;
+            if (pte_huge(pdpte)) {
+                continue; /* 1GB page */
+            }
+
+            page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpte));
+            if (!pd) {
+                continue;
+            }
+
+            for (uint32_t k = 0; k < ENTRIES_PER_PAGE_TABLE; k++) {
+                uint64_t pde = pd->entries[k];
+                if (!pte_present(pde)) {
+                    continue;
+                }
+
+                pd->entries[k] |= PAGE_USER;
+                if (pte_huge(pde)) {
+                    continue; /* 2MB page */
+                }
+
+                page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pde));
+                if (!pt) {
+                    continue;
+                }
+
+                for (uint32_t m = 0; m < ENTRIES_PER_PAGE_TABLE; m++) {
+                    if (pte_present(pt->entries[m])) {
+                        pt->entries[m] |= PAGE_USER;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /*
