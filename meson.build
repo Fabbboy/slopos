@@ -85,7 +85,8 @@ mm_sources += files(
   'mm/memory_reservations.c',
   'mm/memory_init.c',
   'mm/phys_virt.c',
-  'mm/user_copy.c'
+  'mm/user_copy.c',
+  'mm/user_copy_helpers.c'
 )
 
 # Video/framebuffer directory
@@ -112,11 +113,7 @@ lib_sources += files(
 
 # Tests orchestrator directory
 tests_dir = meson.current_source_dir() / 'tests'
-tests_sources = files(
-  'tests/core.c',
-  'tests/interrupt_suite.c',
-  'tests/system_suites.c'
-)
+tests_sources = []
 
 # Drivers directory
 drivers_dir = meson.current_source_dir() / 'drivers'
@@ -135,7 +132,8 @@ drivers_sources += files(
   'drivers/fate.c',
   'drivers/random.c',
   'drivers/wl_currency.c',
-  'drivers/syscall.c'
+  'drivers/syscall.c',
+  'drivers/syscall_handlers.c'
 )
 
 # Scheduler directory
@@ -144,8 +142,7 @@ sched_sources += files(
   'sched/scheduler.c',
   'sched/kthread.c',
   'sched/task.c',
-  'sched/context_switch.s',
-  'sched/test_tasks.c'
+  'sched/context_switch.s'
 )
 
 # Shell directory
@@ -167,6 +164,13 @@ if builtin_tests_enabled
   mm_sources += files('mm/test_process_vm.c', 'mm/test_kernel_heap.c')
   sched_sources += files('sched/test_tasks.c')
   fs_sources += files('fs/test_ramfs.c')
+  tests_sources += files(
+    'tests/core.c',
+    'tests/interrupt_suite.c',
+    'tests/system_suites.c'
+  )
+else
+  tests_sources += files('tests/stub_tests.c')
 endif
 
 # Kernel main sources (root directory)

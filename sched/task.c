@@ -18,6 +18,7 @@
 #include "task.h"
 #include "scheduler.h"
 #include "../boot/kernel_panic.h"
+#include "../boot/init.h"
 
 /* Task manager structure */
 typedef struct task_manager {
@@ -552,6 +553,13 @@ int init_task_manager(void) {
 
     return 0;
 }
+
+static int boot_step_task_manager_init(void) {
+    klog_debug("Initializing task manager...");
+    return init_task_manager();
+}
+
+BOOT_INIT_STEP_WITH_FLAGS(services, "task manager", boot_step_task_manager_init, BOOT_INIT_PRIORITY(20));
 
 /*
  * Get task manager statistics

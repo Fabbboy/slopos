@@ -18,6 +18,44 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../lib/klog.h"
+#include "../tests/core.h"
+#include "../tests/system_suites.h"
+
+#ifndef ENABLE_BUILTIN_TESTS
+#define ENABLE_BUILTIN_TESTS 0
+#endif
+
+#if !ENABLE_BUILTIN_TESTS
+
+/* Stub implementations when built-in tests are disabled. */
+const struct test_suite_desc interrupt_suite_desc = {
+    .name = "interrupt_suite_stub",
+    .mask_bit = 1,
+    .run = NULL,
+};
+
+void interrupt_test_init(const struct interrupt_test_config *config) {
+    (void)config;
+}
+
+void interrupt_test_cleanup(void) {
+}
+
+int run_all_interrupt_tests(const struct interrupt_test_config *config) {
+    (void)config;
+    return 0;
+}
+
+int run_basic_exception_tests(void) { return 0; }
+int run_memory_access_tests(void) { return 0; }
+int run_control_flow_tests(void) { return 0; }
+int run_scheduler_tests(void) { return 0; }
+
+void interrupt_test_request_shutdown(int failed_tests) {
+    (void)failed_tests;
+}
+
+#else
 
 #ifndef ENABLE_BUILTIN_TESTS
 #define ENABLE_BUILTIN_TESTS 0
@@ -1576,3 +1614,5 @@ void log_test_exception(struct interrupt_frame *frame) {
     klog_printf(KLOG_INFO, "TEST_EXCEPTION: Vector %u at RIP 0x%lx\n",
                 (unsigned)frame->vector, frame->rip);
 }
+
+#endif /* ENABLE_BUILTIN_TESTS */

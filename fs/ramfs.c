@@ -7,6 +7,7 @@
 #include "../lib/memory.h"
 #include "../drivers/serial.h"
 #include "../lib/klog.h"
+#include "../boot/init.h"
 
 typedef enum {
     RAMFS_CREATE_NONE = 0,
@@ -246,6 +247,12 @@ static ramfs_node_t *ramfs_create_directory_internal(ramfs_node_t *parent, const
 ramfs_node_t *ramfs_get_root(void) {
     return ramfs_root;
 }
+
+static int ramfs_boot_init(void) {
+    return ramfs_init();
+}
+
+BOOT_INIT_STEP_WITH_FLAGS(services, "ramfs", ramfs_boot_init, BOOT_INIT_PRIORITY(10));
 
 int ramfs_init(void) {
     if (ramfs_initialized) {

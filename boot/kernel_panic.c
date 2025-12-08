@@ -207,5 +207,5 @@ void kernel_roulette(void) {
         panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
     }
 
-    fate_apply_outcome(&res, FATE_RESOLUTION_REBOOT_ON_LOSS);
+    fate_apply_outcome(&res, FATE_RESOLUTION_REBOOT_ON_LOSS, /*notify_hook=*/false);
 }

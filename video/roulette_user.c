@@ -8,6 +8,10 @@
 #include "../lib/user_syscall_defs.h"
 #include "../lib/string.h"
 #include "../lib/memory.h"
+#include "../lib/klog.h"
+#include "../sched/task.h"
+#include "../sched/scheduler.h"
+#include "../boot/init.h"
 #include "roulette.h"
 #include "roulette_core.h"
 
@@ -140,3 +144,29 @@ void roulette_user_main(void *arg) {
     sys_roulette_result(fate);
     sys_exit();
 }
+
+static int boot_step_roulette_task(void) {
+    klog_debug("Creating roulette gatekeeper task...");
+    uint32_t roulette_task_id = task_create("roulette", roulette_user_main, NULL, 5, TASK_FLAG_USER_MODE);
+    if (roulette_task_id == INVALID_TASK_ID) {
+        klog_printf(KLOG_INFO, "ERROR: Failed to create roulette task\n");
+        return -1;
+    }
+
+    task_t *roulette_task_info;
+    if (task_get_info(roulette_task_id, &roulette_task_info) != 0) {
+        klog_printf(KLOG_INFO, "ERROR: Failed to get roulette task info\n");
+        return -1;
+    }
+
+    if (schedule_task(roulette_task_info) != 0) {
+        klog_printf(KLOG_INFO, "ERROR: Failed to schedule roulette task\n");
+        task_terminate(roulette_task_id);
+        return -1;
+    }
+
+    klog_debug("Roulette task created and scheduled successfully!");
+    return 0;
+}
+
+BOOT_INIT_STEP_WITH_FLAGS(services, "roulette task", boot_step_roulette_task, BOOT_INIT_PRIORITY(40));

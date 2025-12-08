@@ -15,6 +15,11 @@ struct boot_init_step {
     uint32_t flags;
 };
 
+#define BOOT_INIT_FLAG_OPTIONAL (1u << 0)
+#define BOOT_INIT_PRIORITY_SHIFT 8
+#define BOOT_INIT_PRIORITY_MASK (0xFFu << BOOT_INIT_PRIORITY_SHIFT)
+#define BOOT_INIT_PRIORITY(val) (((uint32_t)(val) << BOOT_INIT_PRIORITY_SHIFT) & BOOT_INIT_PRIORITY_MASK)
+
 #define BOOT_INIT_PHASES(_) \
     /* Early hardware bring-up before memory/paging */ \
     _(early_hw) \
@@ -46,6 +51,6 @@ int is_kernel_initialized(void);
     BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, 0)
 
 #define BOOT_INIT_OPTIONAL_STEP(phase, label, fn) \
-    BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, 0)
+    BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, BOOT_INIT_FLAG_OPTIONAL)
 
 #endif /* BOOT_INIT_H */

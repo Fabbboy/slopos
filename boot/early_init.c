@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "../drivers/serial.h"
 #include "../mm/mm_constants.h"
 #include "idt.h"
@@ -21,13 +22,8 @@
 #include "../drivers/pic_quiesce.h"
 #include "../drivers/random.h"
 #include "../drivers/interrupt_test.h"
-#include "../sched/task.h"
 #include "../sched/scheduler.h"
-#include "../shell/shell.h"
-#include "../fs/ramfs.h"
 #include "../video/framebuffer.h"
-#include "../video/graphics.h"
-#include "../video/font.h"
 #include "../video/splash.h"
 #include "../drivers/pci.h"
 #include "../drivers/wl_currency.h"
@@ -38,10 +34,6 @@
 #include "cpu_verify.h"
 #include "../mm/memory_init.h"
 #include "../lib/string.h"
-#include "../lib/user_syscall.h"
-
-/* User-mode roulette entry point */
-extern void roulette_user_main(void *arg);
 
 // Kernel state tracking
 static volatile int kernel_initialized = 0;
@@ -82,6 +74,15 @@ static const struct boot_init_phase_desc boot_phase_table[BOOT_INIT_PHASE_COUNT]
 #undef PHASE_ENTRY
 };
 
+#define BOOT_INIT_MAX_STEPS 64
+
+static uint32_t boot_step_priority(const struct boot_init_step *step) {
+    if (!step) {
+        return 0;
+    }
+    return (step->flags & BOOT_INIT_PRIORITY_MASK);
+}
+
 static void boot_init_report_phase(enum klog_level level,
                                    const char *prefix,
                                    const char *value) {
@@ -114,10 +115,15 @@ static int boot_run_step(const char *phase_name, const struct boot_init_step *st
     boot_init_report_step(KLOG_DEBUG, "step", step->name);
     int rc = step->fn();
     if (rc != 0) {
+        bool optional = (step->flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
         boot_init_report_failure(phase_name, step->name);
+        if (optional) {
+            boot_info("Optional boot step failed, continuing...");
+            return 0;
+        }
         kernel_panic("Boot init step failed");
     }
-    return rc;
+    return 0;
 }
 
 int boot_init_run_phase(enum boot_init_phase phase) {
@@ -131,10 +137,30 @@ int boot_init_run_phase(enum boot_init_phase phase) {
     }
 
     boot_init_report_phase(KLOG_DEBUG, "phase start -> ", desc->name);
+    size_t total_steps = (size_t)(desc->end - desc->start);
+    if (total_steps > BOOT_INIT_MAX_STEPS) {
+        kernel_panic("Boot init: too many steps for phase");
+    }
+
+    const struct boot_init_step *ordered[BOOT_INIT_MAX_STEPS];
+    size_t ordered_count = 0;
+
     const struct boot_init_step *cursor = desc->start;
     while (cursor < desc->end) {
-        boot_run_step(desc->name, cursor);
+        /* Insertion sort by priority to keep deterministic ordering */
+        uint32_t prio = boot_step_priority(cursor);
+        size_t idx = ordered_count;
+        while (idx > 0 && prio < boot_step_priority(ordered[idx - 1])) {
+            ordered[idx] = ordered[idx - 1];
+            idx--;
+        }
+        ordered[idx] = cursor;
+        ordered_count++;
         cursor++;
+    }
+
+    for (size_t i = 0; i < ordered_count; i++) {
+        boot_run_step(desc->name, ordered[i]);
     }
     boot_init_report_phase(KLOG_INFO, "phase complete -> ", desc->name);
     return 0;
@@ -466,71 +492,6 @@ BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
 
 /* Services phase --------------------------------------------------------- */
-static int boot_step_ramfs_init(void) {
-    if (ramfs_init() != 0) {
-        boot_info("ERROR: RamFS initialization failed");
-        return -1;
-    }
-    boot_debug("RamFS initialized.");
-    return 0;
-}
-
-static int boot_step_task_manager_init(void) {
-    boot_debug("Initializing task manager...");
-    splash_report_progress(85, "Initializing scheduler...");
-    if (init_task_manager() != 0) {
-        boot_info("ERROR: Task manager initialization failed");
-        return -1;
-    }
-    boot_debug("Task manager initialized.");
-    return 0;
-}
-
-static int boot_step_scheduler_init(void) {
-    boot_debug("Initializing scheduler subsystem...");
-    splash_report_progress(90, "Starting task manager...");
-    if (init_scheduler() != 0) {
-        boot_info("ERROR: Scheduler initialization failed");
-        return -1;
-    }
-    boot_debug("Scheduler initialized.");
-    return 0;
-}
-
-static int boot_step_roulette_task(void) {
-    boot_debug("Creating roulette gatekeeper task...");
-    uint32_t roulette_task_id = task_create("roulette", roulette_user_main, NULL, 5, TASK_FLAG_USER_MODE);
-    if (roulette_task_id == INVALID_TASK_ID) {
-        boot_info("ERROR: Failed to create roulette task");
-        return -1;
-    }
-
-    task_t *roulette_task_info;
-    if (task_get_info(roulette_task_id, &roulette_task_info) != 0) {
-        boot_info("ERROR: Failed to get roulette task info");
-        return -1;
-    }
-
-    if (schedule_task(roulette_task_info) != 0) {
-        boot_info("ERROR: Failed to schedule roulette task");
-        task_terminate(roulette_task_id);
-        return -1;
-    }
-
-    boot_debug("Roulette task created and scheduled successfully!");
-    return 0;
-}
-
-static int boot_step_idle_task(void) {
-    boot_debug("Creating idle task...");
-    if (create_idle_task() != 0) {
-        boot_info("ERROR: Failed to create idle task");
-        return -1;
-    }
-    boot_debug("Idle task ready.");
-    return 0;
-}
-
 static int boot_step_mark_kernel_ready(void) {
     kernel_initialized = 1;
     boot_info("Kernel core services initialized.");
@@ -539,12 +500,7 @@ static int boot_step_mark_kernel_ready(void) {
     return 0;
 }
 
-BOOT_INIT_STEP(services, "ramfs", boot_step_ramfs_init);
-BOOT_INIT_STEP(services, "task manager", boot_step_task_manager_init);
-BOOT_INIT_STEP(services, "scheduler", boot_step_scheduler_init);
-BOOT_INIT_STEP(services, "roulette task", boot_step_roulette_task);
-BOOT_INIT_STEP(services, "idle task", boot_step_idle_task);
-BOOT_INIT_STEP(services, "mark ready", boot_step_mark_kernel_ready);
+BOOT_INIT_STEP_WITH_FLAGS(services, "mark ready", boot_step_mark_kernel_ready, BOOT_INIT_PRIORITY(60));
 
 /* Optional/demo phase ---------------------------------------------------- */
 

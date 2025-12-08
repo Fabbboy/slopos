@@ -7,6 +7,7 @@
 #define DRIVERS_FATE_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 struct fate_result {
     uint32_t value;  /* Raw fate number */
@@ -25,7 +26,12 @@ void fate_init(void);
 struct fate_result fate_spin(void);
 
 /* Apply W/L accounting and optional resolution policy (e.g., reboot on loss). */
-void fate_apply_outcome(const struct fate_result *res, enum fate_resolution resolution);
+void fate_apply_outcome(const struct fate_result *res,
+                        enum fate_resolution resolution,
+                        bool notify_hook);
+
+typedef void (*fate_outcome_hook_t)(const struct fate_result *res);
+void fate_register_outcome_hook(fate_outcome_hook_t hook);
 
 /* Pending fate helpers for syscall/user handshake. */
 void fate_set_pending(struct fate_result res);

@@ -31,4 +31,8 @@ void shell_execute_command(const char *line);
  */
 int shell_parse_line(const char *line, char **tokens, int max_tokens);
 
+/* Kernel-side helpers */
+int shell_launch_once(void);
+void shell_register_roulette_hook(void);
+
 #endif /* SHELL_SHELL_H */

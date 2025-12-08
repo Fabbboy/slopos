@@ -619,6 +619,19 @@ int create_idle_task(void) {
     return 0;
 }
 
+static int boot_step_scheduler_init(void) {
+    klog_debug("Initializing scheduler subsystem...");
+    return init_scheduler();
+}
+
+static int boot_step_idle_task(void) {
+    klog_debug("Creating idle task...");
+    return create_idle_task();
+}
+
+BOOT_INIT_STEP_WITH_FLAGS(services, "scheduler", boot_step_scheduler_init, BOOT_INIT_PRIORITY(30));
+BOOT_INIT_STEP_WITH_FLAGS(services, "idle task", boot_step_idle_task, BOOT_INIT_PRIORITY(50));
+
 /*
  * Start the scheduler (enable scheduling)
  */

@@ -7,10 +7,12 @@
 #include "random.h"
 #include "wl_currency.h"
 #include "../boot/shutdown.h"
+#include <stdbool.h>
 
 static int fate_seeded = 0;
 static struct fate_result pending_fate = {0};
 static int pending_valid = 0;
+static fate_outcome_hook_t outcome_hook = NULL;
 
 void fate_init(void) {
     if (fate_seeded) {
@@ -30,7 +32,9 @@ struct fate_result fate_spin(void) {
     return res;
 }
 
-void fate_apply_outcome(const struct fate_result *res, enum fate_resolution resolution) {
+void fate_apply_outcome(const struct fate_result *res,
+                        enum fate_resolution resolution,
+                        bool notify_hook) {
     if (!res) {
         return;
     }
@@ -42,6 +46,10 @@ void fate_apply_outcome(const struct fate_result *res, enum fate_resolution reso
         if (resolution == FATE_RESOLUTION_REBOOT_ON_LOSS) {
             kernel_reboot("Roulette loss - spinning again");
         }
+    }
+
+    if (notify_hook && outcome_hook) {
+        outcome_hook(res);
     }
 }
 
@@ -61,5 +69,9 @@ int fate_take_pending(struct fate_result *out) {
 
 void fate_clear_pending(void) {
     pending_valid = 0;
+}
+
+void fate_register_outcome_hook(fate_outcome_hook_t hook) {
+    outcome_hook = hook;
 }
 
