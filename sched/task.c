@@ -290,6 +290,9 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->waiting_on_task_id = INVALID_TASK_ID;
     task->user_started = 0;
     task->context_from_user = 0;
+    task->fate_token = 0;
+    task->fate_value = 0;
+    task->fate_pending = 0;
     task->next_ready = NULL;
 
     /* Initialize CPU context */
@@ -358,6 +361,9 @@ int task_terminate(uint32_t task_id) {
 
     /* Mark task as terminated */
     task->state = TASK_STATE_TERMINATED;
+    task->fate_token = 0;
+    task->fate_value = 0;
+    task->fate_pending = 0;
 
     /* Wake any dependents waiting on this task */
     release_task_dependents(resolved_id);
@@ -401,6 +407,9 @@ int task_terminate(uint32_t task_id) {
         task->last_run_timestamp = 0;
         task->user_started = 0;
         task->context_from_user = 0;
+        task->fate_token = 0;
+        task->fate_value = 0;
+        task->fate_pending = 0;
         task->next_ready = NULL;
     }
 
@@ -551,6 +560,9 @@ int init_task_manager(void) {
         task_manager.tasks[i].kernel_stack_size = 0;
         task_manager.tasks[i].user_started = 0;
         task_manager.tasks[i].context_from_user = 0;
+        task_manager.tasks[i].fate_token = 0;
+        task_manager.tasks[i].fate_value = 0;
+        task_manager.tasks[i].fate_pending = 0;
     }
 
     return 0;

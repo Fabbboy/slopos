@@ -26,6 +26,57 @@ static enum syscall_disposition syscall_error(struct interrupt_frame *frame) {
     return SYSCALL_DISP_OK;
 }
 
+/* Bounded user buffer helpers to keep copy/length checks consistent. */
+#define USER_IO_MAX_BYTES 512
+
+static int syscall_validate_len(uint64_t requested_len, size_t *validated_len_out) {
+    if (!validated_len_out || requested_len == 0) {
+        return -1;
+    }
+    size_t len = (requested_len > USER_IO_MAX_BYTES) ? USER_IO_MAX_BYTES : (size_t)requested_len;
+    *validated_len_out = len;
+    return 0;
+}
+
+static int syscall_copy_from_user_bounded(char *dst,
+                                          size_t dst_size,
+                                          const void *user_src,
+                                          size_t user_len,
+                                          size_t *copied_len_out) {
+    if (!dst || dst_size == 0 || !user_src || user_len == 0) {
+        return -1;
+    }
+
+    size_t len = (user_len > dst_size) ? dst_size : user_len;
+    if (user_copy_from_user(dst, user_src, len) != 0) {
+        return -1;
+    }
+
+    if (copied_len_out) {
+        *copied_len_out = len;
+    }
+    return 0;
+}
+
+static int syscall_copy_to_user_bounded(void *user_dst,
+                                        const void *src,
+                                        size_t src_len) {
+    if (!user_dst || src_len == 0) {
+        return -1;
+    }
+    return user_copy_to_user(user_dst, src, src_len);
+}
+
+static enum syscall_disposition syscall_finish_gfx(struct interrupt_frame *frame, int rc) {
+    frame->rax = rc;
+    if (rc == 0) {
+        wl_award_win();
+    } else {
+        wl_award_loss();
+    }
+    return SYSCALL_DISP_OK;
+}
+
 static enum syscall_disposition syscall_yield(task_t *task, struct interrupt_frame *frame) {
     (void)task;
     wl_award_win();
@@ -46,21 +97,20 @@ static enum syscall_disposition syscall_user_write(task_t *task, struct interrup
     (void)task;
     const void *user_buf = (const void *)frame->rdi;
     uint64_t len = frame->rsi;
-    if (!user_buf || len == 0) {
-        return syscall_error(frame);
-    }
-    if (len > 512) {
-        len = 512;
-    }
+    char tmp[USER_IO_MAX_BYTES];
+    size_t write_len = 0;
 
-    char tmp[512];
-    if (user_copy_from_user(tmp, user_buf, (size_t)len) != 0) {
+    if (!user_buf || syscall_validate_len(len, &write_len) != 0) {
         return syscall_error(frame);
     }
 
-    serial_write(COM1_BASE, tmp, (size_t)len);
+    if (syscall_copy_from_user_bounded(tmp, sizeof(tmp), user_buf, write_len, NULL) != 0) {
+        return syscall_error(frame);
+    }
+
+    serial_write(COM1_BASE, tmp, write_len);
     wl_award_win();
-    frame->rax = len;
+    frame->rax = write_len;
     return SYSCALL_DISP_OK;
 }
 
@@ -68,17 +118,17 @@ static enum syscall_disposition syscall_user_read(task_t *task, struct interrupt
     (void)task;
     void *user_buf = (void *)frame->rdi;
     uint64_t buf_len = frame->rsi;
-    if (!user_buf || buf_len == 0) {
+    char tmp[USER_IO_MAX_BYTES];
+    size_t max_len = 0;
+
+    if (!user_buf || syscall_validate_len(buf_len, &max_len) != 0) {
         return syscall_error(frame);
     }
-    if (buf_len > 512) {
-        buf_len = 512;
-    }
 
-    char tmp[512];
-    size_t read_len = tty_read_line(tmp, (size_t)buf_len);
+    /* Use the validated length cap for the read operation. */
+    size_t read_len = tty_read_line(tmp, max_len);
 
-    if (user_copy_to_user(user_buf, tmp, read_len + 1) != 0) {
+    if (syscall_copy_to_user_bounded(user_buf, tmp, read_len + 1) != 0) {
         return syscall_error(frame);
     }
 
@@ -146,13 +196,7 @@ static enum syscall_disposition syscall_gfx_fill_rect(task_t *task, struct inter
         return syscall_error(frame);
     }
     int rc = graphics_draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
-    frame->rax = rc;
-    if (rc == 0) {
-        wl_award_win();
-    } else {
-        wl_award_loss();
-    }
-    return SYSCALL_DISP_OK;
+    return syscall_finish_gfx(frame, rc);
 }
 
 static enum syscall_disposition syscall_gfx_draw_line(task_t *task, struct interrupt_frame *frame) {
@@ -162,13 +206,7 @@ static enum syscall_disposition syscall_gfx_draw_line(task_t *task, struct inter
         return syscall_error(frame);
     }
     int rc = graphics_draw_line(line.x0, line.y0, line.x1, line.y1, line.color);
-    frame->rax = rc;
-    if (rc == 0) {
-        wl_award_win();
-    } else {
-        wl_award_loss();
-    }
-    return SYSCALL_DISP_OK;
+    return syscall_finish_gfx(frame, rc);
 }
 
 static enum syscall_disposition syscall_gfx_draw_circle(task_t *task, struct interrupt_frame *frame) {
@@ -178,13 +216,7 @@ static enum syscall_disposition syscall_gfx_draw_circle(task_t *task, struct int
         return syscall_error(frame);
     }
     int rc = graphics_draw_circle(circle.cx, circle.cy, circle.radius, circle.color);
-    frame->rax = rc;
-    if (rc == 0) {
-        wl_award_win();
-    } else {
-        wl_award_loss();
-    }
-    return SYSCALL_DISP_OK;
+    return syscall_finish_gfx(frame, rc);
 }
 
 static enum syscall_disposition syscall_gfx_draw_circle_filled(task_t *task, struct interrupt_frame *frame) {
@@ -194,13 +226,7 @@ static enum syscall_disposition syscall_gfx_draw_circle_filled(task_t *task, str
         return syscall_error(frame);
     }
     int rc = graphics_draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color);
-    frame->rax = rc;
-    if (rc == 0) {
-        wl_award_win();
-    } else {
-        wl_award_loss();
-    }
-    return SYSCALL_DISP_OK;
+    return syscall_finish_gfx(frame, rc);
 }
 
 static enum syscall_disposition syscall_font_draw(task_t *task, struct interrupt_frame *frame) {
@@ -217,13 +243,7 @@ static enum syscall_disposition syscall_font_draw(task_t *task, struct interrupt
     buffer[text_req.len] = '\0';
 
     int rc = font_draw_string(text_req.x, text_req.y, buffer, text_req.fg_color, text_req.bg_color);
-    frame->rax = rc;
-    if (rc == 0) {
-        wl_award_win();
-    } else {
-        wl_award_loss();
-    }
-    return SYSCALL_DISP_OK;
+    return syscall_finish_gfx(frame, rc);
 }
 
 static enum syscall_disposition syscall_random_next(task_t *task, struct interrupt_frame *frame) {

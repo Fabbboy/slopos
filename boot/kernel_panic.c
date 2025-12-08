@@ -9,6 +9,7 @@
 #include "../drivers/serial.h"
 #include "../lib/numfmt.h"
 #include "../lib/cpu.h"
+#include "../mm/memory_init.h"
 
 static void panic_output_string(const char *str) {
     serial_emergency_puts(str);
@@ -88,7 +89,11 @@ void kernel_panic(const char *message) {
      * Invoke the final purification ritual before shutdown
      * Paint all memory with 0x69—the essence of slop itself
      */
-    execute_kernel();
+    if (is_memory_system_initialized()) {
+        execute_kernel();
+    } else {
+        panic_output_string("Memory system unavailable; skipping paint ritual\n");
+    }
 
     kernel_shutdown(message ? message : "panic");
 }
@@ -148,7 +153,11 @@ void kernel_panic_with_context(const char *message, const char *function,
      * Invoke the final purification ritual before shutdown
      * Paint all memory with 0x69—the essence of slop itself
      */
-    execute_kernel();
+    if (is_memory_system_initialized()) {
+        execute_kernel();
+    } else {
+        panic_output_string("Memory system unavailable; skipping paint ritual\n");
+    }
 
     kernel_shutdown(message ? message : "panic");
 }

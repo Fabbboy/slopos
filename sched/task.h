@@ -101,6 +101,12 @@ typedef struct task {
     uint32_t waiting_on_task_id;         /* Task this task is waiting on, if any */
     uint8_t user_started;                /* User task has executed in ring3 */
     uint8_t context_from_user;           /* Context saved from user frame */
+
+    /* Fate/roulette handshake state (protected by fate service) */
+    uint32_t fate_token;                 /* Pending fate token */
+    uint32_t fate_value;                 /* Pending fate value */
+    uint8_t fate_pending;                /* Pending fate slot validity */
+
     struct task *next_ready;             /* Intrusive ready-queue linkage */
 
 } task_t;
