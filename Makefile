@@ -15,6 +15,13 @@ BOOT_CMDLINE ?= itests=off
 TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on
 VIDEO ?= 0
 
+DEBUG ?= 0
+DEBUG_CMDLINE :=
+ifneq ($(filter 1 true on yes,$(DEBUG)),)
+DEBUG_CMDLINE += boot.debug=on
+endif
+BOOT_CMDLINE_EFFECTIVE := $(strip $(BOOT_CMDLINE) $(DEBUG_CMDLINE))
+
 LIMINE_DIR := third_party/limine
 LIMINE_REPO := https://github.com/limine-bootloader/limine.git
 LIMINE_BRANCH := v5.x-branch-binary
@@ -128,7 +135,7 @@ iso: build
 iso-notests: build
 	@meson configure $(BUILD_DIR) -Denable_builtin_tests=false
 	@meson compile -C $(BUILD_DIR)
-	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE))
+	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
 iso-tests: build
 	@meson configure $(BUILD_DIR) -Denable_builtin_tests=true
