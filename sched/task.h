@@ -101,6 +101,7 @@ typedef struct task {
     uint32_t waiting_on_task_id;         /* Task this task is waiting on, if any */
     uint8_t user_started;                /* User task has executed in ring3 */
     uint8_t context_from_user;           /* Context saved from user frame */
+    struct task *next_ready;             /* Intrusive ready-queue linkage */
 
 } task_t;
 

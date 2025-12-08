@@ -496,4 +496,3 @@ int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
     return want_colored ? 0 : 1;
 }
 
-

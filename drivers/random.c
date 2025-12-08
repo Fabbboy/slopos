@@ -20,6 +20,7 @@
 /* Global LFSR state - the current position in the chaos spiral */
 static uint32_t lfsr_state = 0;
 static int random_seeded = 0;
+static volatile int random_lock = 0;
 
 /* LFSR polynomial taps for Galois configuration */
 #define LFSR_POLYNOMIAL 0xB4000001UL /* x^32 + x^7 + x^5 + x^3 + x^2 + x + 1 */
@@ -28,35 +29,44 @@ static int random_seeded = 0;
  * INITIALIZATION
  * ======================================================================== */
 
-/*
- * Read the CPU timestamp counter for entropy
- * This provides time-based variation even if called multiple times
- */
+static inline void random_lock_acquire(void) {
+    while (__sync_lock_test_and_set(&random_lock, 1)) {
+        /* spin */
+    }
+}
+
+static inline void random_lock_release(void) {
+    __sync_lock_release(&random_lock);
+}
+
+/* Read the CPU timestamp counter for entropy */
 static inline uint32_t read_tsc_low(void) {
     uint32_t eax, edx;
     __asm__ volatile("rdtsc" : "=a"(eax), "=d"(edx));
     return eax;
 }
 
+static void random_seed_state(uint32_t seed) {
+    if (seed == 0) {
+        seed = 0xDEADBEEF; /* Fallback seed if TSC is zero */
+    }
+    lfsr_state = seed;
+    random_seeded = 1;
+}
+
 /*
- * Initialize the random number generator
- * Seeds from TSC to ensure different sequences across boots
+ * Initialize the random number generator once using TSC entropy.
  */
 void random_init(void) {
     if (random_seeded) {
         return;
     }
 
-    /* Read TSC for entropy */
-    uint32_t seed = read_tsc_low();
-
-    /* Ensure seed is non-zero (critical for LFSR!) */
-    if (seed == 0) {
-        seed = 0xDEADBEEF; /* Fallback seed if TSC is zero */
+    random_lock_acquire();
+    if (!random_seeded) {
+        random_seed_state(read_tsc_low());
     }
-
-    lfsr_state = seed;
-    random_seeded = 1;
+    random_lock_release();
 }
 
 /* ========================================================================
@@ -96,11 +106,12 @@ uint32_t random_next(void) {
         random_init();
     }
 
+    random_lock_acquire();
     uint32_t result = 0;
-
     for (int i = 0; i < 32; i++) {
         result = (result << 1) | (lfsr_step() & 1);
     }
+    random_lock_release();
 
     return result;
 }

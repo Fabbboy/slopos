@@ -13,7 +13,6 @@
 #include "../drivers/wl_currency.h"
 #include "../mm/paging.h"
 #include "../mm/process_vm.h"
-#include "../lib/ring_buffer.h"
 #include "../boot/gdt.h"
 #include "scheduler.h"
 
@@ -21,7 +20,6 @@
  * SCHEDULER CONSTANTS
  * ======================================================================== */
 
-#define SCHED_MAX_READY_TASKS         32        /* Maximum tasks in ready queue */
 #define SCHED_DEFAULT_TIME_SLICE      10        /* Default time slice units */
 #define SCHED_IDLE_TASK_ID            0xFFFFFFFE /* Special idle task ID */
 
@@ -36,10 +34,9 @@
 
 /* Ready queue for runnable tasks */
 typedef struct ready_queue {
-    task_t *tasks[SCHED_MAX_READY_TASKS];  /* Array of task pointers */
-    uint32_t head;                         /* Head index (next to run) */
-    uint32_t tail;                         /* Tail index (last added) */
-    uint32_t count;                        /* Number of tasks in queue */
+    task_t *head;                         /* First runnable task */
+    task_t *tail;                         /* Last runnable task */
+    uint32_t count;                       /* Number of tasks in queue */
 } ready_queue_t;
 
 /* Scheduler control structure */
@@ -96,12 +93,9 @@ static void scheduler_reset_task_quantum(task_t *task) {
  * Initialize the ready queue
  */
 static void ready_queue_init(ready_queue_t *queue) {
-    RING_BUFFER_RESET(queue);
-
-    /* Clear all task pointers */
-    for (uint32_t i = 0; i < SCHED_MAX_READY_TASKS; i++) {
-        queue->tasks[i] = NULL;
-    }
+    queue->head = NULL;
+    queue->tail = NULL;
+    queue->count = 0;
 }
 
 /*
@@ -111,11 +105,13 @@ static int ready_queue_empty(ready_queue_t *queue) {
     return queue->count == 0;
 }
 
-/*
- * Check if ready queue is full
- */
-static int ready_queue_full(ready_queue_t *queue) {
-    return queue->count >= SCHED_MAX_READY_TASKS;
+static int ready_queue_contains(ready_queue_t *queue, task_t *task) {
+    for (task_t *cursor = queue->head; cursor; cursor = cursor->next_ready) {
+        if (cursor == task) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /*
@@ -123,16 +119,23 @@ static int ready_queue_full(ready_queue_t *queue) {
  * Returns 0 on success, -1 if queue is full
  */
 static int ready_queue_enqueue(ready_queue_t *queue, task_t *task) {
-    if (!task || ready_queue_full(queue)) {
+    if (!task) {
         return -1;
     }
 
-    int success = 0;
-    RING_BUFFER_TRY_PUSH(queue, tasks, task, success);
-    if (!success) {
-        return -1;
+    /* Avoid double-enqueue to keep list well-formed. */
+    if (ready_queue_contains(queue, task)) {
+        return 0;
     }
 
+    task->next_ready = NULL;
+    if (!queue->head) {
+        queue->head = queue->tail = task;
+    } else {
+        queue->tail->next_ready = task;
+        queue->tail = task;
+    }
+    queue->count++;
     return 0;
 }
 
@@ -145,10 +148,14 @@ static task_t *ready_queue_dequeue(ready_queue_t *queue) {
         return NULL;
     }
 
-    task_t *task = NULL;
-    int success = 0;
-    RING_BUFFER_TRY_POP(queue, tasks, &task, success);
-    return success ? task : NULL;
+    task_t *task = queue->head;
+    queue->head = task->next_ready;
+    if (!queue->head) {
+        queue->tail = NULL;
+    }
+    task->next_ready = NULL;
+    queue->count--;
+    return task;
 }
 
 /*
@@ -160,25 +167,24 @@ static int ready_queue_remove(ready_queue_t *queue, task_t *task) {
         return -1;
     }
 
-    /* Find task in queue */
-    for (uint32_t i = 0; i < queue->count; i++) {
-        uint32_t index = (queue->head + i) % SCHED_MAX_READY_TASKS;
-
-        if (queue->tasks[index] == task) {
-            /* Shift all tasks after this one forward */
-            for (uint32_t j = i; j < queue->count - 1; j++) {
-                uint32_t curr_index = (queue->head + j) % SCHED_MAX_READY_TASKS;
-                uint32_t next_index = (queue->head + j + 1) % SCHED_MAX_READY_TASKS;
-                queue->tasks[curr_index] = queue->tasks[next_index];
+    task_t *prev = NULL;
+    task_t *cursor = queue->head;
+    while (cursor) {
+        if (cursor == task) {
+            if (prev) {
+                prev->next_ready = cursor->next_ready;
+            } else {
+                queue->head = cursor->next_ready;
             }
-
-            /* Clear the last slot and update tail */
-            queue->tail = (queue->tail - 1 + SCHED_MAX_READY_TASKS) % SCHED_MAX_READY_TASKS;
-            queue->tasks[queue->tail] = NULL;
+            if (queue->tail == cursor) {
+                queue->tail = prev;
+            }
+            cursor->next_ready = NULL;
             queue->count--;
-
             return 0;
         }
+        prev = cursor;
+        cursor = cursor->next_ready;
     }
 
     return -1;  /* Task not found */

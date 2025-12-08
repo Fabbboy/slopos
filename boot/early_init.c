@@ -7,31 +7,12 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../drivers/serial.h"
-#include "../mm/mm_constants.h"
-#include "idt.h"
-#include "gdt.h"
 #include "limine_protocol.h"
 #include "init.h"
 #include "../lib/klog.h"
-#include "safe_stack.h"
-#include "shutdown.h"
-#include "../drivers/apic.h"
-#include "../drivers/pit.h"
-#include "../drivers/irq.h"
-#include "../drivers/ioapic.h"
-#include "../drivers/pic_quiesce.h"
-#include "../drivers/interrupt_test.h"
 #include "../sched/scheduler.h"
-#include "../video/framebuffer.h"
-#include "../video/splash.h"
-#include "../drivers/pci.h"
 #include "../drivers/wl_currency.h"
-#include "../tests/core.h"
-#include "../tests/interrupt_suite.h"
-#include "../tests/system_suites.h"
 #include "kernel_panic.h"
-#include "cpu_verify.h"
-#include "../mm/memory_init.h"
 #include "../lib/string.h"
 
 // Kernel state tracking
@@ -44,6 +25,22 @@ struct boot_runtime_context {
 };
 
 static struct boot_runtime_context boot_ctx = {0};
+
+const struct limine_memmap_response *boot_get_memmap(void) {
+    return boot_ctx.memmap;
+}
+
+uint64_t boot_get_hhdm_offset(void) {
+    return boot_ctx.hhdm_offset;
+}
+
+const char *boot_get_cmdline(void) {
+    return boot_ctx.cmdline;
+}
+
+void boot_mark_initialized(void) {
+    kernel_initialized = 1;
+}
 
 static void boot_info(const char *text) {
     klog_info(text);
@@ -256,268 +253,6 @@ BOOT_INIT_STEP(early_hw, "serial", boot_step_serial_init);
 BOOT_INIT_STEP(early_hw, "boot banner", boot_step_boot_banner);
 BOOT_INIT_STEP(early_hw, "limine", boot_step_limine_protocol);
 BOOT_INIT_STEP(early_hw, "boot config", boot_step_boot_config);
-
-/* Memory phase ----------------------------------------------------------- */
-static int boot_step_memory_init(void) {
-    if (!boot_ctx.memmap) {
-        boot_info("ERROR: Memory map not available");
-        return -1;
-    }
-
-    boot_debug("Initializing memory management from Limine data...");
-    if (init_memory_system(boot_ctx.memmap, boot_ctx.hhdm_offset) != 0) {
-        boot_info("ERROR: Memory system initialization failed");
-        return -1;
-    }
-    boot_info("Memory management initialized.");
-    return 0;
-}
-
-static int boot_step_memory_verify(void) {
-    uint64_t stack_ptr;
-    __asm__ volatile ("movq %%rsp, %0" : "=r" (stack_ptr));
-
-    if (klog_is_enabled(KLOG_DEBUG)) {
-        boot_debug("Stack pointer read successfully!");
-        klog_printf(KLOG_INFO, "Current Stack Pointer: 0x%lx\n", stack_ptr);
-
-        void *current_ip = __builtin_return_address(0);
-        klog_printf(KLOG_INFO, "Kernel Code Address: 0x%lx\n", (uint64_t)current_ip);
-
-        if ((uint64_t)current_ip >= KERNEL_VIRTUAL_BASE) {
-            boot_debug("Running in higher-half virtual memory - CORRECT");
-        } else {
-            boot_info("WARNING: Not running in higher-half virtual memory");
-        }
-    }
-
-    return 0;
-}
-
-BOOT_INIT_STEP(memory, "memory init", boot_step_memory_init);
-BOOT_INIT_STEP(memory, "address verification", boot_step_memory_verify);
-
-/* Driver phase ----------------------------------------------------------- */
-static int boot_step_debug_subsystem(void) {
-    boot_debug("Debug/logging subsystem initialized.");
-    return 0;
-}
-
-static int boot_step_gdt_setup(void) {
-    boot_debug("Initializing GDT/TSS...");
-    gdt_init();
-    boot_debug("GDT/TSS initialized.");
-    return 0;
-}
-
-static int boot_step_idt_setup(void) {
-    boot_debug("Initializing IDT...");
-    idt_init();
-    safe_stack_init();
-    idt_load();
-    boot_debug("IDT initialized and loaded.");
-    return 0;
-}
-
-static int boot_step_irq_setup(void) {
-    boot_debug("Configuring IRQ dispatcher...");
-    irq_init();
-    if (serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) != 0) {
-        boot_info("WARNING: Failed to enable COM1 serial interrupts");
-    } else {
-        boot_debug("COM1 serial interrupts armed.");
-    }
-    boot_debug("IRQ dispatcher ready.");
-    return 0;
-}
-
-static int boot_step_timer_setup(void) {
-    boot_debug("Initializing programmable interval timer...");
-    pit_init(PIT_DEFAULT_FREQUENCY_HZ);
-    boot_debug("Programmable interval timer configured.");
-
-    /* Observe early PIT IRQ health: count ticks after a short polling delay. */
-    uint64_t ticks_before = irq_get_timer_ticks();
-    pit_poll_delay_ms(100);
-    uint64_t ticks_after = irq_get_timer_ticks();
-    klog_printf(KLOG_INFO, "BOOT: PIT ticks after 100ms poll: %llu -> %llu\n",
-                (unsigned long long)ticks_before,
-                (unsigned long long)ticks_after);
-    if (ticks_after == ticks_before) {
-        klog_printf(KLOG_INFO, "BOOT: WARNING - no PIT IRQs observed in 100ms window\n");
-    }
-
-    // Initialize framebuffer and splash screen right after PIT is ready.
-    // Video output is mandatory: fail fast if a framebuffer is not present.
-    if (framebuffer_init() != 0) {
-        kernel_panic("Framebuffer initialization failed (video output is mandatory)");
-    }
-
-    splash_show_boot_screen();
-    splash_report_progress(10, "Graphics initialized");
-
-    // Report the upcoming driver steps with delays to show progression
-    splash_report_progress(20, "Initializing debug...");
-    splash_report_progress(30, "Setting up GDT/TSS...");
-    splash_report_progress(40, "Setting up interrupts...");
-    splash_report_progress(50, "Setting up IRQ dispatcher...");
-
-    return 0;
-}
-
-static int boot_step_apic_setup(void) {
-    boot_debug("Detecting Local APIC...");
-    splash_report_progress(60, "Detecting APIC...");
-    if (!apic_detect()) {
-        kernel_panic("SlopOS requires a Local APIC - legacy PIC is gone");
-    }
-
-    boot_debug("Initializing Local APIC...");
-    splash_report_progress(65, "Initializing APIC...");
-    if (apic_init() != 0) {
-        kernel_panic("Local APIC initialization failed");
-    }
-
-    pic_quiesce_disable();
-
-    boot_debug("Local APIC initialized (legacy PIC path removed).");
-    return 0;
-}
-
-static int boot_step_ioapic_setup(void) {
-    boot_debug("Discovering IOAPIC controllers via ACPI MADT...");
-    splash_report_progress(67, "Discovering IOAPIC...");
-    if (ioapic_init() != 0) {
-        kernel_panic("IOAPIC discovery failed - SlopOS cannot operate without it");
-    }
-    boot_debug("IOAPIC: discovery complete, ready for redirection programming.");
-    return 0;
-}
-
-static int boot_step_pci_init(void) {
-    boot_debug("Enumerating PCI devices...");
-    splash_report_progress(70, "Enumerating PCI devices...");
-    if (pci_init() == 0) {
-        boot_debug("PCI subsystem initialized");
-        const pci_gpu_info_t *gpu = pci_get_primary_gpu();
-        if (gpu && gpu->present) {
-            klog_printf(KLOG_DEBUG, "PCI: Primary GPU detected (bus %u, device %u, function %u)\n",
-                        gpu->device.bus,
-                        gpu->device.device,
-                        gpu->device.function);
-            if (gpu->mmio_virt_base) {
-                klog_printf(KLOG_DEBUG, "PCI: GPU MMIO virtual base 0x%llx, size 0x%llx\n",
-                            (unsigned long long)(uintptr_t)gpu->mmio_virt_base,
-                            (unsigned long long)gpu->mmio_size);
-            } else {
-                klog_printf(KLOG_DEBUG, "PCI: WARNING GPU MMIO mapping unavailable\n");
-            }
-        } else {
-            boot_debug("PCI: No GPU-class device discovered during enumeration");
-        }
-    } else {
-        boot_info("WARNING: PCI initialization failed");
-    }
-    return 0;
-}
-
-
-static int boot_step_interrupt_tests(void) {
-    struct interrupt_test_config test_config;
-    interrupt_test_config_init_defaults(&test_config);
-
-    if (boot_ctx.cmdline) {
-        interrupt_test_config_parse_cmdline(&test_config, boot_ctx.cmdline);
-    }
-
-    if (test_config.enabled && test_config.suite_mask == 0) {
-        boot_info("INTERRUPT_TEST: No suites selected, skipping execution");
-        test_config.enabled = 0;
-        test_config.shutdown_on_complete = 0;
-    }
-
-    if (!test_config.enabled) {
-        boot_debug("INTERRUPT_TEST: Harness disabled");
-        return 0;
-    }
-
-    boot_info("INTERRUPT_TEST: Running orchestrated harness");
-    splash_report_progress(75, "Running interrupt tests...");
-
-    if (klog_is_enabled(KLOG_DEBUG)) {
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Suites -> %s\n",
-                    interrupt_test_suite_string(test_config.suite_mask));
-
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Verbosity -> %s\n",
-                    interrupt_test_verbosity_string(test_config.verbosity));
-
-        klog_printf(KLOG_INFO, "INTERRUPT_TEST: Timeout (ms) -> %u\n", test_config.timeout_ms);
-    }
-
-    tests_reset_registry();
-    tests_register_suite(&interrupt_suite_desc);
-    tests_register_system_suites();
-
-    struct test_run_summary summary = {0};
-    int rc = tests_run_all(&test_config, &summary);
-
-    if (test_config.shutdown_on_complete) {
-        boot_debug("INTERRUPT_TEST: Auto shutdown enabled after harness");
-        interrupt_test_request_shutdown((int)summary.failed);
-    }
-
-    if (summary.failed > 0) {
-        boot_info("INTERRUPT_TEST: Failures detected");
-    } else {
-        boot_info("INTERRUPT_TEST: Completed successfully");
-    }
-    return rc;
-}
-
-BOOT_INIT_STEP(drivers, "debug", boot_step_debug_subsystem);
-BOOT_INIT_STEP(drivers, "gdt/tss", boot_step_gdt_setup);
-BOOT_INIT_STEP(drivers, "idt", boot_step_idt_setup);
-BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
-BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
-BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
-BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
-BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
-BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
-
-/* Services phase --------------------------------------------------------- */
-static int boot_step_mark_kernel_ready(void) {
-    kernel_initialized = 1;
-    boot_info("Kernel core services initialized.");
-    splash_report_progress(95, "Boot complete");
-    splash_finish();
-    return 0;
-}
-
-BOOT_INIT_STEP_WITH_FLAGS(services, "mark ready", boot_step_mark_kernel_ready, BOOT_INIT_PRIORITY(60));
-
-/* Optional/demo phase ---------------------------------------------------- */
-
-static int boot_step_framebuffer_demo(void) {
-    klog_debug("Graphics demo: framebuffer already initialized");
-
-    if (!framebuffer_is_initialized()) {
-        kernel_panic("Framebuffer expected to be initialized before demo");
-    }
-
-    framebuffer_info_t *fb_info = framebuffer_get_info();
-    if (fb_info && fb_info->virtual_addr && fb_info->virtual_addr != (void*)fb_info->physical_addr) {
-        if (klog_is_enabled(KLOG_DEBUG)) {
-            klog_printf(KLOG_INFO, "Graphics: Framebuffer using translated virtual address 0x%lx (translation verified)\n",
-                        (uint64_t)fb_info->virtual_addr);
-        }
-    }
-
-    // Splash screen is already running - this step just validates graphics work
-    klog_debug("Graphics demo: framebuffer validation complete");
-    return 0;
-}
-
-BOOT_INIT_OPTIONAL_STEP(optional, "framebuffer demo", boot_step_framebuffer_demo);
 
 /*
  * Main 64-bit kernel entry point

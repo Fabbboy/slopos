@@ -290,6 +290,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->waiting_on_task_id = INVALID_TASK_ID;
     task->user_started = 0;
     task->context_from_user = 0;
+    task->next_ready = NULL;
 
     /* Initialize CPU context */
     init_task_context(task);
@@ -400,6 +401,7 @@ int task_terminate(uint32_t task_id) {
         task->last_run_timestamp = 0;
         task->user_started = 0;
         task->context_from_user = 0;
+        task->next_ready = NULL;
     }
 
     /* Update task manager */

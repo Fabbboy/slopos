@@ -42,6 +42,10 @@ enum boot_init_phase {
 int boot_init_run_all(void);
 int boot_init_run_phase(enum boot_init_phase phase);
 int is_kernel_initialized(void);
+const struct limine_memmap_response *boot_get_memmap(void);
+uint64_t boot_get_hhdm_offset(void);
+const char *boot_get_cmdline(void);
+void boot_mark_initialized(void);
 
 #define BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, flag_value) \
     static const struct boot_init_step boot_init_step_##fn \

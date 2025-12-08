@@ -29,4 +29,6 @@
 #define ROULETTE_FRAME_DELAY_MS 16           /* Delay between frames (ms) - ~60 FPS */
 #define ROULETTE_RESULT_DELAY_MS 5000        /* How long to show result - 5 seconds */
 
+#define ROULETTE_RENDER_ENABLED 1   /* Rendering is always enabled */
+
 #endif /* VIDEO_ROULETTE_H */
