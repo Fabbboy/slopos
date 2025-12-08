@@ -191,6 +191,32 @@ skip_cr3_load:
 # Save current kernel context (if provided) and enter user mode with IRET.
 # Expects new_context->cs/ss to be user selectors.
 #
+# PRIVILEGE DEMOTION (Ring 0 → Ring 3):
+# This function transitions from kernel mode to user mode by:
+#  1. Saving the current kernel context (if switching from another task)
+#  2. Loading user segment selectors into DS, ES, FS, GS (but not CS/SS yet)
+#  3. Building an IRET frame on the kernel stack with user CS/SS/RFLAGS/RSP/RIP
+#  4. Switching to the user task's page tables (CR3)
+#  5. Loading all general-purpose registers from the user context
+#  6. Executing IRETQ to atomically:
+#     - Pop CS (0x23, Ring 3), RIP, RFLAGS, SS (0x1B, Ring 3), RSP from the stack
+#     - Set CPL (Current Privilege Level) to CS.RPL (Ring 3)
+#     - Switch to the user stack
+#     - Resume execution at user RIP with Ring 3 privileges
+#
+# The CPU automatically validates that:
+#  - CS.DPL == CS.RPL == 3 (code segment must be Ring 3)
+#  - SS.DPL == SS.RPL == 3 (stack segment must be Ring 3)
+#  - The target privilege level is less privileged than the current one (0 < 3)
+#
+# If any validation fails, the CPU triggers a General Protection Fault (#GP).
+#
+# Return to kernel mode happens through:
+#  - Syscalls (int 0x80, see drivers/syscall.c)
+#  - Hardware interrupts (timer, keyboard)
+#  - Exceptions (page faults, invalid opcodes, etc.)
+# All of these automatically elevate to Ring 0 using TSS.RSP0.
+#
 .global context_switch_user
 context_switch_user:
     movq    %rdi, %r8               # old_context pointer
