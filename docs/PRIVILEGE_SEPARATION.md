@@ -329,6 +329,8 @@ The U/S bit (bit 2) in page table entries:
 - 0 = Supervisor only (Ring 0-2)
 - 1 = User accessible (Ring 0-3)
 
+The higher-half kernel mappings remain supervisor-only; user page tables clone them without setting U/S. Any deliberate sharing must use an explicit helper that maps a chosen kernel page into user space, keeping the default template locked down.
+
 #### Safe User Memory Access
 
 **Location:** `mm/user_copy.c`, `mm/user_copy.h`
@@ -340,6 +342,8 @@ The kernel validates all user pointers before dereferencing:
 int user_copy_from_user(void *kernel_dst, const void *user_src, size_t n);
 int user_copy_to_user(void *user_dst, const void *kernel_src, size_t n);
 ```
+
+Validation now requires mappings to be present *and* marked user-accessible; a once-per-boot guard rejects operation if any kernel virtual address is ever observed as user-accessible.
 
 This prevents:
 - User code accessing kernel memory

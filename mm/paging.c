@@ -72,8 +72,6 @@ static inline uint64_t intermediate_flags(int user_mapping) {
     return PAGE_PRESENT | PAGE_WRITABLE | (user_mapping ? PAGE_USER : 0);
 }
 
-static void mark_kernel_half_user(page_table_t *pml4);
-
 /* ========================================================================
  * SHARED HELPER IMPLEMENTATIONS
  * ======================================================================== */
@@ -99,9 +97,6 @@ void paging_copy_kernel_mappings(page_table_t *dest_pml4) {
     for (uint32_t i = 0; i < (ENTRIES_PER_PAGE_TABLE / 2); i++) {
         dest_pml4->entries[i] = 0;
     }
-
-    /* Allow user tasks to execute kernel-resident code/data mappings. */
-    mark_kernel_half_user(dest_pml4);
 }
 
 /* ========================================================================
@@ -150,63 +145,8 @@ static inline int pte_huge(uint64_t pte) {
     return pte & PAGE_SIZE;
 }
 
-static void mark_kernel_half_user(page_table_t *pml4) {
-    if (!pml4) {
-        return;
-    }
-
-    for (uint32_t i = ENTRIES_PER_PAGE_TABLE / 2; i < ENTRIES_PER_PAGE_TABLE; i++) {
-        uint64_t pml4e = pml4->entries[i];
-        if (!pte_present(pml4e)) {
-            continue;
-        }
-
-        pml4->entries[i] |= PAGE_USER;
-        page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4e));
-        if (!pdpt) {
-            continue;
-        }
-
-        for (uint32_t j = 0; j < ENTRIES_PER_PAGE_TABLE; j++) {
-            uint64_t pdpte = pdpt->entries[j];
-            if (!pte_present(pdpte)) {
-                continue;
-            }
-
-            pdpt->entries[j] |= PAGE_USER;
-            if (pte_huge(pdpte)) {
-                continue; /* 1GB page */
-            }
-
-            page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpte));
-            if (!pd) {
-                continue;
-            }
-
-            for (uint32_t k = 0; k < ENTRIES_PER_PAGE_TABLE; k++) {
-                uint64_t pde = pd->entries[k];
-                if (!pte_present(pde)) {
-                    continue;
-                }
-
-                pd->entries[k] |= PAGE_USER;
-                if (pte_huge(pde)) {
-                    continue; /* 2MB page */
-                }
-
-                page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pde));
-                if (!pt) {
-                    continue;
-                }
-
-                for (uint32_t m = 0; m < ENTRIES_PER_PAGE_TABLE; m++) {
-                    if (pte_present(pt->entries[m])) {
-                        pt->entries[m] |= PAGE_USER;
-                    }
-                }
-            }
-        }
-    }
+static inline int pte_user(uint64_t pte) {
+    return pte & PAGE_USER;
 }
 
 /*
@@ -528,6 +468,34 @@ int map_page_4kb(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
 
 int map_page_2mb(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
     return map_page_in_directory(current_page_dir, vaddr, paddr, flags, PAGE_SIZE_2MB);
+}
+
+/*
+ * Explicitly share a kernel mapping with user space at a chosen user virtual address.
+ * Use sparingly: callers must supply an allowlisted kernel VA and a user VA in range.
+ */
+int paging_map_shared_kernel_page(process_page_dir_t *page_dir,
+                                  uint64_t kernel_vaddr,
+                                  uint64_t user_vaddr,
+                                  uint64_t flags) {
+    if (!page_dir || !page_dir->pml4) {
+        return -1;
+    }
+
+    if (!is_user_address(user_vaddr)) {
+        return -1;
+    }
+
+    if ((user_vaddr & (PAGE_SIZE_4KB - 1)) || (kernel_vaddr & (PAGE_SIZE_4KB - 1))) {
+        return -1;
+    }
+
+    uint64_t phys = virt_to_phys_in_dir(paging_get_kernel_directory(), kernel_vaddr);
+    if (!phys) {
+        return -1;
+    }
+
+    return map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PAGE_USER);
 }
 
 static int unmap_page_in_directory(process_page_dir_t *page_dir, uint64_t vaddr) {
@@ -860,4 +828,144 @@ uint64_t get_page_size(uint64_t vaddr) {
 
     /* Must be 4KB page if PT entry exists */
     return PAGE_SIZE_4KB;
+}
+
+/*
+ * Set U/S on an existing mapping range within a page directory.
+ * Optionally clear write permission to keep shared text read/execute only.
+ */
+int paging_mark_range_user(process_page_dir_t *page_dir, uint64_t start, uint64_t end, int writable) {
+    if (!page_dir || !page_dir->pml4 || start >= end) {
+        return -1;
+    }
+
+    uint64_t addr = start & ~(PAGE_SIZE_4KB - 1);
+    while (addr < end) {
+        uint16_t pml4_idx = pml4_index(addr);
+        uint16_t pdpt_idx = pdpt_index(addr);
+        uint16_t pd_idx = pd_index(addr);
+        uint16_t pt_idx = pt_index(addr);
+
+        uint64_t *pml4e = &page_dir->pml4->entries[pml4_idx];
+        if (!pte_present(*pml4e)) {
+            return -1;
+        }
+        if (!pte_user(*pml4e)) {
+            *pml4e |= PAGE_USER;
+        }
+        page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(*pml4e));
+        if (!pdpt) {
+            return -1;
+        }
+
+        uint64_t *pdpte = &pdpt->entries[pdpt_idx];
+        if (!pte_present(*pdpte)) {
+            return -1;
+        }
+
+        if (pte_huge(*pdpte)) {
+            uint64_t flags = *pdpte | PAGE_USER;
+            if (!writable) {
+                flags &= ~PAGE_WRITABLE;
+            }
+            *pdpte = flags;
+            addr += PAGE_SIZE_1GB;
+            continue;
+        }
+
+        page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(*pdpte));
+        if (!pd) {
+            return -1;
+        }
+
+        uint64_t *pde = &pd->entries[pd_idx];
+        if (!pte_present(*pde)) {
+            return -1;
+        }
+
+        if (pte_huge(*pde)) {
+            uint64_t flags = *pde | PAGE_USER;
+            if (!writable) {
+                flags &= ~PAGE_WRITABLE;
+            }
+            *pde = flags;
+            addr += PAGE_SIZE_2MB;
+            continue;
+        }
+
+        page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(*pde));
+        if (!pt) {
+            return -1;
+        }
+
+        uint64_t *pte = &pt->entries[pt_idx];
+        if (!pte_present(*pte)) {
+            return -1;
+        }
+
+        uint64_t flags = *pte | PAGE_USER;
+        if (!writable) {
+            flags &= ~PAGE_WRITABLE;
+        }
+        *pte = flags;
+
+        addr += PAGE_SIZE_4KB;
+    }
+
+    return 0;
+}
+
+/*
+ * Check if a virtual address is present and user-accessible (U/S=1) in the given page directory.
+ */
+int paging_is_user_accessible(process_page_dir_t *page_dir, uint64_t vaddr) {
+    if (!page_dir || !page_dir->pml4) {
+        return 0;
+    }
+
+    uint16_t pml4_idx = pml4_index(vaddr);
+    uint16_t pdpt_idx = pdpt_index(vaddr);
+    uint16_t pd_idx = pd_index(vaddr);
+    uint16_t pt_idx = pt_index(vaddr);
+
+    uint64_t pml4_entry = page_dir->pml4->entries[pml4_idx];
+    if (!pte_present(pml4_entry) || !pte_user(pml4_entry)) {
+        return 0;
+    }
+
+    page_table_t *pdpt = (page_table_t *)mm_phys_to_virt(pte_address(pml4_entry));
+    if (!pdpt) {
+        return 0;
+    }
+
+    uint64_t pdpt_entry = pdpt->entries[pdpt_idx];
+    if (!pte_present(pdpt_entry) || !pte_user(pdpt_entry)) {
+        return 0;
+    }
+
+    if (pte_huge(pdpt_entry)) {
+        return 1; /* 1GB page, user-accessible */
+    }
+
+    page_table_t *pd = (page_table_t *)mm_phys_to_virt(pte_address(pdpt_entry));
+    if (!pd) {
+        return 0;
+    }
+
+    uint64_t pd_entry = pd->entries[pd_idx];
+    if (!pte_present(pd_entry) || !pte_user(pd_entry)) {
+        return 0;
+    }
+
+    if (pte_huge(pd_entry)) {
+        return 1; /* 2MB page, user-accessible */
+    }
+
+    page_table_t *pt = (page_table_t *)mm_phys_to_virt(pte_address(pd_entry));
+    if (!pt) {
+        return 0;
+    }
+
+    uint64_t pt_entry = pt->entries[pt_idx];
+    return pte_present(pt_entry) && pte_user(pt_entry);
 }

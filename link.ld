@@ -27,14 +27,18 @@ SECTIONS
 
   /* Code section */
   .text ALIGN(4096) : {
+    _text_start = .;
     *(.text .text.*)
+    _text_end = .;
   } :text
 
-  /* Kernel start symbol */
-  _kernel_start = .;
+  /* Kernel start symbol (alias for start of text) */
+  _kernel_start = _text_start;
 
   .rodata ALIGN(4096) : {
+    _rodata_start = .;
     *(.rodata .rodata.*)
+    _rodata_end = .;
   } :rodata
 
   .boot_init_early_hw ALIGN(8) : {
@@ -68,12 +72,16 @@ SECTIONS
   } :rodata
 
   .data ALIGN(4096) : {
+    _data_start = .;
     *(.data .data.*)
+    _data_end = .;
   } :data
 
   .bss (NOLOAD) : ALIGN(4096) {
+    _bss_start = .;
     *(.bss .bss.*)
     *(COMMON)
+    _bss_end = .;
   } :data
 
   /* Early page tables at fixed addresses */

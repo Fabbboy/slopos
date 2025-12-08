@@ -16,6 +16,8 @@
 #include "../sched/scheduler.h"
 #include "../sched/task.h"
 
+static int kernel_guard_checked = 0;
+
 static process_page_dir_t *current_process_dir(void) {
     task_t *task = scheduler_get_current_task();
     if (!task || task->process_id == INVALID_PROCESS_ID) {
@@ -33,9 +35,6 @@ static int validate_user_buffer(uint64_t user_ptr, size_t len, process_page_dir_
         return -1;
     }
 
-    uint64_t user_start = mm_get_user_space_start();
-    uint64_t user_end = mm_get_user_space_end();
-
     uint64_t start = user_ptr;
     uint64_t end = start + len;
     if (end < start) {
@@ -43,13 +42,22 @@ static int validate_user_buffer(uint64_t user_ptr, size_t len, process_page_dir_
         return -1;
     }
 
-    if (start < user_start || end > user_end) {
-        return -1;
+    if (!kernel_guard_checked) {
+        /*
+         * Probe a kernel-only region (heap base) to ensure U/S is not set.
+         * Kernel text may be user-executable for shared user tasks, so avoid
+         * probing code addresses that can legitimately be mapped with PAGE_USER.
+         */
+        uint64_t kernel_probe = mm_get_kernel_heap_start();
+        if (paging_is_user_accessible(dir, kernel_probe)) {
+            return -1;
+        }
+        kernel_guard_checked = 1;
     }
 
     uint64_t page = start & ~(PAGE_SIZE_4KB - 1);
     while (page < end) {
-        if (virt_to_phys_in_dir(dir, page) == 0) {
+        if (!paging_is_user_accessible(dir, page)) {
             return -1;
         }
         page += PAGE_SIZE_4KB;

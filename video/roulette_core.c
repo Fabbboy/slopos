@@ -484,15 +484,11 @@ int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
 
     backend->sleep_ms(backend->ctx, ROULETTE_RESULT_DELAY_MS);
 
-    if (fate_number & 1) {
-        backend->fill_rect(backend->ctx, 0, 0, width, height, 0x001122FF);
-        int msg_x = width / 2 - 150;
-        int msg_y = height / 2 - 20;
-        backend->draw_text(backend->ctx, msg_x, msg_y, "You won! Continuing to SlopOS...", 0xFFFFFFFF, 0x00000000);
-        backend->sleep_ms(backend->ctx, 1000);
+    /* On wins, hand off to the familiar demo screen to show progress into OS. */
+    if ((fate_number & 1) != 0) {
         roulette_handoff_to_demo(backend, width, height);
     }
 
-    return want_colored ? 0 : 1;
+    return 0;
 }
 

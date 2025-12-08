@@ -123,26 +123,30 @@ void roulette_user_main(void *arg) {
     uint64_t spin = (uint64_t)sys_roulette();
     uint32_t fate = (uint32_t)spin;
 
-    sys_write("ROULETTE: entering wheel of fate (user mode)\n", 46);
+    user_fb_info_t info = {0};
+    int fb_rc = sys_fb_info(&info);
 
-    user_fb_info_t info;
-    if (sys_fb_info(&info) != 0 || info.width == 0 || info.height == 0) {
-        sys_write("ROULETTE: fb info unavailable, using text fallback\n", 54);
-        roulette_text_fallback(fate);
-        sys_roulette_result(spin);
-        sys_exit();
-    }
+    /* Track render outcome for logging even if we fallback. */
+    int rc = -1;
+    int fb_ok = (fb_rc == 0 && info.width != 0 && info.height != 0);
 
-    sys_write("ROULETTE: fb ok, drawing wheel...\n", 36);
-    int rc = roulette_run(&user_backend, fate);
-    if (rc != 0) {
-        sys_write("ROULETTE: render failure, falling back to text\n", 48);
+    if (!fb_ok) {
         roulette_text_fallback(fate);
     } else {
-        sys_write("ROULETTE: render complete\n", 26);
+        rc = roulette_run(&user_backend, fate);
+        if (rc != 0) {
+            roulette_text_fallback(fate);
+        }
     }
 
+    /* Keep the result visible briefly, then report and exit. */
+    sys_sleep_ms(3000);
+
+    /* Log the render result code for debugging. */
     sys_roulette_result(spin);
+    sys_sleep_ms(500);
+
+    /* Exit so the shell/demo can progress; framebuffer remains until something else draws. */
     sys_exit();
 }
 

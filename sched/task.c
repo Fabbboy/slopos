@@ -523,7 +523,7 @@ int task_set_state(uint32_t task_id, uint8_t new_state) {
     task->state = new_state;
 
     if (klog_is_enabled(KLOG_DEBUG)) {
-        klog_printf(KLOG_INFO, "Task %u state: %u -> %u\n",
+        klog_printf(KLOG_DEBUG, "Task %u state: %u -> %u\n",
                     task_id, old_state, new_state);
     }
 

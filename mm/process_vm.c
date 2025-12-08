@@ -17,6 +17,11 @@
 #include "phys_virt.h"
 #include "../boot/kernel_panic.h"
 
+extern char _text_start[], _text_end[];
+extern char _rodata_start[], _rodata_end[];
+extern char _data_start[], _data_end[];
+extern char _bss_start[], _bss_end[];
+
 /* ========================================================================
  * PROCESS VIRTUAL MEMORY STRUCTURES
  * ======================================================================== */
@@ -446,6 +451,23 @@ uint32_t create_process_vm(void) {
 
     /* Inherit kernel mappings */
     paging_copy_kernel_mappings(page_dir->pml4);
+
+    /* Allow user-mode execution of kernel text/rodata while keeping it read-only. */
+    if (paging_mark_range_user(page_dir, (uint64_t)_text_start, (uint64_t)_text_end, 0) != 0 ||
+        paging_mark_range_user(page_dir, (uint64_t)_rodata_start, (uint64_t)_rodata_end, 0) != 0) {
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to expose kernel text to user space\n");
+        kfree(page_dir);
+        free_page_frame(pml4_phys);
+        return INVALID_PROCESS_ID;
+    }
+
+    /* Allow user-mode reads/writes to kernel data/bss used by shared user tasks. */
+    if (paging_mark_range_user(page_dir, (uint64_t)_data_start, (uint64_t)_bss_end, 1) != 0) {
+        klog_printf(KLOG_INFO, "create_process_vm: Failed to expose kernel data to user space\n");
+        kfree(page_dir);
+        free_page_frame(pml4_phys);
+        return INVALID_PROCESS_ID;
+    }
 
     /* Initialize process VM descriptor */
     process->process_id = process_id;
