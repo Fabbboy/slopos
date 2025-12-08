@@ -35,9 +35,9 @@ typedef void (*fate_outcome_hook_t)(const struct fate_result *res);
 void fate_register_outcome_hook(fate_outcome_hook_t hook);
 
 /* Pending fate helpers for syscall/user handshake. */
-void fate_set_pending(struct fate_result res);
-int fate_take_pending(struct fate_result *out);
-void fate_clear_pending(void);
+int fate_set_pending(struct fate_result res, uint32_t task_id);
+int fate_take_pending(uint32_t task_id, struct fate_result *out);
+void fate_clear_pending(uint32_t task_id);
 
 #endif /* DRIVERS_FATE_H */
 

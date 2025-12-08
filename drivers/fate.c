@@ -10,8 +10,12 @@
 #include <stdbool.h>
 
 static int fate_seeded = 0;
-static struct fate_result pending_fate = {0};
-static int pending_valid = 0;
+struct pending_fate_entry {
+    struct fate_result res;
+    uint32_t task_id;
+    int valid;
+};
+static struct pending_fate_entry pending_fate = {0};
 static fate_outcome_hook_t outcome_hook = NULL;
 
 static uint32_t fate_next_token(void) {
@@ -63,22 +67,38 @@ void fate_apply_outcome(const struct fate_result *res,
     }
 }
 
-void fate_set_pending(struct fate_result res) {
-    pending_fate = res;
-    pending_valid = 1;
-}
-
-int fate_take_pending(struct fate_result *out) {
-    if (!out || !pending_valid) {
+int fate_set_pending(struct fate_result res, uint32_t task_id) {
+    if (task_id == 0) {
         return -1;
     }
-    *out = pending_fate;
-    pending_valid = 0;
+
+    /* Only one outstanding spin per task. */
+    if (pending_fate.valid && pending_fate.task_id == task_id) {
+        return -1;
+    }
+
+    pending_fate.res = res;
+    pending_fate.task_id = task_id;
+    pending_fate.valid = 1;
     return 0;
 }
 
-void fate_clear_pending(void) {
-    pending_valid = 0;
+int fate_take_pending(uint32_t task_id, struct fate_result *out) {
+    if (!out || !pending_fate.valid || pending_fate.task_id != task_id) {
+        return -1;
+    }
+
+    *out = pending_fate.res;
+    pending_fate.valid = 0;
+    pending_fate.task_id = 0;
+    return 0;
+}
+
+void fate_clear_pending(uint32_t task_id) {
+    if (pending_fate.valid && pending_fate.task_id == task_id) {
+        pending_fate.valid = 0;
+        pending_fate.task_id = 0;
+    }
 }
 
 void fate_register_outcome_hook(fate_outcome_hook_t hook) {

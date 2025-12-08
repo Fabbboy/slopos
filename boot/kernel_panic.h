@@ -24,13 +24,6 @@ void kernel_panic_with_context(const char *message, const char *function,
 void kernel_assert(int condition, const char *message);
 
 /*
- * The Wheel of Fate: Kernel Roulette
- * Spins a wheel of random numbers; if even, kernel loses and halts.
- * If odd, kernel survives and continues.
- */
-void kernel_roulette(void);
-
-/*
  * Convenience macro for panic with source location
  */
 #define KERNEL_PANIC(msg) \

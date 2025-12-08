@@ -7,9 +7,6 @@
 #include <stdint.h>
 #include "shutdown.h"
 #include "../drivers/serial.h"
-#include "../drivers/fate.h"
-#include "../drivers/wl_currency.h"
-#include "../video/roulette.h"
 #include "../lib/numfmt.h"
 #include "../lib/cpu.h"
 
@@ -163,49 +160,4 @@ void kernel_assert(int condition, const char *message) {
     if (!condition) {
         kernel_panic(message ? message : "Assertion failed");
     }
-}
-
-/*
- * The Wheel of Fate: Kernel Roulette
- *
- * The Scrolls speak of a mystical game inscribed into the very heart of SlopOS:
- * When invoked, the kernel spins a wheel of random numbers, and fate decides
- * its own destiny. If the wheel lands on an even number, the kernel loses
- * and halts forever on the loss screen. If odd, it survives and continues.
- *
- * This is not a call to be taken lightly. It is an embrace of chaos itself,
- * a deliberate surrender to the entropy that flows through Sloptopia.
- *
- * NOW WITH VISUAL GAMBLING ADDICTION!
- *
- * Usage: kernel_roulette() will either halt forever (even) or return safely (odd),
- * depending entirely on the mercy of random fate.
- */
-void kernel_roulette(void) {
-    struct fate_result res = fate_spin();
-
-    panic_output_string("\n=== KERNEL ROULETTE: Spinning the Wheel of Fate ===\n");
-    panic_output_string("Random number: 0x");
-    serial_emergency_put_hex(res.value);
-    panic_output_string(" (");
-    char decimal_buffer[32];
-    if (numfmt_u64_to_decimal(res.value, decimal_buffer, sizeof(decimal_buffer)) == 0) {
-        decimal_buffer[0] = '0';
-        decimal_buffer[1] = '\0';
-    }
-    serial_emergency_puts(decimal_buffer);
-    panic_output_string(")\n");
-
-    if (!res.is_win) {
-        panic_output_string("Even number. The wheel has spoken. You have lost.\n");
-        panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
-        panic_output_string("L bozzo lol\n");
-        panic_output_string("=== ROULETTE LOSS: AUTO-REBOOTING TO TRY AGAIN ===\n");
-        panic_output_string("The gambling never stops...\n");
-    } else {
-        panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
-        panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
-    }
-
-    fate_apply_outcome(&res, FATE_RESOLUTION_REBOOT_ON_LOSS, /*notify_hook=*/false);
 }

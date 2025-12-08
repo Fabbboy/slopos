@@ -542,10 +542,7 @@ void kernel_main(void) {
     boot_info("Graphics: framebuffer required and active");
     boot_info("Kernel initialization complete - ALL SYSTEMS OPERATIONAL!");
 
-    /*
-     * The Wheel of Fate is now handled by the roulette_gatekeeper_task
-     * which runs as the first scheduled task.
-     */
+    /* The Wheel of Fate now runs only via the user-mode roulette gatekeeper task. */
     boot_info("The kernel has initialized. Handing over to scheduler...");
 
     boot_info("Starting scheduler...");
