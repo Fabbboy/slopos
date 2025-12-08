@@ -64,8 +64,8 @@ static inline long sys_read(void *buf, size_t len) {
     return ret;
 }
 
-static inline long sys_roulette(void) {
-    long ret;
+static inline uint64_t sys_roulette(void) {
+    uint64_t ret;
     __asm__ volatile(
         "mov $" _STRINGIFY(SYSCALL_ROULETTE) ", %%rax\n\t"
         "int $0x80\n\t"
@@ -179,7 +179,7 @@ static inline uint32_t sys_random_next(void) {
     return (uint32_t)ret;
 }
 
-static inline long sys_roulette_result(uint32_t fate) {
+static inline long sys_roulette_result(uint64_t fate_packed) {
     long ret;
     __asm__ volatile(
         "mov $" _STRINGIFY(SYSCALL_ROULETTE_RESULT) ", %%rax\n\t"
@@ -187,7 +187,7 @@ static inline long sys_roulette_result(uint32_t fate) {
         "int $0x80\n\t"
         "mov %%rax, %0\n\t"
         : "=r"(ret)
-        : "r"((uint64_t)fate)
+        : "r"(fate_packed)
         : "rax", "rdi", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
     return ret;
 }

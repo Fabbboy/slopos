@@ -19,6 +19,7 @@
 
 /* Global LFSR state - the current position in the chaos spiral */
 static uint32_t lfsr_state = 0;
+static int random_seeded = 0;
 
 /* LFSR polynomial taps for Galois configuration */
 #define LFSR_POLYNOMIAL 0xB4000001UL /* x^32 + x^7 + x^5 + x^3 + x^2 + x + 1 */
@@ -42,6 +43,10 @@ static inline uint32_t read_tsc_low(void) {
  * Seeds from TSC to ensure different sequences across boots
  */
 void random_init(void) {
+    if (random_seeded) {
+        return;
+    }
+
     /* Read TSC for entropy */
     uint32_t seed = read_tsc_low();
 
@@ -51,6 +56,7 @@ void random_init(void) {
     }
 
     lfsr_state = seed;
+    random_seeded = 1;
 }
 
 /* ========================================================================
@@ -86,6 +92,10 @@ static inline uint32_t lfsr_step(void) {
  * Calls lfsr_step() 32 times to build a full 32-bit result
  */
 uint32_t random_next(void) {
+    if (!random_seeded) {
+        random_init();
+    }
+
     uint32_t result = 0;
 
     for (int i = 0; i < 32; i++) {

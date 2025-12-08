@@ -20,7 +20,6 @@
 #include "../drivers/irq.h"
 #include "../drivers/ioapic.h"
 #include "../drivers/pic_quiesce.h"
-#include "../drivers/random.h"
 #include "../drivers/interrupt_test.h"
 #include "../sched/scheduler.h"
 #include "../video/framebuffer.h"
@@ -482,12 +481,6 @@ BOOT_INIT_STEP(drivers, "apic", boot_step_apic_setup);
 BOOT_INIT_STEP(drivers, "ioapic", boot_step_ioapic_setup);
 BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
 BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
-static int boot_step_random_init(void) {
-    random_init();
-    boot_debug("Random driver initialized.");
-    return 0;
-}
-BOOT_INIT_STEP(drivers, "random", boot_step_random_init);
 BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
 

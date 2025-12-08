@@ -10,8 +10,9 @@
 #include <stdbool.h>
 
 struct fate_result {
-    uint32_t value;  /* Raw fate number */
-    int is_win;      /* 1 if odd (win), 0 if even (loss) */
+    uint32_t value;   /* Raw fate number */
+    uint32_t token;   /* Spin authenticity token */
+    int is_win;       /* 1 if odd (win), 0 if even (loss) */
 };
 
 enum fate_resolution {

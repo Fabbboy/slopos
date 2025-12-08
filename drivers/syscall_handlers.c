@@ -91,7 +91,7 @@ static enum syscall_disposition syscall_roulette_spin(task_t *task, struct inter
     (void)task;
     struct fate_result res = fate_spin();
     fate_set_pending(res);
-    frame->rax = res.value;
+    frame->rax = ((uint64_t)res.token << 32) | res.value;
     return SYSCALL_DISP_OK;
 }
 
@@ -230,11 +230,17 @@ static enum syscall_disposition syscall_random_next(task_t *task, struct interru
 
 static enum syscall_disposition syscall_roulette_result(task_t *task, struct interrupt_frame *frame) {
     (void)task;
+    uint64_t packed = frame->rdi;
+    uint32_t token = (uint32_t)(packed >> 32);
+    uint32_t value = (uint32_t)packed;
+
     struct fate_result res;
     if (fate_take_pending(&res) != 0) {
-        uint32_t fate = (uint32_t)frame->rdi;
-        res.value = fate;
-        res.is_win = (fate & 1U) != 0;
+        return syscall_error(frame);
+    }
+
+    if (res.token != token || res.value != value) {
+        return syscall_error(frame);
     }
 
     klog_printf(KLOG_INFO, "SYSCALL_ROULETTE_RESULT fate=0x%x (%u)\n",

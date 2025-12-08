@@ -14,6 +14,15 @@ static struct fate_result pending_fate = {0};
 static int pending_valid = 0;
 static fate_outcome_hook_t outcome_hook = NULL;
 
+static uint32_t fate_next_token(void) {
+    /* Token must be non-zero to distinguish from uninitialized/default values. */
+    uint32_t token = 0;
+    while (token == 0) {
+        token = random_next();
+    }
+    return token;
+}
+
 void fate_init(void) {
     if (fate_seeded) {
         return;
@@ -27,6 +36,7 @@ struct fate_result fate_spin(void) {
     uint32_t value = random_next();
     struct fate_result res = {
         .value = value,
+        .token = fate_next_token(),
         .is_win = (value & 1U) != 0,
     };
     return res;

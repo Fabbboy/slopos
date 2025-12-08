@@ -120,7 +120,8 @@ static void roulette_text_fallback(uint32_t fate) {
 
 void roulette_user_main(void *arg) {
     (void)arg;
-    uint32_t fate = (uint32_t)sys_roulette();
+    uint64_t spin = (uint64_t)sys_roulette();
+    uint32_t fate = (uint32_t)spin;
 
     sys_write("ROULETTE: entering wheel of fate (user mode)\n", 46);
 
@@ -128,7 +129,7 @@ void roulette_user_main(void *arg) {
     if (sys_fb_info(&info) != 0 || info.width == 0 || info.height == 0) {
         sys_write("ROULETTE: fb info unavailable, using text fallback\n", 54);
         roulette_text_fallback(fate);
-        sys_roulette_result(fate);
+        sys_roulette_result(spin);
         sys_exit();
     }
 
@@ -141,7 +142,7 @@ void roulette_user_main(void *arg) {
         sys_write("ROULETTE: render complete\n", 26);
     }
 
-    sys_roulette_result(fate);
+    sys_roulette_result(spin);
     sys_exit();
 }
 
