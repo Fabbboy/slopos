@@ -15,8 +15,6 @@ struct boot_init_step {
     uint32_t flags;
 };
 
-#define BOOT_INIT_FLAG_OPTIONAL (1u << 0)
-
 #define BOOT_INIT_PHASES(_) \
     /* Early hardware bring-up before memory/paging */ \
     _(early_hw) \
@@ -36,8 +34,6 @@ enum boot_init_phase {
 };
 #undef BOOT_INIT_ENUM_ENTRY
 
-void boot_init_set_optional_enabled(int enabled);
-int boot_init_optional_enabled(void);
 int boot_init_run_all(void);
 int boot_init_run_phase(enum boot_init_phase phase);
 int is_kernel_initialized(void);
@@ -50,6 +46,6 @@ int is_kernel_initialized(void);
     BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, 0)
 
 #define BOOT_INIT_OPTIONAL_STEP(phase, label, fn) \
-    BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, BOOT_INIT_FLAG_OPTIONAL)
+    BOOT_INIT_STEP_WITH_FLAGS(phase, label, fn, 0)
 
 #endif /* BOOT_INIT_H */

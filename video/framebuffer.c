@@ -5,7 +5,7 @@
  * DEPENDENCY: This driver requires HHDM (Higher-Half Direct Mapping) or
  * identity mapping to access the framebuffer. The framebuffer physical address
  * is translated to a virtual address using mm_phys_to_virt(). If no mapping
- * is available, framebuffer initialization will fail gracefully.
+ * is available, framebuffer initialization fails and boot will stop.
  *
  * NOTE: The framebuffer memory range should ideally be reserved during memory
  * system initialization to prevent it from being allocated by the page allocator.

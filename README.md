@@ -23,6 +23,10 @@ All day-to-day work goes through the Makefile. Typical targets:
 
 Artifacts land in `builddir/`, and `test_output.log` captures non-interactive boots.
 
+### Video requirement
+
+SlopOS boots only with a Limine-provided framebuffer; video output is mandatory and the kernel will panic if no framebuffer is available. Run under QEMU/OVMF with GOP enabled (e.g., `-machine q35`) so Limine can hand off a valid framebuffer.
+
 ## MCP Quick Start
 
 

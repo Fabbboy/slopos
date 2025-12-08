@@ -54,22 +54,12 @@ struct boot_runtime_context {
 
 static struct boot_runtime_context boot_ctx = {0};
 
-static int optional_steps_enabled = 1;
-
 static void boot_info(const char *text) {
     klog_info(text);
 }
 
 static void boot_debug(const char *text) {
     klog_debug(text);
-}
-
-void boot_init_set_optional_enabled(int enabled) {
-    optional_steps_enabled = enabled ? 1 : 0;
-}
-
-int boot_init_optional_enabled(void) {
-    return optional_steps_enabled;
 }
 
 struct boot_init_phase_desc {
@@ -110,13 +100,6 @@ static void boot_init_report_step(enum klog_level level,
     klog_printf(level, "    %s: %s\n", label, value ? value : "(unnamed)");
 }
 
-static void boot_init_report_skip(const char *value) {
-    if (!klog_is_enabled(KLOG_DEBUG)) {
-        return;
-    }
-    klog_printf(KLOG_DEBUG, "    skip -> %s\n", value ? value : "(unnamed)");
-}
-
 static void boot_init_report_failure(const char *phase, const char *step_name) {
     klog_printf(KLOG_INFO, "[boot:init] FAILURE in %s -> %s\n",
                 phase ? phase : "(unknown)",
@@ -125,11 +108,6 @@ static void boot_init_report_failure(const char *phase, const char *step_name) {
 
 static int boot_run_step(const char *phase_name, const struct boot_init_step *step) {
     if (!step || !step->fn) {
-        return 0;
-    }
-
-    if ((step->flags & BOOT_INIT_FLAG_OPTIONAL) && !boot_init_optional_enabled()) {
-        boot_init_report_skip(step->name);
         return 0;
     }
 
@@ -246,18 +224,6 @@ static int boot_step_boot_config(void) {
         boot_debug("Boot option: debug logging disabled");
     }
 
-    if (str_has_token(boot_ctx.cmdline, "demo=off") ||
-        str_has_token(boot_ctx.cmdline, "demo=disabled") ||
-        str_has_token(boot_ctx.cmdline, "video=off") ||
-        str_has_token(boot_ctx.cmdline, "no-demo")) {
-        boot_init_set_optional_enabled(0);
-        boot_info("Boot option: framebuffer demo disabled");
-    } else if (str_has_token(boot_ctx.cmdline, "demo=on") ||
-               str_has_token(boot_ctx.cmdline, "demo=enabled")) {
-        boot_init_set_optional_enabled(1);
-        boot_info("Boot option: framebuffer demo enabled");
-    }
-
     return 0;
 }
 
@@ -356,17 +322,20 @@ static int boot_step_timer_setup(void) {
         klog_printf(KLOG_INFO, "BOOT: WARNING - no PIT IRQs observed in 100ms window\n");
     }
 
-    // Initialize framebuffer and splash screen right after PIT is ready
-    if (framebuffer_init() == 0) {
-        splash_show_boot_screen();
-        splash_report_progress(10, "Graphics initialized");
-
-        // Report the upcoming driver steps with delays to show progression
-        splash_report_progress(20, "Initializing debug...");
-        splash_report_progress(30, "Setting up GDT/TSS...");
-        splash_report_progress(40, "Setting up interrupts...");
-        splash_report_progress(50, "Setting up IRQ dispatcher...");
+    // Initialize framebuffer and splash screen right after PIT is ready.
+    // Video output is mandatory: fail fast if a framebuffer is not present.
+    if (framebuffer_init() != 0) {
+        kernel_panic("Framebuffer initialization failed (video output is mandatory)");
     }
+
+    splash_show_boot_screen();
+    splash_report_progress(10, "Graphics initialized");
+
+    // Report the upcoming driver steps with delays to show progression
+    splash_report_progress(20, "Initializing debug...");
+    splash_report_progress(30, "Setting up GDT/TSS...");
+    splash_report_progress(40, "Setting up interrupts...");
+    splash_report_progress(50, "Setting up IRQ dispatcher...");
 
     return 0;
 }
@@ -583,8 +552,7 @@ static int boot_step_framebuffer_demo(void) {
     klog_debug("Graphics demo: framebuffer already initialized");
 
     if (!framebuffer_is_initialized()) {
-        klog_debug("WARNING: Framebuffer not available for demo");
-        return 0;
+        kernel_panic("Framebuffer expected to be initialized before demo");
     }
 
     framebuffer_info_t *fb_info = framebuffer_get_info();
@@ -622,9 +590,7 @@ void kernel_main(void) {
     }
     boot_info("=== KERNEL BOOT SUCCESSFUL ===");
     boot_info("Operational subsystems: serial, interrupts, memory, scheduler, shell");
-    if (!boot_init_optional_enabled()) {
-        boot_info("Optional graphics demo: skipped");
-    }
+    boot_info("Graphics: framebuffer required and active");
     boot_info("Kernel initialization complete - ALL SYSTEMS OPERATIONAL!");
 
     /*
