@@ -36,6 +36,7 @@
 #include "../sched/scheduler.h"
 #include "../sched/task.h"
 #include "../drivers/wl_currency.h"
+#include "../drivers/fate.h"
 #include "../lib/klog.h"
 #include "../lib/string.h"
 #include "../boot/gdt_defs.h"
@@ -257,11 +258,12 @@ void syscall_handle(struct interrupt_frame *frame) {
     case SYSCALL_READ:
         syscall_user_read(task, frame);
         return;
-    case SYSCALL_ROULETTE:
-        wl_award_win();
-        kernel_roulette();
-        frame->rax = 0;
+    case SYSCALL_ROULETTE: {
+        struct fate_result res = fate_spin();
+        fate_set_pending(res);
+        frame->rax = res.value;
         return;
+    }
     case SYSCALL_SLEEP_MS: {
         uint64_t ms = frame->rdi;
         if (ms > 60000) {
@@ -397,13 +399,19 @@ void syscall_handle(struct interrupt_frame *frame) {
         frame->rax = random_next();
         return;
     case SYSCALL_ROULETTE_RESULT: {
-        uint32_t fate = (uint32_t)frame->rdi;
-        klog_printf(KLOG_INFO, "SYSCALL_ROULETTE_RESULT fate=0x%x (%u)\n", fate, fate);
-        if ((fate & 1U) == 0) {
-            wl_award_loss();
-            kernel_reboot("Roulette loss - spinning again");
-        } else {
-            wl_award_win();
+        struct fate_result res;
+        if (fate_take_pending(&res) != 0) {
+            uint32_t fate = (uint32_t)frame->rdi;
+            res.value = fate;
+            res.is_win = (fate & 1U) != 0;
+        }
+
+        klog_printf(KLOG_INFO, "SYSCALL_ROULETTE_RESULT fate=0x%x (%u)\n",
+                    res.value, res.value);
+
+        fate_apply_outcome(&res, FATE_RESOLUTION_REBOOT_ON_LOSS);
+
+        if (res.is_win) {
             if (spawn_shell_once() != 0) {
                 kernel_panic("Failed to start shell after roulette win");
             }

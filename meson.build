@@ -132,6 +132,7 @@ drivers_sources += files(
   'drivers/tty.c',
   'drivers/interrupt_test.c',
   'drivers/interrupt_test_config.c',
+  'drivers/fate.c',
   'drivers/random.c',
   'drivers/wl_currency.c',
   'drivers/syscall.c'

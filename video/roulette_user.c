@@ -116,7 +116,7 @@ static void roulette_text_fallback(uint32_t fate) {
 
 void roulette_user_main(void *arg) {
     (void)arg;
-    uint32_t fate = sys_random_next();
+    uint32_t fate = (uint32_t)sys_roulette();
 
     sys_write("ROULETTE: entering wheel of fate (user mode)\n", 46);
 

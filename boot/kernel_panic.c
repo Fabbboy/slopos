@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include "shutdown.h"
 #include "../drivers/serial.h"
-#include "../drivers/random.h"
+#include "../drivers/fate.h"
 #include "../drivers/wl_currency.h"
 #include "../video/roulette.h"
 #include "../lib/numfmt.h"
@@ -182,48 +182,30 @@ void kernel_assert(int condition, const char *message) {
  * depending entirely on the mercy of random fate.
  */
 void kernel_roulette(void) {
-    /* Initialize randomness if needed */
-    static int roulette_initialized = 0;
-    if (!roulette_initialized) {
-        random_init();
-        roulette_initialized = 1;
-    }
+    struct fate_result res = fate_spin();
 
-    /* Spin the wheel of fate */
-    uint32_t fate = random_next();
-
-    /* Display the spin to the world (serial output for logs) */
     panic_output_string("\n=== KERNEL ROULETTE: Spinning the Wheel of Fate ===\n");
     panic_output_string("Random number: 0x");
-    serial_emergency_put_hex(fate);
+    serial_emergency_put_hex(res.value);
     panic_output_string(" (");
     char decimal_buffer[32];
-    if (numfmt_u64_to_decimal(fate, decimal_buffer, sizeof(decimal_buffer)) == 0) {
+    if (numfmt_u64_to_decimal(res.value, decimal_buffer, sizeof(decimal_buffer)) == 0) {
         decimal_buffer[0] = '0';
         decimal_buffer[1] = '\0';
     }
     serial_emergency_puts(decimal_buffer);
     panic_output_string(")\n");
 
-    /* Check if even (bit 0 is 0) or odd (bit 0 is 1) */
-    if ((fate & 1) == 0) {
-        /* Even: The wheel has decided your fate - user takes an L */
-        wl_award_loss();
+    if (!res.is_win) {
         panic_output_string("Even number. The wheel has spoken. You have lost.\n");
         panic_output_string("This is INTENTIONAL - keep booting, keep gambling.\n");
         panic_output_string("L bozzo lol\n");
         panic_output_string("=== ROULETTE LOSS: AUTO-REBOOTING TO TRY AGAIN ===\n");
         panic_output_string("The gambling never stops...\n");
-
-        /* Reboot immediately to spin again - GAMBLING LOOP */
-        kernel_reboot("Roulette loss - spinning again");
-
-        /* Never reached */
     } else {
-        /* Odd: The kernel survives another day - user takes a W */
-        wl_award_win();
         panic_output_string("Odd number. Fortune smiles upon the slop. Kernel survives.\n");
         panic_output_string("=== ROULETTE WIN: CONTINUING TO OS ===\n");
-        /* Return normally - kernel continues to scheduler */
     }
+
+    fate_apply_outcome(&res, FATE_RESOLUTION_REBOOT_ON_LOSS);
 }

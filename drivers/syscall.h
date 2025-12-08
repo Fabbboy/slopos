@@ -15,7 +15,7 @@
 #define SYSCALL_EXIT  1   /* Terminate current task */
 #define SYSCALL_WRITE 2   /* Write bytes to console */
 #define SYSCALL_READ  3   /* Read line from console */
-#define SYSCALL_ROULETTE 4 /* Legacy: kernel roulette path */
+#define SYSCALL_ROULETTE 4 /* Spin roulette, returns fate number */
 #define SYSCALL_SLEEP_MS 5 /* Sleep for a bounded number of milliseconds */
 #define SYSCALL_FB_INFO 6  /* Fetch framebuffer metadata */
 #define SYSCALL_GFX_FILL_RECT 7
