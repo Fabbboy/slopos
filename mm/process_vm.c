@@ -330,8 +330,14 @@ static uint32_t unmap_and_free_range(process_vm_t *process, uint64_t start, uint
     for (uint64_t addr = start; addr < end; addr += PAGE_SIZE_4KB) {
         uint64_t phys = virt_to_phys_in_dir(process->page_dir, addr);
         if (phys) {
+            int was_allocated = page_frame_can_free(phys);
             unmap_page_in_dir(process->page_dir, addr);
-            if (page_frame_can_free(phys)) {
+            /*
+             * The paging layer already frees data pages (and page tables) when
+             * removing mappings. Capture the count before unmapping so we can
+             * keep process->total_pages in sync without double-freeing.
+             */
+            if (was_allocated) {
                 freed++;
             }
         }
