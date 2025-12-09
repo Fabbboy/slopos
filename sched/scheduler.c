@@ -14,6 +14,7 @@
 #include "../mm/paging.h"
 #include "../mm/process_vm.h"
 #include "../boot/gdt.h"
+#include "../lib/spinlock.h"
 #include "scheduler.h"
 
 /* ========================================================================
@@ -70,6 +71,15 @@ typedef struct scheduler {
 static scheduler_t scheduler = {0};
 static scheduler_idle_wakeup_cb_t idle_wakeup_cb = NULL;
 static const uint8_t scheduler_preemption_default = 1; /* enable PIT IRQ preemption by default */
+static spinlock_t scheduler_lock;
+
+static inline uint64_t sched_lock(void) {
+    return spinlock_lock_irqsave(&scheduler_lock);
+}
+
+static inline void sched_unlock(uint64_t guard) {
+    spinlock_unlock_irqrestore(&scheduler_lock, guard);
+}
 
 static uint32_t scheduler_get_default_time_slice(void) {
     return scheduler.time_slice ? scheduler.time_slice : SCHED_DEFAULT_TIME_SLICE;
@@ -202,9 +212,11 @@ int schedule_task(task_t *task) {
         return -1;
     }
 
+    uint64_t guard = sched_lock();
     if (!task_is_ready(task)) {
         klog_printf(KLOG_INFO, "schedule_task: task %u not ready (state %s)\n",
                     task->task_id, task_state_to_string(task_get_state(task)));
+        sched_unlock(guard);
         return -1;
     }
 
@@ -215,9 +227,11 @@ int schedule_task(task_t *task) {
     if (ready_queue_enqueue(&scheduler.ready_queue, task) != 0) {
         klog_printf(KLOG_INFO, "schedule_task: ready queue full, request rejected\n");
         wl_award_loss();
+        sched_unlock(guard);
         return -1;
     }
 
+    sched_unlock(guard);
     return 0;
 }
 
@@ -229,6 +243,7 @@ int unschedule_task(task_t *task) {
         return -1;
     }
 
+    uint64_t guard = sched_lock();
     /* Remove from ready queue if present */
     ready_queue_remove(&scheduler.ready_queue, task);
 
@@ -237,6 +252,7 @@ int unschedule_task(task_t *task) {
         scheduler.current_task = NULL;
     }
 
+    sched_unlock(guard);
     return 0;
 }
 
@@ -355,6 +371,7 @@ void schedule(void) {
         return;
     }
 
+    uint64_t guard = sched_lock();
     scheduler.in_schedule++;
     scheduler.schedule_calls++;
 
@@ -371,6 +388,7 @@ void schedule(void) {
                 task_set_state(current->task_id, TASK_STATE_RUNNING);
                 scheduler_reset_task_quantum(current);
                 scheduler.in_schedule--;
+                sched_unlock(guard);
                 return;
             } else {
                 scheduler_reset_task_quantum(current);
@@ -392,6 +410,7 @@ void schedule(void) {
             /* Switch back to the saved return context */
             if (scheduler.current_task) {
                 scheduler.in_schedule--;
+                sched_unlock(guard);
                 context_switch(&scheduler.current_task->context, &scheduler.return_context);
                 return;
             } else {
@@ -405,6 +424,7 @@ void schedule(void) {
 
     /* Switch to the selected task */
     scheduler.in_schedule--;
+    sched_unlock(guard);
     switch_to_task(next_task);
     return;
 
@@ -412,6 +432,7 @@ out:
     if (scheduler.in_schedule > 0) {
         scheduler.in_schedule--;
     }
+    sched_unlock(guard);
 }
 
 /*
@@ -516,8 +537,10 @@ void scheduler_task_exit(void) {
         klog_printf(KLOG_INFO, "scheduler_task_exit: Failed to terminate current task\n");
     }
 
+    uint64_t guard = sched_lock();
     scheduler.current_task = NULL;
     task_set_current(NULL);
+    sched_unlock(guard);
 
     schedule();
 
@@ -579,6 +602,7 @@ static void idle_task_function(void *arg) {
 int init_scheduler(void) {
     /* Initialize ready queue */
     ready_queue_init(&scheduler.ready_queue);
+    spinlock_init(&scheduler_lock);
 
     /* Initialize scheduler state */
     scheduler.current_task = NULL;
@@ -726,6 +750,7 @@ task_t *scheduler_get_current_task(void) {
 }
 
 void scheduler_set_preemption_enabled(int enabled) {
+    uint64_t guard = sched_lock();
     scheduler.preemption_enabled = enabled ? 1 : 0;
     if (scheduler.preemption_enabled) {
         pit_enable_irq();
@@ -733,6 +758,7 @@ void scheduler_set_preemption_enabled(int enabled) {
         scheduler.reschedule_pending = 0;
         pit_disable_irq();
     }
+    sched_unlock(guard);
 }
 
 int scheduler_is_preemption_enabled(void) {
@@ -740,18 +766,22 @@ int scheduler_is_preemption_enabled(void) {
 }
 
 void scheduler_timer_tick(void) {
+    uint64_t guard = sched_lock();
     scheduler.total_ticks++;
 
     if (!scheduler.enabled || !scheduler.preemption_enabled) {
+        sched_unlock(guard);
         return;
     }
 
     task_t *current = scheduler.current_task;
     if (!current) {
+        sched_unlock(guard);
         return;
     }
 
     if (scheduler.in_schedule) {
+        sched_unlock(guard);
         return;
     }
 
@@ -759,10 +789,12 @@ void scheduler_timer_tick(void) {
         if (scheduler.ready_queue.count > 0) {
             scheduler.reschedule_pending = 1;
         }
+        sched_unlock(guard);
         return;
     }
 
     if (current->flags & TASK_FLAG_NO_PREEMPT) {
+        sched_unlock(guard);
         return;
     }
 
@@ -771,11 +803,13 @@ void scheduler_timer_tick(void) {
     }
 
     if (current->time_slice_remaining > 0) {
+        sched_unlock(guard);
         return;
     }
 
     if (scheduler.ready_queue.count == 0) {
         scheduler_reset_task_quantum(current);
+        sched_unlock(guard);
         return;
     }
 
@@ -783,6 +817,7 @@ void scheduler_timer_tick(void) {
         scheduler.total_preemptions++;
     }
     scheduler.reschedule_pending = 1;
+    sched_unlock(guard);
 }
 
 void scheduler_request_reschedule_from_interrupt(void) {
@@ -790,27 +825,32 @@ void scheduler_request_reschedule_from_interrupt(void) {
         return;
     }
 
-    if (scheduler.in_schedule) {
-        return;
+    uint64_t guard = sched_lock();
+    if (!scheduler.in_schedule) {
+        scheduler.reschedule_pending = 1;
     }
-
-    scheduler.reschedule_pending = 1;
+    sched_unlock(guard);
 }
 
 void scheduler_handle_post_irq(void) {
+    uint64_t guard = sched_lock();
     if (!scheduler.reschedule_pending) {
+        sched_unlock(guard);
         return;
     }
 
     if (!scheduler.enabled || !scheduler.preemption_enabled) {
         scheduler.reschedule_pending = 0;
+        sched_unlock(guard);
         return;
     }
 
     if (scheduler.in_schedule) {
+        sched_unlock(guard);
         return;
     }
 
     scheduler.reschedule_pending = 0;
+    sched_unlock(guard);
     schedule();
 }
