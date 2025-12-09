@@ -11,6 +11,7 @@
 #include "../boot/idt.h"
 #include "../boot/gdt_defs.h"
 #include "../mm/mm_constants.h"
+#include "../user/user_sections.h"
 #include "task.h"
 #include "scheduler.h"
 #include "../lib/klog.h"
@@ -19,7 +20,7 @@
 void test_task_function(int *completed_flag);
 
 /* Forward declaration for privilege separation test */
-static void user_stub_task(void *arg);
+static void USER_TEXT user_stub_task(void *arg);
 
 /* Global for context switch test */
 static task_context_t kernel_return_context_storage;
@@ -187,7 +188,7 @@ int run_scheduler_test(void) {
 /*
  * Simple user-mode stub (never actually scheduled in tests)
  */
-static void user_stub_task(void *arg) {
+static void USER_TEXT user_stub_task(void *arg) {
     (void)arg;
     /* If ever executed, yield then exit via syscall numbers */
     __asm__ volatile (
