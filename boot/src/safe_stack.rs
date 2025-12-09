@@ -1,0 +1,227 @@
+use core::ffi::c_char;
+
+use slopos_lib::{klog_printf, KlogLevel};
+
+use crate::gdt::gdt_set_ist;
+use crate::idt::idt_set_ist;
+use crate::kernel_panic::kernel_panic;
+
+const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFFFFFFB0000000;
+const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x00010000;
+const EXCEPTION_STACK_GUARD_SIZE: u64 = 0x1000;
+const EXCEPTION_STACK_PAGES: u32 = 8;
+const PAGE_SIZE_4KB: u64 = 0x1000;
+const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES as u64 * PAGE_SIZE_4KB;
+const PAGE_KERNEL_RW: u64 = 0x003;
+
+const EXCEPTION_DOUBLE_FAULT: u8 = 8;
+const EXCEPTION_STACK_FAULT: u8 = 12;
+const EXCEPTION_GENERAL_PROTECTION: u8 = 13;
+const EXCEPTION_PAGE_FAULT: u8 = 14;
+
+#[repr(C)]
+pub struct ExceptionStackInfo {
+    name: &'static [u8],
+    vector: u8,
+    ist_index: u8,
+    region_base: u64,
+    guard_start: u64,
+    guard_end: u64,
+    stack_base: u64,
+    stack_top: u64,
+    stack_size: u64,
+    peak_usage: u64,
+    out_of_bounds_reported: i32,
+}
+
+static mut STACK_TABLE: [ExceptionStackInfo; 4] = [
+    ExceptionStackInfo {
+        name: b"Double Fault\0",
+        vector: EXCEPTION_DOUBLE_FAULT,
+        ist_index: 1,
+        region_base: 0,
+        guard_start: 0,
+        guard_end: 0,
+        stack_base: 0,
+        stack_top: 0,
+        stack_size: 0,
+        peak_usage: 0,
+        out_of_bounds_reported: 0,
+    },
+    ExceptionStackInfo {
+        name: b"Stack Fault\0",
+        vector: EXCEPTION_STACK_FAULT,
+        ist_index: 2,
+        region_base: 0,
+        guard_start: 0,
+        guard_end: 0,
+        stack_base: 0,
+        stack_top: 0,
+        stack_size: 0,
+        peak_usage: 0,
+        out_of_bounds_reported: 0,
+    },
+    ExceptionStackInfo {
+        name: b"General Protection\0",
+        vector: EXCEPTION_GENERAL_PROTECTION,
+        ist_index: 3,
+        region_base: 0,
+        guard_start: 0,
+        guard_end: 0,
+        stack_base: 0,
+        stack_top: 0,
+        stack_size: 0,
+        peak_usage: 0,
+        out_of_bounds_reported: 0,
+    },
+    ExceptionStackInfo {
+        name: b"Page Fault\0",
+        vector: EXCEPTION_PAGE_FAULT,
+        ist_index: 4,
+        region_base: 0,
+        guard_start: 0,
+        guard_end: 0,
+        stack_base: 0,
+        stack_top: 0,
+        stack_size: 0,
+        peak_usage: 0,
+        out_of_bounds_reported: 0,
+    },
+];
+
+extern "C" {
+    fn alloc_page_frame(flags: u32) -> u64;
+    fn mm_zero_physical_page(phys: u64) -> i32;
+    fn map_page_4kb(virt: u64, phys: u64, flags: u64) -> i32;
+}
+
+fn log(level: KlogLevel, msg: &[u8]) {
+    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
+}
+
+fn log_debug(msg: &[u8]) {
+    log(KlogLevel::Debug, msg);
+}
+
+fn find_stack_by_vector(vector: u8) -> Option<&'static mut ExceptionStackInfo> {
+    unsafe { STACK_TABLE.iter_mut().find(|s| s.vector == vector) }
+}
+
+fn find_stack_by_address(addr: u64) -> Option<&'static mut ExceptionStackInfo> {
+    unsafe {
+        STACK_TABLE
+            .iter_mut()
+            .find(|info| addr >= info.guard_start && addr < info.stack_top)
+    }
+}
+
+fn map_stack_pages(stack: &mut ExceptionStackInfo) {
+    for page in 0..EXCEPTION_STACK_PAGES {
+        let virt_addr = stack.stack_base + page as u64 * PAGE_SIZE_4KB;
+        let phys_addr = unsafe { alloc_page_frame(0) };
+        if phys_addr == 0 {
+            kernel_panic("safe_stack_init: Failed to allocate exception stack page");
+        }
+        if unsafe { mm_zero_physical_page(phys_addr) } != 0 {
+            kernel_panic("safe_stack_init: Failed to zero exception stack page");
+        }
+        if unsafe { map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) } != 0 {
+            kernel_panic("safe_stack_init: Failed to map exception stack page");
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn safe_stack_init() {
+    log_debug(b"SAFE STACK: Initializing dedicated IST stacks\0");
+
+    for (i, stack) in unsafe { STACK_TABLE.iter_mut().enumerate() } {
+        stack.region_base = EXCEPTION_STACK_REGION_BASE + i as u64 * EXCEPTION_STACK_REGION_STRIDE;
+        stack.guard_start = stack.region_base;
+        stack.guard_end = stack.guard_start + EXCEPTION_STACK_GUARD_SIZE;
+        stack.stack_base = stack.guard_end;
+        stack.stack_top = stack.stack_base + EXCEPTION_STACK_SIZE;
+        stack.stack_size = EXCEPTION_STACK_SIZE;
+        stack.peak_usage = 0;
+        stack.out_of_bounds_reported = 0;
+
+        map_stack_pages(stack);
+
+        gdt_set_ist(stack.ist_index, stack.stack_top);
+        idt_set_ist(stack.vector, stack.ist_index);
+
+        unsafe {
+            klog_printf(
+                KlogLevel::Debug,
+                b"SAFE STACK: Vector %u uses IST%u @ 0x%llx - 0x%llx\n\0".as_ptr() as *const c_char,
+                stack.vector as u32,
+                stack.ist_index as u32,
+                stack.stack_base,
+                stack.stack_top,
+            );
+        }
+    }
+
+    log_debug(b"SAFE STACK: IST stacks ready\0");
+}
+
+#[no_mangle]
+pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
+    let Some(stack) = find_stack_by_vector(vector) else {
+        return;
+    };
+
+    if frame_ptr < stack.stack_base || frame_ptr > stack.stack_top {
+        if stack.out_of_bounds_reported == 0 {
+            unsafe {
+                klog_printf(
+                    KlogLevel::Info,
+                    b"SAFE STACK WARNING: RSP outside managed stack for vector %u\n\0".as_ptr()
+                        as *const c_char,
+                    vector as u32,
+                );
+            }
+            stack.out_of_bounds_reported = 1;
+        }
+        return;
+    }
+
+    let usage = stack.stack_top - frame_ptr;
+    if usage > stack.peak_usage {
+        stack.peak_usage = usage;
+        unsafe {
+            klog_printf(
+                KlogLevel::Debug,
+                b"SAFE STACK: New peak usage on %s stack: %llu bytes\n\0".as_ptr() as *const c_char,
+                stack.name.as_ptr() as *const c_char,
+                usage,
+            );
+        }
+
+        if usage > stack.stack_size - PAGE_SIZE_4KB {
+            unsafe {
+                klog_printf(
+                    KlogLevel::Info,
+                    b"SAFE STACK WARNING: %s stack within one page of guard\n\0".as_ptr()
+                        as *const c_char,
+                    stack.name.as_ptr() as *const c_char,
+                );
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
+    if let Some(stack) = find_stack_by_address(fault_addr) {
+        if fault_addr >= stack.guard_start && fault_addr < stack.guard_end {
+            if !stack_name.is_null() {
+                unsafe {
+                    *stack_name = stack.name.as_ptr() as *const c_char;
+                }
+            }
+            return 1;
+        }
+    }
+    0
+}

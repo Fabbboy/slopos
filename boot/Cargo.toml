@@ -10,4 +10,5 @@ crate-type = ["rlib"]
 
 [dependencies]
 slopos-lib = { path = "../lib" }
+slopos-drivers = { path = "../drivers" }
 
