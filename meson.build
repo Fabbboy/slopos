@@ -147,9 +147,7 @@ drivers_sources += files(
   'drivers/syscall_handlers.c',
   'drivers/syscall_common.c',
   'drivers/syscall_fs.c',
-  'drivers/virtio_gpu.c',
-  'drivers/rust_ffi_test.c',
-  'drivers/rust_canvas_test.c'
+  'drivers/virtio_gpu.c'
 )
 
 # Scheduler directory
@@ -200,16 +198,12 @@ inc_dirs = include_directories('.', 'boot', 'mm', 'video', 'drivers', 'sched', '
 # Custom target for assembly files (when they exist)
 # This will be used for boot assembly code that needs special handling
 
-# Build Rust graphics subsystem
-subdir('rust')
-
 # Main kernel executable
 linker_script = meson.current_source_dir() / 'link.ld'
 
 kernel_elf = executable('kernel',
   sources : all_sources,
   include_directories : inc_dirs,
-  dependencies : rust_graphics_dep,
   c_args : [
     '-O2',
     '-fno-builtin',

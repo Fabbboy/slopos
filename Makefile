@@ -1,6 +1,6 @@
 # Convenience targets for building, booting, and testing SlopOS
 
-.PHONY: setup build iso iso-notests iso-tests boot boot-log test clean
+.PHONY: setup build iso iso-notests iso-tests boot boot-log test clean distclean
 
 BUILD_DIR ?= builddir
 CROSS_FILE ?= metal.ini
@@ -281,3 +281,6 @@ test: iso-tests
 
 clean:
 	@meson compile -C $(BUILD_DIR) --clean || true
+
+distclean: clean
+	@rm -rf $(BUILD_DIR) $(ISO) $(ISO_NO_TESTS) $(ISO_TESTS) $(LOG_FILE)
