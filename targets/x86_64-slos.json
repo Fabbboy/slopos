@@ -1,0 +1,30 @@
+{
+  "arch": "x86_64",
+  "code-model": "kernel",
+  "cpu": "x86-64",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
+  "disable-redzone": true,
+  "eh-frame-header": false,
+  "emit-debug-gdb-scripts": false,
+  "executables": true,
+  "features": "-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,+soft-float",
+  "has-rpath": false,
+  "is-builtin": false,
+  "linker": "rust-lld",
+  "linker-flavor": "ld.lld",
+  "llvm-target": "x86_64-unknown-none",
+  "max-atomic-width": 64,
+  "os": "none",
+  "panic-strategy": "abort",
+  "pre-link-args": {
+    "ld.lld": ["-Tlink.ld"]
+  },
+  "relocation-model": "static",
+  "stack-probes": {
+    "kind": "none"
+  },
+  "target-pointer-width": "64",
+  "trap-unreachable": true,
+  "vendor": "slopos"
+}
+

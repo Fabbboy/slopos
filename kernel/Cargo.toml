@@ -1,0 +1,16 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slopos-boot = { path = "../boot" }
+slopos-drivers = { path = "../drivers" }
+slopos-fs = { path = "../fs" }
+slopos-lib = { path = "../lib" }
+slopos-mm = { path = "../mm" }
+slopos-sched = { path = "../sched" }
+slopos-userland = { path = "../userland" }
+slopos-video = { path = "../video" }
+

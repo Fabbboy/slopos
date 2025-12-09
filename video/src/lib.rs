@@ -1,0 +1,51 @@
+#![no_std]
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+use slopos_boot::FramebufferInfo;
+use slopos_drivers::serial_println;
+
+pub fn init(framebuffer: Option<FramebufferInfo>) {
+    if let Some(fb) = framebuffer {
+        serial_println!(
+            "Framebuffer online: {}x{} pitch {} bpp {}",
+            fb.width,
+            fb.height,
+            fb.pitch,
+            fb.bpp
+        );
+        paint_banner(fb);
+    } else {
+        serial_println!("No framebuffer provided; skipping video init.");
+    }
+}
+
+fn paint_banner(fb: FramebufferInfo) {
+    if fb.bpp < 24 {
+        serial_println!(
+            "Framebuffer bpp {} unsupported for banner paint; skipping.",
+            fb.bpp
+        );
+        return;
+    }
+
+    // Paint a thin bar so the wizards see the Wheel spin in color.
+    let stride = fb.pitch as usize;
+    let height = fb.height.min(32) as usize;
+    let width = fb.width as usize;
+    let base = fb.address;
+
+    for y in 0..height {
+        for x in 0..width {
+            let offset = y * stride + x * (fb.bpp as usize / 8);
+            unsafe {
+                let ptr = base.add(offset);
+                // Simple purple slop hue: ARGB 0x00AA33AA
+                ptr.write_volatile(0xAA);
+                ptr.add(1).write_volatile(0x33);
+                ptr.add(2).write_volatile(0xAA);
+                ptr.add(3).write_volatile(0x00);
+            }
+        }
+    }
+}
+

@@ -1,0 +1,13 @@
+[package]
+name = "slopos-userland"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+slopos-drivers = { path = "../drivers" }
+
