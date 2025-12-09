@@ -4,7 +4,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define PCI_COMMAND_OFFSET 0x04
+
 #define PCI_MAX_BARS 6
+
+struct pci_driver;
 
 typedef struct {
     uint64_t base;
@@ -43,5 +47,14 @@ int pci_init(void);
 size_t pci_get_device_count(void);
 const pci_device_info_t *pci_get_devices(void);
 const pci_gpu_info_t *pci_get_primary_gpu(void);
+
+uint32_t pci_config_read32(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+uint16_t pci_config_read16(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+uint8_t pci_config_read8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+void pci_config_write32(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value);
+void pci_config_write16(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint16_t value);
+void pci_config_write8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint8_t value);
+size_t pci_get_registered_driver_count(void);
+const struct pci_driver *pci_get_registered_driver(size_t index);
 
 #endif /* DRIVERS_PCI_H */

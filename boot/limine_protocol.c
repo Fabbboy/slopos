@@ -248,22 +248,22 @@ int init_limine_protocol(void) {
         klog_info("WARNING: No memory map available from Limine");
     }
 
-    /* Parse framebuffer */
+    /* Parse framebuffer (optional - graphics may be initialized later via virtio-gpu or Rust) */
     if (framebuffer_request.response != NULL) {
-        struct limine_framebuffer_response *fb_resp = 
+        struct limine_framebuffer_response *fb_resp =
             (struct limine_framebuffer_response *)framebuffer_request.response;
 
         if (fb_resp->framebuffer_count > 0) {
-            struct limine_framebuffer *fb = 
+            struct limine_framebuffer *fb =
                 (struct limine_framebuffer *)fb_resp->framebuffers[0];
-            
+
             system_info.framebuffer_addr = (uint64_t)fb->address;
             system_info.framebuffer_width = (uint32_t)fb->width;
             system_info.framebuffer_height = (uint32_t)fb->height;
             system_info.framebuffer_pitch = (uint32_t)fb->pitch;
             system_info.framebuffer_bpp = (uint8_t)fb->bpp;
             system_info.framebuffer_available = 1;
-            
+
             klog_printf(KLOG_DEBUG, "Framebuffer: %lux%lu @ %lu bpp\n",
                         (unsigned long)fb->width,
                         (unsigned long)fb->height,
@@ -273,12 +273,12 @@ int init_limine_protocol(void) {
             klog_printf(KLOG_DEBUG, "Framebuffer pitch: %lu bytes\n",
                         (unsigned long)fb->pitch);
         } else {
-            klog_info("WARNING: No framebuffer provided by Limine");
-            return -1;
+            klog_info("WARNING: No framebuffer provided by Limine (graphics may be initialized later)");
+            system_info.framebuffer_available = 0;
         }
     } else {
-        klog_info("ERROR: No framebuffer response from Limine");
-        return -1;
+        klog_info("WARNING: No framebuffer response from Limine (graphics may be initialized later)");
+        system_info.framebuffer_available = 0;
     }
 
     klog_debug("Limine Protocol: Initialization complete");

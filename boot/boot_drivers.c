@@ -16,6 +16,7 @@
 #include "../drivers/ioapic.h"
 #include "../drivers/pic_quiesce.h"
 #include "../drivers/pci.h"
+#include "../drivers/virtio_gpu.h"
 #include "../drivers/interrupt_test.h"
 #include "../drivers/interrupt_test_config.h"
 #include "../video/framebuffer.h"
@@ -74,9 +75,9 @@ static int boot_step_timer_setup(void) {
         klog_printf(KLOG_INFO, "BOOT: WARNING - no PIT IRQs observed in 100ms window\n");
     }
 
-    /* Video output is mandatory: fail fast if a framebuffer is not present. */
+    /* Framebuffer is optional - graphics stack may be initialized later (e.g., via Rust/virtio-gpu) */
     if (framebuffer_init() != 0) {
-        kernel_panic("Framebuffer initialization failed (video output is mandatory)");
+        klog_info("WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)");
     }
 
     return 0;
@@ -110,6 +111,7 @@ static int boot_step_ioapic_setup(void) {
 
 static int boot_step_pci_init(void) {
     klog_debug("Enumerating PCI devices...");
+    virtio_gpu_register_driver();
     if (pci_init() == 0) {
         klog_debug("PCI subsystem initialized");
         const pci_gpu_info_t *gpu = pci_get_primary_gpu();
@@ -195,4 +197,3 @@ BOOT_INIT_STEP(drivers, "irq dispatcher", boot_step_irq_setup);
 BOOT_INIT_STEP(drivers, "timer", boot_step_timer_setup);
 BOOT_INIT_STEP(drivers, "pci", boot_step_pci_init);
 BOOT_INIT_STEP(drivers, "interrupt tests", boot_step_interrupt_tests);
-

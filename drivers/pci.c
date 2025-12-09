@@ -1,14 +1,15 @@
 #include "pci.h"
 #include "serial.h"
 #include "../mm/phys_virt.h"
+#include "wl_currency.h"
 #include "../lib/klog.h"
+#include "pci_driver.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
 
 #define PCI_VENDOR_ID_OFFSET        0x00
 #define PCI_DEVICE_ID_OFFSET        0x02
-#define PCI_COMMAND_OFFSET          0x04
 #define PCI_STATUS_OFFSET           0x06
 #define PCI_REVISION_ID_OFFSET      0x08
 #define PCI_PROG_IF_OFFSET          0x09
@@ -33,6 +34,10 @@
 
 #define PCI_CLASS_DISPLAY           0x03
 
+#define PCI_VENDOR_ID_VIRTIO                0x1AF4
+#define PCI_DEVICE_ID_VIRTIO_GPU            0x1050
+#define PCI_DEVICE_ID_VIRTIO_GPU_TRANS      0x1010
+
 #define PCI_MAX_BUSES               256
 #define PCI_MAX_DEVICES             256
 
@@ -41,6 +46,10 @@ static pci_device_info_t devices[PCI_MAX_DEVICES];
 static size_t device_count;
 static int pci_initialized;
 static pci_gpu_info_t primary_gpu;
+
+#define PCI_DRIVER_MAX 16
+static const pci_driver_t *pci_registered_drivers[PCI_DRIVER_MAX];
+static size_t pci_registered_driver_count;
 
 static inline void outl(uint16_t port, uint32_t value) {
     __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
@@ -52,7 +61,7 @@ static inline uint32_t inl(uint16_t port) {
     return value;
 }
 
-static uint32_t pci_config_read32(uint8_t bus, uint8_t device,
+uint32_t pci_config_read32(uint8_t bus, uint8_t device,
                                   uint8_t function, uint8_t offset) {
     uint32_t address = (uint32_t)0x80000000 |
                        ((uint32_t)bus << 16) |
@@ -64,21 +73,21 @@ static uint32_t pci_config_read32(uint8_t bus, uint8_t device,
     return inl(PCI_CONFIG_DATA);
 }
 
-static uint16_t pci_config_read16(uint8_t bus, uint8_t device,
+uint16_t pci_config_read16(uint8_t bus, uint8_t device,
                                   uint8_t function, uint8_t offset) {
     uint32_t value = pci_config_read32(bus, device, function, offset);
     uint32_t shift = (offset & 0x2) * 8;
     return (uint16_t)((value >> shift) & 0xFFFF);
 }
 
-static uint8_t pci_config_read8(uint8_t bus, uint8_t device,
+uint8_t pci_config_read8(uint8_t bus, uint8_t device,
                                 uint8_t function, uint8_t offset) {
     uint32_t value = pci_config_read32(bus, device, function, offset);
     uint32_t shift = (offset & 0x3) * 8;
     return (uint8_t)((value >> shift) & 0xFF);
 }
 
-static void pci_config_write32(uint8_t bus, uint8_t device,
+void pci_config_write32(uint8_t bus, uint8_t device,
                                uint8_t function, uint8_t offset,
                                uint32_t value) {
     uint32_t address = (uint32_t)0x80000000 |
@@ -89,6 +98,42 @@ static void pci_config_write32(uint8_t bus, uint8_t device,
 
     outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, value);
+}
+
+void pci_config_write16(uint8_t bus, uint8_t device,
+                        uint8_t function, uint8_t offset,
+                        uint16_t value) {
+    uint32_t address = (uint32_t)0x80000000 |
+                       ((uint32_t)bus << 16) |
+                       ((uint32_t)device << 11) |
+                       ((uint32_t)function << 8) |
+                       (offset & 0xFC);
+
+    outl(PCI_CONFIG_ADDRESS, address);
+    uint32_t current = inl(PCI_CONFIG_DATA);
+    uint32_t shift = (offset & 0x2) * 8;
+    uint32_t mask = ~((uint32_t)0xFFFF << shift);
+    uint32_t new_value = (current & mask) | ((uint32_t)value << shift);
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, new_value);
+}
+
+void pci_config_write8(uint8_t bus, uint8_t device,
+                       uint8_t function, uint8_t offset,
+                       uint8_t value) {
+    uint32_t address = (uint32_t)0x80000000 |
+                       ((uint32_t)bus << 16) |
+                       ((uint32_t)device << 11) |
+                       ((uint32_t)function << 8) |
+                       (offset & 0xFC);
+
+    outl(PCI_CONFIG_ADDRESS, address);
+    uint32_t current = inl(PCI_CONFIG_DATA);
+    uint32_t shift = (offset & 0x3) * 8;
+    uint32_t mask = ~((uint32_t)0xFF << shift);
+    uint32_t new_value = (current & mask) | ((uint32_t)value << shift);
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, new_value);
 }
 
 static uint64_t pci_probe_bar_size(uint8_t bus, uint8_t device,
@@ -170,14 +215,37 @@ static void pci_log_bar(const pci_bar_info_t *bar, uint8_t index) {
     klog_printf(KLOG_INFO, "\n");
 }
 
+static void pci_notify_drivers(const pci_device_info_t *info);
+
+static int pci_is_virtio_gpu(const pci_device_info_t *info) {
+    if (info->vendor_id != PCI_VENDOR_ID_VIRTIO) {
+        return 0;
+    }
+
+    return info->device_id == PCI_DEVICE_ID_VIRTIO_GPU ||
+           info->device_id == PCI_DEVICE_ID_VIRTIO_GPU_TRANS;
+}
+
+static int pci_is_gpu_candidate(const pci_device_info_t *info) {
+    if (info->class_code == PCI_CLASS_DISPLAY) {
+        return 1;
+    }
+
+    return pci_is_virtio_gpu(info);
+}
+
 static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
+    int virtio_candidate = 0;
+
     if (primary_gpu.present) {
         return;
     }
 
-    if (info->class_code != PCI_CLASS_DISPLAY) {
+    if (!pci_is_gpu_candidate(info)) {
         return;
     }
+
+    virtio_candidate = pci_is_virtio_gpu(info);
 
     for (uint8_t i = 0; i < info->bar_count; ++i) {
         const pci_bar_info_t *bar = &info->bars[i];
@@ -192,13 +260,17 @@ static void pci_consider_gpu_candidate(const pci_device_info_t *info) {
         primary_gpu.mmio_virt_base = mm_map_mmio_region(primary_gpu.mmio_phys_base,
                                                         (size_t)primary_gpu.mmio_size);
 
-        klog_printf(KLOG_INFO, "PCI: Selected GPU candidate at MMIO phys=0x%lx size=0x%lx",
+        klog_printf(KLOG_INFO,
+                    "PCI: Selected %s GPU candidate at MMIO phys=0x%lx size=0x%lx",
+                    virtio_candidate ? "virtio" : "display-class",
                     primary_gpu.mmio_phys_base, primary_gpu.mmio_size);
         if (primary_gpu.mmio_virt_base) {
             klog_printf(KLOG_INFO, " virt=0x%lx\n",
                         (uint64_t)(uintptr_t)primary_gpu.mmio_virt_base);
+            wl_award_win();
         } else {
             klog_printf(KLOG_INFO, " (mapping failed)\n");
+            wl_award_loss();
         }
 
         klog_printf(KLOG_INFO, "PCI: GPU acceleration groundwork ready (MMIO mapped)\n");
@@ -294,6 +366,7 @@ static void pci_scan_function(uint8_t bus, uint8_t device, uint8_t function) {
     pci_log_device_header(info);
     pci_collect_bars(info);
     pci_consider_gpu_candidate(info);
+    pci_notify_drivers(info);
 
     if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
         uint8_t secondary_bus = pci_config_read8(bus, device, function, 0x19);
@@ -390,4 +463,46 @@ const pci_device_info_t *pci_get_devices(void) {
 
 const pci_gpu_info_t *pci_get_primary_gpu(void) {
     return primary_gpu.present ? &primary_gpu : NULL;
+}
+
+size_t pci_get_registered_driver_count(void) {
+    return pci_registered_driver_count;
+}
+
+const struct pci_driver *pci_get_registered_driver(size_t index) {
+    if (index >= pci_registered_driver_count) {
+        return NULL;
+    }
+    return pci_registered_drivers[index];
+}
+
+int pci_register_driver(const pci_driver_t *driver) {
+    if (!driver || !driver->match || !driver->probe) {
+        klog_printf(KLOG_INFO, "PCI: Attempted to register invalid driver\n");
+        return -1;
+    }
+
+    if (pci_registered_driver_count >= PCI_DRIVER_MAX) {
+        klog_printf(KLOG_INFO, "PCI: Driver registration queue is full\n");
+        return -1;
+    }
+
+    pci_registered_drivers[pci_registered_driver_count++] = driver;
+    klog_printf(KLOG_DEBUG, "PCI: Registered driver %s\n", driver->name ? driver->name : "<anon>");
+    return 0;
+}
+
+static void pci_notify_drivers(const pci_device_info_t *info) {
+    for (size_t i = 0; i < pci_registered_driver_count; ++i) {
+        const pci_driver_t *driver = pci_registered_drivers[i];
+        if (!driver || !driver->match(info, driver->context)) {
+            continue;
+        }
+
+        if (driver->probe(info, driver->context) != 0) {
+            klog_printf(KLOG_DEBUG, "PCI: Driver %s probe failed for bus %u dev %u func %u\n",
+                        driver->name ? driver->name : "<anon>",
+                        info->bus, info->device, info->function);
+        }
+    }
 }

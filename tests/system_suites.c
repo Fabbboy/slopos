@@ -6,7 +6,10 @@
 
 #include "core.h"
 #include "../lib/klog.h"
+#include "../lib/string.h"
 #include "../lib/cpu.h"
+#include "../drivers/pci_driver.h"
+#include "../drivers/virtio_gpu.h"
 #include "../mm/process_vm.h"
 #include "../mm/paging.h"
 #include "../mm/memory_layout.h"
@@ -159,6 +162,50 @@ static int run_roulette_exec_suite(const struct interrupt_test_config *config,
     return (passed == total) ? 0 : -1;
 }
 
+static int run_virtio_gpu_driver_suite(const struct interrupt_test_config *config,
+                                       struct test_suite_result *out) {
+    (void)config;
+    uint64_t start = cpu_read_tsc();
+
+    virtio_gpu_register_driver();
+
+    size_t total = 2;
+    size_t passed = 0;
+    const struct pci_driver *virtio_driver = NULL;
+    size_t driver_count = pci_get_registered_driver_count();
+    for (size_t i = 0; i < driver_count; ++i) {
+        const struct pci_driver *driver = pci_get_registered_driver(i);
+        if (!driver || !driver->name) {
+            continue;
+        }
+        if (strcmp(driver->name, "virtio-gpu") == 0) {
+            virtio_driver = driver;
+            break;
+        }
+    }
+
+    if (virtio_driver) {
+        pci_device_info_t good = (pci_device_info_t){0};
+        good.vendor_id = VIRTIO_GPU_VENDOR_ID;
+        good.device_id = VIRTIO_GPU_DEVICE_ID_PRIMARY;
+        if (virtio_driver->match(&good, virtio_driver->context)) {
+            passed++;
+        }
+
+        pci_device_info_t bad = (pci_device_info_t){0};
+        bad.vendor_id = 0;
+        bad.device_id = 0;
+        if (!virtio_driver->match(&bad, virtio_driver->context)) {
+            passed++;
+        }
+    }
+
+    uint64_t end = cpu_read_tsc();
+    fill_simple_result(out, "virtio_gpu", (uint32_t)total, (uint32_t)passed,
+                       measure_elapsed_ms(start, end));
+    return passed == total ? 0 : -1;
+}
+
 #else
 static int run_vm_suite(const struct interrupt_test_config *config,
                         struct test_suite_result *out) {
@@ -202,6 +249,13 @@ static int run_roulette_exec_suite(const struct interrupt_test_config *config,
     return 0;
 }
 
+static int run_virtio_gpu_driver_suite(const struct interrupt_test_config *config,
+                                       struct test_suite_result *out) {
+    (void)config;
+    fill_simple_result(out, "virtio_gpu", 0, 0, 0);
+    return 0;
+}
+
 #endif
 
 static const struct test_suite_desc vm_suite_desc = {
@@ -240,6 +294,12 @@ static const struct test_suite_desc roulette_exec_suite_desc = {
     .run = run_roulette_exec_suite,
 };
 
+static const struct test_suite_desc virtio_gpu_driver_suite_desc = {
+    .name = "virtio_gpu",
+    .mask_bit = INTERRUPT_TEST_SUITE_SCHEDULER,
+    .run = run_virtio_gpu_driver_suite,
+};
+
 void tests_register_system_suites(void) {
     tests_register_suite(&vm_suite_desc);
     tests_register_suite(&heap_suite_desc);
@@ -247,5 +307,5 @@ void tests_register_system_suites(void) {
     tests_register_suite(&privsep_suite_desc);
     tests_register_suite(&roulette_suite_desc);
     tests_register_suite(&roulette_exec_suite_desc);
+    tests_register_suite(&virtio_gpu_driver_suite_desc);
 }
-

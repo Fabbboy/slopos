@@ -4,6 +4,7 @@
 
 BUILD_DIR ?= builddir
 CROSS_FILE ?= metal.ini
+QEMU_BIN ?= qemu-system-x86_64
 
 ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
@@ -155,6 +156,7 @@ boot: iso-notests
 	trap cleanup EXIT INT TERM; \
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
+	VIRGL_ARGS=""; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
@@ -162,8 +164,12 @@ boot: iso-notests
 	if [ "$${VIDEO:-0}" != "0" ]; then \
 		DISPLAY_ARGS="-display gtk -vga std"; \
 	fi; \
+	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
+		DISPLAY_ARGS="-display gtk,gl=on -vga none"; \
+		VIRGL_ARGS=" -device virtio-gpu-gl-pci,multifunction=on"; \
+	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
-	qemu-system-x86_64 \
+		$(QEMU_BIN) \
 	  -machine q35,accel=tcg \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
@@ -176,6 +182,7 @@ boot: iso-notests
 	  -monitor none \
 	  $$DISPLAY_ARGS \
 	  $$EXTRA_ARGS \
+	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-}
 
 boot-log: iso-notests
@@ -191,6 +198,7 @@ boot-log: iso-notests
 	trap cleanup EXIT INT TERM; \
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
+	VIRGL_ARGS=""; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
@@ -198,9 +206,13 @@ boot-log: iso-notests
 	if [ "$${VIDEO:-0}" != "0" ]; then \
 		DISPLAY_ARGS="-display gtk -vga std"; \
 	fi; \
+	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
+		DISPLAY_ARGS="-display gtk,gl=on -vga none"; \
+		VIRGL_ARGS=" -device virtio-gpu-pci,virgl=on"; \
+	fi; \
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
 	set +e; \
-	timeout "$(BOOT_LOG_TIMEOUT)s" qemu-system-x86_64 \
+	timeout "$(BOOT_LOG_TIMEOUT)s" $(QEMU_BIN) \
 	  -machine q35,accel=tcg \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
@@ -213,6 +225,7 @@ boot-log: iso-notests
 	  -monitor none \
 	  $$DISPLAY_ARGS \
 	  $$EXTRA_ARGS \
+	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-} \
 	  2>&1 | tee "$(LOG_FILE)"; \
 	status=$$?; \
@@ -238,7 +251,7 @@ test: iso-tests
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	echo "Starting QEMU for interrupt test harness..."; \
 	set +e; \
-	qemu-system-x86_64 \
+	$(QEMU_BIN) \
 	  -machine q35,accel=tcg \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \

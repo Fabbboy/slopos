@@ -144,7 +144,8 @@ drivers_sources += files(
   'drivers/random.c',
   'drivers/wl_currency.c',
   'drivers/syscall.c',
-  'drivers/syscall_handlers.c'
+  'drivers/syscall_handlers.c',
+  'drivers/virtio_gpu.c'
 )
 
 # Scheduler directory

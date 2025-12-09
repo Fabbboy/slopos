@@ -1,0 +1,5 @@
+[workspace]
+members = ["drivers"]
+resolver = "3"
+
+[workspace.dependencies]
