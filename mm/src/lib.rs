@@ -1,8 +1,18 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod mm_constants;
+mod memory_layout;
 mod memory_reservations;
+mod memory_init;
+mod page_alloc;
+mod paging;
+mod kernel_heap;
+mod process_vm;
+mod user_copy;
+mod user_copy_helpers;
 mod phys_virt;
+mod tests;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -61,4 +71,3 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // The bump allocator never frees; this is acceptable for early kernel bring-up.
     }
 }
-
