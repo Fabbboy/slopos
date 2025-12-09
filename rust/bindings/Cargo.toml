@@ -1,0 +1,9 @@
+[package]
+name = "bindings"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+
+[build-dependencies]
+bindgen = { workspace = true }

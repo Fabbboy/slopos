@@ -1,0 +1,14 @@
+[package]
+name = "graphics"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+bindings = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }
+bindgen = { workspace = true }

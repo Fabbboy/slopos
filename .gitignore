@@ -19,3 +19,9 @@ mcp/.bun/
 mcp/.turbo/
 mcp/.cache/
 mcp/*.tsbuildinfo
+
+# Rust build artifacts
+rust/target/
+rust/**/target/
+Cargo.lock
+**/*.rs.bk
