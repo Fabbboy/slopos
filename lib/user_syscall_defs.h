@@ -18,6 +18,11 @@ typedef struct user_fb_info {
     uint8_t pixel_format;
 } user_fb_info_t;
 
+#define USER_FS_OPEN_READ   0x1u
+#define USER_FS_OPEN_WRITE  0x2u
+#define USER_FS_OPEN_CREAT  0x4u
+#define USER_FS_OPEN_APPEND 0x8u
+
 typedef struct user_rect {
     int32_t x;
     int32_t y;

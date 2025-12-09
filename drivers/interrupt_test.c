@@ -12,6 +12,8 @@
 #include "../mm/kernel_heap.h"
 #include "../mm/paging.h"
 #include "../mm/phys_virt.h"
+#include "../mm/process_vm.h"
+#include "../mm/page_alloc.h"
 #include "../lib/cpu.h"
 #include "../lib/io.h"
 #include "../lib/memory.h"
@@ -1229,6 +1231,52 @@ int run_control_flow_tests(void) {
 
 #if ENABLE_BUILTIN_TESTS
 /*
+ * Regression: process VM teardown should return page frames to the allocator.
+ */
+static int test_process_vm_releases_pages(void) {
+    uint32_t base_total = 0, base_free = 0, base_alloc = 0;
+    get_page_allocator_stats(&base_total, &base_free, &base_alloc);
+
+    uint32_t pid = create_process_vm();
+    if (pid == INVALID_PROCESS_ID) {
+        return TEST_FAILED;
+    }
+
+    int result = TEST_FAILED;
+    uint64_t region = process_vm_alloc(pid,
+                                       PAGE_SIZE_4KB * 2,
+                                       VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USER);
+    if (region == 0) {
+        goto out;
+    }
+
+    if (process_vm_free(pid, region, PAGE_SIZE_4KB * 2) != 0) {
+        goto out;
+    }
+
+    if (destroy_process_vm(pid) != 0) {
+        pid = INVALID_PROCESS_ID;
+        goto out_stats;
+    }
+    pid = INVALID_PROCESS_ID;
+
+out_stats:
+    {
+        uint32_t end_total = 0, end_free = 0, end_alloc = 0;
+        get_page_allocator_stats(&end_total, &end_free, &end_alloc);
+        if (end_free == base_free && end_alloc == base_alloc) {
+            result = TEST_SUCCESS;
+        }
+    }
+
+out:
+    if (pid != INVALID_PROCESS_ID) {
+        destroy_process_vm(pid);
+    }
+    return result;
+}
+
+/*
  * Test: Context switch balance verification
  * Runs the smoke test and verifies balanced context switch transitions
  */
@@ -1279,6 +1327,10 @@ int run_scheduler_tests(void) {
     int ramfs_tests_passed = run_ramfs_tests();
     test_record_bulk(5, (uint32_t)ramfs_tests_passed, 0, 0);
     total_passed += ramfs_tests_passed;
+
+    int vm_balance_result = test_process_vm_releases_pages();
+    test_record_simple("process_vm_releases_pages", vm_balance_result);
+    if (vm_balance_result == 0) total_passed++;
 
     /* Privilege separation invariants */
     int priv_result = run_privilege_separation_invariant_test();

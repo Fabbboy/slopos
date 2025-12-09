@@ -65,6 +65,33 @@ typedef struct task_context {
     uint64_t cr3;  /* Page directory base register */
 } __attribute__((packed)) task_context_t;
 
+/* Ensure the assembly context switchers and C layout stay in sync. */
+_Static_assert(offsetof(task_context_t, rax)   == 0x00, "rax offset mismatch");
+_Static_assert(offsetof(task_context_t, rbx)   == 0x08, "rbx offset mismatch");
+_Static_assert(offsetof(task_context_t, rcx)   == 0x10, "rcx offset mismatch");
+_Static_assert(offsetof(task_context_t, rdx)   == 0x18, "rdx offset mismatch");
+_Static_assert(offsetof(task_context_t, rsi)   == 0x20, "rsi offset mismatch");
+_Static_assert(offsetof(task_context_t, rdi)   == 0x28, "rdi offset mismatch");
+_Static_assert(offsetof(task_context_t, rbp)   == 0x30, "rbp offset mismatch");
+_Static_assert(offsetof(task_context_t, rsp)   == 0x38, "rsp offset mismatch");
+_Static_assert(offsetof(task_context_t, r8)    == 0x40, "r8 offset mismatch");
+_Static_assert(offsetof(task_context_t, r9)    == 0x48, "r9 offset mismatch");
+_Static_assert(offsetof(task_context_t, r10)   == 0x50, "r10 offset mismatch");
+_Static_assert(offsetof(task_context_t, r11)   == 0x58, "r11 offset mismatch");
+_Static_assert(offsetof(task_context_t, r12)   == 0x60, "r12 offset mismatch");
+_Static_assert(offsetof(task_context_t, r13)   == 0x68, "r13 offset mismatch");
+_Static_assert(offsetof(task_context_t, r14)   == 0x70, "r14 offset mismatch");
+_Static_assert(offsetof(task_context_t, r15)   == 0x78, "r15 offset mismatch");
+_Static_assert(offsetof(task_context_t, rip)   == 0x80, "rip offset mismatch");
+_Static_assert(offsetof(task_context_t, rflags)== 0x88, "rflags offset mismatch");
+_Static_assert(offsetof(task_context_t, cs)    == 0x90, "cs offset mismatch");
+_Static_assert(offsetof(task_context_t, ds)    == 0x98, "ds offset mismatch");
+_Static_assert(offsetof(task_context_t, es)    == 0xA0, "es offset mismatch");
+_Static_assert(offsetof(task_context_t, fs)    == 0xA8, "fs offset mismatch");
+_Static_assert(offsetof(task_context_t, gs)    == 0xB0, "gs offset mismatch");
+_Static_assert(offsetof(task_context_t, ss)    == 0xB8, "ss offset mismatch");
+_Static_assert(offsetof(task_context_t, cr3)   == 0xC0, "cr3 offset mismatch");
+
 /* Task control block */
 typedef struct task {
     uint32_t task_id;                    /* Unique task identifier */

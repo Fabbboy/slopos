@@ -37,14 +37,15 @@ typedef struct file_descriptor {
     int valid;
 } file_descriptor_t;
 
-void fileio_init(void);
-int file_open(const char *path, uint32_t flags);
-ssize_t file_read(int fd, void *buffer, size_t count);
-ssize_t file_write(int fd, const void *buffer, size_t count);
-int file_close(int fd);
-int file_seek(int fd, uint64_t offset, int whence);
-size_t file_get_size(int fd);
-int file_exists(const char *path);
-int file_unlink(const char *path);
+int fileio_create_table_for_process(uint32_t process_id);
+void fileio_destroy_table_for_process(uint32_t process_id);
+int file_open_for_process(uint32_t process_id, const char *path, uint32_t flags);
+ssize_t file_read_fd(uint32_t process_id, int fd, void *buffer, size_t count);
+ssize_t file_write_fd(uint32_t process_id, int fd, const void *buffer, size_t count);
+int file_close_fd(uint32_t process_id, int fd);
+int file_seek_fd(uint32_t process_id, int fd, uint64_t offset, int whence);
+size_t file_get_size_fd(uint32_t process_id, int fd);
+int file_exists_path(const char *path);
+int file_unlink_path(const char *path);
 
 #endif /* FS_FILEIO_H */

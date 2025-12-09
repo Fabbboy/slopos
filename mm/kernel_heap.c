@@ -16,6 +16,7 @@
 #include "../boot/kernel_panic.h"
 #include "../lib/memory.h"
 #include "memory_layout.h"
+#include "../lib/spinlock.h"
 
 /* ========================================================================
  * KERNEL HEAP CONSTANTS
@@ -70,6 +71,7 @@ typedef struct kernel_heap {
 /* Global kernel heap instance */
 static kernel_heap_t kernel_heap = {0};
 static uint32_t heap_diagnostics_enabled = 1;
+static spinlock_t kernel_heap_lock;
 
 /* Upper bounds for each size class to aid diagnostics */
 static const uint32_t size_class_thresholds[15] = {
@@ -342,6 +344,8 @@ void *kmalloc(size_t size) {
         return NULL;
     }
 
+    uint64_t guard = spinlock_lock_irqsave(&kernel_heap_lock);
+
     /* Round up size and add header overhead */
     uint32_t rounded_size = round_up_size(size);
     uint32_t total_size = rounded_size + sizeof(heap_block_t);
@@ -353,6 +357,7 @@ void *kmalloc(size_t size) {
     if (!block) {
         if (expand_heap(total_size) != 0) {
             wl_award_loss();
+            spinlock_unlock_irqrestore(&kernel_heap_lock, guard);
             return NULL;
         }
         block = find_free_block(total_size);
@@ -361,6 +366,7 @@ void *kmalloc(size_t size) {
     if (!block) {
         klog_printf(KLOG_INFO, "kmalloc: No suitable block found after expansion\n");
         wl_award_loss();
+        spinlock_unlock_irqrestore(&kernel_heap_lock, guard);
         return NULL;
     }
 
@@ -393,7 +399,9 @@ void *kmalloc(size_t size) {
 
     /* Return pointer to data area */
     wl_award_win();
-    return (void*)((uint8_t*)block + sizeof(heap_block_t));
+    void *ptr = (void*)((uint8_t*)block + sizeof(heap_block_t));
+    spinlock_unlock_irqrestore(&kernel_heap_lock, guard);
+    return ptr;
 }
 
 /*
@@ -419,12 +427,15 @@ void kfree(void *ptr) {
         return;
     }
 
+    uint64_t guard = spinlock_lock_irqsave(&kernel_heap_lock);
+
     /* Get block header */
     heap_block_t *block = (heap_block_t*)((uint8_t*)ptr - sizeof(heap_block_t));
 
     if (!validate_block(block) || block->magic != BLOCK_MAGIC_ALLOCATED) {
         klog_printf(KLOG_INFO, "kfree: Invalid block or double free detected\n");
         wl_award_loss();
+        spinlock_unlock_irqrestore(&kernel_heap_lock, guard);
         return;
     }
 
@@ -435,6 +446,7 @@ void kfree(void *ptr) {
 
     /* Add to free list */
     add_to_free_list(block);
+    spinlock_unlock_irqrestore(&kernel_heap_lock, guard);
     wl_award_win();
 }
 
@@ -448,6 +460,7 @@ void kfree(void *ptr) {
  */
 int init_kernel_heap(void) {
     klog_debug("Initializing kernel heap");
+    spinlock_init(&kernel_heap_lock);
 
     kernel_heap.start_addr = mm_get_kernel_heap_start();
     kernel_heap.end_addr = mm_get_kernel_heap_end();

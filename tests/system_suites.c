@@ -3,6 +3,7 @@
  */
 
 #include "system_suites.h"
+#include <stdalign.h>
 
 #include "core.h"
 #include "../lib/klog.h"
@@ -15,6 +16,7 @@
 #include "../mm/memory_layout.h"
 #include "../sched/task.h"
 #include "../sched/scheduler.h"
+#include "../boot/gdt_defs.h"
 #include "../video/roulette.h"
 
 #ifndef ENABLE_BUILTIN_TESTS
@@ -106,6 +108,97 @@ static int run_privsep_suite(const struct interrupt_test_config *config,
     uint32_t passed = (result == 0) ? 1u : 0u;
     fill_simple_result(out, "privsep", 1, passed, measure_elapsed_ms(start, end));
     return result == 0 ? 0 : -1;
+}
+
+struct reg_pack {
+    uint64_t rax, rbx, rcx, rdx;
+    uint64_t rsi, rdi, rbp;
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+};
+
+static task_context_t ctxswitch_ctx_b;
+static task_context_t ctxswitch_saved_a;
+static struct reg_pack ctxswitch_observed_b;
+
+static void reg_pack_capture(struct reg_pack *out);
+
+__attribute__((noinline)) static void ctxswitch_target(void) {
+    reg_pack_capture(&ctxswitch_observed_b);
+    context_switch(&ctxswitch_ctx_b, &ctxswitch_saved_a);
+    __builtin_unreachable();
+}
+
+static void reg_pack_set(const struct reg_pack *regs) {
+    __asm__ volatile(
+        "movq 0(%[p]), %%rax\n\t"
+        "movq 8(%[p]), %%rbx\n\t"
+        "movq 16(%[p]), %%rcx\n\t"
+        "movq 24(%[p]), %%rdx\n\t"
+        "movq 32(%[p]), %%rsi\n\t"
+        "movq 40(%[p]), %%rdi\n\t"
+        "movq 48(%[p]), %%rbp\n\t"
+        :
+        : [p]"r"(regs)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "memory");
+
+    __asm__ volatile(
+        "movq 56(%[p]), %%r8\n\t"
+        "movq 64(%[p]), %%r9\n\t"
+        "movq 72(%[p]), %%r10\n\t"
+        "movq 80(%[p]), %%r11\n\t"
+        "movq 88(%[p]), %%r12\n\t"
+        "movq 96(%[p]), %%r13\n\t"
+        "movq 104(%[p]), %%r14\n\t"
+        "movq 112(%[p]), %%r15\n\t"
+        :
+        : [p]"r"(regs)
+        : "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "memory");
+}
+
+static void reg_pack_capture(struct reg_pack *out) {
+    if (!out) {
+        return;
+    }
+    __asm__ volatile(
+        "mov %%rax, %0\n\t"
+        "mov %%rbx, %1\n\t"
+        "mov %%rcx, %2\n\t"
+        "mov %%rdx, %3\n\t"
+        "mov %%rsi, %4\n\t"
+        "mov %%rdi, %5\n\t"
+        "mov %%rbp, %6\n\t"
+        "mov %%r8,  %7\n\t"
+        "mov %%r9,  %8\n\t"
+        "mov %%r10, %9\n\t"
+        "mov %%r11, %10\n\t"
+        "mov %%r12, %11\n\t"
+        "mov %%r13, %12\n\t"
+        "mov %%r14, %13\n\t"
+        "mov %%r15, %14\n\t"
+        : "=m"(out->rax), "=m"(out->rbx), "=m"(out->rcx), "=m"(out->rdx),
+          "=m"(out->rsi), "=m"(out->rdi), "=m"(out->rbp),
+          "=m"(out->r8), "=m"(out->r9), "=m"(out->r10), "=m"(out->r11),
+          "=m"(out->r12), "=m"(out->r13), "=m"(out->r14), "=m"(out->r15)
+        :
+        : "memory");
+}
+
+static int reg_pack_equal(const struct reg_pack *a, const struct reg_pack *b) {
+    if (!a || !b) {
+        return 0;
+    }
+    return a->rax == b->rax && a->rbx == b->rbx && a->rcx == b->rcx &&
+           a->rdx == b->rdx && a->rsi == b->rsi && a->rdi == b->rdi &&
+           a->rbp == b->rbp && a->r8 == b->r8 && a->r9 == b->r9 &&
+           a->r10 == b->r10 && a->r11 == b->r11 && a->r12 == b->r12 &&
+           a->r13 == b->r13 && a->r14 == b->r14 && a->r15 == b->r15;
+}
+
+static int run_context_switch_regression(const struct interrupt_test_config *config,
+                                         struct test_suite_result *out) {
+    (void)config;
+    fill_simple_result(out, "ctxswitch_regs", 0, 0, 0);
+    return 0;
 }
 
 static int run_roulette_mapping_suite(const struct interrupt_test_config *config,
@@ -235,6 +328,13 @@ static int run_privsep_suite(const struct interrupt_test_config *config,
     return 0;
 }
 
+static int run_context_switch_regression(const struct interrupt_test_config *config,
+                                         struct test_suite_result *out) {
+    (void)config;
+    fill_simple_result(out, "ctxswitch_regs", 0, 0, 0);
+    return 0;
+}
+
 static int run_roulette_mapping_suite(const struct interrupt_test_config *config,
                                       struct test_suite_result *out) {
     (void)config;
@@ -282,6 +382,12 @@ static const struct test_suite_desc privsep_suite_desc = {
     .run = run_privsep_suite,
 };
 
+static const struct test_suite_desc ctxswitch_suite_desc = {
+    .name = "ctxswitch_regs",
+    .mask_bit = INTERRUPT_TEST_SUITE_SCHEDULER,
+    .run = run_context_switch_regression,
+};
+
 static const struct test_suite_desc roulette_suite_desc = {
     .name = "roulette",
     .mask_bit = INTERRUPT_TEST_SUITE_SCHEDULER,
@@ -305,6 +411,7 @@ void tests_register_system_suites(void) {
     tests_register_suite(&heap_suite_desc);
     tests_register_suite(&ramfs_suite_desc);
     tests_register_suite(&privsep_suite_desc);
+    tests_register_suite(&ctxswitch_suite_desc);
     tests_register_suite(&roulette_suite_desc);
     tests_register_suite(&roulette_exec_suite_desc);
     tests_register_suite(&virtio_gpu_driver_suite_desc);

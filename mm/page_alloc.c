@@ -14,6 +14,7 @@
 #include "phys_virt.h"
 #include "../lib/alignment.h"
 #include "../boot/kernel_panic.h"
+#include "../lib/spinlock.h"
 
 /* ========================================================================
  * PHYSICAL PAGE FRAME CONSTANTS
@@ -57,6 +58,7 @@ typedef struct page_allocator {
 } page_allocator_t;
 
 static page_allocator_t page_allocator = {0};
+static spinlock_t page_alloc_lock;
 
 /* ========================================================================
  * UTILITY FUNCTIONS
@@ -297,13 +299,16 @@ uint64_t alloc_page_frames(uint32_t count, uint32_t flags) {
         order = flag_order;
     }
 
+    uint64_t guard = spinlock_lock_irqsave(&page_alloc_lock);
     uint32_t frame_num = allocate_block(order, flags);
     if (frame_num == INVALID_PAGE_FRAME) {
+        spinlock_unlock_irqrestore(&page_alloc_lock, guard);
         klog_info("alloc_page_frames: No suitable block available");
         return 0;
     }
 
     uint64_t phys_addr = frame_to_phys(frame_num);
+    spinlock_unlock_irqrestore(&page_alloc_lock, guard);
     if (flags & ALLOC_FLAG_ZERO) {
         uint64_t span_pages = order_block_pages(order);
         for (uint64_t i = 0; i < span_pages; i++) {
@@ -323,21 +328,25 @@ uint64_t alloc_page_frame(uint32_t flags) {
 }
 
 int free_page_frame(uint64_t phys_addr) {
+    uint64_t guard = spinlock_lock_irqsave(&page_alloc_lock);
     uint32_t frame_num = phys_to_frame(phys_addr);
 
     if (!is_valid_frame(frame_num)) {
         klog_info("free_page_frame: Invalid physical address");
+        spinlock_unlock_irqrestore(&page_alloc_lock, guard);
         return -1;
     }
 
     page_frame_t *frame = get_frame_desc(frame_num);
     if (!frame_state_is_allocated(frame->state)) {
         /* Quietly ignore duplicates or reserved frames */
+        spinlock_unlock_irqrestore(&page_alloc_lock, guard);
         return 0;
     }
 
     if (frame->ref_count > 1) {
         frame->ref_count--;
+        spinlock_unlock_irqrestore(&page_alloc_lock, guard);
         return 0;
     }
 
@@ -352,6 +361,7 @@ int free_page_frame(uint64_t phys_addr) {
         (page_allocator.allocated_frames > pages) ? page_allocator.allocated_frames - pages : 0;
 
     insert_block_coalescing(frame_num, order);
+    spinlock_unlock_irqrestore(&page_alloc_lock, guard);
     return 0;
 }
 
@@ -374,6 +384,7 @@ int init_page_allocator(void *frame_array, uint32_t max_frames) {
     }
 
     klog_debug("Initializing page frame allocator");
+    spinlock_init(&page_alloc_lock);
 
     page_allocator.frames = frames;
     page_allocator.total_frames = max_frames;
