@@ -450,7 +450,7 @@ int run_privilege_separation_invariant_test(void) {
 
 ## Current User Mode Tasks
 
-**Location:** `boot/early_init.c`, `video/roulette_user.c`, `shell/shell.c`
+**Location:** `boot/early_init.c`, `video/roulette_user.c`, `userland/bootstrap.c`
 
 1. **Roulette Task** (created at boot):
    ```c
@@ -458,9 +458,9 @@ int run_privilege_separation_invariant_test(void) {
    task_create("roulette", roulette_user_main, NULL, 5, TASK_FLAG_USER_MODE);
    ```
 
-2. **Shell Task** (spawned via syscall):
+2. **Shell Task** (spawned via fate hook):
    ```c
-   /* shell/shell.c */
+   /* userland/bootstrap.c */
    task_create("shell", shell_user_main, NULL, 5, TASK_FLAG_USER_MODE);
    ```
 
