@@ -53,6 +53,7 @@ typedef struct process_vm {
     uint32_t total_pages;         /* Total allocated pages */
     uint32_t flags;               /* Process VM flags */
     struct process_vm *next;      /* Next process in global list */
+    spinlock_t lock;              /* Protects VMA/mapping mutation */
 } process_vm_t;
 
 /* Global process VM manager */
@@ -67,6 +68,14 @@ typedef struct vm_manager {
 /* Global VM manager instance */
 static vm_manager_t vm_manager = {0};
 static spinlock_t vm_lock;
+
+static inline uint64_t process_vm_lock(process_vm_t *process) {
+    return spinlock_lock_irqsave(&process->lock);
+}
+
+static inline void process_vm_unlock(process_vm_t *process, uint64_t guard) {
+    spinlock_unlock_irqrestore(&process->lock, guard);
+}
 
 /* ========================================================================
  * UTILITY FUNCTIONS
@@ -492,6 +501,7 @@ uint32_t create_process_vm(void) {
     }
 
     /* Initialize process VM descriptor */
+    spinlock_init(&process->lock);
     process->process_id = process_id;
     process->page_dir = page_dir;
     process->vma_list = NULL;
@@ -565,6 +575,8 @@ int destroy_process_vm(uint32_t process_id) {
 
     klog_printf(KLOG_INFO, "Destroying process VM space for PID %u\n", process_id);
 
+    uint64_t guard = process_vm_lock(process);
+
     /* Free all mappings owned by the process */
     teardown_process_mappings(process);
 
@@ -579,7 +591,7 @@ int destroy_process_vm(uint32_t process_id) {
         process->page_dir = NULL;
     }
 
-    uint64_t guard = spinlock_lock_irqsave(&vm_lock);
+    uint64_t vm_guard = spinlock_lock_irqsave(&vm_lock);
     /* Remove from process list */
     if (vm_manager.process_list == process) {
         vm_manager.process_list = process->next;
@@ -605,7 +617,8 @@ int destroy_process_vm(uint32_t process_id) {
     process->total_pages = 0;
     process->flags = 0;
     vm_manager.num_processes--;
-    spinlock_unlock_irqrestore(&vm_lock, guard);
+    spinlock_unlock_irqrestore(&vm_lock, vm_guard);
+    process_vm_unlock(process, guard);
 
     return 0;
 }
@@ -624,6 +637,8 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
         return 0;
     }
 
+    uint64_t guard = process_vm_lock(process);
+
     const process_memory_layout_t *layout = mm_get_process_layout();
 
     /* Align size to page boundary */
@@ -635,6 +650,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
 
     if (end_addr > layout->heap_max) {
         klog_printf(KLOG_INFO, "process_vm_alloc: Heap overflow\n");
+        process_vm_unlock(process, guard);
         return 0;
     }
 
@@ -651,6 +667,7 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
 
     uint32_t pages_mapped = 0;
     if (map_user_range(process->page_dir, start_addr, end_addr, map_flags, &pages_mapped) != 0) {
+        process_vm_unlock(process, guard);
         return 0;
     }
 
@@ -660,10 +677,12 @@ uint64_t process_vm_alloc(uint32_t process_id, uint64_t size, uint32_t flags) {
         klog_printf(KLOG_INFO, "process_vm_alloc: Failed to record VMA\n");
         unmap_user_range(process->page_dir, start_addr, end_addr);
         process->heap_end = start_addr;
+        process_vm_unlock(process, guard);
         return 0;
     }
 
     process->total_pages += pages_mapped;
+    process_vm_unlock(process, guard);
     return start_addr;
 }
 
@@ -676,18 +695,22 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
         return -1;
     }
 
+    uint64_t guard = process_vm_lock(process);
+
     /* Align to page boundary */
     uint64_t start = vaddr & ~(PAGE_SIZE_4KB - 1);
     uint64_t end = (vaddr + size + PAGE_SIZE_4KB - 1) & ~(PAGE_SIZE_4KB - 1);
 
     if (!vma_range_valid(start, end)) {
         klog_printf(KLOG_INFO, "process_vm_free: Invalid or unaligned range\n");
+        process_vm_unlock(process, guard);
         return -1;
     }
 
     vm_area_t *vma = find_vma_covering(process, start, end);
     if (!vma) {
         klog_printf(KLOG_INFO, "process_vm_free: Range not covered by a VMA\n");
+        process_vm_unlock(process, guard);
         return -1;
     }
 
@@ -725,6 +748,7 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
         process->heap_end = start;
     }
 
+    process_vm_unlock(process, guard);
     return 0;
 }
 
