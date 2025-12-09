@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(c_variadic)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod cpu {
@@ -37,6 +38,71 @@ pub mod cpu {
         loop {
             hlt();
         }
+    }
+
+    #[inline(always)]
+    pub fn read_rbp() -> u64 {
+        let rbp: u64;
+        unsafe {
+            asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags));
+        }
+        rbp
+    }
+
+    #[inline(always)]
+    pub fn read_cr3() -> u64 {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
+
+    #[inline(always)]
+    pub fn read_msr(msr: u32) -> u64 {
+        let low: u32;
+        let high: u32;
+        unsafe {
+            asm!(
+                "rdmsr",
+                out("eax") low,
+                out("edx") high,
+                in("ecx") msr,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        ((high as u64) << 32) | (low as u64)
+    }
+
+    #[inline(always)]
+    pub fn write_msr(msr: u32, value: u64) {
+        let low = value as u32;
+        let high = (value >> 32) as u32;
+        unsafe {
+            asm!(
+                "wrmsr",
+                in("eax") low,
+                in("edx") high,
+                in("ecx") msr,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+
+    #[inline(always)]
+    pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
+        let (mut eax, mut ebx, mut ecx, mut edx) = (0u32, 0u32, 0u32, 0u32);
+        unsafe {
+            asm!(
+                "cpuid",
+                inout("eax") leaf => eax,
+                out("ebx") ebx,
+                out("ecx") ecx,
+                out("edx") edx,
+                options(nomem, nostack)
+            );
+        }
+        (eax, ebx, ecx, edx)
     }
 }
 
@@ -111,6 +177,20 @@ pub mod tsc {
         ((hi as u64) << 32) | (lo as u64)
     }
 }
+
+pub mod string;
+pub mod memory;
+pub mod numfmt;
+pub mod klog;
+pub mod stacktrace;
+pub mod kdiag;
+
+pub use kdiag::{interrupt_frame, KDIAG_STACK_TRACE_DEPTH};
+pub use klog::{
+    klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_printf,
+    klog_set_level, KlogLevel,
+};
+pub use stacktrace::stacktrace_entry;
 
 #[inline(always)]
 pub const fn align_up(value: usize, align: usize) -> usize {
