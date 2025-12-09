@@ -4,8 +4,9 @@ rust_target = 'x86_64-unknown-none'
 rust_profile = get_option('buildtype') == 'release' ? 'release' : 'dev'
 rust_profile_dir = rust_profile == 'release' ? 'release' : 'debug'
 
-# Find cargo
+# Find toolchain helpers (resolve via PATH; callers may extend PATH to ~/.cargo/bin)
 cargo = find_program('cargo', required: true)
+rustup = find_program('rustup', required: true)
 
 # Rust source files (for dependency tracking)
 rust_sources = files(
@@ -29,7 +30,10 @@ rust_graphics_build = custom_target('rust_graphics',
     input: rust_sources,
     command: [
         'sh', '-c',
-        cargo.full_path() + ' build ' +
+        'PATH=$HOME/.cargo/bin:$PATH ' +
+        'RUSTUP_TOOLCHAIN=nightly ' + rustup.full_path() + ' +nightly target add ' + rust_target + ' && ' +
+        'PATH=$HOME/.cargo/bin:$PATH ' +
+        'RUSTUP_TOOLCHAIN=nightly ' + cargo.full_path() + ' +nightly build ' +
         '--manifest-path ' + meson.current_source_dir() / 'Cargo.toml' + ' ' +
         '--package graphics ' +
         '--target ' + rust_target + ' ' +
