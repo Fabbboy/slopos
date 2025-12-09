@@ -15,6 +15,7 @@
 #include "../mm/process_vm.h"
 #include "../sched/scheduler.h"
 #include "../sched/task.h"
+#include "../lib/klog.h"
 
 static int kernel_guard_checked = 0;
 
@@ -50,6 +51,7 @@ static int validate_user_buffer(uint64_t user_ptr, size_t len, process_page_dir_
          */
         uint64_t kernel_probe = mm_get_kernel_heap_start();
         if (paging_is_user_accessible(dir, kernel_probe)) {
+            klog_printf(KLOG_INFO, "USER_COPY_GUARD: Kernel heap unexpectedly user-accessible\n");
             return -1;
         }
         kernel_guard_checked = 1;

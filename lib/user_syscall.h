@@ -8,7 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "../drivers/syscall.h"
+#include "syscall_numbers.h"
 #include "user_syscall_defs.h"
 
 #define _STRINGIFY2(x) #x
@@ -190,6 +190,113 @@ static inline long sys_roulette_result(uint64_t fate_packed) {
         : "r"(fate_packed)
         : "rax", "rdi", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
     return ret;
+}
+
+static inline long sys_fs_stat(const char *path, user_fs_stat_t *out_stat) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_STAT) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "mov %2, %%rsi\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path), "r"(out_stat)
+        : "rax", "rdi", "rsi", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_fs_read(const char *path, void *buf, size_t len) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_READ) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "mov %2, %%rsi\n\t"
+        "mov %3, %%rdx\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path), "r"(buf), "r"(len)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_fs_write(const char *path, const void *buf, size_t len) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_WRITE) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "mov %2, %%rsi\n\t"
+        "mov %3, %%rdx\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path), "r"(buf), "r"(len)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_fs_mkdir(const char *path) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_MKDIR) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path)
+        : "rax", "rdi", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_fs_unlink(const char *path) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_UNLINK) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path)
+        : "rax", "rdi", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_fs_list(const char *path, user_fs_list_t *list) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_FS_LIST) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "mov %2, %%rsi\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(path), "r"(list)
+        : "rax", "rdi", "rsi", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_sys_info(user_sys_info_t *info) {
+    long ret;
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_SYS_INFO) ", %%rax\n\t"
+        "mov %1, %%rdi\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(ret)
+        : "r"(info)
+        : "rax", "rdi", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
+    return ret;
+}
+
+static inline long sys_halt(void) {
+    __asm__ volatile(
+        "mov $" _STRINGIFY(SYSCALL_HALT) ", %%rax\n\t"
+        "int $0x80\n\t"
+        :
+        :
+        : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory");
+    __builtin_unreachable();
 }
 
 #endif /* LIB_USER_SYSCALL_H */

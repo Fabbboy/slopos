@@ -102,6 +102,11 @@ typedef struct task {
     uint8_t user_started;                /* User task has executed in ring3 */
     uint8_t context_from_user;           /* Context saved from user frame */
 
+    /* Exit / fault bookkeeping */
+    uint16_t exit_reason;                /* See task_exit_reason */
+    uint16_t fault_reason;               /* Detailed fault code when exit_reason indicates fault */
+    uint32_t exit_code;                  /* Optional code for normal exit paths */
+
     /* Fate/roulette handshake state (protected by fate service) */
     uint32_t fate_token;                 /* Pending fate token */
     uint32_t fate_value;                 /* Pending fate value */
@@ -125,6 +130,29 @@ const char *task_state_to_string(uint8_t state);
 typedef void (*task_iterate_cb)(task_t *task, void *context);
 void task_iterate_active(task_iterate_cb callback, void *context);
 
+/* Exit record helpers */
+typedef struct task_exit_record {
+    uint32_t task_id;
+    uint16_t exit_reason;
+    uint16_t fault_reason;
+    uint32_t exit_code;
+} task_exit_record_t;
+
+enum task_exit_reason {
+    TASK_EXIT_REASON_NONE = 0,
+    TASK_EXIT_REASON_NORMAL = 1,
+    TASK_EXIT_REASON_USER_FAULT = 2,
+    TASK_EXIT_REASON_KERNEL = 3,
+};
+
+enum task_fault_reason {
+    TASK_FAULT_NONE = 0,
+    TASK_FAULT_USER_PAGE,
+    TASK_FAULT_USER_GP,
+    TASK_FAULT_USER_UD,
+    TASK_FAULT_USER_DEVICE_NA,
+};
+
 /* ========================================================================
  * TASK MANAGEMENT API
  * ======================================================================== */
@@ -143,6 +171,7 @@ void task_set_current(task_t *task);
 int task_shutdown_all(void);
 void get_task_stats(uint32_t *total_tasks, uint32_t *active_tasks,
                    uint64_t *context_switches);
+int task_get_exit_record(uint32_t task_id, task_exit_record_t *record_out);
 
 /*
  * Task state helpers for scheduler coordination

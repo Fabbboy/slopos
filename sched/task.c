@@ -19,6 +19,9 @@
 #include "scheduler.h"
 #include "../boot/kernel_panic.h"
 #include "../boot/init.h"
+#include "../user/user_sections.h"
+
+extern char _user_text_start[], _user_text_end[];
 
 /* Task manager structure */
 typedef struct task_manager {
@@ -31,6 +34,8 @@ typedef struct task_manager {
     uint64_t total_yields;               /* Total voluntary yields */
     uint32_t tasks_created;              /* Total tasks created */
     uint32_t tasks_terminated;           /* Total tasks terminated */
+
+    task_exit_record_t exit_records[MAX_TASKS]; /* Persisted exit info */
 } task_manager_t;
 
 /* Global task manager instance */
@@ -38,6 +43,10 @@ static task_manager_t task_manager = {0};
 
 /* Forward declarations */
 static void release_task_dependents(uint32_t completed_task_id);
+static int user_entry_is_allowed(uint64_t addr);
+static size_t task_slot_index(const task_t *task);
+static void record_task_exit(task_t *task, uint16_t exit_reason, uint16_t fault_reason, uint32_t exit_code);
+static void clear_exit_record(task_t *task);
 
 /* ========================================================================
  * UTILITY FUNCTIONS
@@ -90,6 +99,45 @@ static void release_task_dependents(uint32_t completed_task_id) {
             klog_printf(KLOG_INFO, "task_terminate: Failed to unblock dependent task\n");
         }
     }
+}
+
+static int user_entry_is_allowed(uint64_t addr) {
+    uint64_t start = (uint64_t)_user_text_start;
+    uint64_t end = (uint64_t)_user_text_end;
+    if (start == 0 || end == 0 || start >= end) {
+        return 0;
+    }
+    return addr >= start && addr < end;
+}
+
+static size_t task_slot_index(const task_t *task) {
+    if (!task) {
+        return (size_t)-1;
+    }
+    size_t idx = (size_t)(task - task_manager.tasks);
+    return (idx < MAX_TASKS) ? idx : (size_t)-1;
+}
+
+static void clear_exit_record(task_t *task) {
+    size_t idx = task_slot_index(task);
+    if (idx >= MAX_TASKS) {
+        return;
+    }
+    task_manager.exit_records[idx].task_id = INVALID_TASK_ID;
+    task_manager.exit_records[idx].exit_reason = TASK_EXIT_REASON_NONE;
+    task_manager.exit_records[idx].fault_reason = TASK_FAULT_NONE;
+    task_manager.exit_records[idx].exit_code = 0;
+}
+
+static void record_task_exit(task_t *task, uint16_t exit_reason, uint16_t fault_reason, uint32_t exit_code) {
+    size_t idx = task_slot_index(task);
+    if (idx >= MAX_TASKS) {
+        return;
+    }
+    task_manager.exit_records[idx].task_id = task ? task->task_id : INVALID_TASK_ID;
+    task_manager.exit_records[idx].exit_reason = exit_reason;
+    task_manager.exit_records[idx].fault_reason = fault_reason;
+    task_manager.exit_records[idx].exit_code = exit_code;
 }
 
 /*
@@ -210,6 +258,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         klog_printf(KLOG_INFO, "task_create: No free task slots\n");
         return INVALID_TASK_ID;
     }
+    clear_exit_record(task);
 
     uint32_t process_id = INVALID_PROCESS_ID;
     uint64_t stack_base = 0;
@@ -279,6 +328,24 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->stack_base = stack_base;
     task->stack_size = TASK_STACK_SIZE;
     task->stack_pointer = stack_base + TASK_STACK_SIZE - 16;  /* 16-byte align */
+    if ((flags & TASK_FLAG_USER_MODE) && !user_entry_is_allowed((uint64_t)entry_point)) {
+        klog_printf(KLOG_INFO, "task_create: user entry 0x%llx outside user_text window\n",
+                    (unsigned long long)entry_point);
+        /* Roll back partial allocation for user tasks */
+        if (process_id != INVALID_PROCESS_ID) {
+            destroy_process_vm(process_id);
+        }
+        if (task->kernel_stack_base) {
+            kfree((void *)task->kernel_stack_base);
+            task->kernel_stack_base = 0;
+            task->kernel_stack_top = 0;
+            task->kernel_stack_size = 0;
+        }
+        task->task_id = INVALID_TASK_ID;
+        task->state = TASK_STATE_INVALID;
+        return INVALID_TASK_ID;
+    }
+
     task->entry_point = entry_point;
     task->entry_arg = arg;
     task->time_slice = 10;  /* Default time slice */
@@ -290,6 +357,9 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
     task->waiting_on_task_id = INVALID_TASK_ID;
     task->user_started = 0;
     task->context_from_user = 0;
+    task->exit_reason = TASK_EXIT_REASON_NONE;
+    task->fault_reason = TASK_FAULT_NONE;
+    task->exit_code = 0;
     task->fate_token = 0;
     task->fate_value = 0;
     task->fate_pending = 0;
@@ -359,6 +429,13 @@ int task_terminate(uint32_t task_id) {
         task->last_run_timestamp = 0;
     }
 
+    /* Default exit reason if caller did not supply one */
+    if (task->exit_reason == TASK_EXIT_REASON_NONE) {
+        task->exit_reason = TASK_EXIT_REASON_KERNEL;
+    }
+
+    record_task_exit(task, task->exit_reason, task->fault_reason, task->exit_code);
+
     /* Mark task as terminated */
     task->state = TASK_STATE_TERMINATED;
     task->fate_token = 0;
@@ -411,6 +488,9 @@ int task_terminate(uint32_t task_id) {
         task->fate_value = 0;
         task->fate_pending = 0;
         task->next_ready = NULL;
+        task->exit_reason = TASK_EXIT_REASON_NONE;
+        task->fault_reason = TASK_FAULT_NONE;
+        task->exit_code = 0;
     }
 
     /* Update task manager */
@@ -471,6 +551,22 @@ int task_get_info(uint32_t task_id, task_t **task_info) {
 
     *task_info = task;
     return 0;
+}
+
+int task_get_exit_record(uint32_t task_id, task_exit_record_t *record_out) {
+    if (!record_out) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < MAX_TASKS; i++) {
+        task_exit_record_t *rec = &task_manager.exit_records[i];
+        if (rec->task_id == task_id) {
+            *record_out = *rec;
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 /*

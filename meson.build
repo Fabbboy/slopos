@@ -103,6 +103,14 @@ video_sources += files(
   'video/roulette_user.c'
 )
 
+# Userland runtime (mapped for Ring 3)
+user_dir = meson.current_source_dir() / 'user'
+user_sources = files(
+  'user/runtime.c',
+  'user/shell_user.c',
+  'user/loader.c'
+)
+
 # Lib directory - utility functions
 lib_dir = meson.current_source_dir() / 'lib'
 lib_sources += files(
@@ -151,8 +159,7 @@ sched_sources += files(
 # Shell directory
 shell_dir = meson.current_source_dir() / 'shell'
 shell_sources = files(
-  'shell/shell.c',
-  'shell/builtins.c'
+  'shell/shell.c'
 )
 
 # File system directory
@@ -180,10 +187,10 @@ endif
 kernel_sources += files()  # Will be populated when source files exist
 
 # Combine all source files
-all_sources = boot_sources + mm_sources + video_sources + drivers_sources + sched_sources + shell_sources + fs_sources + kernel_sources + lib_sources + tests_sources
+all_sources = boot_sources + mm_sources + video_sources + drivers_sources + sched_sources + shell_sources + fs_sources + kernel_sources + lib_sources + tests_sources + user_sources
 
 # Include directories
-inc_dirs = include_directories('.', 'boot', 'mm', 'video', 'drivers', 'sched', 'shell', 'fs', 'lib', 'tests')
+inc_dirs = include_directories('.', 'boot', 'mm', 'video', 'drivers', 'sched', 'shell', 'fs', 'lib', 'tests', 'user')
 
 # Custom target for assembly files (when they exist)
 # This will be used for boot assembly code that needs special handling

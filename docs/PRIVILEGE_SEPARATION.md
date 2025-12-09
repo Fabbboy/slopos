@@ -329,7 +329,12 @@ The U/S bit (bit 2) in page table entries:
 - 0 = Supervisor only (Ring 0-2)
 - 1 = User accessible (Ring 0-3)
 
-The higher-half kernel mappings remain supervisor-only; user page tables clone them without setting U/S. Any deliberate sharing must use an explicit helper that maps a chosen kernel page into user space, keeping the default template locked down.
+The higher-half kernel mappings remain supervisor-only; user page tables clone them without setting U/S. Only the dedicated `.user_text`, `.user_rodata`, and `.user_data` sections are marked U/S=1 so user tasks can execute their code without seeing kernel internals. Any additional sharing must use an explicit helper, keeping the default template locked down.
+
+### User-mapped kernel sections
+- `.user_text` holds user-executable code; `task_create` rejects user tasks whose entry RIP is outside this window.
+- `.user_rodata` and `.user_data` carry read-only and writable globals used by user tasks.
+- Kernel heap/text/data/bss remain supervisor-only; `user_copy_*` guards log and fail if kernel heap ever becomes user-accessible.
 
 #### Safe User Memory Access
 
@@ -397,6 +402,10 @@ int run_privilege_separation_invariant_test(void) {
 }
 ```
 
+### User fault reporting
+- Exceptions raised from Ring 3 set `exit_reason=TASK_EXIT_REASON_USER_FAULT` and a `fault_reason` enum (`TASK_FAULT_USER_PAGE`, `TASK_FAULT_USER_GP`, `TASK_FAULT_USER_UD`, `TASK_FAULT_USER_DEVICE_NA`).
+- The fault is logged, `wl_award_loss()` is applied, and `task_get_exit_record()` can retrieve the structured status after termination.
+
 ## Privilege Levels Summary
 
 | Component | Ring 0 (Kernel) | Ring 3 (User) |
@@ -451,8 +460,8 @@ int run_privilege_separation_invariant_test(void) {
 
 2. **Shell Task** (spawned via syscall):
    ```c
-   /* drivers/syscall.c line 125 */
-   task_create("shell", shell_main, NULL, 5, TASK_FLAG_USER_MODE);
+   /* shell/shell.c */
+   task_create("shell", shell_user_main, NULL, 5, TASK_FLAG_USER_MODE);
    ```
 
 Both tasks:

@@ -11,6 +11,7 @@
 #include "../drivers/serial.h"
 #include "../drivers/irq.h"
 #include "../drivers/syscall.h"
+#include "../drivers/wl_currency.h"
 #include "kernel_panic.h"
 #include "../sched/scheduler.h"
 #include "../sched/task.h"
@@ -349,37 +350,41 @@ void exception_bound_range(struct interrupt_frame *frame) {
     kdiag_dump_interrupt_frame(frame);
 }
 
-enum user_fault_reason {
-    USER_FAULT_PAGE = 0,
-    USER_FAULT_GP,
-    USER_FAULT_UD,
-    USER_FAULT_DEVICE_NA,
-    USER_FAULT_MAX
-};
-
-static const char *user_fault_reason_str[USER_FAULT_MAX] = {
-    [USER_FAULT_PAGE] = "user page fault",
-    [USER_FAULT_GP] = "user general protection fault (likely privileged instruction or bad segment)",
-    [USER_FAULT_UD] = "user invalid opcode",
-    [USER_FAULT_DEVICE_NA] = "user device not available",
-};
+static const char *fault_reason_str(enum task_fault_reason reason) {
+    switch (reason) {
+    case TASK_FAULT_USER_PAGE:
+        return "user page fault";
+    case TASK_FAULT_USER_GP:
+        return "user general protection fault (privileged instruction or bad segment)";
+    case TASK_FAULT_USER_UD:
+        return "user invalid opcode";
+    case TASK_FAULT_USER_DEVICE_NA:
+        return "user device not available";
+    default:
+        return "user fault";
+    }
+}
 
 static int in_user(const struct interrupt_frame *frame) {
     return (frame->cs & 0x3) == 0x3;
 }
 
-static void terminate_user_task(enum user_fault_reason reason,
+static void terminate_user_task(enum task_fault_reason reason,
                                 struct interrupt_frame *frame,
                                 const char *detail) {
     task_t *task = scheduler_get_current_task();
     uint32_t tid = task ? task->task_id : INVALID_TASK_ID;
-    const char *why = (reason < USER_FAULT_MAX) ? user_fault_reason_str[reason] : "user fault";
+    const char *why = fault_reason_str(reason);
 
     klog_printf(KLOG_INFO, "Terminating user task %u: %s\n", tid, why);
     if (detail) {
         klog_printf(KLOG_INFO, "Detail: %s\n", detail);
     }
     if (task) {
+        task->exit_reason = TASK_EXIT_REASON_USER_FAULT;
+        task->fault_reason = reason;
+        task->exit_code = 1;
+        wl_award_loss();
         task_terminate(tid);
         scheduler_request_reschedule_from_interrupt();
     }
@@ -388,7 +393,7 @@ static void terminate_user_task(enum user_fault_reason reason,
 
 void exception_invalid_opcode(struct interrupt_frame *frame) {
     if (in_user(frame)) {
-        terminate_user_task(USER_FAULT_UD, frame, "invalid opcode in user mode");
+        terminate_user_task(TASK_FAULT_USER_UD, frame, "invalid opcode in user mode");
         return;
     }
     klog_printf(KLOG_INFO, "FATAL: Invalid opcode\n");
@@ -398,7 +403,7 @@ void exception_invalid_opcode(struct interrupt_frame *frame) {
 
 void exception_device_not_available(struct interrupt_frame *frame) {
     if (in_user(frame)) {
-        terminate_user_task(USER_FAULT_DEVICE_NA, frame, "device not available in user mode");
+        terminate_user_task(TASK_FAULT_USER_DEVICE_NA, frame, "device not available in user mode");
         return;
     }
     klog_printf(KLOG_INFO, "ERROR: Device not available\n");
@@ -431,7 +436,7 @@ void exception_stack_fault(struct interrupt_frame *frame) {
 
 void exception_general_protection(struct interrupt_frame *frame) {
     if (in_user(frame)) {
-        terminate_user_task(USER_FAULT_GP, frame, "general protection from user mode");
+        terminate_user_task(TASK_FAULT_USER_GP, frame, "general protection from user mode");
         return;
     }
     klog_printf(KLOG_INFO, "FATAL: General protection fault\n");
@@ -468,7 +473,7 @@ void exception_page_fault(struct interrupt_frame *frame) {
                 (frame->error_code & 4) ? "User" : "Supervisor");
 
     if (from_user) {
-        terminate_user_task(USER_FAULT_PAGE, frame, "user page fault");
+        terminate_user_task(TASK_FAULT_USER_PAGE, frame, "user page fault");
         return;
     }
 

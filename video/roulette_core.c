@@ -9,6 +9,14 @@
 #include <stdbool.h>
 #include "roulette.h"
 #include "roulette_core.h"
+#include "../user/user_sections.h"
+
+#if defined(__clang__)
+#pragma clang section text=".user_text" rodata=".user_rodata" data=".user_data"
+#else
+#pragma GCC push_options
+#pragma GCC section text=".user_text" rodata=".user_rodata" data=".user_data"
+#endif
 
 #define ROULETTE_BLANK_COLOR       0x181818FF
 #define ROULETTE_BLANK_HIGHLIGHT   0x444444FF
@@ -30,20 +38,37 @@ struct roulette_segment_def {
     bool is_colored;
 };
 
-static const struct roulette_segment_def roulette_segments[ROULETTE_SEGMENT_COUNT] = {
+static USER_RODATA const struct roulette_segment_def roulette_segments[ROULETTE_SEGMENT_COUNT] = {
     { true }, { false }, { true }, { false }, { true }, { false },
     { true }, { false }, { true }, { false }, { true }, { false },
 };
 
-static const int16_t roulette_cos_table[ROULETTE_SEGMENT_COUNT + 1] = {
+/* User-visible text constants kept in user_rodata so Ring 3 can read them. */
+static USER_RODATA const char TEXT_UNKNOWN[] = "? ? ?";
+static USER_RODATA const char TEXT_WIN[] = "W I N !";
+static USER_RODATA const char TEXT_WIN_SUB[] = "Fortune smiles upon the slop!";
+static USER_RODATA const char TEXT_LOSE[] = "L O S E";
+static USER_RODATA const char TEXT_LOSE_SUB[] = "L bozzo lol - try again!";
+static USER_RODATA const char TEXT_DEMO_TITLE[] = "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***";
+static USER_RODATA const char TEXT_DEMO_FB[] = "Framebuffer: WORKING | Resolution: 1024x768";
+static USER_RODATA const char TEXT_DEMO_STATUS[] = "Memory: OK | Graphics: OK | Text: OK";
+static USER_RODATA const char TEXT_HANDOFF[] = "Shell launching... enjoy the demo";
+static USER_RODATA const char TEXT_WHEEL_TITLE[] = "=== THE WHEEL OF FATE ===";
+static USER_RODATA const char TEXT_WHEEL_SUB[] = "Pointers choose your destiny...";
+static USER_RODATA const char TEXT_CURRENCY_WIN[] = "+10 W's (currency units)";
+static USER_RODATA const char TEXT_CURRENCY_LOSE[] = "-10 W's (currency units)";
+static USER_RODATA const char TEXT_RESET[] = "Press RESET to try again...";
+static USER_RODATA const char TEXT_CONTINUE[] = "Continuing to OS...";
+
+static USER_RODATA const int16_t roulette_cos_table[ROULETTE_SEGMENT_COUNT + 1] = {
     1024,  887,  512,    0,  -512, -887, -1024, -887, -512,    0,  512,  887, 1024
 };
 
-static const int16_t roulette_sin_table[ROULETTE_SEGMENT_COUNT + 1] = {
+static USER_RODATA const int16_t roulette_sin_table[ROULETTE_SEGMENT_COUNT + 1] = {
        0,  512,  887, 1024,   887,  512,     0, -512, -887, -1024, -887, -512,    0
 };
 
-static const int16_t roulette_cos360[ROULETTE_DEGREE_STEPS] = {
+static USER_RODATA const int16_t roulette_cos360[ROULETTE_DEGREE_STEPS] = {
     1024, 1024, 1023, 1023, 1022, 1020, 1018, 1016, 1014, 1011, 1008, 1005,
     1002,  998,  994,  989,  984,  979,  974,  968,  962,  956,  949,  943,
      935,  928,  920,  912,  904,  896,  887,  878,  868,  859,  849,  839,
@@ -78,7 +103,7 @@ static const int16_t roulette_cos360[ROULETTE_DEGREE_STEPS] = {
     1020,  1022,  1023,  1023,  1024
 };
 
-static const int16_t roulette_sin360[ROULETTE_DEGREE_STEPS] = {
+static USER_RODATA const int16_t roulette_sin360[ROULETTE_DEGREE_STEPS] = {
        0,   18,   36,   54,   71,   89,  107,  125,  143,  160,  178,  195,
      213,  230,  248,  265,  282,  299,  316,  333,  350,  367,  384,  400,
      416,  433,  449,  465,  481,  496,  512,  527,  543,  558,  573,  587,
@@ -112,7 +137,7 @@ static const int16_t roulette_sin360[ROULETTE_DEGREE_STEPS] = {
     -160,  -143,  -125,  -107,   -89,   -71,   -54,   -36,   -18
 };
 
-static inline int roulette_normalize_angle(int degrees) {
+static USER_TEXT inline int roulette_normalize_angle(int degrees) {
     int angle = degrees % ROULETTE_DEGREE_STEPS;
     if (angle < 0) {
         angle += ROULETTE_DEGREE_STEPS;
@@ -120,24 +145,24 @@ static inline int roulette_normalize_angle(int degrees) {
     return angle;
 }
 
-static inline int16_t roulette_cos_deg(int degrees) {
+static USER_TEXT inline int16_t roulette_cos_deg(int degrees) {
     return roulette_cos360[roulette_normalize_angle(degrees)];
 }
 
-static inline int16_t roulette_sin_deg(int degrees) {
+static USER_TEXT inline int16_t roulette_sin_deg(int degrees) {
     return roulette_sin360[roulette_normalize_angle(degrees)];
 }
 
-static inline int segment_center_angle(int segment_index) {
+static USER_TEXT inline int segment_center_angle(int segment_index) {
     return segment_index * ROULETTE_SEGMENT_DEGREES + (ROULETTE_SEGMENT_DEGREES / 2);
 }
 
-static inline int roulette_scale(int16_t value, int radius) {
+static USER_TEXT inline int roulette_scale(int16_t value, int radius) {
     return (value * radius) / ROULETTE_TRIG_SCALE;
 }
 
-static void draw_segment_wedge(const struct roulette_backend *b, int cx, int cy, int start_idx,
-                               int radius, uint32_t color) {
+static USER_TEXT void draw_segment_wedge(const struct roulette_backend *b, int cx, int cy, int start_idx,
+                                         int radius, uint32_t color) {
     int inner = ROULETTE_INNER_RADIUS;
     int16_t start_cos = roulette_cos_table[start_idx];
     int16_t start_sin = roulette_sin_table[start_idx];
@@ -153,13 +178,13 @@ static void draw_segment_wedge(const struct roulette_backend *b, int cx, int cy,
     }
 }
 
-static void draw_segment_divider(const struct roulette_backend *b, int cx, int cy, int idx, int radius) {
+static USER_TEXT void draw_segment_divider(const struct roulette_backend *b, int cx, int cy, int idx, int radius) {
     int x_outer = cx + roulette_scale(roulette_cos_table[idx], radius + 2);
     int y_outer = cy + roulette_scale(roulette_sin_table[idx], radius + 2);
     b->draw_line(b->ctx, cx, cy, x_outer, y_outer, ROULETTE_WHEEL_COLOR);
 }
 
-static void draw_roulette_wheel(const struct roulette_backend *b, int cx, int cy, int radius, int highlight_segment) {
+static USER_TEXT void draw_roulette_wheel(const struct roulette_backend *b, int cx, int cy, int radius, int highlight_segment) {
     /* Outer ring */
     b->draw_circle_filled(b->ctx, cx, cy, radius + 8, 0x000000FF);
     b->draw_circle(b->ctx, cx, cy, radius + 8, ROULETTE_WHEEL_COLOR);
@@ -180,8 +205,8 @@ static void draw_roulette_wheel(const struct roulette_backend *b, int cx, int cy
     b->draw_circle_filled(b->ctx, cx, cy, ROULETTE_INNER_RADIUS, 0x000000FF);
 }
 
-static void draw_pointer_for_angle(const struct roulette_backend *b, int cx, int cy, int radius,
-                                   int angle_deg, uint32_t color) {
+static USER_TEXT void draw_pointer_for_angle(const struct roulette_backend *b, int cx, int cy, int radius,
+                                             int angle_deg, uint32_t color) {
     int16_t dir_x = roulette_cos_deg(angle_deg);
     int16_t dir_y = roulette_sin_deg(angle_deg);
     int16_t perp_x = -dir_y;
@@ -208,20 +233,20 @@ static void draw_pointer_for_angle(const struct roulette_backend *b, int cx, int
     b->draw_line(b->ctx, left_x, left_y, right_x, right_y, color);
 }
 
-static void draw_pointer_ticks(const struct roulette_backend *b, int cx, int cy, int radius,
-                               int angle_deg, uint32_t color) {
+static USER_TEXT void draw_pointer_ticks(const struct roulette_backend *b, int cx, int cy, int radius,
+                                         int angle_deg, uint32_t color) {
     draw_pointer_for_angle(b, cx, cy, radius, angle_deg, color);
     draw_pointer_for_angle(b, cx, cy, radius, angle_deg + 180, color);
 }
 
-static void draw_fate_number(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number, int revealed) {
+static USER_TEXT void draw_fate_number(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number, int revealed) {
     char num_str[21];
 
     if (!revealed) {
         b->fill_rect(b->ctx, cx - 100, y_pos, 200, 60, 0x333333FF);
         b->draw_line(b->ctx, cx - 100, y_pos, cx + 100, y_pos, ROULETTE_WHEEL_COLOR);
         b->draw_line(b->ctx, cx - 100, y_pos + 60, cx + 100, y_pos + 60, ROULETTE_WHEEL_COLOR);
-        b->draw_text(b->ctx, cx - 40, y_pos + 20, "? ? ?", ROULETTE_TEXT_COLOR, 0x00000000);
+        b->draw_text(b->ctx, cx - 40, y_pos + 20, TEXT_UNKNOWN, ROULETTE_TEXT_COLOR, 0x00000000);
         return;
     }
 
@@ -252,18 +277,18 @@ static void draw_fate_number(const struct roulette_backend *b, int cx, int y_pos
     b->draw_text(b->ctx, text_x, y_pos + 20, num_str, 0x000000FF, 0x00000000);
 }
 
-static void draw_result_banner(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number) {
+static USER_TEXT void draw_result_banner(const struct roulette_backend *b, int cx, int y_pos, uint32_t fate_number) {
     const char *result_text;
     const char *sub_text;
     uint32_t banner_color;
 
     if (fate_number & 1) {
-        result_text = "W I N !";
-        sub_text = "Fortune smiles upon the slop!";
+        result_text = TEXT_WIN;
+        sub_text = TEXT_WIN_SUB;
         banner_color = ROULETTE_WIN_COLOR;
     } else {
-        result_text = "L O S E";
-        sub_text = "L bozzo lol - try again!";
+        result_text = TEXT_LOSE;
+        sub_text = TEXT_LOSE_SUB;
         banner_color = ROULETTE_LOSE_COLOR;
     }
 
@@ -275,13 +300,13 @@ static void draw_result_banner(const struct roulette_backend *b, int cx, int y_p
     b->draw_text(b->ctx, cx - 140, y_pos + 50, sub_text, 0x000000FF, 0x00000000);
 }
 
-static void render_wheel_frame(const struct roulette_backend *b,
-                               int screen_width, int screen_height,
-                               int cx, int cy, int radius,
-                               int highlight_segment, int pointer_angle_deg,
-                               int *last_pointer_angle,
-                               uint32_t fate_number, bool reveal_number,
-                               bool clear_background, bool draw_wheel) {
+static USER_TEXT void render_wheel_frame(const struct roulette_backend *b,
+                                         int screen_width, int screen_height,
+                                         int cx, int cy, int radius,
+                                         int highlight_segment, int pointer_angle_deg,
+                                         int *last_pointer_angle,
+                                         uint32_t fate_number, bool reveal_number,
+                                         bool clear_background, bool draw_wheel) {
     int region = radius + 80;
     int region_x = cx - region;
     int region_y = cy - region;
@@ -322,12 +347,12 @@ static void render_wheel_frame(const struct roulette_backend *b,
     }
 }
 
-static bool segment_matches_parity(int segment_index, bool need_colored) {
+static USER_TEXT bool segment_matches_parity(int segment_index, bool need_colored) {
     bool is_colored = roulette_segments[segment_index % ROULETTE_SEGMENT_COUNT].is_colored;
     return need_colored ? is_colored : !is_colored;
 }
 
-static int choose_segment_for_parity(uint32_t fate_number, bool need_colored) {
+static USER_TEXT int choose_segment_for_parity(uint32_t fate_number, bool need_colored) {
     int start = fate_number % ROULETTE_SEGMENT_COUNT;
     for (int tries = 0; tries < ROULETTE_SEGMENT_COUNT; tries++) {
         int idx = (start + tries) % ROULETTE_SEGMENT_COUNT;
@@ -338,7 +363,7 @@ static int choose_segment_for_parity(uint32_t fate_number, bool need_colored) {
     return start;
 }
 
-static void roulette_draw_demo_scene(const struct roulette_backend *b, int width, int height) {
+static USER_TEXT void roulette_draw_demo_scene(const struct roulette_backend *b, int width, int height) {
     /* Recreate the boot demo (rectangles, circle, border, text) from user mode. */
     b->fill_rect(b->ctx, 0, 0, width, height, 0x001122FF);
 
@@ -360,20 +385,20 @@ static void roulette_draw_demo_scene(const struct roulette_backend *b, int width
     b->fill_rect(b->ctx, width - 4, 0, 4, height, 0xFFFFFFFF);
 
     /* Text lines */
-    b->draw_text(b->ctx, 20, height - 140, "*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***", 0xFFFFFFFF, 0x00000000);
-    b->draw_text(b->ctx, 20, height - 124, "Framebuffer: WORKING | Resolution: 1024x768", 0xFFFFFFFF, 0x00000000);
-    b->draw_text(b->ctx, 20, height - 108, "Memory: OK | Graphics: OK | Text: OK", 0xFFFFFFFF, 0x00000000);
+    b->draw_text(b->ctx, 20, height - 140, TEXT_DEMO_TITLE, 0xFFFFFFFF, 0x00000000);
+    b->draw_text(b->ctx, 20, height - 124, TEXT_DEMO_FB, 0xFFFFFFFF, 0x00000000);
+    b->draw_text(b->ctx, 20, height - 108, TEXT_DEMO_STATUS, 0xFFFFFFFF, 0x00000000);
 }
 
-static void roulette_handoff_to_demo(const struct roulette_backend *b, int width, int height) {
+static USER_TEXT void roulette_handoff_to_demo(const struct roulette_backend *b, int width, int height) {
     /* Clear to the boot/demo background so the OS can continue with a clean slate. */
     b->fill_rect(b->ctx, 0, 0, width, height, ROULETTE_BG_COLOR);
-    b->draw_text(b->ctx, width / 2 - 140, height / 2 - 20, "Shell launching... enjoy the demo", ROULETTE_TEXT_COLOR, 0x00000000);
+    b->draw_text(b->ctx, width / 2 - 140, height / 2 - 20, TEXT_HANDOFF, ROULETTE_TEXT_COLOR, 0x00000000);
     b->sleep_ms(b->ctx, 400);
     roulette_draw_demo_scene(b, width, height);
 }
 
-int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
+int USER_TEXT roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
     if (!backend || !backend->get_size) {
         return -1;
     }
@@ -387,8 +412,8 @@ int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
         return -1;
     }
 
-    backend->draw_text(backend->ctx, width / 2 - 150, 50, "=== THE WHEEL OF FATE ===", ROULETTE_WHEEL_COLOR, 0x00000000);
-    backend->draw_text(backend->ctx, width / 2 - 120, 80, "Pointers choose your destiny...", ROULETTE_TEXT_COLOR, 0x00000000);
+    backend->draw_text(backend->ctx, width / 2 - 150, 50, TEXT_WHEEL_TITLE, ROULETTE_WHEEL_COLOR, 0x00000000);
+    backend->draw_text(backend->ctx, width / 2 - 120, 80, TEXT_WHEEL_SUB, ROULETTE_TEXT_COLOR, 0x00000000);
 
     int radius = ROULETTE_WHEEL_RADIUS;
     int max_radius = ((width < height ? width : height) / 2) - 60;
@@ -473,13 +498,13 @@ int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
     backend->fill_rect(backend->ctx, 0, info_y, width, height - info_y, ROULETTE_BG_COLOR);
     draw_result_banner(backend, center_x, center_y + radius + 80, fate_number);
 
-    const char *currency_text = (fate_number & 1) ? "+10 W's (currency units)" : "-10 W's (currency units)";
+    const char *currency_text = (fate_number & 1) ? TEXT_CURRENCY_WIN : TEXT_CURRENCY_LOSE;
     backend->draw_text(backend->ctx, center_x - 110, center_y + radius + 170, currency_text, ROULETTE_TEXT_COLOR, 0x00000000);
 
     if ((fate_number & 1) == 0) {
-        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, "Press RESET to try again...", 0xFFFF00FF, 0x00000000);
+        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, TEXT_RESET, 0xFFFF00FF, 0x00000000);
     } else {
-        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, "Continuing to OS...", 0x00FF00FF, 0x00000000);
+        backend->draw_text(backend->ctx, center_x - 130, center_y + radius + 210, TEXT_CONTINUE, 0x00FF00FF, 0x00000000);
     }
 
     backend->sleep_ms(backend->ctx, ROULETTE_RESULT_DELAY_MS);
@@ -491,4 +516,10 @@ int roulette_run(const struct roulette_backend *backend, uint32_t fate_number) {
 
     return 0;
 }
+
+#if defined(__clang__)
+#pragma clang section text="" rodata="" data=""
+#else
+#pragma GCC pop_options
+#endif
 

@@ -50,6 +50,36 @@ typedef struct user_text {
     uint32_t len;      /* Bytes to copy (excluding terminator), will be capped */
 } user_text_t;
 
+typedef struct user_fs_entry {
+    char name[64];
+    uint8_t type;   /* 0=file, 1=dir */
+    uint32_t size;
+} user_fs_entry_t;
+
+typedef struct user_fs_stat {
+    uint8_t type;    /* 0=file,1=dir,0xFF=missing */
+    uint32_t size;
+} user_fs_stat_t;
+
+typedef struct user_fs_list {
+    user_fs_entry_t *entries; /* user buffer */
+    uint32_t max_entries;     /* capacity in entries */
+    uint32_t count;           /* filled by kernel */
+} user_fs_list_t;
+
+typedef struct user_sys_info {
+    uint32_t total_pages;
+    uint32_t free_pages;
+    uint32_t allocated_pages;
+    uint32_t total_tasks;
+    uint32_t active_tasks;
+    uint64_t task_context_switches;
+    uint64_t scheduler_context_switches;
+    uint64_t scheduler_yields;
+    uint32_t ready_tasks;
+    uint32_t schedule_calls;
+} user_sys_info_t;
+
 #endif /* LIB_USER_SYSCALL_DEFS_H */
 
 
