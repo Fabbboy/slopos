@@ -1,6 +1,9 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod memory_reservations;
+mod phys_virt;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
