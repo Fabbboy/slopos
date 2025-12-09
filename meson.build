@@ -146,10 +146,10 @@ drivers_sources += files(
   'drivers/syscall.c',
   'drivers/syscall_handlers.c',
   'drivers/syscall_common.c',
-  'drivers/syscall_core.c',
   'drivers/syscall_fs.c',
   'drivers/virtio_gpu.c',
-  'drivers/rust_ffi_test.c'
+  'drivers/rust_ffi_test.c',
+  'drivers/rust_canvas_test.c'
 )
 
 # Scheduler directory

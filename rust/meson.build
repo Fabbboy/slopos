@@ -56,7 +56,7 @@ rust_graphics_lib = custom_target('copy_rust_graphics_lib',
 
 # Copy header to build directory
 rust_graphics_header = custom_target('copy_rust_graphics_header',
-    output: 'graphics.h',
+    output: 'rust_graphics.h',
     input: rust_graphics_build,
     command: [
         'sh', '-c',
