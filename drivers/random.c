@@ -12,6 +12,8 @@
  */
 
 #include "random.h"
+#include "irq.h"
+#include "../lib/cpu.h"
 
 /* ========================================================================
  * LFSR STATE AND CONFIGURATION
@@ -39,16 +41,21 @@ static inline void random_lock_release(void) {
     __sync_lock_release(&random_lock);
 }
 
-/* Read the CPU timestamp counter for entropy */
-static inline uint32_t read_tsc_low(void) {
-    uint32_t eax, edx;
-    __asm__ volatile("rdtsc" : "=a"(eax), "=d"(edx));
-    return eax;
+static uint32_t random_time_entropy(void) {
+    uint64_t ticks = irq_get_timer_ticks();
+    uint64_t tsc = cpu_read_tsc();
+
+    /* Mix timer ticks with TSC halves to avoid zero seeds and spread entropy. */
+    uint32_t seed = (uint32_t)(ticks ^ (ticks >> 32));
+    seed ^= (uint32_t)tsc;
+    seed ^= (uint32_t)(tsc >> 32);
+
+    return seed;
 }
 
 static void random_seed_state(uint32_t seed) {
     if (seed == 0) {
-        seed = 0xDEADBEEF; /* Fallback seed if TSC is zero */
+        seed = 0xDEADBEEF; /* Fallback seed if time-derived entropy collapses */
     }
     lfsr_state = seed;
     random_seeded = 1;
@@ -64,7 +71,7 @@ void random_init(void) {
 
     random_lock_acquire();
     if (!random_seeded) {
-        random_seed_state(read_tsc_low());
+        random_seed_state(random_time_entropy());
     }
     random_lock_release();
 }

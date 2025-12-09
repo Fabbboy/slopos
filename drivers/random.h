@@ -19,7 +19,7 @@
 
 /*
  * Initialize the random number generator
- * Seeds from TSC and boot time for entropy
+ * Seeds from timer ticks mixed with TSC for entropy
  */
 void random_init(void);
 
