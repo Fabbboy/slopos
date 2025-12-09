@@ -306,7 +306,13 @@ static USER_TEXT int cmd_cat(int argc, char **argv) {
         return 1;
     }
     char tmp[SHELL_IO_MAX + 1];
-    long r = sys_fs_read(path_buf, tmp, SHELL_IO_MAX);
+    long fd = sys_fs_open(path_buf, USER_FS_OPEN_READ);
+    if (fd < 0) {
+        u_puts(err_no_such);
+        return 1;
+    }
+    long r = sys_fs_read((int)fd, tmp, SHELL_IO_MAX);
+    sys_fs_close((int)fd);
     if (r < 0) {
         u_puts(err_no_such);
         return 1;
@@ -341,7 +347,13 @@ static USER_TEXT int cmd_write(int argc, char **argv) {
     if (len > SHELL_IO_MAX) {
         len = SHELL_IO_MAX;
     }
-    long w = sys_fs_write(path_buf, text, len);
+    long fd = sys_fs_open(path_buf, USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT);
+    if (fd < 0) {
+        sys_write("write failed\n", 13);
+        return 1;
+    }
+    long w = sys_fs_write((int)fd, text, len);
+    sys_fs_close((int)fd);
     if (w < 0 || (size_t)w != len) {
         sys_write("write failed\n", 13);
         return 1;

@@ -16,6 +16,7 @@
 #include "paging.h"
 #include "phys_virt.h"
 #include "../boot/kernel_panic.h"
+#include "../lib/spinlock.h"
 
 extern char _text_start[], _text_end[];
 extern char _rodata_start[], _rodata_end[];
@@ -65,6 +66,7 @@ typedef struct vm_manager {
 
 /* Global VM manager instance */
 static vm_manager_t vm_manager = {0};
+static spinlock_t vm_lock;
 
 /* ========================================================================
  * UTILITY FUNCTIONS
@@ -534,8 +536,10 @@ uint32_t create_process_vm(void) {
     process->total_pages += stack_pages;
 
     /* Add to global list */
+    uint64_t guard = spinlock_lock_irqsave(&vm_lock);
     vm_manager.process_list = process;
     vm_manager.num_processes++;
+    spinlock_unlock_irqrestore(&vm_lock, guard);
 
     klog_printf(KLOG_INFO, "Created process VM space for PID %u\n", process_id);
 
@@ -575,6 +579,7 @@ int destroy_process_vm(uint32_t process_id) {
         process->page_dir = NULL;
     }
 
+    uint64_t guard = spinlock_lock_irqsave(&vm_lock);
     /* Remove from process list */
     if (vm_manager.process_list == process) {
         vm_manager.process_list = process->next;
@@ -600,6 +605,7 @@ int destroy_process_vm(uint32_t process_id) {
     process->total_pages = 0;
     process->flags = 0;
     vm_manager.num_processes--;
+    spinlock_unlock_irqrestore(&vm_lock, guard);
 
     return 0;
 }
@@ -731,6 +737,7 @@ int process_vm_free(uint32_t process_id, uint64_t vaddr, uint64_t size) {
  */
 int init_process_vm(void) {
     klog_debug("Initializing process virtual memory manager");
+    spinlock_init(&vm_lock);
 
     vm_manager.num_processes = 0;
     vm_manager.next_process_id = 1;  /* Start from 1, 0 is kernel */
@@ -755,12 +762,14 @@ int init_process_vm(void) {
  * Get process VM statistics
  */
 void get_process_vm_stats(uint32_t *total_processes, uint32_t *active_processes) {
+    uint64_t guard = spinlock_lock_irqsave(&vm_lock);
     if (total_processes) {
         *total_processes = MAX_PROCESSES;
     }
     if (active_processes) {
         *active_processes = vm_manager.num_processes;
     }
+    spinlock_unlock_irqrestore(&vm_lock, guard);
 }
 
 /*

@@ -20,6 +20,7 @@
 #include "../boot/kernel_panic.h"
 #include "../boot/init.h"
 #include "../user/user_sections.h"
+#include "../fs/fileio.h"
 
 extern char _user_text_start[], _user_text_end[];
 
@@ -305,6 +306,15 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
         task->kernel_stack_base = (uint64_t)kstack;
         task->kernel_stack_top = task->kernel_stack_base + TASK_KERNEL_STACK_SIZE;
         task->kernel_stack_size = TASK_KERNEL_STACK_SIZE;
+
+        if (fileio_create_table_for_process(process_id) != 0) {
+            kfree((void *)task->kernel_stack_base);
+            task->kernel_stack_base = 0;
+            task->kernel_stack_top = 0;
+            task->kernel_stack_size = 0;
+            destroy_process_vm(process_id);
+            return INVALID_TASK_ID;
+        }
     }
 
     /* Assign task ID */
@@ -333,6 +343,7 @@ uint32_t task_create(const char *name, task_entry_t entry_point, void *arg,
                     (unsigned long long)entry_point);
         /* Roll back partial allocation for user tasks */
         if (process_id != INVALID_PROCESS_ID) {
+            fileio_destroy_table_for_process(process_id);
             destroy_process_vm(process_id);
         }
         if (task->kernel_stack_base) {
@@ -454,6 +465,7 @@ int task_terminate(uint32_t task_id) {
         /* Free resources based on task mode */
         if (task->process_id != INVALID_PROCESS_ID) {
             /* User mode tasks: free process VM space */
+            fileio_destroy_table_for_process(task->process_id);
             destroy_process_vm(task->process_id);
             if (task->kernel_stack_base) {
                 kfree((void *)task->kernel_stack_base);
