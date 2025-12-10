@@ -1,5 +1,5 @@
 [package]
-name = "slopos-boot"
+name = "slopos-tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,15 @@ license.workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+builtin-tests = []
+
 [dependencies]
 slopos-lib = { path = "../lib" }
 slopos-drivers = { path = "../drivers" }
-slopos-tests = { path = "../tests" }
+slopos-mm = { path = "../mm" }
+slopos-sched = { path = "../sched" }
+slopos-video = { path = "../video" }
+slopos-fs = { path = "../fs" }
+spin.workspace = true
 

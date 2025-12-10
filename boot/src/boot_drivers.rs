@@ -1,6 +1,10 @@
 use core::ffi::c_char;
 
 use slopos_lib::{klog_is_enabled, klog_printf, KlogLevel};
+use slopos_tests::{
+    interrupt_suite_desc, tests_register_suite, tests_register_system_suites, tests_reset_registry,
+    tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
+};
 
 use crate::early_init::boot_get_cmdline;
 use crate::early_init::{boot_init_step, boot_init_step_with_flags};
@@ -9,57 +13,6 @@ use crate::kernel_panic::kernel_panic;
 const COM1_BASE: u16 = 0x3F8;
 const SERIAL_COM1_IRQ: u8 = 4;
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct InterruptTestConfig {
-    enabled: i32,
-    verbosity: InterruptTestVerbosity,
-    suite_mask: u32,
-    timeout_ms: u32,
-    shutdown_on_complete: i32,
-    stacktrace_demo: i32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-enum InterruptTestVerbosity {
-    Quiet = 0,
-    Summary = 1,
-    Verbose = 2,
-}
-
-#[repr(C)]
-struct TestSuiteResult {
-    name: *const c_char,
-    total: u32,
-    passed: u32,
-    failed: u32,
-    exceptions_caught: u32,
-    unexpected_exceptions: u32,
-    elapsed_ms: u32,
-    timed_out: i32,
-}
-
-#[repr(C)]
-struct TestSuiteDesc {
-    name: *const c_char,
-    mask_bit: u32,
-    run: extern "C" fn(*const InterruptTestConfig, *mut TestSuiteResult) -> i32,
-}
-
-#[repr(C)]
-struct TestRunSummary {
-    suites: [TestSuiteResult; 8],
-    suite_count: usize,
-    total_tests: u32,
-    passed: u32,
-    failed: u32,
-    exceptions_caught: u32,
-    unexpected_exceptions: u32,
-    elapsed_ms: u32,
-    timed_out: i32,
-}
 
 #[repr(C)]
 struct PciBarInfo {
@@ -128,12 +81,6 @@ extern "C" {
     fn interrupt_test_suite_string(mask: u32) -> *const c_char;
     fn interrupt_test_verbosity_string(verbosity: InterruptTestVerbosity) -> *const c_char;
 
-    fn tests_reset_registry();
-    fn tests_register_suite(desc: *const TestSuiteDesc);
-    fn tests_register_system_suites();
-    fn tests_run_all(cfg: *const InterruptTestConfig, summary: *mut TestRunSummary) -> i32;
-
-    static interrupt_suite_desc: TestSuiteDesc;
     fn interrupt_test_request_shutdown(failed: i32);
 }
 
