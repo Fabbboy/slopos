@@ -10,4 +10,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 slopos-drivers = { path = "../drivers" }
+slopos-mm = { path = "../mm" }
+slopos-lib = { path = "../lib" }
+spin.workspace = true
 

@@ -1,10 +1,12 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use slopos_drivers::{serial_println, wl_currency};
+mod fileio;
+mod ramfs;
+pub mod tests;
+#[cfg(test)]
+extern crate std;
 
-pub fn init() {
-    serial_println!("RAMFS is but a dream in Rust for now.");
-    wl_currency::award_loss();
-}
+pub use fileio::*;
+pub use ramfs::*;
 

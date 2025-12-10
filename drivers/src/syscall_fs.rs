@@ -2,7 +2,7 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::too_many_arguments)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void, CStr};
 use core::{mem, ptr, slice};
 
 use crate::syscall_common::{
@@ -14,14 +14,21 @@ use crate::wl_currency;
 
 const USER_FS_MAX_ENTRIES: u32 = 64;
 
-const RAMFS_TYPE_FILE: i32 = 0;
-const RAMFS_TYPE_DIRECTORY: i32 = 1;
+const RAMFS_TYPE_FILE: i32 = 1;
+const RAMFS_TYPE_DIRECTORY: i32 = 2;
 
 #[repr(C)]
 pub struct ramfs_node_t {
-    pub name: [c_char; 64],
-    pub size: u64,
+    pub name: *mut c_char,
     pub type_: i32,
+    pub size: usize,
+    pub data: *mut c_void,
+    pub refcount: u32,
+    pub pending_unlink: u8,
+    pub parent: *mut ramfs_node_t,
+    pub children: *mut ramfs_node_t,
+    pub next_sibling: *mut ramfs_node_t,
+    pub prev_sibling: *mut ramfs_node_t,
 }
 
 #[repr(C)]
@@ -60,7 +67,7 @@ extern "C" {
         count: *mut c_int,
     ) -> c_int;
     fn ramfs_release_list(entries: *mut *mut ramfs_node_t, count: c_int);
-    fn ramfs_create_directory(path: *const c_char) -> c_int;
+    fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t;
 
     fn kmalloc(size: usize) -> *mut c_void;
     fn kfree(ptr: *mut c_void);
@@ -233,7 +240,8 @@ pub fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame) -> syscal
         return syscall_fs_error(frame);
     }
 
-    if unsafe { ramfs_create_directory(path.as_ptr()) } == 0 {
+    let created = unsafe { ramfs_create_directory(path.as_ptr()) };
+    if !created.is_null() {
         return syscall_return_ok(frame, 0);
     }
     syscall_fs_error(frame)
@@ -324,12 +332,10 @@ pub fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame) -> syscall
                 continue;
             }
 
-            let name_src = &(*entry_ptr).name;
-            let mut nlen = name_src.len();
-            if nlen > dst.name.len() {
-                nlen = dst.name.len();
-            }
-            ptr::copy_nonoverlapping(name_src.as_ptr(), dst.name.as_mut_ptr(), nlen);
+            let cstr = CStr::from_ptr((*entry_ptr).name);
+            let name_bytes = cstr.to_bytes();
+            let nlen = name_bytes.len().min(dst.name.len());
+            dst.name[..nlen].copy_from_slice(&name_bytes[..nlen]);
             if nlen < dst.name.len() {
                 dst.name[nlen] = 0;
             }
