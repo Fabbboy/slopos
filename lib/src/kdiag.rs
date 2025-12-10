@@ -9,6 +9,21 @@ use crate::tsc;
 
 pub const KDIAG_STACK_TRACE_DEPTH: usize = 16;
 
+const GPR_FMT: &[u8] = b"General Purpose Registers:\n\
+  RAX: 0x%lx  RBX: 0x%lx  RCX: 0x%lx  RDX: 0x%lx\n\
+  RSI: 0x%lx  RDI: 0x%lx  RBP: 0x%lx  RSP: 0x%lx\n\
+  R8 : 0x%lx  R9 : 0x%lx  R10: 0x%lx  R11: 0x%lx\n\
+  R12: 0x%lx  R13: 0x%lx  R14: 0x%lx  R15: 0x%lx\n\0";
+
+const FLAGS_FMT: &[u8] =
+    b"Flags Register:\n  RFLAGS: 0x%lx [CF:%d PF:%d AF:%d ZF:%d SF:%d TF:%d IF:%d DF:%d OF:%d]\n\0";
+
+const SEGMENT_FMT: &[u8] =
+    b"Segment Registers:\n  CS: 0x%04x  DS: 0x%04x  ES: 0x%04x  FS: 0x%04x  GS: 0x%04x  SS: 0x%04x\n\0";
+
+const CONTROL_FMT: &[u8] =
+    b"Control Registers:\n  CR0: 0x%lx  CR2: 0x%lx\n  CR3: 0x%lx  CR4: 0x%lx\n\0";
+
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct interrupt_frame {
@@ -117,16 +132,11 @@ pub extern "C" fn kdiag_dump_cpu_state() {
     unsafe {
         klog::klog_printf(
             KlogLevel::Info,
-            b"=== CPU STATE DUMP ===\n\0".as_ptr() as *const _,
+            b"=== CPU STATE DUMP ===\n\0".as_ptr() as *const c_char,
         );
         klog::klog_printf(
             KlogLevel::Info,
-            b"General Purpose Registers:\n"
-                b"  RAX: 0x%lx  RBX: 0x%lx  RCX: 0x%lx  RDX: 0x%lx\n"
-                b"  RSI: 0x%lx  RDI: 0x%lx  RBP: 0x%lx  RSP: 0x%lx\n"
-                b"  R8 : 0x%lx  R9 : 0x%lx  R10: 0x%lx  R11: 0x%lx\n"
-                b"  R12: 0x%lx  R13: 0x%lx  R14: 0x%lx  R15: 0x%lx\n\0"
-                    .as_ptr() as *const _,
+            GPR_FMT.as_ptr() as *const c_char,
             rax,
             rbx,
             rcx,
@@ -146,9 +156,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
         );
         klog::klog_printf(
             KlogLevel::Info,
-            b"Flags Register:\n"
-                b"  RFLAGS: 0x%lx [CF:%d PF:%d AF:%d ZF:%d SF:%d TF:%d IF:%d DF:%d OF:%d]\n\0"
-                    .as_ptr() as *const _,
+            FLAGS_FMT.as_ptr() as *const c_char,
             rflags,
             ((rflags & (1 << 0)) != 0) as c_int,
             ((rflags & (1 << 2)) != 0) as c_int,
@@ -162,9 +170,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
         );
         klog::klog_printf(
             KlogLevel::Info,
-            b"Segment Registers:\n"
-                b"  CS: 0x%04x  DS: 0x%04x  ES: 0x%04x  FS: 0x%04x  GS: 0x%04x  SS: 0x%04x\n\0"
-                    .as_ptr() as *const _,
+            SEGMENT_FMT.as_ptr() as *const c_char,
             cs as u32,
             ds as u32,
             es as u32,
@@ -174,10 +180,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
         );
         klog::klog_printf(
             KlogLevel::Info,
-            b"Control Registers:\n"
-                b"  CR0: 0x%lx  CR2: 0x%lx\n"
-                b"  CR3: 0x%lx  CR4: 0x%lx\n\0"
-                    .as_ptr() as *const _,
+            CONTROL_FMT.as_ptr() as *const c_char,
             cr0,
             cr2,
             cr3,
@@ -185,7 +188,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
         );
         klog::klog_printf(
             KlogLevel::Info,
-            b"=== END CPU STATE DUMP ===\n\0".as_ptr() as *const _,
+            b"=== END CPU STATE DUMP ===\n\0".as_ptr() as *const c_char,
         );
     }
 }

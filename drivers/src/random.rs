@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use slopos_lib::tsc;
+use spin::Mutex;
 
 #[derive(Clone, Copy)]
 pub struct Lfsr64 {
@@ -26,5 +27,13 @@ impl Lfsr64 {
         self.state = if x == 0 { 0xfeedc0de } else { x };
         self.state
     }
+}
+
+static RNG: Mutex<Option<Lfsr64>> = Mutex::new(None);
+
+pub fn random_next() -> u64 {
+    let mut guard = RNG.lock();
+    let rng = guard.get_or_insert_with(Lfsr64::from_tsc);
+    rng.next()
 }
 

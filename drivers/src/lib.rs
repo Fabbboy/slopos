@@ -23,4 +23,3 @@ pub mod interrupt_test_config;
 pub mod interrupt_test;
 pub mod wl_currency;
 
-pub use serial::{serial_print, serial_println};

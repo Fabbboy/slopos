@@ -9,13 +9,13 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-builtin-tests = []
+builtin-tests = ["slopos-sched"]
 
 [dependencies]
 slopos-lib = { path = "../lib" }
 slopos-drivers = { path = "../drivers" }
 slopos-mm = { path = "../mm" }
-slopos-sched = { path = "../sched" }
+slopos-sched = { path = "../sched", optional = true }
 slopos-video = { path = "../video" }
 slopos-fs = { path = "../fs" }
 spin.workspace = true

@@ -53,6 +53,8 @@ struct PageAllocator {
     max_order: u32,
 }
 
+unsafe impl Send for PageAllocator {}
+
 impl PageAllocator {
     const fn new() -> Self {
         Self {
@@ -82,7 +84,7 @@ impl PageAllocator {
         if !self.is_valid_frame(frame_num) || self.frames.is_null() {
             return None;
         }
-        Some(&mut *self.frames.add(frame_num as usize))
+        Some(unsafe { &mut *self.frames.add(frame_num as usize) })
     }
 
     fn frame_region_id(&self, frame_num: u32) -> u16 {

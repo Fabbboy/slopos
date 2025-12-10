@@ -18,6 +18,7 @@ use crate::paging::{
     paging_is_user_accessible, paging_mark_range_user, map_page_4kb_in_dir, unmap_page_in_dir,
     virt_to_phys_in_dir, ProcessPageDir, PageTable,
 };
+use crate::phys_virt::mm_phys_to_virt;
 
 extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
@@ -31,6 +32,8 @@ struct VmArea {
     ref_count: u32,
     next: *mut VmArea,
 }
+
+unsafe impl Send for VmArea {}
 
 impl VmArea {
     fn new(start: u64, end: u64, flags: u32) -> *mut Self {
@@ -67,6 +70,8 @@ struct ProcessVm {
     next: *mut ProcessVm,
 }
 
+unsafe impl Send for ProcessVm {}
+
 impl ProcessVm {
     const fn empty() -> Self {
         Self {
@@ -93,6 +98,8 @@ struct VmManager {
     active_process: *mut ProcessVm,
     process_list: *mut ProcessVm,
 }
+
+unsafe impl Send for VmManager {}
 
 impl VmManager {
     const fn new() -> Self {

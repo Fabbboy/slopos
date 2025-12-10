@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use spin::Mutex;
@@ -69,6 +69,8 @@ struct KernelHeap {
     diagnostics_enabled: bool,
 }
 
+unsafe impl Send for KernelHeap {}
+
 impl KernelHeap {
     const fn new() -> Self {
         Self {
@@ -76,7 +78,16 @@ impl KernelHeap {
             end_addr: 0,
             current_break: 0,
             free_lists: [FreeList::new(); 16],
-            stats: HeapStats::default(),
+            stats: HeapStats {
+                total_size: 0,
+                allocated_size: 0,
+                free_size: 0,
+                total_blocks: 0,
+                allocated_blocks: 0,
+                free_blocks: 0,
+                allocation_count: 0,
+                free_count: 0,
+            },
             initialized: false,
             diagnostics_enabled: true,
         }

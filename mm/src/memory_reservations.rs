@@ -42,7 +42,7 @@ pub struct MmRegion {
 }
 
 impl MmRegion {
-    const fn zeroed() -> Self {
+    pub const fn zeroed() -> Self {
         Self {
             phys_base: 0,
             length: 0,

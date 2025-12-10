@@ -6,6 +6,7 @@ const STACKTRACE_MAX_LOCAL: usize = 32;
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
+#[derive(Copy, Clone)]
 pub struct stacktrace_entry {
     pub frame_pointer: u64,
     pub return_address: u64,
@@ -116,7 +117,7 @@ pub unsafe extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
 #[no_mangle]
 pub unsafe extern "C" fn stacktrace_dump(max_frames: c_int) {
     let rbp = read_frame_pointer();
-    stacktrace_dump_from(rbp, max_frames);
+    unsafe { stacktrace_dump_from(rbp, max_frames) };
 }
 
 

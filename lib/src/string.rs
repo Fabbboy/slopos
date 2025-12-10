@@ -36,33 +36,33 @@ pub fn toupper(byte: u8) -> u8 {
 }
 
 pub unsafe fn strlen_internal(ptr: *const c_char) -> usize {
-    if ptr.is_null() {
-        return 0;
-    }
-
-    let mut len = 0usize;
     unsafe {
+        if ptr.is_null() {
+            return 0;
+        }
+
+        let mut len = 0usize;
         while *ptr.add(len) != 0 {
             len += 1;
         }
+        len
     }
-    len
 }
 
 pub unsafe fn strcmp_internal(lhs: *const c_char, rhs: *const c_char) -> c_int {
-    if lhs == rhs {
-        return 0;
-    }
-    if lhs.is_null() {
-        return -1;
-    }
-    if rhs.is_null() {
-        return 1;
-    }
-
-    let mut l = lhs;
-    let mut r = rhs;
     unsafe {
+        if lhs == rhs {
+            return 0;
+        }
+        if lhs.is_null() {
+            return -1;
+        }
+        if rhs.is_null() {
+            return 1;
+        }
+
+        let mut l = lhs;
+        let mut r = rhs;
         while *l != 0 && *l == *r {
             l = l.add(1);
             r = r.add(1);
@@ -73,21 +73,21 @@ pub unsafe fn strcmp_internal(lhs: *const c_char, rhs: *const c_char) -> c_int {
 }
 
 pub unsafe fn strncmp_internal(lhs: *const c_char, rhs: *const c_char, mut n: usize) -> c_int {
-    if n == 0 {
-        return 0;
-    }
-
-    if lhs.is_null() {
-        return if rhs.is_null() { 0 } else { -1 };
-    }
-    if rhs.is_null() {
-        return 1;
-    }
-
-    let mut l = lhs;
-    let mut r = rhs;
-
     unsafe {
+        if n == 0 {
+            return 0;
+        }
+
+        if lhs.is_null() {
+            return if rhs.is_null() { 0 } else { -1 };
+        }
+        if rhs.is_null() {
+            return 1;
+        }
+
+        let mut l = lhs;
+        let mut r = rhs;
+
         while n > 0 && *l == *r {
             if *l == 0 {
                 return 0;
@@ -106,13 +106,13 @@ pub unsafe fn strncmp_internal(lhs: *const c_char, rhs: *const c_char, mut n: us
 }
 
 pub unsafe fn strcpy_internal(dest: *mut c_char, src: *const c_char) -> *mut c_char {
-    if dest.is_null() || src.is_null() {
-        return dest;
-    }
-
-    let mut d = dest;
-    let mut s = src;
     unsafe {
+        if dest.is_null() || src.is_null() {
+            return dest;
+        }
+
+        let mut d = dest;
+        let mut s = src;
         loop {
             let ch = *s;
             *d = ch;
@@ -122,17 +122,17 @@ pub unsafe fn strcpy_internal(dest: *mut c_char, src: *const c_char) -> *mut c_c
             d = d.add(1);
             s = s.add(1);
         }
+        dest
     }
-    dest
 }
 
 pub unsafe fn strncpy_internal(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
-    if dest.is_null() || n == 0 {
-        return dest;
-    }
-
-    let mut i = 0usize;
     unsafe {
+        if dest.is_null() || n == 0 {
+            return dest;
+        }
+
+        let mut i = 0usize;
         while i < n {
             let ch = if !src.is_null() { *src.add(i) } else { 0 };
             *dest.add(i) = ch;
@@ -146,25 +146,25 @@ pub unsafe fn strncpy_internal(dest: *mut c_char, src: *const c_char, n: usize) 
             *dest.add(i) = 0;
             i += 1;
         }
-    }
 
-    dest
+        dest
+    }
 }
 
 pub unsafe fn strcasecmp_internal(lhs: *const c_char, rhs: *const c_char) -> c_int {
-    if lhs == rhs {
-        return 0;
-    }
-    if lhs.is_null() {
-        return -1;
-    }
-    if rhs.is_null() {
-        return 1;
-    }
-
-    let mut l = lhs;
-    let mut r = rhs;
     unsafe {
+        if lhs == rhs {
+            return 0;
+        }
+        if lhs.is_null() {
+            return -1;
+        }
+        if rhs.is_null() {
+            return 1;
+        }
+
+        let mut l = lhs;
+        let mut r = rhs;
         while *l != 0 && *r != 0 {
             let ll = tolower(to_u8(*l));
             let rr = tolower(to_u8(*r));
@@ -180,18 +180,18 @@ pub unsafe fn strcasecmp_internal(lhs: *const c_char, rhs: *const c_char) -> c_i
 }
 
 pub unsafe fn strncasecmp_internal(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
-    if n == 0 {
-        return 0;
-    }
-    if lhs.is_null() {
-        return if rhs.is_null() { 0 } else { -1 };
-    }
-    if rhs.is_null() {
-        return 1;
-    }
-
-    let mut idx = 0usize;
     unsafe {
+        if n == 0 {
+            return 0;
+        }
+        if lhs.is_null() {
+            return if rhs.is_null() { 0 } else { -1 };
+        }
+        if rhs.is_null() {
+            return 1;
+        }
+
+        let mut idx = 0usize;
         while idx < n && *lhs.add(idx) != 0 && *rhs.add(idx) != 0 {
             let ll = tolower(to_u8(*lhs.add(idx)));
             let rr = tolower(to_u8(*rhs.add(idx)));
@@ -210,12 +210,12 @@ pub unsafe fn strncasecmp_internal(lhs: *const c_char, rhs: *const c_char, n: us
 }
 
 pub unsafe fn strchr_internal(str: *const c_char, c: c_int) -> *mut c_char {
-    if str.is_null() {
-        return ptr::null_mut();
-    }
-    let target = c as u8;
-    let mut cursor = str;
     unsafe {
+        if str.is_null() {
+            return ptr::null_mut();
+        }
+        let target = c as u8;
+        let mut cursor = str;
         while *cursor != 0 {
             if to_u8(*cursor) == target {
                 return cursor as *mut c_char;
@@ -231,17 +231,17 @@ pub unsafe fn strchr_internal(str: *const c_char, c: c_int) -> *mut c_char {
 }
 
 pub unsafe fn strstr_internal(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
-    if haystack.is_null() || needle.is_null() {
-        return ptr::null_mut();
-    }
-
-    if *needle == 0 {
-        return haystack as *mut c_char;
-    }
-
-    let needle_len = unsafe { strlen_internal(needle) };
-    let mut h = haystack;
     unsafe {
+        if haystack.is_null() || needle.is_null() {
+            return ptr::null_mut();
+        }
+
+        if *needle == 0 {
+            return haystack as *mut c_char;
+        }
+
+        let needle_len = strlen_internal(needle);
+        let mut h = haystack;
         while *h != 0 {
             if *h == *needle {
                 if strncmp_internal(h, needle, needle_len) == 0 {
@@ -250,22 +250,22 @@ pub unsafe fn strstr_internal(haystack: *const c_char, needle: *const c_char) ->
             }
             h = h.add(1);
         }
+        ptr::null_mut()
     }
-    ptr::null_mut()
 }
 
 pub unsafe fn str_has_token_internal(str: *const c_char, token: *const c_char) -> c_int {
-    if str.is_null() || token.is_null() {
-        return 0;
-    }
-
-    let token_len = unsafe { strlen_internal(token) };
-    if token_len == 0 {
-        return 0;
-    }
-
-    let mut cursor = str;
     unsafe {
+        if str.is_null() || token.is_null() {
+            return 0;
+        }
+
+        let token_len = strlen_internal(token);
+        if token_len == 0 {
+            return 0;
+        }
+
+        let mut cursor = str;
         while *cursor != 0 {
             while *cursor != 0 && isspace(to_u8(*cursor)) {
                 cursor = cursor.add(1);
@@ -284,34 +284,33 @@ pub unsafe fn str_has_token_internal(str: *const c_char, token: *const c_char) -
                 return 1;
             }
         }
+        0
     }
-
-    0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strlen(str: *const c_char) -> usize {
-    strlen_internal(str)
+    unsafe { strlen_internal(str) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
-    strcmp_internal(lhs, rhs)
+    unsafe { strcmp_internal(lhs, rhs) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
-    strncmp_internal(lhs, rhs, n)
+    unsafe { strncmp_internal(lhs, rhs, n) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char {
-    strcpy_internal(dest, src)
+    unsafe { strcpy_internal(dest, src) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strncpy(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
-    strncpy_internal(dest, src, n)
+    unsafe { strncpy_internal(dest, src, n) }
 }
 
 #[no_mangle]
@@ -336,27 +335,27 @@ pub extern "C" fn toupper_k(c: c_int) -> c_int {
 
 #[no_mangle]
 pub unsafe extern "C" fn strcasecmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
-    strcasecmp_internal(lhs, rhs)
+    unsafe { strcasecmp_internal(lhs, rhs) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strncasecmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
-    strncasecmp_internal(lhs, rhs, n)
+    unsafe { strncasecmp_internal(lhs, rhs, n) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strchr(str: *const c_char, c: c_int) -> *mut c_char {
-    strchr_internal(str, c)
+    unsafe { strchr_internal(str, c) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
-    strstr_internal(haystack, needle)
+    unsafe { strstr_internal(haystack, needle) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn str_has_token(str: *const c_char, token: *const c_char) -> c_int {
-    str_has_token_internal(str, token)
+    unsafe { str_has_token_internal(str, token) }
 }
 
 

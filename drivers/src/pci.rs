@@ -22,6 +22,18 @@ pub struct pci_bar_info_t {
     pub prefetchable: u8,
 }
 
+impl pci_bar_info_t {
+    pub const fn zeroed() -> Self {
+        Self {
+            base: 0,
+            size: 0,
+            is_io: 0,
+            is_64bit: 0,
+            prefetchable: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct pci_device_info_t {
@@ -41,6 +53,27 @@ pub struct pci_device_info_t {
     pub bars: [pci_bar_info_t; PCI_MAX_BARS],
 }
 
+impl pci_device_info_t {
+    pub const fn zeroed() -> Self {
+        Self {
+            bus: 0,
+            device: 0,
+            function: 0,
+            vendor_id: 0,
+            device_id: 0,
+            class_code: 0,
+            subclass: 0,
+            prog_if: 0,
+            revision: 0,
+            header_type: 0,
+            irq_line: 0,
+            irq_pin: 0,
+            bar_count: 0,
+            bars: [pci_bar_info_t::zeroed(); PCI_MAX_BARS],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct pci_gpu_info_t {
@@ -51,6 +84,18 @@ pub struct pci_gpu_info_t {
     pub mmio_size: u64,
 }
 
+impl pci_gpu_info_t {
+    pub const fn zeroed() -> Self {
+        Self {
+            present: 0,
+            device: pci_device_info_t::zeroed(),
+            mmio_phys_base: 0,
+            mmio_virt_base: ptr::null_mut(),
+            mmio_size: 0,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct pci_driver_t {
     pub name: *const u8,
@@ -58,6 +103,8 @@ pub struct pci_driver_t {
     pub probe: Option<extern "C" fn(*const pci_device_info_t, *mut core::ffi::c_void) -> c_int>,
     pub context: *mut core::ffi::c_void,
 }
+
+unsafe impl Sync for pci_driver_t {}
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
@@ -97,38 +144,36 @@ const PCI_MAX_DEVICES: usize = 256;
 const PCI_DRIVER_MAX: usize = 16;
 
 static mut BUS_VISITED: [u8; PCI_MAX_BUSES] = [0; PCI_MAX_BUSES];
-static mut DEVICES: [pci_device_info_t; PCI_MAX_DEVICES] = [pci_device_info_t::default(); PCI_MAX_DEVICES];
+static mut DEVICES: [pci_device_info_t; PCI_MAX_DEVICES] = [pci_device_info_t::zeroed(); PCI_MAX_DEVICES];
 static mut DEVICE_COUNT: usize = 0;
 static mut PCI_INITIALIZED: c_int = 0;
-static mut PRIMARY_GPU: pci_gpu_info_t = pci_gpu_info_t {
-    present: 0,
-    device: pci_device_info_t::default(),
-    mmio_phys_base: 0,
-    mmio_virt_base: ptr::null_mut(),
-    mmio_size: 0,
-};
+static mut PRIMARY_GPU: pci_gpu_info_t = pci_gpu_info_t::zeroed();
 static mut PCI_REGISTERED_DRIVERS: [*const pci_driver_t; PCI_DRIVER_MAX] = [ptr::null(); PCI_DRIVER_MAX];
 static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
 
 #[inline(always)]
 unsafe fn outl(port: u16, value: u32) {
-    asm!(
-        "out dx, eax",
-        in("dx") port,
-        in("eax") value,
-        options(nomem, nostack, preserves_flags)
-    );
+    unsafe {
+        asm!(
+            "out dx, eax",
+            in("dx") port,
+            in("eax") value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
 }
 
 #[inline(always)]
 unsafe fn inl(port: u16) -> u32 {
     let value: u32;
-    asm!(
-        "in eax, dx",
-        out("eax") value,
-        in("dx") port,
-        options(nomem, nostack, preserves_flags)
-    );
+    unsafe {
+        asm!(
+            "in eax, dx",
+            out("eax") value,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
     value
 }
 
@@ -405,7 +450,7 @@ fn pci_collect_bars(info: &mut pci_device_info_t) {
     };
 
     let mut bar_index = 0;
-    while bar_index < max_bars && info.bar_count as usize  < PCI_MAX_BARS {
+    while bar_index < max_bars && (info.bar_count as usize) < PCI_MAX_BARS {
         let offset = PCI_BAR0_OFFSET + (bar_index as u8 * 4);
         let raw = pci_config_read32(info.bus, info.device, info.function, offset);
         if raw == 0 {

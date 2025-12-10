@@ -2,7 +2,7 @@
 
 use core::ptr;
 
-use slopos_boot::FramebufferInfo;
+use slopos_lib::FramebufferInfo;
 use spin::Mutex;
 
 const PIXEL_FORMAT_RGB: u8 = 0x01;

@@ -134,9 +134,10 @@ pub extern "C" fn pit_poll_delay_ms(ms: u32) {
     while elapsed < ticks_needed {
         let current = pit_read_count();
         if current <= last {
-            elapsed = elapsed.saturating_add(last - current);
+            elapsed = elapsed.saturating_add((last - current) as u32);
         } else {
-            elapsed = elapsed.saturating_add(last + (0xFFFF - current) + 1);
+            elapsed =
+                elapsed.saturating_add(last as u32 + ((0xFFFF - current) as u32) + 1);
         }
         last = current;
     }

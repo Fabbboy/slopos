@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use slopos_boot::FramebufferInfo;
+use slopos_lib::FramebufferInfo;
 use slopos_drivers::serial_println;
 
 pub mod framebuffer;

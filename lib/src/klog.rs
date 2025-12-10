@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void, CStr, VaListImpl};
+use core::ffi::{c_char, c_int, c_void, CStr, VaList};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::{io, numfmt, string};
@@ -115,7 +115,7 @@ enum Length {
     Size,
 }
 
-unsafe fn format_string(args: &mut VaListImpl<'_>, width: i32, zero_pad: bool) {
+unsafe fn format_string(args: &mut VaList<'_>, width: i32, zero_pad: bool) {
     let str_ptr: *const c_char = unsafe { args.arg() };
     let s = if str_ptr.is_null() {
         b"(null)\0".as_ptr() as *const c_char
@@ -127,14 +127,14 @@ unsafe fn format_string(args: &mut VaListImpl<'_>, width: i32, zero_pad: bool) {
     write_padded(bytes, width, zero_pad);
 }
 
-unsafe fn format_char(args: &mut VaListImpl<'_>, width: i32, zero_pad: bool) {
+unsafe fn format_char(args: &mut VaList<'_>, width: i32, zero_pad: bool) {
     let c: i32 = unsafe { args.arg() };
     let tmp = [c as u8];
     write_padded(&tmp, width, zero_pad);
 }
 
 unsafe fn format_signed(
-    args: &mut VaListImpl<'_>,
+    args: &mut VaList<'_>,
     length: Length,
     width: i32,
     zero_pad: bool,
@@ -168,7 +168,7 @@ unsafe fn format_signed(
         buffer[0] = b'0';
     }
 
-    let mut total = digits + if negative { 1 } else { 0 };
+    let total = digits + if negative { 1 } else { 0 };
     let pad_char = if zero_pad { b'0' } else { b' ' };
     let padding = if width > total as i32 {
         (width as usize).saturating_sub(total)
@@ -193,7 +193,7 @@ unsafe fn format_signed(
 }
 
 unsafe fn format_unsigned(
-    args: &mut VaListImpl<'_>,
+    args: &mut VaList<'_>,
     length: Length,
     width: i32,
     zero_pad: bool,
@@ -241,7 +241,7 @@ unsafe fn format_unsigned(
     write_padded(bytes, width, zero_pad);
 }
 
-unsafe fn format_pointer(args: &mut VaListImpl<'_>, width: i32, zero_pad: bool) {
+unsafe fn format_pointer(args: &mut VaList<'_>, width: i32, zero_pad: bool) {
     let ptr_val: *mut c_void = unsafe { args.arg() };
     let mut buffer = [0u8; 48];
     let len = unsafe {

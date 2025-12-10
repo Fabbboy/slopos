@@ -58,11 +58,21 @@ pub struct user_text {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct user_fs_entry {
     pub name: [c_char; 64],
     pub type_: u8, // 0=file, 1=dir
     pub size: u32,
+}
+
+impl Default for user_fs_entry {
+    fn default() -> Self {
+        Self {
+            name: [0; 64],
+            type_: 0,
+            size: 0,
+        }
+    }
 }
 
 #[repr(C)]

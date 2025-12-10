@@ -615,8 +615,8 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
                 .as_ptr() as *const c_char,
             gsi,
             pin,
-            vector,
-            lapic_id,
+            vector as u32,
+            lapic_id as u32,
             low,
             high,
         );

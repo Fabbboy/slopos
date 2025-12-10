@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_void};
 
 use slopos_lib::{klog_printf, KlogLevel};
 
@@ -39,7 +39,7 @@ pub struct virtio_gpu_device_t {
 
 static mut VIRTIO_GPU_DEVICE: virtio_gpu_device_t = virtio_gpu_device_t {
     present: 0,
-    device: pci_device_info_t::default(),
+    device: pci_device_info_t::zeroed(),
     mmio_base: core::ptr::null_mut(),
     mmio_size: 0,
 };
@@ -53,14 +53,16 @@ fn virtio_gpu_enable_master(info: &pci_device_info_t) {
     }
 }
 
-fn virtio_gpu_match(info: &pci_device_info_t, _context: *mut core::ffi::c_void) -> bool {
+extern "C" fn virtio_gpu_match(info: *const pci_device_info_t, _context: *mut c_void) -> bool {
+    let info = unsafe { &*info };
     if info.vendor_id != VIRTIO_GPU_VENDOR_ID {
         return false;
     }
     info.device_id == VIRTIO_GPU_DEVICE_ID_PRIMARY || info.device_id == VIRTIO_GPU_DEVICE_ID_TRANS
 }
 
-fn virtio_gpu_probe(info: &pci_device_info_t, _context: *mut core::ffi::c_void) -> c_int {
+extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_void) -> c_int {
+    let info = unsafe { &*info };
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {
             klog_printf(

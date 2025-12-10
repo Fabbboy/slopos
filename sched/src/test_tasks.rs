@@ -3,8 +3,6 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_boot::idt::IdtEntry;
-use slopos_boot::SYSCALL_VECTOR;
 use slopos_lib::klog::{klog_printf, KlogLevel};
 
 use crate::scheduler;
@@ -20,6 +18,19 @@ extern "C" {
     fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> c_int;
 }
+
+#[repr(C, packed)]
+pub struct IdtEntry {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    type_attr: u8,
+    offset_mid: u16,
+    offset_high: u32,
+    zero: u32,
+}
+
+const SYSCALL_VECTOR: u8 = 0x80;
 
 const GDT_USER_CODE_SELECTOR: u64 = 0x23;
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;

@@ -3,7 +3,6 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use slopos_boot::{boot_init_priority, boot_init_step_with_flags, is_kernel_initialized};
 use slopos_drivers::wl_currency;
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog::{klog_printf, KlogLevel};
@@ -112,6 +111,8 @@ extern "C" {
     fn pit_disable_irq();
 
     static kernel_stack_top: u8;
+
+    fn is_kernel_initialized() -> i32;
 }
 
 #[repr(C)]
@@ -765,36 +766,18 @@ pub extern "C" fn scheduler_handle_post_irq() {
     schedule();
 }
 
-boot_init_step_with_flags!(
-    services,
-    b"task manager\0",
-    boot_step_task_manager_init,
-    boot_init_priority(20)
-);
-
-boot_init_step_with_flags!(
-    services,
-    b"scheduler\0",
-    boot_step_scheduler_init,
-    boot_init_priority(30)
-);
-
-boot_init_step_with_flags!(
-    services,
-    b"idle task\0",
-    boot_step_idle_task,
-    boot_init_priority(50)
-);
-
-extern "C" fn boot_step_task_manager_init() -> c_int {
+#[no_mangle]
+pub extern "C" fn boot_step_task_manager_init() -> c_int {
     unsafe { crate::task::init_task_manager() }
 }
 
-extern "C" fn boot_step_scheduler_init() -> c_int {
+#[no_mangle]
+pub extern "C" fn boot_step_scheduler_init() -> c_int {
     init_scheduler()
 }
 
-extern "C" fn boot_step_idle_task() -> c_int {
+#[no_mangle]
+pub extern "C" fn boot_step_idle_task() -> c_int {
     create_idle_task()
 }
 

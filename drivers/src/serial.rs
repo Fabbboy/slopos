@@ -33,13 +33,15 @@ impl SerialPort {
     }
 
     unsafe fn init(&mut self) {
-        io::outb(self.base + 1, 0x00);
-        io::outb(self.base + 3, 0x80);
-        io::outb(self.base + 0, 0x03);
-        io::outb(self.base + 1, 0x00);
-        io::outb(self.base + 3, 0x03);
-        io::outb(self.base + 2, 0xC7);
-        io::outb(self.base + 4, 0x0B);
+        unsafe {
+            io::outb(self.base + 1, 0x00);
+            io::outb(self.base + 3, 0x80);
+            io::outb(self.base + 0, 0x03);
+            io::outb(self.base + 1, 0x00);
+            io::outb(self.base + 3, 0x03);
+            io::outb(self.base + 2, 0xC7);
+            io::outb(self.base + 4, 0x0B);
+        }
     }
 
     fn write_byte(&mut self, byte: u8) {

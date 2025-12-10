@@ -275,8 +275,8 @@ pub extern "C" fn syscall_fb_info(
         width: unsafe { (*info).width },
         height: unsafe { (*info).height },
         pitch: unsafe { (*info).pitch },
-        bpp: unsafe { (*info).bpp },
-        pixel_format: unsafe { (*info).pixel_format },
+        bpp: unsafe { (*info).bpp as u8 },
+        pixel_format: unsafe { (*info).pixel_format as u8 },
     };
 
     if syscall_copy_to_user_bounded(
@@ -492,17 +492,14 @@ pub extern "C" fn syscall_halt(_task: *mut task_t, _frame: *mut InterruptFrame) 
     }
 }
 
-// Filesystem handlers exported for the dispatch table
-pub use crate::syscall_fs::{
-    syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
-    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
-};
-
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct syscall_entry {
     pub handler: Option<extern "C" fn(*mut task_t, *mut InterruptFrame) -> syscall_disposition>,
     pub name: *const c_char,
 }
+
+unsafe impl Sync for syscall_entry {}
 
 static SYSCALL_TABLE: [syscall_entry; 32] = {
     use self::lib_syscall_numbers::*;

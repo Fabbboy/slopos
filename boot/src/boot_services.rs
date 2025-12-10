@@ -1,4 +1,4 @@
-use core::ffi::c_void;
+use core::ffi::{c_int, c_void};
 
 use slopos_lib::{klog_printf, KlogLevel};
 
@@ -21,6 +21,9 @@ extern "C" {
     fn boot_mark_initialized();
     fn framebuffer_get_info() -> *mut FramebufferInfo;
     fn framebuffer_is_initialized() -> i32;
+    fn boot_step_task_manager_init() -> c_int;
+    fn boot_step_scheduler_init() -> c_int;
+    fn boot_step_idle_task() -> c_int;
 }
 
 fn log(level: KlogLevel, msg: &[u8]) {
@@ -34,6 +37,27 @@ fn log_info(msg: &[u8]) {
 fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
+
+boot_init_step_with_flags!(
+    services,
+    b"task manager\0",
+    boot_step_task_manager_init,
+    boot_init_priority(20)
+);
+
+boot_init_step_with_flags!(
+    services,
+    b"scheduler\0",
+    boot_step_scheduler_init,
+    boot_init_priority(30)
+);
+
+boot_init_step_with_flags!(
+    services,
+    b"idle task\0",
+    boot_step_idle_task,
+    boot_init_priority(50)
+);
 
 extern "C" fn boot_step_mark_kernel_ready() -> i32 {
     unsafe { boot_mark_initialized() };

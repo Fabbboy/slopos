@@ -54,49 +54,68 @@ impl Default for interrupt_test_config {
 type c_int = i32;
 
 fn verbosity_from_string(value: &str) -> interrupt_test_verbosity {
-    match value.to_ascii_lowercase().as_str() {
-        "quiet" => interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_QUIET,
-        "verbose" => interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_VERBOSE,
-        _ => interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_SUMMARY,
+    if value.eq_ignore_ascii_case("quiet") {
+        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_QUIET
+    } else if value.eq_ignore_ascii_case("verbose") {
+        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_VERBOSE
+    } else {
+        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_SUMMARY
     }
 }
 
 fn suite_from_string(value: &str) -> u32 {
-    let lower = value.to_ascii_lowercase();
-    match lower.as_str() {
-        "none" | "off" => 0,
-        "all" => INTERRUPT_TEST_SUITE_ALL,
-        "basic" => INTERRUPT_TEST_SUITE_BASIC,
-        "memory" => INTERRUPT_TEST_SUITE_MEMORY,
-        "control" => INTERRUPT_TEST_SUITE_CONTROL,
-        "basic+memory" | "memory+basic" => INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_MEMORY,
-        "basic+control" | "control+basic" => INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_CONTROL,
-        "memory+control" | "control+memory" => INTERRUPT_TEST_SUITE_MEMORY | INTERRUPT_TEST_SUITE_CONTROL,
-        _ => INTERRUPT_TEST_SUITE_ALL,
+    if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("off") {
+        0
+    } else if value.eq_ignore_ascii_case("all") {
+        INTERRUPT_TEST_SUITE_ALL
+    } else if value.eq_ignore_ascii_case("basic") {
+        INTERRUPT_TEST_SUITE_BASIC
+    } else if value.eq_ignore_ascii_case("memory") {
+        INTERRUPT_TEST_SUITE_MEMORY
+    } else if value.eq_ignore_ascii_case("control") {
+        INTERRUPT_TEST_SUITE_CONTROL
+    } else if value.eq_ignore_ascii_case("basic+memory") || value.eq_ignore_ascii_case("memory+basic") {
+        INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_MEMORY
+    } else if value.eq_ignore_ascii_case("basic+control") || value.eq_ignore_ascii_case("control+basic") {
+        INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_CONTROL
+    } else if value.eq_ignore_ascii_case("memory+control") || value.eq_ignore_ascii_case("control+memory") {
+        INTERRUPT_TEST_SUITE_MEMORY | INTERRUPT_TEST_SUITE_CONTROL
+    } else {
+        INTERRUPT_TEST_SUITE_ALL
     }
 }
 
 fn parse_on_off_flag(value: &str, current: c_int) -> c_int {
-    match value.to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "enabled" | "1" => 1,
-        "off" | "false" | "no" | "disabled" | "0" => 0,
-        _ => current,
+    if value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("enabled")
+        || value.eq_ignore_ascii_case("1")
+    {
+        1
+    } else if value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("disabled")
+        || value.eq_ignore_ascii_case("0")
+    {
+        0
+    } else {
+        current
     }
 }
 
 fn apply_enable_token(config: &mut interrupt_test_config, value: &str) {
-    let lower = value.to_ascii_lowercase();
-    match lower.as_str() {
-        "on" | "true" | "enabled" => {
-            config.enabled = 1;
-            return;
-        }
-        "off" | "false" | "disabled" => {
-            config.enabled = 0;
-            config.shutdown_on_complete = 0;
-            return;
-        }
-        _ => {}
+    if value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("enabled") {
+        config.enabled = 1;
+        return;
+    } else if value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("disabled")
+    {
+        config.enabled = 0;
+        config.shutdown_on_complete = 0;
+        return;
     }
 
     let suite = suite_from_string(value);

@@ -91,18 +91,10 @@ pub mod cpu {
 
     #[inline(always)]
     pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
-        let (mut eax, mut ebx, mut ecx, mut edx) = (0u32, 0u32, 0u32, 0u32);
         unsafe {
-            asm!(
-                "cpuid",
-                inout("eax") leaf => eax,
-                out("ebx") ebx,
-                out("ecx") ecx,
-                out("edx") edx,
-                options(nomem, nostack)
-            );
+            let res = core::arch::x86_64::__cpuid(leaf);
+            (res.eax, res.ebx, res.ecx, res.edx)
         }
-        (eax, ebx, ecx, edx)
     }
 }
 
@@ -111,51 +103,61 @@ pub mod io {
 
     #[inline(always)]
     pub unsafe fn outb(port: u16, value: u8) {
-        asm!(
-            "out dx, al",
-            in("dx") port,
-            in("al") value,
-            options(nomem, nostack, preserves_flags)
-        );
+        unsafe {
+            asm!(
+                "out dx, al",
+                in("dx") port,
+                in("al") value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
     }
 
     #[inline(always)]
     pub unsafe fn inb(port: u16) -> u8 {
-        let value: u8;
-        asm!(
-            "in al, dx",
-            out("al") value,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        );
-        value
+        unsafe {
+            let value: u8;
+            asm!(
+                "in al, dx",
+                out("al") value,
+                in("dx") port,
+                options(nomem, nostack, preserves_flags)
+            );
+            value
+        }
     }
 
     #[inline(always)]
     pub unsafe fn outw(port: u16, value: u16) {
-        asm!(
-            "out dx, ax",
-            in("dx") port,
-            in("ax") value,
-            options(nomem, nostack, preserves_flags)
-        );
+        unsafe {
+            asm!(
+                "out dx, ax",
+                in("dx") port,
+                in("ax") value,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
     }
 
     #[inline(always)]
     pub unsafe fn inw(port: u16) -> u16 {
-        let value: u16;
-        asm!(
-            "in ax, dx",
-            out("ax") value,
-            in("dx") port,
-            options(nomem, nostack, preserves_flags)
-        );
-        value
+        unsafe {
+            let value: u16;
+            asm!(
+                "in ax, dx",
+                out("ax") value,
+                in("dx") port,
+                options(nomem, nostack, preserves_flags)
+            );
+            value
+        }
     }
 
     #[inline(always)]
     pub unsafe fn io_wait() {
-        outb(0x80, 0);
+        unsafe {
+            outb(0x80, 0);
+        }
     }
 }
 
@@ -193,6 +195,7 @@ pub mod user_syscall_defs;
 pub mod user_syscall;
 
 pub use kdiag::{interrupt_frame, KDIAG_STACK_TRACE_DEPTH};
+pub use kdiag::kdiag_dump_interrupt_frame;
 pub use klog::{
     klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_printf,
     klog_set_level, KlogLevel,
@@ -214,5 +217,15 @@ pub const fn align_up(value: usize, align: usize) -> usize {
 #[inline(always)]
 pub const fn align_down(value: usize, align: usize) -> usize {
     value & !(align - 1)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FramebufferInfo {
+    pub address: *mut u8,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
 }
 

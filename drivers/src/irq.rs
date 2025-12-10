@@ -157,15 +157,17 @@ fn log_unhandled_irq(irq: u8, vector: u8) {
 
 unsafe extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mut c_void) {
     (irq, _frame, _ctx);
-    TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
-    if TIMER_TICK_COUNTER <= 3 {
-        klog_printf(
-            KlogLevel::Debug,
-            b"IRQ: Timer tick #%llu\n\0".as_ptr() as *const c_char,
-            TIMER_TICK_COUNTER,
-        );
+    unsafe {
+        TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
+        if TIMER_TICK_COUNTER <= 3 {
+            klog_printf(
+                KlogLevel::Debug,
+                b"IRQ: Timer tick #%llu\n\0".as_ptr() as *const c_char,
+                TIMER_TICK_COUNTER,
+            );
+        }
+        scheduler_timer_tick();
     }
-    scheduler_timer_tick();
 }
 
 unsafe extern "C" fn keyboard_irq_handler(
@@ -173,14 +175,16 @@ unsafe extern "C" fn keyboard_irq_handler(
     _frame: *mut interrupt_frame,
     _ctx: *mut c_void,
 ) {
-    let status = io::inb(PS2_STATUS_PORT);
-    if status & 0x01 == 0 {
-        return;
-    }
+    unsafe {
+        let status = io::inb(PS2_STATUS_PORT);
+        if status & 0x01 == 0 {
+            return;
+        }
 
-    let scancode = io::inb(PS2_DATA_PORT);
-    KEYBOARD_EVENT_COUNTER = KEYBOARD_EVENT_COUNTER.wrapping_add(1);
-    keyboard::handle_scancode(scancode);
+        let scancode = io::inb(PS2_DATA_PORT);
+        KEYBOARD_EVENT_COUNTER = KEYBOARD_EVENT_COUNTER.wrapping_add(1);
+        keyboard::keyboard_handle_scancode(scancode);
+    }
 }
 
 fn irq_program_ioapic_route(irq: u8) {
@@ -219,15 +223,15 @@ fn irq_program_ioapic_route(irq: u8) {
         IRQ_ROUTE_TABLE[irq as usize].gsi = gsi;
     }
 
-    let polarity = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
-        b"active-low\0"
+    let polarity: *const c_char = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
+        b"active-low\0".as_ptr() as *const c_char
     } else {
-        b"active-high\0"
+        b"active-high\0".as_ptr() as *const c_char
     };
-    let trigger = if legacy_flags & ioapic::IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
-        b"level\0"
+    let trigger: *const c_char = if legacy_flags & ioapic::IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
+        b"level\0".as_ptr() as *const c_char
     } else {
-        b"edge\0"
+        b"edge\0".as_ptr() as *const c_char
     };
 
     unsafe {
@@ -238,8 +242,8 @@ fn irq_program_ioapic_route(irq: u8) {
             irq as u32,
             gsi,
             vector as u32,
-            polarity.as_ptr() as *const c_char,
-            trigger.as_ptr() as *const c_char,
+            polarity,
+            trigger,
         );
     }
 
@@ -285,7 +289,7 @@ pub extern "C" fn irq_init() {
     IRQ_SYSTEM_INITIALIZED.store(true, Ordering::Relaxed);
 
     irq_setup_ioapic_routes();
-    keyboard::init();
+    keyboard::keyboard_init();
 
     let _ = irq_register_handler(
         LEGACY_IRQ_TIMER,

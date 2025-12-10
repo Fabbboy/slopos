@@ -79,7 +79,7 @@ fn syscall_fs_error(frame: *mut InterruptFrame) -> syscall_disposition {
     syscall_return_err(frame, u64::MAX)
 }
 
-pub fn syscall_fs_open(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_open(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -101,7 +101,7 @@ pub fn syscall_fs_open(task: *mut task_t, frame: *mut InterruptFrame) -> syscall
     syscall_return_ok(frame, fd as u64)
 }
 
-pub fn syscall_fs_close(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_close(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -114,7 +114,7 @@ pub fn syscall_fs_close(task: *mut task_t, frame: *mut InterruptFrame) -> syscal
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_fs_read(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_read(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -150,7 +150,7 @@ pub fn syscall_fs_read(task: *mut task_t, frame: *mut InterruptFrame) -> syscall
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub fn syscall_fs_write(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_write(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -186,7 +186,7 @@ pub fn syscall_fs_write(task: *mut task_t, frame: *mut InterruptFrame) -> syscal
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if task.is_null() || (*frame).rdi == 0 || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -231,7 +231,7 @@ pub fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame) -> syscall
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -247,7 +247,7 @@ pub fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame) -> syscal
     syscall_fs_error(frame)
 }
 
-pub fn syscall_fs_unlink(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_unlink(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -262,7 +262,7 @@ pub fn syscall_fs_unlink(task: *mut task_t, frame: *mut InterruptFrame) -> sysca
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     unsafe {
@@ -335,7 +335,9 @@ pub fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame) -> syscall
             let cstr = CStr::from_ptr((*entry_ptr).name);
             let name_bytes = cstr.to_bytes();
             let nlen = name_bytes.len().min(dst.name.len());
-            dst.name[..nlen].copy_from_slice(&name_bytes[..nlen]);
+            for (dst_byte, src_byte) in dst.name[..nlen].iter_mut().zip(name_bytes[..nlen].iter()) {
+                *dst_byte = *src_byte as i8;
+            }
             if nlen < dst.name.len() {
                 dst.name[nlen] = 0;
             }

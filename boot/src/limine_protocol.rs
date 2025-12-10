@@ -352,14 +352,7 @@ static KERNEL_ADDRESS_REQUEST: LimineKernelAddressRequest = LimineKernelAddressR
 #[link_section = ".limine_requests_end_marker"]
 static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 
-#[derive(Clone, Copy, Debug)]
-pub struct FramebufferInfo {
-    pub address: *mut u8,
-    pub width: u64,
-    pub height: u64,
-    pub pitch: u64,
-    pub bpp: u16,
-}
+pub type FramebufferInfo = slopos_lib::FramebufferInfo;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MemmapEntry {

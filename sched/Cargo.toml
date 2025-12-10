@@ -9,7 +9,6 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-slopos-boot = { path = "../boot" }
 slopos-drivers = { path = "../drivers" }
 slopos-lib = { path = "../lib" }
 slopos-mm = { path = "../mm" }
