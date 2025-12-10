@@ -17,7 +17,6 @@
 #include "../sched/task.h"
 #include "../sched/scheduler.h"
 #include "../boot/gdt_defs.h"
-#include "../video/roulette.h"
 
 #ifndef ENABLE_BUILTIN_TESTS
 #define ENABLE_BUILTIN_TESTS 0

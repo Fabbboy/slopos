@@ -10,4 +10,5 @@ crate-type = ["rlib"]
 
 [dependencies]
 slopos-drivers = { path = "../drivers" }
+slopos-video = { path = "../video" }
 

@@ -6,6 +6,9 @@ use slopos_drivers::serial_println;
 
 pub mod framebuffer;
 pub mod graphics;
+pub mod font;
+pub mod splash;
+pub mod roulette_core;
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     if let Some(fb) = framebuffer {
