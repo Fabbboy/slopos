@@ -4,6 +4,9 @@
 use slopos_boot::FramebufferInfo;
 use slopos_drivers::serial_println;
 
+pub mod framebuffer;
+pub mod graphics;
+
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     if let Some(fb) = framebuffer {
         serial_println!(
@@ -13,13 +16,24 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             fb.pitch,
             fb.bpp
         );
-        paint_banner(fb);
+
+        if framebuffer::init_with_info(fb) != 0 {
+            serial_println!("Framebuffer init failed; skipping banner paint.");
+            return;
+        }
+
+        paint_banner();
     } else {
         serial_println!("No framebuffer provided; skipping video init.");
     }
 }
 
-fn paint_banner(fb: FramebufferInfo) {
+fn paint_banner() {
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return,
+    };
+
     if fb.bpp < 24 {
         serial_println!(
             "Framebuffer bpp {} unsupported for banner paint; skipping.",
@@ -32,7 +46,7 @@ fn paint_banner(fb: FramebufferInfo) {
     let stride = fb.pitch as usize;
     let height = fb.height.min(32) as usize;
     let width = fb.width as usize;
-    let base = fb.address;
+    let base = fb.base;
 
     for y in 0..height {
         for x in 0..width {
