@@ -11,7 +11,6 @@ use core::panic::PanicInfo;
 use slopos_boot as boot;
 use slopos_drivers::{
     fate::{detonate, RouletteOutcome, Wheel},
-    interrupts,
     serial,
     serial_println,
     wl_currency,
@@ -31,7 +30,7 @@ pub static kernel_stack_top: u8 = 0;
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     serial::init();
-    serial_println!("Allocation failure: {layout:?}");
+    serial_println!("Allocation failure: {:?}", layout);
     wl_currency::award_loss();
     cpu::halt_loop();
 }
@@ -39,15 +38,25 @@ fn alloc_error(layout: Layout) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     serial::init();
-    serial_println!("Kernel panic: {info}");
+    serial_println!("Kernel panic: {:?}", info);
     wl_currency::award_loss();
     cpu::halt_loop();
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // Boot pipeline: early_hw (serial/limine/cmdline) → memory (Limine map into mm) → drivers
+    // (gdt/idt/apic/ioapic/irq/pit/pci + itests) → services (task manager + scheduler scaffolding)
+    // → optional (framebuffer demo). Keep this ordering intact for bring-up.
+    wl_currency::reset();
     boot::ensure_base_revision();
-    let _ = boot::early_init::boot_init_run_all();
+    let init_rc = boot::early_init::boot_init_run_all();
+    if init_rc != 0 {
+        serial::init();
+        serial_println!("Boot initialization failed (rc={init_rc}).");
+        wl_currency::award_loss();
+        cpu::halt_loop();
+    }
     let boot_info = boot::boot_info();
 
     serial::init();
@@ -58,7 +67,6 @@ pub extern "C" fn _start() -> ! {
         boot_info.memmap_entries
     );
 
-    wl_currency::reset();
     mm::init(boot_info.hhdm_offset);
     wl_currency::award_win();
 
@@ -77,13 +85,10 @@ pub extern "C" fn _start() -> ! {
     fs::ramfs_init();
     userland::init();
 
-    let itests_cfg = interrupts::config_from_cmdline(boot_info.cmdline);
-    interrupts::run(&itests_cfg);
-
-    unsafe {
-        slopos_sched::init_scheduler();
-        slopos_sched::create_idle_task();
-        slopos_sched::start_scheduler();
+    if slopos_sched::start_scheduler() != 0 {
+        serial_println!("Scheduler failed to start.");
+        wl_currency::award_loss();
+        cpu::halt_loop();
     }
     cpu::halt_loop()
 }

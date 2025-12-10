@@ -95,6 +95,7 @@ endef
 define build_kernel
 	set -e; \
 	mkdir -p $(BUILD_DIR); \
+	rm -f $(BUILD_DIR)/kernel $(BUILD_DIR)/kernel.elf; \
 	$(call ensure_rust_toolchain) \
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
 	$(CARGO) +$(RUST_CHANNEL) build \
