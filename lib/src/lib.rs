@@ -184,6 +184,13 @@ pub mod numfmt;
 pub mod klog;
 pub mod stacktrace;
 pub mod kdiag;
+pub mod alignment;
+pub mod math;
+pub mod ring_buffer;
+pub mod spinlock;
+pub mod syscall_numbers;
+pub mod user_syscall_defs;
+pub mod user_syscall;
 
 pub use kdiag::{interrupt_frame, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
@@ -191,6 +198,13 @@ pub use klog::{
     klog_set_level, KlogLevel,
 };
 pub use stacktrace::stacktrace_entry;
+pub use alignment::{align_down_u64, align_up_u64};
+pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
+pub use ring_buffer::RingBuffer;
+pub use spinlock::Spinlock;
+pub use syscall_numbers::*;
+pub use user_syscall::*;
+pub use user_syscall_defs::*;
 
 #[inline(always)]
 pub const fn align_up(value: usize, align: usize) -> usize {

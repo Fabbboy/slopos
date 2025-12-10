@@ -1,0 +1,146 @@
+#![allow(dead_code)]
+
+use core::arch::asm;
+use core::ffi::{c_char, c_int, c_long, c_void};
+use core::hint::unreachable_unchecked;
+
+use crate::syscall_numbers::*;
+use crate::user_syscall_defs::*;
+
+#[inline(always)]
+pub unsafe fn syscall_invoke(num: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "int 0x80",
+        in("rax") num,
+        in("rdi") arg0,
+        in("rsi") arg1,
+        in("rdx") arg2,
+        lateout("rax") ret,
+        options(nostack, preserves_flags),
+    );
+    ret
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_yield() -> i64 {
+    syscall_invoke(SYSCALL_YIELD, 0, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_exit() -> ! {
+    syscall_invoke(SYSCALL_EXIT, 0, 0, 0);
+    unsafe { unreachable_unchecked() }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_write(buf: *const c_void, len: usize) -> i64 {
+    syscall_invoke(SYSCALL_WRITE, buf as u64, len as u64, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_read(buf: *mut c_void, len: usize) -> i64 {
+    syscall_invoke(SYSCALL_READ, buf as u64, len as u64, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_roulette() -> u64 {
+    syscall_invoke(SYSCALL_ROULETTE, 0, 0, 0) as u64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_sleep_ms(ms: u64) -> i64 {
+    syscall_invoke(SYSCALL_SLEEP_MS, ms, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fb_info(out_info: *mut user_fb_info) -> i64 {
+    syscall_invoke(SYSCALL_FB_INFO, out_info as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_gfx_fill_rect(rect: *const user_rect) -> i64 {
+    syscall_invoke(SYSCALL_GFX_FILL_RECT, rect as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_gfx_draw_line(line: *const user_line) -> i64 {
+    syscall_invoke(SYSCALL_GFX_DRAW_LINE, line as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_gfx_draw_circle(circle: *const user_circle) -> i64 {
+    syscall_invoke(SYSCALL_GFX_DRAW_CIRCLE, circle as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_gfx_draw_circle_filled(circle: *const user_circle) -> i64 {
+    syscall_invoke(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_font_draw(text: *const user_text) -> i64 {
+    syscall_invoke(SYSCALL_FONT_DRAW, text as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_random_next() -> u32 {
+    syscall_invoke(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_roulette_result(fate_packed: u64) -> i64 {
+    syscall_invoke(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
+    syscall_invoke(SYSCALL_FS_OPEN, path as u64, flags as u64, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_close(fd: c_int) -> i64 {
+    syscall_invoke(SYSCALL_FS_CLOSE, fd as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_read(fd: c_int, buf: *mut c_void, len: usize) -> i64 {
+    syscall_invoke(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_write(fd: c_int, buf: *const c_void, len: usize) -> i64 {
+    syscall_invoke(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_stat(path: *const c_char, out_stat: *mut user_fs_stat) -> i64 {
+    syscall_invoke(SYSCALL_FS_STAT, path as u64, out_stat as u64, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_mkdir(path: *const c_char) -> i64 {
+    syscall_invoke(SYSCALL_FS_MKDIR, path as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_unlink(path: *const c_char) -> i64 {
+    syscall_invoke(SYSCALL_FS_UNLINK, path as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_fs_list(path: *const c_char, list: *mut user_fs_list) -> i64 {
+    syscall_invoke(SYSCALL_FS_LIST, path as u64, list as u64, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_sys_info(info: *mut user_sys_info) -> i64 {
+    syscall_invoke(SYSCALL_SYS_INFO, info as u64, 0, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sys_halt() -> ! {
+    syscall_invoke(SYSCALL_HALT, 0, 0, 0);
+    unsafe { unreachable_unchecked() }
+}
+
