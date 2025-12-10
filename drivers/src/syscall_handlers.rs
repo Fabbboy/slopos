@@ -78,6 +78,7 @@ pub struct user_sys_info_t {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct fate_result {
     pub token: u32,
     pub value: u32,

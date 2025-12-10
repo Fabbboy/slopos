@@ -1,6 +1,7 @@
 use core::arch::asm;
+use core::ffi::c_char;
 
-use slopos_lib::klog_debug;
+use slopos_lib::{klog_printf, KlogLevel};
 
 const GDT_NULL_SELECTOR: u16 = 0x00;
 const GDT_CODE_SELECTOR: u16 = 0x08;
@@ -83,35 +84,42 @@ extern "C" {
 }
 
 unsafe fn load_gdt(descriptor: &GdtDescriptor) {
-    asm!("lgdt [{0}]", in(reg) descriptor, options(nostack, preserves_flags));
+    unsafe { asm!("lgdt [{0}]", in(reg) descriptor, options(nostack, preserves_flags)) };
 
-    asm!(
-        "pushq {code}",
-        "lea 1f(%rip), %rax",
-        "pushq %rax",
-        "lretq",
-        "1:",
-        "movw {data}, %ax",
-        "movw %ax, %ds",
-        "movw %ax, %es",
-        "movw %ax, %ss",
-        "movw %ax, %fs",
-        "movw %ax, %gs",
-        code = const GDT_CODE_SELECTOR as usize,
-        data = const GDT_DATA_SELECTOR as usize,
-        out("rax") _,
-        options(nostack)
-    );
+    unsafe {
+        asm!(
+            "pushq {code}",
+            "lea 2f(%rip), %rax",
+            "pushq %rax",
+            "lretq",
+            "2:",
+            "movw {data}, %ax",
+            "movw %ax, %ds",
+            "movw %ax, %es",
+            "movw %ax, %ss",
+            "movw %ax, %fs",
+            "movw %ax, %gs",
+            code = const GDT_CODE_SELECTOR as usize,
+            data = const GDT_DATA_SELECTOR as usize,
+            out("rax") _,
+            options(att_syntax, nostack)
+        );
+    }
 }
 
 unsafe fn load_tss() {
     let selector = GDT_TSS_SELECTOR;
-    asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags));
+    unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };
 }
 
 #[no_mangle]
 pub extern "C" fn gdt_init() {
-    klog_debug(b"GDT: Initializing descriptor tables");
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"GDT: Initializing descriptor tables\0".as_ptr() as *const c_char,
+        );
+    }
 
     unsafe {
         GDT_TABLE.entries = [
@@ -130,7 +138,7 @@ pub extern "C" fn gdt_init() {
         tss_entry.base_low = (tss_base & 0xFFFF) as u16;
         tss_entry.base_mid = ((tss_base >> 16) & 0xFF) as u8;
         tss_entry.access = 0x89; // Present | type=64-bit available TSS
-        tss_entry.granularity = ((tss_limit >> 16) & 0x0F) as u8;
+        tss_entry.granularity = (((tss_limit as u32) >> 16) & 0x0F) as u8;
         tss_entry.base_high = ((tss_base >> 24) & 0xFF) as u8;
         tss_entry.base_upper = (tss_base >> 32) as u32;
         tss_entry.reserved = 0;
@@ -147,7 +155,12 @@ pub extern "C" fn gdt_init() {
         load_tss();
     }
 
-    klog_debug(b"GDT: Initialized with TSS loaded");
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"GDT: Initialized with TSS loaded\0".as_ptr() as *const c_char,
+        );
+    }
 }
 
 #[no_mangle]

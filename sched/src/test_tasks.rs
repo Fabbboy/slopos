@@ -484,7 +484,7 @@ pub struct SmokeTestContext {
     pub task_name: *const c_char,
 }
 
-static mut KERNEL_RETURN_CONTEXT: TaskContext = TaskContext::default();
+static mut KERNEL_RETURN_CONTEXT: TaskContext = const { TaskContext::zero() };
 static mut TEST_COMPLETED_PTR: *mut c_int = ptr::null_mut();
 
 #[no_mangle]
@@ -690,7 +690,9 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
 
     let mut dummy_old = TaskContext::default();
     unsafe {
-        simple_context_switch(&mut dummy_old, &test_ctx);
+        unsafe {
+            simple_context_switch(&mut dummy_old, &test_ctx);
+        }
     }
 
     unsafe { core::hint::unreachable_unchecked() }
@@ -712,7 +714,9 @@ pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
 
     let mut dummy = TaskContext::default();
     unsafe {
-        simple_context_switch(&mut dummy, &KERNEL_RETURN_CONTEXT as *const TaskContext);
+        unsafe {
+            simple_context_switch(&mut dummy, &KERNEL_RETURN_CONTEXT as *const TaskContext);
+        }
     }
 }
 

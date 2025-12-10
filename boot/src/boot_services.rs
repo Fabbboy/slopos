@@ -1,8 +1,9 @@
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 
 use slopos_lib::{klog_printf, KlogLevel};
 
-use crate::early_init::{boot_init_optional_step, boot_init_priority, boot_init_step_with_flags};
+use crate::early_init::{boot_init_priority, BootInitStep};
+use crate::{boot_init_optional_step, boot_init_step_with_flags};
 
 #[repr(C)]
 struct FramebufferInfo {
@@ -26,6 +27,18 @@ extern "C" {
     fn boot_step_idle_task() -> c_int;
 }
 
+extern "C" fn boot_step_task_manager_init_wrapper() -> i32 {
+    unsafe { boot_step_task_manager_init() }
+}
+
+extern "C" fn boot_step_scheduler_init_wrapper() -> i32 {
+    unsafe { boot_step_scheduler_init() }
+}
+
+extern "C" fn boot_step_idle_task_wrapper() -> i32 {
+    unsafe { boot_step_idle_task() }
+}
+
 fn log(level: KlogLevel, msg: &[u8]) {
     unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
 }
@@ -38,34 +51,37 @@ fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
 
-boot_init_step_with_flags!(
-    services,
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_TASK_MANAGER: BootInitStep = BootInitStep::new(
     b"task manager\0",
-    boot_step_task_manager_init,
-    boot_init_priority(20)
+    boot_step_task_manager_init_wrapper,
+    boot_init_priority(20),
 );
 
-boot_init_step_with_flags!(
-    services,
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_SCHEDULER: BootInitStep = BootInitStep::new(
     b"scheduler\0",
-    boot_step_scheduler_init,
-    boot_init_priority(30)
+    boot_step_scheduler_init_wrapper,
+    boot_init_priority(30),
 );
 
-boot_init_step_with_flags!(
-    services,
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_IDLE_TASK: BootInitStep = BootInitStep::new(
     b"idle task\0",
-    boot_step_idle_task,
-    boot_init_priority(50)
+    boot_step_idle_task_wrapper,
+    boot_init_priority(50),
 );
 
-extern "C" fn boot_step_mark_kernel_ready() -> i32 {
+extern "C" fn boot_step_mark_kernel_ready_fn() -> i32 {
     unsafe { boot_mark_initialized() };
     log_info(b"Kernel core services initialized.\0");
     0
 }
 
-extern "C" fn boot_step_framebuffer_demo() -> i32 {
+extern "C" fn boot_step_framebuffer_demo_fn() -> i32 {
     let fb_info = unsafe { framebuffer_get_info() };
     if fb_info.is_null() || unsafe { framebuffer_is_initialized() } == 0 {
         log_info(b"Graphics demo: framebuffer not initialized, skipping\0");
@@ -88,10 +104,15 @@ extern "C" fn boot_step_framebuffer_demo() -> i32 {
     0
 }
 
-boot_init_step_with_flags!(
-    services,
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_MARK_READY: BootInitStep = BootInitStep::new(
     b"mark ready\0",
-    boot_step_mark_kernel_ready,
-    boot_init_priority(60)
+    boot_step_mark_kernel_ready_fn,
+    boot_init_priority(60),
 );
-boot_init_optional_step!(optional, b"framebuffer demo\0", boot_step_framebuffer_demo);
+
+#[used]
+#[link_section = ".boot_init_optional"]
+static BOOT_STEP_FRAMEBUFFER_DEMO: BootInitStep =
+    BootInitStep::new(b"framebuffer demo\0", boot_step_framebuffer_demo_fn, 0);

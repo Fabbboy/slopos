@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
@@ -16,7 +17,6 @@ use slopos_drivers::{
     wl_currency,
 };
 use slopos_mm::{self as mm, BumpAllocator};
-use slopos_sched::Scheduler;
 use slopos_video as video;
 use slopos_fs as fs;
 use slopos_userland as userland;
@@ -24,6 +24,9 @@ use slopos_lib::cpu;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator::new();
+
+#[no_mangle]
+pub static kernel_stack_top: u8 = 0;
 
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
@@ -44,7 +47,8 @@ fn panic(info: &PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     boot::ensure_base_revision();
-    let boot_info = boot::init();
+    let _ = boot::early_init::boot_init_run_all();
+    let boot_info = boot::boot_info();
 
     serial::init();
     serial_println!("SlopOS (Rust rewrite) has washed ashore on Sloptopia.");
@@ -70,13 +74,17 @@ pub extern "C" fn _start() -> ! {
     }
 
     video::init(boot_info.framebuffer);
-    fs::init();
+    fs::ramfs_init();
     userland::init();
 
     let itests_cfg = interrupts::config_from_cmdline(boot_info.cmdline);
     interrupts::run(&itests_cfg);
 
-    Scheduler::init();
-    Scheduler::idle()
+    unsafe {
+        slopos_sched::init_scheduler();
+        slopos_sched::create_idle_task();
+        slopos_sched::start_scheduler();
+    }
+    cpu::halt_loop()
 }
 

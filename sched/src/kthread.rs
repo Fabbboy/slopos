@@ -5,9 +5,8 @@ use core::ffi::{c_char, c_int, c_void};
 use slopos_lib::klog::{klog_printf, KlogLevel};
 
 use crate::scheduler;
-use crate::task::{
-    task_create, task_wait_for, TaskEntry, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL,
-};
+use crate::scheduler::task_wait_for;
+use crate::task::{task_create, TaskEntry, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL};
 
 pub type KthreadId = u32;
 

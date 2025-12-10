@@ -312,6 +312,28 @@ impl LimineRsdpRequest {
     }
 }
 
+unsafe impl Sync for LimineHhdmResponse {}
+unsafe impl Sync for LimineMemmapResponse {}
+unsafe impl Sync for LimineFramebufferResponse {}
+unsafe impl Sync for LimineBootloaderInfoResponse {}
+unsafe impl Sync for LimineKernelAddressResponse {}
+unsafe impl Sync for LimineKernelFileResponse {}
+unsafe impl Sync for LimineRsdpResponse {}
+unsafe impl Sync for LimineHhdmRequest {}
+unsafe impl Sync for LimineMemmapRequest {}
+unsafe impl Sync for LimineFramebufferRequest {}
+unsafe impl Sync for LimineBootloaderInfoRequest {}
+unsafe impl Sync for LimineKernelAddressRequest {}
+unsafe impl Sync for LimineKernelFileRequest {}
+unsafe impl Sync for LimineRsdpRequest {}
+unsafe impl Send for LimineHhdmRequest {}
+unsafe impl Send for LimineMemmapRequest {}
+unsafe impl Send for LimineFramebufferRequest {}
+unsafe impl Send for LimineBootloaderInfoRequest {}
+unsafe impl Send for LimineKernelAddressRequest {}
+unsafe impl Send for LimineKernelFileRequest {}
+unsafe impl Send for LimineRsdpRequest {}
+
 #[used]
 #[link_section = ".limine_requests_start_marker"]
 static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];

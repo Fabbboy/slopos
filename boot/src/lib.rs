@@ -19,7 +19,7 @@ pub use early_init::{
     kernel_main, kernel_main_no_multiboot, report_kernel_status,
 };
 pub use kernel_panic::{kernel_assert, kernel_panic, kernel_panic_with_context};
-pub use limine_protocol::{ensure_base_revision, BootInfo, FramebufferInfo, MemmapEntry};
+pub use limine_protocol::{boot_info, ensure_base_revision, BootInfo, FramebufferInfo, MemmapEntry};
 pub use shutdown::{
     execute_kernel, kernel_drain_serial_output, kernel_quiesce_interrupts, kernel_reboot,
     kernel_shutdown,

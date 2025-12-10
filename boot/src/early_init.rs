@@ -36,6 +36,8 @@ pub struct BootInitStep {
     flags: u32,
 }
 
+unsafe impl Sync for BootInitStep {}
+
 impl BootInitStep {
     pub const fn new(label: &'static [u8], func: extern "C" fn() -> i32, flags: u32) -> Self {
         Self {
@@ -216,9 +218,11 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     boot_init_report_step(
         KlogLevel::Debug,
         b"step\0",
-        unsafe { CStr::from_ptr(step.name).to_bytes_with_nul() }
-            .get(0..)
-            .unwrap_or(b"(unnamed)\0"),
+        Some(
+            unsafe { CStr::from_ptr(step.name).to_bytes_with_nul() }
+                .get(0..)
+                .unwrap_or(b"(unnamed)\0"),
+        ),
     );
 
     let rc = func();
@@ -232,7 +236,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
             boot_info(b"Optional boot step failed, continuing...\0");
             return 0;
         }
-        kernel_panic("Boot init step failed");
+        kernel_panic(b"Boot init step failed\0".as_ptr() as *const c_char);
     }
     0
 }
@@ -244,12 +248,12 @@ pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
         return 0;
     }
 
-    let phase_name = match phase {
-        BootInitPhase::EarlyHw => b"early_hw\0",
-        BootInitPhase::Memory => b"memory\0",
-        BootInitPhase::Drivers => b"drivers\0",
-        BootInitPhase::Services => b"services\0",
-        BootInitPhase::Optional => b"optional\0",
+    let phase_name: &[u8] = match phase {
+        BootInitPhase::EarlyHw => b"early_hw\0".as_slice(),
+        BootInitPhase::Memory => b"memory\0".as_slice(),
+        BootInitPhase::Drivers => b"drivers\0".as_slice(),
+        BootInitPhase::Services => b"services\0".as_slice(),
+        BootInitPhase::Optional => b"optional\0".as_slice(),
     };
 
     boot_init_report_phase(KlogLevel::Debug, b"phase start -> \0", Some(phase_name));
@@ -261,7 +265,7 @@ pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     let mut cursor = start;
     while cursor < end {
         if ordered_count >= BOOT_INIT_MAX_STEPS {
-            kernel_panic("Boot init: too many steps for phase");
+            kernel_panic(b"Boot init: too many steps for phase\0".as_ptr() as *const c_char);
         }
 
         let prio = unsafe { (*cursor).priority() };
@@ -356,20 +360,20 @@ extern "C" {
     fn start_scheduler() -> i32;
 }
 
-fn boot_step_serial_init() -> i32 {
+extern "C" fn boot_step_serial_init_fn() -> i32 {
     serial::init();
     slopos_lib::klog_attach_serial();
     boot_debug(b"Serial console ready on COM1\0");
     0
 }
 
-fn boot_step_boot_banner() -> i32 {
+extern "C" fn boot_step_boot_banner_fn() -> i32 {
     boot_info(b"SlopOS Kernel Started!\0");
     boot_info(b"Booting via Limine Protocol...\0");
     0
 }
 
-fn boot_step_limine_protocol() -> i32 {
+extern "C" fn boot_step_limine_protocol_fn() -> i32 {
     boot_debug(b"Initializing Limine protocol interface...\0");
     if unsafe { limine_protocol::init_limine_protocol() } != 0 {
         boot_info(b"ERROR: Limine protocol initialization failed\0");
@@ -398,7 +402,7 @@ fn boot_step_limine_protocol() -> i32 {
     0
 }
 
-fn boot_step_boot_config() -> i32 {
+extern "C" fn boot_step_boot_config_fn() -> i32 {
     let cmdline = boot_state().ctx.cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
@@ -420,17 +424,29 @@ fn boot_step_boot_config() -> i32 {
     0
 }
 
-boot_init_step!(early_hw, b"serial\0", boot_step_serial_init);
-boot_init_step!(early_hw, b"boot banner\0", boot_step_boot_banner);
-boot_init_step!(early_hw, b"limine\0", boot_step_limine_protocol);
-boot_init_step!(early_hw, b"boot config\0", boot_step_boot_config);
+#[used]
+#[link_section = ".boot_init_early_hw"]
+static BOOT_STEP_SERIAL_INIT: BootInitStep =
+    BootInitStep::new(b"serial\0", boot_step_serial_init_fn, 0);
+#[used]
+#[link_section = ".boot_init_early_hw"]
+static BOOT_STEP_BOOT_BANNER: BootInitStep =
+    BootInitStep::new(b"boot banner\0", boot_step_boot_banner_fn, 0);
+#[used]
+#[link_section = ".boot_init_early_hw"]
+static BOOT_STEP_LIMINE: BootInitStep =
+    BootInitStep::new(b"limine\0", boot_step_limine_protocol_fn, 0);
+#[used]
+#[link_section = ".boot_init_early_hw"]
+static BOOT_STEP_BOOT_CONFIG: BootInitStep =
+    BootInitStep::new(b"boot config\0", boot_step_boot_config_fn, 0);
 
 #[no_mangle]
 pub extern "C" fn kernel_main() {
     wl_currency::reset();
 
     if boot_init_run_all() != 0 {
-        kernel_panic("Boot initialization failed");
+        kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);
     }
 
     if unsafe { klog_is_enabled(KlogLevel::Info) } != 0 {
@@ -456,7 +472,7 @@ pub extern "C" fn kernel_main() {
                 b"ERROR: Scheduler startup failed\n\0".as_ptr() as *const c_char,
             );
         }
-        kernel_panic("Scheduler startup failed");
+        kernel_panic(b"Scheduler startup failed\0".as_ptr() as *const c_char);
     }
 
     unsafe {

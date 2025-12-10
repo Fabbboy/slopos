@@ -41,6 +41,8 @@ impl FileDescriptor {
     }
 }
 
+unsafe impl Send for FileDescriptor {}
+
 struct FileTableSlot {
     process_id: u32,
     in_use: bool,
@@ -59,6 +61,8 @@ impl FileTableSlot {
     }
 }
 
+unsafe impl Send for FileTableSlot {}
+
 struct FileioState {
     kernel: FileTableSlot,
     processes: [FileTableSlot; MAX_PROCESSES],
@@ -76,6 +80,8 @@ impl FileioState {
         Self { kernel, processes }
     }
 }
+
+unsafe impl Send for FileioState {}
 
 static FILEIO_STATE: Mutex<Option<FileioState>> = Mutex::new(None);
 static FILEIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -192,14 +198,18 @@ pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
         return;
     }
     with_state(|state| {
+        let kernel_ptr = &mut state.kernel as *mut FileTableSlot;
         if let Some(table) = table_for_pid(state, process_id) {
-            if ptr::eq(table, &state.kernel) {
+            let table_ptr = table as *mut FileTableSlot;
+            if table_ptr == kernel_ptr {
                 return;
             }
-            let guard = table.lock.lock();
-            reset_table(table);
-            table.process_id = INVALID_PROCESS_ID;
-            table.in_use = false;
+            let guard = unsafe { (&(*table_ptr).lock).lock() };
+            unsafe {
+                reset_table(&mut *table_ptr);
+                (*table_ptr).process_id = INVALID_PROCESS_ID;
+                (*table_ptr).in_use = false;
+            }
             drop(guard);
         }
     });
@@ -220,11 +230,15 @@ pub extern "C" fn file_open_for_process(
     }
 
     with_state(|state| {
-        let table = table_for_pid(state, process_id).unwrap_or_else(|| {
-            // Auto-create slot if possible.
-            let slot = find_free_table(state);
-            slot.unwrap_or(&mut state.kernel)
-        });
+        let kernel_ptr = &mut state.kernel as *mut FileTableSlot;
+        let table_ptr = if let Some(t) = table_for_pid(state, process_id) {
+            t as *mut FileTableSlot
+        } else if let Some(t) = find_free_table(state) {
+            t as *mut FileTableSlot
+        } else {
+            kernel_ptr
+        };
+        let table: &mut FileTableSlot = unsafe { &mut *table_ptr };
 
         if !table.in_use {
             table.in_use = true;
@@ -232,7 +246,8 @@ pub extern "C" fn file_open_for_process(
             reset_table(table);
         }
 
-        let guard = table.lock.lock();
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
 
         let Some(slot_idx) = find_free_slot(table) else {
             drop(guard);
@@ -255,7 +270,7 @@ pub extern "C" fn file_open_for_process(
             return -1;
         }
 
-        let desc = &mut table.descriptors[slot_idx];
+        let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
         desc.node = node;
         desc.flags = flags;
         desc.position = if (flags & FILE_OPEN_APPEND) != 0 {
@@ -289,8 +304,9 @@ pub extern "C" fn file_read_fd(
         if !table.in_use {
             return -1;
         }
-        let guard = table.lock.lock();
-        let Some(desc) = get_descriptor(table, fd) else {
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
             return -1;
         };
@@ -343,8 +359,9 @@ pub extern "C" fn file_write_fd(
         if !table.in_use {
             return -1;
         }
-        let guard = table.lock.lock();
-        let Some(desc) = get_descriptor(table, fd) else {
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
             return -1;
         };
@@ -380,8 +397,9 @@ pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
         if !table.in_use {
             return -1;
         }
-        let guard = table.lock.lock();
-        let Some(desc) = get_descriptor(table, fd) else {
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
             return -1;
         };
@@ -406,8 +424,9 @@ pub extern "C" fn file_seek_fd(
         if !table.in_use {
             return -1;
         }
-        let guard = table.lock.lock();
-        let Some(desc) = get_descriptor(table, fd) else {
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
             drop(guard);
             return -1;
         };
@@ -425,14 +444,19 @@ pub extern "C" fn file_seek_fd(
                 }
                 delta
             }
-            1 => desc
-                .position
-                .checked_add(delta)
-                .filter(|p| *p <= size)
-                .unwrap_or_else(|| {
+            1 => {
+                if let Some(p) = desc.position.checked_add(delta) {
+                    if p <= size {
+                        p
+                    } else {
+                        drop(guard);
+                        return -1;
+                    }
+                } else {
                     drop(guard);
-                    usize::MAX
-                }),
+                    return -1;
+                }
+            }
             2 => {
                 if delta > size {
                     drop(guard);
@@ -445,9 +469,6 @@ pub extern "C" fn file_seek_fd(
                 return -1;
             }
         };
-        if new_pos == usize::MAX {
-            return -1;
-        }
         desc.position = new_pos;
         drop(guard);
         0
@@ -464,8 +485,9 @@ pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         if !table.in_use {
             return usize::MAX;
         }
-        let guard = table.lock.lock();
-        let desc = get_descriptor(table, fd);
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let desc = unsafe { get_descriptor(&mut *table_ptr, fd) };
         let size = if let Some(desc) = desc {
             if !desc.node.is_null() && unsafe { (*desc.node).type_ } == RAMFS_TYPE_FILE {
                 unsafe { ramfs_get_size(desc.node) }

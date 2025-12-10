@@ -120,13 +120,22 @@ fn map_stack_pages(stack: &mut ExceptionStackInfo) {
         let virt_addr = stack.stack_base + page as u64 * PAGE_SIZE_4KB;
         let phys_addr = unsafe { alloc_page_frame(0) };
         if phys_addr == 0 {
-            kernel_panic("safe_stack_init: Failed to allocate exception stack page");
+            kernel_panic(
+                b"safe_stack_init: Failed to allocate exception stack page\0".as_ptr()
+                    as *const c_char,
+            );
         }
         if unsafe { mm_zero_physical_page(phys_addr) } != 0 {
-            kernel_panic("safe_stack_init: Failed to zero exception stack page");
+            kernel_panic(
+                b"safe_stack_init: Failed to zero exception stack page\0".as_ptr()
+                    as *const c_char,
+            );
         }
         if unsafe { map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) } != 0 {
-            kernel_panic("safe_stack_init: Failed to map exception stack page");
+            kernel_panic(
+                b"safe_stack_init: Failed to map exception stack page\0".as_ptr()
+                    as *const c_char,
+            );
         }
     }
 }

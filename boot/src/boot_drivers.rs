@@ -6,8 +6,7 @@ use slopos_tests::{
     tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
 };
 
-use crate::early_init::boot_get_cmdline;
-use crate::early_init::{boot_init_step, boot_init_step_with_flags};
+use crate::early_init::{boot_get_cmdline, boot_init_priority, BootInitStep};
 use crate::kernel_panic::kernel_panic;
 
 const COM1_BASE: u16 = 0x3F8;
@@ -96,19 +95,19 @@ fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
 
-extern "C" fn boot_step_debug_subsystem() -> i32 {
+extern "C" fn boot_step_debug_subsystem_fn() -> i32 {
     log_debug(b"Debug/logging subsystem initialized.\0");
     0
 }
 
-extern "C" fn boot_step_gdt_setup() -> i32 {
+extern "C" fn boot_step_gdt_setup_fn() -> i32 {
     log_debug(b"Initializing GDT/TSS...\0");
     unsafe { gdt_init() };
     log_debug(b"GDT/TSS initialized.\0");
     0
 }
 
-extern "C" fn boot_step_idt_setup() -> i32 {
+extern "C" fn boot_step_idt_setup_fn() -> i32 {
     log_debug(b"Initializing IDT...\0");
     unsafe {
         idt_init();
@@ -119,7 +118,7 @@ extern "C" fn boot_step_idt_setup() -> i32 {
     0
 }
 
-extern "C" fn boot_step_irq_setup() -> i32 {
+extern "C" fn boot_step_irq_setup_fn() -> i32 {
     log_debug(b"Configuring IRQ dispatcher...\0");
     unsafe { irq_init() };
     let rc = unsafe { serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) };
@@ -132,7 +131,7 @@ extern "C" fn boot_step_irq_setup() -> i32 {
     0
 }
 
-extern "C" fn boot_step_timer_setup() -> i32 {
+extern "C" fn boot_step_timer_setup_fn() -> i32 {
     log_debug(b"Initializing programmable interval timer...\0");
     unsafe { pit_init(PIT_DEFAULT_FREQUENCY_HZ) };
     log_debug(b"Programmable interval timer configured.\0");
@@ -167,15 +166,17 @@ extern "C" fn boot_step_timer_setup() -> i32 {
     0
 }
 
-extern "C" fn boot_step_apic_setup() -> i32 {
+extern "C" fn boot_step_apic_setup_fn() -> i32 {
     log_debug(b"Detecting Local APIC...\0");
     if unsafe { apic_detect() } == 0 {
-        kernel_panic("SlopOS requires a Local APIC - legacy PIC is gone");
+        kernel_panic(
+            b"SlopOS requires a Local APIC - legacy PIC is gone\0".as_ptr() as *const c_char,
+        );
     }
 
     log_debug(b"Initializing Local APIC...\0");
     if unsafe { apic_init() } != 0 {
-        kernel_panic("Local APIC initialization failed");
+        kernel_panic(b"Local APIC initialization failed\0".as_ptr() as *const c_char);
     }
 
     unsafe { pic_quiesce_disable() };
@@ -184,16 +185,19 @@ extern "C" fn boot_step_apic_setup() -> i32 {
     0
 }
 
-extern "C" fn boot_step_ioapic_setup() -> i32 {
+extern "C" fn boot_step_ioapic_setup_fn() -> i32 {
     log_debug(b"Discovering IOAPIC controllers via ACPI MADT...\0");
     if unsafe { ioapic_init() } != 0 {
-        kernel_panic("IOAPIC discovery failed - SlopOS cannot operate without it");
+        kernel_panic(
+            b"IOAPIC discovery failed - SlopOS cannot operate without it\0".as_ptr()
+                as *const c_char,
+        );
     }
     log_debug(b"IOAPIC: discovery complete, ready for redirection programming.\0");
     0
 }
 
-extern "C" fn boot_step_pci_init() -> i32 {
+extern "C" fn boot_step_pci_init_fn() -> i32 {
     log_debug(b"Enumerating PCI devices...\0");
     unsafe {
         virtio_gpu_register_driver();
@@ -237,10 +241,10 @@ extern "C" fn boot_step_pci_init() -> i32 {
     0
 }
 
-extern "C" fn boot_step_interrupt_tests() -> i32 {
+extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     let mut test_config = InterruptTestConfig {
         enabled: 0,
-        verbosity: InterruptTestVerbosity::Summary,
+        verbosity: InterruptTestVerbosity::INTERRUPT_TEST_VERBOSITY_SUMMARY,
         suite_mask: 0,
         timeout_ms: 0,
         shutdown_on_complete: 0,
@@ -334,12 +338,39 @@ extern "C" fn boot_step_interrupt_tests() -> i32 {
     rc
 }
 
-boot_init_step!(drivers, b"debug\0", boot_step_debug_subsystem);
-boot_init_step!(drivers, b"gdt/tss\0", boot_step_gdt_setup);
-boot_init_step!(drivers, b"idt\0", boot_step_idt_setup);
-boot_init_step!(drivers, b"apic\0", boot_step_apic_setup);
-boot_init_step!(drivers, b"ioapic\0", boot_step_ioapic_setup);
-boot_init_step!(drivers, b"irq dispatcher\0", boot_step_irq_setup);
-boot_init_step!(drivers, b"timer\0", boot_step_timer_setup);
-boot_init_step!(drivers, b"pci\0", boot_step_pci_init);
-boot_init_step!(drivers, b"interrupt tests\0", boot_step_interrupt_tests);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_DEBUG_SUBSYSTEM: BootInitStep =
+    BootInitStep::new(b"debug\0", boot_step_debug_subsystem_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_GDT_SETUP: BootInitStep =
+    BootInitStep::new(b"gdt/tss\0", boot_step_gdt_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_IDT_SETUP: BootInitStep =
+    BootInitStep::new(b"idt\0", boot_step_idt_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_APIC_SETUP: BootInitStep =
+    BootInitStep::new(b"apic\0", boot_step_apic_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_IOAPIC_SETUP: BootInitStep =
+    BootInitStep::new(b"ioapic\0", boot_step_ioapic_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_IRQ_SETUP: BootInitStep =
+    BootInitStep::new(b"irq dispatcher\0", boot_step_irq_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_TIMER_SETUP: BootInitStep =
+    BootInitStep::new(b"timer\0", boot_step_timer_setup_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_PCI_INIT: BootInitStep =
+    BootInitStep::new(b"pci\0", boot_step_pci_init_fn, 0);
+#[used]
+#[link_section = ".boot_init_drivers"]
+static BOOT_STEP_INTERRUPT_TESTS: BootInitStep =
+    BootInitStep::new(b"interrupt tests\0", boot_step_interrupt_tests_fn, 0);

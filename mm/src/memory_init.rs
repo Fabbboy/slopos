@@ -42,8 +42,8 @@ extern "C" {
         pitch: *mut u32,
         bpp: *mut u8,
     ) -> c_int;
-    fn cpuid(leaf: u32, eax: *mut u32, ebx: *mut u32, ecx: *mut u32, edx: *mut u32);
-    fn cpu_read_msr(msr: u32) -> u64;
+    fn cpuid_ffi(leaf: u32, eax: *mut u32, ebx: *mut u32, ecx: *mut u32, edx: *mut u32);
+    fn cpu_read_msr_ffi(msr: u32) -> u64;
 }
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
@@ -391,11 +391,11 @@ fn record_apic_reservation() {
         let mut ebx = 0;
         let mut ecx = 0;
         let mut edx = 0;
-        cpuid(1, &mut eax, &mut ebx, &mut ecx, &mut edx);
+        cpuid_ffi(1, &mut eax, &mut ebx, &mut ecx, &mut edx);
         if (edx & CPUID_FEAT_EDX_APIC) == 0 {
             return;
         }
-        let apic_base_msr = cpu_read_msr(MSR_APIC_BASE);
+        let apic_base_msr = cpu_read_msr_ffi(MSR_APIC_BASE);
         let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
         if apic_phys == 0 {
             return;

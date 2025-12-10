@@ -2,7 +2,7 @@ use core::ffi::c_char;
 
 use slopos_lib::{klog_is_enabled, klog_printf, KlogLevel};
 
-use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
+use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap, BootInitStep};
 use crate::limine_protocol::LimineMemmapResponse;
 
 extern "C" {
@@ -84,5 +84,11 @@ extern "C" fn boot_step_memory_verify() -> i32 {
     0
 }
 
-boot_init_step!(memory, b"memory init\0", boot_step_memory_init);
-boot_init_step!(memory, b"address verification\0", boot_step_memory_verify);
+#[used]
+#[link_section = ".boot_init_memory"]
+static BOOT_STEP_MEMORY_INIT: BootInitStep =
+    BootInitStep::new(b"memory init\0", boot_step_memory_init, 0);
+#[used]
+#[link_section = ".boot_init_memory"]
+static BOOT_STEP_MEMORY_VERIFY: BootInitStep =
+    BootInitStep::new(b"address verification\0", boot_step_memory_verify, 0);

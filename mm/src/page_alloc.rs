@@ -133,15 +133,16 @@ impl PageAllocator {
     }
 
     fn free_list_detach(&mut self, order: u32, target_frame: u32) -> bool {
-        let head = &mut self.free_lists[order as usize];
+        let head_ptr = self.free_lists.as_mut_ptr().wrapping_add(order as usize);
         let mut prev = INVALID_PAGE_FRAME;
-        let mut current = *head;
+        let mut current = unsafe { *head_ptr };
 
         while current != INVALID_PAGE_FRAME {
             if current == target_frame {
-                let next = unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
+                let next =
+                    unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
-                    *head = next;
+                    unsafe { *head_ptr = next };
                 } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
                     prev_desc.next_free = next;
                 }
@@ -169,15 +170,16 @@ impl PageAllocator {
     }
 
     fn free_list_take_matching(&mut self, order: u32, flags: u32) -> u32 {
-        let head = &mut self.free_lists[order as usize];
+        let head_ptr = self.free_lists.as_mut_ptr().wrapping_add(order as usize);
         let mut prev = INVALID_PAGE_FRAME;
-        let mut current = *head;
+        let mut current = unsafe { *head_ptr };
 
         while current != INVALID_PAGE_FRAME {
             if self.block_meets_flags(current, order, flags) {
-                let next = unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
+                let next =
+                    unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
-                    *head = next;
+                    unsafe { *head_ptr = next };
                 } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
                     prev_desc.next_free = next;
                 }

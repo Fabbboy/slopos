@@ -3,7 +3,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_boot::{boot_init_priority, boot_init_step_with_flags};
+use slopos_boot::early_init::{boot_init_priority, BootInitStep};
 use slopos_drivers::wl_currency;
 use slopos_lib::{klog_printf, KlogLevel};
 use slopos_sched::{
@@ -128,16 +128,19 @@ extern "C" fn boot_step_roulette_task() -> i32 {
     userland_spawn_and_schedule(b"roulette\0", roulette_user_main, 5)
 }
 
-boot_init_step_with_flags!(
-    services,
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_USERLAND_HOOK: BootInitStep = BootInitStep::new(
     b"userland fate hook\0",
     boot_step_userland_hook,
-    boot_init_priority(35)
+    boot_init_priority(35),
 );
-boot_init_step_with_flags!(
-    services,
+
+#[used]
+#[link_section = ".boot_init_services"]
+static BOOT_STEP_ROULETTE_TASK: BootInitStep = BootInitStep::new(
     b"roulette task\0",
     boot_step_roulette_task,
-    boot_init_priority(40)
+    boot_init_priority(40),
 );
 

@@ -62,6 +62,8 @@ impl RamfsState {
 
 static RAMFS_STATE: Mutex<RamfsState> = Mutex::new(RamfsState::new());
 
+unsafe impl Send for RamfsState {}
+
 extern "C" {
     fn kmalloc(size: usize) -> *mut c_void;
     fn kfree(ptr: *mut c_void);
@@ -74,67 +76,77 @@ unsafe fn cstr_len(ptr_in: *const c_char) -> usize {
         return 0;
     }
     let mut len = 0usize;
-    while *ptr_in.add(len) != 0 {
-        len += 1;
+    unsafe {
+        while *ptr_in.add(len) != 0 {
+            len += 1;
+        }
     }
     len
 }
 
 unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
-    if path.is_null() {
-        return None;
+    unsafe {
+        if path.is_null() {
+            return None;
+        }
+        let len = cstr_len(path);
+        Some(slice::from_raw_parts(path as *const u8, len.min(MAX_PATH)))
     }
-    let len = cstr_len(path);
-    Some(slice::from_raw_parts(path as *const u8, len.min(MAX_PATH)))
 }
 
 unsafe fn dup_bytes(bytes: &[u8]) -> *mut c_char {
-    let len = bytes.len();
-    let alloc = kmalloc(len + 1);
-    if alloc.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let len = bytes.len();
+        let alloc = kmalloc(len + 1);
+        if alloc.is_null() {
+            return ptr::null_mut();
+        }
+        let dst = alloc as *mut u8;
+        ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+        *dst.add(len) = 0;
+        dst as *mut c_char
     }
-    let dst = alloc as *mut u8;
-    ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
-    *dst.add(len) = 0;
-    dst as *mut c_char
 }
 
 unsafe fn alloc_zeroed(size: usize) -> *mut c_void {
-    let ptr = kmalloc(size);
-    if ptr.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let ptr = kmalloc(size);
+        if ptr.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::write_bytes(ptr, 0, size);
+        ptr
     }
-    ptr::write_bytes(ptr, 0, size);
-    ptr
 }
 
 unsafe fn alloc_node(name: &[u8], type_: c_int, parent: *mut ramfs_node_t) -> *mut ramfs_node_t {
-    let node_ptr = alloc_zeroed(mem::size_of::<ramfs_node_t>()) as *mut ramfs_node_t;
-    if node_ptr.is_null() {
-        return ptr::null_mut();
+    unsafe {
+        let node_ptr = alloc_zeroed(mem::size_of::<ramfs_node_t>()) as *mut ramfs_node_t;
+        if node_ptr.is_null() {
+            return ptr::null_mut();
+        }
+
+        let name_ptr = dup_bytes(name);
+        if name_ptr.is_null() {
+            kfree(node_ptr as *mut c_void);
+            return ptr::null_mut();
+        }
+
+        (*node_ptr) = ramfs_node_t {
+            name: name_ptr,
+            type_,
+            size: 0,
+            data: ptr::null_mut(),
+            refcount: 1,
+            pending_unlink: 0,
+            parent,
+            children: ptr::null_mut(),
+            next_sibling: ptr::null_mut(),
+            prev_sibling: ptr::null_mut(),
+        };
+
+        node_ptr
     }
-
-    let name_ptr = dup_bytes(name);
-    if name_ptr.is_null() {
-        kfree(node_ptr as *mut c_void);
-        return ptr::null_mut();
-    }
-
-    (*node_ptr) = ramfs_node_t {
-        name: name_ptr,
-        type_,
-        size: 0,
-        data: ptr::null_mut(),
-        refcount: 1,
-        pending_unlink: 0,
-        parent,
-        children: ptr::null_mut(),
-        next_sibling: ptr::null_mut(),
-        prev_sibling: ptr::null_mut(),
-    };
-
-    node_ptr
 }
 
 fn validate_path(path: *const c_char) -> bool {
@@ -142,59 +154,67 @@ fn validate_path(path: *const c_char) -> bool {
 }
 
 unsafe fn node_name_bytes<'a>(node: *const ramfs_node_t) -> &'a [u8] {
-    if node.is_null() || (*node).name.is_null() {
-        return &[];
+    unsafe {
+        if node.is_null() || (*node).name.is_null() {
+            return &[];
+        }
+        let len = cstr_len((*node).name);
+        slice::from_raw_parts((*node).name as *const u8, len)
     }
-    let len = cstr_len((*node).name);
-    slice::from_raw_parts((*node).name as *const u8, len)
 }
 
 unsafe fn ramfs_link_child(parent: *mut ramfs_node_t, child: *mut ramfs_node_t) {
-    if parent.is_null() || child.is_null() {
-        return;
+    unsafe {
+        if parent.is_null() || child.is_null() {
+            return;
+        }
+        (*child).next_sibling = (*parent).children;
+        if !(*parent).children.is_null() {
+            (*(*parent).children).prev_sibling = child;
+        }
+        (*parent).children = child;
     }
-    (*child).next_sibling = (*parent).children;
-    if !(*parent).children.is_null() {
-        (*(*parent).children).prev_sibling = child;
-    }
-    (*parent).children = child;
 }
 
 unsafe fn ramfs_detach_node(node: *mut ramfs_node_t) {
-    if node.is_null() || (*node).parent.is_null() {
-        return;
+    unsafe {
+        if node.is_null() || (*node).parent.is_null() {
+            return;
+        }
+        let parent = (*node).parent;
+        if (*parent).children == node {
+            (*parent).children = (*node).next_sibling;
+        }
+        if !(*node).prev_sibling.is_null() {
+            (*(*node).prev_sibling).next_sibling = (*node).next_sibling;
+        }
+        if !(*node).next_sibling.is_null() {
+            (*(*node).next_sibling).prev_sibling = (*node).prev_sibling;
+        }
+        (*node).parent = ptr::null_mut();
+        (*node).prev_sibling = ptr::null_mut();
+        (*node).next_sibling = ptr::null_mut();
     }
-    let parent = (*node).parent;
-    if (*parent).children == node {
-        (*parent).children = (*node).next_sibling;
-    }
-    if !(*node).prev_sibling.is_null() {
-        (*(*node).prev_sibling).next_sibling = (*node).next_sibling;
-    }
-    if !(*node).next_sibling.is_null() {
-        (*(*node).next_sibling).prev_sibling = (*node).prev_sibling;
-    }
-    (*node).parent = ptr::null_mut();
-    (*node).prev_sibling = ptr::null_mut();
-    (*node).next_sibling = ptr::null_mut();
 }
 
 unsafe fn ramfs_find_child_component(
     parent: *mut ramfs_node_t,
     name: &[u8],
 ) -> *mut ramfs_node_t {
-    if parent.is_null() || (*parent).type_ != RAMFS_TYPE_DIRECTORY {
-        return ptr::null_mut();
-    }
-    let mut child = (*parent).children;
-    while !child.is_null() {
-        let child_name = node_name_bytes(child);
-        if child_name == name {
-            return child;
+    unsafe {
+        if parent.is_null() || (*parent).type_ != RAMFS_TYPE_DIRECTORY {
+            return ptr::null_mut();
         }
-        child = (*child).next_sibling;
+        let mut child = (*parent).children;
+        while !child.is_null() {
+            let child_name = node_name_bytes(child);
+            if child_name == name {
+                return child;
+            }
+            child = (*child).next_sibling;
+        }
+        ptr::null_mut()
     }
-    ptr::null_mut()
 }
 
 fn component_is_dot(comp: &[u8]) -> bool {
@@ -212,90 +232,94 @@ unsafe fn ramfs_traverse_internal<'a>(
     stop_before_last: bool,
     last_component: &mut Option<&'a [u8]>,
 ) -> *mut ramfs_node_t {
-    if path.is_empty() || state.root.is_null() || path[0] != b'/' {
-        return ptr::null_mut();
-    }
-
-    let mut current = state.root;
-    let mut idx = 0usize;
-
-    while idx < path.len() {
-        while idx < path.len() && path[idx] == b'/' {
-            idx += 1;
+    unsafe {
+        if path.is_empty() || state.root.is_null() || path[0] != b'/' {
+            return ptr::null_mut();
         }
-        if idx >= path.len() {
-            if stop_before_last {
-                *last_component = Some(&[]);
+
+        let mut current = state.root;
+        let mut idx = 0usize;
+
+        while idx < path.len() {
+            while idx < path.len() && path[idx] == b'/' {
+                idx += 1;
             }
-            return current;
-        }
-
-        let start = idx;
-        while idx < path.len() && path[idx] != b'/' {
-            idx += 1;
-        }
-        let component = &path[start..idx];
-        while idx < path.len() && path[idx] == b'/' {
-            idx += 1;
-        }
-        let is_last = idx >= path.len();
-
-        if stop_before_last && is_last {
-            *last_component = Some(component);
-            return current;
-        }
-
-        if component_is_dot(component) {
-            continue;
-        }
-        if component_is_dotdot(component) {
-            if !(*current).parent.is_null() {
-                current = (*current).parent;
+            if idx >= path.len() {
+                if stop_before_last {
+                    *last_component = Some(&[]);
+                }
+                return current;
             }
-            continue;
-        }
 
-        let mut next = ramfs_find_child_component(current, component);
-        if next.is_null() {
-            if create_mode == RamfsCreateMode::Directories {
-                next = alloc_node(component, RAMFS_TYPE_DIRECTORY, current);
-                if next.is_null() {
+            let start = idx;
+            while idx < path.len() && path[idx] != b'/' {
+                idx += 1;
+            }
+            let component = &path[start..idx];
+            while idx < path.len() && path[idx] == b'/' {
+                idx += 1;
+            }
+            let is_last = idx >= path.len();
+
+            if stop_before_last && is_last {
+                *last_component = Some(component);
+                return current;
+            }
+
+            if component_is_dot(component) {
+                continue;
+            }
+            if component_is_dotdot(component) {
+                if !(*current).parent.is_null() {
+                    current = (*current).parent;
+                }
+                continue;
+            }
+
+            let mut next = ramfs_find_child_component(current, component);
+            if next.is_null() {
+                if create_mode == RamfsCreateMode::Directories {
+                    next = alloc_node(component, RAMFS_TYPE_DIRECTORY, current);
+                    if next.is_null() {
+                        return ptr::null_mut();
+                    }
+                    ramfs_link_child(current, next);
+                } else {
                     return ptr::null_mut();
                 }
-                ramfs_link_child(current, next);
-            } else {
-                return ptr::null_mut();
             }
+            current = next;
         }
-        current = next;
-    }
 
-    current
+        current
+    }
 }
 
 unsafe fn ramfs_free_node_recursive(node: *mut ramfs_node_t) {
-    if node.is_null() {
-        return;
-    }
+    unsafe {
+        if node.is_null() {
+            return;
+        }
 
-    let mut child = (*node).children;
-    while !child.is_null() {
-        let next = (*child).next_sibling;
-        ramfs_free_node_recursive(child);
-        child = next;
-    }
+        let mut child = (*node).children;
+        while !child.is_null() {
+            let next = (*child).next_sibling;
+            ramfs_free_node_recursive(child);
+            child = next;
+        }
 
-    if !(*node).data.is_null() {
-        kfree((*node).data);
-        (*node).data = ptr::null_mut();
-    }
+        if !(*node).data.is_null() {
+            kfree((*node).data);
+            (*node).data = ptr::null_mut();
+        }
 
-    if !(*node).name.is_null() {
-        kfree((*node).name as *mut c_void);
-        (*node).name = ptr::null_mut();
-    }
+        if !(*node).name.is_null() {
+            kfree((*node).name as *mut c_void);
+            (*node).name = ptr::null_mut();
+        }
 
-    kfree(node as *mut c_void);
+        kfree(node as *mut c_void);
+    }
 }
 
 fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
@@ -624,44 +648,46 @@ pub extern "C" fn ramfs_read_bytes(
 }
 
 unsafe fn ensure_capacity_locked(node: *mut ramfs_node_t, required_size: usize) -> c_int {
-    if node.is_null() {
-        return -1;
-    }
-    if required_size <= (*node).size {
-        if (*node).size > 0 && (*node).data.is_null() {
-            let new_data = kmalloc((*node).size);
-            if new_data.is_null() {
-                return -1;
-            }
-            ptr::write_bytes(new_data, 0, (*node).size);
-            (*node).data = new_data;
+    unsafe {
+        if node.is_null() {
+            return -1;
         }
-        return 0;
-    }
+        if required_size <= (*node).size {
+            if (*node).size > 0 && (*node).data.is_null() {
+                let new_data = kmalloc((*node).size);
+                if new_data.is_null() {
+                    return -1;
+                }
+                ptr::write_bytes(new_data, 0, (*node).size);
+                (*node).data = new_data;
+            }
+            return 0;
+        }
 
-    let new_data = kmalloc(required_size);
-    if new_data.is_null() {
-        return -1;
-    }
+        let new_data = kmalloc(required_size);
+        if new_data.is_null() {
+            return -1;
+        }
 
-    if (*node).size > 0 && !(*node).data.is_null() {
-        ptr::copy_nonoverlapping((*node).data, new_data, (*node).size);
-    } else if (*node).size > 0 {
-        ptr::write_bytes(new_data, 0, (*node).size);
-    }
+        if (*node).size > 0 && !(*node).data.is_null() {
+            ptr::copy_nonoverlapping((*node).data, new_data, (*node).size);
+        } else if (*node).size > 0 {
+            ptr::write_bytes(new_data, 0, (*node).size);
+        }
 
-    if required_size > (*node).size {
-        let gap = required_size - (*node).size;
-        ptr::write_bytes((new_data as *mut u8).add((*node).size), 0, gap);
-    }
+        if required_size > (*node).size {
+            let gap = required_size - (*node).size;
+            ptr::write_bytes((new_data as *mut u8).add((*node).size), 0, gap);
+        }
 
-    if !(*node).data.is_null() {
-        kfree((*node).data);
-    }
+        if !(*node).data.is_null() {
+            kfree((*node).data);
+        }
 
-    (*node).data = new_data;
-    (*node).size = required_size;
-    0
+        (*node).data = new_data;
+        (*node).size = required_size;
+        0
+    }
 }
 
 #[no_mangle]

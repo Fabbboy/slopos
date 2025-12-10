@@ -49,7 +49,7 @@ static mut TOKEN_STORAGE: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS] =
 #[link_section = ".user_data"]
 static mut PATH_BUF: [u8; SHELL_PATH_BUF] = [0; SHELL_PATH_BUF];
 #[link_section = ".user_data"]
-static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::default(); 32];
+static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::new(); 32];
 
 type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;
 
@@ -539,11 +539,11 @@ pub extern "C" fn shell_user_main(_arg: *mut c_void) {
                 LINE_BUF.len(),
             );
         }
-        let len = sys_read(unsafe { &mut LINE_BUF[..LINE_BUF.len() - 1] });
+        let len = sys_read(unsafe { &mut LINE_BUF[..unsafe { LINE_BUF.len() - 1 }] });
         if len <= 0 {
             continue;
         }
-        let capped = cmp::min(len as usize, LINE_BUF.len() - 1);
+        let capped = cmp::min(len as usize, unsafe { LINE_BUF.len() - 1 });
         unsafe { LINE_BUF[capped] = 0 };
 
         let mut tokens: [*const u8; SHELL_MAX_TOKENS] = [ptr::null(); SHELL_MAX_TOKENS];

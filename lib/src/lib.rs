@@ -159,6 +159,36 @@ pub mod io {
             outb(0x80, 0);
         }
     }
+
+    #[no_mangle]
+    pub extern "C" fn cpuid_ffi(
+        leaf: u32,
+        eax: *mut u32,
+        ebx: *mut u32,
+        ecx: *mut u32,
+        edx: *mut u32,
+    ) {
+        let (a, b, c, d) = crate::cpu::cpuid(leaf);
+        unsafe {
+            if !eax.is_null() {
+                *eax = a;
+            }
+            if !ebx.is_null() {
+                *ebx = b;
+            }
+            if !ecx.is_null() {
+                *ecx = c;
+            }
+            if !edx.is_null() {
+                *edx = d;
+            }
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn cpu_read_msr_ffi(msr: u32) -> u64 {
+        crate::cpu::read_msr(msr)
+    }
 }
 
 pub mod tsc {
@@ -194,7 +224,7 @@ pub mod syscall_numbers;
 pub mod user_syscall_defs;
 pub mod user_syscall;
 
-pub use kdiag::{interrupt_frame, KDIAG_STACK_TRACE_DEPTH};
+pub use kdiag::{interrupt_frame, kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use klog::{
     klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_printf,

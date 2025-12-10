@@ -27,6 +27,19 @@ pub struct FramebufferInfoC {
     pub pixel_format: u32,
 }
 
+impl FramebufferInfoC {
+    pub const fn new() -> Self {
+        Self {
+            initialized: 0,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            pixel_format: 0,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub(crate) struct FbState {
     pub(crate) base: *mut u8,
@@ -49,7 +62,10 @@ impl FramebufferState {
 }
 
 static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
-static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> = Mutex::new(FramebufferInfoC::default());
+static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> = Mutex::new(const { FramebufferInfoC::new() });
+
+unsafe impl Send for FbState {}
+unsafe impl Send for FramebufferState {}
 
 extern "C" {
     fn get_framebuffer_info(

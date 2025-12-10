@@ -64,7 +64,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
             return ptr::null_mut();
         }
         self.next.store(offset + size, Ordering::Relaxed);
-        HEAP.as_mut_ptr().add(offset)
+        unsafe { HEAP.as_mut_ptr().add(offset) }
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {

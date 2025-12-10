@@ -73,22 +73,24 @@ struct UserText {
 #[inline(always)]
 unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let mut ret = num;
-    core::arch::asm!(
-        "mov {a0}, rdi",
-        "mov {a1}, rsi",
-        "mov {a2}, rdx",
-        "int 0x80",
-        a0 = in(reg) arg0,
-        a1 = in(reg) arg1,
-        a2 = in(reg) arg2,
-        inout("rax") ret,
-        lateout("rcx") _,
-        lateout("r8") _,
-        lateout("r9") _,
-        lateout("r10") _,
-        lateout("r11") _,
-        options(nostack, preserves_flags),
-    );
+    unsafe {
+        core::arch::asm!(
+            "mov {a0}, rdi",
+            "mov {a1}, rsi",
+            "mov {a2}, rdx",
+            "int 0x80",
+            a0 = in(reg) arg0,
+            a1 = in(reg) arg1,
+            a2 = in(reg) arg2,
+            inout("rax") ret,
+            lateout("rcx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+            options(nostack, preserves_flags),
+        );
+    }
     ret
 }
 
@@ -154,7 +156,7 @@ fn sys_font_draw(text: &UserText) -> i64 {
     unsafe { syscall(SYSCALL_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
 }
 
-fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
+unsafe extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
     let mut info = UserFbInfo::default();
     if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return -1;
@@ -170,27 +172,60 @@ fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
     0
 }
 
-fn user_fill_rect(_ctx: *mut c_void, x: i32, y: i32, w: i32, h: i32, color: u32) -> i32 {
+unsafe extern "C" fn user_fill_rect(
+    _ctx: *mut c_void,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) -> i32 {
     let rect = UserRect { x, y, width: w, height: h, color };
     sys_gfx_fill_rect(&rect) as i32
 }
 
-fn user_draw_line(_ctx: *mut c_void, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32 {
+unsafe extern "C" fn user_draw_line(
+    _ctx: *mut c_void,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: u32,
+) -> i32 {
     let line = UserLine { x0, y0, x1, y1, color };
     sys_gfx_draw_line(&line) as i32
 }
 
-fn user_draw_circle(_ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
+unsafe extern "C" fn user_draw_circle(
+    _ctx: *mut c_void,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> i32 {
     let circle = UserCircle { cx, cy, radius, color };
     sys_gfx_draw_circle(&circle) as i32
 }
 
-fn user_draw_circle_filled(_ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
+unsafe extern "C" fn user_draw_circle_filled(
+    _ctx: *mut c_void,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> i32 {
     let circle = UserCircle { cx, cy, radius, color };
     sys_gfx_draw_circle_filled(&circle) as i32
 }
 
-fn user_draw_text(_ctx: *mut c_void, x: i32, y: i32, text: *const u8, fg: u32, bg: u32) -> i32 {
+unsafe extern "C" fn user_draw_text(
+    _ctx: *mut c_void,
+    x: i32,
+    y: i32,
+    text: *const u8,
+    fg: u32,
+    bg: u32,
+) -> i32 {
     if text.is_null() {
         return -1;
     }
@@ -219,7 +254,7 @@ fn user_draw_text(_ctx: *mut c_void, x: i32, y: i32, text: *const u8, fg: u32, b
     sys_font_draw(&text_desc) as i32
 }
 
-fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
+unsafe extern "C" fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
     sys_sleep_ms(ms);
 }
 

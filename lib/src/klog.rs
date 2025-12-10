@@ -107,6 +107,20 @@ pub extern "C" fn klog_newline() {
     putc(b'\n');
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn klog_info(msg: *const u8, _: ...) {
+    unsafe {
+        klog_printf(KlogLevel::Info, msg as *const c_char);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn klog_debug(msg: *const u8, _: ...) {
+    unsafe {
+        klog_printf(KlogLevel::Debug, msg as *const c_char);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Length {
     Default,

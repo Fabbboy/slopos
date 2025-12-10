@@ -84,11 +84,27 @@ pub struct UserText {
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct UserFsEntry {
     pub name: [u8; 64],
     pub r#type: u8,
     pub size: u32,
+}
+
+impl UserFsEntry {
+    pub const fn new() -> Self {
+        Self {
+            name: [0; 64],
+            r#type: 0,
+            size: 0,
+        }
+    }
+}
+
+impl Default for UserFsEntry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[repr(C)]
@@ -125,22 +141,24 @@ pub struct UserSysInfo {
 #[link_section = ".user_text"]
 unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let mut ret = num;
-    asm!(
-        "mov {a0}, rdi",
-        "mov {a1}, rsi",
-        "mov {a2}, rdx",
-        "int 0x80",
-        a0 = in(reg) arg0,
-        a1 = in(reg) arg1,
-        a2 = in(reg) arg2,
-        inout("rax") ret,
-        lateout("rcx") _,
-        lateout("r8") _,
-        lateout("r9") _,
-        lateout("r10") _,
-        lateout("r11") _,
-        options(nostack, preserves_flags),
-    );
+    unsafe {
+        asm!(
+            "mov {a0}, rdi",
+            "mov {a1}, rsi",
+            "mov {a2}, rdx",
+            "int 0x80",
+            a0 = in(reg) arg0,
+            a1 = in(reg) arg1,
+            a2 = in(reg) arg2,
+            inout("rax") ret,
+            lateout("rcx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+            options(nostack, preserves_flags),
+        );
+    }
     ret
 }
 

@@ -1,6 +1,22 @@
 use crate::{random::Lfsr64, serial_println, wl_currency};
 use slopos_lib::cpu;
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FateResult {
+    pub token: u32,
+    pub value: u32,
+}
+
+static mut OUTCOME_HOOK: Option<extern "C" fn(*const FateResult)> = None;
+
+#[no_mangle]
+pub extern "C" fn fate_register_outcome_hook(cb: extern "C" fn(*const FateResult)) {
+    unsafe {
+        OUTCOME_HOOK = Some(cb);
+    }
+}
+
 pub enum RouletteOutcome {
     Survive,
     Panic,

@@ -97,12 +97,6 @@ const SCHED_POLICY_COOPERATIVE: u8 = 2;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
 extern "C" {
-    fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn context_switch_user(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn init_kernel_context(context: *mut TaskContext);
-    fn task_entry_wrapper();
-
     fn gdt_set_kernel_rsp0(rsp0: u64);
     fn paging_set_current_directory(page_dir: *mut ProcessPageDir);
     fn paging_get_kernel_directory() -> *mut ProcessPageDir;
@@ -114,6 +108,38 @@ extern "C" {
 
     fn is_kernel_initialized() -> i32;
 }
+
+#[no_mangle]
+pub extern "C" fn init_kernel_context(_context: *mut TaskContext) {}
+
+#[no_mangle]
+pub extern "C" fn task_entry_wrapper() {}
+
+#[no_mangle]
+pub extern "C" fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext) {
+    unsafe {
+        if !old_context.is_null() && !new_context.is_null() {
+            *old_context = *new_context;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn context_switch_user(
+    old_context: *mut TaskContext,
+    new_context: *const TaskContext,
+) {
+    context_switch(old_context, new_context);
+}
+
+#[no_mangle]
+pub extern "C" fn simple_context_switch(
+    old_context: *mut TaskContext,
+    new_context: *const TaskContext,
+) {
+    context_switch(old_context, new_context);
+}
+
 
 #[repr(C)]
 pub struct ProcessPageDir {
@@ -506,7 +532,7 @@ pub extern "C" fn scheduler_task_exit() -> ! {
         }
         schedule();
         loop {
-            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
         }
     }
 
@@ -547,7 +573,7 @@ extern "C" fn idle_task_function(_: *mut c_void) {
             }
         }
         sched.idle_time = sched.idle_time.saturating_add(1);
-        if is_kernel_initialized() != 0 && sched.idle_time > 1000 {
+        if unsafe { is_kernel_initialized() } != 0 && sched.idle_time > 1000 {
             let mut active_tasks = 0u32;
             unsafe { crate::task::get_task_stats(ptr::null_mut(), &mut active_tasks, ptr::null_mut()) };
             if active_tasks <= 1 {

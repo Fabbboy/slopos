@@ -26,8 +26,8 @@ struct ConsoleState {
     initialized: bool,
 }
 
-impl Default for ConsoleState {
-    fn default() -> Self {
+impl ConsoleState {
+    pub const fn new() -> Self {
         Self {
             cursor_x: 0,
             cursor_y: 0,
@@ -38,7 +38,7 @@ impl Default for ConsoleState {
     }
 }
 
-static FONT_CONSOLE: spin::Mutex<ConsoleState> = spin::Mutex::new(ConsoleState::default());
+static FONT_CONSOLE: spin::Mutex<ConsoleState> = spin::Mutex::new(const { ConsoleState::new() });
 
 // Glyph data copied 1:1 from the original 8x16 bitmap font.
 #[allow(clippy::unreadable_literal)]
@@ -124,7 +124,7 @@ static FONT_DATA: [[u8; FONT_CHAR_HEIGHT as usize]; FONT_CHAR_COUNT] = [
     // G (71)
     [0x00, 0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xDE, 0xC6, 0xC6, 0x66, 0x3A, 0x00, 0x00, 0x00, 0x00],
     // H (72)
-    [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00, 0x00],
     // I (73)
     [0x00, 0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00],
     // J (74)
@@ -292,9 +292,11 @@ unsafe fn c_str_len(ptr: *const c_char) -> usize {
     }
     let mut len = 0usize;
     let mut p = ptr;
-    while *p != 0 {
-        len += 1;
-        p = p.add(1);
+    unsafe {
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
     }
     len
 }
@@ -303,9 +305,11 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
     if ptr.is_null() {
         return &[];
     }
-    let len = c_str_len(ptr).min(buf.len());
+    let len = unsafe { c_str_len(ptr) }.min(buf.len());
     for i in 0..len {
-        buf[i] = *ptr.add(i) as u8;
+        unsafe {
+            buf[i] = *ptr.add(i) as u8;
+        }
     }
     &buf[..len]
 }

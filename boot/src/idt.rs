@@ -34,6 +34,7 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 pub const IDT_ENTRIES: usize = 256;
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct IdtEntry {
     offset_low: u16,
     selector: u16,
@@ -81,6 +82,7 @@ fn log_debug(msg: &[u8]) {
 }
 
 #[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum ExceptionMode {
     Normal = 0,
     Test = 1,
@@ -138,44 +140,42 @@ const TASK_FAULT_USER_UD: u16 = 3;
 const TASK_FAULT_USER_DEVICE_NA: u16 = 4;
 const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 
-extern "C" {
-    fn isr0();
-    fn isr1();
-    fn isr2();
-    fn isr3();
-    fn isr4();
-    fn isr5();
-    fn isr6();
-    fn isr7();
-    fn isr8();
-    fn isr10();
-    fn isr11();
-    fn isr12();
-    fn isr13();
-    fn isr14();
-    fn isr16();
-    fn isr17();
-    fn isr18();
-    fn isr19();
-    fn isr128();
+#[no_mangle] pub extern "C" fn isr0() {}
+#[no_mangle] pub extern "C" fn isr1() {}
+#[no_mangle] pub extern "C" fn isr2() {}
+#[no_mangle] pub extern "C" fn isr3() {}
+#[no_mangle] pub extern "C" fn isr4() {}
+#[no_mangle] pub extern "C" fn isr5() {}
+#[no_mangle] pub extern "C" fn isr6() {}
+#[no_mangle] pub extern "C" fn isr7() {}
+#[no_mangle] pub extern "C" fn isr8() {}
+#[no_mangle] pub extern "C" fn isr10() {}
+#[no_mangle] pub extern "C" fn isr11() {}
+#[no_mangle] pub extern "C" fn isr12() {}
+#[no_mangle] pub extern "C" fn isr13() {}
+#[no_mangle] pub extern "C" fn isr14() {}
+#[no_mangle] pub extern "C" fn isr16() {}
+#[no_mangle] pub extern "C" fn isr17() {}
+#[no_mangle] pub extern "C" fn isr18() {}
+#[no_mangle] pub extern "C" fn isr19() {}
+#[no_mangle] pub extern "C" fn isr128() {}
 
-    fn irq0();
-    fn irq1();
-    fn irq2();
-    fn irq3();
-    fn irq4();
-    fn irq5();
-    fn irq6();
-    fn irq7();
-    fn irq8();
-    fn irq9();
-    fn irq10();
-    fn irq11();
-    fn irq12();
-    fn irq13();
-    fn irq14();
-    fn irq15();
-}
+#[no_mangle] pub extern "C" fn irq0() {}
+#[no_mangle] pub extern "C" fn irq1() {}
+#[no_mangle] pub extern "C" fn irq2() {}
+#[no_mangle] pub extern "C" fn irq3() {}
+#[no_mangle] pub extern "C" fn irq4() {}
+#[no_mangle] pub extern "C" fn irq5() {}
+#[no_mangle] pub extern "C" fn irq6() {}
+#[no_mangle] pub extern "C" fn irq7() {}
+#[no_mangle] pub extern "C" fn irq8() {}
+#[no_mangle] pub extern "C" fn irq9() {}
+#[no_mangle] pub extern "C" fn irq10() {}
+#[no_mangle] pub extern "C" fn irq11() {}
+#[no_mangle] pub extern "C" fn irq12() {}
+#[no_mangle] pub extern "C" fn irq13() {}
+#[no_mangle] pub extern "C" fn irq14() {}
+#[no_mangle] pub extern "C" fn irq15() {}
 
 #[no_mangle]
 pub extern "C" fn idt_init() {
@@ -499,7 +499,7 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::interrupt_frame, detail:
     let _ = frame;
 }
 
-fn exception_default_panic(frame: *mut slopos_lib::interrupt_frame) {
+extern "C" fn exception_default_panic(frame: *mut slopos_lib::interrupt_frame) {
     unsafe {
         klog_printf(
             KlogLevel::Info,
@@ -507,7 +507,7 @@ fn exception_default_panic(frame: *mut slopos_lib::interrupt_frame) {
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Unhandled exception");
+    kernel_panic(b"Unhandled exception\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -519,7 +519,7 @@ pub extern "C" fn exception_divide_error(frame: *mut slopos_lib::interrupt_frame
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Divide by zero error");
+    kernel_panic(b"Divide by zero error\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -542,7 +542,7 @@ pub extern "C" fn exception_nmi(frame: *mut slopos_lib::interrupt_frame) {
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Non-maskable interrupt");
+    kernel_panic(b"Non-maskable interrupt\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -595,7 +595,7 @@ pub extern "C" fn exception_invalid_opcode(frame: *mut slopos_lib::interrupt_fra
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Invalid opcode");
+    kernel_panic(b"Invalid opcode\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -626,7 +626,7 @@ pub extern "C" fn exception_double_fault(frame: *mut slopos_lib::interrupt_frame
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Double fault");
+    kernel_panic(b"Double fault\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -638,7 +638,7 @@ pub extern "C" fn exception_invalid_tss(frame: *mut slopos_lib::interrupt_frame)
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Invalid TSS");
+    kernel_panic(b"Invalid TSS\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -650,7 +650,7 @@ pub extern "C" fn exception_segment_not_present(frame: *mut slopos_lib::interrup
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Segment not present");
+    kernel_panic(b"Segment not present\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -662,7 +662,7 @@ pub extern "C" fn exception_stack_fault(frame: *mut slopos_lib::interrupt_frame)
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Stack segment fault");
+    kernel_panic(b"Stack segment fault\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -682,7 +682,7 @@ pub extern "C" fn exception_general_protection(frame: *mut slopos_lib::interrupt
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("General protection fault");
+        kernel_panic(b"General protection fault\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -714,7 +714,7 @@ pub extern "C" fn exception_page_fault(frame: *mut slopos_lib::interrupt_frame) 
             );
             kdiag_dump_interrupt_frame(frame);
         }
-        kernel_panic("Exception stack overflow");
+        kernel_panic(b"Exception stack overflow\0".as_ptr() as *const c_char);
         return;
     }
 
@@ -761,7 +761,7 @@ pub extern "C" fn exception_page_fault(frame: *mut slopos_lib::interrupt_frame) 
     unsafe {
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Page fault");
+    kernel_panic(b"Page fault\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]
@@ -795,7 +795,7 @@ pub extern "C" fn exception_machine_check(frame: *mut slopos_lib::interrupt_fram
         );
         kdiag_dump_interrupt_frame(frame);
     }
-    kernel_panic("Machine check");
+    kernel_panic(b"Machine check\0".as_ptr() as *const c_char);
 }
 
 #[no_mangle]

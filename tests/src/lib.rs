@@ -51,6 +51,8 @@ pub struct TestSuiteDesc {
     pub run: Option<extern "C" fn(*const InterruptTestConfig, *mut TestSuiteResult) -> i32>,
 }
 
+unsafe impl Sync for TestSuiteDesc {}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TestRunSummary {
@@ -353,11 +355,7 @@ mod suites {
             intr::interrupt_test_cleanup();
         }
 
-        let stats = if stats_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { *stats_ptr })
-        };
+        let stats = unsafe { stats_ptr.as_ref() };
 
         if let Some(out_ref) = unsafe { out.as_mut() } {
             out_ref.name = INTERRUPT_NAME.as_ptr() as *const c_char;
@@ -475,7 +473,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_vm_suite(
+    extern "C" fn run_vm_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -500,7 +498,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_vm_suite(
+    extern "C" fn run_vm_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -509,7 +507,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_heap_suite(
+    extern "C" fn run_heap_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -532,7 +530,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_heap_suite(
+    extern "C" fn run_heap_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -541,7 +539,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_ramfs_suite(
+    extern "C" fn run_ramfs_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -554,7 +552,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_ramfs_suite(
+    extern "C" fn run_ramfs_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -563,7 +561,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_privsep_suite(
+    extern "C" fn run_privsep_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -576,7 +574,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_privsep_suite(
+    extern "C" fn run_privsep_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -584,7 +582,7 @@ mod suites {
         0
     }
 
-    fn run_context_switch_regression(
+    extern "C" fn run_context_switch_regression(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -593,7 +591,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_roulette_mapping_suite(
+    extern "C" fn run_roulette_mapping_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -633,7 +631,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_roulette_mapping_suite(
+    extern "C" fn run_roulette_mapping_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -642,7 +640,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_roulette_exec_suite(
+    extern "C" fn run_roulette_exec_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -684,7 +682,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_roulette_exec_suite(
+    extern "C" fn run_roulette_exec_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -693,7 +691,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_virtio_gpu_driver_suite(
+    extern "C" fn run_virtio_gpu_driver_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -754,7 +752,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_virtio_gpu_driver_suite(
+    extern "C" fn run_virtio_gpu_driver_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {

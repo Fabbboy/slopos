@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem;
 use core::ptr;
 
@@ -80,6 +80,38 @@ pub struct TaskContext {
     pub cr3: u64,
 }
 
+impl TaskContext {
+    pub const fn zero() -> Self {
+        Self {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            rsp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            rflags: 0,
+            cs: 0,
+            ds: 0,
+            es: 0,
+            fs: 0,
+            gs: 0,
+            ss: 0,
+            cr3: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Task {
@@ -133,7 +165,7 @@ impl Task {
             kernel_stack_size: 0,
             entry_point: 0,
             entry_arg: ptr::null_mut(),
-            context: TaskContext::default(),
+            context: TaskContext::zero(),
             time_slice: 0,
             time_slice_remaining: 0,
             total_runtime: 0,
@@ -806,8 +838,8 @@ pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
                 KlogLevel::Debug,
                 b"Task %u state: %u -> %u\n\0".as_ptr() as *const c_char,
                 task_id,
-                old_state,
-                new_state,
+                old_state as c_uint,
+                new_state as c_uint,
             );
         }
     }
