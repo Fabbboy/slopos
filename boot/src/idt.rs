@@ -1,7 +1,9 @@
 use core::arch::asm;
 use core::ffi::c_char;
 
+use slopos_drivers::serial_println;
 use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::io;
 
 use crate::kernel_panic::kernel_panic;
 use crate::safe_stack;
@@ -79,6 +81,17 @@ fn log_info(msg: &[u8]) {
 
 fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
+}
+
+#[inline(always)]
+fn handler_ptr(f: extern "C" fn()) -> u64 {
+    f as *const () as u64
+}
+
+#[repr(C, packed)]
+struct Idtr {
+    limit: u16,
+    base: u64,
 }
 
 #[repr(u8)]
@@ -179,6 +192,7 @@ const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 
 #[no_mangle]
 pub extern "C" fn idt_init() {
+    serial_println!("IDT: init start");
     unsafe {
         core::ptr::write_bytes(
             IDT.as_mut_ptr() as *mut u8,
@@ -190,43 +204,43 @@ pub extern "C" fn idt_init() {
     }
 
     unsafe {
-        idt_set_gate(0, isr0 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(1, isr1 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(2, isr2 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(3, isr3 as u64, 0x08, IDT_GATE_TRAP);
-        idt_set_gate(4, isr4 as u64, 0x08, IDT_GATE_TRAP);
-        idt_set_gate(5, isr5 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(6, isr6 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(7, isr7 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(8, isr8 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(10, isr10 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(11, isr11 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(12, isr12 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(13, isr13 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(14, isr14 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(16, isr16 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(17, isr17 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(18, isr18 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(19, isr19 as u64, 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(0, handler_ptr(isr0), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(1, handler_ptr(isr1), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(2, handler_ptr(isr2), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(3, handler_ptr(isr3), 0x08, IDT_GATE_TRAP);
+        idt_set_gate(4, handler_ptr(isr4), 0x08, IDT_GATE_TRAP);
+        idt_set_gate(5, handler_ptr(isr5), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(6, handler_ptr(isr6), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(7, handler_ptr(isr7), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(8, handler_ptr(isr8), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(10, handler_ptr(isr10), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(11, handler_ptr(isr11), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(12, handler_ptr(isr12), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(13, handler_ptr(isr13), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(14, handler_ptr(isr14), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(16, handler_ptr(isr16), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(17, handler_ptr(isr17), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(18, handler_ptr(isr18), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(19, handler_ptr(isr19), 0x08, IDT_GATE_INTERRUPT);
 
-        idt_set_gate(32, irq0 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(33, irq1 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(34, irq2 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(35, irq3 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(36, irq4 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(37, irq5 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(38, irq6 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(39, irq7 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(40, irq8 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(41, irq9 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(42, irq10 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(43, irq11 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(44, irq12 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(45, irq13 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(46, irq14 as u64, 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(47, irq15 as u64, 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(32, handler_ptr(irq0), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(33, handler_ptr(irq1), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(34, handler_ptr(irq2), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(35, handler_ptr(irq3), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(36, handler_ptr(irq4), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(37, handler_ptr(irq5), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(38, handler_ptr(irq6), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(39, handler_ptr(irq7), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(40, handler_ptr(irq8), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(41, handler_ptr(irq9), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(42, handler_ptr(irq10), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(43, handler_ptr(irq11), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(44, handler_ptr(irq12), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(45, handler_ptr(irq13), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(46, handler_ptr(irq14), 0x08, IDT_GATE_INTERRUPT);
+        idt_set_gate(47, handler_ptr(irq15), 0x08, IDT_GATE_INTERRUPT);
 
-        idt_set_gate_priv(SYSCALL_VECTOR, isr128 as u64, 0x08, IDT_GATE_TRAP, 3);
+        idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
     }
 
     initialize_handler_tables();
@@ -237,6 +251,9 @@ pub extern "C" fn idt_init() {
             b"IDT: Configured 256 interrupt vectors\n\0".as_ptr() as *const c_char,
         );
     }
+    let base = unsafe { IDT_POINTER.base };
+    let limit = unsafe { IDT_POINTER.limit };
+    serial_println!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
 }
 
 #[no_mangle]
@@ -347,15 +364,35 @@ pub extern "C" fn exception_is_critical(vector: u8) -> i32 {
 #[no_mangle]
 pub extern "C" fn idt_load() {
     unsafe {
+        IDT_POINTER.limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
+        IDT_POINTER.base = IDT.as_ptr() as u64;
+        let base = IDT_POINTER.base;
+        let limit = IDT_POINTER.limit;
+        let table = IDT.as_ptr() as u64;
+        serial_println!("IDT: load base=0x{:x} limit=0x{:x} idt@=0x{:x}", base, limit, table);
+        // Emit debug bytes to port 0xE9 even before serial is fully up.
+        io::outb(0xe9, b'I');
         klog_printf(
             KlogLevel::Debug,
             b"IDT: Loading IDT at address 0x%llx with limit 0x%llx\n\0".as_ptr() as *const c_char,
             IDT_POINTER.base,
             IDT_POINTER.limit as u64,
         );
-        asm!("lidt [{}]", in(reg) &IDT_POINTER, options(nostack, preserves_flags));
+        let idtr = &raw const IDT_POINTER;
+        asm!("lidt [{}]", in(reg) idtr, options(nostack, preserves_flags));
+        let mut read_back = Idtr { limit: 0, base: 0 };
+        asm!("sidt [{}]", in(reg) &mut read_back, options(nostack, preserves_flags));
+        let rb_limit = core::ptr::read_unaligned(core::ptr::addr_of!(read_back.limit));
+        let rb_base = core::ptr::read_unaligned(core::ptr::addr_of!(read_back.base));
+        serial_println!(
+            "IDT: after lidt sidt base=0x{:x} limit=0x{:x}",
+            rb_base,
+            rb_limit
+        );
+        io::outb(0xe9, b'i');
         log_info(b"IDT: Successfully loaded\0");
     }
+    serial_println!("IDT: load complete");
 }
 
 #[no_mangle]

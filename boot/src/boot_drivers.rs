@@ -95,6 +95,10 @@ fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
 
+fn serial_note(msg: &str) {
+    slopos_drivers::serial::write_line(msg);
+}
+
 extern "C" fn boot_step_debug_subsystem_fn() -> i32 {
     log_debug(b"Debug/logging subsystem initialized.\0");
     0
@@ -109,11 +113,13 @@ extern "C" fn boot_step_gdt_setup_fn() -> i32 {
 
 extern "C" fn boot_step_idt_setup_fn() -> i32 {
     log_debug(b"Initializing IDT...\0");
+    serial_note("boot: idt setup start");
     unsafe {
         idt_init();
         safe_stack_init();
         idt_load();
     }
+    serial_note("boot: idt setup done");
     log_debug(b"IDT initialized and loaded.\0");
     0
 }

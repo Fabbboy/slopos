@@ -10,7 +10,7 @@ use slopos_drivers::serial;
 use slopos_drivers::wl_currency;
 use slopos_lib::{klog_is_enabled, klog_newline, klog_printf, klog_set_level, KlogLevel};
 
-use crate::kernel_panic::kernel_panic;
+use crate::{gdt, idt, kernel_panic::kernel_panic, safe_stack};
 use crate::limine_protocol;
 
 const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
@@ -363,6 +363,7 @@ extern "C" {
 extern "C" fn boot_step_serial_init_fn() -> i32 {
     serial::init();
     slopos_lib::klog_attach_serial();
+    slopos_drivers::serial::write_line("SERIAL: init ok");
     boot_debug(b"Serial console ready on COM1\0");
     0
 }
@@ -444,6 +445,14 @@ static BOOT_STEP_BOOT_CONFIG: BootInitStep =
 #[no_mangle]
 pub extern "C" fn kernel_main() {
     wl_currency::reset();
+
+    // Bring up minimal CPU tables early to avoid triple faults during initialization.
+    unsafe {
+        gdt::gdt_init();
+        idt::idt_init();
+        safe_stack::safe_stack_init();
+        idt::idt_load();
+    }
 
     if boot_init_run_all() != 0 {
         kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);

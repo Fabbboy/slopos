@@ -88,12 +88,12 @@ unsafe fn load_gdt(descriptor: &GdtDescriptor) {
 
     unsafe {
         asm!(
-            "pushq {code}",
+            "pushq ${code}",
             "lea 2f(%rip), %rax",
             "pushq %rax",
             "lretq",
             "2:",
-            "movw {data}, %ax",
+            "movw ${data}, %ax",
             "movw %ax, %ds",
             "movw %ax, %es",
             "movw %ax, %ss",
