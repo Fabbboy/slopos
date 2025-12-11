@@ -1,4 +1,4 @@
-use core::arch::asm;
+use core::arch::{asm, global_asm};
 use core::ffi::c_char;
 
 use slopos_drivers::serial_println;
@@ -7,6 +7,8 @@ use slopos_lib::io;
 
 use crate::kernel_panic::kernel_panic;
 use crate::safe_stack;
+
+global_asm!(include_str!("../idt_handlers.s"));
 
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 pub const IDT_GATE_TRAP: u8 = 0x8F;
@@ -84,7 +86,7 @@ fn log_debug(msg: &[u8]) {
 }
 
 #[inline(always)]
-fn handler_ptr(f: extern "C" fn()) -> u64 {
+fn handler_ptr(f: unsafe extern "C" fn()) -> u64 {
     f as *const () as u64
 }
 
@@ -153,42 +155,44 @@ const TASK_FAULT_USER_UD: u16 = 3;
 const TASK_FAULT_USER_DEVICE_NA: u16 = 4;
 const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 
-#[no_mangle] pub extern "C" fn isr0() {}
-#[no_mangle] pub extern "C" fn isr1() {}
-#[no_mangle] pub extern "C" fn isr2() {}
-#[no_mangle] pub extern "C" fn isr3() {}
-#[no_mangle] pub extern "C" fn isr4() {}
-#[no_mangle] pub extern "C" fn isr5() {}
-#[no_mangle] pub extern "C" fn isr6() {}
-#[no_mangle] pub extern "C" fn isr7() {}
-#[no_mangle] pub extern "C" fn isr8() {}
-#[no_mangle] pub extern "C" fn isr10() {}
-#[no_mangle] pub extern "C" fn isr11() {}
-#[no_mangle] pub extern "C" fn isr12() {}
-#[no_mangle] pub extern "C" fn isr13() {}
-#[no_mangle] pub extern "C" fn isr14() {}
-#[no_mangle] pub extern "C" fn isr16() {}
-#[no_mangle] pub extern "C" fn isr17() {}
-#[no_mangle] pub extern "C" fn isr18() {}
-#[no_mangle] pub extern "C" fn isr19() {}
-#[no_mangle] pub extern "C" fn isr128() {}
+extern "C" {
+    fn isr0();
+    fn isr1();
+    fn isr2();
+    fn isr3();
+    fn isr4();
+    fn isr5();
+    fn isr6();
+    fn isr7();
+    fn isr8();
+    fn isr10();
+    fn isr11();
+    fn isr12();
+    fn isr13();
+    fn isr14();
+    fn isr16();
+    fn isr17();
+    fn isr18();
+    fn isr19();
+    fn isr128();
 
-#[no_mangle] pub extern "C" fn irq0() {}
-#[no_mangle] pub extern "C" fn irq1() {}
-#[no_mangle] pub extern "C" fn irq2() {}
-#[no_mangle] pub extern "C" fn irq3() {}
-#[no_mangle] pub extern "C" fn irq4() {}
-#[no_mangle] pub extern "C" fn irq5() {}
-#[no_mangle] pub extern "C" fn irq6() {}
-#[no_mangle] pub extern "C" fn irq7() {}
-#[no_mangle] pub extern "C" fn irq8() {}
-#[no_mangle] pub extern "C" fn irq9() {}
-#[no_mangle] pub extern "C" fn irq10() {}
-#[no_mangle] pub extern "C" fn irq11() {}
-#[no_mangle] pub extern "C" fn irq12() {}
-#[no_mangle] pub extern "C" fn irq13() {}
-#[no_mangle] pub extern "C" fn irq14() {}
-#[no_mangle] pub extern "C" fn irq15() {}
+    fn irq0();
+    fn irq1();
+    fn irq2();
+    fn irq3();
+    fn irq4();
+    fn irq5();
+    fn irq6();
+    fn irq7();
+    fn irq8();
+    fn irq9();
+    fn irq10();
+    fn irq11();
+    fn irq12();
+    fn irq13();
+    fn irq14();
+    fn irq15();
+}
 
 #[no_mangle]
 pub extern "C" fn idt_init() {
@@ -366,33 +370,9 @@ pub extern "C" fn idt_load() {
     unsafe {
         IDT_POINTER.limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
         IDT_POINTER.base = IDT.as_ptr() as u64;
-        let base = IDT_POINTER.base;
-        let limit = IDT_POINTER.limit;
-        let table = IDT.as_ptr() as u64;
-        serial_println!("IDT: load base=0x{:x} limit=0x{:x} idt@=0x{:x}", base, limit, table);
-        // Emit debug bytes to port 0xE9 even before serial is fully up.
-        io::outb(0xe9, b'I');
-        klog_printf(
-            KlogLevel::Debug,
-            b"IDT: Loading IDT at address 0x%llx with limit 0x%llx\n\0".as_ptr() as *const c_char,
-            IDT_POINTER.base,
-            IDT_POINTER.limit as u64,
-        );
         let idtr = &raw const IDT_POINTER;
         asm!("lidt [{}]", in(reg) idtr, options(nostack, preserves_flags));
-        let mut read_back = Idtr { limit: 0, base: 0 };
-        asm!("sidt [{}]", in(reg) &mut read_back, options(nostack, preserves_flags));
-        let rb_limit = core::ptr::read_unaligned(core::ptr::addr_of!(read_back.limit));
-        let rb_base = core::ptr::read_unaligned(core::ptr::addr_of!(read_back.base));
-        serial_println!(
-            "IDT: after lidt sidt base=0x{:x} limit=0x{:x}",
-            rb_base,
-            rb_limit
-        );
-        io::outb(0xe9, b'i');
-        log_info(b"IDT: Successfully loaded\0");
     }
-    serial_println!("IDT: load complete");
 }
 
 #[no_mangle]
@@ -401,6 +381,9 @@ pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::interrupt_fra
     let vector = (frame_ref.vector & 0xFF) as u8;
 
     safe_stack::safe_stack_record_usage(vector, frame as u64);
+
+    serial_println!("EXC vector {}", vector);
+    kernel_panic(b"early exception\0".as_ptr() as *const c_char);
 
     if vector == SYSCALL_VECTOR {
         unsafe { syscall_handle(frame) };

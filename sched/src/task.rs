@@ -282,7 +282,7 @@ fn task_manager_mut() -> &'static mut TaskManager {
     unsafe { &mut TASK_MANAGER }
 }
 
-fn find_task_by_id(task_id: u32) -> *mut Task {
+pub fn task_find_by_id(task_id: u32) -> *mut Task {
     let mgr = task_manager_mut();
     for task in mgr.tasks.iter_mut() {
         if task.task_id == task_id {
@@ -663,7 +663,7 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
         }
         resolved_id = unsafe { (*task_ptr).task_id };
     } else {
-        task_ptr = find_task_by_id(task_id);
+        task_ptr = task_find_by_id(task_id);
     }
 
     if task_ptr.is_null() || unsafe { (*task_ptr).state } == TASK_STATE_INVALID {
@@ -761,7 +761,7 @@ pub extern "C" fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_in
     if task_info.is_null() {
         return -1;
     }
-    let task = find_task_by_id(task_id);
+    let task = task_find_by_id(task_id);
     unsafe {
         if task.is_null() || (*task).state == TASK_STATE_INVALID {
             *task_info = ptr::null_mut();
@@ -814,7 +814,7 @@ fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
 
 #[no_mangle]
 pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
-    let task = find_task_by_id(task_id);
+    let task = task_find_by_id(task_id);
     if task.is_null() || unsafe { (*task).state } == TASK_STATE_INVALID {
         return -1;
     }

@@ -461,6 +461,12 @@ pub extern "C" fn r#yield() {
     schedule();
 }
 
+// C-ABI shim expected by syscall and TTY code.
+#[no_mangle]
+pub extern "C" fn yield_() {
+    r#yield();
+}
+
 #[no_mangle]
 pub extern "C" fn block_current_task() {
     let sched = scheduler_mut();

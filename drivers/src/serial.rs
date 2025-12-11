@@ -3,6 +3,46 @@ use spin::Mutex;
 use slopos_lib::io;
 
 static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(0x3f8));
+const BUF_SIZE: usize = 256;
+
+struct SerialBuffer {
+    buf: [u8; BUF_SIZE],
+    head: usize,
+    tail: usize,
+}
+
+impl SerialBuffer {
+    const fn new() -> Self {
+        Self {
+            buf: [0; BUF_SIZE],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        let next = (self.head + 1) % BUF_SIZE;
+        if next != self.tail {
+            self.buf[self.head] = byte;
+            self.head = next;
+        }
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.head == self.tail {
+            return None;
+        }
+        let byte = self.buf[self.tail];
+        self.tail = (self.tail + 1) % BUF_SIZE;
+        Some(byte)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+}
+
+static INPUT_BUFFER: Mutex<SerialBuffer> = Mutex::new(SerialBuffer::new());
 
 pub fn init() {
     let mut port = SERIAL.lock();
@@ -26,6 +66,40 @@ pub fn write_line(s: &str) {
 
 pub fn print_args(args: fmt::Arguments<'_>) {
     let _ = SERIAL.lock().write_fmt(args);
+}
+
+#[no_mangle]
+pub extern "C" fn serial_poll_receive(port: u16) {
+    // Poll the UART Line Status Register (offset +5) for data ready.
+    while unsafe { io::inb(port + 5) } & 0x01 != 0 {
+        let byte = unsafe { io::inb(port) };
+        let mut buf = INPUT_BUFFER.lock();
+        buf.push(byte);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn serial_buffer_pending(port: u16) -> i32 {
+    // Ensure we service the port before reporting availability.
+    serial_poll_receive(port);
+    let buf = INPUT_BUFFER.lock();
+    (!buf.is_empty()) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
+    // Refresh buffer then attempt to pop one byte.
+    serial_poll_receive(port);
+    let mut buf = INPUT_BUFFER.lock();
+    match buf.pop() {
+        Some(b) => {
+            if !out.is_null() {
+                unsafe { *out = b };
+            }
+            0
+        }
+        None => -1,
+    }
 }
 
 struct SerialPort {

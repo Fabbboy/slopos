@@ -215,6 +215,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
         return 0;
     };
 
+    serial::write_line("BOOT: running init step");
     boot_init_report_step(
         KlogLevel::Debug,
         b"step\0",
@@ -257,6 +258,15 @@ pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     };
 
     boot_init_report_phase(KlogLevel::Debug, b"phase start -> \0", Some(phase_name));
+
+    let phase_label = match phase {
+        BootInitPhase::EarlyHw => "BOOT: phase early_hw",
+        BootInitPhase::Memory => "BOOT: phase memory",
+        BootInitPhase::Drivers => "BOOT: phase drivers",
+        BootInitPhase::Services => "BOOT: phase services",
+        BootInitPhase::Optional => "BOOT: phase optional",
+    };
+    serial::write_line(phase_label);
 
     let mut ordered: [*const BootInitStep; BOOT_INIT_MAX_STEPS] =
         [ptr::null(); BOOT_INIT_MAX_STEPS];
@@ -361,8 +371,13 @@ extern "C" {
 }
 
 extern "C" fn boot_step_serial_init_fn() -> i32 {
+    serial::write_line("BOOT: serial step -> init");
     serial::init();
+    serial::write_line("BOOT: serial step -> after serial::init");
+
     slopos_lib::klog_attach_serial();
+    serial::write_line("BOOT: serial step -> after klog_attach_serial");
+
     slopos_drivers::serial::write_line("SERIAL: init ok");
     boot_debug(b"Serial console ready on COM1\0");
     0
@@ -446,17 +461,23 @@ static BOOT_STEP_BOOT_CONFIG: BootInitStep =
 pub extern "C" fn kernel_main() {
     wl_currency::reset();
 
-    // Bring up minimal CPU tables early to avoid triple faults during initialization.
+    // Install basic GDT/IDT early so faults have somewhere to land. IST
+    // stacks are deferred to the driver phase (after memory is online) so
+    // safe_stack_init can allocate pages.
     unsafe {
         gdt::gdt_init();
         idt::idt_init();
-        safe_stack::safe_stack_init();
+        serial::write_line("BOOT: before idt_load (early)");
         idt::idt_load();
+        serial::write_line("BOOT: after idt_load (early)");
     }
+    serial::write_line("BOOT: early GDT/IDT initialized");
 
+    serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {
         kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);
     }
+    serial::write_line("BOOT: boot init complete");
 
     if unsafe { klog_is_enabled(KlogLevel::Info) } != 0 {
         unsafe { klog_newline() };
