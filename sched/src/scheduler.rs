@@ -579,18 +579,11 @@ extern "C" fn idle_task_function(_: *mut c_void) {
             }
         }
         sched.idle_time = sched.idle_time.saturating_add(1);
-        if unsafe { is_kernel_initialized() } != 0 && sched.idle_time > 1000 {
-            let mut active_tasks = 0u32;
-            unsafe { crate::task::get_task_stats(ptr::null_mut(), &mut active_tasks, ptr::null_mut()) };
-            if active_tasks <= 1 {
-                break;
-            }
-        }
         if sched.idle_time % 1000 == 0 {
             r#yield();
         }
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
-    sched.enabled = 0;
 }
 
 #[no_mangle]
@@ -655,12 +648,20 @@ pub extern "C" fn start_scheduler() -> c_int {
 
     if !ready_queue_empty(&sched.ready_queue) {
         schedule();
-    } else if !sched.idle_task.is_null() {
-        switch_to_task(sched.idle_task);
-    } else {
+    }
+
+    if sched.current_task.is_null() && !sched.idle_task.is_null() {
+        sched.current_task = sched.idle_task;
+        task_set_current(sched.idle_task);
+        scheduler_reset_task_quantum(sched.idle_task);
+        unsafe { idle_task_function(ptr::null_mut()) };
+    } else if sched.current_task.is_null() {
         return -1;
     }
-    0
+
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 #[no_mangle]
@@ -812,4 +813,3 @@ pub extern "C" fn boot_step_scheduler_init() -> c_int {
 pub extern "C" fn boot_step_idle_task() -> c_int {
     create_idle_task()
 }
-
