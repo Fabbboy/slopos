@@ -15,8 +15,6 @@ use crate::syscall_fs::{
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
 use crate::syscall_types::{task_t, InterruptFrame};
-use crate::wl_currency;
-use slopos_lib::{klog_printf, KlogLevel};
 
 #[repr(C)]
 pub struct user_rect_t {
@@ -647,4 +645,3 @@ pub extern "C" fn syscall_lookup(sysno: u64) -> *const syscall_entry {
         entry as *const syscall_entry
     }
 }
-

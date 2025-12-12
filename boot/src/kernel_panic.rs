@@ -116,9 +116,7 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     } else {
         message
     };
-    unsafe {
-        kernel_shutdown(reason);
-    }
+    kernel_shutdown(reason);
 }
 
 #[no_mangle]
@@ -193,9 +191,7 @@ pub extern "C" fn kernel_panic_with_context(
     } else {
         message
     };
-    unsafe {
-        kernel_shutdown(reason);
-    }
+    kernel_shutdown(reason);
 }
 
 #[no_mangle]

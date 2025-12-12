@@ -5,11 +5,9 @@ use core::ptr;
 
 use spin::Mutex;
 
-use crate::mm_constants::{
-    ENTRIES_PER_PAGE_TABLE, PAGE_PRESENT, PAGE_SIZE_4KB,
-};
+use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::memory_reservations::{
-    mm_region_count, mm_region_get, MmRegion, MmRegionKind, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+    mm_region_count, mm_region_get, MmRegion, MmRegionKind,
 };
 use crate::phys_virt::{mm_phys_to_virt, mm_zero_physical_page};
 
@@ -284,7 +282,7 @@ impl PageAllocator {
             return;
         }
 
-        let mut start_frame = self.phys_to_frame(aligned_start);
+        let start_frame = self.phys_to_frame(aligned_start);
         let mut end_frame = self.phys_to_frame(aligned_end);
         if start_frame >= self.total_frames {
             return;
@@ -399,7 +397,7 @@ pub extern "C" fn finalize_page_allocator() -> c_int {
 
     let region_count = mm_region_count();
     for i in 0..region_count {
-        let region = unsafe { mm_region_get(i) };
+        let region = mm_region_get(i);
         if !region.is_null() {
             let region_ref = unsafe { &*region };
             alloc.seed_region_from_map(region_ref, i as u16);
@@ -453,7 +451,7 @@ pub extern "C" fn alloc_page_frames(count: u32, flags: u32) -> u64 {
     if flags & ALLOC_FLAG_ZERO != 0 {
         let span_pages = PageAllocator::order_block_pages(order);
         for i in 0..span_pages {
-            if unsafe { mm_zero_physical_page(phys_addr + (i as u64 * PAGE_SIZE_4KB)) } != 0 {
+            if mm_zero_physical_page(phys_addr + (i as u64 * PAGE_SIZE_4KB)) != 0 {
                 free_page_frame(phys_addr);
                 return 0;
             }
@@ -567,4 +565,3 @@ pub extern "C" fn page_allocator_paint_all(value: u8) {
         }
     }
 }
-

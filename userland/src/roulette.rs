@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
 use core::ffi::{c_char, c_void};
-use core::mem;
 
-use slopos_video::roulette_core::{roulette_run, RouletteBackend, ROULETTE_BG_COLOR};
+use slopos_video::roulette_core::{roulette_run, RouletteBackend};
 
 const SYSCALL_YIELD: u64 = 0;
 const SYSCALL_EXIT: u64 = 1;
@@ -315,7 +314,7 @@ pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
         text_fallback(fate);
     } else {
         let backend = backend();
-        rc = unsafe { roulette_run(&backend as *const RouletteBackend, fate) };
+        rc = roulette_run(&backend as *const RouletteBackend, fate);
         if rc != 0 {
             text_fallback(fate);
         }
@@ -327,5 +326,4 @@ pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
     sys_sleep_ms(500);
     sys_exit();
 }
-
 

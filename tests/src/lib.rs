@@ -1,5 +1,8 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unused_unsafe)]
+#![allow(unused_imports)]
+#![allow(static_mut_refs)]
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -814,4 +817,3 @@ mod suites {
 }
 
 pub use suites::interrupt_suite_desc;
-

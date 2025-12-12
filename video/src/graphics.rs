@@ -111,8 +111,8 @@ pub extern "C" fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: 
         return GRAPHICS_ERROR_BOUNDS;
     }
 
-    let mut dx = (x1 - x0).abs();
-    let mut dy = (y1 - y0).abs();
+    let dx = (x1 - x0).abs();
+    let dy = (y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut err = dx - dy;
@@ -357,4 +357,3 @@ pub extern "C" fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, col
 
     GRAPHICS_SUCCESS
 }
-

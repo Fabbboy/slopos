@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
+#![allow(static_mut_refs)]
 
 use core::ffi::{c_int, c_void};
 
@@ -208,4 +209,3 @@ pub extern "C" fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {
         }
     }
 }
-

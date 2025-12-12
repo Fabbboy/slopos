@@ -59,7 +59,7 @@ extern "C" fn boot_step_memory_verify() -> i32 {
             );
         }
 
-        let current_ip = boot_step_memory_verify as usize as u64;
+        let current_ip = boot_step_memory_verify as *const () as usize as u64;
         unsafe {
             klog_printf(
                 KlogLevel::Info,

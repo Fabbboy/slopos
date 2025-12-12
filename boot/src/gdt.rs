@@ -1,13 +1,12 @@
+#![allow(static_mut_refs)]
+
 use core::arch::asm;
 use core::ffi::c_char;
 
 use slopos_lib::{klog_printf, KlogLevel};
 
-const GDT_NULL_SELECTOR: u16 = 0x00;
 const GDT_CODE_SELECTOR: u16 = 0x08;
 const GDT_DATA_SELECTOR: u16 = 0x10;
-const GDT_USER_DATA_SELECTOR: u16 = 0x1B;
-const GDT_USER_CODE_SELECTOR: u16 = 0x23;
 const GDT_TSS_SELECTOR: u16 = 0x28;
 
 const GDT_NULL_DESCRIPTOR: u64 = 0x0000_0000_0000_0000;

@@ -752,7 +752,7 @@ pub extern "C" fn limine_get_memmap_response() -> *const LimineMemmapResponse {
 
 #[no_mangle]
 pub extern "C" fn limine_get_hhdm_response() -> *const LimineHhdmResponse {
-    unsafe { HHDM_REQUEST.response }
+    HHDM_REQUEST.response
 }
 
 #[no_mangle]

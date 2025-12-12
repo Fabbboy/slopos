@@ -479,8 +479,8 @@ pub extern "C" fn kernel_main() {
     }
     serial::write_line("BOOT: boot init complete");
 
-    if unsafe { klog_is_enabled(KlogLevel::Info) } != 0 {
-        unsafe { klog_newline() };
+    if klog_is_enabled(KlogLevel::Info) != 0 {
+        klog_newline();
     }
 
     boot_info(b"=== KERNEL BOOT SUCCESSFUL ===\0");
@@ -490,8 +490,8 @@ pub extern "C" fn kernel_main() {
     boot_info(b"The kernel has initialized. Handing over to scheduler...\0");
     boot_info(b"Starting scheduler...\0");
 
-    if unsafe { klog_is_enabled(KlogLevel::Info) } != 0 {
-        unsafe { klog_newline() };
+    if klog_is_enabled(KlogLevel::Info) != 0 {
+        klog_newline();
     }
 
     let rc = unsafe { start_scheduler() };

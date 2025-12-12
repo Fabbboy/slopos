@@ -1,5 +1,6 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(static_mut_refs)]
 
 mod mm_constants;
 mod memory_layout;

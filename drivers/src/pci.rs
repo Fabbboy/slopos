@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
+#![allow(static_mut_refs)]
 
 use core::arch::asm;
 use core::ffi::c_int;
@@ -247,41 +248,37 @@ fn pci_probe_bar_size(bus: u8, device: u8, function: u8, offset: u8, original_va
     }
 
     if (original_value & PCI_BAR_IO_SPACE) != 0 {
-        unsafe {
-            pci_config_write32(bus, device, function, offset, 0xFFFF_FFFF);
-            let size_mask = pci_config_read32(bus, device, function, offset);
-            pci_config_write32(bus, device, function, offset, original_value);
-            let masked = size_mask & PCI_BAR_IO_ADDRESS_MASK;
-            if masked == 0 {
-                return 0;
-            }
-            let size = (!masked + 1) & 0xFFFF_FFFF;
-            return size as u64;
+        pci_config_write32(bus, device, function, offset, 0xFFFF_FFFF);
+        let size_mask = pci_config_read32(bus, device, function, offset);
+        pci_config_write32(bus, device, function, offset, original_value);
+        let masked = size_mask & PCI_BAR_IO_ADDRESS_MASK;
+        if masked == 0 {
+            return 0;
         }
+        let size = (!masked + 1) & 0xFFFF_FFFF;
+        return size as u64;
     }
 
     let bar_mem_type = original_value & PCI_BAR_MEM_TYPE_MASK;
     let is_64bit = bar_mem_type == PCI_BAR_MEM_TYPE_64;
 
-    unsafe {
-        pci_config_write32(bus, device, function, offset, 0xFFFF_FFFF);
-        let size_low = pci_config_read32(bus, device, function, offset);
-        pci_config_write32(bus, device, function, offset, original_value);
+    pci_config_write32(bus, device, function, offset, 0xFFFF_FFFF);
+    let size_low = pci_config_read32(bus, device, function, offset);
+    pci_config_write32(bus, device, function, offset, original_value);
 
-        let mut mask: u64 = (size_low & PCI_BAR_MEM_ADDRESS_MASK) as u64;
-        let mut size_value: u64 = (!mask + 1) as u64;
+    let mut mask: u64 = (size_low & PCI_BAR_MEM_ADDRESS_MASK) as u64;
+    let mut size_value: u64 = (!mask + 1) as u64;
 
-        if is_64bit {
-            let original_high = pci_config_read32(bus, device, function, offset + 4);
-            pci_config_write32(bus, device, function, offset + 4, 0xFFFF_FFFF);
-            let size_high = pci_config_read32(bus, device, function, offset + 4);
-            pci_config_write32(bus, device, function, offset + 4, original_high);
+    if is_64bit {
+        let original_high = pci_config_read32(bus, device, function, offset + 4);
+        pci_config_write32(bus, device, function, offset + 4, 0xFFFF_FFFF);
+        let size_high = pci_config_read32(bus, device, function, offset + 4);
+        pci_config_write32(bus, device, function, offset + 4, original_high);
 
-            mask |= (size_high as u64) << 32;
-            size_value = (!mask).wrapping_add(1);
-        }
-        size_value
+        mask |= (size_high as u64) << 32;
+        size_value = (!mask).wrapping_add(1);
     }
+    size_value
 }
 
 fn pci_log_device_header(info: &pci_device_info_t) {
@@ -359,7 +356,7 @@ extern "C" {
 }
 
 fn pci_consider_gpu_candidate(info: &pci_device_info_t) {
-    let mut virtio_candidate = false;
+    let virtio_candidate = pci_is_virtio_gpu(info);
 
     unsafe {
         if PRIMARY_GPU.present != 0 {
@@ -370,8 +367,6 @@ fn pci_consider_gpu_candidate(info: &pci_device_info_t) {
     if !pci_is_gpu_candidate(info) {
         return;
     }
-
-    virtio_candidate = pci_is_virtio_gpu(info);
 
     for i in 0..info.bar_count as usize {
         let bar = &info.bars[i];
@@ -749,4 +744,3 @@ pub extern "C" fn pci_register_driver(driver: *const pci_driver_t) -> c_int {
     }
     0
 }
-

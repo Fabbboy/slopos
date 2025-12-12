@@ -1,3 +1,5 @@
+#![allow(static_mut_refs)]
+
 use core::arch::{asm, global_asm};
 use core::ffi::c_char;
 
@@ -73,14 +75,17 @@ static mut PANIC_HANDLERS: [ExceptionHandler; 32] = [exception_default_panic; 32
 static mut OVERRIDE_HANDLERS: [Option<ExceptionHandler>; 32] = [None; 32];
 static mut CURRENT_EXCEPTION_MODE: ExceptionMode = ExceptionMode::Normal;
 
+#[allow(dead_code)]
 fn log(level: KlogLevel, msg: &[u8]) {
     unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
 }
 
+#[allow(dead_code)]
 fn log_info(msg: &[u8]) {
     log(KlogLevel::Info, msg);
 }
 
+#[allow(dead_code)]
 fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
@@ -91,6 +96,7 @@ fn handler_ptr(f: unsafe extern "C" fn()) -> u64 {
 }
 
 #[repr(C, packed)]
+#[allow(dead_code)]
 struct Idtr {
     limit: u16,
     base: u64,

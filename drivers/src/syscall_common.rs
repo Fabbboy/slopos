@@ -4,8 +4,6 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_lib::interrupt_frame;
-
 use crate::syscall_types::{task_t, InterruptFrame};
 use crate::wl_currency;
 
@@ -121,4 +119,3 @@ pub fn syscall_copy_to_user_bounded(
     }
     unsafe { user_copy_to_user(user_dst, src, len) }
 }
-

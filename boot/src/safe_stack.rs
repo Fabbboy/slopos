@@ -1,3 +1,5 @@
+#![allow(static_mut_refs)]
+
 use core::ffi::c_char;
 
 use slopos_lib::{klog_printf, KlogLevel};

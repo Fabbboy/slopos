@@ -1,5 +1,13 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(static_mut_refs)]
+#![allow(unused_unsafe)]
+#![allow(unused_imports)]
+#![allow(unused_mut)]
+#![allow(unused_assignments)]
+#![allow(unused_variables)]
+#![allow(ambiguous_glob_reexports)]
+#![allow(function_casts_as_integer)]
 
 pub mod scheduler;
 pub mod task;
@@ -12,4 +20,3 @@ pub use task::*;
 pub use kthread::*;
 pub use test_tasks::*;
 pub use fate_api::*;
-

@@ -2,6 +2,7 @@
 #![no_main]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![feature(alloc_error_handler)]
+#![allow(bad_asm_style)]
 
 extern crate alloc;
 
@@ -74,4 +75,3 @@ fn panic(info: &PanicInfo) -> ! {
     wl_currency::award_loss();
     cpu::halt_loop();
 }
-

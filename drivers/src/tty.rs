@@ -4,7 +4,7 @@
 use core::ffi::c_int;
 use core::ptr;
 
-use slopos_lib::{cpu, klog_printf, KlogLevel};
+use slopos_lib::cpu;
 
 use crate::keyboard;
 use crate::serial;
@@ -248,4 +248,3 @@ pub extern "C" fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
         serial_putc(port, c);
     }
 }
-

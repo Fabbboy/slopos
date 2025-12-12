@@ -8,14 +8,11 @@ use spin::Mutex;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::mm_constants::{
     INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_PRESENT, PAGE_SIZE_4KB, PAGE_USER, PAGE_WRITABLE,
-    PROCESS_HEAP_MAX_VA, PROCESS_HEAP_START_VA, PROCESS_STACK_SIZE_BYTES, PROCESS_STACK_TOP_VA,
-    USER_SPACE_END_VA, USER_SPACE_START_VA,
 };
 use crate::memory_layout::mm_get_process_layout;
 use crate::page_alloc::{alloc_page_frame, free_page_frame, page_frame_can_free, ALLOC_FLAG_ZERO};
 use crate::paging::{
-    paging_copy_kernel_mappings, paging_free_user_space, paging_get_kernel_directory,
-    paging_is_user_accessible, paging_mark_range_user, map_page_4kb_in_dir, unmap_page_in_dir,
+    paging_copy_kernel_mappings, paging_free_user_space, map_page_4kb_in_dir, unmap_page_in_dir,
     virt_to_phys_in_dir, ProcessPageDir, PageTable,
 };
 use crate::phys_virt::mm_phys_to_virt;
@@ -37,7 +34,7 @@ unsafe impl Send for VmArea {}
 
 impl VmArea {
     fn new(start: u64, end: u64, flags: u32) -> *mut Self {
-        let ptr = unsafe { kmalloc(core::mem::size_of::<VmArea>()) as *mut VmArea };
+        let ptr = kmalloc(core::mem::size_of::<VmArea>()) as *mut VmArea;
         if ptr.is_null() {
             return ptr::null_mut();
         }
@@ -437,7 +434,7 @@ pub extern "C" fn create_process_vm() -> u32 {
         unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: Failed to allocate PML4\n\0".as_ptr() as *const c_char); }
         return INVALID_PROCESS_ID;
     }
-    let pml4 = unsafe { mm_phys_to_virt(pml4_phys) as *mut PageTable };
+    let pml4 = mm_phys_to_virt(pml4_phys) as *mut PageTable;
     if pml4.is_null() {
         unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: No HHDM/identity map available for PML4\n\0".as_ptr() as *const c_char); }
         free_page_frame(pml4_phys);
@@ -450,7 +447,7 @@ pub extern "C" fn create_process_vm() -> u32 {
     let process_id = manager.next_process_id;
     manager.next_process_id += 1;
 
-    let page_dir_ptr = unsafe { kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir };
+    let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if page_dir_ptr.is_null() {
         unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: Failed to allocate page directory\n\0".as_ptr() as *const c_char); }
         free_page_frame(pml4_phys);
@@ -597,7 +594,7 @@ pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u6
     let process = unsafe { &mut *process_ptr };
     let layout = unsafe { &*mm_get_process_layout() };
 
-    let mut size_aligned = (size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
+    let size_aligned = (size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
     if size_aligned == 0 {
         return 0;
     }
@@ -730,4 +727,3 @@ pub extern "C" fn get_current_process_id() -> u32 {
         unsafe { (*manager.active_process).process_id }
     }
 }
-

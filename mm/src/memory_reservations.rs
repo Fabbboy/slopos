@@ -150,7 +150,7 @@ fn insert_slot(index: u32) -> Result<(), ()> {
         return Err(());
     }
 
-    let mut idx = index.min(store.count);
+    let idx = index.min(store.count);
     if store.count > 0 && idx < store.count {
         unsafe {
             let dst = store.regions.add((idx + 1) as usize);
@@ -287,7 +287,7 @@ fn overlay_region(
 
     let mut cursor = aligned_base;
     while cursor < aligned_end {
-        let mut idx = find_region_index(cursor);
+        let idx = find_region_index(cursor);
         let store = ensure_storage();
 
         let region_exists = idx < store.count;
@@ -305,9 +305,6 @@ fn overlay_region(
             try_merge_with_neighbors(idx);
             break;
         }
-
-        let region = unsafe { &mut *store.regions.add(idx as usize) };
-        let region_end = region.phys_base + region.length;
 
         if split_region(idx, cursor).is_err() {
             return -1;
@@ -521,10 +518,8 @@ pub extern "C" fn mm_iterate_reserved(cb: MmRegionIterCb, ctx: *mut c_void) {
         if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
             continue;
         }
-        unsafe {
-            if let Some(func) = cb {
-                func(region as *const MmRegion, ctx);
-            }
+        if let Some(func) = cb {
+            func(region as *const MmRegion, ctx);
         }
     }
 }
@@ -622,4 +617,3 @@ pub extern "C" fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
         }
     }
 }
-

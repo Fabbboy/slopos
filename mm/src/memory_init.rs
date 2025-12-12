@@ -1,30 +1,26 @@
 #![allow(dead_code)]
 
 use core::ffi::{c_char, c_int};
-use core::ptr;
-
 use crate::memory_layout::{
-    get_kernel_memory_layout, init_kernel_memory_layout, KernelMemoryLayout, ProcessMemoryLayout,
-    mm_get_process_layout,
+    get_kernel_memory_layout, init_kernel_memory_layout,
 };
 use crate::memory_reservations::{
     mm_region_add_usable, mm_region_count, mm_region_get, mm_region_highest_usable_frame,
-    mm_region_map_configure, mm_region_map_reset, mm_region_total_bytes, mm_region_dump, mm_region_reserve,
+    mm_region_map_configure, mm_region_map_reset, mm_region_total_bytes, mm_region_reserve,
     mm_reservation_type_name, mm_reservations_capacity, mm_reservations_count,
-    mm_reservations_find, mm_reservations_get, mm_reservations_overflow_count,
-    mm_reservations_total_bytes, MmRegion, MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MM_RESERVATION_FLAG_MMIO, MmRegionKind,
+    mm_reservations_get, mm_reservations_overflow_count, mm_reservations_total_bytes, MmRegion,
+    MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+    MM_RESERVATION_FLAG_MMIO, MmRegionKind,
 };
 use crate::mm_constants::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PDPT_PHYS_ADDR, EARLY_PD_PHYS_ADDR, EARLY_PML4_PHYS_ADDR,
-    HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB,
+    HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB,
 };
 use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
-    page_allocator_max_supported_frames,
 };
 use crate::paging::init_paging;
-use crate::phys_virt::{mm_init_phys_virt_helpers, mm_map_mmio_region};
+use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
 
@@ -162,13 +158,13 @@ fn configure_region_store(memmap: *const LimineMemmapResponse) {
 }
 
 fn add_reservation_or_panic(base: u64, length: u64, type_: MmReservationType, flags: u32, label: *const c_char) {
-    if unsafe { mm_region_reserve(base, length, type_, flags, label) } != 0 {
+    if mm_region_reserve(base, length, type_, flags, label) != 0 {
         unsafe { kernel_panic(b"MM: Failed to record reserved region\0".as_ptr() as *const c_char) };
     }
 }
 
 fn add_usable_or_panic(base: u64, length: u64, label: *const c_char) {
-    if unsafe { mm_region_add_usable(base, length, label) } != 0 {
+    if mm_region_add_usable(base, length, label) != 0 {
         unsafe { kernel_panic(b"MM: Failed to record usable region\0".as_ptr() as *const c_char) };
     }
 }
@@ -668,4 +664,3 @@ pub extern "C" fn get_memory_statistics(
         }
     }
 }
-

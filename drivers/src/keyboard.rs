@@ -99,7 +99,8 @@ const SCANCODE_SHIFTED: [u8; 0x80] = [
 ];
 
 #[inline]
-fn kb_buffer_push_overwrite(buf: &mut KeyboardBuffer, byte: u8) {
+unsafe fn kb_buffer_push_overwrite(buf: *mut KeyboardBuffer, byte: u8) {
+    let buf = unsafe { &mut *buf };
     if buf.count >= KEYBOARD_BUFFER_SIZE as u32 {
         buf.tail = (buf.tail + 1) % KEYBOARD_BUFFER_SIZE as u32;
         buf.count = buf.count.saturating_sub(1);
@@ -110,7 +111,8 @@ fn kb_buffer_push_overwrite(buf: &mut KeyboardBuffer, byte: u8) {
 }
 
 #[inline]
-fn kb_buffer_pop(buf: &mut KeyboardBuffer) -> Option<u8> {
+unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
+    let buf = unsafe { &mut *buf };
     let mut out = None;
     cpu::disable_interrupts();
     if buf.count > 0 {
@@ -124,10 +126,10 @@ fn kb_buffer_pop(buf: &mut KeyboardBuffer) -> Option<u8> {
 }
 
 #[inline]
-fn kb_buffer_has_data(buf: &KeyboardBuffer) -> bool {
-    let mut has_data = false;
+unsafe fn kb_buffer_has_data(buf: *const KeyboardBuffer) -> bool {
+    let buf = unsafe { &*buf };
     cpu::disable_interrupts();
-    has_data = buf.count > 0;
+    let has_data = buf.count > 0;
     cpu::enable_interrupts();
     has_data
 }
@@ -235,9 +237,7 @@ pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
         );
     }
 
-    unsafe {
-        kb_buffer_push_overwrite(&mut SCANCODE_BUFFER, scancode);
-    }
+    unsafe { kb_buffer_push_overwrite(&raw mut SCANCODE_BUFFER, scancode) };
 
     if matches!(
         make_code,
@@ -266,7 +266,7 @@ pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
                 KlogLevel::Debug,
                 b"[KBD] Adding to buffer\n\0".as_ptr() as *const c_char,
             );
-            kb_buffer_push_overwrite(&mut CHAR_BUFFER, ascii);
+            kb_buffer_push_overwrite(&raw mut CHAR_BUFFER, ascii);
         }
         unsafe {
             scheduler_request_reschedule_from_interrupt();
@@ -276,12 +276,12 @@ pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
 
 #[no_mangle]
 pub extern "C" fn keyboard_getchar() -> u8 {
-    unsafe { kb_buffer_pop(&mut CHAR_BUFFER).unwrap_or(0) }
+    unsafe { kb_buffer_pop(&raw mut CHAR_BUFFER).unwrap_or(0) }
 }
 
 #[no_mangle]
 pub extern "C" fn keyboard_has_input() -> i32 {
-    let has_data = unsafe { kb_buffer_has_data(&CHAR_BUFFER) };
+    let has_data = unsafe { kb_buffer_has_data(&raw const CHAR_BUFFER) };
     if has_data {
         1
     } else {
@@ -296,5 +296,5 @@ pub extern "C" fn keyboard_buffer_pending() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn keyboard_get_scancode() -> u8 {
-    unsafe { kb_buffer_pop(&mut SCANCODE_BUFFER).unwrap_or(0) }
+    unsafe { kb_buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
 }

@@ -3,14 +3,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{c_char, c_int, c_void, CStr};
-use core::{mem, ptr, slice};
+use core::{mem, ptr};
 
 use crate::syscall_common::{
     syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
     syscall_disposition, syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES, USER_PATH_MAX,
 };
 use crate::syscall_types::{task_t, InterruptFrame, INVALID_PROCESS_ID};
-use crate::wl_currency;
 
 const USER_FS_MAX_ENTRIES: u32 = 64;
 
@@ -382,4 +381,3 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
     }
     syscall_return_ok(frame, 0)
 }
-

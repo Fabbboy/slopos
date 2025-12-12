@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
+#![allow(static_mut_refs)]
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -7,8 +8,8 @@ use core::ptr;
 use slopos_lib::{io, klog_printf, KlogLevel};
 
 use crate::interrupt_test_config::{
-    interrupt_test_config, interrupt_test_verbosity, INTERRUPT_TEST_SUITE_ALL, INTERRUPT_TEST_SUITE_BASIC,
-    INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY, INTERRUPT_TEST_SUITE_SCHEDULER,
+    interrupt_test_config, INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL,
+    INTERRUPT_TEST_SUITE_MEMORY, INTERRUPT_TEST_SUITE_SCHEDULER,
 };
 
 #[repr(C)]
@@ -397,4 +398,3 @@ pub extern "C" fn log_test_exception(frame: *mut slopos_lib::interrupt_frame) {
 extern "C" {
     fn kernel_shutdown(reason: *const c_char) -> !;
 }
-

@@ -4,9 +4,8 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use crate::mm_constants::{
-    ENTRIES_PER_PAGE_TABLE, HHDM_VIRT_BASE, KERNEL_PDPT_INDEX, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE,
-    PAGE_KERNEL_RW, PAGE_PRESENT, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT,
-    PAGE_USER, PAGE_WRITABLE,
+    ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
+    PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
 };
 use crate::page_alloc::{
     alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
@@ -307,7 +306,7 @@ fn map_page_in_directory(
         let pd_idx = pd_index(vaddr);
         let pt_idx = pt_index(vaddr);
 
-        let mut pdpt: *mut PageTable;
+        let pdpt: *mut PageTable;
         let mut pdpt_phys = 0;
         let pml4_entry = (*pml4).entries[pml4_idx];
         if !pte_present(pml4_entry) {
@@ -335,7 +334,7 @@ fn map_page_in_directory(
             }
         }
 
-        let mut pd: *mut PageTable;
+        let pd: *mut PageTable;
         let mut pd_phys = 0;
         let pdpt_entry = (*pdpt).entries[pdpt_idx];
 
@@ -914,4 +913,3 @@ pub extern "C" fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr
         (pte_present(pt_entry) && pte_user(pt_entry)) as c_int
     }
 }
-

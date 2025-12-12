@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 use core::ptr;
 
 use slopos_boot::early_init::{boot_init_priority, BootInitStep};
@@ -63,7 +63,7 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     }
 
     let mut task_info: *mut Task = ptr::null_mut();
-    if unsafe { task_get_info(task_id, &mut task_info) } != 0 || task_info.is_null() {
+    if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
         log_info_name(b"USERLAND: Failed to fetch task info for '%s'\n\0", name.as_ptr() as *const c_char);
         wl_currency::award_loss();
         return -1;
@@ -72,9 +72,7 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     if schedule_task(task_info) != 0 {
         log_info_name(b"USERLAND: Failed to schedule task '%s'\n\0", name.as_ptr() as *const c_char);
         wl_currency::award_loss();
-        unsafe {
-            task_terminate(task_id);
-        }
+        task_terminate(task_id);
         return -1;
     }
 
@@ -143,4 +141,3 @@ static BOOT_STEP_ROULETTE_TASK: BootInitStep = BootInitStep::new(
     boot_step_roulette_task,
     boot_init_priority(40),
 );
-

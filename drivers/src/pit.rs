@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use core::ffi::c_void;
-
 use slopos_lib::{cpu, io, klog_printf, KlogLevel};
 
 use crate::irq;
@@ -161,4 +159,3 @@ pub extern "C" fn pit_sleep_ms(ms: u32) {
         cpu::hlt();
     }
 }
-

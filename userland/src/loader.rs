@@ -15,6 +15,5 @@ pub extern "C" fn user_spawn_program(
     if entry_point as usize == 0 {
         return INVALID_TASK_ID;
     }
-    unsafe { task_create(name, entry_point, arg, priority, TASK_FLAG_USER_MODE) }
+    task_create(name, entry_point, arg, priority, TASK_FLAG_USER_MODE)
 }
-

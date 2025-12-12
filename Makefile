@@ -104,7 +104,7 @@ define build_kernel
 	  --target $(RUST_TARGET_JSON) \
 	  --package kernel \
 	  --bin kernel \
-	  --out-dir $(BUILD_DIR); \
+	  --artifact-dir $(BUILD_DIR); \
 	if [ -f $(BUILD_DIR)/kernel ]; then \
 		mv "$(BUILD_DIR)/kernel" "$(BUILD_DIR)/kernel.elf"; \
 	fi;

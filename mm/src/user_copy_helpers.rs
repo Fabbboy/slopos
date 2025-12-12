@@ -47,7 +47,7 @@ pub extern "C" fn user_copy_rect_checked(dst: *mut UserRect, user_rect: *const U
     if dst.is_null() || user_rect.is_null() {
         return -1;
     }
-    if unsafe { user_copy_from_user(dst as *mut _, user_rect as *const _, core::mem::size_of::<UserRect>()) } != 0 {
+    if user_copy_from_user(dst as *mut _, user_rect as *const _, core::mem::size_of::<UserRect>()) != 0 {
         return -1;
     }
     unsafe {
@@ -66,7 +66,7 @@ pub extern "C" fn user_copy_line_checked(dst: *mut UserLine, user_line: *const U
     if dst.is_null() || user_line.is_null() {
         return -1;
     }
-    if unsafe { user_copy_from_user(dst as *mut _, user_line as *const _, core::mem::size_of::<UserLine>()) } != 0 {
+    if user_copy_from_user(dst as *mut _, user_line as *const _, core::mem::size_of::<UserLine>()) != 0 {
         return -1;
     }
     0
@@ -77,7 +77,7 @@ pub extern "C" fn user_copy_circle_checked(dst: *mut UserCircle, user_circle: *c
     if dst.is_null() || user_circle.is_null() {
         return -1;
     }
-    if unsafe { user_copy_from_user(dst as *mut _, user_circle as *const _, core::mem::size_of::<UserCircle>()) } != 0 {
+    if user_copy_from_user(dst as *mut _, user_circle as *const _, core::mem::size_of::<UserCircle>()) != 0 {
         return -1;
     }
     unsafe {
@@ -93,7 +93,7 @@ pub extern "C" fn user_copy_text_header(dst: *mut UserText, user_text: *const Us
     if dst.is_null() || user_text.is_null() {
         return -1;
     }
-    if unsafe { user_copy_from_user(dst as *mut _, user_text as *const _, core::mem::size_of::<UserText>()) } != 0 {
+    if user_copy_from_user(dst as *mut _, user_text as *const _, core::mem::size_of::<UserText>()) != 0 {
         return -1;
     }
     unsafe {
@@ -106,4 +106,3 @@ pub extern "C" fn user_copy_text_header(dst: *mut UserText, user_text: *const Us
     }
     0
 }
-

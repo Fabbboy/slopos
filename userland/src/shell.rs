@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(static_mut_refs)]
 
 use core::cmp;
 use core::ffi::{c_char, c_void};
@@ -147,7 +148,7 @@ fn u_puts(s: *const u8) {
     if s.is_null() {
         return;
     }
-    let len = unsafe { runtime::u_strlen(s) };
+    let len = runtime::u_strlen(s);
     if len == 0 {
         return;
     }
@@ -181,7 +182,7 @@ fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     }
 
     let maxlen = buffer.len().saturating_sub(2);
-    let len = unsafe { runtime::u_strnlen(input, maxlen) };
+    let len = runtime::u_strnlen(input, maxlen);
     if len > maxlen {
         return -1;
     }
@@ -302,7 +303,7 @@ fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
         if !first {
             let _ = sys_write(b" ");
         }
-        let len = unsafe { runtime::u_strlen(arg) };
+        let len = runtime::u_strlen(arg);
         let _ = sys_write(unsafe { core::slice::from_raw_parts(arg, len) });
         first = false;
     }
@@ -461,7 +462,7 @@ fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
         let _ = sys_write(ERR_MISSING_TEXT);
         return 1;
     }
-    let mut len = unsafe { runtime::u_strlen(text) };
+    let mut len = runtime::u_strlen(text);
     if len > SHELL_IO_MAX {
         len = SHELL_IO_MAX;
     }
@@ -539,7 +540,7 @@ pub extern "C" fn shell_user_main(_arg: *mut c_void) {
                 LINE_BUF.len(),
             );
         }
-        let len = sys_read(unsafe { &mut LINE_BUF[..unsafe { LINE_BUF.len() - 1 }] });
+        let len = sys_read(unsafe { &mut LINE_BUF[..LINE_BUF.len() - 1] });
         if len <= 0 {
             continue;
         }
@@ -559,4 +560,3 @@ pub extern "C" fn shell_user_main(_arg: *mut c_void) {
         }
     }
 }
-

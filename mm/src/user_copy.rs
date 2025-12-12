@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use crate::memory_layout::mm_get_kernel_heap_start;
@@ -54,7 +54,7 @@ fn validate_user_buffer(user_ptr: u64, len: usize, dir: *mut crate::paging::Proc
 
     let mut page = start & !(crate::mm_constants::PAGE_SIZE_4KB - 1);
     while page < end {
-        if unsafe { paging_is_user_accessible(dir, page) } == 0 {
+        if paging_is_user_accessible(dir, page) == 0 {
             return -1;
         }
         page = page.wrapping_add(crate::mm_constants::PAGE_SIZE_4KB);
@@ -91,5 +91,4 @@ pub extern "C" fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_
     }
     0
 }
-
 
