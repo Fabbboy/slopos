@@ -17,6 +17,7 @@ use slopos_drivers::{serial, serial_println, wl_currency};
 use slopos_mm::BumpAllocator;
 use slopos_video as video;
 use slopos_lib::cpu;
+use slopos_userland as userland;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator::new();
@@ -27,6 +28,10 @@ global_asm!(include_str!("../../boot/limine_entry.s"));
 // Ensure the boot crate is linked so kernel_main is available for the assembly entry.
 #[used]
 static BOOT_LINK_GUARD: extern "C" fn() = boot::kernel_main;
+
+// Force-link userland so its boot init steps (roulette/shell) stay in the image.
+#[used]
+static USERLAND_LINK_GUARD: fn() = userland::init;
 
 // Pull in other subsystems that the boot crate expects to call by making a volatile reference to them.
 #[no_mangle]
