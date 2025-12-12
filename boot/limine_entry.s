@@ -34,6 +34,17 @@ _start:
     mov al, 0x53           # 'S'
     out dx, al
 
+    # Enable SSE/FXSR so Rust-generated memcpy instructions don't #UD
+    mov rax, cr0
+    or rax, 1 << 1          # CR0.MP
+    and rax, ~(1 << 2)      # clear CR0.EM
+    mov cr0, rax
+
+    mov rax, cr4
+    or rax, (1 << 9) | (1 << 10)   # CR4.OSFXSR | CR4.OSXMMEXCPT
+    mov cr4, rax
+    fninit
+
     # Zero out registers for clean state
     xor rax, rax
     xor rbx, rbx
@@ -114,4 +125,3 @@ kernel_stack_bottom:
     .skip 65536             # 64KB stack
 .global kernel_stack_top
 kernel_stack_top:
-

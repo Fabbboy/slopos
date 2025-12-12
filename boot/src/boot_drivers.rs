@@ -347,36 +347,44 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_DEBUG_SUBSYSTEM: BootInitStep =
-    BootInitStep::new(b"debug\0", boot_step_debug_subsystem_fn, 0);
+    BootInitStep::new(b"debug\0", boot_step_debug_subsystem_fn, boot_init_priority(10));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_GDT_SETUP: BootInitStep =
-    BootInitStep::new(b"gdt/tss\0", boot_step_gdt_setup_fn, 0);
+    BootInitStep::new(b"gdt/tss\0", boot_step_gdt_setup_fn, boot_init_priority(20));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_IDT_SETUP: BootInitStep =
-    BootInitStep::new(b"idt\0", boot_step_idt_setup_fn, 0);
+    BootInitStep::new(b"idt\0", boot_step_idt_setup_fn, boot_init_priority(30));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_APIC_SETUP: BootInitStep =
-    BootInitStep::new(b"apic\0", boot_step_apic_setup_fn, 0);
+    BootInitStep::new(b"apic\0", boot_step_apic_setup_fn, boot_init_priority(40));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_IOAPIC_SETUP: BootInitStep =
-    BootInitStep::new(b"ioapic\0", boot_step_ioapic_setup_fn, 0);
+    BootInitStep::new(b"ioapic\0", boot_step_ioapic_setup_fn, boot_init_priority(50));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_IRQ_SETUP: BootInitStep =
-    BootInitStep::new(b"irq dispatcher\0", boot_step_irq_setup_fn, 0);
+    BootInitStep::new(
+        b"irq dispatcher\0",
+        boot_step_irq_setup_fn,
+        boot_init_priority(60),
+    );
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_TIMER_SETUP: BootInitStep =
-    BootInitStep::new(b"timer\0", boot_step_timer_setup_fn, 0);
+    BootInitStep::new(b"timer\0", boot_step_timer_setup_fn, boot_init_priority(70));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_PCI_INIT: BootInitStep =
-    BootInitStep::new(b"pci\0", boot_step_pci_init_fn, 0);
+    BootInitStep::new(b"pci\0", boot_step_pci_init_fn, boot_init_priority(80));
 #[used]
 #[link_section = ".boot_init_drivers"]
 static BOOT_STEP_INTERRUPT_TESTS: BootInitStep =
-    BootInitStep::new(b"interrupt tests\0", boot_step_interrupt_tests_fn, 0);
+    BootInitStep::new(
+        b"interrupt tests\0",
+        boot_step_interrupt_tests_fn,
+        boot_init_priority(90),
+    );

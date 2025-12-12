@@ -388,9 +388,6 @@ pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::interrupt_fra
 
     safe_stack::safe_stack_record_usage(vector, frame as u64);
 
-    serial_println!("EXC vector {}", vector);
-    kernel_panic(b"early exception\0".as_ptr() as *const c_char);
-
     if vector == SYSCALL_VECTOR {
         unsafe { syscall_handle(frame) };
         return;
