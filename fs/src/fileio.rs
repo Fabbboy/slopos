@@ -63,36 +63,43 @@ impl FileTableSlot {
 
 unsafe impl Send for FileTableSlot {}
 
-struct FileioState {
-    kernel: FileTableSlot,
-    processes: [FileTableSlot; MAX_PROCESSES],
+struct FileioStateStorage {
+    initialized: bool,
+    kernel: MaybeUninit<FileTableSlot>,
+    processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES],
 }
 
-impl FileioState {
-    fn new() -> Self {
-        let kernel = FileTableSlot::new(true);
-        let mut processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] =
-            unsafe { MaybeUninit::uninit().assume_init() };
-        for slot in processes.iter_mut() {
-            slot.write(FileTableSlot::new(false));
+impl FileioStateStorage {
+    const fn uninitialized() -> Self {
+        let processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] =
+            unsafe { MaybeUninit::<[MaybeUninit<FileTableSlot>; MAX_PROCESSES]>::uninit().assume_init() };
+        Self {
+            initialized: false,
+            kernel: MaybeUninit::uninit(),
+            processes,
         }
-        let processes = unsafe { mem::transmute::<_, [FileTableSlot; MAX_PROCESSES]>(processes) };
-        Self { kernel, processes }
     }
 }
 
-unsafe impl Send for FileioState {}
+unsafe impl Send for FileioStateStorage {}
 
-static FILEIO_STATE: Mutex<Option<FileioState>> = Mutex::new(None);
+static FILEIO_STATE: Mutex<FileioStateStorage> = Mutex::new(FileioStateStorage::uninitialized());
 static FILEIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-fn with_state<R>(f: impl FnOnce(&mut FileioState) -> R) -> R {
+fn with_state<R>(f: impl FnOnce(&mut FileioStateStorage) -> R) -> R {
     let mut guard = FILEIO_STATE.lock();
-    if guard.is_none() {
-        *guard = Some(FileioState::new());
-    }
-    let state = guard.as_mut().unwrap();
-    f(state)
+    f(&mut *guard)
+}
+
+fn with_tables<R>(f: impl FnOnce(&mut FileTableSlot, &mut [FileTableSlot; MAX_PROCESSES]) -> R) -> R {
+    with_state(|state| {
+        ensure_initialized(state);
+        let kernel = unsafe { state.kernel.assume_init_mut() };
+        let processes = unsafe {
+            mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes)
+        };
+        f(kernel, processes)
+    })
 }
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
@@ -113,8 +120,8 @@ fn reset_table(table: &mut FileTableSlot) {
     }
 }
 
-fn find_free_table(state: &mut FileioState) -> Option<&mut FileTableSlot> {
-    for slot in state.processes.iter_mut() {
+fn find_free_table(processes: &mut [FileTableSlot; MAX_PROCESSES]) -> Option<&mut FileTableSlot> {
+    for slot in processes.iter_mut() {
         if !slot.in_use {
             return Some(slot);
         }
@@ -122,11 +129,15 @@ fn find_free_table(state: &mut FileioState) -> Option<&mut FileTableSlot> {
     None
 }
 
-fn table_for_pid<'a>(state: &'a mut FileioState, pid: u32) -> Option<&'a mut FileTableSlot> {
+fn table_for_pid<'a>(
+    kernel: &'a mut FileTableSlot,
+    processes: &'a mut [FileTableSlot; MAX_PROCESSES],
+    pid: u32,
+) -> Option<&'a mut FileTableSlot> {
     if pid == INVALID_PROCESS_ID {
-        return Some(&mut state.kernel);
+        return Some(kernel);
     }
-    for slot in state.processes.iter_mut() {
+    for slot in processes.iter_mut() {
         if slot.in_use && slot.process_id == pid {
             return Some(slot);
         }
@@ -157,31 +168,37 @@ fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
     None
 }
 
-fn ensure_initialized() {
+fn ensure_initialized(state: &mut FileioStateStorage) {
     if FILEIO_INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
     }
-    with_state(|state| {
-        reset_table(&mut state.kernel);
-        for slot in state.processes.iter_mut() {
-            reset_table(slot);
-            slot.process_id = INVALID_PROCESS_ID;
-            slot.in_use = false;
-        }
-    });
+
+    state.kernel.write(FileTableSlot::new(true));
+    for slot in state.processes.iter_mut() {
+        slot.write(FileTableSlot::new(false));
+    }
+    // Now that memory is populated, clear descriptors and mark free.
+    let kernel = unsafe { state.kernel.assume_init_mut() };
+    reset_table(kernel);
+    let processes = unsafe { mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes) };
+    for slot in processes.iter_mut() {
+        reset_table(slot);
+        slot.process_id = INVALID_PROCESS_ID;
+        slot.in_use = false;
+    }
+    state.initialized = true;
 }
 
 #[no_mangle]
 pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
-    ensure_initialized();
     if process_id == INVALID_PROCESS_ID {
         return 0;
     }
-    with_state(|state| {
-        if table_for_pid(state, process_id).is_some() {
+    with_tables(|kernel, processes| {
+        if table_for_pid(kernel, processes, process_id).is_some() {
             return 0;
         }
-        let Some(slot) = find_free_table(state) else {
+        let Some(slot) = find_free_table(processes) else {
             return -1;
         };
         reset_table(slot);
@@ -193,13 +210,12 @@ pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
-    ensure_initialized();
     if process_id == INVALID_PROCESS_ID {
         return;
     }
-    with_state(|state| {
-        let kernel_ptr = &mut state.kernel as *mut FileTableSlot;
-        if let Some(table) = table_for_pid(state, process_id) {
+    with_tables(|kernel, processes| {
+        let kernel_ptr = kernel as *mut FileTableSlot;
+        if let Some(table) = table_for_pid(kernel, processes, process_id) {
             let table_ptr = table as *mut FileTableSlot;
             if table_ptr == kernel_ptr {
                 return;
@@ -221,7 +237,6 @@ pub extern "C" fn file_open_for_process(
     path: *const c_char,
     flags: u32,
 ) -> c_int {
-    ensure_initialized();
     if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
         return -1;
     }
@@ -229,11 +244,11 @@ pub extern "C" fn file_open_for_process(
         return -1;
     }
 
-    with_state(|state| {
-        let kernel_ptr = &mut state.kernel as *mut FileTableSlot;
-        let table_ptr = if let Some(t) = table_for_pid(state, process_id) {
+    with_tables(|kernel, processes| {
+        let kernel_ptr = kernel as *mut FileTableSlot;
+        let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
             t as *mut FileTableSlot
-        } else if let Some(t) = find_free_table(state) {
+        } else if let Some(t) = find_free_table(processes) {
             t as *mut FileTableSlot
         } else {
             kernel_ptr
@@ -295,10 +310,9 @@ pub extern "C" fn file_read_fd(
     if buffer.is_null() || count == 0 {
         return 0;
     }
-    ensure_initialized();
 
-    with_state(|state| {
-        let Some(table) = table_for_pid(state, process_id) else {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
         };
         if !table.in_use {
@@ -350,10 +364,8 @@ pub extern "C" fn file_write_fd(
     if buffer.is_null() || count == 0 {
         return 0;
     }
-    ensure_initialized();
-
-    with_state(|state| {
-        let Some(table) = table_for_pid(state, process_id) else {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
         };
         if !table.in_use {
@@ -389,9 +401,8 @@ pub extern "C" fn file_write_fd(
 
 #[no_mangle]
 pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
-    ensure_initialized();
-    with_state(|state| {
-        let Some(table) = table_for_pid(state, process_id) else {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
         };
         if !table.in_use {
@@ -416,9 +427,8 @@ pub extern "C" fn file_seek_fd(
     offset: u64,
     whence: c_int,
 ) -> c_int {
-    ensure_initialized();
-    with_state(|state| {
-        let Some(table) = table_for_pid(state, process_id) else {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
         };
         if !table.in_use {
@@ -477,9 +487,8 @@ pub extern "C" fn file_seek_fd(
 
 #[no_mangle]
 pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
-    ensure_initialized();
-    with_state(|state| {
-        let Some(table) = table_for_pid(state, process_id) else {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return usize::MAX;
         };
         if !table.in_use {
@@ -522,4 +531,3 @@ pub extern "C" fn file_unlink_path(path: *const c_char) -> c_int {
     }
     unsafe { ramfs_remove_file(path) }
 }
-
