@@ -301,6 +301,7 @@ fn backend() -> RouletteBackend {
 }
 
 #[no_mangle]
+#[link_section = ".user_text"]
 pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
     let spin = sys_roulette();
     let fate = spin as u32;
@@ -326,4 +327,3 @@ pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
     sys_sleep_ms(500);
     sys_exit();
 }
-
