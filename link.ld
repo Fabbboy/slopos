@@ -98,6 +98,13 @@ SECTIONS
     _user_data_end = .;
   } :data
 
+  /* User zero-initialized globals */
+  .user_bss (NOLOAD) : ALIGN(4096) {
+    _user_bss_start = .;
+    *(.user_bss .user_bss.*)
+    _user_bss_end = .;
+  } :data
+
   .bss (NOLOAD) : ALIGN(4096) {
     _bss_start = .;
     *(.bss .bss.*)

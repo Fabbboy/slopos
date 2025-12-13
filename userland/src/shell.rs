@@ -42,14 +42,14 @@ static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
 #[link_section = ".user_rodata"]
 static HALTED: &[u8] = b"Shell requested shutdown...\n";
 
-#[link_section = ".user_data"]
+#[link_section = ".user_bss"]
 static mut LINE_BUF: [u8; 256] = [0; 256];
-#[link_section = ".user_data"]
+#[link_section = ".user_bss"]
 static mut TOKEN_STORAGE: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS] =
     [[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
-#[link_section = ".user_data"]
+#[link_section = ".user_bss"]
 static mut PATH_BUF: [u8; SHELL_PATH_BUF] = [0; SHELL_PATH_BUF];
-#[link_section = ".user_data"]
+#[link_section = ".user_bss"]
 static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::new(); 32];
 
 type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;

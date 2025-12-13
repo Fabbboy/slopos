@@ -80,6 +80,7 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     0
 }
 
+#[link_section = ".user_bss"]
 static mut SHELL_SPAWNED: bool = false;
 
 #[link_section = ".user_text"]

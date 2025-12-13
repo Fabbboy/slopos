@@ -16,9 +16,19 @@ use crate::paging::{
     virt_to_phys_in_dir, ProcessPageDir, PageTable,
 };
 use crate::phys_virt::mm_phys_to_virt;
+use slopos_lib::{align_down, align_up};
 
 extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
+    fn get_hhdm_offset() -> u64;
+    static _user_text_start: u8;
+    static _user_text_end: u8;
+    static _user_rodata_start: u8;
+    static _user_rodata_end: u8;
+    static _user_data_start: u8;
+    static _user_data_end: u8;
+    static _user_bss_start: u8;
+    static _user_bss_end: u8;
 }
 
 #[repr(C)]
@@ -409,6 +419,81 @@ fn teardown_process_mappings(process: *mut ProcessVm) {
     }
 }
 
+fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
+    if page_dir.is_null() {
+        return -1;
+    }
+
+    #[inline(always)]
+    fn section_bounds(start: *const u8, end: *const u8) -> (u64, u64) {
+        let s = start as usize as u64;
+        let e = end as usize as u64;
+        (
+            align_down(s as usize, PAGE_SIZE_4KB as usize) as u64,
+            align_up(e as usize, PAGE_SIZE_4KB as usize) as u64,
+        )
+    }
+
+    // Layout user sections contiguously in the low-half user window, copying into fresh frames.
+    let base = crate::mm_constants::PROCESS_CODE_START_VA;
+    let sections = unsafe {
+        [
+            // .user_text: executable, read-only
+            (section_bounds(&_user_text_start, &_user_text_end), 0, false),
+            // .user_rodata: read-only
+            (section_bounds(&_user_rodata_start, &_user_rodata_end), 0, false),
+            // .user_data: writable
+            (section_bounds(&_user_data_start, &_user_data_end), 1, false),
+            // .user_bss: zeroed writable
+            (section_bounds(&_user_bss_start, &_user_bss_end), 1, true),
+        ]
+    };
+
+    for &((src_start, src_end), writable, zeroed) in sections.iter() {
+        if src_start == 0 || src_end <= src_start {
+            continue;
+        }
+
+        let size = src_end - src_start;
+        let dst_start = base + (src_start - sections[0].0 .0);
+        let dst_end = dst_start + size;
+
+        let mut src = src_start;
+        let mut dst = dst_start;
+        while dst < dst_end {
+            let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+            if phys == 0 {
+                return -1;
+            }
+
+            let mut flags = PAGE_PRESENT | PAGE_USER;
+            if writable != 0 {
+                flags |= PAGE_WRITABLE;
+            }
+            if map_page_4kb_in_dir(page_dir, dst, phys, flags) != 0 {
+                free_page_frame(phys);
+                return -1;
+            }
+
+            if !zeroed {
+                let dest_virt = mm_phys_to_virt(phys);
+                if dest_virt == 0 {
+                    return -1;
+                }
+                let copy_len = core::cmp::min(PAGE_SIZE_4KB, dst_end - dst) as usize;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src as *const u8, dest_virt as *mut u8, copy_len);
+                }
+            }
+
+            src += PAGE_SIZE_4KB;
+            dst += PAGE_SIZE_4KB;
+        }
+    }
+
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
@@ -463,7 +548,12 @@ pub extern "C" fn create_process_vm() -> u32 {
 
     unsafe {
         paging_copy_kernel_mappings((*page_dir_ptr).pml4);
-        // Expose dedicated user sections (text/rodata/data) if present.
+        // Map dedicated user sections (text/rodata/data/bss) into the user window.
+        if map_user_sections(page_dir_ptr) != 0 {
+            kfree(page_dir_ptr as *mut _);
+            free_page_frame(pml4_phys);
+            return INVALID_PROCESS_ID;
+        }
     }
 
     unsafe {

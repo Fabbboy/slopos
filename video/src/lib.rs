@@ -25,7 +25,10 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             return;
         }
 
-        paint_banner();
+        if splash::splash_show_boot_screen() != 0 {
+            serial_println!("Splash paint failed; falling back to banner stripe.");
+            paint_banner();
+        }
     } else {
         serial_println!("No framebuffer provided; skipping video init.");
     }
@@ -65,4 +68,3 @@ fn paint_banner() {
         }
     }
 }
-
