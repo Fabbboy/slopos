@@ -5,7 +5,6 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::syscall_types::{task_t, InterruptFrame};
-use crate::wl_currency;
 
 pub const USER_IO_MAX_BYTES: usize = 512;
 pub const USER_PATH_MAX: usize = 128;
@@ -33,10 +32,8 @@ extern "C" {
 
 pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> syscall_disposition {
     if frame.is_null() {
-        wl_currency::award_loss();
         return syscall_disposition::SYSCALL_DISP_OK;
     }
-    wl_currency::award_win();
     unsafe {
         (*frame).rax = value;
     }
@@ -45,10 +42,8 @@ pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> syscall_disp
 
 pub fn syscall_return_err(frame: *mut InterruptFrame, _err_value: u64) -> syscall_disposition {
     if frame.is_null() {
-        wl_currency::award_loss();
         return syscall_disposition::SYSCALL_DISP_OK;
     }
-    wl_currency::award_loss();
     unsafe {
         (*frame).rax = u64::MAX;
     }
