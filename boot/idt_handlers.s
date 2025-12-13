@@ -4,6 +4,7 @@
 # This file defines low-level assembly interrupt handlers that save
 # CPU state and call high-level C handlers
 
+.att_syntax prefix
 .section .text
 
 # External C function

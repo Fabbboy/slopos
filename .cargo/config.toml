@@ -1,0 +1,24 @@
+[build]
+target = "targets/x86_64-slos.json"
+target-dir = "builddir/target"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target."targets/x86_64-slos.json"]
+linker = "rust-lld"
+rustflags = [
+  "-C", "link-arg=-Tlink.ld",
+  "-C", "panic=abort",
+  "-C", "force-frame-pointers=yes",
+  "-C", "code-model=kernel",
+  "-C", "relocation-model=static",
+  "-C", "target-cpu=x86-64",
+  "-C", "target-feature=-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,+soft-float",
+  "-C", "no-redzone=yes",
+  "-Z", "unstable-options",
+  "-Z", "relro-level=off",
+  "-Z", "emit-stack-sizes"
+]
+

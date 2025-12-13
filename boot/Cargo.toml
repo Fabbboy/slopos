@@ -1,0 +1,18 @@
+[package]
+name = "slopos-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+slopos-lib = { path = "../lib" }
+slopos-drivers = { path = "../drivers" }
+slopos-tests = { path = "../tests" }
+slopos-video = { path = "../video" }

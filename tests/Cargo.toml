@@ -1,0 +1,25 @@
+[package]
+name = "slopos-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+builtin-tests = ["slopos-sched"]
+
+[dependencies]
+slopos-lib = { path = "../lib" }
+slopos-drivers = { path = "../drivers" }
+slopos-mm = { path = "../mm" }
+slopos-sched = { path = "../sched", optional = true }
+slopos-video = { path = "../video" }
+slopos-fs = { path = "../fs" }
+spin.workspace = true
+

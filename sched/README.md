@@ -5,7 +5,7 @@ termination handling. A quick recap of the metrics printed by
 `print_scheduler_stats()` and how to interpret them:
 
 - **Context switches** — incremented whenever the scheduler hands execution to a
-  different task. The counter in `scheduler.c` matches the task manager’s
+  different task. The counter in `scheduler.rs` matches the task manager’s
   `total_context_switches`. A sudden spike usually means a task is yielding (or
   exiting) more frequently than expected.
 - **Voluntary yields** — counts explicit `yield()` calls. The aggregate value in
