@@ -2,8 +2,13 @@
 
 use core::ptr;
 
+use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use spin::Mutex;
+
+extern "C" {
+    fn mm_phys_to_virt(phys_addr: u64) -> u64;
+}
 
 const PIXEL_FORMAT_RGB: u8 = 0x01;
 const PIXEL_FORMAT_BGR: u8 = 0x02;
@@ -114,8 +119,12 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
         _ => return -1,
     };
 
+    // Translate the physical address into the higher-half mapping if available.
+    let virt_addr = unsafe { mm_phys_to_virt(addr) };
+    let mapped_base = if virt_addr != 0 { virt_addr } else { addr };
+
     let fb_state = FbState {
-        base: addr as *mut u8,
+        base: mapped_base as *mut u8,
         width,
         height,
         pitch,
@@ -130,13 +139,40 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
 }
 
 pub fn init_with_info(info: FramebufferInfo) -> i32 {
-    init_state_from_raw(
+    let rc = init_state_from_raw(
         info.address as u64,
         info.width as u32,
         info.height as u32,
         info.pitch as u32,
         info.bpp as u8,
-    )
+    );
+
+    if rc == 0 {
+        if let Some(fb) = FRAMEBUFFER.lock().fb {
+            serial_println!(
+                "Framebuffer init: phys=0x{:x} virt=0x{:x} {}x{} pitch={} bpp={}",
+                info.address as u64,
+                fb.base as u64,
+                fb.width,
+                fb.height,
+                fb.pitch,
+                fb.bpp
+            );
+        } else {
+            serial_println!("Framebuffer init: state missing after init");
+        }
+    } else {
+        serial_println!(
+            "Framebuffer init failed: phys=0x{:x} {}x{} pitch={} bpp={}",
+            info.address as u64,
+            info.width,
+            info.height,
+            info.pitch,
+            info.bpp
+        );
+    }
+
+    rc
 }
 
 #[no_mangle]
@@ -312,4 +348,3 @@ pub extern "C" fn framebuffer_convert_color(color: u32) -> u32 {
 pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
 }
-

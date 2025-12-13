@@ -1,6 +1,7 @@
 use core::ffi::c_char;
 
 use slopos_lib::{klog_is_enabled, klog_printf, KlogLevel};
+use slopos_video as video;
 use slopos_tests::{
     interrupt_suite_desc, tests_register_suite, tests_register_system_suites, tests_reset_registry,
     tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
@@ -8,6 +9,7 @@ use slopos_tests::{
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority, BootInitStep};
 use crate::kernel_panic::kernel_panic;
+use crate::limine_protocol;
 
 const COM1_BASE: u16 = 0x3F8;
 const SERIAL_COM1_IRQ: u8 = 4;
@@ -168,6 +170,8 @@ extern "C" fn boot_step_timer_setup_fn() -> i32 {
             b"WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)\0",
         );
     }
+    let fb = limine_protocol::boot_info().framebuffer;
+    video::init(fb);
 
     0
 }

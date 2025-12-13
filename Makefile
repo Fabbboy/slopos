@@ -88,8 +88,12 @@ define ensure_rust_toolchain
 		echo "Failed to read Rust channel from $(RUST_TOOLCHAIN_FILE)" >&2; \
 		exit 1; \
 	fi; \
-	rustup toolchain install $(RUST_CHANNEL) --component=rust-src --component=rustfmt --component=clippy --component=llvm-tools-preview; \
-	rustup target add x86_64-unknown-none --toolchain $(RUST_CHANNEL);
+	if ! rustup toolchain list | grep -q "^$(RUST_CHANNEL)"; then \
+		rustup toolchain install $(RUST_CHANNEL) --component=rust-src --component=rustfmt --component=clippy --component=llvm-tools-preview; \
+	fi; \
+	if ! rustup target list --toolchain $(RUST_CHANNEL) --installed | grep -q "^x86_64-unknown-none"; then \
+		rustup target add x86_64-unknown-none --toolchain $(RUST_CHANNEL); \
+	fi;
 endef
 
 define build_kernel

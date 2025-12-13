@@ -5,7 +5,6 @@ use core::ffi::c_char;
 
 use slopos_drivers::serial_println;
 use slopos_lib::{klog_printf, KlogLevel};
-use slopos_lib::io;
 
 use crate::kernel_panic::kernel_panic;
 use crate::safe_stack;
@@ -396,6 +395,22 @@ pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::interrupt_fra
     if vector >= IRQ_BASE_VECTOR {
         unsafe { irq_dispatch(frame) };
         return;
+    }
+
+    unsafe {
+        let cr2: u64;
+        unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags)) };
+        klog_printf(
+            KlogLevel::Debug,
+            b"EXCEPTION: vec=%u rip=0x%llx err=0x%llx cs=0x%llx ss=0x%llx cr2=0x%llx\n\0".as_ptr()
+                as *const c_char,
+            vector as u32,
+            frame_ref.rip,
+            frame_ref.error_code,
+            frame_ref.cs,
+            frame_ref.ss,
+            cr2,
+        );
     }
 
     if vector >= 32 {

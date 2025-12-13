@@ -103,43 +103,16 @@ extern "C" {
     fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir;
     fn pit_enable_irq();
     fn pit_disable_irq();
+    fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
+    fn context_switch_user(old_context: *mut TaskContext, new_context: *const TaskContext);
+    fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
+    fn init_kernel_context(context: *mut TaskContext);
+    fn task_entry_wrapper();
 
     static kernel_stack_top: u8;
 
     fn is_kernel_initialized() -> i32;
 }
-
-#[no_mangle]
-pub extern "C" fn init_kernel_context(_context: *mut TaskContext) {}
-
-#[no_mangle]
-pub extern "C" fn task_entry_wrapper() {}
-
-#[no_mangle]
-pub extern "C" fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext) {
-    unsafe {
-        if !old_context.is_null() && !new_context.is_null() {
-            *old_context = *new_context;
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn context_switch_user(
-    old_context: *mut TaskContext,
-    new_context: *const TaskContext,
-) {
-    context_switch(old_context, new_context);
-}
-
-#[no_mangle]
-pub extern "C" fn simple_context_switch(
-    old_context: *mut TaskContext,
-    new_context: *const TaskContext,
-) {
-    context_switch(old_context, new_context);
-}
-
 
 #[repr(C)]
 pub struct ProcessPageDir {
@@ -301,6 +274,15 @@ pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
         wl_currency::award_loss();
         return -1;
     }
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"schedule_task: enqueued task %u (flags=0x%x) ready_count=%u\n\0".as_ptr() as *const i8,
+            (*task).task_id,
+            (*task).flags as u32,
+            sched.ready_queue.count,
+        );
+    }
     0
 }
 
@@ -343,6 +325,16 @@ fn switch_to_task(new_task: *mut Task) {
     task_set_current(new_task);
     scheduler_reset_task_quantum(new_task);
     sched.total_switches += 1;
+
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"switch_to_task: now running task %u (flags=0x%x pid=%u)\n\0".as_ptr() as *const i8,
+            (*new_task).task_id,
+            (*new_task).flags as u32,
+            (*new_task).process_id,
+        );
+    }
 
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
     unsafe {
@@ -645,6 +637,15 @@ pub extern "C" fn start_scheduler() -> c_int {
     sched.enabled = 1;
     unsafe { init_kernel_context(&mut sched.return_context) };
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
+
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"start_scheduler: ready_count=%u idle_task=%p\n\0".as_ptr() as *const i8,
+            sched.ready_queue.count,
+            sched.idle_task,
+        );
+    }
 
     if !ready_queue_empty(&sched.ready_queue) {
         schedule();

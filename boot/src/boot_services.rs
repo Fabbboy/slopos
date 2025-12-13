@@ -88,18 +88,6 @@ extern "C" fn boot_step_framebuffer_demo_fn() -> i32 {
         return 0;
     }
 
-    let fb = unsafe { &*fb_info };
-    if !fb.virtual_addr.is_null() && (fb.virtual_addr as u64) != fb.physical_addr {
-        unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"Graphics: Framebuffer using translated virtual address 0x%lx (translation verified)\n\0"
-                    .as_ptr() as *const core::ffi::c_char,
-                fb.virtual_addr as u64,
-            );
-        }
-    }
-
     log_debug(b"Graphics demo: framebuffer validation complete\0");
     0
 }

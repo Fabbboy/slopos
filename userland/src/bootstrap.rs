@@ -25,6 +25,7 @@ type FateHook = extern "C" fn(*const FateResult);
 
 extern "C" {
     fn fate_register_outcome_hook(cb: FateHook);
+    fn process_vm_load_elf(process_id: u32, payload: *const u8, payload_len: usize, entry_out: *mut u64) -> i32;
 }
 
 #[inline(always)]
@@ -67,6 +68,22 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
         log_info_name(b"USERLAND: Failed to fetch task info for '%s'\n\0", name.as_ptr() as *const c_char);
         wl_currency::award_loss();
         return -1;
+    }
+
+    // Load bundled user payload ELF into the new process address space and repoint entry.
+    let mut new_entry: u64 = 0;
+    const ROULETTE_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../builddir/roulette_payload.elf"));
+    let pid = unsafe { (*task_info).process_id };
+    if unsafe { process_vm_load_elf(pid, ROULETTE_ELF.as_ptr(), ROULETTE_ELF.len(), &mut new_entry) } != 0 || new_entry == 0 {
+        log_info_name(b"USERLAND: Failed to load roulette payload ELF for '%s'\n\0", name.as_ptr() as *const c_char);
+        wl_currency::award_loss();
+        task_terminate(task_id);
+        return -1;
+    }
+
+    unsafe {
+        (*task_info).entry_point = new_entry;
+        (*task_info).context.rip = new_entry;
     }
 
     if schedule_task(task_info) != 0 {

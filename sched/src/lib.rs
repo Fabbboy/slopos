@@ -9,6 +9,10 @@
 #![allow(ambiguous_glob_reexports)]
 #![allow(function_casts_as_integer)]
 
+use core::arch::global_asm;
+
+global_asm!(include_str!("../context_switch.s"), options(att_syntax));
+
 pub mod scheduler;
 pub mod task;
 pub mod kthread;

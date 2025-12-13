@@ -15,6 +15,7 @@ use crate::syscall_fs::{
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
 use crate::syscall_types::{task_t, InterruptFrame};
+use slopos_lib::klog_printf;
 
 #[repr(C)]
 pub struct user_rect_t {
@@ -267,6 +268,12 @@ pub extern "C" fn syscall_fb_info(
 ) -> syscall_disposition {
     let info = unsafe { framebuffer_get_info() };
     if info.is_null() || unsafe { (*info).initialized == 0 } {
+        unsafe {
+            klog_printf(
+                slopos_lib::klog::KlogLevel::Debug,
+                b"syscall_fb_info: framebuffer not initialized\n\0".as_ptr() as *const c_char,
+            );
+        }
         return syscall_return_err(frame, u64::MAX);
     }
 

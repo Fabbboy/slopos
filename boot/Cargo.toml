@@ -12,4 +12,4 @@ crate-type = ["rlib"]
 slopos-lib = { path = "../lib" }
 slopos-drivers = { path = "../drivers" }
 slopos-tests = { path = "../tests" }
-
+slopos-video = { path = "../video" }

@@ -33,6 +33,8 @@ pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 
+const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
+
 pub type TaskIterateCb = Option<extern "C" fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = extern "C" fn(*mut c_void);
 
@@ -389,8 +391,8 @@ fn init_task_context(task: &mut Task) {
         task.context.cs = 0x23;
         task.context.ds = 0x1B;
         task.context.es = 0x1B;
-        task.context.fs = 0;
-        task.context.gs = 0;
+        task.context.fs = 0x1B;
+        task.context.gs = 0x1B;
         task.context.ss = 0x1B;
         task.context.rdi = task.entry_arg as u64;
         task.context.rsi = 0;
@@ -574,7 +576,8 @@ pub extern "C" fn task_create(
     task_ref.process_id = process_id;
     task_ref.stack_base = stack_base;
     task_ref.stack_size = TASK_STACK_SIZE;
-    task_ref.stack_pointer = stack_base + TASK_STACK_SIZE - 16;
+    // Align for System V ABI expectations (rsp is 16-byte aligned before CALL, 8-byte inside).
+    task_ref.stack_pointer = stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         unsafe {
             klog_printf(
@@ -600,7 +603,19 @@ pub extern "C" fn task_create(
     task_ref.kernel_stack_base = kernel_stack_base;
     task_ref.kernel_stack_top = kernel_stack_base + kernel_stack_size;
     task_ref.kernel_stack_size = kernel_stack_size;
-    task_ref.entry_point = entry_point as usize as u64;
+    if flags & TASK_FLAG_USER_MODE != 0 {
+        let entry_addr = entry_point as u64;
+        let text_start = unsafe { &_user_text_start as *const u8 as u64 };
+        let text_end = unsafe { &_user_text_end as *const u8 as u64 };
+        if entry_addr >= text_start && entry_addr < text_end {
+            let offset = entry_addr - text_start;
+            task_ref.entry_point = USER_CODE_BASE + offset;
+        } else {
+            task_ref.entry_point = entry_addr;
+        }
+    } else {
+        task_ref.entry_point = entry_point as usize as u64;
+    }
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
     task_ref.time_slice_remaining = task_ref.time_slice;
@@ -989,4 +1004,3 @@ pub extern "C" fn task_is_terminated(task: *const Task) -> bool {
 extern "C" {
     fn task_entry_wrapper();
 }
-

@@ -69,7 +69,28 @@ pub extern "C" fn mm_phys_to_virt(phys_addr: u64) -> u64 {
         return 0;
     }
 
-    unsafe { phys_addr + get_hhdm_offset() }
+    let hhdm = unsafe { get_hhdm_offset() };
+
+    // If we were handed something already in the higher-half window, treat it
+    // as translated and return it directly rather than overflowing the add.
+    if phys_addr >= hhdm {
+        return phys_addr;
+    }
+
+    if phys_addr > u64::MAX - hhdm {
+        unsafe {
+            klog_printf(
+                slopos_lib::klog::KlogLevel::Info,
+                b"mm_phys_to_virt: overflow translating phys 0x%llx with hhdm 0x%llx\n\0".as_ptr()
+                    as *const c_char,
+                phys_addr,
+                hhdm,
+            );
+        }
+        return 0;
+    }
+
+    phys_addr + hhdm
 }
 
 #[no_mangle]
@@ -133,4 +154,3 @@ pub extern "C" fn mm_unmap_mmio_region(_virt_addr: *mut c_void, _size: usize) ->
     /* HHDM mappings are static; nothing to do yet. */
     0
 }
-

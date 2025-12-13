@@ -495,6 +495,150 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
 }
 
 #[no_mangle]
+pub extern "C" fn process_vm_load_elf(
+    process_id: u32,
+    payload: *const u8,
+    payload_len: usize,
+    entry_out: *mut u64,
+) -> c_int {
+    if payload.is_null() || payload_len < 64 || process_id == INVALID_PROCESS_ID {
+        return -1;
+    }
+
+    #[repr(C)]
+    struct Elf64Ehdr {
+        ident: [u8; 16],
+        e_type: u16,
+        e_machine: u16,
+        e_version: u32,
+        e_entry: u64,
+        e_phoff: u64,
+        e_shoff: u64,
+        e_flags: u32,
+        e_ehsize: u16,
+        e_phentsize: u16,
+        e_phnum: u16,
+        e_shentsize: u16,
+        e_shnum: u16,
+        e_shstrndx: u16,
+    }
+
+    #[repr(C)]
+    struct Elf64Phdr {
+        p_type: u32,
+        p_flags: u32,
+        p_offset: u64,
+        p_vaddr: u64,
+        p_paddr: u64,
+        p_filesz: u64,
+        p_memsz: u64,
+        p_align: u64,
+    }
+
+    const PT_LOAD: u32 = 1;
+    const PF_X: u32 = 0x1;
+    const PF_W: u32 = 0x2;
+
+    // Safety: payload points to in-kernel memory provided by caller.
+    let ehdr = unsafe { &*(payload as *const Elf64Ehdr) };
+    if &ehdr.ident[0..4] != b"\x7fELF"
+        || ehdr.ident[4] != 2
+        || ehdr.e_machine != 0x3E
+        || ehdr.e_phoff == 0
+        || ehdr.e_phnum == 0
+    {
+        return -1;
+    }
+
+    let process = find_process_vm(process_id);
+    if process.is_null() {
+        return -1;
+    }
+    let page_dir = unsafe { (*process).page_dir };
+    if page_dir.is_null() {
+        return -1;
+    }
+
+    // Unmap any existing code region at the payload VMA to avoid overlaps.
+    let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
+    let code_limit = code_base + 0x100000; // generous 1 MiB window for this payload
+    unmap_user_range(page_dir, code_base, code_limit);
+
+    let ph_size = ehdr.e_phentsize as usize;
+    let ph_num = ehdr.e_phnum as usize;
+    let ph_off = ehdr.e_phoff as usize;
+    if ph_off + ph_num * ph_size > payload_len {
+        return -1;
+    }
+
+    let mut mapped_pages: u32 = 0;
+    for i in 0..ph_num {
+        let ph_ptr = unsafe { payload.add(ph_off + i * ph_size) as *const Elf64Phdr };
+        let ph = unsafe { &*ph_ptr };
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        let seg_start = ph.p_vaddr;
+        let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
+        if seg_end <= seg_start {
+            continue;
+        }
+        let map_flags = if (ph.p_flags & PF_W) != 0 {
+            PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE
+        } else {
+            PAGE_PRESENT | PAGE_USER
+        };
+
+        let page_start = align_down(seg_start as usize, PAGE_SIZE_4KB as usize) as u64;
+        let page_end = align_up(seg_end as usize, PAGE_SIZE_4KB as usize) as u64;
+
+        let mut dst = page_start;
+        while dst < page_end {
+            let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+            if phys == 0 {
+                return -1;
+            }
+            if map_page_4kb_in_dir(page_dir, dst, phys, map_flags) != 0 {
+                free_page_frame(phys);
+                return -1;
+            }
+            let dest_virt = mm_phys_to_virt(phys);
+            if dest_virt == 0 {
+                return -1;
+            }
+
+            // Copy file-backed portion that falls within this page.
+            let page_off = dst.saturating_sub(seg_start);
+            let file_bytes = ph.p_filesz.saturating_sub(page_off);
+            if file_bytes > 0 && ph.p_offset + page_off < payload_len as u64 {
+                let copy_len = core::cmp::min(PAGE_SIZE_4KB, file_bytes) as usize;
+                let src_off = (ph.p_offset + page_off) as usize;
+                if src_off + copy_len <= payload_len {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            payload.add(src_off),
+                            dest_virt as *mut u8,
+                            copy_len,
+                        );
+                    }
+                }
+            }
+
+            dst += PAGE_SIZE_4KB;
+            mapped_pages += 1;
+        }
+    }
+
+    unsafe {
+        (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
+        if !entry_out.is_null() {
+            *entry_out = ehdr.e_entry;
+        }
+    }
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
     let mut manager = VM_MANAGER.lock();

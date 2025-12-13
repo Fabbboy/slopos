@@ -60,6 +60,19 @@ pub extern "C" fn syscall_handle(frame: *mut InterruptFrame) {
         return;
     }
 
+    unsafe {
+        klog_printf(
+            KlogLevel::Debug,
+            b"SYSCALL: vector=%u rip=0x%llx cs=0x%llx ss=0x%llx rax=%llu\n\0".as_ptr()
+                as *const c_char,
+            (*frame).vector as u32,
+            (*frame).rip,
+            (*frame).cs,
+            (*frame).ss,
+            (*frame).rax,
+        );
+    }
+
     let task = unsafe { scheduler_get_current_task() };
     unsafe {
         if task.is_null() || ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
@@ -90,4 +103,3 @@ pub extern "C" fn syscall_handle(frame: *mut InterruptFrame) {
         func(task, frame);
     }
 }
-
