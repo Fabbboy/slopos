@@ -12,7 +12,7 @@ use crate::pci::{
 };
 use crate::wl_currency;
 
-extern "C" {
+unsafe extern "C" {
     fn mm_map_mmio_region(base: u64, size: usize) -> *mut core::ffi::c_void;
     fn mm_unmap_mmio_region(ptr: *mut core::ffi::c_void, size: usize);
 }
@@ -182,7 +182,7 @@ static VIRTIO_GPU_PCI_DRIVER: pci_driver_t = pci_driver_t {
     context: core::ptr::null_mut(),
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn virtio_gpu_register_driver() {
     static mut REGISTERED: bool = false;
     unsafe {
@@ -199,7 +199,7 @@ pub extern "C" fn virtio_gpu_register_driver() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {

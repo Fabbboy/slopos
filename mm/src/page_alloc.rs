@@ -326,7 +326,7 @@ impl PageAllocator {
 
 static PAGE_ALLOCATOR: Mutex<PageAllocator> = Mutex::new(PageAllocator::new());
 
-extern "C" {
+unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
 }
@@ -349,7 +349,7 @@ fn align_up_u64(value: u64, alignment: u64) -> u64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
     if frame_array.is_null() || max_frames == 0 {
         unsafe { kernel_panic(b"init_page_allocator: Invalid parameters\0".as_ptr() as *const c_char) };
@@ -388,7 +388,7 @@ pub extern "C" fn init_page_allocator(frame_array: *mut c_void, max_frames: u32)
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn finalize_page_allocator() -> c_int {
     let mut alloc = PAGE_ALLOCATOR.lock();
     alloc.free_lists_reset();
@@ -415,7 +415,7 @@ pub extern "C" fn finalize_page_allocator() -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn alloc_page_frames(count: u32, flags: u32) -> u64 {
     if count == 0 {
         return 0;
@@ -461,12 +461,12 @@ pub extern "C" fn alloc_page_frames(count: u32, flags: u32) -> u64 {
     phys_addr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn alloc_page_frame(flags: u32) -> u64 {
     alloc_page_frames(1, flags)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn free_page_frame(phys_addr: u64) -> c_int {
     let mut alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
@@ -503,17 +503,17 @@ pub extern "C" fn free_page_frame(phys_addr: u64) -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn page_allocator_descriptor_size() -> usize {
     core::mem::size_of::<PageFrame>()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn page_allocator_max_supported_frames() -> u32 {
     PAGE_ALLOCATOR.lock().max_supported_frames
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
     let alloc = PAGE_ALLOCATOR.lock();
     unsafe {
@@ -529,14 +529,14 @@ pub extern "C" fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allo
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn page_frame_is_tracked(phys_addr: u64) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     (frame_num < alloc.total_frames) as c_int
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn page_frame_can_free(phys_addr: u64) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
@@ -547,7 +547,7 @@ pub extern "C" fn page_frame_can_free(phys_addr: u64) -> c_int {
     PageAllocator::frame_state_is_allocated(frame.state) as c_int
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn page_allocator_paint_all(value: u8) {
     let alloc = PAGE_ALLOCATOR.lock();
     if alloc.frames.is_null() {

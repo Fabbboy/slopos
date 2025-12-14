@@ -4,8 +4,8 @@ use core::ffi::{c_char, c_void};
 
 use slopos_sched::{task_create, TaskEntry, INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 
-#[no_mangle]
-#[link_section = ".user_text"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_spawn_program(
     name: *const c_char,
     entry_point: TaskEntry,

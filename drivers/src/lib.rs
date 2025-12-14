@@ -1,5 +1,5 @@
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod apic;
 pub mod fate;

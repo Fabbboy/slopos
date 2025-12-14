@@ -50,7 +50,7 @@ pub struct user_fs_list_t {
     pub count: u32,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int;
     fn file_close_fd(process_id: u32, fd: c_int) -> c_int;
     fn file_read_fd(process_id: u32, fd: c_int, buf: *mut c_char, len: usize) -> isize;

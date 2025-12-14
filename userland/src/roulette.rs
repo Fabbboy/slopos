@@ -70,42 +70,42 @@ struct UserText {
 }
 
 impl Default for UserFbInfo {
-    #[link_section = ".user_text"]
+    #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
         Self { width: 0, height: 0, pitch: 0, bpp: 0, pixel_format: 0 }
     }
 }
 
 impl Default for UserRect {
-    #[link_section = ".user_text"]
+    #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
         Self { x: 0, y: 0, width: 0, height: 0, color: 0 }
     }
 }
 
 impl Default for UserLine {
-    #[link_section = ".user_text"]
+    #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
         Self { x0: 0, y0: 0, x1: 0, y1: 0, color: 0 }
     }
 }
 
 impl Default for UserCircle {
-    #[link_section = ".user_text"]
+    #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
         Self { cx: 0, cy: 0, radius: 0, color: 0 }
     }
 }
 
 impl Default for UserText {
-    #[link_section = ".user_text"]
+    #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
         Self { x: 0, y: 0, fg_color: 0, bg_color: 0, str_ptr: core::ptr::null(), len: 0 }
     }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let mut ret = num;
     unsafe {
@@ -130,13 +130,13 @@ unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_write(buf: &[u8]) -> i64 {
     unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_sleep_ms(ms: u32) {
     unsafe {
         syscall(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
@@ -144,13 +144,13 @@ fn sys_sleep_ms(ms: u32) {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_roulette() -> u64 {
     unsafe { syscall(SYSCALL_ROULETTE, 0, 0, 0) }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_roulette_result(fate_packed: u64) {
     unsafe {
         syscall(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
@@ -158,7 +158,7 @@ fn sys_roulette_result(fate_packed: u64) {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_exit() -> ! {
     unsafe {
         syscall(SYSCALL_EXIT, 0, 0, 0);
@@ -167,43 +167,43 @@ fn sys_exit() -> ! {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_fb_info(out: &mut UserFbInfo) -> i64 {
     unsafe { syscall(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_gfx_fill_rect(rect: &UserRect) -> i64 {
     unsafe { syscall(SYSCALL_GFX_FILL_RECT, rect as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_gfx_draw_line(line: &UserLine) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_LINE, line as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_gfx_draw_circle(circle: &UserCircle) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE, circle as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_gfx_draw_circle_filled(circle: &UserCircle) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn sys_font_draw(text: &UserText) -> i64 {
     unsafe { syscall(SYSCALL_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
     let mut info = UserFbInfo::default();
     if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return -1;
@@ -219,8 +219,8 @@ unsafe extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) 
     0
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_fill_rect(
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_fill_rect(
     _ctx: *mut c_void,
     x: i32,
     y: i32,
@@ -232,8 +232,8 @@ unsafe extern "C" fn user_fill_rect(
     sys_gfx_fill_rect(&rect) as i32
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_draw_line(
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_draw_line(
     _ctx: *mut c_void,
     x0: i32,
     y0: i32,
@@ -245,8 +245,8 @@ unsafe extern "C" fn user_draw_line(
     sys_gfx_draw_line(&line) as i32
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_draw_circle(
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_draw_circle(
     _ctx: *mut c_void,
     cx: i32,
     cy: i32,
@@ -257,8 +257,8 @@ unsafe extern "C" fn user_draw_circle(
     sys_gfx_draw_circle(&circle) as i32
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_draw_circle_filled(
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_draw_circle_filled(
     _ctx: *mut c_void,
     cx: i32,
     cy: i32,
@@ -269,8 +269,8 @@ unsafe extern "C" fn user_draw_circle_filled(
     sys_gfx_draw_circle_filled(&circle) as i32
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_draw_text(
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_draw_text(
     _ctx: *mut c_void,
     x: i32,
     y: i32,
@@ -306,12 +306,12 @@ unsafe extern "C" fn user_draw_text(
     sys_font_draw(&text_desc) as i32
 }
 
-#[link_section = ".user_text"]
-unsafe extern "C" fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
+#[unsafe(link_section = ".user_text")]
+extern "C" fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
     sys_sleep_ms(ms);
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn text_fallback(fate: u32) {
     const HDR: &[u8] = b"ROULETTE: framebuffer unavailable, using text fallback\n";
     const LBL: &[u8] = b"Fate number: ";
@@ -342,7 +342,7 @@ fn text_fallback(fate: u32) {
     sys_write(b"\n");
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn backend() -> RouletteBackend {
     RouletteBackend {
         ctx: core::ptr::null_mut(),
@@ -356,8 +356,8 @@ fn backend() -> RouletteBackend {
     }
 }
 
-#[no_mangle]
-#[link_section = ".user_text"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".user_text")]
 pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
     let _ = sys_write(b"ROULETTE: start\n");
     let spin = sys_roulette();

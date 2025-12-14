@@ -24,7 +24,7 @@ use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
 
-extern "C" {
+unsafe extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn klog_debug(msg: *const u8, ...);
     fn klog_info(msg: *const u8, ...);
@@ -581,7 +581,7 @@ fn display_memory_summary() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> c_int {
     unsafe {
         klog_debug(b"========== SlopOS Memory System Initialization ==========\0".as_ptr());
@@ -641,12 +641,12 @@ pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_o
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_memory_system_initialized() -> c_int {
     unsafe { MEMORY_SYSTEM_INITIALIZED as c_int }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_memory_statistics(
     total_memory_out: *mut u64,
     available_memory_out: *mut u64,

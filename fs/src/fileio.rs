@@ -189,7 +189,7 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
     state.initialized = true;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
@@ -208,7 +208,7 @@ pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
     if process_id == INVALID_PROCESS_ID {
         return;
@@ -231,7 +231,7 @@ pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_open_for_process(
     process_id: u32,
     path: *const c_char,
@@ -300,7 +300,7 @@ pub extern "C" fn file_open_for_process(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_read_fd(
     process_id: u32,
     fd: c_int,
@@ -354,7 +354,7 @@ pub extern "C" fn file_read_fd(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_write_fd(
     process_id: u32,
     fd: c_int,
@@ -399,7 +399,7 @@ pub extern "C" fn file_write_fd(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -420,7 +420,7 @@ pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_seek_fd(
     process_id: u32,
     fd: c_int,
@@ -485,7 +485,7 @@ pub extern "C" fn file_seek_fd(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -511,7 +511,7 @@ pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
@@ -524,7 +524,7 @@ pub extern "C" fn file_exists_path(path: *const c_char) -> c_int {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;

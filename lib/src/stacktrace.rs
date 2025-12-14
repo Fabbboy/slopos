@@ -32,8 +32,8 @@ fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
     true
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn stacktrace_capture_from(
+#[unsafe(no_mangle)]
+pub extern "C" fn stacktrace_capture_from(
     mut rbp: u64,
     entries: *mut stacktrace_entry,
     max_entries: c_int,
@@ -74,17 +74,17 @@ pub unsafe extern "C" fn stacktrace_capture_from(
     count as c_int
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn stacktrace_capture(
+#[unsafe(no_mangle)]
+pub extern "C" fn stacktrace_capture(
     entries: *mut stacktrace_entry,
     max_entries: c_int,
 ) -> c_int {
     let rbp = read_frame_pointer();
-    unsafe { stacktrace_capture_from(rbp, entries, max_entries) }
+    stacktrace_capture_from(rbp, entries, max_entries)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
+#[unsafe(no_mangle)]
+pub extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     if max_frames <= 0 {
         return;
     }
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     let mut local_entries: [stacktrace_entry; STACKTRACE_MAX_LOCAL] =
         [stacktrace_entry { frame_pointer: 0, return_address: 0 }; STACKTRACE_MAX_LOCAL];
 
-    let captured = unsafe { stacktrace_capture_from(rbp, local_entries.as_mut_ptr(), max as c_int) };
+    let captured = stacktrace_capture_from(rbp, local_entries.as_mut_ptr(), max as c_int);
     if captured <= 0 {
         klog::log_line(KlogLevel::Info, "STACKTRACE: <empty>");
         return;
@@ -114,10 +114,9 @@ pub unsafe extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn stacktrace_dump(max_frames: c_int) {
+#[unsafe(no_mangle)]
+pub extern "C" fn stacktrace_dump(max_frames: c_int) {
     let rbp = read_frame_pointer();
-    unsafe { stacktrace_dump_from(rbp, max_frames) };
+    stacktrace_dump_from(rbp, max_frames);
 }
-
 

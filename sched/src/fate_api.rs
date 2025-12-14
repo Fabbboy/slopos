@@ -25,7 +25,7 @@ where
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fate_spin() -> fate_result {
     let val = random::random_next() as u32;
     fate_result {
@@ -34,7 +34,7 @@ pub extern "C" fn fate_spin() -> fate_result {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
     with_task(task_id, |t| {
         t.fate_token = res.token;
@@ -43,7 +43,7 @@ pub extern "C" fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int {
     let mut result = -1;
     let _ = with_task(task_id, |t| {
@@ -63,7 +63,7 @@ pub extern "C" fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_in
     result
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fate_apply_outcome(res: *const fate_result, _resolution: u32, award: bool) {
     if res.is_null() {
         return;

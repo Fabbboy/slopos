@@ -42,7 +42,7 @@ pub struct UserText {
 
 pub const USER_TEXT_MAX_BYTES: u32 = 256;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_rect_checked(dst: *mut UserRect, user_rect: *const UserRect) -> c_int {
     if dst.is_null() || user_rect.is_null() {
         return -1;
@@ -61,7 +61,7 @@ pub extern "C" fn user_copy_rect_checked(dst: *mut UserRect, user_rect: *const U
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_line_checked(dst: *mut UserLine, user_line: *const UserLine) -> c_int {
     if dst.is_null() || user_line.is_null() {
         return -1;
@@ -72,7 +72,7 @@ pub extern "C" fn user_copy_line_checked(dst: *mut UserLine, user_line: *const U
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_circle_checked(dst: *mut UserCircle, user_circle: *const UserCircle) -> c_int {
     if dst.is_null() || user_circle.is_null() {
         return -1;
@@ -88,7 +88,7 @@ pub extern "C" fn user_copy_circle_checked(dst: *mut UserCircle, user_circle: *c
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_text_header(dst: *mut UserText, user_text: *const UserText) -> c_int {
     if dst.is_null() || user_text.is_null() {
         return -1;

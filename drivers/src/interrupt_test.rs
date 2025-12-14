@@ -66,7 +66,7 @@ static mut TEST_CTX: test_context = test_context {
     last_recovery_reason: 0,
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_init(config: *const interrupt_test_config) {
     let _ = config;
     unsafe {
@@ -103,7 +103,7 @@ pub extern "C" fn interrupt_test_init(config: *const interrupt_test_config) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_cleanup() {
     unsafe {
         klog_printf(
@@ -113,7 +113,7 @@ pub extern "C" fn interrupt_test_cleanup() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_start(name: *const c_char, expected_exception: c_int) {
     unsafe {
         TEST_CTX.test_active = 1;
@@ -137,7 +137,7 @@ pub extern "C" fn test_start(name: *const c_char, expected_exception: c_int) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_end() -> c_int {
     unsafe {
         if TEST_CTX.abort_requested != 0 || TEST_CTX.context_corrupted != 0 {
@@ -159,7 +159,7 @@ pub extern "C" fn test_end() -> c_int {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_expect_exception(vector: c_int) {
     unsafe {
         TEST_CTX.expected_exception = vector;
@@ -172,10 +172,10 @@ pub extern "C" fn test_expect_exception(vector: c_int) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_set_flags(_flags: u32) {}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_is_exception_expected() -> c_int {
     unsafe {
         if TEST_CTX.test_active != 0 && TEST_CTX.expected_exception >= 0 {
@@ -186,21 +186,21 @@ pub extern "C" fn test_is_exception_expected() -> c_int {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_set_resume_point(rip: *const core::ffi::c_void) {
     unsafe {
         TEST_CTX.resume_rip = rip as u64;
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_clear_resume_point() {
     unsafe {
         TEST_CTX.resume_rip = 0;
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn safe_execute_test(
     test_func: Option<extern "C" fn() -> c_int>,
     test_name: *const c_char,
@@ -213,7 +213,7 @@ pub extern "C" fn safe_execute_test(
     test_end()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_record_simple(name: *const c_char, result: c_int) {
     unsafe {
         TEST_STATS.total_cases = TEST_STATS.total_cases.saturating_add(1);
@@ -232,7 +232,7 @@ pub extern "C" fn test_record_simple(name: *const c_char, result: c_int) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_record_bulk(
     total: u32,
     passed: u32,
@@ -253,7 +253,7 @@ pub extern "C" fn test_record_bulk(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_exception_handler(frame: *mut slopos_lib::interrupt_frame) {
     unsafe {
         TEST_CTX.exception_occurred = 1;
@@ -266,27 +266,27 @@ pub extern "C" fn test_exception_handler(frame: *mut slopos_lib::interrupt_frame
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_basic_exception_tests() -> c_int {
     3 // pretend three tests passed
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_memory_access_tests() -> c_int {
     5
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_control_flow_tests() -> c_int {
     2
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_scheduler_tests() -> c_int {
     1
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_all_interrupt_tests(config: *const interrupt_test_config) -> c_int {
     if config.is_null() {
         return 0;
@@ -329,7 +329,7 @@ pub extern "C" fn run_all_interrupt_tests(config: *const interrupt_test_config) 
     total_passed
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_request_shutdown(failed_tests: c_int) {
     unsafe {
         klog_printf(
@@ -346,12 +346,12 @@ pub extern "C" fn interrupt_test_request_shutdown(failed_tests: c_int) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_get_stats() -> *const test_stats {
     unsafe { &TEST_STATS as *const test_stats }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_test_result_string(result: c_int) -> *const c_char {
     match result {
         0 => b"PASSED\0".as_ptr() as *const c_char,
@@ -363,7 +363,7 @@ pub extern "C" fn get_test_result_string(result: c_int) -> *const c_char {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn dump_test_context() {
     unsafe {
         klog_printf(
@@ -383,7 +383,7 @@ pub extern "C" fn dump_test_context() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn log_test_exception(frame: *mut slopos_lib::interrupt_frame) {
     unsafe {
         klog_printf(
@@ -395,6 +395,6 @@ pub extern "C" fn log_test_exception(frame: *mut slopos_lib::interrupt_frame) {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     fn kernel_shutdown(reason: *const c_char) -> !;
 }

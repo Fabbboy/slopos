@@ -192,18 +192,16 @@ fn process_token(config: &mut interrupt_test_config, token: &str) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn interrupt_test_config_init_defaults(config: *mut interrupt_test_config) {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn interrupt_test_config_init_defaults(config: *mut interrupt_test_config) {
     if config.is_null() {
         return;
     }
-    unsafe {
-        *config = interrupt_test_config::default();
-    }
+    *config = interrupt_test_config::default();
 }
 
-#[no_mangle]
-pub extern "C" fn interrupt_test_config_parse_cmdline(
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn interrupt_test_config_parse_cmdline(
     config: *mut interrupt_test_config,
     cmdline: *const c_char,
 ) {
@@ -211,19 +209,17 @@ pub extern "C" fn interrupt_test_config_parse_cmdline(
         return;
     }
 
-    let raw = unsafe { CStr::from_ptr(cmdline) };
+    let raw = CStr::from_ptr(cmdline);
     if let Ok(cmd) = raw.to_str() {
-        let mut cfg = unsafe { *config };
+        let mut cfg = *config;
         for token in cmd.split_whitespace() {
             process_token(&mut cfg, token);
         }
-        unsafe {
-            *config = cfg;
-        }
+        *config = cfg;
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_verbosity_string(
     verbosity: interrupt_test_verbosity,
 ) -> *const c_char {
@@ -234,7 +230,7 @@ pub extern "C" fn interrupt_test_verbosity_string(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_suite_string(suite_mask: u32) -> *const c_char {
     match suite_mask {
         0 => b"none\0".as_ptr() as *const c_char,
@@ -254,4 +250,3 @@ pub extern "C" fn interrupt_test_suite_string(suite_mask: u32) -> *const c_char 
         _ => b"custom\0".as_ptr() as *const c_char,
     }
 }
-

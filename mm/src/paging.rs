@@ -12,7 +12,7 @@ use crate::page_alloc::{
 };
 use crate::phys_virt::mm_phys_to_virt;
 
-extern "C" {
+unsafe extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn kernel_panic(msg: *const c_char) -> !;
     fn is_hhdm_available() -> c_int;
@@ -40,11 +40,11 @@ pub struct ProcessPageDir {
     pub next: *mut ProcessPageDir,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut early_pml4: PageTable = PageTable::zeroed();
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut early_pdpt: PageTable = PageTable::zeroed();
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static mut early_pd: PageTable = PageTable::zeroed();
 
 static mut KERNEL_PAGE_DIR: ProcessPageDir = ProcessPageDir {
@@ -150,7 +150,7 @@ fn set_cr3(pml4_phys: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
     if dest_pml4.is_null() {
         return;
@@ -242,17 +242,17 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn virt_to_phys_in_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
     virt_to_phys_for_dir(page_dir, vaddr)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn virt_to_phys(vaddr: u64) -> u64 {
     unsafe { virt_to_phys_for_dir(CURRENT_PAGE_DIR, vaddr) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn virt_to_phys_process(vaddr: u64, page_dir: *mut ProcessPageDir) -> u64 {
     if page_dir.is_null() {
         return 0;
@@ -440,7 +440,7 @@ fn map_page_in_directory(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn map_page_4kb_in_dir(
     page_dir: *mut ProcessPageDir,
     vaddr: u64,
@@ -450,17 +450,17 @@ pub extern "C" fn map_page_4kb_in_dir(
     map_page_in_directory(page_dir, vaddr, paddr, flags, PAGE_SIZE_4KB)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn map_page_4kb(vaddr: u64, paddr: u64, flags: u64) -> c_int {
     unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_4KB) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn map_page_2mb(vaddr: u64, paddr: u64, flags: u64) -> c_int {
     unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_2MB) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_map_shared_kernel_page(
     page_dir: *mut ProcessPageDir,
     kernel_vaddr: u64,
@@ -585,17 +585,17 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
     unmap_page_in_directory(page_dir, vaddr)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn unmap_page(vaddr: u64) -> c_int {
     unsafe { unmap_page_in_directory(CURRENT_PAGE_DIR, vaddr) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
     if page_dir.is_null() {
         unsafe {
@@ -617,12 +617,12 @@ pub extern "C" fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_current_page_directory() -> *mut ProcessPageDir {
     unsafe { CURRENT_PAGE_DIR }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_set_current_directory(page_dir: *mut ProcessPageDir) {
     if !page_dir.is_null() {
         unsafe {
@@ -631,7 +631,7 @@ pub extern "C" fn paging_set_current_directory(page_dir: *mut ProcessPageDir) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_get_kernel_directory() -> *mut ProcessPageDir {
     unsafe { &mut KERNEL_PAGE_DIR }
 }
@@ -705,12 +705,12 @@ fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_free_user_space(page_dir: *mut ProcessPageDir) {
     free_page_table_tree(page_dir);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_paging() {
     unsafe {
         let cr3 = get_cr3();
@@ -753,7 +753,7 @@ pub extern "C" fn init_paging() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_memory_layout_info(kernel_virt_base: *mut u64, kernel_phys_base: *mut u64) {
     unsafe {
         if !kernel_virt_base.is_null() {
@@ -765,12 +765,12 @@ pub extern "C" fn get_memory_layout_info(kernel_virt_base: *mut u64, kernel_phys
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_mapped(vaddr: u64) -> c_int {
     (virt_to_phys(vaddr) != 0) as c_int
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_page_size(vaddr: u64) -> u64 {
     unsafe {
         if CURRENT_PAGE_DIR.is_null() || (*CURRENT_PAGE_DIR).pml4.is_null() {
@@ -800,7 +800,7 @@ pub extern "C" fn get_page_size(vaddr: u64) -> u64 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_mark_range_user(
     page_dir: *mut ProcessPageDir,
     start: u64,
@@ -873,7 +873,7 @@ pub extern "C" fn paging_mark_range_user(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
     if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
         return 0;

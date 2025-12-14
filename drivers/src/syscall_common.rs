@@ -25,7 +25,7 @@ pub struct syscall_entry {
     pub name: *const c_char,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn user_copy_from_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
     fn user_copy_to_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
 }

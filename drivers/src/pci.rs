@@ -178,7 +178,7 @@ unsafe fn inl(port: u16) -> u32 {
     value
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
@@ -188,21 +188,21 @@ pub extern "C" fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x2) * 8) as u32;
     ((value >> shift) & 0xFFFF) as u16
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x3) * 8) as u32;
     ((value >> shift) & 0xFF) as u8
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
@@ -212,7 +212,7 @@ pub extern "C" fn pci_config_write32(bus: u8, device: u8, function: u8, offset: 
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
@@ -227,7 +227,7 @@ pub extern "C" fn pci_config_write16(bus: u8, device: u8, function: u8, offset: 
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
@@ -350,7 +350,7 @@ fn pci_log_bar(bar: &pci_bar_info_t, index: u8) {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     fn mm_map_mmio_region(base_phys: u64, size: usize) -> *mut core::ffi::c_void;
     fn mm_unmap_mmio_region(virt: *mut core::ffi::c_void, size: usize);
 }
@@ -635,7 +635,7 @@ fn pci_enumerate_bus(bus: u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_init() -> c_int {
     unsafe {
         if PCI_INITIALIZED != 0 {
@@ -677,17 +677,17 @@ pub extern "C" fn pci_init() -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_get_device_count() -> usize {
     unsafe { DEVICE_COUNT }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_get_devices() -> *const pci_device_info_t {
     unsafe { DEVICES.as_ptr() }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_get_primary_gpu() -> *const pci_gpu_info_t {
     unsafe {
         if PRIMARY_GPU.present != 0 {
@@ -698,12 +698,12 @@ pub extern "C" fn pci_get_primary_gpu() -> *const pci_gpu_info_t {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_get_registered_driver_count() -> usize {
     unsafe { PCI_REGISTERED_DRIVER_COUNT }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_get_registered_driver(index: usize) -> *const pci_driver_t {
     unsafe {
         if index >= PCI_REGISTERED_DRIVER_COUNT {
@@ -714,7 +714,7 @@ pub extern "C" fn pci_get_registered_driver(index: usize) -> *const pci_driver_t
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pci_register_driver(driver: *const pci_driver_t) -> c_int {
     if driver.is_null() {
         unsafe {

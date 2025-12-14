@@ -7,7 +7,7 @@ use crate::process_vm::{
     create_process_vm, destroy_process_vm, get_process_vm_stats, process_vm_get_page_dir, init_process_vm,
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_heap_free_list_search() -> i32 {
     let mut stats_before = MaybeUninit::uninit();
     get_heap_stats(stats_before.as_mut_ptr());
@@ -52,7 +52,7 @@ pub extern "C" fn test_heap_free_list_search() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_heap_fragmentation_behind_head() -> i32 {
     let mut ptrs: [*mut core::ffi::c_void; 5] = [core::ptr::null_mut(); 5];
     let sizes = [128usize, 256, 128, 512, 256];
@@ -84,7 +84,7 @@ pub extern "C" fn test_heap_fragmentation_behind_head() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_process_vm_slot_reuse() -> i32 {
     init_process_vm();
 
@@ -148,7 +148,7 @@ pub extern "C" fn test_process_vm_slot_reuse() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_process_vm_counter_reset() -> i32 {
     init_process_vm();
 

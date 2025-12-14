@@ -78,7 +78,7 @@ static mut KERNEL_TSS: Tss64 = Tss64 {
     iomap_base: 0,
 };
 
-extern "C" {
+unsafe extern "C" {
     static kernel_stack_top: u8;
 }
 
@@ -111,7 +111,7 @@ unsafe fn load_tss() {
     unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn gdt_init() {
     unsafe {
         klog_printf(
@@ -162,14 +162,14 @@ pub extern "C" fn gdt_init() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn gdt_set_kernel_rsp0(rsp0: u64) {
     unsafe {
         KERNEL_TSS.rsp0 = rsp0;
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn gdt_set_ist(index: u8, stack_top: u64) {
     if index == 0 || index > 7 {
         return;

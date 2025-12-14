@@ -12,7 +12,7 @@ pub struct Task {
     pub process_id: u32,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn scheduler_get_current_task() -> *mut Task;
 }
 
@@ -62,7 +62,7 @@ fn validate_user_buffer(user_ptr: u64, len: usize, dir: *mut crate::paging::Proc
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const c_void, len: usize) -> c_int {
     let dir = current_process_dir();
     if kernel_dst.is_null() || user_src.is_null() {
@@ -77,7 +77,7 @@ pub extern "C" fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_void, len: usize) -> c_int {
     let dir = current_process_dir();
     if user_dst.is_null() || kernel_src.is_null() {
@@ -91,4 +91,3 @@ pub extern "C" fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_
     }
     0
 }
-

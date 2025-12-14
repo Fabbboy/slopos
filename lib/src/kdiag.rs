@@ -78,7 +78,7 @@ fn exception_name(vector: u8) -> &'static [u8] {
 static MONOTONIC_TIME: AtomicU64 = AtomicU64::new(0);
 static LAST_TSC: AtomicU64 = AtomicU64::new(0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kdiag_timestamp() -> u64 {
     let tsc = tsc::rdtsc();
     let last = LAST_TSC.load(Ordering::Relaxed);
@@ -90,7 +90,7 @@ pub extern "C" fn kdiag_timestamp() -> u64 {
     MONOTONIC_TIME.load(Ordering::Relaxed)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kdiag_dump_cpu_state() {
     let (rsp, rbp, rax, rbx, rcx, rdx, rsi, rdi): (u64, u64, u64, u64, u64, u64, u64, u64);
     let (r8, r9, r10, r11, r12, r13, r14, r15): (u64, u64, u64, u64, u64, u64, u64, u64);
@@ -193,8 +193,8 @@ pub extern "C" fn kdiag_dump_cpu_state() {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kdiag_dump_interrupt_frame(frame: *const interrupt_frame) {
+#[unsafe(no_mangle)]
+pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const interrupt_frame) {
     if frame.is_null() {
         return;
     }
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn kdiag_dump_interrupt_frame(frame: *const interrupt_fram
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kdiag_dump_stack_trace() {
     let rbp = cpu::read_rbp();
     unsafe {
@@ -284,14 +284,13 @@ pub extern "C" fn kdiag_dump_stack_trace() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
     let mut entries: [stacktrace_entry; KDIAG_STACK_TRACE_DEPTH] =
         [stacktrace_entry { frame_pointer: 0, return_address: 0 }; KDIAG_STACK_TRACE_DEPTH];
 
-    let frame_count = unsafe {
-        stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), KDIAG_STACK_TRACE_DEPTH as c_int)
-    };
+    let frame_count =
+        stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), KDIAG_STACK_TRACE_DEPTH as c_int);
 
     if frame_count == 0 {
         unsafe {
@@ -317,8 +316,8 @@ pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const interrupt_frame) {
+#[unsafe(no_mangle)]
+pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const interrupt_frame) {
     if frame.is_null() {
         return;
     }
@@ -341,8 +340,8 @@ pub unsafe extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const interru
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
+#[unsafe(no_mangle)]
+pub extern "C" fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
     if data.is_null() || length == 0 {
         return;
     }
@@ -401,5 +400,3 @@ pub unsafe extern "C" fn kdiag_hexdump(data: *const u8, length: usize, base_addr
         i += 16;
     }
 }
-
-

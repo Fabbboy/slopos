@@ -17,39 +17,39 @@ const SHELL_MAX_TOKEN_LENGTH: usize = 64;
 const SHELL_PATH_BUF: usize = 128;
 const SHELL_IO_MAX: usize = 512;
 
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static PROMPT: &[u8] = b"$ ";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static NL: &[u8] = b"\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static WELCOME: &[u8] = b"SlopOS Shell v0.1 (userland)\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static HELP_HEADER: &[u8] = b"Available commands:\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static UNKNOWN_CMD: &[u8] = b"Unknown command. Type 'help'.\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static PATH_TOO_LONG: &[u8] = b"path too long\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static ERR_NO_SUCH: &[u8] = b"No such file or directory\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static ERR_TOO_MANY_ARGS: &[u8] = b"too many arguments\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_OPERAND: &[u8] = b"missing operand\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_FILE: &[u8] = b"missing file operand\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static HALTED: &[u8] = b"Shell requested shutdown...\n";
 
-#[link_section = ".user_bss"]
+#[unsafe(link_section = ".user_bss")]
 static mut LINE_BUF: [u8; 256] = [0; 256];
-#[link_section = ".user_bss"]
+#[unsafe(link_section = ".user_bss")]
 static mut TOKEN_STORAGE: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS] =
     [[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
-#[link_section = ".user_bss"]
+#[unsafe(link_section = ".user_bss")]
 static mut PATH_BUF: [u8; SHELL_PATH_BUF] = [0; SHELL_PATH_BUF];
-#[link_section = ".user_bss"]
+#[unsafe(link_section = ".user_bss")]
 static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::new(); 32];
 
 type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;
@@ -60,7 +60,7 @@ struct BuiltinEntry {
     func: BuiltinFn,
 }
 
-#[link_section = ".user_rodata"]
+#[unsafe(link_section = ".user_rodata")]
 static BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: b"help",
@@ -119,7 +119,7 @@ fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn u_strcmp(a: *const u8, b: *const u8) -> i32 {
     if a.is_null() && b.is_null() {
         return 0;
@@ -143,7 +143,7 @@ fn u_strcmp(a: *const u8, b: *const u8) -> i32 {
     }
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn u_puts(s: *const u8) {
     if s.is_null() {
         return;
@@ -156,7 +156,7 @@ fn u_puts(s: *const u8) {
     let _ = sys_write(slice);
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     if buffer.is_empty() {
         return -1;
@@ -195,7 +195,7 @@ fn normalize_path(input: *const u8, buffer: &mut [u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     if line.is_empty() || tokens.is_empty() {
         return 0;
@@ -234,7 +234,7 @@ fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     count as i32
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
     for entry in BUILTINS {
         if u_strcmp(entry.name.as_ptr(), name) == 0 {
@@ -244,7 +244,7 @@ fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
     None
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn print_kv(key: &[u8], value: u64) {
     if !key.is_empty() {
         let _ = sys_write(key);
@@ -273,7 +273,7 @@ fn print_kv(key: &[u8], value: u64) {
     let _ = sys_write(NL);
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
     let _ = sys_write(HELP_HEADER);
     for entry in BUILTINS {
@@ -288,7 +288,7 @@ fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
     let mut first = true;
     for i in 1..argc {
@@ -311,19 +311,19 @@ fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
     let _ = sys_write(b"\x1B[2J\x1B[H");
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_halt(_argc: i32, _argv: &[*const u8]) -> i32 {
     let _ = sys_write(HALTED);
     sys_halt();
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_sys_info(&mut info) != 0 {
@@ -354,7 +354,7 @@ fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
         let _ = sys_write(ERR_TOO_MANY_ARGS);
@@ -402,7 +402,7 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         let _ = sys_write(ERR_MISSING_FILE);
@@ -438,7 +438,7 @@ fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         let _ = sys_write(ERR_MISSING_FILE);
@@ -483,7 +483,7 @@ fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         let _ = sys_write(ERR_MISSING_OPERAND);
@@ -505,7 +505,7 @@ fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
         let _ = sys_write(ERR_MISSING_OPERAND);
@@ -527,8 +527,8 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     0
 }
 
-#[no_mangle]
-#[link_section = ".user_text"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".user_text")]
 pub extern "C" fn shell_user_main(_arg: *mut c_void) {
     let _ = sys_write(WELCOME);
     loop {

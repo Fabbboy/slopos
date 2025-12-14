@@ -138,7 +138,7 @@ pub struct UserSysInfo {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let mut ret = num;
     unsafe {
@@ -163,19 +163,19 @@ unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_write(buf: &[u8]) -> i64 {
     unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_read(buf: &mut [u8]) -> i64 {
     unsafe { syscall(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_sleep_ms(ms: u32) {
     unsafe {
         syscall(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
@@ -183,13 +183,13 @@ pub fn sys_sleep_ms(ms: u32) {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_roulette() -> u64 {
     unsafe { syscall(SYSCALL_ROULETTE, 0, 0, 0) }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_roulette_result(fate_packed: u64) {
     unsafe {
         syscall(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
@@ -197,7 +197,7 @@ pub fn sys_roulette_result(fate_packed: u64) {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_exit() -> ! {
     unsafe {
         syscall(SYSCALL_EXIT, 0, 0, 0);
@@ -206,103 +206,103 @@ pub fn sys_exit() -> ! {
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fb_info(out: &mut UserFbInfo) -> i64 {
     unsafe { syscall(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_fill_rect(rect: &UserRect) -> i64 {
     unsafe { syscall(SYSCALL_GFX_FILL_RECT, rect as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_draw_line(line: &UserLine) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_LINE, line as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_draw_circle(circle: &UserCircle) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE, circle as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_draw_circle_filled(circle: &UserCircle) -> i64 {
     unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_font_draw(text: &UserText) -> i64 {
     unsafe { syscall(SYSCALL_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_random_next() -> u32 {
     unsafe { syscall(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
     unsafe { syscall(SYSCALL_FS_OPEN, path as u64, flags as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_close(fd: i32) -> i64 {
     unsafe { syscall(SYSCALL_FS_CLOSE, fd as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_read(fd: i32, buf: *mut c_void, len: usize) -> i64 {
     unsafe { syscall(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_write(fd: i32, buf: *const c_void, len: usize) -> i64 {
     unsafe { syscall(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_stat(path: *const c_char, out_stat: &mut UserFsStat) -> i64 {
     unsafe { syscall(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_mkdir(path: *const c_char) -> i64 {
     unsafe { syscall(SYSCALL_FS_MKDIR, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_unlink(path: *const c_char) -> i64 {
     unsafe { syscall(SYSCALL_FS_UNLINK, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
     unsafe { syscall(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_halt() -> ! {
     unsafe {
         syscall(SYSCALL_HALT, 0, 0, 0);

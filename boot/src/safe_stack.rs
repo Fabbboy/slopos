@@ -109,7 +109,7 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
     ExceptionStackMetrics::new(),
 ];
 
-extern "C" {
+unsafe extern "C" {
     fn alloc_page_frame(flags: u32) -> u64;
     fn mm_zero_physical_page(phys: u64) -> i32;
     fn map_page_4kb(virt: u64, phys: u64, flags: u64) -> i32;
@@ -158,7 +158,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn safe_stack_init() {
     log_debug(b"SAFE STACK: Initializing dedicated IST stacks\0");
 
@@ -185,7 +185,7 @@ pub extern "C" fn safe_stack_init() {
     log_debug(b"SAFE STACK: IST stacks ready\0");
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
     let Some(idx) = find_stack_index_by_vector(vector) else {
         return;
@@ -231,7 +231,7 @@ pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
     if let Some(idx) = find_stack_index_by_address(fault_addr) {
         let stack = &STACK_CONFIGS[idx];

@@ -61,23 +61,23 @@ pub unsafe fn memcmp_internal(s1: *const u8, s2: *const u8, n: usize) -> c_int {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+#[unsafe(no_mangle)]
+pub extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe { memmove_internal(dest, src, n) }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+#[unsafe(no_mangle)]
+pub extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
     unsafe { memset_internal(dest, value, n) }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+#[unsafe(no_mangle)]
+pub extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe { memcpy_internal(dest, src, n) }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> c_int {
     unsafe { memcmp_internal(s1, s2, n) }
 }
 

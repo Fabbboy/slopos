@@ -12,7 +12,7 @@ use crate::task::{
     TASK_PRIORITY_NORMAL,
 };
 
-extern "C" {
+unsafe extern "C" {
     fn serial_putc_com1(ch: u8);
     fn kmalloc(size: usize) -> *mut c_void;
     fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
@@ -39,7 +39,7 @@ const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
  * TEST TASK IMPLEMENTATIONS
  * ======================================================================== */
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_task_a(arg: *mut c_void) {
     let _ = arg;
     let mut counter: u32 = 0;
@@ -80,7 +80,7 @@ pub extern "C" fn test_task_a(arg: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_task_b(arg: *mut c_void) {
     let _ = arg;
 
@@ -135,7 +135,7 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
  * SCHEDULER TEST FUNCTIONS
  * ======================================================================== */
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_scheduler_test() -> c_int {
     unsafe {
         klog_printf(
@@ -319,7 +319,7 @@ pub extern "C" fn run_scheduler_test() -> c_int {
  * PRIVILEGE SEPARATION TEST
  * ======================================================================== */
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 extern "C" fn user_stub_task(arg: *mut c_void) {
     let _ = arg;
     unsafe {
@@ -333,7 +333,7 @@ extern "C" fn user_stub_task(arg: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
     unsafe {
         klog_printf(
@@ -487,7 +487,7 @@ pub struct SmokeTestContext {
 static mut KERNEL_RETURN_CONTEXT: TaskContext = const { TaskContext::zero() };
 static mut TEST_COMPLETED_PTR: *mut c_int = ptr::null_mut();
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     if ctx.is_null() {
         return;
@@ -598,7 +598,7 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn smoke_test_task_a(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
@@ -608,7 +608,7 @@ pub extern "C" fn smoke_test_task_a(arg: *mut c_void) {
     smoke_test_task_impl(ctx);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn smoke_test_task_b(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
@@ -618,7 +618,7 @@ pub extern "C" fn smoke_test_task_b(arg: *mut c_void) {
     smoke_test_task_impl(ctx);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     unsafe {
         klog_printf(
@@ -698,7 +698,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     unsafe { core::hint::unreachable_unchecked() }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
     unsafe {
         klog_printf(
@@ -720,7 +720,7 @@ pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn context_switch_return_trampoline() -> c_int {
     unsafe {
         klog_printf(
@@ -785,9 +785,9 @@ extern "C" fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn print_scheduler_stats() {
-    extern "C" {
+    unsafe extern "C" {
         fn get_scheduler_stats(
             context_switches: *mut u64,
             yields: *mut u64,

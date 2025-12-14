@@ -105,7 +105,7 @@ fn splash_draw_progress_bar(x: i32, y: i32, width: i32, height: i32, progress: i
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn splash_show_boot_screen() -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -139,7 +139,7 @@ pub extern "C" fn splash_show_boot_screen() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn splash_update_progress(progress: i32, message: *const c_char) -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -167,7 +167,7 @@ pub extern "C" fn splash_update_progress(progress: i32, message: *const c_char) 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn splash_report_progress(progress: i32, message: *const c_char) -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -199,7 +199,7 @@ pub extern "C" fn splash_report_progress(progress: i32, message: *const c_char) 
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn splash_finish() -> i32 {
     let mut state = STATE.lock();
     if state.active {
@@ -210,7 +210,7 @@ pub extern "C" fn splash_finish() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn splash_clear() -> i32 {
     if !framebuffer_ready() {
         return -1;

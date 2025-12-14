@@ -6,7 +6,7 @@ use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use spin::Mutex;
 
-extern "C" {
+unsafe extern "C" {
     fn mm_phys_to_virt(phys_addr: u64) -> u64;
 }
 
@@ -72,7 +72,7 @@ static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> = Mutex::new(const { Fra
 unsafe impl Send for FbState {}
 unsafe impl Send for FramebufferState {}
 
-extern "C" {
+unsafe extern "C" {
     fn get_framebuffer_info(
         addr: *mut u64,
         width: *mut u32,
@@ -175,7 +175,7 @@ pub fn init_with_info(info: FramebufferInfo) -> i32 {
     rc
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_init() -> i32 {
     let mut addr = 0u64;
     let mut width = 0u32;
@@ -191,7 +191,7 @@ pub extern "C" fn framebuffer_init() -> i32 {
     init_state_from_raw(addr, width, height, pitch, bpp)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_get_info() -> *mut FramebufferInfoC {
     let guard = FRAMEBUFFER.lock();
     let mut export = FRAMEBUFFER_INFO_EXPORT.lock();
@@ -211,12 +211,12 @@ pub extern "C" fn framebuffer_get_info() -> *mut FramebufferInfoC {
     &mut *export as *mut FramebufferInfoC
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_is_initialized() -> i32 {
     FRAMEBUFFER.lock().fb.is_some() as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_clear(color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
@@ -248,7 +248,7 @@ pub extern "C" fn framebuffer_clear(color: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
@@ -278,7 +278,7 @@ pub extern "C" fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
@@ -311,32 +311,32 @@ pub extern "C" fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
     framebuffer_convert_color_internal(&fb, color)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_get_width() -> u32 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.width).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_get_height() -> u32 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.height).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_get_bpp() -> u8 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.bpp).unwrap_or(0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32) | ((a as u32) << 24)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_rgb(r: u8, g: u8, b: u8) -> u32 {
     framebuffer_rgba(r, g, b, 0xFF)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn framebuffer_convert_color(color: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,

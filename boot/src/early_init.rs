@@ -13,7 +13,7 @@ use slopos_lib::{klog_is_enabled, klog_newline, klog_printf, klog_set_level, Klo
 use crate::{gdt, idt, kernel_panic::kernel_panic, safe_stack};
 use crate::limine_protocol;
 
-const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
+pub const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
 const BOOT_INIT_PRIORITY_SHIFT: u32 = 8;
 const BOOT_INIT_PRIORITY_MASK: u32 = 0xFF << BOOT_INIT_PRIORITY_SHIFT;
 
@@ -56,7 +56,7 @@ impl BootInitStep {
 macro_rules! boot_init_step {
     ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
         #[used]
-        #[link_section = concat!(".boot_init_", stringify!($phase))]
+        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
         static $static_name: $crate::early_init::BootInitStep =
             $crate::early_init::BootInitStep::new($label, $func, 0);
     };
@@ -66,7 +66,7 @@ macro_rules! boot_init_step {
 macro_rules! boot_init_step_with_flags {
     ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
         #[used]
-        #[link_section = concat!(".boot_init_", stringify!($phase))]
+        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
         static $static_name: $crate::early_init::BootInitStep =
             $crate::early_init::BootInitStep::new($label, $func, $flags);
     };
@@ -178,7 +178,7 @@ fn boot_init_report_failure(phase: &[u8], step_name: Option<&[u8]>) {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     static __start_boot_init_early_hw: BootInitStep;
     static __stop_boot_init_early_hw: BootInitStep;
     static __start_boot_init_memory: BootInitStep;
@@ -243,7 +243,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     let (start, end) = phase_bounds(phase);
     if start.is_null() || end.is_null() {
@@ -307,7 +307,7 @@ pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_init_run_all() -> i32 {
     let mut phase = BootInitPhase::EarlyHw as u8;
     while phase <= BootInitPhase::Optional as u8 {
@@ -320,17 +320,17 @@ pub extern "C" fn boot_init_run_all() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
     boot_state().ctx.memmap
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_get_hhdm_offset() -> u64 {
     boot_state().ctx.hhdm_offset
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_get_cmdline() -> *const c_char {
     boot_state()
         .ctx
@@ -339,17 +339,17 @@ pub extern "C" fn boot_get_cmdline() -> *const c_char {
         .unwrap_or(ptr::null())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boot_mark_initialized() {
     boot_state_mut().initialized = true;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_kernel_initialized() -> i32 {
     boot_state().initialized as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_initialization_progress() -> i32 {
     if boot_state().initialized {
         100
@@ -358,7 +358,7 @@ pub extern "C" fn get_initialization_progress() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn report_kernel_status() {
     if boot_state().initialized {
         boot_info(b"SlopOS: Kernel status - INITIALIZED\0");
@@ -367,7 +367,7 @@ pub extern "C" fn report_kernel_status() {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     fn start_scheduler() -> i32;
 }
 
@@ -441,24 +441,27 @@ extern "C" fn boot_step_boot_config_fn() -> i32 {
     0
 }
 
-#[used]
-#[link_section = ".boot_init_early_hw"]
-static BOOT_STEP_SERIAL_INIT: BootInitStep =
-    BootInitStep::new(b"serial\0", boot_step_serial_init_fn, 0);
-#[used]
-#[link_section = ".boot_init_early_hw"]
-static BOOT_STEP_BOOT_BANNER: BootInitStep =
-    BootInitStep::new(b"boot banner\0", boot_step_boot_banner_fn, 0);
-#[used]
-#[link_section = ".boot_init_early_hw"]
-static BOOT_STEP_LIMINE: BootInitStep =
-    BootInitStep::new(b"limine\0", boot_step_limine_protocol_fn, 0);
-#[used]
-#[link_section = ".boot_init_early_hw"]
-static BOOT_STEP_BOOT_CONFIG: BootInitStep =
-    BootInitStep::new(b"boot config\0", boot_step_boot_config_fn, 0);
+boot_init_step!(
+    BOOT_STEP_SERIAL_INIT,
+    early_hw,
+    b"serial\0",
+    boot_step_serial_init_fn
+);
+boot_init_step!(
+    BOOT_STEP_BOOT_BANNER,
+    early_hw,
+    b"boot banner\0",
+    boot_step_boot_banner_fn
+);
+boot_init_step!(BOOT_STEP_LIMINE, early_hw, b"limine\0", boot_step_limine_protocol_fn);
+boot_init_step!(
+    BOOT_STEP_BOOT_CONFIG,
+    early_hw,
+    b"boot config\0",
+    boot_step_boot_config_fn
+);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() {
     wl_currency::reset();
 
@@ -518,7 +521,7 @@ pub extern "C" fn kernel_main() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_main_no_multiboot() {
     kernel_main();
 }

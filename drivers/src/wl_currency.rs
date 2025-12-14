@@ -22,12 +22,12 @@ pub fn award_loss() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wl_award_loss() {
     award_loss();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wl_award_win() {
     award_win();
 }

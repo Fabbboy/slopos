@@ -8,7 +8,7 @@ use slopos_lib::{cpu, klog_printf, KlogLevel};
 
 use crate::wl_currency;
 
-extern "C" {
+unsafe extern "C" {
     fn is_hhdm_available() -> i32;
     fn get_hhdm_offset() -> u64;
 }
@@ -440,7 +440,7 @@ pub fn dump_state() {
     log(KlogLevel::Info, b"=== END APIC STATE DUMP ===\0");
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_detect() -> i32 {
     if detect() {
         1
@@ -449,12 +449,12 @@ pub extern "C" fn apic_detect() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_init() -> i32 {
     init()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_is_available() -> i32 {
     if is_available() {
         1
@@ -463,7 +463,7 @@ pub extern "C" fn apic_is_available() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_is_x2apic_available() -> i32 {
     if is_x2apic_available() {
         1
@@ -472,7 +472,7 @@ pub extern "C" fn apic_is_x2apic_available() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_is_bsp() -> i32 {
     if is_bsp() {
         1
@@ -481,7 +481,7 @@ pub extern "C" fn apic_is_bsp() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_is_enabled() -> i32 {
     if is_enabled() {
         1
@@ -490,77 +490,77 @@ pub extern "C" fn apic_is_enabled() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_enable() {
     enable();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_disable() {
     disable();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_send_eoi() {
     send_eoi();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_get_id() -> u32 {
     get_id()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_get_version() -> u32 {
     get_version()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_timer_init(vector: u32, frequency: u32) {
     timer_init(vector, frequency);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_timer_start(initial_count: u32) {
     timer_start(initial_count);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_timer_stop() {
     timer_stop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_timer_get_current_count() -> u32 {
     timer_get_current_count()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_timer_set_divisor(divisor: u32) {
     timer_set_divisor(divisor);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_dump_state() {
     dump_state();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_get_base_address() -> u64 {
     get_base_address()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_set_base_address(base: u64) {
     set_base_address(base);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_read_register(reg: u32) -> u32 {
     read_register(reg)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn apic_write_register(reg: u32, value: u32) {
     write_register(reg, value);
 }

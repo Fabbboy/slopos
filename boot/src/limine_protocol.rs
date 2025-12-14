@@ -335,43 +335,43 @@ unsafe impl Send for LimineKernelFileRequest {}
 unsafe impl Send for LimineRsdpRequest {}
 
 #[used]
-#[link_section = ".limine_requests_start_marker"]
+#[unsafe(link_section = ".limine_requests_start_marker")]
 static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static BASE_REVISION: LimineBaseRevision = LimineBaseRevision::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static HHDM_REQUEST: LimineHhdmRequest = LimineHhdmRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static MEMMAP_REQUEST: LimineMemmapRequest = LimineMemmapRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static FRAMEBUFFER_REQUEST: LimineFramebufferRequest = LimineFramebufferRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static KERNEL_FILE_REQUEST: LimineKernelFileRequest = LimineKernelFileRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static RSDP_REQUEST: LimineRsdpRequest = LimineRsdpRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static BOOTLOADER_INFO_REQUEST: LimineBootloaderInfoRequest = LimineBootloaderInfoRequest::new();
 
 #[used]
-#[link_section = ".limine_requests"]
+#[unsafe(link_section = ".limine_requests")]
 static KERNEL_ADDRESS_REQUEST: LimineKernelAddressRequest = LimineKernelAddressRequest::new();
 
 #[used]
-#[link_section = ".limine_requests_end_marker"]
+#[unsafe(link_section = ".limine_requests_end_marker")]
 static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 
 pub type FramebufferInfo = slopos_lib::FramebufferInfo;
@@ -466,7 +466,7 @@ pub fn ensure_base_revision() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_limine_protocol() -> i32 {
     unsafe {
         if !BASE_REVISION.supported() {
@@ -660,7 +660,7 @@ pub fn boot_info() -> BootInfo {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_framebuffer_info(
     addr: *mut u64,
     width: *mut u32,
@@ -693,47 +693,47 @@ pub extern "C" fn get_framebuffer_info(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_framebuffer_available() -> i32 {
     sysinfo().flags.framebuffer_available as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_total_memory() -> u64 {
     sysinfo().total_memory
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_available_memory() -> u64 {
     sysinfo().available_memory
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_memory_map_available() -> i32 {
     sysinfo().flags.memmap_available as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_hhdm_offset() -> u64 {
     sysinfo().hhdm_offset
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_hhdm_available() -> i32 {
     sysinfo().flags.hhdm_available as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_kernel_phys_base() -> u64 {
     sysinfo().kernel_phys_base
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_kernel_virt_base() -> u64 {
     sysinfo().kernel_virt_base
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_kernel_cmdline() -> *const c_char {
     sysinfo().cmdline_ptr
 }
@@ -742,7 +742,7 @@ pub fn kernel_cmdline_str() -> Option<&'static str> {
     sysinfo().cmdline
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     sysinfo()
         .memmap
@@ -750,22 +750,22 @@ pub extern "C" fn limine_get_memmap_response() -> *const LimineMemmapResponse {
         .unwrap_or(ptr::null())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn limine_get_hhdm_response() -> *const LimineHhdmResponse {
     HHDM_REQUEST.response
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn is_rsdp_available() -> i32 {
     sysinfo().flags.rsdp_available as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_rsdp_phys_address() -> u64 {
     sysinfo().rsdp_phys_addr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_rsdp_address() -> *const c_void {
     let info = sysinfo();
     if !info.flags.rsdp_available {

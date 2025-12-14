@@ -49,7 +49,7 @@ pub fn init() {
     unsafe { port.init(); }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn serial_enable_interrupts(_port: u16, _irq: u8) -> i32 {
     0
 }
@@ -68,7 +68,7 @@ pub fn print_args(args: fmt::Arguments<'_>) {
     let _ = SERIAL.lock().write_fmt(args);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn serial_poll_receive(port: u16) {
     // Poll the UART Line Status Register (offset +5) for data ready.
     while unsafe { io::inb(port + 5) } & 0x01 != 0 {
@@ -78,7 +78,7 @@ pub extern "C" fn serial_poll_receive(port: u16) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn serial_buffer_pending(port: u16) -> i32 {
     // Ensure we service the port before reporting availability.
     serial_poll_receive(port);
@@ -86,7 +86,7 @@ pub extern "C" fn serial_buffer_pending(port: u16) -> i32 {
     (!buf.is_empty()) as i32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     // Refresh buffer then attempt to pop one byte.
     serial_poll_receive(port);

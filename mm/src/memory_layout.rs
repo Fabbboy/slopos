@@ -65,7 +65,7 @@ static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     user_space_end: USER_SPACE_END_VA,
 };
 
-extern "C" {
+unsafe extern "C" {
     static _kernel_start: c_void;
     static _kernel_end: c_void;
     fn klog_debug(fmt: *const u8, ...);
@@ -75,7 +75,7 @@ fn ptr_as_u64(p: *const c_void) -> u64 {
     p as usize as u64
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_kernel_memory_layout() {
     unsafe {
         let start_phys = ptr_as_u64(&_kernel_start);
@@ -103,7 +103,7 @@ pub extern "C" fn init_kernel_memory_layout() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
     unsafe {
         if LAYOUT_INITIALIZED {
@@ -114,47 +114,47 @@ pub extern "C" fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_kernel_phys_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_start_phys }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_kernel_phys_end() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_end_phys }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_kernel_virt_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_start_virt }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_identity_map_limit() -> u64 {
     unsafe { KERNEL_LAYOUT.identity_map_end }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_kernel_heap_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_start }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_kernel_heap_end() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_end }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_user_space_start() -> u64 {
     unsafe { KERNEL_LAYOUT.user_space_start }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_user_space_end() -> u64 {
     unsafe { KERNEL_LAYOUT.user_space_end }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_get_process_layout() -> *const ProcessMemoryLayout {
     &PROCESS_LAYOUT as *const ProcessMemoryLayout
 }

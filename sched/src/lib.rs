@@ -1,5 +1,5 @@
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 #![allow(unused_unsafe)]
 #![allow(unused_imports)]

@@ -33,7 +33,7 @@ fn get_stack_pointer() -> u64 {
     rsp
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn verify_cpu_state() {
     let cr0 = read_cr0();
     let cr4 = read_cr4();
@@ -56,7 +56,7 @@ pub extern "C" fn verify_cpu_state() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
     if addr < 0xFFFFFFFF80000000 {
@@ -68,13 +68,13 @@ pub extern "C" fn verify_memory_layout() {
         kernel_panic(b"Kernel running in user space address range\0".as_ptr() as *const c_char);
     }
 
-    extern "C" {
+    unsafe extern "C" {
         static _start: u8;
     }
     let _ = unsafe { core::ptr::read_volatile(&_start) };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn check_stack_health() {
     let rsp = get_stack_pointer();
     if rsp == 0 {
@@ -91,7 +91,7 @@ pub extern "C" fn check_stack_health() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn verify_cpu_features() {
     let (eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
     let _ = eax1;
@@ -108,7 +108,7 @@ pub extern "C" fn verify_cpu_features() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn complete_system_verification() {
     verify_cpu_state();
     verify_memory_layout();

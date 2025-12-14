@@ -7,7 +7,8 @@ use slopos_tests::{
     tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
 };
 
-use crate::early_init::{boot_get_cmdline, boot_init_priority, BootInitStep};
+use crate::boot_init_step_with_flags;
+use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::kernel_panic::kernel_panic;
 use crate::limine_protocol;
 
@@ -51,7 +52,7 @@ struct PciGpuInfo {
     mmio_size: u64,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn gdt_init();
     fn idt_init();
     fn safe_stack_init();
@@ -348,47 +349,66 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     rc
 }
 
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_DEBUG_SUBSYSTEM: BootInitStep =
-    BootInitStep::new(b"debug\0", boot_step_debug_subsystem_fn, boot_init_priority(10));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_GDT_SETUP: BootInitStep =
-    BootInitStep::new(b"gdt/tss\0", boot_step_gdt_setup_fn, boot_init_priority(20));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_IDT_SETUP: BootInitStep =
-    BootInitStep::new(b"idt\0", boot_step_idt_setup_fn, boot_init_priority(30));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_APIC_SETUP: BootInitStep =
-    BootInitStep::new(b"apic\0", boot_step_apic_setup_fn, boot_init_priority(40));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_IOAPIC_SETUP: BootInitStep =
-    BootInitStep::new(b"ioapic\0", boot_step_ioapic_setup_fn, boot_init_priority(50));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_IRQ_SETUP: BootInitStep =
-    BootInitStep::new(
-        b"irq dispatcher\0",
-        boot_step_irq_setup_fn,
-        boot_init_priority(60),
-    );
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_TIMER_SETUP: BootInitStep =
-    BootInitStep::new(b"timer\0", boot_step_timer_setup_fn, boot_init_priority(70));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_PCI_INIT: BootInitStep =
-    BootInitStep::new(b"pci\0", boot_step_pci_init_fn, boot_init_priority(80));
-#[used]
-#[link_section = ".boot_init_drivers"]
-static BOOT_STEP_INTERRUPT_TESTS: BootInitStep =
-    BootInitStep::new(
-        b"interrupt tests\0",
-        boot_step_interrupt_tests_fn,
-        boot_init_priority(90),
-    );
+boot_init_step_with_flags!(
+    BOOT_STEP_DEBUG_SUBSYSTEM,
+    drivers,
+    b"debug\0",
+    boot_step_debug_subsystem_fn,
+    boot_init_priority(10)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_GDT_SETUP,
+    drivers,
+    b"gdt/tss\0",
+    boot_step_gdt_setup_fn,
+    boot_init_priority(20)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_IDT_SETUP,
+    drivers,
+    b"idt\0",
+    boot_step_idt_setup_fn,
+    boot_init_priority(30)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_APIC_SETUP,
+    drivers,
+    b"apic\0",
+    boot_step_apic_setup_fn,
+    boot_init_priority(40)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_IOAPIC_SETUP,
+    drivers,
+    b"ioapic\0",
+    boot_step_ioapic_setup_fn,
+    boot_init_priority(50)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_IRQ_SETUP,
+    drivers,
+    b"irq dispatcher\0",
+    boot_step_irq_setup_fn,
+    boot_init_priority(60)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_TIMER_SETUP,
+    drivers,
+    b"timer\0",
+    boot_step_timer_setup_fn,
+    boot_init_priority(70)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_PCI_INIT,
+    drivers,
+    b"pci\0",
+    boot_step_pci_init_fn,
+    boot_init_priority(80)
+);
+boot_init_step_with_flags!(
+    BOOT_STEP_INTERRUPT_TESTS,
+    drivers,
+    b"interrupt tests\0",
+    boot_step_interrupt_tests_fn,
+    boot_init_priority(90)
+);

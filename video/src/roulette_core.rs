@@ -31,13 +31,13 @@ pub const ROULETTE_RESULT_DELAY_MS: u32 = 5000;
 #[repr(C)]
 pub struct RouletteBackend {
     pub ctx: *mut c_void,
-    pub get_size: Option<unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32>,
-    pub fill_rect: Option<unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
-    pub draw_line: Option<unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
-    pub draw_circle: Option<unsafe extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
-    pub draw_circle_filled: Option<unsafe extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
-    pub draw_text: Option<unsafe extern "C" fn(*mut c_void, i32, i32, *const u8, u32, u32) -> i32>,
-    pub sleep_ms: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+    pub get_size: Option<extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32>,
+    pub fill_rect: Option<extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
+    pub draw_line: Option<extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
+    pub draw_circle: Option<extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
+    pub draw_circle_filled: Option<extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
+    pub draw_text: Option<extern "C" fn(*mut c_void, i32, i32, *const u8, u32, u32) -> i32>,
+    pub sleep_ms: Option<extern "C" fn(*mut c_void, u32)>,
 }
 
 #[derive(Copy, Clone)]
@@ -107,49 +107,49 @@ fn scale(value: i16, radius: i32) -> i32 {
 
 unsafe fn backend_get_size(b: &RouletteBackend, w: &mut i32, h: &mut i32) -> i32 {
     match b.get_size {
-        Some(f) => unsafe { f(b.ctx, w as *mut i32, h as *mut i32) },
+        Some(f) => f(b.ctx, w as *mut i32, h as *mut i32),
         None => -1,
     }
 }
 
 unsafe fn backend_fill_rect(b: &RouletteBackend, x: i32, y: i32, w: i32, h: i32, color: u32) -> i32 {
     match b.fill_rect {
-        Some(f) => unsafe { f(b.ctx, x, y, w, h, color) },
+        Some(f) => f(b.ctx, x, y, w, h, color),
         None => -1,
     }
 }
 
 unsafe fn backend_draw_line(b: &RouletteBackend, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32 {
     match b.draw_line {
-        Some(f) => unsafe { f(b.ctx, x0, y0, x1, y1, color) },
+        Some(f) => f(b.ctx, x0, y0, x1, y1, color),
         None => -1,
     }
 }
 
 unsafe fn backend_draw_circle(b: &RouletteBackend, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
     match b.draw_circle {
-        Some(f) => unsafe { f(b.ctx, cx, cy, radius, color) },
+        Some(f) => f(b.ctx, cx, cy, radius, color),
         None => -1,
     }
 }
 
 unsafe fn backend_draw_circle_filled(b: &RouletteBackend, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
     match b.draw_circle_filled {
-        Some(f) => unsafe { f(b.ctx, cx, cy, radius, color) },
+        Some(f) => f(b.ctx, cx, cy, radius, color),
         None => -1,
     }
 }
 
 unsafe fn backend_draw_text(b: &RouletteBackend, x: i32, y: i32, text: &[u8], fg: u32, bg: u32) -> i32 {
     match b.draw_text {
-        Some(f) => unsafe { f(b.ctx, x, y, text.as_ptr(), fg, bg) },
+        Some(f) => f(b.ctx, x, y, text.as_ptr(), fg, bg),
         None => -1,
     }
 }
 
 unsafe fn backend_sleep_ms(b: &RouletteBackend, ms: u32) {
     if let Some(f) = b.sleep_ms {
-        unsafe { f(b.ctx, ms) };
+        f(b.ctx, ms);
     }
 }
 
@@ -414,7 +414,7 @@ fn roulette_handoff_to_demo(b: &RouletteBackend, width: i32, height: i32) {
     roulette_draw_demo_scene(b, width, height);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;
@@ -635,5 +635,4 @@ pub extern "C" fn roulette_run(backend: *const RouletteBackend, fate_number: u32
 
     0
 }
-
 

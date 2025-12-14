@@ -10,7 +10,7 @@ pub struct FateResult {
 
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn fate_register_outcome_hook(cb: extern "C" fn(*const FateResult)) {
     OUTCOME_HOOK.store(cb as usize, core::sync::atomic::Ordering::SeqCst);
 }

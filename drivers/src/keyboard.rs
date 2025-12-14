@@ -4,7 +4,7 @@ use core::ffi::c_char;
 
 use slopos_lib::{cpu, klog_printf, KlogLevel};
 
-extern "C" {
+unsafe extern "C" {
     fn scheduler_request_reschedule_from_interrupt();
 }
 
@@ -206,7 +206,7 @@ fn handle_modifier_key(make_code: u8, is_press: bool) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_init() {
     unsafe {
         KB_STATE = KeyboardState::new();
@@ -215,7 +215,7 @@ pub extern "C" fn keyboard_init() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
     unsafe {
         klog_printf(
@@ -274,12 +274,12 @@ pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_getchar() -> u8 {
     unsafe { kb_buffer_pop(&raw mut CHAR_BUFFER).unwrap_or(0) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_has_input() -> i32 {
     let has_data = unsafe { kb_buffer_has_data(&raw const CHAR_BUFFER) };
     if has_data {
@@ -289,12 +289,12 @@ pub extern "C" fn keyboard_has_input() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_buffer_pending() -> i32 {
     unsafe { (CHAR_BUFFER.count > 0) as i32 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn keyboard_get_scancode() -> u8 {
     unsafe { kb_buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
 }

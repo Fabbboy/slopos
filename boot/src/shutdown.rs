@@ -8,7 +8,7 @@ static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
 static SERIAL_DRAINED: AtomicBool = AtomicBool::new(false);
 
-extern "C" {
+unsafe extern "C" {
     fn scheduler_shutdown();
     fn task_shutdown_all() -> i32;
     fn task_set_current(task: *mut core::ffi::c_void);
@@ -36,7 +36,7 @@ fn serial_flush() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_quiesce_interrupts() {
     cpu::disable_interrupts();
     if INTERRUPTS_QUIESCED.swap(true, Ordering::SeqCst) {
@@ -59,7 +59,7 @@ pub extern "C" fn kernel_quiesce_interrupts() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_drain_serial_output() {
     if SERIAL_DRAINED.swap(true, Ordering::SeqCst) {
         return;
@@ -73,7 +73,7 @@ pub extern "C" fn kernel_drain_serial_output() {
     serial_flush();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_shutdown(reason: *const c_char) {
     cpu::disable_interrupts();
 
@@ -130,7 +130,7 @@ fn halt() -> ! {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_reboot(reason: *const c_char) {
     cpu::disable_interrupts();
 
@@ -178,13 +178,13 @@ pub extern "C" fn kernel_reboot(reason: *const c_char) {
     let invalid_idt = InvalidIdt { limit: 0, base: 0 };
     unsafe {
         asm!("lidt [{}]", in(reg) &invalid_idt, options(nostack, preserves_flags));
-        asm!("int 0x03", options(nostack));
+        asm!("int3", options(nostack, preserves_flags));
     }
 
     halt();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn execute_kernel() {
     unsafe {
         klog_printf(

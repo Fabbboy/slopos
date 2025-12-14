@@ -20,7 +20,7 @@ const LEGACY_IRQ_COM1: u8 = 4;
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
 
-type IrqHandler = unsafe extern "C" fn(u8, *mut interrupt_frame, *mut c_void);
+type IrqHandler = extern "C" fn(u8, *mut interrupt_frame, *mut c_void);
 
 #[derive(Clone, Copy)]
 struct IrqEntry {
@@ -92,7 +92,7 @@ static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
 static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
 
-extern "C" {
+unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn scheduler_timer_tick();
     fn scheduler_handle_post_irq();
@@ -208,7 +208,7 @@ fn log_unhandled_irq(irq: u8, vector: u8) {
     }
 }
 
-unsafe extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mut c_void) {
+extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mut c_void) {
     (irq, _frame, _ctx);
     unsafe {
         TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
@@ -223,7 +223,7 @@ unsafe extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _c
     }
 }
 
-unsafe extern "C" fn keyboard_irq_handler(
+extern "C" fn keyboard_irq_handler(
     _irq: u8,
     _frame: *mut interrupt_frame,
     _ctx: *mut c_void,
@@ -322,12 +322,12 @@ fn irq_setup_ioapic_routes() {
     irq_program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_get_timer_ticks() -> u64 {
     unsafe { TIMER_TICK_COUNTER }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_init() {
     with_irq_tables(|table, routes| {
         for i in 0..IRQ_LINES {
@@ -362,7 +362,7 @@ pub extern "C" fn irq_init() {
     cpu::enable_interrupts();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_register_handler(
     irq: u8,
     handler: Option<IrqHandler>,
@@ -408,7 +408,7 @@ pub extern "C" fn irq_register_handler(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_unregister_handler(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -430,7 +430,7 @@ pub extern "C" fn irq_unregister_handler(irq: u8) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_enable_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -441,7 +441,7 @@ pub extern "C" fn irq_enable_line(irq: u8) {
     unmask_irq_line(irq);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_disable_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -449,7 +449,7 @@ pub extern "C" fn irq_disable_line(irq: u8) {
     mask_irq_line(irq);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
     if frame.is_null() {
         log(KlogLevel::Info, b"IRQ: Received null frame\0");
@@ -507,7 +507,7 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
         return;
     };
 
-    unsafe { handler(irq, frame, context) };
+    handler(irq, frame, context);
 
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
         unsafe {
@@ -518,7 +518,7 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
                 irq as u32,
             );
         }
-        unsafe { kdiag_dump_interrupt_frame(frame) };
+        kdiag_dump_interrupt_frame(frame);
         unsafe { kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
     }
 
@@ -532,7 +532,7 @@ pub struct irq_stats {
     last_timestamp: u64,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn irq_get_stats(irq: u8, out_stats: *mut irq_stats) -> i32 {
     if irq as usize >= IRQ_LINES || out_stats.is_null() {
         return -1;

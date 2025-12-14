@@ -12,7 +12,7 @@ use crate::wl_currency;
 
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 
-extern "C" {
+unsafe extern "C" {
     fn scheduler_get_current_task() -> *mut task_t;
 }
 
@@ -53,7 +53,7 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut task_t) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_handle(frame: *mut InterruptFrame) {
     if frame.is_null() {
         wl_currency::award_loss();

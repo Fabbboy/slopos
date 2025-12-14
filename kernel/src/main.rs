@@ -34,7 +34,7 @@ static BOOT_LINK_GUARD: extern "C" fn() = boot::kernel_main;
 static USERLAND_LINK_GUARD: fn() = userland::init;
 
 // Pull in other subsystems that the boot crate expects to call by making a volatile reference to them.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn __link_boot_deps() {
     unsafe {
         core::ptr::read_volatile(&((sched::scheduler_shutdown as *const ()) as usize));

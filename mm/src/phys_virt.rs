@@ -10,7 +10,7 @@ use crate::memory_reservations::{
 
 const PAGE_SIZE_4KB: usize = 0x1000;
 
-extern "C" {
+unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn get_hhdm_offset() -> u64;
     fn is_hhdm_available() -> c_int;
@@ -24,7 +24,7 @@ fn hhdm_available() -> bool {
     unsafe { is_hhdm_available() != 0 }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_init_phys_virt_helpers() {
     if !hhdm_available() {
         static MSG: &[u8] = b"MM: HHDM unavailable; cannot translate physical addresses\0";
@@ -34,7 +34,7 @@ pub extern "C" fn mm_init_phys_virt_helpers() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     if phys_addr == 0 {
         return 0;
@@ -93,7 +93,7 @@ pub extern "C" fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     phys_addr + hhdm
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_virt_to_phys(virt_addr: u64) -> u64 {
     if virt_addr == 0 {
         return 0;
@@ -101,7 +101,7 @@ pub extern "C" fn mm_virt_to_phys(virt_addr: u64) -> u64 {
     unsafe { virt_to_phys(virt_addr) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_zero_physical_page(phys_addr: u64) -> c_int {
     if phys_addr == 0 {
         return -1;
@@ -118,7 +118,7 @@ pub extern "C" fn mm_zero_physical_page(phys_addr: u64) -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void {
     if phys_addr == 0 || size == 0 {
         return ptr::null_mut();
@@ -149,7 +149,7 @@ pub extern "C" fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void
     unsafe { (phys_addr + get_hhdm_offset()) as *mut c_void }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mm_unmap_mmio_region(_virt_addr: *mut c_void, _size: usize) -> c_int {
     /* HHDM mappings are static; nothing to do yet. */
     0

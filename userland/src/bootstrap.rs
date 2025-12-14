@@ -23,7 +23,7 @@ pub struct FateResult {
 
 type FateHook = extern "C" fn(*const FateResult);
 
-extern "C" {
+unsafe extern "C" {
     fn fate_register_outcome_hook(cb: FateHook);
     fn process_vm_load_elf(process_id: u32, payload: *const u8, payload_len: usize, entry_out: *mut u64) -> i32;
 }
@@ -33,7 +33,7 @@ fn is_win(res: &FateResult) -> bool {
     res.value & 1 == 1
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn log_info(msg: &[u8]) {
     unsafe {
         klog_printf(
@@ -43,7 +43,7 @@ fn log_info(msg: &[u8]) {
     }
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn log_info_name(msg: &[u8], name: *const c_char) {
     unsafe {
         klog_printf(
@@ -54,7 +54,7 @@ fn log_info_name(msg: &[u8], name: *const c_char) {
     }
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i32 {
     let task_id = user_spawn_program(name.as_ptr() as *const c_char, entry, ptr::null_mut(), priority);
     if task_id == INVALID_TASK_ID {
@@ -97,10 +97,10 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     0
 }
 
-#[link_section = ".user_bss"]
+#[unsafe(link_section = ".user_bss")]
 static mut SHELL_SPAWNED: bool = false;
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 fn userland_launch_shell_once() -> i32 {
     unsafe {
         if SHELL_SPAWNED {
@@ -117,7 +117,7 @@ fn userland_launch_shell_once() -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 extern "C" fn userland_fate_hook(res: *const FateResult) {
     if res.is_null() {
         return;
@@ -131,7 +131,7 @@ extern "C" fn userland_fate_hook(res: *const FateResult) {
     }
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 extern "C" fn boot_step_userland_hook() -> i32 {
     unsafe {
         fate_register_outcome_hook(userland_fate_hook);
@@ -139,13 +139,13 @@ extern "C" fn boot_step_userland_hook() -> i32 {
     0
 }
 
-#[link_section = ".user_text"]
+#[unsafe(link_section = ".user_text")]
 extern "C" fn boot_step_roulette_task() -> i32 {
     userland_spawn_and_schedule(b"roulette\0", roulette_user_main, 5)
 }
 
 #[used]
-#[link_section = ".boot_init_services"]
+#[unsafe(link_section = ".boot_init_services")]
 static BOOT_STEP_USERLAND_HOOK: BootInitStep = BootInitStep::new(
     b"userland fate hook\0",
     boot_step_userland_hook,
@@ -153,7 +153,7 @@ static BOOT_STEP_USERLAND_HOOK: BootInitStep = BootInitStep::new(
 );
 
 #[used]
-#[link_section = ".boot_init_services"]
+#[unsafe(link_section = ".boot_init_services")]
 static BOOT_STEP_ROULETTE_TASK: BootInitStep = BootInitStep::new(
     b"roulette task\0",
     boot_step_roulette_task,

@@ -12,7 +12,7 @@ use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
 
-extern "C" {
+unsafe extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn kernel_panic(msg: *const c_char) -> !;
     fn wl_award_win();
@@ -288,7 +288,7 @@ fn goto_rollback(expansion_start: u64, mapped_pages: u32) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
     let mut heap = KERNEL_HEAP.lock();
 
@@ -348,7 +348,7 @@ pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kzalloc(size: usize) -> *mut c_void {
     let ptr = kmalloc(size);
     if ptr.is_null() {
@@ -360,7 +360,7 @@ pub extern "C" fn kzalloc(size: usize) -> *mut c_void {
     ptr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kfree(ptr_in: *mut c_void) {
     if ptr_in.is_null() {
         return;
@@ -391,7 +391,7 @@ pub extern "C" fn kfree(ptr_in: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_kernel_heap() -> c_int {
     let mut heap = KERNEL_HEAP.lock();
     heap.start_addr = mm_get_kernel_heap_start();
@@ -422,7 +422,7 @@ pub extern "C" fn init_kernel_heap() -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_heap_stats(stats: *mut HeapStats) {
     let heap = KERNEL_HEAP.lock();
     if !stats.is_null() {
@@ -432,13 +432,13 @@ pub extern "C" fn get_heap_stats(stats: *mut HeapStats) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_heap_enable_diagnostics(enable: c_int) {
     let mut heap = KERNEL_HEAP.lock();
     heap.diagnostics_enabled = enable != 0;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn print_heap_stats() {
     let heap = KERNEL_HEAP.lock();
     unsafe {
@@ -569,4 +569,3 @@ pub extern "C" fn print_heap_stats() {
         }
     }
 }
-

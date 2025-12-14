@@ -36,12 +36,12 @@ pub fn disable() {
     disable_impl();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pic_quiesce_mask_all() {
     mask_all_impl();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pic_quiesce_disable() {
     disable_impl();
 }

@@ -37,7 +37,7 @@ fn convert_color(fb: &FbState, color: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_pixel(x: i32, y: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -52,7 +52,7 @@ pub extern "C" fn graphics_draw_pixel(x: i32, y: i32, color: u32) -> i32 {
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_hline(x1: i32, x2: i32, y: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -75,7 +75,7 @@ pub extern "C" fn graphics_draw_hline(x1: i32, x2: i32, y: i32, color: u32) -> i
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_vline(x: i32, y1: i32, y2: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -98,7 +98,7 @@ pub extern "C" fn graphics_draw_vline(x: i32, y1: i32, y2: i32, color: u32) -> i
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -140,7 +140,7 @@ pub extern "C" fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: 
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_rect(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
     if width <= 0 || height <= 0 {
         return GRAPHICS_ERROR_INVALID;
@@ -155,7 +155,7 @@ pub extern "C" fn graphics_draw_rect(x: i32, y: i32, width: i32, height: i32, co
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -197,7 +197,7 @@ pub extern "C" fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: 
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_rect_filled_fast(
     x: i32,
     y: i32,
@@ -273,7 +273,7 @@ pub extern "C" fn graphics_draw_rect_filled_fast(
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
@@ -331,7 +331,7 @@ pub extern "C" fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32
     GRAPHICS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,

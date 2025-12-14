@@ -14,9 +14,9 @@ members = [
 resolver = "2"
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 version = "0.1.0"
-license = "GNU GPL v3"
+license = "GPL-3.0-only"
 
 [workspace.lints.rust]
 warnings = "deny"

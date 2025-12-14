@@ -18,7 +18,7 @@ use crate::paging::{
 use crate::phys_virt::mm_phys_to_virt;
 use slopos_lib::{align_down, align_up};
 
-extern "C" {
+unsafe extern "C" {
     fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn get_hhdm_offset() -> u64;
     static _user_text_start: u8;
@@ -241,7 +241,7 @@ fn find_process_vm(process_id: u32) -> *mut ProcessVm {
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -494,7 +494,7 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn process_vm_load_elf(
     process_id: u32,
     payload: *const u8,
@@ -638,7 +638,7 @@ pub extern "C" fn process_vm_load_elf(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
     let mut manager = VM_MANAGER.lock();
@@ -764,7 +764,7 @@ pub extern "C" fn create_process_vm() -> u32 {
     process_id
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn destroy_process_vm(process_id: u32) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -819,7 +819,7 @@ pub extern "C" fn destroy_process_vm(process_id: u32) -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -865,7 +865,7 @@ pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u6
     start_addr
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() || size == 0 {
@@ -920,7 +920,7 @@ pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_i
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init_process_vm() -> c_int {
     let mut manager = VM_MANAGER.lock();
     manager.num_processes = 0;
@@ -939,7 +939,7 @@ pub extern "C" fn init_process_vm() -> c_int {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
     let manager = VM_MANAGER.lock();
     unsafe {
@@ -952,7 +952,7 @@ pub extern "C" fn get_process_vm_stats(total_processes: *mut u32, active_process
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_current_process_id() -> u32 {
     let manager = VM_MANAGER.lock();
     if manager.active_process.is_null() {

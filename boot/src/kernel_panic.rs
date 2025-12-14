@@ -6,7 +6,7 @@ use slopos_lib::{klog_printf, KlogLevel};
 
 use crate::shutdown::kernel_shutdown;
 
-extern "C" {
+unsafe extern "C" {
     fn is_memory_system_initialized() -> i32;
     fn execute_kernel();
 }
@@ -49,7 +49,7 @@ fn read_cr(reg: &str) -> u64 {
     value
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_panic(message: *const c_char) {
     cpu::disable_interrupts();
 
@@ -119,7 +119,7 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     kernel_shutdown(reason);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_panic_with_context(
     message: *const c_char,
     function: *const c_char,
@@ -194,7 +194,7 @@ pub extern "C" fn kernel_panic_with_context(
     kernel_shutdown(reason);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kernel_assert(condition: i32, message: *const c_char) {
     if condition == 0 {
         let msg = if message.is_null() {

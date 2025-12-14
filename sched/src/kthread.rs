@@ -10,7 +10,7 @@ use crate::task::{task_create, TaskEntry, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE
 
 pub type KthreadId = u32;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kthread_spawn(
     name: *const c_char,
     entry_point: Option<TaskEntry>,
@@ -19,7 +19,7 @@ pub extern "C" fn kthread_spawn(
     kthread_spawn_ex(name, entry_point, arg, TASK_PRIORITY_NORMAL, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kthread_spawn_ex(
     name: *const c_char,
     entry_point: Option<TaskEntry>,
@@ -53,17 +53,17 @@ pub extern "C" fn kthread_spawn_ex(
     id
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kthread_yield() {
     scheduler::r#yield();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kthread_join(thread_id: KthreadId) -> c_int {
     unsafe { task_wait_for(thread_id) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kthread_exit() -> ! {
     scheduler::scheduler_task_exit();
 }

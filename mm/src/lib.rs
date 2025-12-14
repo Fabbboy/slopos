@@ -1,5 +1,5 @@
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 
 mod mm_constants;
@@ -24,7 +24,7 @@ static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-#[link_section = ".bss.heap"]
+#[unsafe(link_section = ".bss.heap")]
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 pub fn init(hhdm_offset: u64) {

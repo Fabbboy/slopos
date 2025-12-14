@@ -10,7 +10,7 @@ use slopos_lib::{klog_printf, KlogLevel};
 
 use crate::wl_currency;
 
-extern "C" {
+unsafe extern "C" {
     fn is_hhdm_available() -> i32;
     fn get_hhdm_offset() -> u64;
     fn is_rsdp_available() -> i32;
@@ -681,32 +681,32 @@ pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_init() -> i32 {
     init()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     config_irq(gsi, vector, lapic_id, flags)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_mask_gsi(gsi: u32) -> i32 {
     mask_gsi(gsi)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_unmask_gsi(gsi: u32) -> i32 {
     unmask_gsi(gsi)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_is_ready() -> i32 {
     is_ready()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ioapic_legacy_irq_info(
     legacy_irq: u8,
     out_gsi: *mut u32,

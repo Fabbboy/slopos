@@ -93,7 +93,7 @@ pub struct framebuffer_info_t {
     pub pixel_format: u32,
 }
 
-extern "C" {
+unsafe extern "C" {
     fn user_copy_rect_checked(dst: *mut user_rect_t, src: *const user_rect_t) -> c_int;
     fn user_copy_line_checked(dst: *mut user_line_t, src: *const user_line_t) -> c_int;
     fn user_copy_circle_checked(dst: *mut user_circle_t, src: *const user_circle_t) -> c_int;
@@ -143,14 +143,14 @@ fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> syscall_disposit
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_yield(_task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
     let _ = syscall_return_ok(frame, 0);
     unsafe { yield_() };
     syscall_disposition::SYSCALL_DISP_OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_exit(task: *mut task_t, _frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         if !task.is_null() {
@@ -164,7 +164,7 @@ pub extern "C" fn syscall_exit(task: *mut task_t, _frame: *mut InterruptFrame) -
     syscall_disposition::SYSCALL_DISP_NO_RETURN
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_user_write(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -193,7 +193,7 @@ pub extern "C" fn syscall_user_write(
     syscall_return_ok(frame, write_len as u64)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_user_read(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -232,7 +232,7 @@ pub extern "C" fn syscall_user_read(
     syscall_return_ok(frame, read_len as u64)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_roulette_spin(
     task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -249,7 +249,7 @@ pub extern "C" fn syscall_roulette_spin(
     syscall_return_ok(frame, packed)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_sleep_ms(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -266,7 +266,7 @@ pub extern "C" fn syscall_sleep_ms(
     syscall_return_ok(frame, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_fb_info(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -302,7 +302,7 @@ pub extern "C" fn syscall_fb_info(
     syscall_return_ok(frame, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_fill_rect(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -321,7 +321,7 @@ pub extern "C" fn syscall_gfx_fill_rect(
     syscall_finish_gfx(frame, rc)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_line(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -340,7 +340,7 @@ pub extern "C" fn syscall_gfx_draw_line(
     syscall_finish_gfx(frame, rc)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_circle(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -358,7 +358,7 @@ pub extern "C" fn syscall_gfx_draw_circle(
     syscall_finish_gfx(frame, rc)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_circle_filled(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -376,7 +376,7 @@ pub extern "C" fn syscall_gfx_draw_circle_filled(
     syscall_finish_gfx(frame, rc)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_font_draw(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -412,7 +412,7 @@ pub extern "C" fn syscall_font_draw(
     syscall_finish_gfx(frame, rc)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_random_next(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -421,7 +421,7 @@ pub extern "C" fn syscall_random_next(
     syscall_return_ok(frame, value as u64)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_roulette_result(
     task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -443,7 +443,7 @@ pub extern "C" fn syscall_roulette_result(
     syscall_return_ok(frame, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_sys_info(
     _task: *mut task_t,
     frame: *mut InterruptFrame,
@@ -496,7 +496,7 @@ pub extern "C" fn syscall_sys_info(
     syscall_return_ok(frame, 0)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_halt(_task: *mut task_t, _frame: *mut InterruptFrame) -> syscall_disposition {
     unsafe {
         kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
@@ -645,7 +645,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_HALT: u64 = 23;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn syscall_lookup(sysno: u64) -> *const syscall_entry {
     if (sysno as usize) >= SYSCALL_TABLE.len() {
         return ptr::null();

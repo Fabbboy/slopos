@@ -29,7 +29,7 @@ static mut TTY_WAIT_QUEUE: tty_wait_queue = tty_wait_queue {
     count: 0,
 };
 
-extern "C" {
+unsafe extern "C" {
     fn scheduler_register_idle_wakeup_callback(cb: extern "C" fn() -> c_int);
     fn scheduler_is_enabled() -> c_int;
     fn task_is_blocked(task: *mut task_t) -> c_int;
@@ -88,7 +88,7 @@ fn tty_wait_queue_pop() -> *mut task_t {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tty_notify_input_ready() {
     if unsafe { scheduler_is_enabled() } == 0 {
         return;
@@ -177,11 +177,11 @@ fn serial_putc(port: u16, c: u8) {
     let _ = port; // keep signature parity
 }
 
-extern "C" {
+unsafe extern "C" {
     fn yield_();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     if buffer.is_null() || buffer_size == 0 {
         return 0;

@@ -1,6 +1,6 @@
 #![no_std]
 #![feature(c_variadic)]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod cpu {
     use core::arch::asm;
@@ -160,7 +160,7 @@ pub mod io {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn cpuid_ffi(
         leaf: u32,
         eax: *mut u32,
@@ -185,7 +185,7 @@ pub mod io {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn cpu_read_msr_ffi(msr: u32) -> u64 {
         crate::cpu::read_msr(msr)
     }

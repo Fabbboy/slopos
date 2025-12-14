@@ -1,5 +1,5 @@
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![allow(unused_unsafe)]
 #![allow(unused_imports)]
 #![allow(static_mut_refs)]
@@ -151,7 +151,7 @@ fn award_wl_for_result(res: &TestSuiteResult) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tests_reset_registry() {
     unsafe {
         REGISTRY.iter_mut().for_each(|slot| *slot = None);
@@ -159,7 +159,7 @@ pub extern "C" fn tests_reset_registry() {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     if desc.is_null() {
         return -1;
@@ -178,12 +178,12 @@ pub extern "C" fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tests_register_system_suites() {
     suites::register_system_suites();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn tests_run_all(
     config: *const InterruptTestConfig,
     summary: *mut TestRunSummary,
@@ -320,7 +320,7 @@ mod suites {
     const ROULETTE_EXEC_NAME: &[u8] = b"roulette_exec\0";
     const VIRTIO_GPU_NAME: &[u8] = b"virtio_gpu\0";
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub static interrupt_suite_desc: TestSuiteDesc = TestSuiteDesc {
         name: INTERRUPT_NAME.as_ptr() as *const c_char,
         mask_bit: INTERRUPT_TEST_SUITE_BASIC
@@ -422,7 +422,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" {
+    unsafe extern "C" {
         fn test_heap_free_list_search() -> c_int;
         fn test_heap_fragmentation_behind_head() -> c_int;
         fn test_process_vm_slot_reuse() -> c_int;

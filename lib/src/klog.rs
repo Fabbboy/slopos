@@ -72,28 +72,28 @@ pub(crate) fn log_line(level: KlogLevel, text: &str) {
     putc(b'\n');
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_init() {
     CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
     SERIAL_READY.store(false, Ordering::Relaxed);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_attach_serial() {
     SERIAL_READY.store(true, Ordering::Relaxed);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_set_level(level: KlogLevel) {
     CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_get_level() -> KlogLevel {
     KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_is_enabled(level: KlogLevel) -> c_int {
     if is_enabled(level) {
         1
@@ -102,23 +102,19 @@ pub extern "C" fn klog_is_enabled(level: KlogLevel) -> c_int {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn klog_newline() {
     putc(b'\n');
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn klog_info(msg: *const u8, _: ...) {
-    unsafe {
-        klog_printf(KlogLevel::Info, msg as *const c_char);
-    }
+    klog_printf(KlogLevel::Info, msg as *const c_char);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn klog_debug(msg: *const u8, _: ...) {
-    unsafe {
-        klog_printf(KlogLevel::Debug, msg as *const c_char);
-    }
+    klog_printf(KlogLevel::Debug, msg as *const c_char);
 }
 
 #[derive(Clone, Copy)]
@@ -270,7 +266,7 @@ unsafe fn format_pointer(args: &mut VaList<'_>, width: i32, zero_pad: bool) {
     write_padded(bytes, width, zero_pad);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn klog_printf(
     level: KlogLevel,
     fmt: *const c_char,
@@ -354,5 +350,4 @@ pub unsafe extern "C" fn klog_printf(
         }
     }
 }
-
 
