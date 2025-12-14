@@ -3,6 +3,8 @@
 use slopos_lib::tsc;
 use spin::Mutex;
 
+const DEFAULT_LFSR_SEED: u64 = 0xACE1u64;
+
 #[derive(Clone, Copy)]
 pub struct Lfsr64 {
     state: u64,
@@ -10,7 +12,7 @@ pub struct Lfsr64 {
 
 impl Lfsr64 {
     pub fn with_seed(seed: u64) -> Self {
-        let s = if seed == 0 { 0xACE1u64 } else { seed };
+        let s = if seed == 0 { DEFAULT_LFSR_SEED } else { seed };
         Self { state: s }
     }
 
