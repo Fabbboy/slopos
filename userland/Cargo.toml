@@ -12,9 +12,8 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-slopos-drivers = { path = "../drivers" }
-slopos-video = { path = "../video" }
-slopos-boot = { path = "../boot" }
-slopos-lib = { path = "../lib" }
-slopos-sched = { path = "../sched" }
-
+slopos-drivers = { workspace = true }
+slopos-video = { workspace = true }
+slopos-boot = { workspace = true }
+slopos-lib = { workspace = true }
+slopos-sched = { workspace = true }

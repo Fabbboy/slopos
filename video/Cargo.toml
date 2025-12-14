@@ -12,7 +12,6 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-slopos-drivers = { path = "../drivers" }
-slopos-lib = { path = "../lib" }
+slopos-drivers = { workspace = true }
+slopos-lib = { workspace = true }
 spin = { workspace = true }
-

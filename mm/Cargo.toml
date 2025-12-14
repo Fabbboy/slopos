@@ -12,6 +12,5 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-slopos-lib = { path = "../lib" }
+slopos-lib = { workspace = true }
 spin.workspace = true
-
