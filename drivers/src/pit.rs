@@ -51,7 +51,7 @@ fn pit_calculate_divisor(mut frequency_hz: u32) -> u16 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_set_frequency(frequency_hz: u32) {
+pub fn pit_set_frequency(frequency_hz: u32) {
     let divisor = pit_calculate_divisor(frequency_hz);
 
     unsafe {
@@ -69,7 +69,7 @@ pub extern "C" fn pit_set_frequency(frequency_hz: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_init(frequency_hz: u32) {
+pub fn pit_init(frequency_hz: u32) {
     let freq = if frequency_hz == 0 {
         PIT_DEFAULT_FREQUENCY_HZ
     } else {
@@ -81,7 +81,7 @@ pub extern "C" fn pit_init(frequency_hz: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_get_frequency() -> u32 {
+pub fn pit_get_frequency() -> u32 {
     let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
     if freq == 0 {
         PIT_DEFAULT_FREQUENCY_HZ
@@ -91,12 +91,12 @@ pub extern "C" fn pit_get_frequency() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_enable_irq() {
+pub fn pit_enable_irq() {
     irq::enable_line(PIT_IRQ_LINE);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_disable_irq() {
+pub fn pit_disable_irq() {
     irq::disable_line(PIT_IRQ_LINE);
 }
 
@@ -110,7 +110,7 @@ fn pit_read_count() -> u16 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_poll_delay_ms(ms: u32) {
+pub fn pit_poll_delay_ms(ms: u32) {
     if ms == 0 {
         return;
     }
@@ -142,7 +142,7 @@ pub extern "C" fn pit_poll_delay_ms(ms: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pit_sleep_ms(ms: u32) {
+pub fn pit_sleep_ms(ms: u32) {
     if ms == 0 {
         return;
     }

@@ -141,7 +141,7 @@ pub fn print_args(args: fmt::Arguments<'_>) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn serial_poll_receive(port: u16) {
+pub fn serial_poll_receive(port: u16) {
     // Poll the UART Line Status Register for data ready.
     // This works with all UART types (8250/16450/16550 family)
     while unsafe { io::inb(port + REG_LSR) } & LSR_DATA_READY != 0 {
@@ -152,7 +152,7 @@ pub extern "C" fn serial_poll_receive(port: u16) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn serial_buffer_pending(port: u16) -> i32 {
+pub fn serial_buffer_pending(port: u16) -> i32 {
     // Ensure we service the port before reporting availability.
     serial_poll_receive(port);
     let buf = INPUT_BUFFER.lock();
@@ -160,7 +160,7 @@ pub extern "C" fn serial_buffer_pending(port: u16) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
+pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     // Refresh buffer then attempt to pop one byte.
     serial_poll_receive(port);
     let mut buf = INPUT_BUFFER.lock();
