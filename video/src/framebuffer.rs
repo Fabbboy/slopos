@@ -176,7 +176,7 @@ pub fn init_with_info(info: FramebufferInfo) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_init() -> i32 {
+pub fn framebuffer_init() -> i32 {
     let mut addr = 0u64;
     let mut width = 0u32;
     let mut height = 0u32;
@@ -192,7 +192,7 @@ pub extern "C" fn framebuffer_init() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_get_info() -> *mut FramebufferInfoC {
+pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
     let guard = FRAMEBUFFER.lock();
     let mut export = FRAMEBUFFER_INFO_EXPORT.lock();
     if let Some(fb) = guard.fb {
@@ -212,12 +212,12 @@ pub extern "C" fn framebuffer_get_info() -> *mut FramebufferInfoC {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_is_initialized() -> i32 {
+pub fn framebuffer_is_initialized() -> i32 {
     FRAMEBUFFER.lock().fb.is_some() as i32
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_clear(color: u32) {
+pub fn framebuffer_clear(color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return,
@@ -249,7 +249,7 @@ pub extern "C" fn framebuffer_clear(color: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
+pub fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return,
@@ -279,7 +279,7 @@ pub extern "C" fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
+pub fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return 0,
@@ -312,32 +312,32 @@ pub extern "C" fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_get_width() -> u32 {
+pub fn framebuffer_get_width() -> u32 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.width).unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_get_height() -> u32 {
+pub fn framebuffer_get_height() -> u32 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.height).unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_get_bpp() -> u8 {
+pub fn framebuffer_get_bpp() -> u8 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.bpp).unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
+pub fn framebuffer_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32) | ((a as u32) << 24)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_rgb(r: u8, g: u8, b: u8) -> u32 {
+pub fn framebuffer_rgb(r: u8, g: u8, b: u8) -> u32 {
     framebuffer_rgba(r, g, b, 0xFF)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn framebuffer_convert_color(color: u32) -> u32 {
+pub fn framebuffer_convert_color(color: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return color,

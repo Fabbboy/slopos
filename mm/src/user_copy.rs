@@ -63,7 +63,7 @@ fn validate_user_buffer(user_ptr: u64, len: usize, dir: *mut crate::paging::Proc
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const c_void, len: usize) -> c_int {
+pub fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const c_void, len: usize) -> c_int {
     let dir = current_process_dir();
     if kernel_dst.is_null() || user_src.is_null() {
         return -1;
@@ -78,7 +78,7 @@ pub extern "C" fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_void, len: usize) -> c_int {
+pub fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_void, len: usize) -> c_int {
     let dir = current_process_dir();
     if user_dst.is_null() || kernel_src.is_null() {
         return -1;

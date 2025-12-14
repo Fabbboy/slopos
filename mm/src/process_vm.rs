@@ -222,7 +222,7 @@ fn find_process_vm(process_id: u32) -> *mut ProcessVm {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
+pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
         return ptr::null_mut();
@@ -466,7 +466,7 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn process_vm_load_elf(
+pub fn process_vm_load_elf(
     process_id: u32,
     payload: *const u8,
     payload_len: usize,
@@ -610,7 +610,7 @@ pub extern "C" fn process_vm_load_elf(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn create_process_vm() -> u32 {
+pub fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
     let mut manager = VM_MANAGER.lock();
     if manager.num_processes >= MAX_PROCESSES as u32 {
@@ -726,7 +726,7 @@ pub extern "C" fn create_process_vm() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn destroy_process_vm(process_id: u32) -> c_int {
+pub fn destroy_process_vm(process_id: u32) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
         return 0;
@@ -777,7 +777,7 @@ pub extern "C" fn destroy_process_vm(process_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
+pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
         return 0;
@@ -823,7 +823,7 @@ pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u6
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
+pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() || size == 0 {
         return -1;
@@ -875,7 +875,7 @@ pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_i
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_process_vm() -> c_int {
+pub fn init_process_vm() -> c_int {
     let mut manager = VM_MANAGER.lock();
     manager.num_processes = 0;
     manager.next_process_id = 1;
@@ -890,7 +890,7 @@ pub extern "C" fn init_process_vm() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
+pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
     let manager = VM_MANAGER.lock();
     unsafe {
         if !total_processes.is_null() {
@@ -903,7 +903,7 @@ pub extern "C" fn get_process_vm_stats(total_processes: *mut u32, active_process
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_current_process_id() -> u32 {
+pub fn get_current_process_id() -> u32 {
     let manager = VM_MANAGER.lock();
     if manager.active_process.is_null() {
         0

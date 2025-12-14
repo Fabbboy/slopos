@@ -330,7 +330,7 @@ fn overlay_region(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
+pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
     if buffer.is_null() || capacity == 0 {
         unsafe {
             kernel_panic(b"MM: invalid region storage configuration\0".as_ptr() as *const c_char);
@@ -345,7 +345,7 @@ pub extern "C" fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_map_reset() {
+pub fn mm_region_map_reset() {
     unsafe {
         if !REGION_STORE.configured {
             REGION_STORE.regions = STATIC_REGION_STORE.as_mut_ptr();
@@ -357,7 +357,7 @@ pub extern "C" fn mm_region_map_reset() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_add_usable(
+pub fn mm_region_add_usable(
     phys_base: u64,
     length: u64,
     label: *const c_char,
@@ -376,7 +376,7 @@ pub extern "C" fn mm_region_add_usable(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_reserve(
+pub fn mm_region_reserve(
     phys_base: u64,
     length: u64,
     type_: MmReservationType,
@@ -390,12 +390,12 @@ pub extern "C" fn mm_region_reserve(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_count() -> u32 {
+pub fn mm_region_count() -> u32 {
     ensure_storage().count
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_get(index: u32) -> *const MmRegion {
+pub fn mm_region_get(index: u32) -> *const MmRegion {
     let store = ensure_storage();
     if index >= store.count {
         return ptr::null();
@@ -404,7 +404,7 @@ pub extern "C" fn mm_region_get(index: u32) -> *const MmRegion {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_count() -> u32 {
+pub fn mm_reservations_count() -> u32 {
     let store = ensure_storage();
     let mut count = 0;
     for i in 0..store.count {
@@ -417,17 +417,17 @@ pub extern "C" fn mm_reservations_count() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_capacity() -> u32 {
+pub fn mm_reservations_capacity() -> u32 {
     ensure_storage().capacity
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_overflow_count() -> u32 {
+pub fn mm_reservations_overflow_count() -> u32 {
     ensure_storage().overflows
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_get(index: u32) -> *const MmRegion {
+pub fn mm_reservations_get(index: u32) -> *const MmRegion {
     let store = ensure_storage();
     let mut seen = 0;
     for i in 0..store.count {
@@ -444,7 +444,7 @@ pub extern "C" fn mm_reservations_get(index: u32) -> *const MmRegion {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_find(phys_addr: u64) -> *const MmRegion {
+pub fn mm_reservations_find(phys_addr: u64) -> *const MmRegion {
     let store = ensure_storage();
     for i in 0..store.count {
         let region = unsafe { &*store.regions.add(i as usize) };
@@ -469,7 +469,7 @@ pub fn mm_reservations_find_option(phys_addr: u64) -> Option<&'static MmRegion> 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_is_reserved(phys_addr: u64) -> c_int {
+pub fn mm_is_reserved(phys_addr: u64) -> c_int {
     if mm_reservations_find(phys_addr).is_null() {
         0
     } else {
@@ -478,7 +478,7 @@ pub extern "C" fn mm_is_reserved(phys_addr: u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_is_range_reserved(phys_base: u64, length: u64) -> c_int {
+pub fn mm_is_range_reserved(phys_base: u64, length: u64) -> c_int {
     if length == 0 {
         return 0;
     }
@@ -503,7 +503,7 @@ pub extern "C" fn mm_is_range_reserved(phys_base: u64, length: u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_iterate_reserved(cb: MmRegionIterCb, ctx: *mut c_void) {
+pub fn mm_iterate_reserved(cb: MmRegionIterCb, ctx: *mut c_void) {
     if cb.is_none() {
         return;
     }
@@ -520,7 +520,7 @@ pub extern "C" fn mm_iterate_reserved(cb: MmRegionIterCb, ctx: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char {
+pub fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char {
     match type_ {
         MmReservationType::AllocatorMetadata => b"allocator metadata\0".as_ptr() as *const c_char,
         MmReservationType::Framebuffer => b"framebuffer\0".as_ptr() as *const c_char,
@@ -532,7 +532,7 @@ pub extern "C" fn mm_reservation_type_name(type_: MmReservationType) -> *const c
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
+pub fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
     let store = ensure_storage();
     let mut total = 0u64;
     for i in 0..store.count {
@@ -549,7 +549,7 @@ pub extern "C" fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
+pub fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
     let store = ensure_storage();
     let mut total = 0u64;
     for i in 0..store.count {
@@ -562,7 +562,7 @@ pub extern "C" fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_highest_usable_frame() -> u64 {
+pub fn mm_region_highest_usable_frame() -> u64 {
     let store = ensure_storage();
     let mut highest = 0u64;
     for i in 0..store.count {
@@ -580,7 +580,7 @@ pub extern "C" fn mm_region_highest_usable_frame() -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
+pub fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
     let store = ensure_storage();
     for i in 0..store.count {
         let region = unsafe { &*store.regions.add(i as usize) };

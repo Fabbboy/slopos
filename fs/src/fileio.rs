@@ -189,7 +189,7 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
+pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
     }
@@ -208,7 +208,7 @@ pub extern "C" fn fileio_create_table_for_process(process_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
+pub fn fileio_destroy_table_for_process(process_id: u32) {
     if process_id == INVALID_PROCESS_ID {
         return;
     }
@@ -231,7 +231,7 @@ pub extern "C" fn fileio_destroy_table_for_process(process_id: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_open_for_process(
+pub fn file_open_for_process(
     process_id: u32,
     path: *const c_char,
     flags: u32,
@@ -300,7 +300,7 @@ pub extern "C" fn file_open_for_process(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_read_fd(
+pub fn file_read_fd(
     process_id: u32,
     fd: c_int,
     buffer: *mut c_char,
@@ -352,7 +352,7 @@ pub extern "C" fn file_read_fd(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_write_fd(
+pub fn file_write_fd(
     process_id: u32,
     fd: c_int,
     buffer: *const c_char,
@@ -396,7 +396,7 @@ pub extern "C" fn file_write_fd(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
+pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
@@ -417,7 +417,7 @@ pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_seek_fd(
+pub fn file_seek_fd(
     process_id: u32,
     fd: c_int,
     offset: u64,
@@ -482,7 +482,7 @@ pub extern "C" fn file_seek_fd(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
+pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return usize::MAX;
@@ -508,7 +508,7 @@ pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_exists_path(path: *const c_char) -> c_int {
+pub fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
     }
@@ -521,7 +521,7 @@ pub extern "C" fn file_exists_path(path: *const c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_unlink_path(path: *const c_char) -> c_int {
+pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }

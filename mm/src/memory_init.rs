@@ -518,7 +518,7 @@ fn display_memory_summary() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> c_int {
+pub fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> c_int {
     unsafe {
         klog_debug!("========== SlopOS Memory System Initialization ==========");
         klog_debug!("Initializing complete memory management system...");
@@ -572,12 +572,12 @@ pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_o
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn is_memory_system_initialized() -> c_int {
+pub fn is_memory_system_initialized() -> c_int {
     unsafe { MEMORY_SYSTEM_INITIALIZED as c_int }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_memory_statistics(
+pub fn get_memory_statistics(
     total_memory_out: *mut u64,
     available_memory_out: *mut u64,
     regions_count_out: *mut u32,

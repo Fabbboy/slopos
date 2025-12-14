@@ -257,7 +257,7 @@ fn glyph_for_char(c: c_char) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_draw_char(x: i32, y: i32, c: c_char, fg_color: u32, bg_color: u32) -> c_int {
+pub fn font_draw_char(x: i32, y: i32, c: c_char, fg_color: u32, bg_color: u32) -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
@@ -315,7 +315,7 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_draw_string(x: i32, y: i32, str_ptr: *const c_char, fg_color: u32, bg_color: u32) -> c_int {
+pub fn font_draw_string(x: i32, y: i32, str_ptr: *const c_char, fg_color: u32, bg_color: u32) -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
@@ -362,7 +362,7 @@ pub extern "C" fn font_draw_string(x: i32, y: i32, str_ptr: *const c_char, fg_co
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_draw_string_clear(
+pub fn font_draw_string_clear(
     x: i32,
     y: i32,
     str_ptr: *const c_char,
@@ -380,7 +380,7 @@ pub extern "C" fn font_draw_string_clear(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_get_string_width(str_ptr: *const c_char) -> i32 {
+pub fn font_get_string_width(str_ptr: *const c_char) -> i32 {
     if str_ptr.is_null() {
         return 0;
     }
@@ -405,7 +405,7 @@ pub extern "C" fn font_get_string_width(str_ptr: *const c_char) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_get_string_lines(str_ptr: *const c_char) -> c_int {
+pub fn font_get_string_lines(str_ptr: *const c_char) -> c_int {
     if str_ptr.is_null() {
         return 0;
     }
@@ -465,7 +465,7 @@ fn console_scroll_up(state: &mut ConsoleState) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_console_init(fg_color: u32, bg_color: u32) {
+pub fn font_console_init(fg_color: u32, bg_color: u32) {
     let mut console = FONT_CONSOLE.lock();
     console.cursor_x = 0;
     console.cursor_y = 0;
@@ -475,7 +475,7 @@ pub extern "C" fn font_console_init(fg_color: u32, bg_color: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_console_putc(c: c_char) -> c_int {
+pub fn font_console_putc(c: c_char) -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
@@ -511,7 +511,7 @@ pub extern "C" fn font_console_putc(c: c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_console_puts(str_ptr: *const c_char) -> c_int {
+pub fn font_console_puts(str_ptr: *const c_char) -> c_int {
     if str_ptr.is_null() {
         return FONT_ERROR_INVALID;
     }
@@ -530,7 +530,7 @@ pub extern "C" fn font_console_puts(str_ptr: *const c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_console_clear() -> c_int {
+pub fn font_console_clear() -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
@@ -550,7 +550,7 @@ pub extern "C" fn font_console_clear() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn font_console_set_colors(fg_color: u32, bg_color: u32) {
+pub fn font_console_set_colors(fg_color: u32, bg_color: u32) {
     let mut console = FONT_CONSOLE.lock();
     console.fg_color = fg_color;
     console.bg_color = bg_color;

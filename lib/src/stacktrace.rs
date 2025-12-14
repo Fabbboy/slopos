@@ -32,7 +32,7 @@ fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stacktrace_capture_from(
+pub fn stacktrace_capture_from(
     mut rbp: u64,
     entries: *mut StacktraceEntry,
     max_entries: c_int,
@@ -74,7 +74,7 @@ pub extern "C" fn stacktrace_capture_from(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stacktrace_capture(
+pub fn stacktrace_capture(
     entries: *mut StacktraceEntry,
     max_entries: c_int,
 ) -> c_int {
@@ -83,7 +83,7 @@ pub extern "C" fn stacktrace_capture(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
+pub fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     if max_frames <= 0 {
         return;
     }
@@ -111,7 +111,7 @@ pub extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stacktrace_dump(max_frames: c_int) {
+pub fn stacktrace_dump(max_frames: c_int) {
     let rbp = read_frame_pointer();
     stacktrace_dump_from(rbp, max_frames);
 }

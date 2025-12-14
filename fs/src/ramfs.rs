@@ -357,7 +357,7 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_get_root() -> *mut ramfs_node_t {
+pub fn ramfs_get_root() -> *mut ramfs_node_t {
     let mut state = RAMFS_STATE.lock();
     if ensure_initialized_locked(&mut state) != 0 {
         return ptr::null_mut();
@@ -366,13 +366,13 @@ pub extern "C" fn ramfs_get_root() -> *mut ramfs_node_t {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_init() -> c_int {
+pub fn ramfs_init() -> c_int {
     let mut state = RAMFS_STATE.lock();
     ensure_initialized_locked(&mut state)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_node_retain(node: *mut ramfs_node_t) {
+pub fn ramfs_node_retain(node: *mut ramfs_node_t) {
     if node.is_null() {
         return;
     }
@@ -383,7 +383,7 @@ pub extern "C" fn ramfs_node_retain(node: *mut ramfs_node_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_node_release(node: *mut ramfs_node_t) {
+pub fn ramfs_node_release(node: *mut ramfs_node_t) {
     if node.is_null() {
         return;
     }
@@ -406,7 +406,7 @@ pub extern "C" fn ramfs_node_release(node: *mut ramfs_node_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_find_node(path: *const c_char) -> *mut ramfs_node_t {
+pub fn ramfs_find_node(path: *const c_char) -> *mut ramfs_node_t {
     if !validate_path(path) {
         return ptr::null_mut();
     }
@@ -422,7 +422,7 @@ pub extern "C" fn ramfs_find_node(path: *const c_char) -> *mut ramfs_node_t {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_acquire_node(path: *const c_char) -> *mut ramfs_node_t {
+pub fn ramfs_acquire_node(path: *const c_char) -> *mut ramfs_node_t {
     let node = ramfs_find_node(path);
     if node.is_null() {
         return ptr::null_mut();
@@ -432,7 +432,7 @@ pub extern "C" fn ramfs_acquire_node(path: *const c_char) -> *mut ramfs_node_t {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t {
+pub fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t {
     if !validate_path(path) {
         return ptr::null_mut();
     }
@@ -480,7 +480,7 @@ pub extern "C" fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_create_file(
+pub fn ramfs_create_file(
     path: *const c_char,
     data: *const c_void,
     size: usize,
@@ -547,7 +547,7 @@ pub extern "C" fn ramfs_create_file(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_read_file(
+pub fn ramfs_read_file(
     path: *const c_char,
     buffer: *mut c_void,
     buffer_size: usize,
@@ -571,7 +571,7 @@ pub extern "C" fn ramfs_read_file(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_write_file(path: *const c_char, data: *const c_void, size: usize) -> c_int {
+pub fn ramfs_write_file(path: *const c_char, data: *const c_void, size: usize) -> c_int {
     if !validate_path(path) {
         return -1;
     }
@@ -610,7 +610,7 @@ pub extern "C" fn ramfs_write_file(path: *const c_char, data: *const c_void, siz
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_read_bytes(
+pub fn ramfs_read_bytes(
     node: *mut ramfs_node_t,
     offset: usize,
     buffer: *mut c_void,
@@ -690,7 +690,7 @@ unsafe fn ensure_capacity_locked(node: *mut ramfs_node_t, required_size: usize) 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_write_bytes(
+pub fn ramfs_write_bytes(
     node: *mut ramfs_node_t,
     offset: usize,
     data: *const c_void,
@@ -717,7 +717,7 @@ pub extern "C" fn ramfs_write_bytes(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_list_directory(
+pub fn ramfs_list_directory(
     path: *const c_char,
     entries: *mut *mut *mut ramfs_node_t,
     count: *mut c_int,
@@ -790,7 +790,7 @@ pub extern "C" fn ramfs_list_directory(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_release_list(entries: *mut *mut ramfs_node_t, count: c_int) {
+pub fn ramfs_release_list(entries: *mut *mut ramfs_node_t, count: c_int) {
     if entries.is_null() || count <= 0 {
         return;
     }
@@ -805,7 +805,7 @@ pub extern "C" fn ramfs_release_list(entries: *mut *mut ramfs_node_t, count: c_i
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_remove_file(path: *const c_char) -> c_int {
+pub fn ramfs_remove_file(path: *const c_char) -> c_int {
     if !validate_path(path) {
         return -1;
     }
@@ -832,7 +832,7 @@ pub extern "C" fn ramfs_remove_file(path: *const c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn ramfs_get_size(node: *mut ramfs_node_t) -> usize {
+pub fn ramfs_get_size(node: *mut ramfs_node_t) -> usize {
     if node.is_null() {
         return 0;
     }

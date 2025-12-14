@@ -62,7 +62,7 @@ static MONOTONIC_TIME: AtomicU64 = AtomicU64::new(0);
 static LAST_TSC: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_timestamp() -> u64 {
+pub fn kdiag_timestamp() -> u64 {
     let tsc = tsc::rdtsc();
     let last = LAST_TSC.load(Ordering::Relaxed);
     if tsc > last {
@@ -74,7 +74,7 @@ pub extern "C" fn kdiag_timestamp() -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_cpu_state() {
+pub fn kdiag_dump_cpu_state() {
     let (rsp, rbp, rax, rbx, rcx, rdx, rsi, rdi): (u64, u64, u64, u64, u64, u64, u64, u64);
     let (r8, r9, r10, r11, r12, r13, r14, r15): (u64, u64, u64, u64, u64, u64, u64, u64);
     let (rflags, cr0, cr2, cr3, cr4): (u64, u64, u64, u64, u64);
@@ -142,7 +142,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
+pub fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;
     }
@@ -170,7 +170,7 @@ pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_stack_trace() {
+pub fn kdiag_dump_stack_trace() {
     let rbp = cpu::read_rbp();
     crate::klog_info!("=== STACK TRACE ===");
     kdiag_dump_stack_trace_from_rbp(rbp);
@@ -178,7 +178,7 @@ pub extern "C" fn kdiag_dump_stack_trace() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
+pub fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
     let mut entries: [StacktraceEntry; KDIAG_STACK_TRACE_DEPTH] =
         [StacktraceEntry { frame_pointer: 0, return_address: 0 }; KDIAG_STACK_TRACE_DEPTH];
 
@@ -202,7 +202,7 @@ pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
+pub fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;
     }
@@ -216,7 +216,7 @@ pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
+pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
     if data.is_null() || length == 0 {
         return;
     }

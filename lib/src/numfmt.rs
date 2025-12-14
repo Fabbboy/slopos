@@ -248,7 +248,7 @@ pub unsafe fn parse_u64_internal(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_u64_to_decimal(
+pub fn numfmt_u64_to_decimal(
     value: u64,
     buffer: *mut c_char,
     buffer_len: usize,
@@ -257,7 +257,7 @@ pub extern "C" fn numfmt_u64_to_decimal(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_i64_to_decimal(
+pub fn numfmt_i64_to_decimal(
     value: i64,
     buffer: *mut c_char,
     buffer_len: usize,
@@ -266,7 +266,7 @@ pub extern "C" fn numfmt_i64_to_decimal(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_u64_to_hex(
+pub fn numfmt_u64_to_hex(
     value: u64,
     buffer: *mut c_char,
     buffer_len: usize,
@@ -276,7 +276,7 @@ pub extern "C" fn numfmt_u64_to_hex(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_u8_to_hex(
+pub fn numfmt_u8_to_hex(
     value: u8,
     buffer: *mut c_char,
     buffer_len: usize,
@@ -285,7 +285,7 @@ pub extern "C" fn numfmt_u8_to_hex(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_parse_u32(
+pub fn numfmt_parse_u32(
     str_ptr: *const c_char,
     out: *mut u32,
     fallback: u32,
@@ -294,7 +294,7 @@ pub extern "C" fn numfmt_parse_u32(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn numfmt_parse_u64(
+pub fn numfmt_parse_u64(
     str_ptr: *const c_char,
     out: *mut u64,
     fallback: u64,

@@ -77,7 +77,7 @@ fn ptr_as_u64(p: *const c_void) -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_kernel_memory_layout() {
+pub fn init_kernel_memory_layout() {
     unsafe {
         let start_phys = ptr_as_u64(&_kernel_start);
         let end_phys = ptr_as_u64(&_kernel_end);
@@ -105,7 +105,7 @@ pub extern "C" fn init_kernel_memory_layout() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
+pub fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
     unsafe {
         if LAYOUT_INITIALIZED {
             &KERNEL_LAYOUT as *const KernelMemoryLayout
@@ -116,46 +116,46 @@ pub extern "C" fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_kernel_phys_start() -> u64 {
+pub fn mm_get_kernel_phys_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_start_phys }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_kernel_phys_end() -> u64 {
+pub fn mm_get_kernel_phys_end() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_end_phys }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_kernel_virt_start() -> u64 {
+pub fn mm_get_kernel_virt_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_start_virt }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_identity_map_limit() -> u64 {
+pub fn mm_get_identity_map_limit() -> u64 {
     unsafe { KERNEL_LAYOUT.identity_map_end }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_kernel_heap_start() -> u64 {
+pub fn mm_get_kernel_heap_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_start }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_kernel_heap_end() -> u64 {
+pub fn mm_get_kernel_heap_end() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_end }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_user_space_start() -> u64 {
+pub fn mm_get_user_space_start() -> u64 {
     unsafe { KERNEL_LAYOUT.user_space_start }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_user_space_end() -> u64 {
+pub fn mm_get_user_space_end() -> u64 {
     unsafe { KERNEL_LAYOUT.user_space_end }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mm_get_process_layout() -> *const ProcessMemoryLayout {
+pub fn mm_get_process_layout() -> *const ProcessMemoryLayout {
     &PROCESS_LAYOUT as *const ProcessMemoryLayout
 }

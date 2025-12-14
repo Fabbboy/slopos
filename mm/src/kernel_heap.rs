@@ -271,7 +271,7 @@ fn goto_rollback(expansion_start: u64, mapped_pages: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
+pub fn kmalloc(size: usize) -> *mut c_void {
     let mut heap = KERNEL_HEAP.lock();
 
     if !heap.initialized {
@@ -331,7 +331,7 @@ pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kzalloc(size: usize) -> *mut c_void {
+pub fn kzalloc(size: usize) -> *mut c_void {
     let ptr = kmalloc(size);
     if ptr.is_null() {
         return ptr::null_mut();
@@ -343,7 +343,7 @@ pub extern "C" fn kzalloc(size: usize) -> *mut c_void {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kfree(ptr_in: *mut c_void) {
+pub fn kfree(ptr_in: *mut c_void) {
     if ptr_in.is_null() {
         return;
     }
@@ -371,7 +371,7 @@ pub extern "C" fn kfree(ptr_in: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_kernel_heap() -> c_int {
+pub fn init_kernel_heap() -> c_int {
     let mut heap = KERNEL_HEAP.lock();
     heap.start_addr = mm_get_kernel_heap_start();
     heap.end_addr = mm_get_kernel_heap_end();
@@ -396,7 +396,7 @@ pub extern "C" fn init_kernel_heap() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_heap_stats(stats: *mut HeapStats) {
+pub fn get_heap_stats(stats: *mut HeapStats) {
     let heap = KERNEL_HEAP.lock();
     if !stats.is_null() {
         unsafe {
@@ -406,13 +406,13 @@ pub extern "C" fn get_heap_stats(stats: *mut HeapStats) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_heap_enable_diagnostics(enable: c_int) {
+pub fn kernel_heap_enable_diagnostics(enable: c_int) {
     let mut heap = KERNEL_HEAP.lock();
     heap.diagnostics_enabled = enable != 0;
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn print_heap_stats() {
+pub fn print_heap_stats() {
     let heap = KERNEL_HEAP.lock();
     unsafe {
         klog_info!("=== Kernel Heap Statistics ===");

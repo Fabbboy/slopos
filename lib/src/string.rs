@@ -289,72 +289,72 @@ pub unsafe fn str_has_token_internal(str: *const c_char, token: *const c_char) -
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strlen(str: *const c_char) -> usize {
+pub fn strlen(str: *const c_char) -> usize {
     unsafe { strlen_internal(str) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
+pub fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
     unsafe { strcmp_internal(lhs, rhs) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
+pub fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
     unsafe { strncmp_internal(lhs, rhs, n) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char {
+pub fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char {
     unsafe { strcpy_internal(dest, src) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strncpy(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
+pub fn strncpy(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
     unsafe { strncpy_internal(dest, src, n) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn isspace_k(c: c_int) -> c_int {
+pub fn isspace_k(c: c_int) -> c_int {
     from_bool(isspace(c as u8))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn isdigit_k(c: c_int) -> c_int {
+pub fn isdigit_k(c: c_int) -> c_int {
     from_bool(isdigit(c as u8))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tolower_k(c: c_int) -> c_int {
+pub fn tolower_k(c: c_int) -> c_int {
     tolower(c as u8) as c_int
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn toupper_k(c: c_int) -> c_int {
+pub fn toupper_k(c: c_int) -> c_int {
     toupper(c as u8) as c_int
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strcasecmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
+pub fn strcasecmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
     unsafe { strcasecmp_internal(lhs, rhs) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strncasecmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
+pub fn strncasecmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
     unsafe { strncasecmp_internal(lhs, rhs, n) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strchr(str: *const c_char, c: c_int) -> *mut c_char {
+pub fn strchr(str: *const c_char, c: c_int) -> *mut c_char {
     unsafe { strchr_internal(str, c) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
+pub fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
     unsafe { strstr_internal(haystack, needle) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn str_has_token(str: *const c_char, token: *const c_char) -> c_int {
+pub fn str_has_token(str: *const c_char, token: *const c_char) -> c_int {
     unsafe { str_has_token_internal(str, token) }
 }
 

@@ -81,28 +81,28 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_init() {
+pub fn klog_init() {
     CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
     SERIAL_READY.store(false, Ordering::Relaxed);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_attach_serial() {
+pub fn klog_attach_serial() {
     SERIAL_READY.store(true, Ordering::Relaxed);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_set_level(level: KlogLevel) {
+pub fn klog_set_level(level: KlogLevel) {
     CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_get_level() -> KlogLevel {
+pub fn klog_get_level() -> KlogLevel {
     KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_is_enabled(level: KlogLevel) -> c_int {
+pub fn klog_is_enabled(level: KlogLevel) -> c_int {
     if is_enabled(level) {
         1
     } else {
@@ -111,7 +111,7 @@ pub extern "C" fn klog_is_enabled(level: KlogLevel) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn klog_newline() {
+pub fn klog_newline() {
     putc(b'\n');
 }
 
