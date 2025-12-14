@@ -227,7 +227,7 @@ pub mod user_syscall;
 pub use kdiag::{interrupt_frame, kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use klog::{
-    klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_printf,
+    klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline,
     klog_set_level, KlogLevel,
 };
 pub use stacktrace::stacktrace_entry;
