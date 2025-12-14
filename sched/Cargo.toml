@@ -16,3 +16,5 @@ slopos-drivers = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
 spin.workspace = true
+
+[dev-dependencies]

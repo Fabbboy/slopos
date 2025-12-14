@@ -8,7 +8,7 @@ use slopos_lib::io;
 use slopos_lib::{cpu, InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 use slopos_lib::spinlock::Spinlock;
 
-use crate::{apic, ioapic, keyboard, wl_currency};
+use crate::{apic, ioapic, keyboard, wl_currency, scheduler_callbacks};
 
 const IRQ_LINES: usize = 16;
 const IRQ_BASE_VECTOR: u8 = 32;
@@ -94,9 +94,6 @@ static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
 
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
-    fn scheduler_timer_tick();
-    fn scheduler_handle_post_irq();
-    fn scheduler_request_reschedule_from_interrupt();
 }
 
 #[inline]
@@ -196,7 +193,7 @@ extern "C" fn timer_irq_handler(irq: u8, _frame: *mut InterruptFrame, _ctx: *mut
         if tick <= 3 {
             klog_debug!("IRQ: Timer tick #{}", tick);
         }
-        scheduler_timer_tick();
+        scheduler_callbacks::call_timer_tick();
     }
 }
 
@@ -463,7 +460,7 @@ pub extern "C" fn irq_dispatch(frame: *mut InterruptFrame) {
     }
 
     acknowledge_irq();
-    unsafe { scheduler_handle_post_irq() };
+    unsafe { scheduler_callbacks::call_handle_post_irq() };
 }
 
 #[repr(C)]

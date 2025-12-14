@@ -247,7 +247,7 @@ fn scheduler_reset_task_quantum(task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
+pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
@@ -273,7 +273,7 @@ pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn unschedule_task(task: *mut Task) -> c_int {
+pub fn unschedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
@@ -360,7 +360,7 @@ fn switch_to_task(new_task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn schedule() {
+pub fn schedule() {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 {
         return;
@@ -410,7 +410,7 @@ pub extern "C" fn schedule() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn r#yield() {
+pub fn r#yield() {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.total_yields += 1;
     if !sched.current_task.is_null() {
@@ -421,12 +421,12 @@ pub extern "C" fn r#yield() {
 
 // C-ABI shim expected by syscall and TTY code.
 #[unsafe(no_mangle)]
-pub extern "C" fn yield_() {
+pub fn yield_() {
     r#yield();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn block_current_task() {
+pub fn block_current_task() {
     let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
@@ -440,7 +440,7 @@ pub extern "C" fn block_current_task() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_wait_for(task_id: u32) -> c_int {
+pub fn task_wait_for(task_id: u32) -> c_int {
     let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
@@ -462,7 +462,7 @@ pub extern "C" fn task_wait_for(task_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn unblock_task(task: *mut Task) -> c_int {
+pub fn unblock_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
@@ -528,7 +528,7 @@ pub extern "C" fn scheduler_register_idle_wakeup_callback(callback: Option<exter
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_scheduler() -> c_int {
+pub fn init_scheduler() -> c_int {
     let sched = unsafe { &mut *scheduler_mut() };
     ready_queue_init(&mut sched.ready_queue);
     sched.current_task = ptr::null_mut();
@@ -549,7 +549,7 @@ pub extern "C" fn init_scheduler() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn create_idle_task() -> c_int {
+pub fn create_idle_task() -> c_int {
     let idle_task_id = crate::task::task_create(
         b"idle\0".as_ptr() as *const i8,
         idle_task_function,
@@ -569,7 +569,7 @@ pub extern "C" fn create_idle_task() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn start_scheduler() -> c_int {
+pub fn start_scheduler() -> c_int {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled != 0 {
         return -1;
@@ -599,12 +599,12 @@ pub extern "C" fn start_scheduler() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn stop_scheduler() {
+pub fn stop_scheduler() {
     unsafe { (*scheduler_mut()).enabled = 0 };
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_shutdown() {
+pub fn scheduler_shutdown() {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.enabled = 0;
     ready_queue_init(&mut sched.ready_queue);
@@ -613,7 +613,7 @@ pub extern "C" fn scheduler_shutdown() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_scheduler_stats(
+pub fn get_scheduler_stats(
     context_switches: *mut u64,
     yields: *mut u64,
     ready_tasks: *mut u32,
@@ -637,7 +637,7 @@ pub extern "C" fn get_scheduler_stats(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_is_enabled() -> c_int {
+pub fn scheduler_is_enabled() -> c_int {
     unsafe { (*scheduler_mut()).enabled as c_int }
 }
 
@@ -647,7 +647,7 @@ pub extern "C" fn scheduler_get_current_task() -> *mut Task {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_set_preemption_enabled(enabled: c_int) {
+pub fn scheduler_set_preemption_enabled(enabled: c_int) {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
     if sched.preemption_enabled != 0 {
@@ -659,7 +659,7 @@ pub extern "C" fn scheduler_set_preemption_enabled(enabled: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_is_preemption_enabled() -> c_int {
+pub fn scheduler_is_preemption_enabled() -> c_int {
     unsafe { (*scheduler_mut()).preemption_enabled as c_int }
 }
 
@@ -734,16 +734,32 @@ pub extern "C" fn scheduler_handle_post_irq() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn boot_step_task_manager_init() -> c_int {
+pub fn boot_step_task_manager_init() -> c_int {
     crate::task::init_task_manager()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn boot_step_scheduler_init() -> c_int {
-    init_scheduler()
+pub fn boot_step_scheduler_init() -> c_int {
+    let rc = init_scheduler();
+    if rc == 0 {
+        // Register scheduler callbacks with drivers to break circular dependency
+        unsafe {
+            use slopos_drivers::scheduler_callbacks::SchedulerCallbacks;
+            use core::ffi::c_void;
+            // Cast the function pointer to use c_void pointer to avoid type mismatch
+            let get_current_task_fn: extern "C" fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as extern "C" fn() -> *mut Task);
+            slopos_drivers::scheduler_callbacks::register_callbacks(SchedulerCallbacks {
+                timer_tick: Some(scheduler_timer_tick),
+                handle_post_irq: Some(scheduler_handle_post_irq),
+                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
+                get_current_task: Some(get_current_task_fn),
+            });
+        }
+    }
+    rc
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn boot_step_idle_task() -> c_int {
+pub fn boot_step_idle_task() -> c_int {
     create_idle_task()
 }

@@ -22,4 +22,5 @@ pub mod virtio_gpu;
 pub mod interrupt_test_config;
 pub mod interrupt_test;
 pub mod wl_currency;
+pub mod scheduler_callbacks;
 

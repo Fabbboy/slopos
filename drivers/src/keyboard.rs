@@ -2,9 +2,7 @@
 
 use slopos_lib::{cpu, klog_debug};
 
-unsafe extern "C" {
-    fn scheduler_request_reschedule_from_interrupt();
-}
+use crate::scheduler_callbacks;
 
 const KEYBOARD_BUFFER_SIZE: usize = 256;
 
@@ -249,7 +247,7 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         }
         klog_debug!("[KBD] Adding to buffer");
         unsafe {
-            scheduler_request_reschedule_from_interrupt();
+            scheduler_callbacks::call_request_reschedule_from_interrupt();
         }
     }
 }

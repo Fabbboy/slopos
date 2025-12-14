@@ -408,7 +408,7 @@ unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn init_task_manager() -> c_int {
+pub fn init_task_manager() -> c_int {
     let mgr = unsafe { &mut *task_manager_mut() };
     mgr.num_tasks = 0;
     mgr.next_task_id = 1;
@@ -426,7 +426,7 @@ pub extern "C" fn init_task_manager() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_create(
+pub fn task_create(
     name: *const c_char,
     entry_point: TaskEntry,
     arg: *mut c_void,
@@ -606,7 +606,7 @@ pub extern "C" fn task_create(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_terminate(task_id: u32) -> c_int {
+pub fn task_terminate(task_id: u32) -> c_int {
     let mut resolved_id = task_id;
     let task_ptr: *mut Task;
 
@@ -679,7 +679,7 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_shutdown_all() -> c_int {
+pub fn task_shutdown_all() -> c_int {
     let mut result = 0;
     let current = scheduler::scheduler_get_current_task();
     for idx in 0..MAX_TASKS {
@@ -702,7 +702,7 @@ pub extern "C" fn task_shutdown_all() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
+pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     if task_info.is_null() {
         return -1;
     }
@@ -718,7 +718,7 @@ pub extern "C" fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_in
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_int {
+pub fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_int {
     if record_out.is_null() {
         return -1;
     }
@@ -758,7 +758,7 @@ fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
+pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     let task = task_find_by_id(task_id);
     if task.is_null() || unsafe { (*task).state } == TASK_STATE_INVALID {
         return -1;
@@ -779,7 +779,7 @@ pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_task_stats(
+pub fn get_task_stats(
     total_tasks: *mut u32,
     active_tasks: *mut u32,
     context_switches: *mut u64,
@@ -797,7 +797,7 @@ pub extern "C" fn get_task_stats(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
+pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
     if !from.is_null() {
         unsafe {
             if (*from).last_run_timestamp != 0 && timestamp >= (*from).last_run_timestamp {
@@ -817,7 +817,7 @@ pub extern "C" fn task_record_context_switch(from: *mut Task, to: *mut Task, tim
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_record_yield(task: *mut Task) {
+pub fn task_record_yield(task: *mut Task) {
     unsafe { (*task_manager_mut()).total_yields += 1 };
     if !task.is_null() {
         unsafe { (*task).yield_count = (*task).yield_count.saturating_add(1) };
@@ -825,12 +825,12 @@ pub extern "C" fn task_record_yield(task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_total_yields() -> u64 {
+pub fn task_get_total_yields() -> u64 {
     unsafe { (*task_manager_mut()).total_yields }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_state_to_string(state: u8) -> *const c_char {
+pub fn task_state_to_string(state: u8) -> *const c_char {
     match state {
         TASK_STATE_INVALID => b"invalid\0".as_ptr() as *const c_char,
         TASK_STATE_READY => b"ready\0".as_ptr() as *const c_char,
@@ -857,7 +857,7 @@ pub extern "C" fn task_iterate_active(callback: TaskIterateCb, context: *mut c_v
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_current_id() -> u32 {
+pub fn task_get_current_id() -> u32 {
     let current = scheduler::scheduler_get_current_task();
     if current.is_null() {
         0
@@ -867,12 +867,12 @@ pub extern "C" fn task_get_current_id() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_current() -> *mut Task {
+pub fn task_get_current() -> *mut Task {
     scheduler::scheduler_get_current_task()
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_set_current(task: *mut Task) {
+pub fn task_set_current(task: *mut Task) {
     if task.is_null() {
         return;
     }
@@ -885,7 +885,7 @@ pub extern "C" fn task_set_current(task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_get_state(task: *const Task) -> u8 {
+pub fn task_get_state(task: *const Task) -> u8 {
     if task.is_null() {
         return TASK_STATE_INVALID;
     }
@@ -893,22 +893,22 @@ pub extern "C" fn task_get_state(task: *const Task) -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_is_ready(task: *const Task) -> bool {
+pub fn task_is_ready(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_READY
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_is_running(task: *const Task) -> bool {
+pub fn task_is_running(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_RUNNING
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_is_blocked(task: *const Task) -> bool {
+pub fn task_is_blocked(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_BLOCKED
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_is_terminated(task: *const Task) -> bool {
+pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_TERMINATED
 }
 

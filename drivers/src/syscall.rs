@@ -2,13 +2,10 @@ use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
 use crate::syscall_types::{Task, TaskContext, InterruptFrame, TASK_FLAG_USER_MODE};
-use crate::wl_currency;
+use crate::{wl_currency, scheduler_callbacks};
 
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 
-unsafe extern "C" {
-    fn scheduler_get_current_task() -> *mut Task;
-}
 
 fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     if frame.is_null() || task.is_null() {
@@ -54,7 +51,7 @@ pub extern "C" fn syscall_handle(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task = unsafe { scheduler_get_current_task() };
+    let task = unsafe { scheduler_callbacks::call_get_current_task() as *mut Task };
     unsafe {
         if task.is_null() || ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
             wl_currency::award_loss();

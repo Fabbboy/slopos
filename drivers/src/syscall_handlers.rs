@@ -110,7 +110,9 @@ unsafe extern "C" {
         ready_tasks: *mut u32,
         schedule_calls: *mut u32,
     );
+}
 
+unsafe extern "C" {
     fn tty_read_line(buffer: *mut c_char, buffer_size: usize) -> usize;
     fn tty_notify_input_ready();
 
