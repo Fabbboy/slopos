@@ -30,13 +30,13 @@ pub const ROULETTE_RESULT_DELAY_MS: u32 = 5000;
 #[repr(C)]
 pub struct RouletteBackend {
     pub ctx: *mut c_void,
-    pub get_size: Option<extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32>,
-    pub fill_rect: Option<extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
-    pub draw_line: Option<extern "C" fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
-    pub draw_circle: Option<extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
-    pub draw_circle_filled: Option<extern "C" fn(*mut c_void, i32, i32, i32, u32) -> i32>,
-    pub draw_text: Option<extern "C" fn(*mut c_void, i32, i32, *const u8, u32, u32) -> i32>,
-    pub sleep_ms: Option<extern "C" fn(*mut c_void, u32)>,
+    pub get_size: Option<fn(*mut c_void, *mut i32, *mut i32) -> i32>,
+    pub fill_rect: Option<fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
+    pub draw_line: Option<fn(*mut c_void, i32, i32, i32, i32, u32) -> i32>,
+    pub draw_circle: Option<fn(*mut c_void, i32, i32, i32, u32) -> i32>,
+    pub draw_circle_filled: Option<fn(*mut c_void, i32, i32, i32, u32) -> i32>,
+    pub draw_text: Option<fn(*mut c_void, i32, i32, *const u8, u32, u32) -> i32>,
+    pub sleep_ms: Option<fn(*mut c_void, u32)>,
 }
 
 #[derive(Copy, Clone)]

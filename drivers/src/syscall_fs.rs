@@ -52,6 +52,9 @@ use crate::scheduler_callbacks::{
     call_file_open_for_process, call_file_close_fd, call_file_read_fd, call_file_write_fd, call_file_unlink_path,
 };
 
+use slopos_mm::kernel_heap::{kmalloc, kfree};
+use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
+// Keep extern "C" for fs functions to break circular dependency
 unsafe extern "C" {
     fn ramfs_acquire_node(path: *const c_char) -> *mut RamfsNode;
     fn ramfs_get_size(node: *const RamfsNode) -> u64;
@@ -63,18 +66,13 @@ unsafe extern "C" {
     ) -> c_int;
     fn ramfs_release_list(entries: *mut *mut RamfsNode, count: c_int);
     fn ramfs_create_directory(path: *const c_char) -> *mut RamfsNode;
-
-    fn kmalloc(size: usize) -> *mut c_void;
-    fn kfree(ptr: *mut c_void);
-    fn user_copy_from_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
-    fn user_copy_to_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
 }
 
 fn syscall_fs_error(frame: *mut InterruptFrame) -> SyscallDisposition {
     syscall_return_err(frame, u64::MAX)
 }
 
-pub extern "C" fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -96,7 +94,7 @@ pub extern "C" fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -
     syscall_return_ok(frame, fd as u64)
 }
 
-pub extern "C" fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -109,7 +107,7 @@ pub extern "C" fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) 
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -145,7 +143,7 @@ pub extern "C" fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub extern "C" fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -181,7 +179,7 @@ pub extern "C" fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) 
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub extern "C" fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*frame).rdi == 0 || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -226,7 +224,7 @@ pub extern "C" fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -242,7 +240,7 @@ pub extern "C" fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) 
     syscall_fs_error(frame)
 }
 
-pub extern "C" fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -257,7 +255,7 @@ pub extern "C" fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame)
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     unsafe {
@@ -305,7 +303,7 @@ pub extern "C" fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -
     }
 
     let tmp_size = mem::size_of::<UserFsEntry>() * cap as usize;
-    let tmp_ptr = unsafe { kmalloc(tmp_size) as *mut UserFsEntry };
+    let tmp_ptr = kmalloc(tmp_size) as *mut UserFsEntry;
     if tmp_ptr.is_null() {
         if !entries.is_null() {
             unsafe {
@@ -349,13 +347,11 @@ pub extern "C" fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -
 
     list_hdr.count = count as u32;
 
-    let mut rc_user = unsafe {
-        user_copy_to_user(
-            list_hdr.entries as *mut c_void,
-            tmp_ptr as *const c_void,
-            mem::size_of::<UserFsEntry>() * count as usize,
-        )
-    };
+    let mut rc_user = user_copy_to_user(
+        list_hdr.entries as *mut c_void,
+        tmp_ptr as *const c_void,
+        mem::size_of::<UserFsEntry>() * count as usize,
+    );
     if rc_user == 0 {
         rc_user = unsafe {
             user_copy_to_user(

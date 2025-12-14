@@ -4,10 +4,9 @@ use core::ptr;
 
 use spin::Mutex;
 use slopos_lib::{klog_debug, klog_info};
+// Keep extern "C" for kernel_panic and wl_currency to break circular dependencies
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
-}
-unsafe extern "C" {
     fn wl_award_loss();
     fn wl_award_win();
 }

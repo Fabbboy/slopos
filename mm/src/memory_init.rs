@@ -24,6 +24,7 @@ use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
 
 use slopos_lib::{klog_debug, klog_info, cpu};
+// Keep extern "C" for boot functions to break circular dependency
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn get_hhdm_offset() -> u64;

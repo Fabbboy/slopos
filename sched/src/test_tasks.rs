@@ -14,11 +14,10 @@ use crate::task::{
 
 use crate::ffi_boundary::simple_context_switch;
 
+use slopos_mm::kernel_heap::kmalloc;
+// Keep extern "C" for serial and idt functions to break circular dependencies
 unsafe extern "C" {
     fn serial_putc_com1(ch: u8);
-}
-use slopos_mm::kernel_heap::kmalloc;
-unsafe extern "C" {
     fn idt_get_gate(vector: u8, entry: *mut IdtEntry) -> c_int;
 }
 

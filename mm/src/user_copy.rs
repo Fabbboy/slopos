@@ -5,6 +5,7 @@ use core::ptr;
 use crate::memory_layout::mm_get_kernel_heap_start;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
+// Keep extern "C" for scheduler_get_current_task to break circular dependency with sched
 unsafe extern "C" {
     fn scheduler_get_current_task() -> *mut Task;
 }

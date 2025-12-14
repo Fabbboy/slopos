@@ -191,10 +191,10 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
 
     // Register callbacks with drivers to break circular dependency
     unsafe {
-        extern "C" fn file_read_fd_wrapper(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> c_int {
+        fn file_read_fd_wrapper(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> c_int {
             file_read_fd(process_id, fd, buffer, count) as c_int
         }
-        extern "C" fn file_write_fd_wrapper(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> c_int {
+        fn file_write_fd_wrapper(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> c_int {
             file_write_fd(process_id, fd, buffer, count) as c_int
         }
         register_fs_callbacks(FsCallbacks {
@@ -250,7 +250,7 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_open_for_process(
+pub fn file_open_for_process(
     process_id: u32,
     path: *const c_char,
     flags: u32,
@@ -319,7 +319,7 @@ pub extern "C" fn file_open_for_process(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_read_fd(
+pub fn file_read_fd(
     process_id: u32,
     fd: c_int,
     buffer: *mut c_char,
@@ -371,7 +371,7 @@ pub extern "C" fn file_read_fd(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_write_fd(
+pub fn file_write_fd(
     process_id: u32,
     fd: c_int,
     buffer: *const c_char,
@@ -415,7 +415,7 @@ pub extern "C" fn file_write_fd(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
+pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;
@@ -540,7 +540,7 @@ pub fn file_exists_path(path: *const c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn file_unlink_path(path: *const c_char) -> c_int {
+pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }

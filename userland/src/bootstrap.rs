@@ -19,10 +19,9 @@ pub struct FateResult {
     pub value: u32,
 }
 
-type FateHook = extern "C" fn(*const FateResult);
-
+// Keep extern "C" for these functions to break circular dependencies
 unsafe extern "C" {
-    fn fate_register_outcome_hook(cb: FateHook);
+    fn fate_register_outcome_hook(cb: extern "C" fn(*const FateResult));
     fn process_vm_load_elf(process_id: u32, payload: *const u8, payload_len: usize, entry_out: *mut u64) -> i32;
 }
 

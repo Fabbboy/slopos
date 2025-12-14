@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 
+// Keep extern "C" for drivers functions to break circular dependency
 unsafe extern "C" {
     fn random_u64() -> u64;
     fn wl_award_win();

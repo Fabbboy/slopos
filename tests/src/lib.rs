@@ -400,18 +400,13 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    unsafe extern "C" {
-        fn test_heap_free_list_search() -> c_int;
-        fn test_heap_fragmentation_behind_head() -> c_int;
-        fn test_process_vm_slot_reuse() -> c_int;
-        fn test_process_vm_counter_reset() -> c_int;
-        fn mm_get_process_layout() -> *const ProcessMemoryLayout;
-        fn mm_get_kernel_heap_start() -> u64;
-        fn create_process_vm() -> u32;
-        fn destroy_process_vm(pid: u32) -> c_int;
-        fn process_vm_get_page_dir(pid: u32) -> *mut ProcessPageDir;
-        fn paging_is_user_accessible(dir: *mut ProcessPageDir, vaddr: u64) -> c_int;
-    }
+    use slopos_mm::tests::{test_heap_free_list_search, test_heap_fragmentation_behind_head, test_process_vm_slot_reuse, test_process_vm_counter_reset};
+    #[cfg(feature = "builtin-tests")]
+    use slopos_mm::memory_layout::{mm_get_process_layout, mm_get_kernel_heap_start};
+    #[cfg(feature = "builtin-tests")]
+    use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_get_page_dir};
+    #[cfg(feature = "builtin-tests")]
+    use slopos_mm::paging::paging_is_user_accessible;
 
     #[cfg(feature = "builtin-tests")]
     #[repr(C)]

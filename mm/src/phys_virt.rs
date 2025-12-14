@@ -5,18 +5,19 @@ use core::ptr;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::memory_reservations::{
-    mm_reservations_find_option, MmRegion, MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+    mm_reservations_find_option, MmRegion, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
     MM_RESERVATION_FLAG_MMIO,
 };
 
 const PAGE_SIZE_4KB: usize = 0x1000;
 
+use crate::paging::virt_to_phys;
+use crate::memory_reservations::mm_reservation_type_name;
+// Keep extern "C" for boot functions to break circular dependency
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn get_hhdm_offset() -> u64;
     fn is_hhdm_available() -> c_int;
-    fn virt_to_phys(vaddr: u64) -> u64;
-    fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char;
 }
 
 #[inline]
@@ -44,7 +45,7 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     if let Some(region) = reservation {
         let allowed = region.flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT | MM_RESERVATION_FLAG_MMIO);
         if allowed == 0 {
-            let type_name = unsafe { mm_reservation_type_name(region.type_) };
+            let type_name = mm_reservation_type_name(region.type_);
             let type_name_str = unsafe { CStr::from_ptr(type_name) }
                 .to_str()
                 .unwrap_or("<invalid utf-8>");
@@ -79,7 +80,7 @@ pub fn mm_virt_to_phys(virt_addr: u64) -> u64 {
     if virt_addr == 0 {
         return 0;
     }
-    unsafe { virt_to_phys(virt_addr) }
+    virt_to_phys(virt_addr)
 }
 
 #[unsafe(no_mangle)]

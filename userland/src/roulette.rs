@@ -199,7 +199,7 @@ fn sys_font_draw(text: &UserText) -> i64 {
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
+fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
     let mut info = UserFbInfo::default();
     if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return -1;
@@ -216,7 +216,7 @@ extern "C" fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_fill_rect(
+fn user_fill_rect(
     _ctx: *mut c_void,
     x: i32,
     y: i32,
@@ -229,7 +229,7 @@ extern "C" fn user_fill_rect(
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_draw_line(
+fn user_draw_line(
     _ctx: *mut c_void,
     x0: i32,
     y0: i32,
@@ -242,7 +242,7 @@ extern "C" fn user_draw_line(
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_draw_circle(
+fn user_draw_circle(
     _ctx: *mut c_void,
     cx: i32,
     cy: i32,
@@ -254,7 +254,7 @@ extern "C" fn user_draw_circle(
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_draw_circle_filled(
+fn user_draw_circle_filled(
     _ctx: *mut c_void,
     cx: i32,
     cy: i32,
@@ -266,7 +266,7 @@ extern "C" fn user_draw_circle_filled(
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_draw_text(
+fn user_draw_text(
     _ctx: *mut c_void,
     x: i32,
     y: i32,
@@ -303,7 +303,7 @@ extern "C" fn user_draw_text(
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
+fn user_sleep_ms(_ctx: *mut c_void, ms: u32) {
     sys_sleep_ms(ms);
 }
 

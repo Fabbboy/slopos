@@ -26,6 +26,7 @@ static mut TTY_WAIT_QUEUE: TtyWaitQueue = TtyWaitQueue {
     count: 0,
 };
 
+// Keep extern "C" for scheduler functions to break circular dependency
 unsafe extern "C" {
     fn scheduler_register_idle_wakeup_callback(callback: Option<extern "C" fn() -> c_int>);
     fn scheduler_is_enabled() -> c_int;
@@ -169,6 +170,7 @@ fn serial_putc(port: u16, c: u8) {
     let _ = port; // keep signature parity
 }
 
+// Keep extern "C" for yield to break circular dependency
 unsafe extern "C" {
     fn yield_();
 }

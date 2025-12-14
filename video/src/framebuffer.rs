@@ -5,7 +5,7 @@ use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use slopos_mm::phys_virt::mm_phys_to_virt;
 use spin::Mutex;
-
+// Keep extern "C" for get_framebuffer_info to break circular dependency with boot
 unsafe extern "C" {
     fn get_framebuffer_info(
         addr: *mut u64,

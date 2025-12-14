@@ -134,6 +134,12 @@ pub fn write_line(s: &str) {
     let _ = guard.write_str("\r\n");
 }
 
+/// Write a single byte to COM1 (for compatibility with legacy code)
+pub fn serial_putc_com1(ch: u8) {
+    let mut guard = SERIAL.lock();
+    guard.write_byte(ch);
+}
+
 pub fn print_args(args: fmt::Arguments<'_>) {
     let _ = SERIAL.lock().write_fmt(args);
 }

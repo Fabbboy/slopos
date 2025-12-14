@@ -256,6 +256,7 @@ static mut TASK_MANAGER: TaskManager = TaskManager::new();
 
 use slopos_mm::kernel_heap::{kmalloc, kfree};
 use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir};
+// Keep extern "C" for fs functions to break circular dependency
 unsafe extern "C" {
     fn fileio_create_table_for_process(process_id: u32) -> c_int;
     fn fileio_destroy_table_for_process(process_id: u32) -> c_int;

@@ -1,6 +1,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
+// Keep extern "C" for wl_currency to break circular dependency with drivers
 unsafe extern "C" {
     fn wl_check_balance() -> i64;
     fn wl_award_loss();
@@ -99,6 +100,7 @@ const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
 use slopos_mm::paging::{paging_set_current_directory, paging_get_kernel_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;
+// Keep extern "C" for pit and gdt functions to break circular dependencies
 unsafe extern "C" {
     fn pit_enable_irq();
     fn pit_disable_irq();
@@ -762,19 +764,19 @@ pub fn boot_step_scheduler_init() -> c_int {
                 fn register_callbacks(callbacks: SchedulerCallbacks);
             }
             
-            // Cast the function pointer to use c_void pointer to avoid type mismatch, and convert extern "C" fn to fn
+            // Convert function to c_void pointer type for get_current_task
             let get_current_task_fn: fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as *const ());
             register_callbacks(SchedulerCallbacks {
-                timer_tick: Some(core::mem::transmute(scheduler_timer_tick as *const ())),
-                handle_post_irq: Some(core::mem::transmute(scheduler_handle_post_irq as *const ())),
-                request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
+                timer_tick: Some(scheduler_timer_tick),
+                handle_post_irq: Some(scheduler_handle_post_irq),
+                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
                 get_current_task: Some(get_current_task_fn),
-                yield_fn: Some(core::mem::transmute(yield_ as *const ())),
-                schedule_fn: Some(core::mem::transmute(schedule as *const ())),
-                task_terminate_fn: Some(core::mem::transmute(task_terminate as *const ())),
-                scheduler_is_preemption_enabled_fn: Some(core::mem::transmute(scheduler_is_preemption_enabled as *const ())),
-                get_task_stats_fn: Some(core::mem::transmute(crate::task::get_task_stats as *const ())),
-                get_scheduler_stats_fn: Some(core::mem::transmute(get_scheduler_stats as *const ())),
+                yield_fn: Some(yield_),
+                schedule_fn: Some(schedule),
+                task_terminate_fn: Some(task_terminate),
+                scheduler_is_preemption_enabled_fn: Some(scheduler_is_preemption_enabled),
+                get_task_stats_fn: Some(crate::task::get_task_stats),
+                get_scheduler_stats_fn: Some(get_scheduler_stats),
             });
         }
         
@@ -797,13 +799,13 @@ pub fn boot_step_scheduler_init() -> c_int {
                 fn register_scheduler_callbacks_for_boot(callbacks: SchedulerCallbacksForBoot);
             }
             
-            // Cast Task pointer to opaque Task type in drivers, and convert extern "C" fn to fn via pointer cast
+            // Cast Task pointer to opaque Task type in drivers
             let get_current_task_boot_fn: fn() -> *mut Task = 
                 core::mem::transmute(scheduler_get_current_task as *const ());
             register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
-                request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
+                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
                 get_current_task: Some(get_current_task_boot_fn),
-                task_terminate: Some(core::mem::transmute(crate::task::task_terminate as *const ())),
+                task_terminate: Some(crate::task::task_terminate),
             });
         }
     }

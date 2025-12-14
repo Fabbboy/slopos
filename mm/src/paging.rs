@@ -3,6 +3,7 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
+// Keep extern "C" for kernel_panic and is_hhdm_available to break circular dependency with boot
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn is_hhdm_available() -> c_int;

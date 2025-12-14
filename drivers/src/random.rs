@@ -41,7 +41,7 @@ pub fn random_next() -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn random_u64() -> u64 {
+pub fn random_u64() -> u64 {
     random_next()
 }
 

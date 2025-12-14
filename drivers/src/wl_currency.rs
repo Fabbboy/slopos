@@ -23,12 +23,12 @@ pub fn award_loss() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wl_award_loss() {
+pub fn wl_award_loss() {
     award_loss();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wl_award_win() {
+pub fn wl_award_win() {
     award_win();
 }
 
@@ -37,6 +37,6 @@ pub fn check_balance() -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wl_check_balance() -> i64 {
+pub fn wl_check_balance() -> i64 {
     check_balance()
 }

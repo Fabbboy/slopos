@@ -57,6 +57,7 @@ impl MmRegion {
 
 type MmRegionIterCb = Option<fn(region: *const MmRegion, ctx: *mut c_void)>;
 
+// Keep extern "C" for kernel_panic to break circular dependency with boot
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
 }

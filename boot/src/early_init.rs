@@ -493,19 +493,19 @@ pub fn kernel_main_impl() {
 
     // Register boot callbacks early to break circular dependencies
     unsafe {
-        use slopos_drivers::scheduler_callbacks::BootCallbacks;
+        use slopos_drivers::scheduler_callbacks::{BootCallbacks, register_boot_callbacks};
         use crate::shutdown::{kernel_shutdown, kernel_reboot};
-        use crate::limine_protocol::{get_hhdm_offset, is_hhdm_available, is_rsdp_available, get_rsdp_address};
-        slopos_drivers::scheduler_callbacks::register_boot_callbacks(BootCallbacks {
-            gdt_set_kernel_rsp0: Some(core::mem::transmute(gdt::gdt_set_kernel_rsp0 as *const ())),
-            is_kernel_initialized: Some(core::mem::transmute(is_kernel_initialized as *const ())),
-            kernel_panic: Some(core::mem::transmute(kernel_panic as *const ())),
-            kernel_shutdown: Some(core::mem::transmute(kernel_shutdown as *const ())),
-            kernel_reboot: Some(core::mem::transmute(kernel_reboot as *const ())),
-            get_hhdm_offset: Some(core::mem::transmute(get_hhdm_offset as *const ())),
-            is_hhdm_available: Some(core::mem::transmute(is_hhdm_available as *const ())),
-            is_rsdp_available: Some(core::mem::transmute(is_rsdp_available as *const ())),
-            get_rsdp_address: Some(core::mem::transmute(get_rsdp_address as *const ())),
+        use crate::limine_protocol::{is_rsdp_available, get_rsdp_address};
+        register_boot_callbacks(BootCallbacks {
+            gdt_set_kernel_rsp0: Some(gdt::gdt_set_kernel_rsp0),
+            is_kernel_initialized: Some(is_kernel_initialized),
+            kernel_panic: Some(kernel_panic),
+            kernel_shutdown: Some(kernel_shutdown),
+            kernel_reboot: Some(kernel_reboot),
+            get_hhdm_offset: Some(limine_protocol::get_hhdm_offset_rust),
+            is_hhdm_available: Some(limine_protocol::is_hhdm_available_rust),
+            is_rsdp_available: Some(is_rsdp_available),
+            get_rsdp_address: Some(get_rsdp_address),
         });
     }
     
