@@ -132,6 +132,7 @@ unsafe extern "C" {
     fn framebuffer_get_info() -> *mut FramebufferInfo;
 
     fn kernel_shutdown(reason: *const c_char) -> !;
+    fn kernel_reboot(reason: *const c_char) -> !;
 }
 
 fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDisposition {
@@ -431,10 +432,21 @@ pub extern "C" fn syscall_roulette_result(
     if token != stored.token {
         return syscall_return_err(frame, u64::MAX);
     }
+    
+    // Check if the fate value is even (loss) or odd (win)
+    let is_win = (stored.value & 1) == 1;
+    
     unsafe {
-        fate_apply_outcome(&stored, 0, true);
+        if is_win {
+            // Win: award the win and continue
+            fate_apply_outcome(&stored, 0, true);
+            syscall_return_ok(frame, 0)
+        } else {
+            // Loss: award the loss and reboot to spin again
+            fate_apply_outcome(&stored, 0, false);
+            kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
+        }
     }
-    syscall_return_ok(frame, 0)
 }
 
 #[unsafe(no_mangle)]
