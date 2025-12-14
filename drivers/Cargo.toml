@@ -11,6 +11,9 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+qemu-exit = []
+
 [dependencies]
 slopos-lib = { workspace = true }
 spin.workspace = true

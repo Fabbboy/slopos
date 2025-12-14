@@ -98,6 +98,7 @@ endef
 
 define build_kernel
 	set -e; \
+	FEATURES="$(1)"; \
 	mkdir -p $(BUILD_DIR); \
 	rm -f $(BUILD_DIR)/kernel $(BUILD_DIR)/kernel.elf; \
 	$(call ensure_rust_toolchain) \
@@ -108,6 +109,7 @@ define build_kernel
 	  --target $(RUST_TARGET_JSON) \
 	  --package kernel \
 	  --bin kernel \
+	  $(if $$FEATURES,--features "$$FEATURES",) \
 	  --artifact-dir $(BUILD_DIR); \
 	if [ -f $(BUILD_DIR)/kernel ]; then \
 		mv "$(BUILD_DIR)/kernel" "$(BUILD_DIR)/kernel.elf"; \
@@ -173,7 +175,8 @@ iso: build
 iso-notests: build
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
-iso-tests: build
+iso-tests:
+	@$(call build_kernel,slopos-drivers/qemu-exit)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
 boot: iso-notests

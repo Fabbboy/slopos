@@ -130,12 +130,21 @@ pub fn run(config: &InterruptTestConfig) -> bool {
     serial_println!("Interrupt tests: 13 total, 13 passed, 0 failed, timeout=0");
 
     if config.shutdown {
-        qemu_exit(true);
+        #[cfg(feature = "qemu-exit")]
+        {
+            qemu_exit(true);
+        }
+        #[cfg(not(feature = "qemu-exit"))]
+        {
+            serial_println!("Shutdown requested but qemu-exit feature not enabled. Halting.");
+            cpu::halt_loop();
+        }
     }
 
     true
 }
 
+#[cfg(feature = "qemu-exit")]
 fn qemu_exit(success: bool) -> ! {
     let code: u8 = if success { 0 } else { 1 };
     unsafe {
