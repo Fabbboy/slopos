@@ -1,5 +1,7 @@
 use crate::{serial_println, wl_currency};
-use slopos_lib::{cpu, io};
+use slopos_lib::cpu;
+#[cfg(feature = "qemu-exit")]
+use slopos_lib::io;
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_SUITE: Suite = Suite::All;

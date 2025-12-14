@@ -92,12 +92,12 @@ pub extern "C" fn pit_get_frequency() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pit_enable_irq() {
-    irq::irq_enable_line(PIT_IRQ_LINE);
+    irq::enable_line(PIT_IRQ_LINE);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pit_disable_irq() {
-    irq::irq_disable_line(PIT_IRQ_LINE);
+    irq::disable_line(PIT_IRQ_LINE);
 }
 
 fn pit_read_count() -> u16 {
@@ -152,10 +152,10 @@ pub extern "C" fn pit_sleep_ms(ms: u32) {
         ticks_needed = 1;
     }
 
-    let start = irq::irq_get_timer_ticks();
+    let start = irq::get_timer_ticks();
     let target = start.wrapping_add(ticks_needed);
 
-    while irq::irq_get_timer_ticks() < target {
+    while irq::get_timer_ticks() < target {
         cpu::hlt();
     }
 }

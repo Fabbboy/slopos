@@ -295,13 +295,11 @@ fn irq_setup_ioapic_routes() {
     irq_program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_get_timer_ticks() -> u64 {
+pub fn get_timer_ticks() -> u64 {
     unsafe { TIMER_TICK_COUNTER }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_init() {
+pub fn init() {
     with_irq_tables(|table, routes| {
         for i in 0..IRQ_LINES {
             table[i] = IrqEntry::new();
@@ -318,13 +316,13 @@ pub extern "C" fn irq_init() {
     irq_setup_ioapic_routes();
     keyboard::keyboard_init();
 
-    let _ = irq_register_handler(
+    let _ = register_handler(
         LEGACY_IRQ_TIMER,
         Some(timer_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
-    let _ = irq_register_handler(
+    let _ = register_handler(
         LEGACY_IRQ_KEYBOARD,
         Some(keyboard_irq_handler),
         core::ptr::null_mut(),
@@ -335,8 +333,7 @@ pub extern "C" fn irq_init() {
     cpu::enable_interrupts();
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_register_handler(
+pub fn register_handler(
     irq: u8,
     handler: Option<IrqHandler>,
     context: *mut c_void,
@@ -373,8 +370,7 @@ pub extern "C" fn irq_register_handler(
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_unregister_handler(irq: u8) {
+pub fn unregister_handler(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
@@ -389,8 +385,7 @@ pub extern "C" fn irq_unregister_handler(irq: u8) {
     klog_debug!("IRQ: Unregistered handler for line {}", irq);
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_enable_line(irq: u8) {
+pub fn enable_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
@@ -400,8 +395,7 @@ pub extern "C" fn irq_enable_line(irq: u8) {
     unmask_irq_line(irq);
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_disable_line(irq: u8) {
+pub fn disable_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
@@ -473,13 +467,12 @@ pub extern "C" fn irq_dispatch(frame: *mut InterruptFrame) {
 }
 
 #[repr(C)]
-pub struct irq_stats {
+pub struct IrqStats {
     count: u64,
     last_timestamp: u64,
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_get_stats(irq: u8, out_stats: *mut irq_stats) -> i32 {
+pub fn get_stats(irq: u8, out_stats: *mut IrqStats) -> i32 {
     if irq as usize >= IRQ_LINES || out_stats.is_null() {
         return -1;
     }

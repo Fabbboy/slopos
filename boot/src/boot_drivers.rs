@@ -58,9 +58,6 @@ unsafe extern "C" {
     fn safe_stack_init();
     fn idt_load();
 
-    fn irq_init();
-    fn irq_get_timer_ticks() -> u64;
-
     fn serial_enable_interrupts(port: u16, irq: u8) -> i32;
 
     fn pit_init(freq: u32);
@@ -114,7 +111,7 @@ extern "C" fn boot_step_idt_setup_fn() {
 
 extern "C" fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
-    unsafe { irq_init() };
+    slopos_drivers::irq::init();
     let rc = unsafe { serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) };
     if rc != 0 {
         klog_info!("WARNING: Failed to enable COM1 serial interrupts");
@@ -129,9 +126,9 @@ extern "C" fn boot_step_timer_setup_fn() {
     unsafe { pit_init(PIT_DEFAULT_FREQUENCY_HZ) };
     klog_debug!("Programmable interval timer configured.");
 
-    let ticks_before = unsafe { irq_get_timer_ticks() };
+    let ticks_before = slopos_drivers::irq::get_timer_ticks();
     unsafe { pit_poll_delay_ms(100) };
-    let ticks_after = unsafe { irq_get_timer_ticks() };
+    let ticks_after = slopos_drivers::irq::get_timer_ticks();
     klog_info!(
         "BOOT: PIT ticks after 100ms poll: {} -> {}",
         ticks_before,
