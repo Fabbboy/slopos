@@ -49,11 +49,6 @@ pub fn init() {
     unsafe { port.init(); }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn serial_enable_interrupts(_port: u16, _irq: u8) -> i32 {
-    0
-}
-
 pub fn write_str(s: &str) {
     let _ = SERIAL.lock().write_str(s);
 }

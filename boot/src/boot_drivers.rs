@@ -12,8 +12,6 @@ use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::kernel_panic::kernel_panic;
 use crate::limine_protocol;
 
-const COM1_BASE: u16 = 0x3F8;
-const SERIAL_COM1_IRQ: u8 = 4;
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
 #[repr(C)]
@@ -57,8 +55,6 @@ unsafe extern "C" {
     fn idt_init();
     fn safe_stack_init();
     fn idt_load();
-
-    fn serial_enable_interrupts(port: u16, irq: u8) -> i32;
 
     fn pit_init(freq: u32);
     fn pit_poll_delay_ms(ms: u32);
@@ -112,12 +108,6 @@ extern "C" fn boot_step_idt_setup_fn() {
 extern "C" fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
-    let rc = unsafe { serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) };
-    if rc != 0 {
-        klog_info!("WARNING: Failed to enable COM1 serial interrupts");
-    } else {
-        klog_debug!("COM1 serial interrupts armed.");
-    }
     klog_debug!("IRQ dispatcher ready.");
 }
 
