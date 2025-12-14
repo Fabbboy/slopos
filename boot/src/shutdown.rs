@@ -178,7 +178,7 @@ pub extern "C" fn kernel_reboot(reason: *const c_char) {
     let invalid_idt = InvalidIdt { limit: 0, base: 0 };
     unsafe {
         asm!("lidt [{}]", in(reg) &invalid_idt, options(nostack, preserves_flags));
-        asm!("int $0x03", options(nostack));
+        asm!("int 0x03", options(nostack));
     }
 
     halt();

@@ -213,12 +213,17 @@ pub extern "C" fn syscall_user_read(
         }
     };
 
-    let read_len = unsafe { tty_read_line(tmp.as_mut_ptr() as *mut c_char, max_len) };
+    let mut read_len = unsafe { tty_read_line(tmp.as_mut_ptr() as *mut c_char, max_len) };
+    if max_len > 0 {
+        read_len = read_len.min(max_len.saturating_sub(1));
+        tmp[read_len] = 0;
+    }
 
+    let copy_len = read_len.saturating_add(1).min(max_len);
     if syscall_copy_to_user_bounded(
         unsafe { (*frame).rdi as *mut c_void },
         tmp.as_ptr() as *const c_void,
-        read_len + 1,
+        copy_len,
     ) != 0
     {
         return syscall_return_err(frame, u64::MAX);

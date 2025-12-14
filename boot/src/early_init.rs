@@ -54,28 +54,29 @@ impl BootInitStep {
 
 #[macro_export]
 macro_rules! boot_init_step {
-    ($phase:ident, $label:expr, $func:ident) => {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
         #[used]
         #[link_section = concat!(".boot_init_", stringify!($phase))]
-        static $func: $crate::early_init::BootInitStep =
+        static $static_name: $crate::early_init::BootInitStep =
             $crate::early_init::BootInitStep::new($label, $func, 0);
     };
 }
 
 #[macro_export]
 macro_rules! boot_init_step_with_flags {
-    ($phase:ident, $label:expr, $func:ident, $flags:expr) => {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
         #[used]
         #[link_section = concat!(".boot_init_", stringify!($phase))]
-        static $func: $crate::early_init::BootInitStep =
+        static $static_name: $crate::early_init::BootInitStep =
             $crate::early_init::BootInitStep::new($label, $func, $flags);
     };
 }
 
 #[macro_export]
 macro_rules! boot_init_optional_step {
-    ($phase:ident, $label:expr, $func:ident) => {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
         $crate::boot_init_step_with_flags!(
+            $static_name,
             $phase,
             $label,
             $func,

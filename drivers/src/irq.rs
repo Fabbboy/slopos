@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::io;
 use slopos_lib::{cpu, interrupt_frame, kdiag_dump_interrupt_frame, klog_printf, tsc, KlogLevel};
+use slopos_lib::spinlock::Spinlock;
 
 use crate::{apic, ioapic, keyboard, wl_currency};
 
@@ -60,11 +62,35 @@ impl IrqRouteState {
     }
 }
 
-static mut IRQ_TABLE: [IrqEntry; IRQ_LINES] = [IrqEntry::new(); IRQ_LINES];
-static mut IRQ_ROUTE_TABLE: [IrqRouteState; IRQ_LINES] = [IrqRouteState::new(); IRQ_LINES];
+struct IrqTables {
+    entries: UnsafeCell<[IrqEntry; IRQ_LINES]>,
+    routes: UnsafeCell<[IrqRouteState; IRQ_LINES]>,
+}
+
+unsafe impl Sync for IrqTables {}
+
+impl IrqTables {
+    const fn new() -> Self {
+        Self {
+            entries: UnsafeCell::new([IrqEntry::new(); IRQ_LINES]),
+            routes: UnsafeCell::new([IrqRouteState::new(); IRQ_LINES]),
+        }
+    }
+
+    fn entries_mut(&self) -> *mut [IrqEntry; IRQ_LINES] {
+        self.entries.get()
+    }
+
+    fn routes_mut(&self) -> *mut [IrqRouteState; IRQ_LINES] {
+        self.routes.get()
+    }
+}
+
+static IRQ_TABLES: IrqTables = IrqTables::new();
 static IRQ_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
+static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
 
 extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
@@ -79,11 +105,18 @@ fn log(level: KlogLevel, msg: &[u8]) {
 }
 
 #[inline]
-fn irq_line_has_ioapic_route(irq: u8) -> bool {
-    if irq as usize >= IRQ_LINES {
-        return false;
-    }
-    unsafe { IRQ_ROUTE_TABLE[irq as usize].via_ioapic }
+fn with_irq_tables<R>(
+    f: impl FnOnce(&mut [IrqEntry; IRQ_LINES], &mut [IrqRouteState; IRQ_LINES]) -> R,
+) -> R {
+    let flags = IRQ_TABLE_LOCK.lock_irqsave();
+    let res = unsafe {
+        f(
+            &mut *IRQ_TABLES.entries_mut(),
+            &mut *IRQ_TABLES.routes_mut(),
+        )
+    };
+    IRQ_TABLE_LOCK.unlock_irqrestore(flags);
+    res
 }
 
 #[inline]
@@ -95,18 +128,24 @@ fn mask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
-    unsafe {
-        if !IRQ_TABLE[irq as usize].masked {
-            if irq_line_has_ioapic_route(irq) {
-                let _ = ioapic::mask_gsi(IRQ_ROUTE_TABLE[irq as usize].gsi);
-            } else {
-                log(
-                    KlogLevel::Info,
-                    b"IRQ: Mask request ignored for line (no IOAPIC route)\0",
-                );
-            }
-            IRQ_TABLE[irq as usize].masked = true;
+    let (mask_hw, gsi) = with_irq_tables(|table, routes| {
+        if table[irq as usize].masked {
+            return (false, 0);
         }
+        table[irq as usize].masked = true;
+        if routes[irq as usize].via_ioapic {
+            (true, routes[irq as usize].gsi)
+        } else {
+            (false, 0)
+        }
+    });
+    if mask_hw {
+        let _ = ioapic::mask_gsi(gsi);
+    } else {
+        log(
+            KlogLevel::Info,
+            b"IRQ: Mask request ignored for line (no IOAPIC route)\0",
+        );
     }
 }
 
@@ -114,38 +153,52 @@ fn unmask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
-    unsafe {
-        if !IRQ_TABLE[irq as usize].masked {
-            return;
+    let (unmask_hw, gsi) = with_irq_tables(|table, routes| {
+        if !table[irq as usize].masked {
+            return (false, 0);
         }
-        if irq_line_has_ioapic_route(irq) {
-            let _ = ioapic::unmask_gsi(IRQ_ROUTE_TABLE[irq as usize].gsi);
-            IRQ_TABLE[irq as usize].masked = false;
+        table[irq as usize].masked = false;
+        if routes[irq as usize].via_ioapic {
+            (true, routes[irq as usize].gsi)
         } else {
-            log(
-                KlogLevel::Info,
-                b"IRQ: Cannot unmask line (no IOAPIC route configured)\0",
-            );
+            (false, 0)
         }
+    });
+    if unmask_hw {
+        let _ = ioapic::unmask_gsi(gsi);
+    } else {
+        log(
+            KlogLevel::Info,
+            b"IRQ: Cannot unmask line (no IOAPIC route configured)\0",
+        );
     }
 }
 
 fn log_unhandled_irq(irq: u8, vector: u8) {
-    unsafe {
-        if irq as usize >= IRQ_LINES {
+    if irq as usize >= IRQ_LINES {
+        unsafe {
             klog_printf(
                 KlogLevel::Info,
                 b"IRQ: Spurious vector %u received\n\0".as_ptr() as *const c_char,
                 vector as u32,
             );
-            return;
         }
+        return;
+    }
 
-        let entry = &mut IRQ_TABLE[irq as usize];
+    let already_reported = with_irq_tables(|table, _| {
+        let entry = &mut table[irq as usize];
         if entry.reported_unhandled {
-            return;
+            true
+        } else {
+            entry.reported_unhandled = true;
+            false
         }
-        entry.reported_unhandled = true;
+    });
+    if already_reported {
+        return;
+    }
+    unsafe {
         klog_printf(
             KlogLevel::Info,
             b"IRQ: Unhandled IRQ %u (vector %u) - masking line\n\0".as_ptr() as *const c_char,
@@ -218,10 +271,11 @@ fn irq_program_ioapic_route(irq: u8) {
         unsafe { kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char) };
     }
 
-    unsafe {
-        IRQ_ROUTE_TABLE[irq as usize].via_ioapic = true;
-        IRQ_ROUTE_TABLE[irq as usize].gsi = gsi;
-    }
+    let masked = with_irq_tables(|table, routes| {
+        routes[irq as usize].via_ioapic = true;
+        routes[irq as usize].gsi = gsi;
+        table[irq as usize].masked
+    });
 
     let polarity: *const c_char = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
         b"active-low\0".as_ptr() as *const c_char
@@ -247,12 +301,10 @@ fn irq_program_ioapic_route(irq: u8) {
         );
     }
 
-    unsafe {
-        if IRQ_TABLE[irq as usize].masked {
-            let _ = ioapic::mask_gsi(gsi);
-        } else {
-            let _ = ioapic::unmask_gsi(gsi);
-        }
+    if masked {
+        let _ = ioapic::mask_gsi(gsi);
+    } else {
+        let _ = ioapic::unmask_gsi(gsi);
     }
 }
 
@@ -277,11 +329,13 @@ pub extern "C" fn irq_get_timer_ticks() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn irq_init() {
-    unsafe {
+    with_irq_tables(|table, routes| {
         for i in 0..IRQ_LINES {
-            IRQ_TABLE[i] = IrqEntry::new();
-            IRQ_ROUTE_TABLE[i] = IrqRouteState::new();
+            table[i] = IrqEntry::new();
+            routes[i] = IrqRouteState::new();
         }
+    });
+    unsafe {
         TIMER_TICK_COUNTER = 0;
         KEYBOARD_EVENT_COUNTER = 0;
     }
@@ -293,13 +347,13 @@ pub extern "C" fn irq_init() {
 
     let _ = irq_register_handler(
         LEGACY_IRQ_TIMER,
-        timer_irq_handler,
+        Some(timer_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
     let _ = irq_register_handler(
         LEGACY_IRQ_KEYBOARD,
-        keyboard_irq_handler,
+        Some(keyboard_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );
@@ -311,7 +365,7 @@ pub extern "C" fn irq_init() {
 #[no_mangle]
 pub extern "C" fn irq_register_handler(
     irq: u8,
-    handler: IrqHandler,
+    handler: Option<IrqHandler>,
     context: *mut c_void,
     name: *const c_char,
 ) -> i32 {
@@ -323,22 +377,16 @@ pub extern "C" fn irq_register_handler(
         wl_currency::award_loss();
         return -1;
     }
-    if handler as usize == 0 {
-        log(
-            KlogLevel::Info,
-            b"IRQ: Attempted to register NULL handler\0",
-        );
-        wl_currency::award_loss();
-        return -1;
-    }
 
-    unsafe {
-        let entry = &mut IRQ_TABLE[irq as usize];
-        entry.handler = Some(handler);
+    with_irq_tables(|table, _| {
+        let entry = &mut table[irq as usize];
+        entry.handler = handler;
         entry.context = context;
         entry.name = name;
         entry.reported_unhandled = false;
+    });
 
+    unsafe {
         if !name.is_null() {
             klog_printf(
                 KlogLevel::Debug,
@@ -365,13 +413,13 @@ pub extern "C" fn irq_unregister_handler(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
-    unsafe {
-        let entry = &mut IRQ_TABLE[irq as usize];
+    with_irq_tables(|table, _| {
+        let entry = &mut table[irq as usize];
         entry.handler = None;
         entry.context = core::ptr::null_mut();
         entry.name = core::ptr::null();
         entry.reported_unhandled = false;
-    }
+    });
     mask_irq_line(irq);
     unsafe {
         klog_printf(
@@ -387,9 +435,9 @@ pub extern "C" fn irq_enable_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
-    unsafe {
-        IRQ_TABLE[irq as usize].reported_unhandled = false;
-    }
+    with_irq_tables(|table, _| {
+        table[irq as usize].reported_unhandled = false;
+    });
     unmask_irq_line(irq);
 }
 
@@ -442,20 +490,24 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
         return;
     }
 
-    let entry = unsafe { &mut IRQ_TABLE[irq as usize] };
-    if entry.handler.is_none() {
+    let handler_snapshot = with_irq_tables(|table, _| {
+        let entry = &mut table[irq as usize];
+        if entry.handler.is_none() {
+            return None;
+        }
+        entry.count = entry.count.wrapping_add(1);
+        entry.last_timestamp = tsc::rdtsc();
+        entry.handler.map(|h| (h, entry.context))
+    });
+
+    let Some((handler, context)) = handler_snapshot else {
         log_unhandled_irq(irq, vector);
         mask_irq_line(irq);
         acknowledge_irq();
         return;
-    }
+    };
 
-    entry.count = entry.count.wrapping_add(1);
-    entry.last_timestamp = tsc::rdtsc();
-
-    if let Some(handler) = entry.handler {
-        unsafe { handler(irq, frame, entry.context) };
-    }
+    unsafe { handler(irq, frame, context) };
 
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
         unsafe {
@@ -485,9 +537,11 @@ pub extern "C" fn irq_get_stats(irq: u8, out_stats: *mut irq_stats) -> i32 {
     if irq as usize >= IRQ_LINES || out_stats.is_null() {
         return -1;
     }
-    unsafe {
-        (*out_stats).count = IRQ_TABLE[irq as usize].count;
-        (*out_stats).last_timestamp = IRQ_TABLE[irq as usize].last_timestamp;
-    }
+    with_irq_tables(|table, _| {
+        unsafe {
+            (*out_stats).count = table[irq as usize].count;
+            (*out_stats).last_timestamp = table[irq as usize].last_timestamp;
+        }
+    });
     0
 }

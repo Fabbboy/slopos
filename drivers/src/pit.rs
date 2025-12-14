@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use slopos_lib::{cpu, io, klog_printf, KlogLevel};
 
 use crate::irq;
@@ -17,7 +19,8 @@ const PIT_COMMAND_BINARY: u8 = 0x00;
 
 const PIT_IRQ_LINE: u8 = 0;
 
-static mut CURRENT_FREQUENCY_HZ: u32 = 0;
+static CURRENT_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(0);
+static CURRENT_RELOAD_DIVISOR: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn pit_io_wait() {
@@ -41,9 +44,9 @@ fn pit_calculate_divisor(mut frequency_hz: u32) -> u16 {
         divisor = 0xFFFF;
     }
 
-    unsafe {
-        CURRENT_FREQUENCY_HZ = PIT_BASE_FREQUENCY_HZ / divisor;
-    }
+    let actual_freq = PIT_BASE_FREQUENCY_HZ / divisor;
+    CURRENT_FREQUENCY_HZ.store(actual_freq, Ordering::SeqCst);
+    CURRENT_RELOAD_DIVISOR.store(divisor, Ordering::SeqCst);
     divisor as u16
 }
 
@@ -61,11 +64,12 @@ pub extern "C" fn pit_set_frequency(frequency_hz: u32) {
     }
     pit_io_wait();
 
+    let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
     unsafe {
         klog_printf(
             KlogLevel::Debug,
             b"PIT: frequency set to %u Hz\n\0".as_ptr() as *const i8,
-            CURRENT_FREQUENCY_HZ,
+            freq,
         );
     }
 }
@@ -90,12 +94,11 @@ pub extern "C" fn pit_init(frequency_hz: u32) {
 
 #[no_mangle]
 pub extern "C" fn pit_get_frequency() -> u32 {
-    unsafe {
-        if CURRENT_FREQUENCY_HZ == 0 {
-            PIT_DEFAULT_FREQUENCY_HZ
-        } else {
-            CURRENT_FREQUENCY_HZ
-        }
+    let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
+    if freq == 0 {
+        PIT_DEFAULT_FREQUENCY_HZ
+    } else {
+        freq
     }
 }
 
@@ -124,8 +127,16 @@ pub extern "C" fn pit_poll_delay_ms(ms: u32) {
         return;
     }
 
-    let ticks_needed =
-        ((ms as u64) * PIT_BASE_FREQUENCY_HZ as u64 / 1000) as u32;
+    let freq = {
+        let f = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
+        if f == 0 { PIT_DEFAULT_FREQUENCY_HZ } else { f }
+    };
+    let reload = {
+        let d = CURRENT_RELOAD_DIVISOR.load(Ordering::SeqCst);
+        if d == 0 { 0x10000 } else { d }
+    };
+
+    let ticks_needed = ((ms as u64) * freq as u64 / 1000) as u32;
     let mut last = pit_read_count();
     let mut elapsed: u32 = 0;
 
@@ -134,8 +145,9 @@ pub extern "C" fn pit_poll_delay_ms(ms: u32) {
         if current <= last {
             elapsed = elapsed.saturating_add((last - current) as u32);
         } else {
-            elapsed =
-                elapsed.saturating_add(last as u32 + ((0xFFFF - current) as u32) + 1);
+            elapsed = elapsed.saturating_add(
+                last as u32 + (reload.saturating_sub(current as u32)),
+            );
         }
         last = current;
     }

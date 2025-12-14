@@ -509,7 +509,7 @@ fn in_user(frame: &slopos_lib::interrupt_frame) -> bool {
     (frame.cs & 0x3) == 0x3
 }
 
-fn terminate_user_task(reason: u16, frame: &slopos_lib::interrupt_frame, detail: &str) {
+fn terminate_user_task(reason: u16, frame: &slopos_lib::interrupt_frame, detail: *const c_char) {
     let task = unsafe { scheduler_get_current_task() };
     let tid = if task.is_null() {
         INVALID_TASK_ID
@@ -521,7 +521,7 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::interrupt_frame, detail:
             KlogLevel::Info,
             b"Terminating user task %u: %s\n\0".as_ptr() as *const c_char,
             tid,
-            detail.as_ptr() as *const c_char,
+            detail,
         );
     }
     if !task.is_null() {
@@ -622,7 +622,7 @@ pub extern "C" fn exception_invalid_opcode(frame: *mut slopos_lib::interrupt_fra
         terminate_user_task(
             TASK_FAULT_USER_UD,
             unsafe { &*frame },
-            "invalid opcode in user mode",
+            b"invalid opcode in user mode\0".as_ptr() as *const c_char,
         );
         return;
     }
@@ -642,7 +642,7 @@ pub extern "C" fn exception_device_not_available(frame: *mut slopos_lib::interru
         terminate_user_task(
             TASK_FAULT_USER_DEVICE_NA,
             unsafe { &*frame },
-            "device not available in user mode",
+            b"device not available in user mode\0".as_ptr() as *const c_char,
         );
         return;
     }
@@ -709,7 +709,7 @@ pub extern "C" fn exception_general_protection(frame: *mut slopos_lib::interrupt
         terminate_user_task(
             TASK_FAULT_USER_GP,
             unsafe { &*frame },
-            "general protection from user mode",
+            b"general protection from user mode\0".as_ptr() as *const c_char,
         );
         return;
     }
@@ -792,7 +792,11 @@ pub extern "C" fn exception_page_fault(frame: *mut slopos_lib::interrupt_frame) 
     }
 
     if from_user {
-        terminate_user_task(TASK_FAULT_USER_PAGE, unsafe { &*frame }, "user page fault");
+        terminate_user_task(
+            TASK_FAULT_USER_PAGE,
+            unsafe { &*frame },
+            b"user page fault\0".as_ptr() as *const c_char,
+        );
         return;
     }
 

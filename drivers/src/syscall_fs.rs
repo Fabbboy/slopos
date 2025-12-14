@@ -319,13 +319,15 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         }
         return syscall_fs_error(frame);
     }
+    unsafe {
+        core::ptr::write_bytes(tmp_ptr as *mut u8, 0, tmp_size);
+    }
 
     for i in 0..(count as usize) {
         unsafe {
             let entry_ptr = *entries.add(i);
             let dst = &mut *tmp_ptr.add(i);
             if entry_ptr.is_null() {
-                dst.name.fill(0);
                 dst.type_ = 0;
                 dst.size = 0;
                 continue;

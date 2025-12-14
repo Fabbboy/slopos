@@ -1,6 +1,5 @@
-#![allow(static_mut_refs)]
-
 use core::ffi::c_char;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{klog_printf, KlogLevel};
 
@@ -22,7 +21,7 @@ const EXCEPTION_GENERAL_PROTECTION: u8 = 13;
 const EXCEPTION_PAGE_FAULT: u8 = 14;
 
 #[repr(C)]
-pub struct ExceptionStackInfo {
+pub struct ExceptionStackInfoConfig {
     name: &'static [u8],
     vector: u8,
     ist_index: u8,
@@ -32,63 +31,82 @@ pub struct ExceptionStackInfo {
     stack_base: u64,
     stack_top: u64,
     stack_size: u64,
-    peak_usage: u64,
-    out_of_bounds_reported: i32,
 }
 
-static mut STACK_TABLE: [ExceptionStackInfo; 4] = [
-    ExceptionStackInfo {
-        name: b"Double Fault\0",
-        vector: EXCEPTION_DOUBLE_FAULT,
-        ist_index: 1,
-        region_base: 0,
-        guard_start: 0,
-        guard_end: 0,
-        stack_base: 0,
-        stack_top: 0,
-        stack_size: 0,
-        peak_usage: 0,
-        out_of_bounds_reported: 0,
-    },
-    ExceptionStackInfo {
-        name: b"Stack Fault\0",
-        vector: EXCEPTION_STACK_FAULT,
-        ist_index: 2,
-        region_base: 0,
-        guard_start: 0,
-        guard_end: 0,
-        stack_base: 0,
-        stack_top: 0,
-        stack_size: 0,
-        peak_usage: 0,
-        out_of_bounds_reported: 0,
-    },
-    ExceptionStackInfo {
-        name: b"General Protection\0",
-        vector: EXCEPTION_GENERAL_PROTECTION,
-        ist_index: 3,
-        region_base: 0,
-        guard_start: 0,
-        guard_end: 0,
-        stack_base: 0,
-        stack_top: 0,
-        stack_size: 0,
-        peak_usage: 0,
-        out_of_bounds_reported: 0,
-    },
-    ExceptionStackInfo {
-        name: b"Page Fault\0",
-        vector: EXCEPTION_PAGE_FAULT,
-        ist_index: 4,
-        region_base: 0,
-        guard_start: 0,
-        guard_end: 0,
-        stack_base: 0,
-        stack_top: 0,
-        stack_size: 0,
-        peak_usage: 0,
-        out_of_bounds_reported: 0,
-    },
+impl ExceptionStackInfoConfig {
+    const fn new(index: usize, name: &'static [u8], vector: u8, ist_index: u8) -> Self {
+        let region_base = EXCEPTION_STACK_REGION_BASE + index as u64 * EXCEPTION_STACK_REGION_STRIDE;
+        let guard_start = region_base;
+        let guard_end = guard_start + EXCEPTION_STACK_GUARD_SIZE;
+        let stack_base = guard_end;
+        let stack_top = stack_base + EXCEPTION_STACK_SIZE;
+        Self {
+            name,
+            vector,
+            ist_index,
+            region_base,
+            guard_start,
+            guard_end,
+            stack_base,
+            stack_top,
+            stack_size: EXCEPTION_STACK_SIZE,
+        }
+    }
+}
+
+struct ExceptionStackMetrics {
+    peak_usage: AtomicU64,
+    out_of_bounds_reported: AtomicBool,
+}
+
+impl ExceptionStackMetrics {
+    const fn new() -> Self {
+        Self {
+            peak_usage: AtomicU64::new(0),
+            out_of_bounds_reported: AtomicBool::new(false),
+        }
+    }
+
+    fn reset(&self) {
+        self.peak_usage.store(0, Ordering::Relaxed);
+        self.out_of_bounds_reported.store(false, Ordering::Relaxed);
+    }
+
+    fn mark_out_of_bounds_once(&self) -> bool {
+        self.out_of_bounds_reported
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn record_usage(&self, usage: u64) -> bool {
+        let mut current = self.peak_usage.load(Ordering::Relaxed);
+        while usage > current {
+            match self.peak_usage.compare_exchange_weak(
+                current,
+                usage,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(prev) => current = prev,
+            }
+        }
+        false
+    }
+}
+
+static STACK_CONFIGS: [ExceptionStackInfoConfig; 4] = [
+    ExceptionStackInfoConfig::new(0, b"Double Fault\0", EXCEPTION_DOUBLE_FAULT, 1),
+    ExceptionStackInfoConfig::new(1, b"Stack Fault\0", EXCEPTION_STACK_FAULT, 2),
+    ExceptionStackInfoConfig::new(2, b"General Protection\0", EXCEPTION_GENERAL_PROTECTION, 3),
+    ExceptionStackInfoConfig::new(3, b"Page Fault\0", EXCEPTION_PAGE_FAULT, 4),
+];
+
+static STACK_METRICS: [ExceptionStackMetrics; 4] = [
+    ExceptionStackMetrics::new(),
+    ExceptionStackMetrics::new(),
+    ExceptionStackMetrics::new(),
+    ExceptionStackMetrics::new(),
 ];
 
 extern "C" {
@@ -105,19 +123,17 @@ fn log_debug(msg: &[u8]) {
     log(KlogLevel::Debug, msg);
 }
 
-fn find_stack_by_vector(vector: u8) -> Option<&'static mut ExceptionStackInfo> {
-    unsafe { STACK_TABLE.iter_mut().find(|s| s.vector == vector) }
+fn find_stack_index_by_vector(vector: u8) -> Option<usize> {
+    STACK_CONFIGS.iter().position(|cfg| cfg.vector == vector)
 }
 
-fn find_stack_by_address(addr: u64) -> Option<&'static mut ExceptionStackInfo> {
-    unsafe {
-        STACK_TABLE
-            .iter_mut()
-            .find(|info| addr >= info.guard_start && addr < info.stack_top)
-    }
+fn find_stack_index_by_address(addr: u64) -> Option<usize> {
+    STACK_CONFIGS
+        .iter()
+        .position(|cfg| addr >= cfg.guard_start && addr < cfg.stack_top)
 }
 
-fn map_stack_pages(stack: &mut ExceptionStackInfo) {
+fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack.stack_base + page as u64 * PAGE_SIZE_4KB;
         let phys_addr = unsafe { alloc_page_frame(0) };
@@ -146,15 +162,8 @@ fn map_stack_pages(stack: &mut ExceptionStackInfo) {
 pub extern "C" fn safe_stack_init() {
     log_debug(b"SAFE STACK: Initializing dedicated IST stacks\0");
 
-    for (i, stack) in unsafe { STACK_TABLE.iter_mut().enumerate() } {
-        stack.region_base = EXCEPTION_STACK_REGION_BASE + i as u64 * EXCEPTION_STACK_REGION_STRIDE;
-        stack.guard_start = stack.region_base;
-        stack.guard_end = stack.guard_start + EXCEPTION_STACK_GUARD_SIZE;
-        stack.stack_base = stack.guard_end;
-        stack.stack_top = stack.stack_base + EXCEPTION_STACK_SIZE;
-        stack.stack_size = EXCEPTION_STACK_SIZE;
-        stack.peak_usage = 0;
-        stack.out_of_bounds_reported = 0;
+    for (i, stack) in STACK_CONFIGS.iter().enumerate() {
+        STACK_METRICS[i].reset();
 
         map_stack_pages(stack);
 
@@ -178,12 +187,14 @@ pub extern "C" fn safe_stack_init() {
 
 #[no_mangle]
 pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
-    let Some(stack) = find_stack_by_vector(vector) else {
+    let Some(idx) = find_stack_index_by_vector(vector) else {
         return;
     };
+    let stack = &STACK_CONFIGS[idx];
+    let metrics = &STACK_METRICS[idx];
 
     if frame_ptr < stack.stack_base || frame_ptr > stack.stack_top {
-        if stack.out_of_bounds_reported == 0 {
+        if metrics.mark_out_of_bounds_once() {
             unsafe {
                 klog_printf(
                     KlogLevel::Info,
@@ -192,14 +203,12 @@ pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
                     vector as u32,
                 );
             }
-            stack.out_of_bounds_reported = 1;
         }
         return;
     }
 
     let usage = stack.stack_top - frame_ptr;
-    if usage > stack.peak_usage {
-        stack.peak_usage = usage;
+    if metrics.record_usage(usage) {
         unsafe {
             klog_printf(
                 KlogLevel::Debug,
@@ -224,7 +233,8 @@ pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
 
 #[no_mangle]
 pub extern "C" fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
-    if let Some(stack) = find_stack_by_address(fault_addr) {
+    if let Some(idx) = find_stack_index_by_address(fault_addr) {
+        let stack = &STACK_CONFIGS[idx];
         if fault_addr >= stack.guard_start && fault_addr < stack.guard_end {
             if !stack_name.is_null() {
                 unsafe {

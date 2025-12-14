@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::mem;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
@@ -155,8 +156,21 @@ impl IoapicIso {
     }
 }
 
-static mut IOAPIC_TABLE: [IoapicController; IOAPIC_MAX_CONTROLLERS] =
-    [IoapicController::new(); IOAPIC_MAX_CONTROLLERS];
+struct IoapicTable(UnsafeCell<[IoapicController; IOAPIC_MAX_CONTROLLERS]>);
+
+unsafe impl Sync for IoapicTable {}
+
+impl IoapicTable {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([IoapicController::new(); IOAPIC_MAX_CONTROLLERS]))
+    }
+
+    fn ptr(&self) -> *mut IoapicController {
+        self.0.get() as *mut IoapicController
+    }
+}
+
+static IOAPIC_TABLE: IoapicTable = IoapicTable::new();
 static mut ISO_TABLE: [IoapicIso; IOAPIC_MAX_ISO_ENTRIES] =
     [IoapicIso::new(); IOAPIC_MAX_ISO_ENTRIES];
 static mut IOAPIC_COUNT: usize = 0;
@@ -301,18 +315,19 @@ fn acpi_find_table(rsdp: *const AcpiRsdp, signature: &[u8; 4]) -> *const AcpiSdt
     core::ptr::null()
 }
 
-fn ioapic_find_controller(gsi: u32) -> Option<&'static mut IoapicController> {
+fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
     unsafe {
+        let base_ptr = IOAPIC_TABLE.ptr();
         for i in 0..IOAPIC_COUNT {
-            let ctrl = &mut IOAPIC_TABLE[i];
+            let ctrl = &*base_ptr.add(i);
             let start = ctrl.gsi_base;
             let end = ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1);
             if gsi >= start && gsi <= end {
-                return Some(ctrl);
+                return Some(base_ptr.add(i));
             }
         }
+        None
     }
-    None
 }
 
 fn ioapic_read(ctrl: &IoapicController, reg: u8) -> u32 {
@@ -403,7 +418,7 @@ fn ioapic_find_iso(irq: u8) -> Option<&'static IoapicIso> {
 }
 
 fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
-    let Some(ctrl) = ioapic_find_controller(gsi) else {
+    let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
         log(
             KlogLevel::Info,
             b"IOAPIC: No controller for requested GSI\0",
@@ -411,6 +426,7 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
         return -1;
     };
 
+    let ctrl = unsafe { &mut *ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         log(
@@ -477,7 +493,7 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                             );
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIoapicEntry);
-                            let ctrl = &mut IOAPIC_TABLE[IOAPIC_COUNT];
+                            let ctrl = &mut *IOAPIC_TABLE.ptr().add(IOAPIC_COUNT);
                             IOAPIC_COUNT += 1;
                             ctrl.id = entry.ioapic_id;
                             ctrl.gsi_base = entry.gsi_base;
@@ -584,7 +600,7 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         return -1;
     }
 
-    let Some(ctrl) = ioapic_find_controller(gsi) else {
+    let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
         log(
             KlogLevel::Info,
             b"IOAPIC: No IOAPIC handles requested GSI\0",
@@ -592,6 +608,7 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         return -1;
     };
 
+    let ctrl = unsafe { &mut *ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         log(
