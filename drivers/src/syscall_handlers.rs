@@ -61,19 +61,10 @@ use slopos_mm::user_copy_helpers::{user_copy_rect_checked, user_copy_line_checke
 use slopos_mm::user_copy::user_copy_from_user;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 
-unsafe extern "C" {
-    fn yield_();
-    fn schedule();
-    fn task_terminate(task_id: u32) -> c_int;
-    fn scheduler_is_preemption_enabled() -> c_int;
-    fn get_task_stats(total: *mut u32, active: *mut u32, context_switches: *mut u64);
-    fn get_scheduler_stats(
-        context_switches: *mut u64,
-        yields: *mut u64,
-        ready_tasks: *mut u32,
-        schedule_calls: *mut u32,
-    );
-}
+use crate::scheduler_callbacks::{
+    call_get_scheduler_stats, call_get_task_stats, call_schedule, call_scheduler_is_preemption_enabled,
+    call_task_terminate, call_yield,
+};
 
 unsafe extern "C" {
     fn tty_read_line(buffer: *mut c_char, buffer_size: usize) -> usize;
@@ -111,7 +102,7 @@ fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDispositi
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = syscall_return_ok(frame, 0);
-    unsafe { yield_() };
+    unsafe { call_yield() };
     SyscallDisposition::Ok
 }
 
@@ -123,9 +114,9 @@ pub extern "C" fn syscall_exit(task: *mut Task, _frame: *mut InterruptFrame) -> 
             (*task).fault_reason = crate::syscall_types::TaskFaultReason::None;
             (*task).exit_code = 0;
         }
-        task_terminate(if task.is_null() { u32::MAX } else { (*task).task_id });
+        call_task_terminate(if task.is_null() { u32::MAX } else { (*task).task_id });
     }
-    unsafe { schedule() };
+    unsafe { call_schedule() };
     SyscallDisposition::NoReturn
 }
 
@@ -223,7 +214,7 @@ pub extern "C" fn syscall_sleep_ms(
     if ms > 60000 {
         ms = 60000;
     }
-    if unsafe { scheduler_is_preemption_enabled() } != 0 {
+    if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
         unsafe { pit_sleep_ms(ms as u32) };
     } else {
         unsafe { pit_poll_delay_ms(ms as u32) };
@@ -439,12 +430,12 @@ pub extern "C" fn syscall_sys_info(
             &mut info.free_pages,
             &mut info.allocated_pages,
         );
-        get_task_stats(
+        call_get_task_stats(
             &mut info.total_tasks,
             &mut info.active_tasks,
             &mut info.task_context_switches,
         );
-        get_scheduler_stats(
+        call_get_scheduler_stats(
             &mut info.scheduler_context_switches,
             &mut info.scheduler_yields,
             &mut info.ready_tasks,

@@ -597,7 +597,7 @@ pub fn task_create(
 }
 
 #[unsafe(no_mangle)]
-pub fn task_terminate(task_id: u32) -> c_int {
+pub extern "C" fn task_terminate(task_id: u32) -> c_int {
     let mut resolved_id = task_id;
     let task_ptr: *mut Task;
 
@@ -770,7 +770,7 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub fn get_task_stats(
+pub extern "C" fn get_task_stats(
     total_tasks: *mut u32,
     active_tasks: *mut u32,
     context_switches: *mut u64,

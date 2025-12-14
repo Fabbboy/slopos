@@ -92,9 +92,7 @@ static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
 static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
 
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-}
+use crate::scheduler_callbacks::call_kernel_panic;
 
 #[inline]
 fn with_irq_tables<R>(
@@ -221,7 +219,7 @@ fn irq_program_ioapic_route(irq: u8) {
 
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
         unsafe {
-            kernel_panic(
+            call_kernel_panic(
                 b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr()
                     as *const c_char,
             )
@@ -231,7 +229,7 @@ fn irq_program_ioapic_route(irq: u8) {
     let mut gsi = 0u32;
     let mut legacy_flags = 0u32;
     if ioapic::legacy_irq_info(irq, &mut gsi, &mut legacy_flags) != 0 {
-        unsafe { kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char) };
+        unsafe { call_kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char) };
     }
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq) as u8;
@@ -242,7 +240,7 @@ fn irq_program_ioapic_route(irq: u8) {
         | ioapic::IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
-        unsafe { kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char) };
+        unsafe { call_kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char) };
     }
 
     let masked = with_irq_tables(|table, routes| {
@@ -281,7 +279,7 @@ fn irq_program_ioapic_route(irq: u8) {
 fn irq_setup_ioapic_routes() {
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
         unsafe {
-            kernel_panic(
+            call_kernel_panic(
                 b"IRQ: APIC/IOAPIC not ready during dispatcher init\0".as_ptr() as *const c_char,
             )
         };
@@ -456,7 +454,7 @@ pub extern "C" fn irq_dispatch(frame: *mut InterruptFrame) {
             irq
         );
         kdiag_dump_interrupt_frame(frame);
-        unsafe { kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
+        unsafe { call_kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
     }
 
     acknowledge_irq();

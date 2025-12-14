@@ -100,11 +100,9 @@ use slopos_drivers::syscall::syscall_handle;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_drivers::wl_currency::wl_award_loss;
 
-unsafe extern "C" {
-    fn scheduler_request_reschedule_from_interrupt();
-    fn scheduler_get_current_task() -> *mut Task;
-    fn task_terminate(task_id: u32) -> i32;
-}
+use slopos_drivers::scheduler_callbacks::{
+    call_boot_get_current_task, call_boot_request_reschedule_from_interrupt, call_boot_task_terminate,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -470,7 +468,7 @@ fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
 }
 
 fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: &'static CStr) {
-    let task = unsafe { scheduler_get_current_task() };
+    let task = unsafe { call_boot_get_current_task() as *mut Task };
     let tid = if task.is_null() {
         INVALID_TASK_ID
     } else {
@@ -484,8 +482,8 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: 
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
             wl_award_loss();
-            task_terminate(tid);
-            scheduler_request_reschedule_from_interrupt();
+            call_boot_task_terminate(tid);
+            call_boot_request_reschedule_from_interrupt();
         }
     }
     let _ = frame;

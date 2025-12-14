@@ -99,10 +99,9 @@ const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 use slopos_mm::paging::{paging_set_current_directory, paging_get_kernel_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_drivers::pit::{pit_enable_irq, pit_disable_irq};
+use slopos_drivers::scheduler_callbacks::call_gdt_set_kernel_rsp0;
 
 unsafe extern "C" {
-    fn gdt_set_kernel_rsp0(rsp0: u64);
-    fn is_kernel_initialized() -> i32;
     fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn context_switch_user(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
@@ -344,10 +343,10 @@ fn switch_to_task(new_task: *mut Task) {
             } else {
                 &kernel_stack_top as *const u8 as u64
             };
-            gdt_set_kernel_rsp0(rsp0);
+            call_gdt_set_kernel_rsp0(rsp0);
             context_switch_user(old_ctx_ptr, &(*new_task).context);
         } else {
-            gdt_set_kernel_rsp0(&kernel_stack_top as *const u8 as u64);
+            call_gdt_set_kernel_rsp0(&kernel_stack_top as *const u8 as u64);
             if !old_ctx_ptr.is_null() {
                 context_switch(old_ctx_ptr, &(*new_task).context);
             } else {
@@ -358,7 +357,7 @@ fn switch_to_task(new_task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub fn schedule() {
+pub extern "C" fn schedule() {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 {
         return;
@@ -419,7 +418,7 @@ pub fn r#yield() {
 
 // C-ABI shim expected by syscall and TTY code.
 #[unsafe(no_mangle)]
-pub fn yield_() {
+pub extern "C" fn yield_() {
     r#yield();
 }
 
@@ -611,7 +610,7 @@ pub fn scheduler_shutdown() {
 }
 
 #[unsafe(no_mangle)]
-pub fn get_scheduler_stats(
+pub extern "C" fn get_scheduler_stats(
     context_switches: *mut u64,
     yields: *mut u64,
     ready_tasks: *mut u32,
@@ -657,7 +656,7 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub fn scheduler_is_preemption_enabled() -> c_int {
+pub extern "C" fn scheduler_is_preemption_enabled() -> c_int {
     unsafe { (*scheduler_mut()).preemption_enabled as c_int }
 }
 
@@ -744,6 +743,7 @@ pub fn boot_step_scheduler_init() -> c_int {
         unsafe {
             use slopos_drivers::scheduler_callbacks::SchedulerCallbacks;
             use core::ffi::c_void;
+            use crate::task::task_terminate;
             // Cast the function pointer to use c_void pointer to avoid type mismatch
             let get_current_task_fn: extern "C" fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as extern "C" fn() -> *mut Task);
             slopos_drivers::scheduler_callbacks::register_callbacks(SchedulerCallbacks {
@@ -751,6 +751,26 @@ pub fn boot_step_scheduler_init() -> c_int {
                 handle_post_irq: Some(scheduler_handle_post_irq),
                 request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
                 get_current_task: Some(get_current_task_fn),
+                yield_fn: Some(yield_ as extern "C" fn()),
+                schedule_fn: Some(schedule as extern "C" fn()),
+                task_terminate_fn: Some(task_terminate as extern "C" fn(u32) -> c_int),
+                scheduler_is_preemption_enabled_fn: Some(scheduler_is_preemption_enabled as extern "C" fn() -> c_int),
+                get_task_stats_fn: Some(crate::task::get_task_stats as extern "C" fn(*mut u32, *mut u32, *mut u64)),
+                get_scheduler_stats_fn: Some(get_scheduler_stats as extern "C" fn(*mut u64, *mut u64, *mut u32, *mut u32)),
+            });
+        }
+        
+        // Register scheduler callbacks for boot to break circular dependency
+        unsafe {
+            use slopos_drivers::scheduler_callbacks::SchedulerCallbacksForBoot;
+            // Cast Task pointer to opaque Task type in drivers
+            let get_current_task_boot_fn: extern "C" fn() -> *mut slopos_drivers::scheduler_callbacks::Task = 
+                core::mem::transmute(scheduler_get_current_task as extern "C" fn() -> *mut Task);
+            let task_terminate_fn: extern "C" fn(u32) -> i32 = crate::task::task_terminate;
+            slopos_drivers::scheduler_callbacks::register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
+                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
+                get_current_task: Some(get_current_task_boot_fn),
+                task_terminate: Some(task_terminate_fn),
             });
         }
     }
