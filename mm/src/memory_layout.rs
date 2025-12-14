@@ -3,6 +3,8 @@
 use core::ffi::c_void;
 use core::ptr;
 
+use slopos_lib::klog_debug;
+
 use crate::mm_constants::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, KERNEL_HEAP_SIZE, KERNEL_HEAP_VBASE, KERNEL_VIRTUAL_BASE,
     PAGE_SIZE_1GB, USER_SPACE_END_VA, USER_SPACE_START_VA, PROCESS_CODE_START_VA,
@@ -68,7 +70,6 @@ static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
 unsafe extern "C" {
     static _kernel_start: c_void;
     static _kernel_end: c_void;
-    fn klog_debug(fmt: *const u8, ...);
 }
 
 fn ptr_as_u64(p: *const c_void) -> u64 {
@@ -99,7 +100,7 @@ pub extern "C" fn init_kernel_memory_layout() {
 
         LAYOUT_INITIALIZED = true;
 
-        klog_debug(b"SlopOS: Kernel memory layout initialized\0".as_ptr());
+        klog_debug!("SlopOS: Kernel memory layout initialized");
     }
 }
 

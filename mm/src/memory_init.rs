@@ -27,8 +27,6 @@ use crate::process_vm::init_process_vm;
 use slopos_lib::{klog_debug, klog_info};
 
 unsafe extern "C" {
-    fn klog_debug(msg: *const u8, ...);
-    fn klog_info(msg: *const u8, ...);
     fn kernel_panic(msg: *const c_char) -> !;
     fn get_hhdm_offset() -> u64;
     fn is_hhdm_available() -> c_int;
@@ -235,7 +233,7 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
 fn record_kernel_core_reservations() {
     let layout_ptr = get_kernel_memory_layout();
     if layout_ptr.is_null() {
-        unsafe { klog_info(b"MM: kernel layout unavailable; cannot reserve kernel image\0".as_ptr()) };
+        klog_info!("MM: kernel layout unavailable; cannot reserve kernel image");
         return;
     }
     let layout = unsafe { &*layout_ptr };
@@ -471,7 +469,7 @@ fn log_reserved_regions() {
     unsafe {
         let count = mm_reservations_count();
         if count == 0 {
-            klog_info(b"MM: No device memory reservations detected\0".as_ptr());
+            klog_info!("MM: No device memory reservations detected");
             return;
         }
         let total_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
@@ -522,8 +520,8 @@ fn display_memory_summary() {
 #[unsafe(no_mangle)]
 pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> c_int {
     unsafe {
-        klog_debug(b"========== SlopOS Memory System Initialization ==========\0".as_ptr());
-        klog_debug(b"Initializing complete memory management system...\0".as_ptr());
+        klog_debug!("========== SlopOS Memory System Initialization ==========");
+        klog_debug!("Initializing complete memory management system...");
 
         if memmap.is_null() {
             kernel_panic(b"MM: Missing Limine memory map\0".as_ptr() as *const c_char);
@@ -567,7 +565,7 @@ pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_o
         MEMORY_SYSTEM_INITIALIZED = true;
         display_memory_summary();
 
-        klog_info(b"MM: Complete memory system initialization successful!\0".as_ptr());
+        klog_info!("MM: Complete memory system initialization successful!");
         klog_debug!("MM: Ready for scheduler and video subsystem initialization\n");
     }
     0
