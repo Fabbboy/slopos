@@ -102,15 +102,12 @@ pub extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     klog::log_line(KlogLevel::Info, "STACKTRACE:");
     for i in 0..captured as usize {
         let entry = &local_entries[i];
-        unsafe {
-            klog::klog_printf(
-                KlogLevel::Info,
-                b"  #%d rbp=0x%lx rip=0x%lx\n\0".as_ptr() as *const _,
-                i as i32,
-                entry.frame_pointer,
-                entry.return_address,
-            );
-        }
+        crate::klog_info!(
+            "  #{} rbp=0x{:x} rip=0x{:x}",
+            i,
+            entry.frame_pointer,
+            entry.return_address
+        );
     }
 }
 

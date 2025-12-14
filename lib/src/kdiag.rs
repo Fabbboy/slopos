@@ -1,28 +1,12 @@
 use core::arch::asm;
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, CStr};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
-use crate::klog::{self, KlogLevel};
 use crate::stacktrace::{self, stacktrace_entry};
 use crate::tsc;
 
 pub const KDIAG_STACK_TRACE_DEPTH: usize = 16;
-
-const GPR_FMT: &[u8] = b"General Purpose Registers:\n\
-  RAX: 0x%lx  RBX: 0x%lx  RCX: 0x%lx  RDX: 0x%lx\n\
-  RSI: 0x%lx  RDI: 0x%lx  RBP: 0x%lx  RSP: 0x%lx\n\
-  R8 : 0x%lx  R9 : 0x%lx  R10: 0x%lx  R11: 0x%lx\n\
-  R12: 0x%lx  R13: 0x%lx  R14: 0x%lx  R15: 0x%lx\n\0";
-
-const FLAGS_FMT: &[u8] =
-    b"Flags Register:\n  RFLAGS: 0x%lx [CF:%d PF:%d AF:%d ZF:%d SF:%d TF:%d IF:%d DF:%d OF:%d]\n\0";
-
-const SEGMENT_FMT: &[u8] =
-    b"Segment Registers:\n  CS: 0x%04x  DS: 0x%04x  ES: 0x%04x  FS: 0x%04x  GS: 0x%04x  SS: 0x%04x\n\0";
-
-const CONTROL_FMT: &[u8] =
-    b"Control Registers:\n  CR0: 0x%lx  CR2: 0x%lx\n  CR3: 0x%lx  CR4: 0x%lx\n\0";
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -129,68 +113,33 @@ pub extern "C" fn kdiag_dump_cpu_state() {
         asm!("mov {}, cr4", out(reg) cr4);
     }
 
-    unsafe {
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== CPU STATE DUMP ===\n\0".as_ptr() as *const c_char,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            GPR_FMT.as_ptr() as *const c_char,
-            rax,
-            rbx,
-            rcx,
-            rdx,
-            rsi,
-            rdi,
-            rbp,
-            rsp,
-            r8,
-            r9,
-            r10,
-            r11,
-            r12,
-            r13,
-            r14,
-            r15,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            FLAGS_FMT.as_ptr() as *const c_char,
-            rflags,
-            ((rflags & (1 << 0)) != 0) as c_int,
-            ((rflags & (1 << 2)) != 0) as c_int,
-            ((rflags & (1 << 4)) != 0) as c_int,
-            ((rflags & (1 << 6)) != 0) as c_int,
-            ((rflags & (1 << 7)) != 0) as c_int,
-            ((rflags & (1 << 8)) != 0) as c_int,
-            ((rflags & (1 << 9)) != 0) as c_int,
-            ((rflags & (1 << 10)) != 0) as c_int,
-            ((rflags & (1 << 11)) != 0) as c_int,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            SEGMENT_FMT.as_ptr() as *const c_char,
-            cs as u32,
-            ds as u32,
-            es as u32,
-            fs as u32,
-            gs as u32,
-            ss as u32,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            CONTROL_FMT.as_ptr() as *const c_char,
-            cr0,
-            cr2,
-            cr3,
-            cr4,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== END CPU STATE DUMP ===\n\0".as_ptr() as *const c_char,
-        );
-    }
+    crate::klog_info!("=== CPU STATE DUMP ===");
+    crate::klog_info!(
+        "General Purpose Registers:\n  RAX: 0x{:x}  RBX: 0x{:x}  RCX: 0x{:x}  RDX: 0x{:x}\n  RSI: 0x{:x}  RDI: 0x{:x}  RBP: 0x{:x}  RSP: 0x{:x}\n  R8 : 0x{:x}  R9 : 0x{:x}  R10: 0x{:x}  R11: 0x{:x}\n  R12: 0x{:x}  R13: 0x{:x}  R14: 0x{:x}  R15: 0x{:x}",
+        rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15
+    );
+    crate::klog_info!(
+        "Flags Register:\n  RFLAGS: 0x{:x} [CF:{} PF:{} AF:{} ZF:{} SF:{} TF:{} IF:{} DF:{} OF:{}]",
+        rflags,
+        ((rflags & (1 << 0)) != 0) as i32,
+        ((rflags & (1 << 2)) != 0) as i32,
+        ((rflags & (1 << 4)) != 0) as i32,
+        ((rflags & (1 << 6)) != 0) as i32,
+        ((rflags & (1 << 7)) != 0) as i32,
+        ((rflags & (1 << 8)) != 0) as i32,
+        ((rflags & (1 << 9)) != 0) as i32,
+        ((rflags & (1 << 10)) != 0) as i32,
+        ((rflags & (1 << 11)) != 0) as i32,
+    );
+    crate::klog_info!(
+        "Segment Registers:\n  CS: 0x{:04x}  DS: 0x{:04x}  ES: 0x{:04x}  FS: 0x{:04x}  GS: 0x{:04x}  SS: 0x{:04x}",
+        cs, ds, es, fs, gs, ss
+    );
+    crate::klog_info!(
+        "Control Registers:\n  CR0: 0x{:x}  CR2: 0x{:x}\n  CR3: 0x{:x}  CR4: 0x{:x}",
+        cr0, cr2, cr3, cr4
+    );
+    crate::klog_info!("=== END CPU STATE DUMP ===");
 }
 
 #[unsafe(no_mangle)]
@@ -200,88 +149,33 @@ pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const interrupt_frame) {
     }
     unsafe {
         let f = &*frame;
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== INTERRUPT FRAME DUMP ===\n\0".as_ptr() as *const _,
+        let exc_name = CStr::from_ptr(exception_name(f.vector as u8).as_ptr() as *const c_char)
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        crate::klog_info!("=== INTERRUPT FRAME DUMP ===");
+        crate::klog_info!(
+            "Vector: {} ({}) Error Code: 0x{:x}",
+            f.vector,
+            exc_name,
+            f.error_code
         );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"Vector: %u (%s) Error Code: 0x%lx\n\0".as_ptr() as *const _,
-            f.vector as u32,
-            exception_name(f.vector as u8).as_ptr() as *const c_char,
-            f.error_code,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"RIP: 0x%lx  CS: 0x%lx  RFLAGS: 0x%lx\n\0".as_ptr() as *const _,
-            f.rip,
-            f.cs,
-            f.rflags,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"RSP: 0x%lx  SS: 0x%lx\n\0".as_ptr() as *const _,
-            f.rsp,
-            f.ss,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"RAX: 0x%lx  RBX: 0x%lx  RCX: 0x%lx\n\0".as_ptr() as *const _,
-            f.rax,
-            f.rbx,
-            f.rcx,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"RDX: 0x%lx  RSI: 0x%lx  RDI: 0x%lx\n\0".as_ptr() as *const _,
-            f.rdx,
-            f.rsi,
-            f.rdi,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"RBP: 0x%lx  R8: 0x%lx  R9: 0x%lx\n\0".as_ptr() as *const _,
-            f.rbp,
-            f.r8,
-            f.r9,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"R10: 0x%lx  R11: 0x%lx  R12: 0x%lx\n\0".as_ptr() as *const _,
-            f.r10,
-            f.r11,
-            f.r12,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"R13: 0x%lx  R14: 0x%lx  R15: 0x%lx\n\0".as_ptr() as *const _,
-            f.r13,
-            f.r14,
-            f.r15,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== END INTERRUPT FRAME DUMP ===\n\0".as_ptr() as *const _,
-        );
+        crate::klog_info!("RIP: 0x{:x}  CS: 0x{:x}  RFLAGS: 0x{:x}", f.rip, f.cs, f.rflags);
+        crate::klog_info!("RSP: 0x{:x}  SS: 0x{:x}", f.rsp, f.ss);
+        crate::klog_info!("RAX: 0x{:x}  RBX: 0x{:x}  RCX: 0x{:x}", f.rax, f.rbx, f.rcx);
+        crate::klog_info!("RDX: 0x{:x}  RSI: 0x{:x}  RDI: 0x{:x}", f.rdx, f.rsi, f.rdi);
+        crate::klog_info!("RBP: 0x{:x}  R8: 0x{:x}  R9: 0x{:x}", f.rbp, f.r8, f.r9);
+        crate::klog_info!("R10: 0x{:x}  R11: 0x{:x}  R12: 0x{:x}", f.r10, f.r11, f.r12);
+        crate::klog_info!("R13: 0x{:x}  R14: 0x{:x}  R15: 0x{:x}", f.r13, f.r14, f.r15);
+        crate::klog_info!("=== END INTERRUPT FRAME DUMP ===");
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kdiag_dump_stack_trace() {
     let rbp = cpu::read_rbp();
-    unsafe {
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== STACK TRACE ===\n\0".as_ptr() as *const _,
-        );
-    }
+    crate::klog_info!("=== STACK TRACE ===");
     kdiag_dump_stack_trace_from_rbp(rbp);
-    unsafe {
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== END STACK TRACE ===\n\0".as_ptr() as *const _,
-        );
-    }
+    crate::klog_info!("=== END STACK TRACE ===");
 }
 
 #[unsafe(no_mangle)]
@@ -293,26 +187,18 @@ pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
         stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), KDIAG_STACK_TRACE_DEPTH as c_int);
 
     if frame_count == 0 {
-        unsafe {
-            klog::klog_printf(
-                KlogLevel::Info,
-                b"No stack frames found\n\0".as_ptr() as *const _,
-            );
-        }
+        crate::klog_info!("No stack frames found");
         return;
     }
 
     for i in 0..frame_count as usize {
         let entry = &entries[i];
-        unsafe {
-            klog::klog_printf(
-                KlogLevel::Info,
-                b"Frame %d: RBP=0x%lx RIP=0x%lx\n\0".as_ptr() as *const _,
-                i as i32,
-                entry.frame_pointer,
-                entry.return_address,
-            );
-        }
+        crate::klog_info!(
+            "Frame {}: RBP=0x{:x} RIP=0x{:x}",
+            i,
+            entry.frame_pointer,
+            entry.return_address
+        );
     }
 }
 
@@ -323,20 +209,10 @@ pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const interrupt_fram
     }
     unsafe {
         let f = &*frame;
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== STACK TRACE FROM EXCEPTION ===\n\0".as_ptr() as *const _,
-        );
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"Exception occurred at RIP: 0x%lx\n\0".as_ptr() as *const _,
-            f.rip,
-        );
+        crate::klog_info!("=== STACK TRACE FROM EXCEPTION ===");
+        crate::klog_info!("Exception occurred at RIP: 0x{:x}", f.rip);
         kdiag_dump_stack_trace_from_rbp(f.rbp);
-        klog::klog_printf(
-            KlogLevel::Info,
-            b"=== END STACK TRACE ===\n\0".as_ptr() as *const _,
-        );
+        crate::klog_info!("=== END STACK TRACE ===");
     }
 }
 
@@ -350,52 +226,34 @@ pub extern "C" fn kdiag_hexdump(data: *const u8, length: usize, base_address: u6
 
     let mut i = 0usize;
     while i < length {
-        unsafe {
-            klog::klog_printf(
-                KlogLevel::Info,
-                b"0x%lx: \0".as_ptr() as *const _,
-                base_address + i as u64,
-            );
-        }
+        crate::klog_info!("0x{:x}: ", base_address + i as u64);
 
         let mut j = 0usize;
         while j < 16 && i + j < length {
             if j == 8 {
-                unsafe { klog::klog_printf(KlogLevel::Info, b" \0".as_ptr() as *const _) };
+                crate::klog_info!(" ");
             }
-            unsafe {
-                klog::klog_printf(
-                    KlogLevel::Info,
-                    b"%02x \0".as_ptr() as *const _,
-                    bytes[i + j] as c_int,
-                );
-            }
+            crate::klog_info!("{:02x} ", bytes[i + j]);
             j += 1;
         }
 
         while j < 16 {
             if j == 8 {
-                unsafe { klog::klog_printf(KlogLevel::Info, b" \0".as_ptr() as *const _) };
+                crate::klog_info!(" ");
             }
-            unsafe { klog::klog_printf(KlogLevel::Info, b"   \0".as_ptr() as *const _) };
+            crate::klog_info!("   ");
             j += 1;
         }
 
-        unsafe { klog::klog_printf(KlogLevel::Info, b" |\0".as_ptr() as *const _) };
+        crate::klog_info!(" |");
         let mut j = 0usize;
         while j < 16 && i + j < length {
             let c = bytes[i + j];
-            let display = if (32..=126).contains(&c) { c } else { b'.' };
-            unsafe {
-                klog::klog_printf(
-                    KlogLevel::Info,
-                    b"%c\0".as_ptr() as *const _,
-                    display as c_int,
-                );
-            }
+            let display = if (32..=126).contains(&c) { c as char } else { '.' };
+            crate::klog_info!("{}", display);
             j += 1;
         }
-        unsafe { klog::klog_printf(KlogLevel::Info, b"|\n\0".as_ptr() as *const _) };
+        crate::klog_info!("|");
 
         i += 16;
     }
