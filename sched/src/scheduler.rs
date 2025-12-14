@@ -11,7 +11,7 @@ use crate::task::{
     task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running, task_is_terminated,
     task_record_context_switch, task_record_yield, task_set_current, task_set_state, Task, TaskContext,
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE,
-    TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING, TASK_STATE_TERMINATED,
+    TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING,
 };
 
 #[repr(C)]
@@ -128,8 +128,8 @@ pub struct PageTable {
     pub entries: [u64; 512],
 }
 
-fn scheduler_mut() -> &'static mut Scheduler {
-    unsafe { &mut SCHEDULER }
+fn scheduler_mut() -> *mut Scheduler {
+    &raw mut SCHEDULER
 }
 
 fn ready_queue_init(queue: &mut ReadyQueue) {
@@ -219,11 +219,13 @@ fn ready_queue_remove(queue: &mut ReadyQueue, task: *mut Task) -> c_int {
 }
 
 fn scheduler_get_default_time_slice() -> u64 {
-    let sched = scheduler_mut();
-    if sched.time_slice != 0 {
-        sched.time_slice as u64
-    } else {
-        SCHED_DEFAULT_TIME_SLICE as u64
+    unsafe {
+        let sched = &mut *scheduler_mut();
+        if sched.time_slice != 0 {
+            sched.time_slice as u64
+        } else {
+            SCHED_DEFAULT_TIME_SLICE as u64
+        }
     }
 }
 
@@ -249,7 +251,7 @@ pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     if !task_is_ready(task) {
         unsafe {
             klog_info!("schedule_task: task {} not ready (state {})", (*task).task_id, task_get_state(task) as u32);
@@ -275,7 +277,7 @@ pub extern "C" fn unschedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     ready_queue_remove(&mut sched.ready_queue, task);
     if sched.current_task == task {
         sched.current_task = ptr::null_mut();
@@ -284,7 +286,7 @@ pub extern "C" fn unschedule_task(task: *mut Task) -> c_int {
 }
 
 fn select_next_task() -> *mut Task {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     let mut next = ready_queue_dequeue(&mut sched.ready_queue);
     if next.is_null() && !sched.idle_task.is_null() && !task_is_terminated(sched.idle_task) {
         next = sched.idle_task;
@@ -296,7 +298,7 @@ fn switch_to_task(new_task: *mut Task) {
     if new_task.is_null() {
         return;
     }
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     let old_task = sched.current_task;
     if old_task == new_task {
         return;
@@ -359,7 +361,7 @@ fn switch_to_task(new_task: *mut Task) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schedule() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 {
         return;
     }
@@ -409,7 +411,7 @@ pub extern "C" fn schedule() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn r#yield() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     sched.total_yields += 1;
     if !sched.current_task.is_null() {
         task_record_yield(sched.current_task);
@@ -425,7 +427,7 @@ pub extern "C" fn yield_() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn block_current_task() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
         return;
@@ -439,7 +441,7 @@ pub extern "C" fn block_current_task() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn task_wait_for(task_id: u32) -> c_int {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
         return -1;
@@ -474,7 +476,7 @@ pub extern "C" fn unblock_task(task: *mut Task) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_task_exit() -> ! {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
         klog_info!("scheduler_task_exit: No current task");
@@ -487,10 +489,8 @@ pub extern "C" fn scheduler_task_exit() -> ! {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(current, ptr::null_mut(), timestamp);
 
-    unsafe {
-        if crate::task::task_terminate(u32::MAX) != 0 {
-            klog_info!("scheduler_task_exit: Failed to terminate current task");
-        }
+    if crate::task::task_terminate(u32::MAX) != 0 {
+        klog_info!("scheduler_task_exit: Failed to terminate current task");
     }
 
     sched.current_task = ptr::null_mut();
@@ -504,7 +504,7 @@ pub extern "C" fn scheduler_task_exit() -> ! {
 }
 
 extern "C" fn idle_task_function(_: *mut c_void) {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     loop {
         if let Some(cb) = unsafe { IDLE_WAKEUP_CB } {
             if cb() != 0 {
@@ -529,7 +529,7 @@ pub extern "C" fn scheduler_register_idle_wakeup_callback(callback: Option<exter
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init_scheduler() -> c_int {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     ready_queue_init(&mut sched.ready_queue);
     sched.current_task = ptr::null_mut();
     sched.idle_task = ptr::null_mut();
@@ -550,15 +550,13 @@ pub extern "C" fn init_scheduler() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn create_idle_task() -> c_int {
-    let idle_task_id = unsafe {
-        crate::task::task_create(
-            b"idle\0".as_ptr() as *const i8,
-            idle_task_function,
-            ptr::null_mut(),
-            TASK_PRIORITY_IDLE,
-            TASK_FLAG_KERNEL_MODE,
-        )
-    };
+    let idle_task_id = crate::task::task_create(
+        b"idle\0".as_ptr() as *const i8,
+        idle_task_function,
+        ptr::null_mut(),
+        TASK_PRIORITY_IDLE,
+        TASK_FLAG_KERNEL_MODE,
+    );
     if idle_task_id == INVALID_TASK_ID {
         return -1;
     }
@@ -566,13 +564,13 @@ pub extern "C" fn create_idle_task() -> c_int {
     if task_get_info(idle_task_id, &mut idle_task) != 0 {
         return -1;
     }
-    scheduler_mut().idle_task = idle_task;
+    unsafe { (*scheduler_mut()).idle_task = idle_task };
     0
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn start_scheduler() -> c_int {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled != 0 {
         return -1;
     }
@@ -580,9 +578,7 @@ pub extern "C" fn start_scheduler() -> c_int {
     unsafe { init_kernel_context(&mut sched.return_context) };
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
 
-    unsafe {
-        klog_debug!("start_scheduler: ready_count={} idle_task={:p}", sched.ready_queue.count, sched.idle_task);
-    }
+    klog_debug!("start_scheduler: ready_count={} idle_task={:p}", sched.ready_queue.count, sched.idle_task);
 
     if !ready_queue_empty(&sched.ready_queue) {
         schedule();
@@ -592,7 +588,7 @@ pub extern "C" fn start_scheduler() -> c_int {
         sched.current_task = sched.idle_task;
         task_set_current(sched.idle_task);
         scheduler_reset_task_quantum(sched.idle_task);
-        unsafe { idle_task_function(ptr::null_mut()) };
+        idle_task_function(ptr::null_mut());
     } else if sched.current_task.is_null() {
         return -1;
     }
@@ -604,12 +600,12 @@ pub extern "C" fn start_scheduler() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn stop_scheduler() {
-    scheduler_mut().enabled = 0;
+    unsafe { (*scheduler_mut()).enabled = 0 };
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_shutdown() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     sched.enabled = 0;
     ready_queue_init(&mut sched.ready_queue);
     sched.current_task = ptr::null_mut();
@@ -623,7 +619,7 @@ pub extern "C" fn get_scheduler_stats(
     ready_tasks: *mut u32,
     schedule_calls: *mut u32,
 ) {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     unsafe {
         if !context_switches.is_null() {
             *context_switches = sched.total_switches;
@@ -642,17 +638,17 @@ pub extern "C" fn get_scheduler_stats(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_is_enabled() -> c_int {
-    scheduler_mut().enabled as c_int
+    unsafe { (*scheduler_mut()).enabled as c_int }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_get_current_task() -> *mut Task {
-    scheduler_mut().current_task
+    unsafe { (*scheduler_mut()).current_task }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_set_preemption_enabled(enabled: c_int) {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
     if sched.preemption_enabled != 0 {
         unsafe { pit_enable_irq() };
@@ -664,12 +660,12 @@ pub extern "C" fn scheduler_set_preemption_enabled(enabled: c_int) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_is_preemption_enabled() -> c_int {
-    scheduler_mut().preemption_enabled as c_int
+    unsafe { (*scheduler_mut()).preemption_enabled as c_int }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_timer_tick() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     sched.total_ticks = sched.total_ticks.saturating_add(1);
     if sched.enabled == 0 || sched.preemption_enabled == 0 {
         return;
@@ -711,7 +707,7 @@ pub extern "C" fn scheduler_timer_tick() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_request_reschedule_from_interrupt() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 || sched.preemption_enabled == 0 {
         return;
     }
@@ -722,7 +718,7 @@ pub extern "C" fn scheduler_request_reschedule_from_interrupt() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_handle_post_irq() {
-    let sched = scheduler_mut();
+    let sched = unsafe { &mut *scheduler_mut() };
     if sched.reschedule_pending == 0 {
         return;
     }
@@ -739,7 +735,7 @@ pub extern "C" fn scheduler_handle_post_irq() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn boot_step_task_manager_init() -> c_int {
-    unsafe { crate::task::init_task_manager() }
+    crate::task::init_task_manager()
 }
 
 #[unsafe(no_mangle)]

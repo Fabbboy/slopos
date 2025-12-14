@@ -10,6 +10,7 @@ use slopos_lib::klog::{klog_is_enabled, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
+use crate::scheduler::ProcessPageDir;
 
 pub const MAX_TASKS: usize = 32;
 pub const TASK_STACK_SIZE: u64 = 0x8000; /* 32KB */
@@ -39,19 +40,7 @@ const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
 pub type TaskIterateCb = Option<extern "C" fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = extern "C" fn(*mut c_void);
 
-#[repr(C)]
-pub struct ProcessPageDir {
-    pub pml4: *mut PageTable,
-    pub pml4_phys: u64,
-    pub ref_count: u32,
-    pub process_id: u32,
-    pub next: *mut ProcessPageDir,
-}
-
-#[repr(C, align(4096))]
-pub struct PageTable {
-    pub entries: [u64; 512],
-}
+// ProcessPageDir and PageTable are defined in scheduler module to avoid duplicate re-exports
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
@@ -281,12 +270,12 @@ unsafe extern "C" {
     static _user_text_end: u8;
 }
 
-fn task_manager_mut() -> &'static mut TaskManager {
-    unsafe { &mut TASK_MANAGER }
+fn task_manager_mut() -> *mut TaskManager {
+    &raw mut TASK_MANAGER
 }
 
 pub fn task_find_by_id(task_id: u32) -> *mut Task {
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     for task in mgr.tasks.iter_mut() {
         if task.task_id == task_id {
             return task as *mut Task;
@@ -296,7 +285,7 @@ pub fn task_find_by_id(task_id: u32) -> *mut Task {
 }
 
 fn find_free_task_slot() -> *mut Task {
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     for task in mgr.tasks.iter_mut() {
         if task.state == TASK_STATE_INVALID {
             return task as *mut Task;
@@ -306,7 +295,7 @@ fn find_free_task_slot() -> *mut Task {
 }
 
 fn release_task_dependents(completed_task_id: u32) {
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     for dependent in mgr.tasks.iter_mut() {
         if !task_is_blocked(dependent) {
             continue;
@@ -315,10 +304,8 @@ fn release_task_dependents(completed_task_id: u32) {
             continue;
         }
         dependent.waiting_on_task_id = INVALID_TASK_ID;
-        unsafe {
-            if scheduler::unblock_task(dependent as *mut Task) != 0 {
-                klog_info!("task_terminate: Failed to unblock dependent task");
-            }
+        if scheduler::unblock_task(dependent as *mut Task) != 0 {
+            klog_info!("task_terminate: Failed to unblock dependent task");
         }
     }
 }
@@ -348,14 +335,14 @@ fn task_slot_index(task: *const Task) -> Option<usize> {
 
 fn clear_exit_record(task: *const Task) {
     if let Some(idx) = task_slot_index(task) {
-        let mgr = task_manager_mut();
+        let mgr = unsafe { &mut *task_manager_mut() };
         mgr.exit_records[idx] = TaskExitRecord::empty();
     }
 }
 
 fn record_task_exit(task: *const Task, exit_reason: TaskExitReason, fault_reason: TaskFaultReason, exit_code: u32) {
     if let Some(idx) = task_slot_index(task) {
-        let mgr = task_manager_mut();
+        let mgr = unsafe { &mut *task_manager_mut() };
         mgr.exit_records[idx] = TaskExitRecord {
             task_id: unsafe { (*task).task_id },
             exit_reason,
@@ -373,7 +360,7 @@ fn init_task_context(task: &mut Task) {
     task.context.rflags = 0x202;
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
-        task.context.rip = unsafe { task_entry_wrapper as usize as u64 };
+        task.context.rip = task_entry_wrapper as *const () as usize as u64;
     } else {
         task.context.rip = task.entry_point;
     }
@@ -422,7 +409,7 @@ unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init_task_manager() -> c_int {
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     mgr.num_tasks = 0;
     mgr.next_task_id = 1;
     mgr.total_context_switches = 0;
@@ -460,7 +447,7 @@ pub extern "C" fn task_create(
         return INVALID_TASK_ID;
     }
 
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
 
     if mgr.num_tasks >= MAX_TASKS as u32 {
         klog_info!("task_create: Maximum tasks reached");
@@ -476,9 +463,9 @@ pub extern "C" fn task_create(
     clear_exit_record(task);
 
     let mut process_id = INVALID_PROCESS_ID;
-    let mut stack_base = 0u64;
-    let mut kernel_stack_base = 0u64;
-    let mut kernel_stack_size = 0u64;
+    let stack_base;
+    let kernel_stack_base;
+    let kernel_stack_size;
 
     unsafe {
         if flags & TASK_FLAG_KERNEL_MODE != 0 {
@@ -621,7 +608,7 @@ pub extern "C" fn task_create(
 #[unsafe(no_mangle)]
 pub extern "C" fn task_terminate(task_id: u32) -> c_int {
     let mut resolved_id = task_id;
-    let mut task_ptr: *mut Task = ptr::null_mut();
+    let task_ptr: *mut Task;
 
     if task_id == u32::MAX {
         task_ptr = scheduler::scheduler_get_current_task();
@@ -647,9 +634,7 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
 
-    unsafe {
-        scheduler::unschedule_task(task_ptr);
-    }
+    scheduler::unschedule_task(task_ptr);
 
     let now = kdiag_timestamp();
     unsafe {
@@ -684,7 +669,7 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
         }
     }
 
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     if !is_current && mgr.num_tasks > 0 {
         mgr.num_tasks -= 1;
     }
@@ -698,7 +683,7 @@ pub extern "C" fn task_shutdown_all() -> c_int {
     let mut result = 0;
     let current = scheduler::scheduler_get_current_task();
     for idx in 0..MAX_TASKS {
-        let task = unsafe { &mut task_manager_mut().tasks[idx] };
+        let task = unsafe { &mut (*task_manager_mut()).tasks[idx] };
         if task.state == TASK_STATE_INVALID {
             continue;
         }
@@ -712,7 +697,7 @@ pub extern "C" fn task_shutdown_all() -> c_int {
             result = -1;
         }
     }
-    task_manager_mut().num_tasks = 0;
+    unsafe { (*task_manager_mut()).num_tasks = 0 };
     result
 }
 
@@ -737,7 +722,7 @@ pub extern "C" fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRe
     if record_out.is_null() {
         return -1;
     }
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     for rec in mgr.exit_records.iter() {
         if rec.task_id == task_id {
             unsafe { *record_out = *rec };
@@ -786,7 +771,7 @@ pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
 
     unsafe { (*task).state = new_state };
 
-    if unsafe { klog_is_enabled(KlogLevel::Debug) } != 0 {
+    if klog_is_enabled(KlogLevel::Debug) != 0 {
         klog_debug!("Task {} state: {} -> {}", task_id, old_state as c_uint, new_state as c_uint);
     }
 
@@ -799,17 +784,15 @@ pub extern "C" fn get_task_stats(
     active_tasks: *mut u32,
     context_switches: *mut u64,
 ) {
-    let mgr = task_manager_mut();
-    unsafe {
-        if !total_tasks.is_null() {
-            *total_tasks = mgr.tasks_created;
-        }
-        if !active_tasks.is_null() {
-            *active_tasks = mgr.num_tasks;
-        }
-        if !context_switches.is_null() {
-            *context_switches = mgr.total_context_switches;
-        }
+    let mgr = unsafe { &mut *task_manager_mut() };
+    if !total_tasks.is_null() {
+        unsafe { *total_tasks = mgr.tasks_created };
+    }
+    if !active_tasks.is_null() {
+        unsafe { *active_tasks = mgr.num_tasks };
+    }
+    if !context_switches.is_null() {
+        unsafe { *context_switches = mgr.total_context_switches };
     }
 }
 
@@ -829,13 +812,13 @@ pub extern "C" fn task_record_context_switch(from: *mut Task, to: *mut Task, tim
     }
 
     if !to.is_null() && to != from {
-        task_manager_mut().total_context_switches += 1;
+        unsafe { (*task_manager_mut()).total_context_switches += 1 };
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn task_record_yield(task: *mut Task) {
-    task_manager_mut().total_yields += 1;
+    unsafe { (*task_manager_mut()).total_yields += 1 };
     if !task.is_null() {
         unsafe { (*task).yield_count = (*task).yield_count.saturating_add(1) };
     }
@@ -843,7 +826,7 @@ pub extern "C" fn task_record_yield(task: *mut Task) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn task_get_total_yields() -> u64 {
-    task_manager_mut().total_yields
+    unsafe { (*task_manager_mut()).total_yields }
 }
 
 #[unsafe(no_mangle)]
@@ -864,7 +847,7 @@ pub extern "C" fn task_iterate_active(callback: TaskIterateCb, context: *mut c_v
         return;
     }
     let cb = callback.unwrap();
-    let mgr = task_manager_mut();
+    let mgr = unsafe { &mut *task_manager_mut() };
     for task in mgr.tasks.iter_mut() {
         if task.state == TASK_STATE_INVALID || task.task_id == INVALID_TASK_ID {
             continue;

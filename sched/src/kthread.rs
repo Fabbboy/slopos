@@ -33,7 +33,7 @@ pub extern "C" fn kthread_spawn_ex(
     }
 
     let combined_flags = flags | TASK_FLAG_KERNEL_MODE;
-    let id = unsafe { task_create(name, entry_point.unwrap(), arg, priority, combined_flags) };
+    let id = task_create(name, entry_point.unwrap(), arg, priority, combined_flags);
 
     if id == INVALID_TASK_ID {
         let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>") };
@@ -50,7 +50,7 @@ pub extern "C" fn kthread_yield() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kthread_join(thread_id: KthreadId) -> c_int {
-    unsafe { task_wait_for(thread_id) }
+    task_wait_for(thread_id)
 }
 
 #[unsafe(no_mangle)]

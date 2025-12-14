@@ -99,7 +99,7 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
 pub extern "C" fn run_scheduler_test() -> c_int {
     klog_info!("=== Starting SlopOS Cooperative Scheduler Test ===");
 
-    if unsafe { crate::task::init_task_manager() } != 0 {
+    if crate::task::init_task_manager() != 0 {
         klog_info!("Failed to initialize task manager");
         return -1;
     }
@@ -116,15 +116,13 @@ pub extern "C" fn run_scheduler_test() -> c_int {
 
     klog_info!("Creating test tasks...");
 
-    let task_a_id = unsafe {
-        task_create(
-            b"TestTaskA\0".as_ptr() as *const c_char,
-            test_task_a,
-            ptr::null_mut(),
-            1,
-            TASK_FLAG_KERNEL_MODE,
-        )
-    };
+    let task_a_id = task_create(
+        b"TestTaskA\0".as_ptr() as *const c_char,
+        test_task_a,
+        ptr::null_mut(),
+        1,
+        TASK_FLAG_KERNEL_MODE,
+    );
 
     if task_a_id == INVALID_TASK_ID {
         klog_info!("Failed to create test task A");
@@ -133,15 +131,13 @@ pub extern "C" fn run_scheduler_test() -> c_int {
 
     klog_info!("Created Task A with ID {}", task_a_id);
 
-    let task_b_id = unsafe {
-        task_create(
-            b"TestTaskB\0".as_ptr() as *const c_char,
-            test_task_b,
-            ptr::null_mut(),
-            1,
-            TASK_FLAG_KERNEL_MODE,
-        )
-    };
+    let task_b_id = task_create(
+        b"TestTaskB\0".as_ptr() as *const c_char,
+        test_task_b,
+        ptr::null_mut(),
+        1,
+        TASK_FLAG_KERNEL_MODE,
+    );
 
     if task_b_id == INVALID_TASK_ID {
         klog_info!("Failed to create test task B");
@@ -165,19 +161,15 @@ pub extern "C" fn run_scheduler_test() -> c_int {
 
     if scheduler::schedule_task(task_a_info) != 0 {
         klog_info!("Failed to schedule task A");
-        unsafe {
-            crate::task::task_terminate(task_a_id);
-            crate::task::task_terminate(task_b_id);
-        }
+        crate::task::task_terminate(task_a_id);
+        crate::task::task_terminate(task_b_id);
         return -1;
     }
 
     if scheduler::schedule_task(task_b_info) != 0 {
         klog_info!("Failed to schedule task B");
-        unsafe {
-            crate::task::task_terminate(task_a_id);
-            crate::task::task_terminate(task_b_id);
-        }
+        crate::task::task_terminate(task_a_id);
+        crate::task::task_terminate(task_b_id);
         return -1;
     }
 
@@ -215,7 +207,7 @@ extern "C" fn user_stub_task(arg: *mut c_void) {
 pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
     klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
-    if unsafe { crate::task::init_task_manager() } != 0
+    if crate::task::init_task_manager() != 0
         || scheduler::init_scheduler() != 0
         || scheduler::create_idle_task() != 0
     {
@@ -223,15 +215,13 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
         return -1;
     }
 
-    let user_task_id = unsafe {
-        task_create(
-            b"UserStub\0".as_ptr() as *const c_char,
-            user_stub_task,
-            ptr::null_mut(),
-            TASK_PRIORITY_NORMAL,
-            TASK_FLAG_USER_MODE,
-        )
-    };
+    let user_task_id = task_create(
+        b"UserStub\0".as_ptr() as *const c_char,
+        user_stub_task,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_USER_MODE,
+    );
     if user_task_id == INVALID_TASK_ID {
         klog_info!("PRIVSEP_TEST: user task creation failed");
         return -1;
@@ -283,10 +273,8 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
         }
     }
 
-    unsafe {
-        task_shutdown_all();
-        scheduler::scheduler_shutdown();
-    }
+    task_shutdown_all();
+    scheduler::scheduler_shutdown();
 
     if failed != 0 {
         klog_info!("PRIVSEP_TEST: FAILED");
@@ -436,7 +424,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     static mut TEST_COMPLETED: c_int = 0;
     unsafe {
         TEST_COMPLETED = 0;
-        TEST_COMPLETED_PTR = &mut TEST_COMPLETED;
+        TEST_COMPLETED_PTR = &raw mut TEST_COMPLETED;
     }
 
     let mut test_ctx = TaskContext::default();
@@ -447,7 +435,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     test_ctx.rsi = 0;
     test_ctx.rdi = unsafe { TEST_COMPLETED_PTR as u64 };
     test_ctx.rbp = 0;
-    test_ctx.rip = test_task_function as u64;
+    test_ctx.rip = test_task_function as *const () as usize as u64;
     test_ctx.rflags = 0x202;
     test_ctx.cs = 0x08;
     test_ctx.ds = 0x10;
@@ -469,7 +457,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     let mut current_rsp: u64 = 0;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp);
-        KERNEL_RETURN_CONTEXT.rip = context_switch_return_trampoline as u64;
+        KERNEL_RETURN_CONTEXT.rip = context_switch_return_trampoline as *const () as usize as u64;
         KERNEL_RETURN_CONTEXT.rsp = current_rsp;
         KERNEL_RETURN_CONTEXT.cs = 0x08;
         KERNEL_RETURN_CONTEXT.ss = 0x10;
@@ -482,9 +470,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
 
     let mut dummy_old = TaskContext::default();
     unsafe {
-        unsafe {
-            simple_context_switch(&mut dummy_old, &test_ctx);
-        }
+        simple_context_switch(&mut dummy_old, &test_ctx);
     }
 
     unsafe { core::hint::unreachable_unchecked() }
@@ -501,9 +487,7 @@ pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
 
     let mut dummy = TaskContext::default();
     unsafe {
-        unsafe {
-            simple_context_switch(&mut dummy, &KERNEL_RETURN_CONTEXT as *const TaskContext);
-        }
+        simple_context_switch(&mut dummy, &raw const KERNEL_RETURN_CONTEXT);
     }
 }
 
