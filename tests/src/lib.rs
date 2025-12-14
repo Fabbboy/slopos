@@ -1,8 +1,4 @@
 #![no_std]
-#![allow(unsafe_op_in_unsafe_fn)]
-#![allow(unused_unsafe)]
-#![allow(unused_imports)]
-#![allow(static_mut_refs)]
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -90,10 +86,22 @@ static mut REGISTRY: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] = [None;
 static mut REGISTRY_COUNT: usize = 0;
 static mut CACHED_CYCLES_PER_MS: u64 = 0;
 
+fn registry_mut() -> *mut [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] {
+    &raw mut REGISTRY
+}
+
+fn registry_count_mut() -> *mut usize {
+    &raw mut REGISTRY_COUNT
+}
+
+fn cached_cycles_per_ms_mut() -> *mut u64 {
+    &raw mut CACHED_CYCLES_PER_MS
+}
+
 fn estimate_cycles_per_ms() -> u64 {
     unsafe {
-        if CACHED_CYCLES_PER_MS != 0 {
-            return CACHED_CYCLES_PER_MS;
+        if *cached_cycles_per_ms_mut() != 0 {
+            return *cached_cycles_per_ms_mut();
         }
     }
 
@@ -107,7 +115,7 @@ fn estimate_cycles_per_ms() -> u64 {
     }
 
     unsafe {
-        CACHED_CYCLES_PER_MS = cycles_per_ms;
+        *cached_cycles_per_ms_mut() = cycles_per_ms;
     }
     cycles_per_ms
 }
@@ -154,8 +162,8 @@ fn award_wl_for_result(res: &TestSuiteResult) {
 #[unsafe(no_mangle)]
 pub extern "C" fn tests_reset_registry() {
     unsafe {
-        REGISTRY.iter_mut().for_each(|slot| *slot = None);
-        REGISTRY_COUNT = 0;
+        (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
+        *registry_count_mut() = 0;
     }
 }
 
@@ -169,11 +177,11 @@ pub extern "C" fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
         return -1;
     }
     unsafe {
-        if REGISTRY_COUNT >= TESTS_MAX_SUITES {
+        if *registry_count_mut() >= TESTS_MAX_SUITES {
             return -1;
         }
-        REGISTRY[REGISTRY_COUNT] = Some(desc_ref);
-        REGISTRY_COUNT += 1;
+        (*registry_mut())[*registry_count_mut()] = Some(desc_ref);
+        *registry_count_mut() += 1;
     }
     0
 }
@@ -212,12 +220,12 @@ pub extern "C" fn tests_run_all(
 
     let mut desc_list: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] =
         [None; TESTS_MAX_SUITES];
-    let mut desc_count = unsafe { REGISTRY_COUNT };
+    let mut desc_count = unsafe { *registry_count_mut() };
     if desc_count > TESTS_MAX_SUITES {
         desc_count = TESTS_MAX_SUITES;
     }
     for i in 0..desc_count {
-        desc_list[i] = unsafe { REGISTRY[i] };
+        desc_list[i] = unsafe { (*registry_mut())[i] };
     }
 
     let start_cycles = slopos_lib::tsc::rdtsc();
@@ -278,8 +286,6 @@ pub extern "C" fn tests_run_all(
 }
 
 mod suites {
-    use core::ffi::c_int;
-
     use super::*;
     use slopos_drivers::interrupt_test_config::{
         INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY,
@@ -325,14 +331,10 @@ mod suites {
             return 0;
         }
 
-        unsafe {
-            intr::interrupt_test_init(&scoped as *const _);
-            intr::run_all_interrupt_tests(&scoped as *const _);
-        }
-        let stats_ptr = unsafe { intr::test_get_stats() };
-        unsafe {
-            intr::interrupt_test_cleanup();
-        }
+        intr::interrupt_test_init(&scoped as *const _);
+        intr::run_all_interrupt_tests(&scoped as *const _);
+        let stats_ptr = intr::test_get_stats();
+        intr::interrupt_test_cleanup();
 
         let stats = unsafe { stats_ptr.as_ref() };
 
@@ -781,14 +783,14 @@ mod suites {
             run: Some(run_virtio_gpu_driver_suite),
         };
 
-        let _ = unsafe { tests_register_suite(&VM_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&HEAP_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&RAMFS_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&PRIVSEP_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&CTX_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&ROULETTE_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&ROULETTE_EXEC_SUITE_DESC) };
-        let _ = unsafe { tests_register_suite(&VIRTIO_GPU_SUITE_DESC) };
+        let _ = tests_register_suite(&VM_SUITE_DESC);
+        let _ = tests_register_suite(&HEAP_SUITE_DESC);
+        let _ = tests_register_suite(&RAMFS_SUITE_DESC);
+        let _ = tests_register_suite(&PRIVSEP_SUITE_DESC);
+        let _ = tests_register_suite(&CTX_SUITE_DESC);
+        let _ = tests_register_suite(&ROULETTE_SUITE_DESC);
+        let _ = tests_register_suite(&ROULETTE_EXEC_SUITE_DESC);
+        let _ = tests_register_suite(&VIRTIO_GPU_SUITE_DESC);
     }
 }
 
