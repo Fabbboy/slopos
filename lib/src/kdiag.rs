@@ -3,14 +3,13 @@ use core::ffi::{c_char, c_int, CStr};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
-use crate::stacktrace::{self, stacktrace_entry};
+use crate::stacktrace::{self, StacktraceEntry};
 use crate::tsc;
 
 pub const KDIAG_STACK_TRACE_DEPTH: usize = 16;
 
 #[repr(C)]
-#[allow(non_camel_case_types)]
-pub struct interrupt_frame {
+pub struct InterruptFrame {
     pub r15: u64,
     pub r14: u64,
     pub r13: u64,
@@ -143,7 +142,7 @@ pub extern "C" fn kdiag_dump_cpu_state() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const interrupt_frame) {
+pub extern "C" fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;
     }
@@ -180,8 +179,8 @@ pub extern "C" fn kdiag_dump_stack_trace() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
-    let mut entries: [stacktrace_entry; KDIAG_STACK_TRACE_DEPTH] =
-        [stacktrace_entry { frame_pointer: 0, return_address: 0 }; KDIAG_STACK_TRACE_DEPTH];
+    let mut entries: [StacktraceEntry; KDIAG_STACK_TRACE_DEPTH] =
+        [StacktraceEntry { frame_pointer: 0, return_address: 0 }; KDIAG_STACK_TRACE_DEPTH];
 
     let frame_count =
         stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), KDIAG_STACK_TRACE_DEPTH as c_int);
@@ -203,7 +202,7 @@ pub extern "C" fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const interrupt_frame) {
+pub extern "C" fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;
     }

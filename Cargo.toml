@@ -20,6 +20,12 @@ license = "GPL-3.0-only"
 
 [workspace.lints.rust]
 warnings = "deny"
+non_camel_case_types = "deny"
+non_snake_case = "deny"
+non_upper_case_globals = "deny"
+
+[workspace.lints.clippy]
+type_complexity = "warn"
 
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }

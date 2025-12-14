@@ -31,7 +31,7 @@ pub struct test_context {
     pub exception_vector: c_int,
     pub test_rip: u64,
     pub resume_rip: u64,
-    pub last_frame: *mut slopos_lib::interrupt_frame,
+    pub last_frame: *mut slopos_lib::InterruptFrame,
     pub test_name: [c_char; 64],
     pub recovery_rip: u64,
     pub abort_requested: c_int,
@@ -250,7 +250,7 @@ pub extern "C" fn test_record_bulk(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_exception_handler(frame: *mut slopos_lib::interrupt_frame) {
+pub extern "C" fn test_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
     unsafe {
         TEST_CTX.exception_occurred = 1;
         if !frame.is_null() {
@@ -361,7 +361,7 @@ pub extern "C" fn dump_test_context() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn log_test_exception(frame: *mut slopos_lib::interrupt_frame) {
+pub extern "C" fn log_test_exception(frame: *mut slopos_lib::InterruptFrame) {
     let (vector, rip) = unsafe {
         if frame.is_null() {
             (0, 0)

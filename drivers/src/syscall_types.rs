@@ -1,9 +1,8 @@
-#![allow(non_camel_case_types)]
 #![allow(dead_code)]
 
 use core::ffi::{c_void};
 
-use slopos_lib::interrupt_frame;
+use slopos_lib::InterruptFrame as LibInterruptFrame;
 
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
@@ -15,7 +14,7 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
-pub struct task_context_t {
+pub struct TaskContext {
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -45,7 +44,7 @@ pub struct task_context_t {
 
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum task_exit_reason_t {
+pub enum TaskExitReason {
     #[default]
     None = 0,
     Normal = 1,
@@ -55,7 +54,7 @@ pub enum task_exit_reason_t {
 
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum task_fault_reason_t {
+pub enum TaskFaultReason {
     #[default]
     None = 0,
     UserPage = 1,
@@ -66,7 +65,7 @@ pub enum task_fault_reason_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct task_t {
+pub struct Task {
     pub task_id: u32,
     pub name: [u8; 32],
     pub state: u8,
@@ -81,7 +80,7 @@ pub struct task_t {
     pub kernel_stack_size: u64,
     pub entry_point: u64,
     pub entry_arg: *mut c_void,
-    pub context: task_context_t,
+    pub context: TaskContext,
     pub time_slice: u64,
     pub time_slice_remaining: u64,
     pub total_runtime: u64,
@@ -91,14 +90,14 @@ pub struct task_t {
     pub waiting_on_task_id: u32,
     pub user_started: u8,
     pub context_from_user: u8,
-    pub exit_reason: task_exit_reason_t,
-    pub fault_reason: task_fault_reason_t,
+    pub exit_reason: TaskExitReason,
+    pub fault_reason: TaskFaultReason,
     pub exit_code: u32,
     pub fate_token: u32,
     pub fate_value: u32,
     pub fate_pending: u8,
-    pub next_ready: *mut task_t,
+    pub next_ready: *mut Task,
 }
 
-pub type InterruptFrame = interrupt_frame;
+pub type InterruptFrame = LibInterruptFrame;
 

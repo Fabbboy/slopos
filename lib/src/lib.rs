@@ -224,13 +224,13 @@ pub mod syscall_numbers;
 pub mod user_syscall_defs;
 pub mod user_syscall;
 
-pub use kdiag::{interrupt_frame, kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
+pub use kdiag::{InterruptFrame, kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use klog::{
     klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline,
     klog_set_level, KlogLevel,
 };
-pub use stacktrace::stacktrace_entry;
+pub use stacktrace::StacktraceEntry;
 pub use alignment::{align_down_u64, align_up_u64};
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ring_buffer::RingBuffer;

@@ -5,9 +5,8 @@ use crate::klog::{self, KlogLevel};
 const STACKTRACE_MAX_LOCAL: usize = 32;
 
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Copy, Clone)]
-pub struct stacktrace_entry {
+pub struct StacktraceEntry {
     pub frame_pointer: u64,
     pub return_address: u64,
 }
@@ -35,7 +34,7 @@ fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn stacktrace_capture_from(
     mut rbp: u64,
-    entries: *mut stacktrace_entry,
+    entries: *mut StacktraceEntry,
     max_entries: c_int,
 ) -> c_int {
     if entries.is_null() || max_entries <= 0 {
@@ -76,7 +75,7 @@ pub extern "C" fn stacktrace_capture_from(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn stacktrace_capture(
-    entries: *mut stacktrace_entry,
+    entries: *mut StacktraceEntry,
     max_entries: c_int,
 ) -> c_int {
     let rbp = read_frame_pointer();
@@ -90,8 +89,8 @@ pub extern "C" fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     }
 
     let max = max_frames.clamp(0, STACKTRACE_MAX_LOCAL as c_int) as usize;
-    let mut local_entries: [stacktrace_entry; STACKTRACE_MAX_LOCAL] =
-        [stacktrace_entry { frame_pointer: 0, return_address: 0 }; STACKTRACE_MAX_LOCAL];
+    let mut local_entries: [StacktraceEntry; STACKTRACE_MAX_LOCAL] =
+        [StacktraceEntry { frame_pointer: 0, return_address: 0 }; STACKTRACE_MAX_LOCAL];
 
     let captured = stacktrace_capture_from(rbp, local_entries.as_mut_ptr(), max as c_int);
     if captured <= 0 {

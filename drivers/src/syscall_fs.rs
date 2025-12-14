@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{c_char, c_int, c_void, CStr};
@@ -7,9 +6,9 @@ use core::{mem, ptr};
 
 use crate::syscall_common::{
     syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
-    syscall_disposition, syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES, USER_PATH_MAX,
+    SyscallDisposition, syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES, USER_PATH_MAX,
 };
-use crate::syscall_types::{task_t, InterruptFrame, INVALID_PROCESS_ID};
+use crate::syscall_types::{Task, InterruptFrame, INVALID_PROCESS_ID};
 
 const USER_FS_MAX_ENTRIES: u32 = 64;
 
@@ -17,35 +16,35 @@ const RAMFS_TYPE_FILE: i32 = 1;
 const RAMFS_TYPE_DIRECTORY: i32 = 2;
 
 #[repr(C)]
-pub struct ramfs_node_t {
+pub struct RamfsNode {
     pub name: *mut c_char,
     pub type_: i32,
     pub size: usize,
     pub data: *mut c_void,
     pub refcount: u32,
     pub pending_unlink: u8,
-    pub parent: *mut ramfs_node_t,
-    pub children: *mut ramfs_node_t,
-    pub next_sibling: *mut ramfs_node_t,
-    pub prev_sibling: *mut ramfs_node_t,
+    pub parent: *mut RamfsNode,
+    pub children: *mut RamfsNode,
+    pub next_sibling: *mut RamfsNode,
+    pub prev_sibling: *mut RamfsNode,
 }
 
 #[repr(C)]
-pub struct user_fs_entry_t {
+pub struct UserFsEntry {
     pub name: [c_char; 64],
     pub type_: u8,
     pub size: u32,
 }
 
 #[repr(C)]
-pub struct user_fs_stat_t {
+pub struct UserFsStat {
     pub type_: u8,
     pub size: u32,
 }
 
 #[repr(C)]
-pub struct user_fs_list_t {
-    pub entries: *mut user_fs_entry_t,
+pub struct UserFsList {
+    pub entries: *mut UserFsEntry,
     pub max_entries: u32,
     pub count: u32,
 }
@@ -57,16 +56,16 @@ unsafe extern "C" {
     fn file_write_fd(process_id: u32, fd: c_int, buf: *const c_char, len: usize) -> isize;
     fn file_unlink_path(path: *const c_char) -> c_int;
 
-    fn ramfs_acquire_node(path: *const c_char) -> *mut ramfs_node_t;
-    fn ramfs_get_size(node: *const ramfs_node_t) -> u64;
-    fn ramfs_node_release(node: *mut ramfs_node_t);
+    fn ramfs_acquire_node(path: *const c_char) -> *mut RamfsNode;
+    fn ramfs_get_size(node: *const RamfsNode) -> u64;
+    fn ramfs_node_release(node: *mut RamfsNode);
     fn ramfs_list_directory(
         path: *const c_char,
-        entries: *mut *mut *mut ramfs_node_t,
+        entries: *mut *mut *mut RamfsNode,
         count: *mut c_int,
     ) -> c_int;
-    fn ramfs_release_list(entries: *mut *mut ramfs_node_t, count: c_int);
-    fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t;
+    fn ramfs_release_list(entries: *mut *mut RamfsNode, count: c_int);
+    fn ramfs_create_directory(path: *const c_char) -> *mut RamfsNode;
 
     fn kmalloc(size: usize) -> *mut c_void;
     fn kfree(ptr: *mut c_void);
@@ -74,11 +73,11 @@ unsafe extern "C" {
     fn user_copy_to_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
 }
 
-fn syscall_fs_error(frame: *mut InterruptFrame) -> syscall_disposition {
+fn syscall_fs_error(frame: *mut InterruptFrame) -> SyscallDisposition {
     syscall_return_err(frame, u64::MAX)
 }
 
-pub extern "C" fn syscall_fs_open(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -100,7 +99,7 @@ pub extern "C" fn syscall_fs_open(task: *mut task_t, frame: *mut InterruptFrame)
     syscall_return_ok(frame, fd as u64)
 }
 
-pub extern "C" fn syscall_fs_close(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
             return syscall_fs_error(frame);
@@ -113,7 +112,7 @@ pub extern "C" fn syscall_fs_close(task: *mut task_t, frame: *mut InterruptFrame
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_read(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -149,7 +148,7 @@ pub extern "C" fn syscall_fs_read(task: *mut task_t, frame: *mut InterruptFrame)
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub extern "C" fn syscall_fs_write(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -185,7 +184,7 @@ pub extern "C" fn syscall_fs_write(task: *mut task_t, frame: *mut InterruptFrame
     syscall_return_ok(frame, bytes as u64)
 }
 
-pub extern "C" fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if task.is_null() || (*frame).rdi == 0 || (*frame).rsi == 0 {
             return syscall_fs_error(frame);
@@ -204,7 +203,7 @@ pub extern "C" fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame)
         return syscall_fs_error(frame);
     }
 
-    let mut stat = user_fs_stat_t { type_: 0, size: 0 };
+    let mut stat = UserFsStat { type_: 0, size: 0 };
     unsafe {
         stat.size = ramfs_get_size(node) as u32;
         let kind = (*node).type_;
@@ -221,7 +220,7 @@ pub extern "C" fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame)
     if syscall_copy_to_user_bounded(
         unsafe { (*frame).rsi as *mut c_void },
         &stat as *const _ as *const c_void,
-        mem::size_of::<user_fs_stat_t>(),
+        mem::size_of::<UserFsStat>(),
     ) != 0
     {
         return syscall_fs_error(frame);
@@ -230,7 +229,7 @@ pub extern "C" fn syscall_fs_stat(task: *mut task_t, frame: *mut InterruptFrame)
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -246,7 +245,7 @@ pub extern "C" fn syscall_fs_mkdir(task: *mut task_t, frame: *mut InterruptFrame
     syscall_fs_error(frame)
 }
 
-pub extern "C" fn syscall_fs_unlink(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
@@ -261,7 +260,7 @@ pub extern "C" fn syscall_fs_unlink(task: *mut task_t, frame: *mut InterruptFram
     syscall_return_ok(frame, 0)
 }
 
-pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
     unsafe {
@@ -272,7 +271,7 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         }
     }
 
-    let mut list_hdr = user_fs_list_t {
+    let mut list_hdr = UserFsList {
         entries: ptr::null_mut(),
         max_entries: 0,
         count: 0,
@@ -282,7 +281,7 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         if user_copy_from_user(
             &mut list_hdr as *mut _ as *mut c_void,
             (*frame).rsi as *const c_void,
-            mem::size_of::<user_fs_list_t>(),
+            mem::size_of::<UserFsList>(),
         ) != 0
         {
             return syscall_fs_error(frame);
@@ -294,7 +293,7 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         return syscall_fs_error(frame);
     }
 
-    let mut entries: *mut *mut ramfs_node_t = ptr::null_mut();
+    let mut entries: *mut *mut RamfsNode = ptr::null_mut();
     let mut count: c_int = 0;
     let rc = unsafe { ramfs_list_directory(path.as_ptr(), &mut entries, &mut count) };
     if rc != 0 {
@@ -308,8 +307,8 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         count = cap as c_int;
     }
 
-    let tmp_size = mem::size_of::<user_fs_entry_t>() * cap as usize;
-    let tmp_ptr = unsafe { kmalloc(tmp_size) as *mut user_fs_entry_t };
+    let tmp_size = mem::size_of::<UserFsEntry>() * cap as usize;
+    let tmp_ptr = unsafe { kmalloc(tmp_size) as *mut UserFsEntry };
     if tmp_ptr.is_null() {
         if !entries.is_null() {
             unsafe {
@@ -357,7 +356,7 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
         user_copy_to_user(
             list_hdr.entries as *mut c_void,
             tmp_ptr as *const c_void,
-            mem::size_of::<user_fs_entry_t>() * count as usize,
+            mem::size_of::<UserFsEntry>() * count as usize,
         )
     };
     if rc_user == 0 {
@@ -365,7 +364,7 @@ pub extern "C" fn syscall_fs_list(task: *mut task_t, frame: *mut InterruptFrame)
             user_copy_to_user(
                 (*frame).rsi as *mut c_void,
                 &list_hdr as *const _ as *const c_void,
-                mem::size_of::<user_fs_list_t>(),
+                mem::size_of::<UserFsList>(),
             )
         };
     }

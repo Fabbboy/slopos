@@ -1,25 +1,24 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 
 use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
-use crate::syscall_types::{task_t, task_context_t, InterruptFrame, TASK_FLAG_USER_MODE};
+use crate::syscall_types::{Task, TaskContext, InterruptFrame, TASK_FLAG_USER_MODE};
 use crate::wl_currency;
 
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 
 unsafe extern "C" {
-    fn scheduler_get_current_task() -> *mut task_t;
+    fn scheduler_get_current_task() -> *mut Task;
 }
 
-fn save_user_context(frame: *mut InterruptFrame, task: *mut task_t) {
+fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     if frame.is_null() || task.is_null() {
         return;
     }
 
     unsafe {
-        let ctx: &mut task_context_t = &mut (*task).context;
+        let ctx: &mut TaskContext = &mut (*task).context;
         ctx.rax = (*frame).rax;
         ctx.rbx = (*frame).rbx;
         ctx.rcx = (*frame).rcx;

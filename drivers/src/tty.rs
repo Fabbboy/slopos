@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 
 use core::ffi::c_int;
 use core::ptr;
@@ -8,7 +7,7 @@ use slopos_lib::cpu;
 
 use crate::keyboard;
 use crate::serial;
-use crate::syscall_types::task_t;
+use crate::syscall_types::Task;
 
 const MAX_TASKS: usize = 32;
 const TTY_MAX_WAITERS: usize = MAX_TASKS;
@@ -16,7 +15,7 @@ const COM1_BASE: u16 = 0x3F8;
 
 #[repr(C)]
 struct tty_wait_queue {
-    tasks: [*mut task_t; TTY_MAX_WAITERS],
+    tasks: [*mut Task; TTY_MAX_WAITERS],
     head: usize,
     tail: usize,
     count: usize,
@@ -32,8 +31,8 @@ static mut TTY_WAIT_QUEUE: tty_wait_queue = tty_wait_queue {
 unsafe extern "C" {
     fn scheduler_register_idle_wakeup_callback(cb: extern "C" fn() -> c_int);
     fn scheduler_is_enabled() -> c_int;
-    fn task_is_blocked(task: *mut task_t) -> c_int;
-    fn unblock_task(task: *mut task_t) -> c_int;
+    fn task_is_blocked(task: *mut Task) -> c_int;
+    fn unblock_task(task: *mut Task) -> c_int;
 
     fn serial_poll_receive(port: u16);
     fn serial_buffer_pending(port: u16) -> c_int;
@@ -76,7 +75,7 @@ fn tty_register_idle_callback() {
     }
 }
 
-fn tty_wait_queue_pop() -> *mut task_t {
+fn tty_wait_queue_pop() -> *mut Task {
     unsafe {
         if TTY_WAIT_QUEUE.count == 0 {
             return ptr::null_mut();
@@ -95,7 +94,7 @@ pub extern "C" fn tty_notify_input_ready() {
     }
 
     cpu::disable_interrupts();
-    let mut task_to_wake: *mut task_t = ptr::null_mut();
+    let mut tasko_wake: *mut Task = ptr::null_mut();
 
     unsafe {
         while TTY_WAIT_QUEUE.count > 0 {
@@ -106,16 +105,16 @@ pub extern "C" fn tty_notify_input_ready() {
             if task_is_blocked(candidate) == 0 {
                 continue;
             }
-            task_to_wake = candidate;
+            tasko_wake = candidate;
             break;
         }
     }
 
     cpu::enable_interrupts();
 
-    if !task_to_wake.is_null() {
+    if !tasko_wake.is_null() {
         unsafe {
-            let _ = unblock_task(task_to_wake);
+            let _ = unblock_task(tasko_wake);
         }
     }
 }

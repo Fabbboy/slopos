@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
@@ -7,18 +6,18 @@ use core::ptr;
 use crate::random;
 use crate::serial;
 use crate::syscall_common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_disposition,
+    syscall_bounded_from_user, syscall_copy_to_user_bounded, SyscallDisposition,
     syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES,
 };
 use crate::syscall_fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_types::{task_t, InterruptFrame};
+use crate::syscall_types::{Task, InterruptFrame};
 use slopos_lib::klog_debug;
 
 #[repr(C)]
-pub struct user_rect_t {
+pub struct UserRect {
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -27,7 +26,7 @@ pub struct user_rect_t {
 }
 
 #[repr(C)]
-pub struct user_line_t {
+pub struct UserLine {
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,
@@ -36,7 +35,7 @@ pub struct user_line_t {
 }
 
 #[repr(C)]
-pub struct user_circle_t {
+pub struct UserCircle {
     pub cx: i32,
     pub cy: i32,
     pub radius: i32,
@@ -44,7 +43,7 @@ pub struct user_circle_t {
 }
 
 #[repr(C)]
-pub struct user_text_t {
+pub struct UserText {
     pub x: i32,
     pub y: i32,
     pub fg_color: u32,
@@ -54,7 +53,7 @@ pub struct user_text_t {
 }
 
 #[repr(C)]
-pub struct user_fb_info_t {
+pub struct UserFbInfo {
     pub width: u32,
     pub height: u32,
     pub pitch: u32,
@@ -63,7 +62,7 @@ pub struct user_fb_info_t {
 }
 
 #[repr(C)]
-pub struct user_sys_info_t {
+pub struct UserSysInfo {
     pub total_pages: u32,
     pub free_pages: u32,
     pub allocated_pages: u32,
@@ -78,13 +77,13 @@ pub struct user_sys_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct fate_result {
+pub struct FateResult {
     pub token: u32,
     pub value: u32,
 }
 
 #[repr(C)]
-pub struct framebuffer_info_t {
+pub struct FramebufferInfo {
     pub initialized: u8,
     pub width: u32,
     pub height: u32,
@@ -94,10 +93,10 @@ pub struct framebuffer_info_t {
 }
 
 unsafe extern "C" {
-    fn user_copy_rect_checked(dst: *mut user_rect_t, src: *const user_rect_t) -> c_int;
-    fn user_copy_line_checked(dst: *mut user_line_t, src: *const user_line_t) -> c_int;
-    fn user_copy_circle_checked(dst: *mut user_circle_t, src: *const user_circle_t) -> c_int;
-    fn user_copy_text_header(dst: *mut user_text_t, src: *const user_text_t) -> c_int;
+    fn user_copy_rect_checked(dst: *mut UserRect, src: *const UserRect) -> c_int;
+    fn user_copy_line_checked(dst: *mut UserLine, src: *const UserLine) -> c_int;
+    fn user_copy_circle_checked(dst: *mut UserCircle, src: *const UserCircle) -> c_int;
+    fn user_copy_text_header(dst: *mut UserText, src: *const UserText) -> c_int;
     fn user_copy_from_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
     fn yield_();
     fn schedule();
@@ -120,22 +119,22 @@ unsafe extern "C" {
     fn pit_sleep_ms(ms: u32);
     fn pit_poll_delay_ms(ms: u32);
 
-    fn fate_spin() -> fate_result;
-    fn fate_set_pending(res: fate_result, task_id: u32) -> c_int;
-    fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int;
-    fn fate_apply_outcome(res: *const fate_result, resolution: u32, award: bool);
+    fn fate_spin() -> FateResult;
+    fn fate_set_pending(res: FateResult, task_id: u32) -> c_int;
+    fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int;
+    fn fate_apply_outcome(res: *const FateResult, resolution: u32, award: bool);
 
     fn graphics_draw_rect_filled_fast(x: i32, y: i32, w: i32, h: i32, color: u32) -> c_int;
     fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> c_int;
     fn graphics_draw_circle(cx: i32, cy: i32, r: i32, color: u32) -> c_int;
     fn graphics_draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32) -> c_int;
     fn font_draw_string(x: i32, y: i32, text: *const c_char, fg: u32, bg: u32) -> c_int;
-    fn framebuffer_get_info() -> *mut framebuffer_info_t;
+    fn framebuffer_get_info() -> *mut FramebufferInfo;
 
     fn kernel_shutdown(reason: *const c_char) -> !;
 }
 
-fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> syscall_disposition {
+fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDisposition {
     if rc == 0 {
         syscall_return_ok(frame, 0)
     } else {
@@ -144,31 +143,31 @@ fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> syscall_disposit
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn syscall_yield(_task: *mut task_t, frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = syscall_return_ok(frame, 0);
     unsafe { yield_() };
-    syscall_disposition::SYSCALL_DISP_OK
+    SyscallDisposition::Ok
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn syscall_exit(task: *mut task_t, _frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_exit(task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         if !task.is_null() {
-            (*task).exit_reason = crate::syscall_types::task_exit_reason_t::Normal;
-            (*task).fault_reason = crate::syscall_types::task_fault_reason_t::None;
+            (*task).exit_reason = crate::syscall_types::TaskExitReason::Normal;
+            (*task).fault_reason = crate::syscall_types::TaskFaultReason::None;
             (*task).exit_code = 0;
         }
         task_terminate(if task.is_null() { u32::MAX } else { (*task).task_id });
     }
     unsafe { schedule() };
-    syscall_disposition::SYSCALL_DISP_NO_RETURN
+    SyscallDisposition::NoReturn
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_user_write(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let mut write_len: usize = 0;
 
@@ -195,9 +194,9 @@ pub extern "C" fn syscall_user_write(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_user_read(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     unsafe {
         if (*frame).rdi == 0 || (*frame).rsi == 0 {
@@ -234,9 +233,9 @@ pub extern "C" fn syscall_user_read(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_roulette_spin(
-    task: *mut task_t,
+    task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let res = unsafe { fate_spin() };
     if task.is_null() {
         return syscall_return_err(frame, u64::MAX);
@@ -251,9 +250,9 @@ pub extern "C" fn syscall_roulette_spin(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_sleep_ms(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let mut ms = unsafe { (*frame).rdi };
     if ms > 60000 {
         ms = 60000;
@@ -268,16 +267,16 @@ pub extern "C" fn syscall_sleep_ms(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_fb_info(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let info = unsafe { framebuffer_get_info() };
     if info.is_null() || unsafe { (*info).initialized == 0 } {
         klog_debug!("syscall_fb_info: framebuffer not initialized");
         return syscall_return_err(frame, u64::MAX);
     }
 
-    let user_info = user_fb_info_t {
+    let user_info = UserFbInfo {
         width: unsafe { (*info).width },
         height: unsafe { (*info).height },
         pitch: unsafe { (*info).pitch },
@@ -288,7 +287,7 @@ pub extern "C" fn syscall_fb_info(
     if syscall_copy_to_user_bounded(
         unsafe { (*frame).rdi as *mut c_void },
         &user_info as *const _ as *const c_void,
-        core::mem::size_of::<user_fb_info_t>(),
+        core::mem::size_of::<UserFbInfo>(),
     ) != 0
     {
         return syscall_return_err(frame, u64::MAX);
@@ -299,17 +298,17 @@ pub extern "C" fn syscall_fb_info(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_fill_rect(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
-    let mut rect = user_rect_t {
+) -> SyscallDisposition {
+    let mut rect = UserRect {
         x: 0,
         y: 0,
         width: 0,
         height: 0,
         color: 0,
     };
-    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const user_rect_t) } != 0 {
+    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let rc = unsafe { graphics_draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color) };
@@ -318,17 +317,17 @@ pub extern "C" fn syscall_gfx_fill_rect(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_line(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
-    let mut line = user_line_t {
+) -> SyscallDisposition {
+    let mut line = UserLine {
         x0: 0,
         y0: 0,
         x1: 0,
         y1: 0,
         color: 0,
     };
-    if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const user_line_t) } != 0 {
+    if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const UserLine) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let rc = unsafe { graphics_draw_line(line.x0, line.y0, line.x1, line.y1, line.color) };
@@ -337,16 +336,16 @@ pub extern "C" fn syscall_gfx_draw_line(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_circle(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
-    let mut circle = user_circle_t {
+) -> SyscallDisposition {
+    let mut circle = UserCircle {
         cx: 0,
         cy: 0,
         radius: 0,
         color: 0,
     };
-    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const user_circle_t) } != 0 {
+    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let rc = unsafe { graphics_draw_circle(circle.cx, circle.cy, circle.radius, circle.color) };
@@ -355,16 +354,16 @@ pub extern "C" fn syscall_gfx_draw_circle(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_gfx_draw_circle_filled(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
-    let mut circle = user_circle_t {
+) -> SyscallDisposition {
+    let mut circle = UserCircle {
         cx: 0,
         cy: 0,
         radius: 0,
         color: 0,
     };
-    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const user_circle_t) } != 0 {
+    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let rc = unsafe { graphics_draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color) };
@@ -373,10 +372,10 @@ pub extern "C" fn syscall_gfx_draw_circle_filled(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_font_draw(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
-    let mut text = user_text_t {
+) -> SyscallDisposition {
+    let mut text = UserText {
         x: 0,
         y: 0,
         fg_color: 0,
@@ -384,7 +383,7 @@ pub extern "C" fn syscall_font_draw(
         str_ptr: ptr::null(),
         len: 0,
     };
-    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const user_text_t) } != 0 {
+    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const UserText) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     if text.len == 0 || text.len as usize >= USER_IO_MAX_BYTES {
@@ -409,23 +408,23 @@ pub extern "C" fn syscall_font_draw(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_random_next(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_roulette_result(
-    task: *mut task_t,
+    task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     if task.is_null() {
         return syscall_return_err(frame, u64::MAX);
     }
-    let mut stored = fate_result { token: 0, value: 0 };
-    if unsafe { fate_take_pending((*task).task_id, &mut stored as *mut fate_result) } != 0 {
+    let mut stored = FateResult { token: 0, value: 0 };
+    if unsafe { fate_take_pending((*task).task_id, &mut stored as *mut FateResult) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let token = unsafe { ((*frame).rdi >> 32) as u32 };
@@ -440,14 +439,14 @@ pub extern "C" fn syscall_roulette_result(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_sys_info(
-    _task: *mut task_t,
+    _task: *mut Task,
     frame: *mut InterruptFrame,
-) -> syscall_disposition {
+) -> SyscallDisposition {
     if unsafe { (*frame).rdi } == 0 {
         return syscall_return_err(frame, u64::MAX);
     }
 
-    let mut info = user_sys_info_t {
+    let mut info = UserSysInfo {
         total_pages: 0,
         free_pages: 0,
         allocated_pages: 0,
@@ -482,7 +481,7 @@ pub extern "C" fn syscall_sys_info(
     if syscall_copy_to_user_bounded(
         unsafe { (*frame).rdi as *mut c_void },
         &info as *const _ as *const c_void,
-        core::mem::size_of::<user_sys_info_t>(),
+        core::mem::size_of::<UserSysInfo>(),
     ) != 0
     {
         return syscall_return_err(frame, u64::MAX);
@@ -492,7 +491,7 @@ pub extern "C" fn syscall_sys_info(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn syscall_halt(_task: *mut task_t, _frame: *mut InterruptFrame) -> syscall_disposition {
+pub extern "C" fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
         kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     }
@@ -500,112 +499,112 @@ pub extern "C" fn syscall_halt(_task: *mut task_t, _frame: *mut InterruptFrame) 
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct syscall_entry {
-    pub handler: Option<extern "C" fn(*mut task_t, *mut InterruptFrame) -> syscall_disposition>,
+pub struct SyscallEntry {
+    pub handler: Option<extern "C" fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition>,
     pub name: *const c_char,
 }
 
-unsafe impl Sync for syscall_entry {}
+unsafe impl Sync for SyscallEntry {}
 
-static SYSCALL_TABLE: [syscall_entry; 32] = {
+static SYSCALL_TABLE: [SyscallEntry; 32] = {
     use self::lib_syscall_numbers::*;
-    let mut table: [syscall_entry; 32] = [syscall_entry {
+    let mut table: [SyscallEntry; 32] = [SyscallEntry {
         handler: None,
         name: core::ptr::null(),
     }; 32];
-    table[SYSCALL_YIELD as usize] = syscall_entry {
+    table[SYSCALL_YIELD as usize] = SyscallEntry {
         handler: Some(syscall_yield),
         name: b"yield\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_EXIT as usize] = syscall_entry {
+    table[SYSCALL_EXIT as usize] = SyscallEntry {
         handler: Some(syscall_exit),
         name: b"exit\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_WRITE as usize] = syscall_entry {
+    table[SYSCALL_WRITE as usize] = SyscallEntry {
         handler: Some(syscall_user_write),
         name: b"write\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_READ as usize] = syscall_entry {
+    table[SYSCALL_READ as usize] = SyscallEntry {
         handler: Some(syscall_user_read),
         name: b"read\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_ROULETTE as usize] = syscall_entry {
+    table[SYSCALL_ROULETTE as usize] = SyscallEntry {
         handler: Some(syscall_roulette_spin),
         name: b"roulette\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_SLEEP_MS as usize] = syscall_entry {
+    table[SYSCALL_SLEEP_MS as usize] = SyscallEntry {
         handler: Some(syscall_sleep_ms),
         name: b"sleep_ms\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FB_INFO as usize] = syscall_entry {
+    table[SYSCALL_FB_INFO as usize] = SyscallEntry {
         handler: Some(syscall_fb_info),
         name: b"fb_info\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_GFX_FILL_RECT as usize] = syscall_entry {
+    table[SYSCALL_GFX_FILL_RECT as usize] = SyscallEntry {
         handler: Some(syscall_gfx_fill_rect),
         name: b"gfx_fill_rect\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_GFX_DRAW_LINE as usize] = syscall_entry {
+    table[SYSCALL_GFX_DRAW_LINE as usize] = SyscallEntry {
         handler: Some(syscall_gfx_draw_line),
         name: b"gfx_draw_line\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_GFX_DRAW_CIRCLE as usize] = syscall_entry {
+    table[SYSCALL_GFX_DRAW_CIRCLE as usize] = SyscallEntry {
         handler: Some(syscall_gfx_draw_circle),
         name: b"gfx_draw_circle\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_GFX_DRAW_CIRCLE_FILLED as usize] = syscall_entry {
+    table[SYSCALL_GFX_DRAW_CIRCLE_FILLED as usize] = SyscallEntry {
         handler: Some(syscall_gfx_draw_circle_filled),
         name: b"gfx_draw_circle_filled\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FONT_DRAW as usize] = syscall_entry {
+    table[SYSCALL_FONT_DRAW as usize] = SyscallEntry {
         handler: Some(syscall_font_draw),
         name: b"font_draw\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_RANDOM_NEXT as usize] = syscall_entry {
+    table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
         handler: Some(syscall_random_next),
         name: b"random_next\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_ROULETTE_RESULT as usize] = syscall_entry {
+    table[SYSCALL_ROULETTE_RESULT as usize] = SyscallEntry {
         handler: Some(syscall_roulette_result),
         name: b"roulette_result\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_OPEN as usize] = syscall_entry {
+    table[SYSCALL_FS_OPEN as usize] = SyscallEntry {
         handler: Some(syscall_fs_open),
         name: b"fs_open\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_CLOSE as usize] = syscall_entry {
+    table[SYSCALL_FS_CLOSE as usize] = SyscallEntry {
         handler: Some(syscall_fs_close),
         name: b"fs_close\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_READ as usize] = syscall_entry {
+    table[SYSCALL_FS_READ as usize] = SyscallEntry {
         handler: Some(syscall_fs_read),
         name: b"fs_read\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_WRITE as usize] = syscall_entry {
+    table[SYSCALL_FS_WRITE as usize] = SyscallEntry {
         handler: Some(syscall_fs_write),
         name: b"fs_write\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_STAT as usize] = syscall_entry {
+    table[SYSCALL_FS_STAT as usize] = SyscallEntry {
         handler: Some(syscall_fs_stat),
         name: b"fs_stat\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_MKDIR as usize] = syscall_entry {
+    table[SYSCALL_FS_MKDIR as usize] = SyscallEntry {
         handler: Some(syscall_fs_mkdir),
         name: b"fs_mkdir\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_UNLINK as usize] = syscall_entry {
+    table[SYSCALL_FS_UNLINK as usize] = SyscallEntry {
         handler: Some(syscall_fs_unlink),
         name: b"fs_unlink\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FS_LIST as usize] = syscall_entry {
+    table[SYSCALL_FS_LIST as usize] = SyscallEntry {
         handler: Some(syscall_fs_list),
         name: b"fs_list\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_SYS_INFO as usize] = syscall_entry {
+    table[SYSCALL_SYS_INFO as usize] = SyscallEntry {
         handler: Some(syscall_sys_info),
         name: b"sys_info\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_HALT as usize] = syscall_entry {
+    table[SYSCALL_HALT as usize] = SyscallEntry {
         handler: Some(syscall_halt),
         name: b"halt\0".as_ptr() as *const c_char,
     };
@@ -641,7 +640,7 @@ pub mod lib_syscall_numbers {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn syscall_lookup(sysno: u64) -> *const syscall_entry {
+pub extern "C" fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
     if (sysno as usize) >= SYSCALL_TABLE.len() {
         return ptr::null();
     }
@@ -649,6 +648,6 @@ pub extern "C" fn syscall_lookup(sysno: u64) -> *const syscall_entry {
     if entry.handler.is_none() {
         ptr::null()
     } else {
-        entry as *const syscall_entry
+        entry as *const SyscallEntry
     }
 }

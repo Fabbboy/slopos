@@ -1,27 +1,26 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use crate::syscall_types::{task_t, InterruptFrame};
+use crate::syscall_types::{Task, InterruptFrame};
 
 pub const USER_IO_MAX_BYTES: usize = 512;
 pub const USER_PATH_MAX: usize = 128;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum syscall_disposition {
-    SYSCALL_DISP_OK = 0,
-    SYSCALL_DISP_NO_RETURN = 1,
+pub enum SyscallDisposition {
+    Ok = 0,
+    NoReturn = 1,
 }
 
-pub type syscall_handler_t =
-    extern "C" fn(*mut task_t, *mut InterruptFrame) -> syscall_disposition;
+pub type SyscallHandler =
+    extern "C" fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
 
 #[repr(C)]
-pub struct syscall_entry {
-    pub handler: Option<syscall_handler_t>,
+pub struct SyscallEntry {
+    pub handler: Option<SyscallHandler>,
     pub name: *const c_char,
 }
 
@@ -30,24 +29,24 @@ unsafe extern "C" {
     fn user_copy_to_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
 }
 
-pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> syscall_disposition {
+pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> SyscallDisposition {
     if frame.is_null() {
-        return syscall_disposition::SYSCALL_DISP_OK;
+        return SyscallDisposition::Ok;
     }
     unsafe {
         (*frame).rax = value;
     }
-    syscall_disposition::SYSCALL_DISP_OK
+    SyscallDisposition::Ok
 }
 
-pub fn syscall_return_err(frame: *mut InterruptFrame, _err_value: u64) -> syscall_disposition {
+pub fn syscall_return_err(frame: *mut InterruptFrame, _err_value: u64) -> SyscallDisposition {
     if frame.is_null() {
-        return syscall_disposition::SYSCALL_DISP_OK;
+        return SyscallDisposition::Ok;
     }
     unsafe {
         (*frame).rax = u64::MAX;
     }
-    syscall_disposition::SYSCALL_DISP_OK
+    SyscallDisposition::Ok
 }
 
 pub fn syscall_copy_user_str(dst: *mut c_char, dst_len: usize, user_src: *const c_char) -> c_int {

@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(non_camel_case_types)]
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
@@ -15,7 +14,7 @@ pub const PCI_MAX_BARS: usize = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct pci_bar_info_t {
+pub struct PciBarInfo {
     pub base: u64,
     pub size: u64,
     pub is_io: u8,
@@ -23,7 +22,7 @@ pub struct pci_bar_info_t {
     pub prefetchable: u8,
 }
 
-impl pci_bar_info_t {
+impl PciBarInfo {
     pub const fn zeroed() -> Self {
         Self {
             base: 0,
@@ -37,7 +36,7 @@ impl pci_bar_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct pci_device_info_t {
+pub struct PciDeviceInfo {
     pub bus: u8,
     pub device: u8,
     pub function: u8,
@@ -51,10 +50,10 @@ pub struct pci_device_info_t {
     pub irq_line: u8,
     pub irq_pin: u8,
     pub bar_count: u8,
-    pub bars: [pci_bar_info_t; PCI_MAX_BARS],
+    pub bars: [PciBarInfo; PCI_MAX_BARS],
 }
 
-impl pci_device_info_t {
+impl PciDeviceInfo {
     pub const fn zeroed() -> Self {
         Self {
             bus: 0,
@@ -70,26 +69,26 @@ impl pci_device_info_t {
             irq_line: 0,
             irq_pin: 0,
             bar_count: 0,
-            bars: [pci_bar_info_t::zeroed(); PCI_MAX_BARS],
+            bars: [PciBarInfo::zeroed(); PCI_MAX_BARS],
         }
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct pci_gpu_info_t {
+pub struct PciGpuInfo {
     pub present: c_int,
-    pub device: pci_device_info_t,
+    pub device: PciDeviceInfo,
     pub mmio_phys_base: u64,
     pub mmio_virt_base: *mut u8,
     pub mmio_size: u64,
 }
 
-impl pci_gpu_info_t {
+impl PciGpuInfo {
     pub const fn zeroed() -> Self {
         Self {
             present: 0,
-            device: pci_device_info_t::zeroed(),
+            device: PciDeviceInfo::zeroed(),
             mmio_phys_base: 0,
             mmio_virt_base: ptr::null_mut(),
             mmio_size: 0,
@@ -98,14 +97,14 @@ impl pci_gpu_info_t {
 }
 
 #[repr(C)]
-pub struct pci_driver_t {
+pub struct PciDriver {
     pub name: *const u8,
-    pub match_fn: Option<extern "C" fn(*const pci_device_info_t, *mut core::ffi::c_void) -> bool>,
-    pub probe: Option<extern "C" fn(*const pci_device_info_t, *mut core::ffi::c_void) -> c_int>,
+    pub match_fn: Option<extern "C" fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> bool>,
+    pub probe: Option<extern "C" fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> c_int>,
     pub context: *mut core::ffi::c_void,
 }
 
-unsafe impl Sync for pci_driver_t {}
+unsafe impl Sync for PciDriver {}
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
@@ -145,11 +144,11 @@ const PCI_MAX_DEVICES: usize = 256;
 const PCI_DRIVER_MAX: usize = 16;
 
 static mut BUS_VISITED: [u8; PCI_MAX_BUSES] = [0; PCI_MAX_BUSES];
-static mut DEVICES: [pci_device_info_t; PCI_MAX_DEVICES] = [pci_device_info_t::zeroed(); PCI_MAX_DEVICES];
+static mut DEVICES: [PciDeviceInfo; PCI_MAX_DEVICES] = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
 static mut DEVICE_COUNT: usize = 0;
 static mut PCI_INITIALIZED: c_int = 0;
-static mut PRIMARY_GPU: pci_gpu_info_t = pci_gpu_info_t::zeroed();
-static mut PCI_REGISTERED_DRIVERS: [*const pci_driver_t; PCI_DRIVER_MAX] = [ptr::null(); PCI_DRIVER_MAX];
+static mut PRIMARY_GPU: PciGpuInfo = PciGpuInfo::zeroed();
+static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] = [ptr::null(); PCI_DRIVER_MAX];
 static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
@@ -290,7 +289,7 @@ fn pci_probe_bar_size(bus: u8, device: u8, function: u8, offset: u8, original_va
     size_value
 }
 
-fn pci_log_device_header(info: &pci_device_info_t) {
+fn pci_log_device_header(info: &PciDeviceInfo) {
     klog_info!(
         "PCI: [Bus {} Dev {} Func {}] VID=0x{:04x} DID=0x{:04x} Class=0x{:02x}:{:02x} ProgIF=0x{:02x} Rev=0x{:02x}",
         info.bus,
@@ -305,7 +304,7 @@ fn pci_log_device_header(info: &pci_device_info_t) {
     );
 }
 
-fn pci_log_bar(bar: &pci_bar_info_t, index: u8) {
+fn pci_log_bar(bar: &PciBarInfo, index: u8) {
     if bar.is_io != 0 {
         if bar.size != 0 {
             klog_info!(
@@ -350,7 +349,7 @@ unsafe extern "C" {
     fn mm_unmap_mmio_region(virt: *mut core::ffi::c_void, size: usize);
 }
 
-fn pci_consider_gpu_candidate(info: &pci_device_info_t) {
+fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
     let virtio_candidate = pci_is_virtio_gpu(info);
 
     unsafe {
@@ -408,19 +407,19 @@ fn pci_consider_gpu_candidate(info: &pci_device_info_t) {
     }
 }
 
-fn pci_is_virtio_gpu(info: &pci_device_info_t) -> bool {
+fn pci_is_virtio_gpu(info: &PciDeviceInfo) -> bool {
     info.vendor_id == PCI_VENDOR_ID_VIRTIO
         && (info.device_id == PCI_DEVICE_ID_VIRTIO_GPU || info.device_id == PCI_DEVICE_ID_VIRTIO_GPU_TRANS)
 }
 
-fn pci_is_gpu_candidate(info: &pci_device_info_t) -> bool {
+fn pci_is_gpu_candidate(info: &PciDeviceInfo) -> bool {
     if info.class_code == PCI_CLASS_DISPLAY {
         return true;
     }
     pci_is_virtio_gpu(info)
 }
 
-fn pci_collect_bars(info: &mut pci_device_info_t) {
+fn pci_collect_bars(info: &mut PciDeviceInfo) {
     info.bar_count = 0;
 
     let header_type = info.header_type & PCI_HEADER_TYPE_MASK;
@@ -470,7 +469,7 @@ fn pci_collect_bars(info: &mut pci_device_info_t) {
     }
 }
 
-fn pci_notify_drivers(info: &pci_device_info_t) {
+fn pci_notify_drivers(info: &PciDeviceInfo) {
     unsafe {
         for i in 0..PCI_REGISTERED_DRIVER_COUNT {
             let driver_ptr = PCI_REGISTERED_DRIVERS[i];
@@ -527,7 +526,7 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
         }
     }
 
-    let mut info = pci_device_info_t {
+    let mut info = PciDeviceInfo {
         bus,
         device,
         function,
@@ -541,7 +540,7 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
         irq_line,
         irq_pin,
         bar_count: 0,
-        bars: [pci_bar_info_t::default(); PCI_MAX_BARS],
+        bars: [PciBarInfo::default(); PCI_MAX_BARS],
     };
 
     pci_log_device_header(&info);
@@ -656,15 +655,15 @@ pub extern "C" fn pci_get_device_count() -> usize {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_devices() -> *const pci_device_info_t {
+pub extern "C" fn pci_get_devices() -> *const PciDeviceInfo {
     unsafe { DEVICES.as_ptr() }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_primary_gpu() -> *const pci_gpu_info_t {
+pub extern "C" fn pci_get_primary_gpu() -> *const PciGpuInfo {
     unsafe {
         if PRIMARY_GPU.present != 0 {
-            &PRIMARY_GPU as *const pci_gpu_info_t
+            &PRIMARY_GPU as *const PciGpuInfo
         } else {
             ptr::null()
         }
@@ -677,7 +676,7 @@ pub extern "C" fn pci_get_registered_driver_count() -> usize {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_registered_driver(index: usize) -> *const pci_driver_t {
+pub extern "C" fn pci_get_registered_driver(index: usize) -> *const PciDriver {
     unsafe {
         if index >= PCI_REGISTERED_DRIVER_COUNT {
             ptr::null()
@@ -688,7 +687,7 @@ pub extern "C" fn pci_get_registered_driver(index: usize) -> *const pci_driver_t
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_register_driver(driver: *const pci_driver_t) -> c_int {
+pub extern "C" fn pci_register_driver(driver: *const PciDriver) -> c_int {
     if driver.is_null() {
         klog_info!("PCI: Attempted to register invalid driver");
         return -1;

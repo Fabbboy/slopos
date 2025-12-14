@@ -7,8 +7,8 @@ use core::ffi::{c_int, c_void};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::pci::{
-    pci_bar_info_t, pci_config_read16, pci_config_read8, pci_config_write16, pci_config_write8,
-    pci_device_info_t, pci_register_driver, pci_driver_t, PCI_COMMAND_OFFSET,
+    PciBarInfo, pci_config_read16, pci_config_read8, pci_config_write16, pci_config_write8,
+    PciDeviceInfo, pci_register_driver, PciDriver, PCI_COMMAND_OFFSET,
 };
 use crate::wl_currency;
 
@@ -33,19 +33,19 @@ const PCI_COMMAND_BUS_MASTER: u16 = 0x0004;
 #[derive(Clone, Copy, Default)]
 pub struct virtio_gpu_device_t {
     pub present: c_int,
-    pub device: pci_device_info_t,
+    pub device: PciDeviceInfo,
     pub mmio_base: *mut core::ffi::c_void,
     pub mmio_size: usize,
 }
 
 static mut VIRTIO_GPU_DEVICE: virtio_gpu_device_t = virtio_gpu_device_t {
     present: 0,
-    device: pci_device_info_t::zeroed(),
+    device: PciDeviceInfo::zeroed(),
     mmio_base: core::ptr::null_mut(),
     mmio_size: 0,
 };
 
-fn virtio_gpu_enable_master(info: &pci_device_info_t) {
+fn virtio_gpu_enable_master(info: &PciDeviceInfo) {
     let command =
         pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
     let desired = command | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
@@ -54,7 +54,7 @@ fn virtio_gpu_enable_master(info: &pci_device_info_t) {
     }
 }
 
-extern "C" fn virtio_gpu_match(info: *const pci_device_info_t, _context: *mut c_void) -> bool {
+extern "C" fn virtio_gpu_match(info: *const PciDeviceInfo, _context: *mut c_void) -> bool {
     let info = unsafe { &*info };
     if info.vendor_id != VIRTIO_GPU_VENDOR_ID {
         return false;
@@ -62,7 +62,7 @@ extern "C" fn virtio_gpu_match(info: *const pci_device_info_t, _context: *mut c_
     info.device_id == VIRTIO_GPU_DEVICE_ID_PRIMARY || info.device_id == VIRTIO_GPU_DEVICE_ID_TRANS
 }
 
-extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_void) -> c_int {
+extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
     let info = unsafe { &*info };
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {
@@ -71,7 +71,7 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
         }
     }
 
-    let mut bar_opt: Option<&pci_bar_info_t> = None;
+    let mut bar_opt: Option<&PciBarInfo> = None;
     for i in 0..info.bar_count as usize {
         let bar = &info.bars[i];
         if bar.is_io == 0 && bar.base != 0 {
@@ -140,7 +140,7 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
     0
 }
 
-static VIRTIO_GPU_PCI_DRIVER: pci_driver_t = pci_driver_t {
+static VIRTIO_GPU_PCI_DRIVER: PciDriver = PciDriver {
     name: b"virtio-gpu\0".as_ptr(),
     match_fn: Some(virtio_gpu_match),
     probe: Some(virtio_gpu_probe),
@@ -154,7 +154,7 @@ pub extern "C" fn virtio_gpu_register_driver() {
         if REGISTERED {
             return;
         }
-        if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const pci_driver_t) != 0 {
+        if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const PciDriver) != 0 {
             klog_info!("PCI: virtio-gpu driver registration failed");
         }
         REGISTERED = true;

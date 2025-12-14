@@ -5,7 +5,7 @@ use core::ffi::{c_char, c_void, CStr};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::io;
-use slopos_lib::{cpu, interrupt_frame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
+use slopos_lib::{cpu, InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 use slopos_lib::spinlock::Spinlock;
 
 use crate::{apic, ioapic, keyboard, wl_currency};
@@ -20,7 +20,7 @@ const LEGACY_IRQ_COM1: u8 = 4;
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
 
-type IrqHandler = extern "C" fn(u8, *mut interrupt_frame, *mut c_void);
+type IrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);
 
 #[derive(Clone, Copy)]
 struct IrqEntry {
@@ -188,7 +188,7 @@ fn log_unhandled_irq(irq: u8, vector: u8) {
     );
 }
 
-extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mut c_void) {
+extern "C" fn timer_irq_handler(irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     (irq, _frame, _ctx);
     unsafe {
         TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
@@ -202,7 +202,7 @@ extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mu
 
 extern "C" fn keyboard_irq_handler(
     _irq: u8,
-    _frame: *mut interrupt_frame,
+    _frame: *mut InterruptFrame,
     _ctx: *mut c_void,
 ) {
     unsafe {
@@ -409,7 +409,7 @@ pub extern "C" fn irq_disable_line(irq: u8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
+pub extern "C" fn irq_dispatch(frame: *mut InterruptFrame) {
     if frame.is_null() {
         klog_info!("IRQ: Received null frame");
         return;
