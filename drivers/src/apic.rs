@@ -34,6 +34,8 @@ const LAPIC_LVT_PERFCNT: u32 = 0x340;
 const LAPIC_LVT_LINT0: u32 = 0x350;
 const LAPIC_LVT_LINT1: u32 = 0x360;
 const LAPIC_LVT_ERROR: u32 = 0x370;
+const LAPIC_ICR_LOW: u32 = 0x300;
+const LAPIC_ICR_HIGH: u32 = 0x310;
 const LAPIC_TIMER_ICR: u32 = 0x380;
 const LAPIC_TIMER_CCR: u32 = 0x390;
 const LAPIC_TIMER_DCR: u32 = 0x3E0;
@@ -47,6 +49,14 @@ const LAPIC_LVT_DELIVERY_MODE_EXTINT: u32 = 0x7 << 8;
 // Timer modes/divisors
 const LAPIC_TIMER_PERIODIC: u32 = 0x0002_0000;
 const LAPIC_TIMER_DIV_16: u32 = 0x3;
+
+// IPI delivery mode flags
+const LAPIC_ICR_DELIVERY_FIXED: u32 = 0 << 8;
+const LAPIC_ICR_DEST_PHYSICAL: u32 = 0 << 11;
+const LAPIC_ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const LAPIC_ICR_TRIGGER_EDGE: u32 = 0 << 15;
+const LAPIC_ICR_DEST_BROADCAST: u32 = 0xFF << 24;
+const LAPIC_ICR_DELIVERY_STATUS: u32 = 1 << 12;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static X2APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -265,6 +275,47 @@ pub fn timer_set_divisor(divisor: u32) {
     write_register(LAPIC_TIMER_DCR, divisor);
 }
 
+pub fn send_ipi_halt_all() {
+    if !is_available() || !is_enabled() {
+        return;
+    }
+
+    // Vector 0xFE is commonly used for shutdown IPI
+    const SHUTDOWN_VECTOR: u32 = 0xFE;
+
+    // Wait for any pending IPI to complete (delivery status bit must be clear)
+    let mut timeout = 1000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
+
+    // Write destination to ICR_HIGH (broadcast to all except self in physical mode)
+    write_register(LAPIC_ICR_HIGH, LAPIC_ICR_DEST_BROADCAST);
+
+    // Write IPI command to ICR_LOW:
+    // - Vector: 0xFE (shutdown)
+    // - Delivery mode: Fixed (0)
+    // - Destination mode: Physical (0)
+    // - Level: Asserted (1)
+    // - Trigger: Edge (0)
+    let icr_low = SHUTDOWN_VECTOR
+        | LAPIC_ICR_DELIVERY_FIXED
+        | LAPIC_ICR_DEST_PHYSICAL
+        | LAPIC_ICR_LEVEL_ASSERT
+        | LAPIC_ICR_TRIGGER_EDGE;
+    write_register(LAPIC_ICR_LOW, icr_low);
+
+    // Wait for IPI to be sent (delivery status bit must clear)
+    timeout = 1000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
+
+    klog_debug!("APIC: Sent shutdown IPI to all processors");
+}
+
 pub fn get_base_address() -> u64 {
     APIC_BASE_ADDRESS.load(Ordering::Relaxed)
 }
@@ -473,4 +524,9 @@ pub extern "C" fn apic_read_register(reg: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn apic_write_register(reg: u32, value: u32) {
     write_register(reg, value);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn apic_send_ipi_halt_all() {
+    send_ipi_halt_all();
 }

@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn apic_send_eoi();
     fn apic_timer_stop();
     fn apic_disable();
+    fn apic_send_ipi_halt_all();
 
     fn pit_poll_delay_ms(ms: u32);
 
@@ -47,6 +48,12 @@ pub extern "C" fn kernel_quiesce_interrupts() {
 
     unsafe {
         if apic_is_available() != 0 {
+            // Send shutdown IPIs to all processors before disabling APIC
+            apic_send_ipi_halt_all();
+            // Small delay to allow IPIs to be delivered
+            for _ in 0..100 {
+                cpu::pause();
+            }
             apic_send_eoi();
             apic_timer_stop();
             apic_disable();
@@ -95,12 +102,23 @@ pub extern "C" fn kernel_shutdown(reason: *const c_char) {
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();
 
-    klog_info!("Kernel shutdown complete. Halting processors.");
+    klog_info!("Kernel shutdown complete. Coordinating APIC shutdown and halting processors.");
 
     halt();
 }
 
 fn halt() -> ! {
+    // Contact APIC for proper shutdown coordination
+    unsafe {
+        if apic_is_available() != 0 {
+            apic_send_ipi_halt_all();
+            // Small delay to allow IPIs to be delivered
+            for _ in 0..100 {
+                cpu::pause();
+            }
+        }
+    }
+
     loop {
         unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
