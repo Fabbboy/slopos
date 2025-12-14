@@ -136,6 +136,7 @@ pub extern "C" fn kernel_reboot(reason: *const c_char) {
         klog_info!("Reason: {}", reason_str);
     }
 
+    kernel_quiesce_interrupts();
     kernel_drain_serial_output();
 
     klog_info!("Rebooting via keyboard controller...");
