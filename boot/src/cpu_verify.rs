@@ -94,8 +94,7 @@ pub extern "C" fn check_stack_health() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn verify_cpu_features() {
-    let (eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
-    let _ = eax1;
+    let (_eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
     if (edx1 & (1 << 6)) == 0 {
         kernel_panic(b"CPU does not support PAE\0".as_ptr() as *const c_char);
     }
