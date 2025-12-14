@@ -4,10 +4,17 @@ use core::ptr;
 
 use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
+use slopos_mm::phys_virt::mm_phys_to_virt;
 use spin::Mutex;
 
 unsafe extern "C" {
-    fn mm_phys_to_virt(phys_addr: u64) -> u64;
+    fn get_framebuffer_info(
+        addr: *mut u64,
+        width: *mut u32,
+        height: *mut u32,
+        pitch: *mut u32,
+        bpp: *mut u8,
+    ) -> i32;
 }
 
 const PIXEL_FORMAT_RGB: u8 = 0x01;
@@ -72,15 +79,6 @@ static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> = Mutex::new(const { Fra
 unsafe impl Send for FbState {}
 unsafe impl Send for FramebufferState {}
 
-unsafe extern "C" {
-    fn get_framebuffer_info(
-        addr: *mut u64,
-        width: *mut u32,
-        height: *mut u32,
-        pitch: *mut u32,
-        bpp: *mut u8,
-    ) -> i32;
-}
 
 fn determine_pixel_format(bpp: u8) -> u8 {
     match bpp {
@@ -120,7 +118,7 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
     };
 
     // Translate the physical address into the higher-half mapping if available.
-    let virt_addr = unsafe { mm_phys_to_virt(addr) };
+    let virt_addr = mm_phys_to_virt(addr);
     let mapped_base = if virt_addr != 0 { virt_addr } else { addr };
 
     let fb_state = FbState {

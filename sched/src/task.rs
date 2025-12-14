@@ -10,7 +10,6 @@ use slopos_lib::klog::{klog_is_enabled, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
-use crate::scheduler::ProcessPageDir;
 
 pub const MAX_TASKS: usize = 32;
 pub const TASK_STACK_SIZE: u64 = 0x8000; /* 32KB */
@@ -257,15 +256,11 @@ impl TaskManager {
 
 static mut TASK_MANAGER: TaskManager = TaskManager::new();
 
+use slopos_mm::kernel_heap::{kmalloc, kfree};
+use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir};
+use slopos_fs::{fileio_create_table_for_process, fileio_destroy_table_for_process};
+
 unsafe extern "C" {
-    fn kmalloc(size: usize) -> *mut c_void;
-    fn kfree(ptr: *mut c_void);
-    fn create_process_vm() -> u32;
-    fn destroy_process_vm(process_id: u32) -> c_int;
-    fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64;
-    fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir;
-    fn fileio_create_table_for_process(process_id: u32) -> c_int;
-    fn fileio_destroy_table_for_process(process_id: u32);
     static _user_text_start: u8;
     static _user_text_end: u8;
 }
@@ -467,50 +462,48 @@ pub fn task_create(
     let kernel_stack_base;
     let kernel_stack_size;
 
-    unsafe {
-        if flags & TASK_FLAG_KERNEL_MODE != 0 {
-            let stack = kmalloc(TASK_STACK_SIZE as usize);
-            if stack.is_null() {
-                klog_info!("task_create: Failed to allocate kernel stack");
-                return INVALID_TASK_ID;
-            }
-            stack_base = stack as u64;
-            kernel_stack_base = stack_base;
-            kernel_stack_size = TASK_STACK_SIZE;
-        } else {
-            process_id = create_process_vm();
-            if process_id == INVALID_PROCESS_ID {
-                klog_info!("task_create: Failed to create process VM");
-                return INVALID_TASK_ID;
-            }
+    if flags & TASK_FLAG_KERNEL_MODE != 0 {
+        let stack = kmalloc(TASK_STACK_SIZE as usize);
+        if stack.is_null() {
+            klog_info!("task_create: Failed to allocate kernel stack");
+            return INVALID_TASK_ID;
+        }
+        stack_base = stack as u64;
+        kernel_stack_base = stack_base;
+        kernel_stack_size = TASK_STACK_SIZE;
+    } else {
+        process_id = create_process_vm();
+        if process_id == INVALID_PROCESS_ID {
+            klog_info!("task_create: Failed to create process VM");
+            return INVALID_TASK_ID;
+        }
 
-            stack_base = process_vm_alloc(
-                process_id,
-                TASK_STACK_SIZE,
-                (0x1 | 0x2 | 0x4) as u32, /* PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER */
-            );
+        stack_base = process_vm_alloc(
+            process_id,
+            TASK_STACK_SIZE,
+            (0x1 | 0x2 | 0x4) as u32, /* PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER */
+        );
 
-            if stack_base == 0 {
-                klog_info!("task_create: Failed to allocate stack");
-                destroy_process_vm(process_id);
-                return INVALID_TASK_ID;
-            }
+        if stack_base == 0 {
+            klog_info!("task_create: Failed to allocate stack");
+            destroy_process_vm(process_id);
+            return INVALID_TASK_ID;
+        }
 
-            let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
-            if kstack.is_null() {
-                klog_info!("task_create: Failed to allocate kernel RSP0 stack");
-                destroy_process_vm(process_id);
-                return INVALID_TASK_ID;
-            }
+        let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
+        if kstack.is_null() {
+            klog_info!("task_create: Failed to allocate kernel RSP0 stack");
+            destroy_process_vm(process_id);
+            return INVALID_TASK_ID;
+        }
 
-            kernel_stack_base = kstack as u64;
-            kernel_stack_size = TASK_KERNEL_STACK_SIZE;
+        kernel_stack_base = kstack as u64;
+        kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-            if fileio_create_table_for_process(process_id) != 0 {
-                kfree(kstack);
-                destroy_process_vm(process_id);
-                return INVALID_TASK_ID;
-            }
+        if fileio_create_table_for_process(process_id) != 0 {
+            kfree(kstack);
+            destroy_process_vm(process_id);
+            return INVALID_TASK_ID;
         }
     }
 
@@ -534,15 +527,13 @@ pub fn task_create(
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         if process_id != INVALID_PROCESS_ID {
-            unsafe {
-                fileio_destroy_table_for_process(process_id);
-                destroy_process_vm(process_id);
-                if kernel_stack_base != 0 {
-                    kfree(kernel_stack_base as *mut c_void);
-                }
+            fileio_destroy_table_for_process(process_id);
+            destroy_process_vm(process_id);
+            if kernel_stack_base != 0 {
+                kfree(kernel_stack_base as *mut c_void);
             }
         } else if kernel_stack_base != 0 {
-            unsafe { kfree(kernel_stack_base as *mut c_void) };
+            kfree(kernel_stack_base as *mut c_void);
         }
         *task_ref = Task::invalid();
         return INVALID_TASK_ID;
@@ -587,7 +578,7 @@ pub fn task_create(
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
         task_ref.context.cr3 = cpu::read_cr3() & !0xFFF;
     } else {
-        let page_dir = unsafe { process_vm_get_page_dir(process_id) };
+        let page_dir = process_vm_get_page_dir(process_id);
         if !page_dir.is_null() {
             task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys };
         }

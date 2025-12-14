@@ -65,10 +65,7 @@ static RAMFS_STATE: Mutex<RamfsState> = Mutex::new(RamfsState::new());
 
 unsafe impl Send for RamfsState {}
 
-unsafe extern "C" {
-    fn kmalloc(size: usize) -> *mut c_void;
-    fn kfree(ptr: *mut c_void);
-}
+use slopos_mm::kernel_heap::{kmalloc, kfree};
 
 const MAX_PATH: usize = 512;
 
@@ -761,7 +758,7 @@ pub fn ramfs_list_directory(
 
     let array_bytes = (child_count as usize)
         .saturating_mul(mem::size_of::<*mut ramfs_node_t>());
-    let array_ptr = unsafe { kmalloc(array_bytes) as *mut *mut ramfs_node_t };
+    let array_ptr = kmalloc(array_bytes) as *mut *mut ramfs_node_t;
     if array_ptr.is_null() {
         ramfs_node_release(dir);
         return -1;

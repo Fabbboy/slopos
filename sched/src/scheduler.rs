@@ -96,13 +96,13 @@ const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHED_POLICY_COOPERATIVE: u8 = 2;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
+use slopos_mm::paging::{paging_set_current_directory, paging_get_kernel_directory};
+use slopos_mm::process_vm::process_vm_get_page_dir;
+use slopos_drivers::pit::{pit_enable_irq, pit_disable_irq};
+
 unsafe extern "C" {
     fn gdt_set_kernel_rsp0(rsp0: u64);
-    fn paging_set_current_directory(page_dir: *mut ProcessPageDir);
-    fn paging_get_kernel_directory() -> *mut ProcessPageDir;
-    fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir;
-    fn pit_enable_irq();
-    fn pit_disable_irq();
+    fn is_kernel_initialized() -> i32;
     fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn context_switch_user(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
@@ -110,8 +110,6 @@ unsafe extern "C" {
     fn task_entry_wrapper();
 
     static kernel_stack_top: u8;
-
-    fn is_kernel_initialized() -> i32;
 }
 
 #[repr(C)]
@@ -651,10 +649,10 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
     if sched.preemption_enabled != 0 {
-        unsafe { pit_enable_irq() };
+        pit_enable_irq();
     } else {
         sched.reschedule_pending = 0;
-        unsafe { pit_disable_irq() };
+        pit_disable_irq();
     }
 }
 

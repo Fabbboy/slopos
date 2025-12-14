@@ -15,42 +15,7 @@ use crate::syscall_fs::{
 };
 use crate::syscall_types::{Task, InterruptFrame};
 use slopos_lib::klog_debug;
-
-#[repr(C)]
-pub struct UserRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-pub struct UserLine {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-pub struct UserCircle {
-    pub cx: i32,
-    pub cy: i32,
-    pub radius: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-pub struct UserText {
-    pub x: i32,
-    pub y: i32,
-    pub fg_color: u32,
-    pub bg_color: u32,
-    pub str_ptr: *const c_char,
-    pub len: u32,
-}
+use slopos_mm::user_copy_helpers::{UserRect, UserLine, UserCircle, UserText};
 
 #[repr(C)]
 pub struct UserFbInfo {
@@ -92,17 +57,15 @@ pub struct FramebufferInfo {
     pub pixel_format: u32,
 }
 
+use slopos_mm::user_copy_helpers::{user_copy_rect_checked, user_copy_line_checked, user_copy_circle_checked, user_copy_text_header};
+use slopos_mm::user_copy::user_copy_from_user;
+use slopos_mm::page_alloc::get_page_allocator_stats;
+
 unsafe extern "C" {
-    fn user_copy_rect_checked(dst: *mut UserRect, src: *const UserRect) -> c_int;
-    fn user_copy_line_checked(dst: *mut UserLine, src: *const UserLine) -> c_int;
-    fn user_copy_circle_checked(dst: *mut UserCircle, src: *const UserCircle) -> c_int;
-    fn user_copy_text_header(dst: *mut UserText, src: *const UserText) -> c_int;
-    fn user_copy_from_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
     fn yield_();
     fn schedule();
     fn task_terminate(task_id: u32) -> c_int;
     fn scheduler_is_preemption_enabled() -> c_int;
-    fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32);
     fn get_task_stats(total: *mut u32, active: *mut u32, context_switches: *mut u64);
     fn get_scheduler_stats(
         context_switches: *mut u64,
@@ -394,15 +357,12 @@ pub extern "C" fn syscall_font_draw(
     }
 
     let mut buf = [0u8; USER_IO_MAX_BYTES];
-    unsafe {
-        if user_copy_from_user(
-            buf.as_mut_ptr() as *mut c_void,
-            text.str_ptr as *const c_void,
-            text.len as usize,
-        ) != 0
-        {
-            return syscall_return_err(frame, u64::MAX);
-        }
+    if user_copy_from_user(
+        buf.as_mut_ptr() as *mut c_void,
+        text.str_ptr as *const c_void,
+        text.len as usize,
+    ) != 0 {
+        return syscall_return_err(frame, u64::MAX);
     }
     buf[text.len as usize] = 0;
     let rc = unsafe { font_draw_string(text.x, text.y, buf.as_ptr() as *const c_char, text.fg_color, text.bg_color) };

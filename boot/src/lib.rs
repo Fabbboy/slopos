@@ -6,6 +6,7 @@ pub mod boot_services;
 pub mod cpu_verify;
 pub mod early_init;
 pub mod gdt;
+pub use gdt::gdt_set_kernel_rsp0;
 pub mod idt;
 pub mod kernel_panic;
 pub mod limine_protocol;
