@@ -9,8 +9,7 @@ use crate::keyboard;
 use crate::serial;
 use crate::syscall_types::Task;
 
-const MAX_TASKS: usize = 32;
-const TTY_MAX_WAITERS: usize = MAX_TASKS;
+const TTY_MAX_WAITERS: usize = 32;
 const COM1_BASE: u16 = 0x3F8;
 
 #[repr(C)]
