@@ -1,9 +1,7 @@
-use core::ffi::c_char;
-
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::{boot_init_step, boot_init_step_unit};
+use crate::boot_init_step;
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 use crate::limine_protocol::LimineMemmapResponse;
 

@@ -262,11 +262,9 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
         klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);
     }
 
-    unsafe {
-        tests_reset_registry();
-        tests_register_suite(&interrupt_suite_desc);
-        tests_register_system_suites();
-    }
+    tests_reset_registry();
+    tests_register_suite(&interrupt_suite_desc);
+    tests_register_system_suites();
 
     let mut summary = TestRunSummary {
         suites: [TestSuiteResult {
@@ -289,7 +287,7 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
         timed_out: 0,
     };
 
-    let rc = unsafe { tests_run_all(&test_config, &mut summary) };
+    let rc = tests_run_all(&test_config, &mut summary);
 
     if test_config.shutdown_on_complete != 0 {
         klog_debug!("INTERRUPT_TEST: Auto shutdown enabled after harness");

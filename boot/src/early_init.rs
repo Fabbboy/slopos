@@ -3,7 +3,6 @@
 use core::{
     cell::UnsafeCell,
     ffi::{c_char, CStr},
-    fmt,
     ptr,
 };
 
@@ -12,7 +11,7 @@ use slopos_drivers::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
 
-use crate::{gdt, idt, kernel_panic::kernel_panic, safe_stack};
+use crate::{gdt, idt, kernel_panic::kernel_panic};
 use crate::limine_protocol;
 
 pub const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
@@ -132,7 +131,7 @@ macro_rules! boot_init_optional_step_unit {
 }
 
 pub const fn boot_init_priority(val: u32) -> u32 {
-    ((val << BOOT_INIT_PRIORITY_SHIFT) & BOOT_INIT_PRIORITY_MASK)
+    (val << BOOT_INIT_PRIORITY_SHIFT) & BOOT_INIT_PRIORITY_MASK
 }
 
 struct BootRuntimeContext {
@@ -169,6 +168,7 @@ fn boot_state() -> &'static BootState {
     unsafe { &*BOOT_STATE.0.get() }
 }
 
+#[allow(static_mut_refs)]
 fn boot_state_mut() -> &'static mut BootState {
     unsafe { &mut *BOOT_STATE.0.get() }
 }
@@ -428,18 +428,18 @@ extern "C" fn boot_step_boot_banner_fn() {
 
 extern "C" fn boot_step_limine_protocol_fn() -> i32 {
     boot_debug(b"Initializing Limine protocol interface...\0");
-    if unsafe { limine_protocol::init_limine_protocol() } != 0 {
+    if limine_protocol::init_limine_protocol() != 0 {
         boot_info(b"ERROR: Limine protocol initialization failed\0");
         return -1;
     }
     boot_info(b"Limine protocol interface ready.\0");
 
-    if unsafe { limine_protocol::is_memory_map_available() } == 0 {
+    if limine_protocol::is_memory_map_available() == 0 {
         boot_info(b"ERROR: Limine did not provide a memory map\0");
         return -1;
     }
 
-    let memmap = unsafe { limine_protocol::limine_get_memmap_response() };
+    let memmap = limine_protocol::limine_get_memmap_response();
     if memmap.is_null() {
         boot_info(b"ERROR: Limine memory map response pointer is NULL\0");
         return -1;
@@ -448,7 +448,7 @@ extern "C" fn boot_step_limine_protocol_fn() -> i32 {
     {
         let state = boot_state_mut();
         state.ctx.memmap = memmap;
-        state.ctx.hhdm_offset = unsafe { limine_protocol::get_hhdm_offset() };
+        state.ctx.hhdm_offset = limine_protocol::get_hhdm_offset();
         state.ctx.cmdline = limine_protocol::kernel_cmdline_str();
     }
 
@@ -502,13 +502,11 @@ pub extern "C" fn kernel_main() {
     // Install basic GDT/IDT early so faults have somewhere to land. IST
     // stacks are deferred to the driver phase (after memory is online) so
     // safe_stack_init can allocate pages.
-    unsafe {
-        gdt::gdt_init();
-        idt::idt_init();
-        serial::write_line("BOOT: before idt_load (early)");
-        idt::idt_load();
-        serial::write_line("BOOT: after idt_load (early)");
-    }
+    gdt::gdt_init();
+    idt::idt_init();
+    serial::write_line("BOOT: before idt_load (early)");
+    idt::idt_load();
+    serial::write_line("BOOT: after idt_load (early)");
     serial::write_line("BOOT: early GDT/IDT initialized");
 
     serial::write_line("BOOT: entering boot init");

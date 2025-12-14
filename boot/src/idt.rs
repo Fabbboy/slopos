@@ -1,4 +1,5 @@
 #![allow(static_mut_refs)]
+#![allow(bad_asm_style)]
 
 use core::arch::{asm, global_asm};
 use core::ffi::{c_char, CStr};
@@ -197,45 +198,43 @@ pub extern "C" fn idt_init() {
         IDT_POINTER.base = IDT.as_ptr() as u64;
     }
 
-    unsafe {
-        idt_set_gate(0, handler_ptr(isr0), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(1, handler_ptr(isr1), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(2, handler_ptr(isr2), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(3, handler_ptr(isr3), 0x08, IDT_GATE_TRAP);
-        idt_set_gate(4, handler_ptr(isr4), 0x08, IDT_GATE_TRAP);
-        idt_set_gate(5, handler_ptr(isr5), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(6, handler_ptr(isr6), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(7, handler_ptr(isr7), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(8, handler_ptr(isr8), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(10, handler_ptr(isr10), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(11, handler_ptr(isr11), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(12, handler_ptr(isr12), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(13, handler_ptr(isr13), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(14, handler_ptr(isr14), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(16, handler_ptr(isr16), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(17, handler_ptr(isr17), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(18, handler_ptr(isr18), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(19, handler_ptr(isr19), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(0, handler_ptr(isr0), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(1, handler_ptr(isr1), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(2, handler_ptr(isr2), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(3, handler_ptr(isr3), 0x08, IDT_GATE_TRAP);
+    idt_set_gate(4, handler_ptr(isr4), 0x08, IDT_GATE_TRAP);
+    idt_set_gate(5, handler_ptr(isr5), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(6, handler_ptr(isr6), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(7, handler_ptr(isr7), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(8, handler_ptr(isr8), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(10, handler_ptr(isr10), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(11, handler_ptr(isr11), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(12, handler_ptr(isr12), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(13, handler_ptr(isr13), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(14, handler_ptr(isr14), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(16, handler_ptr(isr16), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(17, handler_ptr(isr17), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(18, handler_ptr(isr18), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(19, handler_ptr(isr19), 0x08, IDT_GATE_INTERRUPT);
 
-        idt_set_gate(32, handler_ptr(irq0), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(33, handler_ptr(irq1), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(34, handler_ptr(irq2), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(35, handler_ptr(irq3), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(36, handler_ptr(irq4), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(37, handler_ptr(irq5), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(38, handler_ptr(irq6), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(39, handler_ptr(irq7), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(40, handler_ptr(irq8), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(41, handler_ptr(irq9), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(42, handler_ptr(irq10), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(43, handler_ptr(irq11), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(44, handler_ptr(irq12), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(45, handler_ptr(irq13), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(46, handler_ptr(irq14), 0x08, IDT_GATE_INTERRUPT);
-        idt_set_gate(47, handler_ptr(irq15), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(32, handler_ptr(irq0), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(33, handler_ptr(irq1), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(34, handler_ptr(irq2), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(35, handler_ptr(irq3), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(36, handler_ptr(irq4), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(37, handler_ptr(irq5), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(38, handler_ptr(irq6), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(39, handler_ptr(irq7), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(40, handler_ptr(irq8), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(41, handler_ptr(irq9), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(42, handler_ptr(irq10), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(43, handler_ptr(irq11), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(44, handler_ptr(irq12), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(45, handler_ptr(irq13), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(46, handler_ptr(irq14), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(47, handler_ptr(irq15), 0x08, IDT_GATE_INTERRUPT);
 
-        idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
-    }
+    idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
 
     initialize_handler_tables();
 
@@ -362,7 +361,7 @@ pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::InterruptFram
 
     unsafe {
         let cr2: u64;
-        unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags)) };
+        asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags));
         klog_debug!(
             "EXCEPTION: vec={} rip=0x{:x} err=0x{:x} cs=0x{:x} ss=0x{:x} cr2=0x{:x}",
             vector,
@@ -642,7 +641,7 @@ pub extern "C" fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     }
 
     let mut stack_name: *const c_char = core::ptr::null();
-    if unsafe { safe_stack::safe_stack_guard_fault(fault_addr, &mut stack_name) } != 0 {
+    if safe_stack::safe_stack_guard_fault(fault_addr, &mut stack_name) != 0 {
         klog_info!("FATAL: Exception stack overflow detected via guard page");
         if !stack_name.is_null() {
             let owner = unsafe { CStr::from_ptr(stack_name) }

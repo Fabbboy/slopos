@@ -452,6 +452,7 @@ unsafe impl Sync for SystemInfoCell {}
 
 static SYSTEM_INFO: SystemInfoCell = SystemInfoCell(UnsafeCell::new(SystemInfo::new()));
 
+#[allow(static_mut_refs)]
 fn sysinfo_mut() -> &'static mut SystemInfo {
     unsafe { &mut *SYSTEM_INFO.0.get() }
 }
@@ -468,11 +469,9 @@ pub fn ensure_base_revision() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init_limine_protocol() -> i32 {
-    unsafe {
-        if !BASE_REVISION.supported() {
-            klog_info!("ERROR: Limine base revision not supported!");
-            return -1;
-        }
+    if !BASE_REVISION.supported() {
+        klog_info!("ERROR: Limine base revision not supported!");
+        return -1;
     }
 
     let info = sysinfo_mut();
@@ -482,16 +481,12 @@ pub extern "C" fn init_limine_protocol() -> i32 {
             if !resp.name.is_null() && !resp.version.is_null() {
                 klog_debug!(
                     "Bootloader: {} version {}",
-                    unsafe {
-                        CStr::from_ptr(resp.name as *const c_char)
-                            .to_str()
-                            .unwrap_or("<invalid utf-8>")
-                    },
-                    unsafe {
-                        CStr::from_ptr(resp.version as *const c_char)
-                            .to_str()
-                            .unwrap_or("<invalid utf-8>")
-                    }
+                    CStr::from_ptr(resp.name as *const c_char)
+                        .to_str()
+                        .unwrap_or("<invalid utf-8>"),
+                    CStr::from_ptr(resp.version as *const c_char)
+                        .to_str()
+                        .unwrap_or("<invalid utf-8>")
                 );
             }
         }

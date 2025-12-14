@@ -174,6 +174,7 @@ unsafe extern "C" {
     static kernel_stack_top: u8;
 }
 
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn load_gdt(descriptor: &GdtDescriptor) {
     unsafe { asm!("lgdt [{0}]", in(reg) descriptor, options(nostack, preserves_flags)) };
 
@@ -198,6 +199,7 @@ unsafe fn load_gdt(descriptor: &GdtDescriptor) {
     }
 }
 
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn load_tss() {
     let selector = GDT_TSS_SELECTOR;
     unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };

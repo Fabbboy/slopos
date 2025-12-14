@@ -1,10 +1,4 @@
 #![no_std]
-#![allow(unsafe_op_in_unsafe_fn)]
-#![allow(unused_unsafe)]
-#![allow(unused_imports)]
-#![allow(unused_parens)]
-#![allow(static_mut_refs)]
-#![allow(bad_asm_style)]
 
 pub mod boot_drivers;
 pub mod boot_memory;
