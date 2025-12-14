@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
