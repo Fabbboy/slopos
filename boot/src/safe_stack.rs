@@ -109,11 +109,9 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
     ExceptionStackMetrics::new(),
 ];
 
-unsafe extern "C" {
-    fn alloc_page_frame(flags: u32) -> u64;
-    fn mm_zero_physical_page(phys: u64) -> i32;
-    fn map_page_4kb(virt: u64, phys: u64, flags: u64) -> i32;
-}
+use slopos_mm::page_alloc::alloc_page_frame;
+use slopos_mm::phys_virt::mm_zero_physical_page;
+use slopos_mm::paging::map_page_4kb;
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)
@@ -135,20 +133,20 @@ fn find_stack_index_by_address(addr: u64) -> Option<usize> {
 fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack.stack_base + page as u64 * PAGE_SIZE_4KB;
-        let phys_addr = unsafe { alloc_page_frame(0) };
+        let phys_addr = alloc_page_frame(0);
         if phys_addr == 0 {
             kernel_panic(
                 b"safe_stack_init: Failed to allocate exception stack page\0".as_ptr()
                     as *const c_char,
             );
         }
-        if unsafe { mm_zero_physical_page(phys_addr) } != 0 {
+        if mm_zero_physical_page(phys_addr) != 0 {
             kernel_panic(
                 b"safe_stack_init: Failed to zero exception stack page\0".as_ptr()
                     as *const c_char,
             );
         }
-        if unsafe { map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) } != 0 {
+        if map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) != 0 {
             kernel_panic(
                 b"safe_stack_init: Failed to map exception stack page\0".as_ptr()
                     as *const c_char,
@@ -158,7 +156,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn safe_stack_init() {
+pub fn safe_stack_init() {
     klog_debug!("SAFE STACK: Initializing dedicated IST stacks");
 
     for (i, stack) in STACK_CONFIGS.iter().enumerate() {
@@ -182,7 +180,7 @@ pub extern "C" fn safe_stack_init() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
+pub fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
     let Some(idx) = find_stack_index_by_vector(vector) else {
         return;
     };
@@ -217,7 +215,7 @@ pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
+pub fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
     if let Some(idx) = find_stack_index_by_address(fault_addr) {
         let stack = &STACK_CONFIGS[idx];
         if fault_addr >= stack.guard_start && fault_addr < stack.guard_end {

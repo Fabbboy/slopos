@@ -26,12 +26,20 @@ pub extern "C" fn scheduler_task_exit() -> ! {
 // ============================================================================
 
 // Functions defined in assembly (context_switch.s) - these are just declarations
+// The assembly exports: context_switch, context_switch_user, simple_context_switch, 
+// init_kernel_context, task_entry_wrapper, and kernel_stack_top
 unsafe extern "C" {
+    #[link_name = "context_switch"]
     fn context_switch_impl(old_context: *mut TaskContext, new_context: *const TaskContext);
+    #[link_name = "context_switch_user"]
     fn context_switch_user_impl(old_context: *mut TaskContext, new_context: *const TaskContext);
+    #[link_name = "simple_context_switch"]
     fn simple_context_switch_impl(old_context: *mut TaskContext, new_context: *const TaskContext);
+    #[link_name = "init_kernel_context"]
     fn init_kernel_context_impl(context: *mut TaskContext);
+    #[link_name = "task_entry_wrapper"]
     fn task_entry_wrapper_impl();
+    #[link_name = "kernel_stack_top"]
     static kernel_stack_top_impl: u8;
 }
 

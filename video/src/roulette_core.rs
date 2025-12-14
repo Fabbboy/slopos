@@ -414,7 +414,7 @@ fn roulette_handoff_to_demo(b: &RouletteBackend, width: i32, height: i32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
+pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;
     }

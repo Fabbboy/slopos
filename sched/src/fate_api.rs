@@ -1,6 +1,10 @@
 use core::ffi::c_int;
 
-use slopos_drivers::{random, wl_currency};
+unsafe extern "C" {
+    fn random_u64() -> u64;
+    fn wl_award_win();
+    fn wl_award_loss();
+}
 
 use crate::task::{task_find_by_id, Task};
 
@@ -26,8 +30,8 @@ where
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fate_spin() -> fate_result {
-    let val = random::random_next() as u32;
+pub fn fate_spin() -> fate_result {
+    let val = unsafe { random_u64() } as u32;
     fate_result {
         token: val,
         value: val,
@@ -35,7 +39,7 @@ pub extern "C" fn fate_spin() -> fate_result {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
+pub fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
     with_task(task_id, |t| {
         t.fate_token = res.token;
         t.fate_value = res.value;
@@ -44,7 +48,7 @@ pub extern "C" fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int {
+pub fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int {
     let mut result = -1;
     let _ = with_task(task_id, |t| {
         if t.fate_pending != 0 {
@@ -64,13 +68,13 @@ pub extern "C" fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_in
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fate_apply_outcome(res: *const fate_result, _resolution: u32, award: bool) {
+pub fn fate_apply_outcome(res: *const fate_result, _resolution: u32, award: bool) {
     if res.is_null() {
         return;
     }
     if award {
-        wl_currency::award_win();
+        unsafe { wl_award_win() };
     } else {
-        wl_currency::award_loss();
+        unsafe { wl_award_loss() };
     }
 }

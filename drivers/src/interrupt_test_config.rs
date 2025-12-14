@@ -192,7 +192,7 @@ fn process_token(config: &mut interrupt_test_config, token: &str) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn interrupt_test_config_init_defaults(config: *mut interrupt_test_config) {
+pub unsafe fn interrupt_test_config_init_defaults(config: *mut interrupt_test_config) {
     if config.is_null() {
         return;
     }
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn interrupt_test_config_init_defaults(config: *mut interr
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn interrupt_test_config_parse_cmdline(
+pub unsafe fn interrupt_test_config_parse_cmdline(
     config: *mut interrupt_test_config,
     cmdline: *const c_char,
 ) {
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn interrupt_test_config_parse_cmdline(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn interrupt_test_verbosity_string(
+pub fn interrupt_test_verbosity_string(
     verbosity: interrupt_test_verbosity,
 ) -> *const c_char {
     match verbosity {
@@ -230,7 +230,7 @@ pub extern "C" fn interrupt_test_verbosity_string(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn interrupt_test_suite_string(suite_mask: u32) -> *const c_char {
+pub fn interrupt_test_suite_string(suite_mask: u32) -> *const c_char {
     match suite_mask {
         0 => b"none\0".as_ptr() as *const c_char,
         x if x == INTERRUPT_TEST_SUITE_ALL => b"all\0".as_ptr() as *const c_char,

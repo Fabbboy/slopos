@@ -15,7 +15,7 @@ pub enum SyscallDisposition {
 }
 
 pub type SyscallHandler =
-    extern "C" fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
+    fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
 
 #[repr(C)]
 pub struct SyscallEntry {
@@ -23,10 +23,7 @@ pub struct SyscallEntry {
     pub name: *const c_char,
 }
 
-unsafe extern "C" {
-    fn user_copy_from_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
-    fn user_copy_to_user(dst: *mut c_void, src: *const c_void, len: usize) -> c_int;
-}
+use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
 
 pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> SyscallDisposition {
     if frame.is_null() {
@@ -110,5 +107,5 @@ pub fn syscall_copy_to_user_bounded(
     if user_dst.is_null() || src.is_null() || len == 0 {
         return -1;
     }
-    unsafe { user_copy_to_user(user_dst, src, len) }
+    user_copy_to_user(user_dst, src, len)
 }

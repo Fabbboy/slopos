@@ -4,11 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use crate::wl_currency;
-
-unsafe extern "C" {
-    fn is_hhdm_available() -> i32;
-    fn get_hhdm_offset() -> u64;
-}
+use crate::scheduler_callbacks::{call_is_hhdm_available, call_get_hhdm_offset};
 
 // CPUID feature flags (leaf 1)
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
@@ -68,12 +64,10 @@ fn hhdm_virt_for(phys: u64) -> Option<u64> {
     if phys == 0 {
         return None;
     }
-    unsafe {
-        if is_hhdm_available() != 0 {
-            Some(phys + get_hhdm_offset())
-        } else {
-            None
-        }
+    if unsafe { call_is_hhdm_available() } != 0 {
+        Some(phys + unsafe { call_get_hhdm_offset() })
+    } else {
+        None
     }
 }
 

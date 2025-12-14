@@ -171,7 +171,7 @@ fn test_list_directory() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn run_ramfs_tests() -> c_int {
+pub fn run_ramfs_tests() -> c_int {
     serial_println!("RAMFS_TEST: running suite");
     let mut passed = 0;
 

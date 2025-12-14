@@ -98,8 +98,8 @@ impl PciGpuInfo {
 #[repr(C)]
 pub struct PciDriver {
     pub name: *const u8,
-    pub match_fn: Option<extern "C" fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> bool>,
-    pub probe: Option<extern "C" fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> c_int>,
+    pub match_fn: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> bool>,
+    pub probe: Option<fn(*const PciDeviceInfo, *mut core::ffi::c_void) -> c_int>,
     pub context: *mut core::ffi::c_void,
 }
 
@@ -185,7 +185,7 @@ unsafe fn inl(port: u16) -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
     unsafe {
@@ -195,21 +195,21 @@ pub extern "C" fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
+pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x2) * 8) as u32;
     ((value >> shift) & 0xFFFF) as u16
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x3) * 8) as u32;
     ((value >> shift) & 0xFF) as u8
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
     unsafe {
@@ -219,7 +219,7 @@ pub extern "C" fn pci_config_write32(bus: u8, device: u8, function: u8, offset: 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
     unsafe {
@@ -234,7 +234,7 @@ pub extern "C" fn pci_config_write16(bus: u8, device: u8, function: u8, offset: 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
+pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
     let address: u32 =
         0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
     unsafe {
@@ -342,9 +342,7 @@ fn pci_log_bar(bar: &PciBarInfo, index: u8) {
     }
 }
 
-unsafe extern "C" {
-    fn mm_map_mmio_region(base_phys: u64, size: usize) -> *mut core::ffi::c_void;
-}
+use slopos_mm::phys_virt::mm_map_mmio_region;
 
 fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
     let virtio_candidate = pci_is_virtio_gpu(info);
@@ -612,7 +610,7 @@ fn pci_enumerate_bus(bus: u8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_init() -> c_int {
+pub fn pci_init() -> c_int {
     unsafe {
         if PCI_INITIALIZED != 0 {
             return 0;
@@ -647,17 +645,17 @@ pub extern "C" fn pci_init() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_device_count() -> usize {
+pub fn pci_get_device_count() -> usize {
     unsafe { DEVICE_COUNT }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_devices() -> *const PciDeviceInfo {
+pub fn pci_get_devices() -> *const PciDeviceInfo {
     unsafe { DEVICES.as_ptr() }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_primary_gpu() -> *const PciGpuInfo {
+pub fn pci_get_primary_gpu() -> *const PciGpuInfo {
     unsafe {
         if PRIMARY_GPU.present != 0 {
             &PRIMARY_GPU as *const PciGpuInfo
@@ -668,12 +666,12 @@ pub extern "C" fn pci_get_primary_gpu() -> *const PciGpuInfo {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_registered_driver_count() -> usize {
+pub fn pci_get_registered_driver_count() -> usize {
     unsafe { PCI_REGISTERED_DRIVER_COUNT }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_get_registered_driver(index: usize) -> *const PciDriver {
+pub fn pci_get_registered_driver(index: usize) -> *const PciDriver {
     unsafe {
         if index >= PCI_REGISTERED_DRIVER_COUNT {
             ptr::null()
@@ -684,7 +682,7 @@ pub extern "C" fn pci_get_registered_driver(index: usize) -> *const PciDriver {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pci_register_driver(driver: *const PciDriver) -> c_int {
+pub fn pci_register_driver(driver: *const PciDriver) -> c_int {
     if driver.is_null() {
         klog_info!("PCI: Attempted to register invalid driver");
         return -1;

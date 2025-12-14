@@ -1,6 +1,5 @@
 
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
 use core::mem;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -9,12 +8,7 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
 
-unsafe extern "C" {
-    fn is_hhdm_available() -> i32;
-    fn get_hhdm_offset() -> u64;
-    fn is_rsdp_available() -> i32;
-    fn get_rsdp_address() -> *const c_void;
-}
+use crate::scheduler_callbacks::{call_get_hhdm_offset, call_is_hhdm_available, call_is_rsdp_available, call_get_rsdp_address};
 
 const IOAPIC_MAX_CONTROLLERS: usize = 8;
 const IOAPIC_MAX_ISO_ENTRIES: usize = 32;
@@ -179,12 +173,10 @@ fn phys_to_virt(phys: u64) -> *mut u8 {
     if phys == 0 {
         return core::ptr::null_mut();
     }
-    unsafe {
-        if is_hhdm_available() != 0 {
-            (phys + get_hhdm_offset()) as *mut u8
-        } else {
-            phys as *mut u8
-        }
+    if unsafe { call_is_hhdm_available() } != 0 {
+        unsafe { (phys + call_get_hhdm_offset()) as *mut u8 }
+    } else {
+        phys as *mut u8
     }
 }
 
@@ -509,19 +501,19 @@ pub fn init() -> i32 {
         return 0;
     }
 
-    if unsafe { is_hhdm_available() } == 0 {
+    if unsafe { call_is_hhdm_available() } == 0 {
         klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         wl_currency::award_loss();
         return -1;
     }
 
-    if unsafe { is_rsdp_available() } == 0 {
+    if unsafe { call_is_rsdp_available() } == 0 {
         klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         wl_currency::award_loss();
         return -1;
     }
 
-    let rsdp = unsafe { get_rsdp_address() as *const AcpiRsdp };
+    let rsdp = unsafe { call_get_rsdp_address() } as *const AcpiRsdp;
     if !acpi_validate_rsdp(rsdp) {
         klog_info!("IOAPIC: ACPI RSDP checksum failed");
         wl_currency::award_loss();

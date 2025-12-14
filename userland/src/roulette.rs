@@ -354,7 +354,7 @@ fn backend() -> RouletteBackend {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]
-pub extern "C" fn roulette_user_main(_arg: *mut c_void) {
+pub fn roulette_user_main(_arg: *mut c_void) {
     let _ = sys_write(b"ROULETTE: start\n");
     let spin = sys_roulette();
     let fate = spin as u32;

@@ -11,10 +11,7 @@ use crate::pci::{
 };
 use crate::wl_currency;
 
-unsafe extern "C" {
-    fn mm_map_mmio_region(base: u64, size: usize) -> *mut core::ffi::c_void;
-    fn mm_unmap_mmio_region(ptr: *mut core::ffi::c_void, size: usize);
-}
+use slopos_mm::phys_virt::{mm_map_mmio_region, mm_unmap_mmio_region};
 
 pub const VIRTIO_GPU_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;
@@ -89,7 +86,7 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
     };
 
     let mmio_size = if bar.size != 0 { bar.size as usize } else { VIRTIO_MMIO_DEFAULT_SIZE };
-    let mmio_base = unsafe { mm_map_mmio_region(bar.base, mmio_size) };
+    let mmio_base = mm_map_mmio_region(bar.base, mmio_size);
     if mmio_base.is_null() {
         klog_info!(
             "PCI: virtio-gpu MMIO mapping failed for phys=0x{:x}",
@@ -116,7 +113,7 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
             "PCI: virtio-gpu handshake incomplete (status=0x{:02x})",
             status_handshake
         );
-        unsafe { mm_unmap_mmio_region(mmio_base, mmio_size) };
+        mm_unmap_mmio_region(mmio_base, mmio_size);
         wl_currency::award_loss();
         return -1;
     }
@@ -139,15 +136,15 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
     0
 }
 
-static VIRTIO_GPU_PCI_DRIVER: PciDriver = PciDriver {
+static VIRTIO_GPU_PCI_DRIVER: PciDriver = unsafe { PciDriver {
     name: b"virtio-gpu\0".as_ptr(),
-    match_fn: Some(virtio_gpu_match),
-    probe: Some(virtio_gpu_probe),
+    match_fn: Some(core::mem::transmute(virtio_gpu_match as *const ())),
+    probe: Some(core::mem::transmute(virtio_gpu_probe as *const ())),
     context: core::ptr::null_mut(),
-};
+} };
 
 #[unsafe(no_mangle)]
-pub extern "C" fn virtio_gpu_register_driver() {
+pub fn virtio_gpu_register_driver() {
     static mut REGISTERED: bool = false;
     unsafe {
         if REGISTERED {
@@ -161,7 +158,7 @@ pub extern "C" fn virtio_gpu_register_driver() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {
+pub fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {
             &VIRTIO_GPU_DEVICE as *const virtio_gpu_device_t

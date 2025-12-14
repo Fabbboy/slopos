@@ -6,10 +6,8 @@ use slopos_lib::klog_info;
 
 use crate::shutdown::kernel_shutdown;
 
-unsafe extern "C" {
-    fn is_memory_system_initialized() -> i32;
-    fn execute_kernel();
-}
+use crate::shutdown::execute_kernel;
+use slopos_mm::memory_init::is_memory_system_initialized;
 
 fn panic_output_str(s: &str) {
     serial::write_line(s);
@@ -57,7 +55,7 @@ fn read_cr(reg: ControlRegister) -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_panic(message: *const c_char) {
+pub fn kernel_panic(message: *const c_char) {
     cpu::disable_interrupts();
 
     panic_output_str("\n\n=== KERNEL PANIC ===");
@@ -85,12 +83,10 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     panic_output_str("Skill issue lol");
     panic_output_str("System halted.");
 
-    unsafe {
-        if is_memory_system_initialized() != 0 {
-            execute_kernel();
-        } else {
-            panic_output_str("Memory system unavailable; skipping paint ritual");
-        }
+    if is_memory_system_initialized() != 0 {
+        execute_kernel();
+    } else {
+        panic_output_str("Memory system unavailable; skipping paint ritual");
     }
 
     let reason = if message.is_null() {
@@ -102,7 +98,7 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_panic_with_context(
+pub fn kernel_panic_with_context(
     message: *const c_char,
     function: *const c_char,
     file: *const c_char,
@@ -143,12 +139,10 @@ pub extern "C" fn kernel_panic_with_context(
     panic_output_str("Skill issue lol");
     panic_output_str("System halted.");
 
-    unsafe {
-        if is_memory_system_initialized() != 0 {
-            execute_kernel();
-        } else {
-            panic_output_str("Memory system unavailable; skipping paint ritual");
-        }
+    if is_memory_system_initialized() != 0 {
+        execute_kernel();
+    } else {
+        panic_output_str("Memory system unavailable; skipping paint ritual");
     }
 
     let reason = if message.is_null() {
@@ -160,7 +154,7 @@ pub extern "C" fn kernel_panic_with_context(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_assert(condition: i32, message: *const c_char) {
+pub fn kernel_assert(condition: i32, message: *const c_char) {
     if condition == 0 {
         let msg = if message.is_null() {
             b"Assertion failed\0".as_ptr() as *const c_char

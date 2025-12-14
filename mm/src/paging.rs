@@ -3,6 +3,10 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
+unsafe extern "C" {
+    fn kernel_panic(msg: *const c_char) -> !;
+    fn is_hhdm_available() -> c_int;
+}
 
 use crate::mm_constants::{
     ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
@@ -12,11 +16,6 @@ use crate::page_alloc::{
     alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
 };
 use crate::phys_virt::mm_phys_to_virt;
-
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn is_hhdm_available() -> c_int;
-}
 
 #[repr(C, align(4096))]
 pub struct PageTable {

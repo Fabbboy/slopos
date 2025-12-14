@@ -2,7 +2,6 @@ use core::ffi::{c_char, c_int, c_void};
 use core::{mem, ptr, slice};
 
 use spin::Mutex;
-
 use slopos_drivers::serial_println;
 use slopos_drivers::wl_currency;
 
@@ -332,8 +331,8 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     );
     let _ = ramfs_create_directory(TMP.as_ptr() as *const c_char);
 
-    serial_println!("ramfs: initialized");
-    wl_currency::award_win();
+        serial_println!("ramfs: initialized");
+        wl_currency::award_win();
     0
 }
 

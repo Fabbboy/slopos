@@ -34,8 +34,8 @@ pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 
 const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
 
-pub type TaskIterateCb = Option<extern "C" fn(*mut Task, *mut c_void)>;
-pub type TaskEntry = extern "C" fn(*mut c_void);
+pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
+pub type TaskEntry = fn(*mut c_void);
 
 // ProcessPageDir and PageTable are defined in scheduler module to avoid duplicate re-exports
 
@@ -256,7 +256,10 @@ static mut TASK_MANAGER: TaskManager = TaskManager::new();
 
 use slopos_mm::kernel_heap::{kmalloc, kfree};
 use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir};
-use slopos_fs::{fileio_create_table_for_process, fileio_destroy_table_for_process};
+unsafe extern "C" {
+    fn fileio_create_table_for_process(process_id: u32) -> c_int;
+    fn fileio_destroy_table_for_process(process_id: u32) -> c_int;
+}
 
 unsafe extern "C" {
     static _user_text_start: u8;
@@ -498,7 +501,7 @@ pub fn task_create(
         kernel_stack_base = kstack as u64;
         kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-        if fileio_create_table_for_process(process_id) != 0 {
+        if unsafe { fileio_create_table_for_process(process_id) } != 0 {
             kfree(kstack);
             destroy_process_vm(process_id);
             return INVALID_TASK_ID;
@@ -525,7 +528,7 @@ pub fn task_create(
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         if process_id != INVALID_PROCESS_ID {
-            fileio_destroy_table_for_process(process_id);
+            unsafe { fileio_destroy_table_for_process(process_id) };
             destroy_process_vm(process_id);
             if kernel_stack_base != 0 {
                 kfree(kernel_stack_base as *mut c_void);
@@ -595,7 +598,7 @@ pub fn task_create(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_terminate(task_id: u32) -> c_int {
+pub fn task_terminate(task_id: u32) -> c_int {
     let mut resolved_id = task_id;
     let task_ptr: *mut Task;
 
@@ -768,7 +771,7 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_task_stats(
+pub fn get_task_stats(
     total_tasks: *mut u32,
     active_tasks: *mut u32,
     context_switches: *mut u64,
@@ -831,7 +834,7 @@ pub fn task_state_to_string(state: u8) -> *const c_char {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
+pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
     if callback.is_none() {
         return;
     }
@@ -901,6 +904,4 @@ pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_TERMINATED
 }
 
-unsafe extern "C" {
-    fn task_entry_wrapper();
-}
+use crate::ffi_boundary::task_entry_wrapper;

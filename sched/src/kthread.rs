@@ -53,7 +53,7 @@ pub fn kthread_join(thread_id: KthreadId) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kthread_exit() -> ! {
+pub fn kthread_exit() -> ! {
     crate::ffi_boundary::scheduler_task_exit();
 }
 

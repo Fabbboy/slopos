@@ -16,8 +16,10 @@ use crate::ffi_boundary::simple_context_switch;
 
 unsafe extern "C" {
     fn serial_putc_com1(ch: u8);
-    fn kmalloc(size: usize) -> *mut c_void;
-    fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> c_int;
+}
+use slopos_mm::kernel_heap::kmalloc;
+unsafe extern "C" {
+    fn idt_get_gate(vector: u8, entry: *mut IdtEntry) -> c_int;
 }
 
 #[repr(C, packed)]
@@ -41,7 +43,7 @@ const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
  * ======================================================================== */
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_task_a(arg: *mut c_void) {
+pub fn test_task_a(arg: *mut c_void) {
     let _ = arg;
     let mut counter: u32 = 0;
 
@@ -61,7 +63,7 @@ pub extern "C" fn test_task_a(arg: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_task_b(arg: *mut c_void) {
+pub fn test_task_b(arg: *mut c_void) {
     let _ = arg;
 
     let mut current_char: u8 = b'A';
@@ -96,7 +98,7 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
  * ======================================================================== */
 
 #[unsafe(no_mangle)]
-pub extern "C" fn run_scheduler_test() -> c_int {
+pub fn run_scheduler_test() -> c_int {
     klog_info!("=== Starting SlopOS Cooperative Scheduler Test ===");
 
     if crate::task::init_task_manager() != 0 {
@@ -190,7 +192,7 @@ pub extern "C" fn run_scheduler_test() -> c_int {
  * ======================================================================== */
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn user_stub_task(arg: *mut c_void) {
+fn user_stub_task(arg: *mut c_void) {
     let _ = arg;
     unsafe {
         core::arch::asm!(
@@ -204,7 +206,7 @@ extern "C" fn user_stub_task(arg: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
+pub fn run_privilege_separation_invariant_test() -> c_int {
     klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
     if crate::task::init_task_manager() != 0
@@ -303,7 +305,7 @@ static mut KERNEL_RETURN_CONTEXT: TaskContext = const { TaskContext::zero() };
 static mut TEST_COMPLETED_PTR: *mut c_int = ptr::null_mut();
 
 #[unsafe(no_mangle)]
-pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
+pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     if ctx.is_null() {
         return;
     }
@@ -397,7 +399,7 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn smoke_test_task_a(arg: *mut c_void) {
+pub fn smoke_test_task_a(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
         return;
@@ -407,7 +409,7 @@ pub extern "C" fn smoke_test_task_a(arg: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn smoke_test_task_b(arg: *mut c_void) {
+pub fn smoke_test_task_b(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
         return;
@@ -417,7 +419,7 @@ pub extern "C" fn smoke_test_task_b(arg: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn run_context_switch_smoke_test() -> c_int {
+pub fn run_context_switch_smoke_test() -> c_int {
     klog_info!("=== Context Switch Stack Discipline Smoke Test ===");
     klog_info!("Testing basic context switch functionality");
 
@@ -445,7 +447,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
     test_ctx.ss = 0x10;
     test_ctx.cr3 = 0;
 
-    let stack = unsafe { kmalloc(4096) as *mut u64 };
+    let stack = kmalloc(4096) as *mut u64;
     if stack.is_null() {
         klog_info!("Failed to allocate stack for test task");
         return -1;
@@ -477,7 +479,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
+pub fn test_task_function(completed_flag: *mut c_int) {
     klog_info!("Test task function executed successfully");
     if !completed_flag.is_null() {
         unsafe {
@@ -492,7 +494,7 @@ pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn context_switch_return_trampoline() -> c_int {
+pub fn context_switch_return_trampoline() -> c_int {
     klog_info!("Context switch returned successfully");
 
     let completed = unsafe {
@@ -521,7 +523,7 @@ struct TaskStatPrintCtx {
     index: u32,
 }
 
-extern "C" fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
+fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     let ctx = unsafe { &mut *(context as *mut TaskStatPrintCtx) };
     ctx.index = ctx.index.wrapping_add(1);
 
@@ -533,16 +535,9 @@ extern "C" fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn print_scheduler_stats() {
-    unsafe extern "C" {
-        fn get_scheduler_stats(
-            context_switches: *mut u64,
-            yields: *mut u64,
-            ready_tasks: *mut u32,
-            schedule_calls: *mut u32,
-        );
-        fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64);
-    }
+pub fn print_scheduler_stats() {
+    use crate::scheduler::get_scheduler_stats;
+    use crate::task::get_task_stats;
 
     let mut sched_switches: u64 = 0;
     let mut sched_yields: u64 = 0;
@@ -553,15 +548,13 @@ pub extern "C" fn print_scheduler_stats() {
     let mut task_switches: u64 = 0;
     let task_yields = task_get_total_yields();
 
-    unsafe {
-        get_scheduler_stats(
-            &mut sched_switches,
-            &mut sched_yields,
-            &mut ready_tasks,
-            &mut schedule_calls,
-        );
-        get_task_stats(&mut total_tasks, &mut active_tasks, &mut task_switches);
-    }
+    get_scheduler_stats(
+        &mut sched_switches,
+        &mut sched_yields,
+        &mut ready_tasks,
+        &mut schedule_calls,
+    );
+    get_task_stats(&mut total_tasks, &mut active_tasks, &mut task_switches);
 
     klog_info!("\n=== Scheduler Statistics ===");
     klog_info!("Context switches: {}", sched_switches);

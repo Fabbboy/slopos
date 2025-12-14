@@ -48,13 +48,11 @@ pub struct UserFsList {
     pub count: u32,
 }
 
-unsafe extern "C" {
-    fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int;
-    fn file_close_fd(process_id: u32, fd: c_int) -> c_int;
-    fn file_read_fd(process_id: u32, fd: c_int, buf: *mut c_char, len: usize) -> isize;
-    fn file_write_fd(process_id: u32, fd: c_int, buf: *const c_char, len: usize) -> isize;
-    fn file_unlink_path(path: *const c_char) -> c_int;
+use crate::scheduler_callbacks::{
+    call_file_open_for_process, call_file_close_fd, call_file_read_fd, call_file_write_fd, call_file_unlink_path,
+};
 
+unsafe extern "C" {
     fn ramfs_acquire_node(path: *const c_char) -> *mut RamfsNode;
     fn ramfs_get_size(node: *const RamfsNode) -> u64;
     fn ramfs_node_release(node: *mut RamfsNode);
@@ -91,7 +89,7 @@ pub extern "C" fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -
     }
 
     let flags = unsafe { (*frame).rsi as u32 };
-    let fd = unsafe { file_open_for_process((*task).process_id, path.as_ptr(), flags) };
+    let fd = unsafe { call_file_open_for_process((*task).process_id, path.as_ptr(), flags) };
     if fd < 0 {
         return syscall_fs_error(frame);
     }
@@ -104,7 +102,7 @@ pub extern "C" fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) 
             return syscall_fs_error(frame);
         }
     }
-    let rc = unsafe { file_close_fd((*task).process_id, (*frame).rdi as c_int) };
+    let rc = unsafe { call_file_close_fd((*task).process_id, (*frame).rdi as c_int) };
     if rc != 0 {
         return syscall_fs_error(frame);
     }
@@ -123,7 +121,7 @@ pub extern "C" fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -
     let capped_len = request_len.min(USER_IO_MAX_BYTES);
 
     let bytes = unsafe {
-        file_read_fd(
+        call_file_read_fd(
             (*task).process_id,
             (*frame).rdi as c_int,
             tmp.as_mut_ptr() as *mut c_char,
@@ -169,7 +167,7 @@ pub extern "C" fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) 
     }
 
     let bytes = unsafe {
-        file_write_fd(
+        call_file_write_fd(
             (*task).process_id,
             (*frame).rdi as c_int,
             tmp.as_ptr() as *const c_char,
@@ -253,7 +251,7 @@ pub extern "C" fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame)
         return syscall_fs_error(frame);
     }
 
-    if unsafe { file_unlink_path(path.as_ptr()) } != 0 {
+    if unsafe { call_file_unlink_path(path.as_ptr()) } != 0 {
         return syscall_fs_error(frame);
     }
     syscall_return_ok(frame, 0)

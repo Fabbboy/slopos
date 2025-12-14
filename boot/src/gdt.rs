@@ -206,7 +206,7 @@ unsafe fn load_tss() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gdt_init() {
+pub fn gdt_init() {
     klog_debug!("GDT: Initializing descriptor tables");
 
     unsafe {
@@ -247,14 +247,14 @@ pub extern "C" fn gdt_init() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gdt_set_kernel_rsp0(rsp0: u64) {
+pub fn gdt_set_kernel_rsp0(rsp0: u64) {
     unsafe {
         KERNEL_TSS.rsp0 = rsp0;
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gdt_set_ist(index: u8, stack_top: u64) {
+pub fn gdt_set_ist(index: u8, stack_top: u64) {
     if index == 0 || index > 7 {
         return;
     }

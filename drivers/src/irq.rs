@@ -397,7 +397,7 @@ pub fn disable_line(irq: u8) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn irq_dispatch(frame: *mut InterruptFrame) {
+pub fn irq_dispatch(frame: *mut InterruptFrame) {
     if frame.is_null() {
         klog_info!("IRQ: Received null frame");
         return;

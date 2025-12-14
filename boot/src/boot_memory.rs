@@ -4,9 +4,7 @@ use slopos_lib::{klog_debug, klog_info};
 use crate::boot_init_step;
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 
-unsafe extern "C" {
-    fn init_memory_system(memmap: *const crate::limine_protocol::LimineMemmapResponse, hhdm_offset: u64) -> i32;
-}
+use slopos_mm::memory_init::init_memory_system;
 
 const KERNEL_VIRTUAL_BASE: u64 = 0xFFFFFFFF80000000;
 
@@ -20,7 +18,7 @@ fn boot_step_memory_init() -> i32 {
     let hhdm = boot_get_hhdm_offset();
 
     klog_debug!("Initializing memory management from Limine data...");
-    let rc = unsafe { init_memory_system(memmap, hhdm) };
+    let rc = init_memory_system(memmap as *const slopos_mm::memory_init::LimineMemmapResponse, hhdm);
     if rc != 0 {
         klog_info!("ERROR: Memory system initialization failed");
         return -1;

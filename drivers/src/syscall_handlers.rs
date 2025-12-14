@@ -46,15 +46,6 @@ pub struct FateResult {
     pub value: u32,
 }
 
-#[repr(C)]
-pub struct FramebufferInfo {
-    pub initialized: u8,
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u32,
-    pub pixel_format: u32,
-}
 
 use slopos_mm::user_copy_helpers::{user_copy_rect_checked, user_copy_line_checked, user_copy_circle_checked, user_copy_text_header};
 use slopos_mm::user_copy::user_copy_from_user;
@@ -65,26 +56,33 @@ use crate::scheduler_callbacks::{
     call_task_terminate, call_yield,
 };
 
+use crate::tty::tty_read_line;
+use crate::pit::{pit_sleep_ms, pit_poll_delay_ms};
 unsafe extern "C" {
-    fn tty_read_line(buffer: *mut c_char, buffer_size: usize) -> usize;
-
-    fn pit_sleep_ms(ms: u32);
-    fn pit_poll_delay_ms(ms: u32);
-
     fn fate_spin() -> FateResult;
     fn fate_set_pending(res: FateResult, task_id: u32) -> c_int;
     fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int;
-    fn fate_apply_outcome(res: *const FateResult, resolution: u32, award: bool);
+    fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool);
+}
+use crate::scheduler_callbacks::{call_kernel_shutdown, call_kernel_reboot};
 
-    fn graphics_draw_rect_filled_fast(x: i32, y: i32, w: i32, h: i32, color: u32) -> c_int;
-    fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> c_int;
-    fn graphics_draw_circle(cx: i32, cy: i32, r: i32, color: u32) -> c_int;
-    fn graphics_draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32) -> c_int;
-    fn font_draw_string(x: i32, y: i32, text: *const c_char, fg: u32, bg: u32) -> c_int;
-    fn framebuffer_get_info() -> *mut FramebufferInfo;
+#[repr(C)]
+struct FramebufferInfoC {
+    initialized: u8,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+    pixel_format: u32,
+}
 
-    fn kernel_shutdown(reason: *const c_char) -> !;
-    fn kernel_reboot(reason: *const c_char) -> !;
+unsafe extern "C" {
+    fn graphics_draw_rect_filled_fast(x: i32, y: i32, w: i32, h: i32, color: u32) -> i32;
+    fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32;
+    fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32) -> i32;
+    fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32) -> i32;
+    fn font_draw_string(x: i32, y: i32, str_ptr: *const c_char, fg_color: u32, bg_color: u32) -> c_int;
+    fn framebuffer_get_info() -> *mut FramebufferInfoC;
 }
 
 fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDisposition {
@@ -165,7 +163,7 @@ pub extern "C" fn syscall_user_read(
         }
     };
 
-    let mut read_len = unsafe { tty_read_line(tmp.as_mut_ptr() as *mut c_char, max_len) };
+    let mut read_len = tty_read_line(tmp.as_mut_ptr(), max_len);
     if max_len > 0 {
         read_len = read_len.min(max_len.saturating_sub(1));
         tmp[read_len] = 0;
@@ -211,9 +209,9 @@ pub extern "C" fn syscall_sleep_ms(
         ms = 60000;
     }
     if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
-        unsafe { pit_sleep_ms(ms as u32) };
+        pit_sleep_ms(ms as u32);
     } else {
-        unsafe { pit_poll_delay_ms(ms as u32) };
+        pit_poll_delay_ms(ms as u32);
     }
     syscall_return_ok(frame, 0)
 }
@@ -224,17 +222,21 @@ pub extern "C" fn syscall_fb_info(
     frame: *mut InterruptFrame,
 ) -> SyscallDisposition {
     let info = unsafe { framebuffer_get_info() };
-    if info.is_null() || unsafe { (*info).initialized == 0 } {
+    if info.is_null() {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let info_local = unsafe { core::ptr::read(info) };
+    if info_local.initialized == 0 {
         klog_debug!("syscall_fb_info: framebuffer not initialized");
         return syscall_return_err(frame, u64::MAX);
     }
 
     let user_info = UserFbInfo {
-        width: unsafe { (*info).width },
-        height: unsafe { (*info).height },
-        pitch: unsafe { (*info).pitch },
-        bpp: unsafe { (*info).bpp as u8 },
-        pixel_format: unsafe { (*info).pixel_format as u8 },
+        width: info_local.width,
+        height: info_local.height,
+        pitch: info_local.pitch,
+        bpp: info_local.bpp as u8,
+        pixel_format: info_local.pixel_format as u8,
     };
 
     if syscall_copy_to_user_bounded(
@@ -374,7 +376,7 @@ pub extern "C" fn syscall_roulette_result(
         return syscall_return_err(frame, u64::MAX);
     }
     let mut stored = FateResult { token: 0, value: 0 };
-    if unsafe { fate_take_pending((*task).task_id, &mut stored as *mut FateResult) } != 0 {
+    if unsafe { fate_take_pending((*task).task_id, &mut stored) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let token = unsafe { ((*frame).rdi >> 32) as u32 };
@@ -393,7 +395,7 @@ pub extern "C" fn syscall_roulette_result(
         } else {
             // Loss: award the loss and reboot to spin again
             fate_apply_outcome(&stored, 0, false);
-            kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
+            call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
         }
     }
 }
@@ -454,7 +456,7 @@ pub extern "C" fn syscall_sys_info(
 #[unsafe(no_mangle)]
 pub extern "C" fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
-        kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
+        call_kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     }
 }
 

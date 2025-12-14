@@ -36,11 +36,11 @@ pub fn disable() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pic_quiesce_mask_all() {
+pub fn pic_quiesce_mask_all() {
     mask_all_impl();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pic_quiesce_disable() {
+pub fn pic_quiesce_disable() {
     disable_impl();
 }

@@ -1,7 +1,10 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use slopos_drivers::wl_currency;
+unsafe extern "C" {
+    fn wl_check_balance() -> i64;
+    fn wl_award_loss();
+}
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::{klog_debug, klog_info};
 
@@ -88,7 +91,7 @@ static mut SCHEDULER: Scheduler = Scheduler {
     in_schedule: 0,
 };
 
-static mut IDLE_WAKEUP_CB: Option<extern "C" fn() -> c_int> = None;
+static mut IDLE_WAKEUP_CB: Option<fn() -> c_int> = None;
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHED_POLICY_COOPERATIVE: u8 = 2;
@@ -96,8 +99,11 @@ const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
 use slopos_mm::paging::{paging_set_current_directory, paging_get_kernel_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;
-use slopos_drivers::pit::{pit_enable_irq, pit_disable_irq};
-use slopos_drivers::scheduler_callbacks::call_gdt_set_kernel_rsp0;
+unsafe extern "C" {
+    fn pit_enable_irq();
+    fn pit_disable_irq();
+    fn gdt_set_kernel_rsp0(rsp0: u64);
+}
 
 // Use assembly functions from FFI boundary
 use crate::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
@@ -251,7 +257,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     }
     if ready_queue_enqueue(&mut sched.ready_queue, task) != 0 {
         klog_info!("schedule_task: ready queue full, request rejected");
-        wl_currency::award_loss();
+        unsafe { wl_award_loss() };
         return -1;
     }
     unsafe {
@@ -325,7 +331,7 @@ fn switch_to_task(new_task: *mut Task) {
         }
     }
 
-    wl_currency::check_balance();
+    let _balance = unsafe { wl_check_balance() };
 
     unsafe {
         if (*new_task).flags & TASK_FLAG_USER_MODE != 0 {
@@ -334,10 +340,10 @@ fn switch_to_task(new_task: *mut Task) {
             } else {
                 kernel_stack_top() as u64
             };
-            call_gdt_set_kernel_rsp0(rsp0);
+            gdt_set_kernel_rsp0(rsp0);
             context_switch_user(old_ctx_ptr, &(*new_task).context);
         } else {
-            call_gdt_set_kernel_rsp0(kernel_stack_top() as u64);
+            gdt_set_kernel_rsp0(kernel_stack_top() as u64);
             if !old_ctx_ptr.is_null() {
                 context_switch(old_ctx_ptr, &(*new_task).context);
             } else {
@@ -348,7 +354,7 @@ fn switch_to_task(new_task: *mut Task) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn schedule() {
+pub fn schedule() {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 {
         return;
@@ -409,7 +415,7 @@ pub fn r#yield() {
 
 // C-ABI shim expected by syscall and TTY code.
 #[unsafe(no_mangle)]
-pub extern "C" fn yield_() {
+pub fn yield_() {
     r#yield();
 }
 
@@ -509,7 +515,7 @@ extern "C" fn idle_task_function(_: *mut c_void) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_register_idle_wakeup_callback(callback: Option<extern "C" fn() -> c_int>) {
+pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
     unsafe {
         IDLE_WAKEUP_CB = callback;
     }
@@ -538,13 +544,15 @@ pub fn init_scheduler() -> c_int {
 
 #[unsafe(no_mangle)]
 pub fn create_idle_task() -> c_int {
-    let idle_task_id = crate::task::task_create(
-        b"idle\0".as_ptr() as *const i8,
-        idle_task_function,
-        ptr::null_mut(),
-        TASK_PRIORITY_IDLE,
-        TASK_FLAG_KERNEL_MODE,
-    );
+    let idle_task_id = unsafe {
+        crate::task::task_create(
+            b"idle\0".as_ptr() as *const i8,
+            core::mem::transmute(idle_task_function as *const ()),
+            ptr::null_mut(),
+            TASK_PRIORITY_IDLE,
+            TASK_FLAG_KERNEL_MODE,
+        )
+    };
     if idle_task_id == INVALID_TASK_ID {
         return -1;
     }
@@ -601,7 +609,7 @@ pub fn scheduler_shutdown() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_scheduler_stats(
+pub fn get_scheduler_stats(
     context_switches: *mut u64,
     yields: *mut u64,
     ready_tasks: *mut u32,
@@ -630,7 +638,7 @@ pub fn scheduler_is_enabled() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_get_current_task() -> *mut Task {
+pub fn scheduler_get_current_task() -> *mut Task {
     unsafe { (*scheduler_mut()).current_task }
 }
 
@@ -639,20 +647,20 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
     if sched.preemption_enabled != 0 {
-        pit_enable_irq();
+        unsafe { pit_enable_irq() };
     } else {
         sched.reschedule_pending = 0;
-        pit_disable_irq();
+        unsafe { pit_disable_irq() };
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_is_preemption_enabled() -> c_int {
+pub fn scheduler_is_preemption_enabled() -> c_int {
     unsafe { (*scheduler_mut()).preemption_enabled as c_int }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_timer_tick() {
+pub fn scheduler_timer_tick() {
     let sched = unsafe { &mut *scheduler_mut() };
     sched.total_ticks = sched.total_ticks.saturating_add(1);
     if sched.enabled == 0 || sched.preemption_enabled == 0 {
@@ -694,7 +702,7 @@ pub extern "C" fn scheduler_timer_tick() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_request_reschedule_from_interrupt() {
+pub fn scheduler_request_reschedule_from_interrupt() {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.enabled == 0 || sched.preemption_enabled == 0 {
         return;
@@ -705,7 +713,7 @@ pub extern "C" fn scheduler_request_reschedule_from_interrupt() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn scheduler_handle_post_irq() {
+pub fn scheduler_handle_post_irq() {
     let sched = unsafe { &mut *scheduler_mut() };
     if sched.reschedule_pending == 0 {
         return;
@@ -732,12 +740,31 @@ pub fn boot_step_scheduler_init() -> c_int {
     if rc == 0 {
         // Register scheduler callbacks with drivers to break circular dependency
         unsafe {
-            use slopos_drivers::scheduler_callbacks::SchedulerCallbacks;
             use core::ffi::c_void;
             use crate::task::task_terminate;
+            
+            #[repr(C)]
+            struct SchedulerCallbacks {
+                timer_tick: Option<fn()>,
+                handle_post_irq: Option<fn()>,
+                request_reschedule_from_interrupt: Option<fn()>,
+                get_current_task: Option<fn() -> *mut c_void>,
+                yield_fn: Option<fn()>,
+                schedule_fn: Option<fn()>,
+                task_terminate_fn: Option<fn(u32) -> c_int>,
+                scheduler_is_preemption_enabled_fn: Option<fn() -> c_int>,
+                get_task_stats_fn: Option<fn(*mut u32, *mut u32, *mut u64)>,
+                get_scheduler_stats_fn: Option<fn(*mut u64, *mut u64, *mut u32, *mut u32)>,
+            }
+            
+            #[allow(improper_ctypes)]
+            unsafe extern "C" {
+                fn register_callbacks(callbacks: SchedulerCallbacks);
+            }
+            
             // Cast the function pointer to use c_void pointer to avoid type mismatch, and convert extern "C" fn to fn
             let get_current_task_fn: fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as *const ());
-            slopos_drivers::scheduler_callbacks::register_callbacks(SchedulerCallbacks {
+            register_callbacks(SchedulerCallbacks {
                 timer_tick: Some(core::mem::transmute(scheduler_timer_tick as *const ())),
                 handle_post_irq: Some(core::mem::transmute(scheduler_handle_post_irq as *const ())),
                 request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
@@ -753,11 +780,27 @@ pub fn boot_step_scheduler_init() -> c_int {
         
         // Register scheduler callbacks for boot to break circular dependency
         unsafe {
-            use slopos_drivers::scheduler_callbacks::SchedulerCallbacksForBoot;
+            #[repr(C)]
+            struct Task {
+                _private: [u8; 0],
+            }
+            
+            #[repr(C)]
+            struct SchedulerCallbacksForBoot {
+                request_reschedule_from_interrupt: Option<fn()>,
+                get_current_task: Option<fn() -> *mut Task>,
+                task_terminate: Option<fn(u32) -> c_int>,
+            }
+            
+            #[allow(improper_ctypes)]
+            unsafe extern "C" {
+                fn register_scheduler_callbacks_for_boot(callbacks: SchedulerCallbacksForBoot);
+            }
+            
             // Cast Task pointer to opaque Task type in drivers, and convert extern "C" fn to fn via pointer cast
-            let get_current_task_boot_fn: fn() -> *mut slopos_drivers::scheduler_callbacks::Task = 
+            let get_current_task_boot_fn: fn() -> *mut Task = 
                 core::mem::transmute(scheduler_get_current_task as *const ());
-            slopos_drivers::scheduler_callbacks::register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
+            register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
                 request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
                 get_current_task: Some(get_current_task_boot_fn),
                 task_terminate: Some(core::mem::transmute(crate::task::task_terminate as *const ())),

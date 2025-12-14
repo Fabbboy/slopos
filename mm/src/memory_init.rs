@@ -23,8 +23,7 @@ use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
 
-use slopos_lib::{klog_debug, klog_info};
-
+use slopos_lib::{klog_debug, klog_info, cpu};
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
     fn get_hhdm_offset() -> u64;
@@ -36,8 +35,6 @@ unsafe extern "C" {
         pitch: *mut u32,
         bpp: *mut u8,
     ) -> c_int;
-    fn cpuid_ffi(leaf: u32, eax: *mut u32, ebx: *mut u32, ecx: *mut u32, edx: *mut u32);
-    fn cpu_read_msr_ffi(msr: u32) -> u64;
 }
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
@@ -375,28 +372,22 @@ fn record_framebuffer_reservation() {
 }
 
 fn record_apic_reservation() {
-    unsafe {
-        let mut eax = 0;
-        let mut ebx = 0;
-        let mut ecx = 0;
-        let mut edx = 0;
-        cpuid_ffi(1, &mut eax, &mut ebx, &mut ecx, &mut edx);
-        if (edx & CPUID_FEAT_EDX_APIC) == 0 {
-            return;
-        }
-        let apic_base_msr = cpu_read_msr_ffi(MSR_APIC_BASE);
-        let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
-        if apic_phys == 0 {
-            return;
-        }
-        add_reservation_or_panic(
-            apic_phys,
-            0x1000,
-            MmReservationType::Apic,
-            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_MMIO,
-            b"Local APIC\0".as_ptr() as *const c_char,
-        );
+    let (_a, _b, _c, d) = cpu::cpuid(1);
+    if (d & CPUID_FEAT_EDX_APIC) == 0 {
+        return;
     }
+    let apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
+    let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
+    if apic_phys == 0 {
+        return;
+    }
+    add_reservation_or_panic(
+        apic_phys,
+        0x1000,
+        MmReservationType::Apic,
+        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_MMIO,
+        b"Local APIC\0".as_ptr() as *const c_char,
+    );
 }
 
 fn select_allocator_window(reserved_bytes: u64) -> u64 {

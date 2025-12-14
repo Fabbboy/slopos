@@ -7,7 +7,7 @@ use crate::process_vm::{
 };
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_heap_free_list_search() -> i32 {
+pub fn test_heap_free_list_search() -> i32 {
     let mut stats_before = MaybeUninit::uninit();
     get_heap_stats(stats_before.as_mut_ptr());
     let initial_heap_size = unsafe { stats_before.assume_init() }.total_size;
@@ -52,7 +52,7 @@ pub extern "C" fn test_heap_free_list_search() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_heap_fragmentation_behind_head() -> i32 {
+pub fn test_heap_fragmentation_behind_head() -> i32 {
     let mut ptrs: [*mut core::ffi::c_void; 5] = [core::ptr::null_mut(); 5];
     let sizes = [128usize, 256, 128, 512, 256];
 
@@ -84,7 +84,7 @@ pub extern "C" fn test_heap_fragmentation_behind_head() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_process_vm_slot_reuse() -> i32 {
+pub fn test_process_vm_slot_reuse() -> i32 {
     init_process_vm();
 
     let mut initial_active: u32 = 0;
@@ -148,7 +148,7 @@ pub extern "C" fn test_process_vm_slot_reuse() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_process_vm_counter_reset() -> i32 {
+pub fn test_process_vm_counter_reset() -> i32 {
     init_process_vm();
 
     let mut initial_active: u32 = 0;

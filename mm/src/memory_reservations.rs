@@ -55,7 +55,7 @@ impl MmRegion {
     }
 }
 
-type MmRegionIterCb = Option<extern "C" fn(region: *const MmRegion, ctx: *mut c_void)>;
+type MmRegionIterCb = Option<fn(region: *const MmRegion, ctx: *mut c_void)>;
 
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;

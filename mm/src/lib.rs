@@ -5,7 +5,7 @@
 pub mod mm_constants;
 mod memory_layout;
 mod memory_reservations;
-mod memory_init;
+pub mod memory_init;
 pub mod page_alloc;
 pub mod paging;
 pub mod kernel_heap;

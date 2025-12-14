@@ -4,6 +4,13 @@ use core::ptr;
 
 use spin::Mutex;
 use slopos_lib::{klog_debug, klog_info};
+unsafe extern "C" {
+    fn kernel_panic(msg: *const c_char) -> !;
+}
+unsafe extern "C" {
+    fn wl_award_loss();
+    fn wl_award_win();
+}
 
 use crate::mm_constants::{
     PAGE_KERNEL_RW, PAGE_SIZE_4KB,
@@ -11,12 +18,6 @@ use crate::mm_constants::{
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
-
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn wl_award_win();
-    fn wl_award_loss();
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

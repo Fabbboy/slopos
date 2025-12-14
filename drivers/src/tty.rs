@@ -27,15 +27,12 @@ static mut TTY_WAIT_QUEUE: TtyWaitQueue = TtyWaitQueue {
 };
 
 unsafe extern "C" {
-    fn scheduler_register_idle_wakeup_callback(cb: extern "C" fn() -> c_int);
+    fn scheduler_register_idle_wakeup_callback(callback: Option<extern "C" fn() -> c_int>);
     fn scheduler_is_enabled() -> c_int;
-    fn task_is_blocked(task: *mut Task) -> c_int;
+    fn task_is_blocked(task: *const Task) -> bool;
     fn unblock_task(task: *mut Task) -> c_int;
-
-    fn serial_poll_receive(port: u16);
-    fn serial_buffer_pending(port: u16) -> c_int;
-    fn serial_buffer_read(port: u16, out: *mut u8) -> c_int;
 }
+use crate::serial::{serial_poll_receive, serial_buffer_pending, serial_buffer_read};
 
 #[inline]
 fn tty_cpu_relax() {
@@ -44,7 +41,7 @@ fn tty_cpu_relax() {
 
 #[inline]
 fn tty_service_serial_input() {
-    unsafe { serial_poll_receive(COM1_BASE) };
+    serial_poll_receive(COM1_BASE);
 }
 
 fn tty_input_available() -> c_int {
@@ -52,7 +49,7 @@ fn tty_input_available() -> c_int {
     if keyboard::keyboard_has_input() != 0 {
         return 1;
     }
-    if unsafe { serial_buffer_pending(COM1_BASE) } != 0 {
+    if serial_buffer_pending(COM1_BASE) != 0 {
         return 1;
     }
     0
@@ -68,7 +65,7 @@ fn tty_register_idle_callback() {
         if REGISTERED {
             return;
         }
-        scheduler_register_idle_wakeup_callback(tty_input_available_cb);
+        scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
         REGISTERED = true;
     }
 }
@@ -86,7 +83,7 @@ fn tty_wait_queue_pop() -> *mut Task {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tty_notify_input_ready() {
+pub fn tty_notify_input_ready() {
     if unsafe { scheduler_is_enabled() } == 0 {
         return;
     }
@@ -100,7 +97,7 @@ pub extern "C" fn tty_notify_input_ready() {
             if candidate.is_null() {
                 continue;
             }
-            if task_is_blocked(candidate) == 0 {
+            if !task_is_blocked(candidate as *const Task) {
                 continue;
             }
             tasko_wake = candidate;
@@ -138,16 +135,14 @@ fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
     tty_service_serial_input();
 
     let mut raw = 0u8;
-    unsafe {
-        if serial_buffer_read(COM1_BASE, &mut raw as *mut u8) != 0 {
-            if raw == b'\r' {
-                raw = b'\n';
-            } else if raw == 0x7F {
-                raw = b'\x08';
-            }
-            *out_char = raw;
-            return true;
+    if serial_buffer_read(COM1_BASE, &mut raw as *mut u8) != 0 {
+        if raw == b'\r' {
+            raw = b'\n';
+        } else if raw == 0x7F {
+            raw = b'\x08';
         }
+        *out_char = raw;
+        return true;
     }
     false
 }
@@ -179,7 +174,7 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
+pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     if buffer.is_null() || buffer_size == 0 {
         return 0;
     }

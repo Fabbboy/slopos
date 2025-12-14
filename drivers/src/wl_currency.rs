@@ -35,3 +35,8 @@ pub extern "C" fn wl_award_win() {
 pub fn check_balance() -> i64 {
     BALANCE.load(Ordering::Relaxed)
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wl_check_balance() -> i64 {
+    check_balance()
+}

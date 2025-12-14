@@ -11,7 +11,7 @@ pub struct FateResult {
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fate_register_outcome_hook(cb: extern "C" fn(*const FateResult)) {
+pub fn fate_register_outcome_hook(cb: fn(*const FateResult)) {
     OUTCOME_HOOK.store(cb as usize, core::sync::atomic::Ordering::SeqCst);
 }
 
@@ -38,7 +38,7 @@ impl Wheel {
         let hook = OUTCOME_HOOK.load(core::sync::atomic::Ordering::SeqCst);
         if hook != 0 {
             unsafe {
-                let cb: extern "C" fn(*const FateResult) = core::mem::transmute(hook);
+                let cb: fn(*const FateResult) = core::mem::transmute(hook);
                 let result = FateResult {
                     token: 0xC0DE_CAFE,
                     value: (roll & 0xFFFF_FFFF) as u32,

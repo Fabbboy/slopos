@@ -5,14 +5,13 @@ use core::ptr;
 use crate::memory_layout::mm_get_kernel_heap_start;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
+unsafe extern "C" {
+    fn scheduler_get_current_task() -> *mut Task;
+}
 
 #[repr(C)]
 pub struct Task {
     pub process_id: u32,
-}
-
-unsafe extern "C" {
-    fn scheduler_get_current_task() -> *mut Task;
 }
 
 static mut KERNEL_GUARD_CHECKED: bool = false;

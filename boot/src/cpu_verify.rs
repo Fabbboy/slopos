@@ -35,7 +35,7 @@ fn get_stack_pointer() -> u64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn verify_cpu_state() {
+pub fn verify_cpu_state() {
     let cr0 = read_cr0();
     let cr4 = read_cr4();
     let efer = read_efer();
@@ -58,7 +58,7 @@ pub extern "C" fn verify_cpu_state() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn verify_memory_layout() {
+pub fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
     if addr < KERNEL_VIRTUAL_BASE {
         kernel_panic(
@@ -76,7 +76,7 @@ pub extern "C" fn verify_memory_layout() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn check_stack_health() {
+pub fn check_stack_health() {
     let rsp = get_stack_pointer();
     if rsp == 0 {
         kernel_panic(b"Stack pointer is null\0".as_ptr() as *const c_char);
@@ -93,7 +93,7 @@ pub extern "C" fn check_stack_health() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn verify_cpu_features() {
+pub fn verify_cpu_features() {
     let (_eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
     if (edx1 & (1 << 6)) == 0 {
         kernel_panic(b"CPU does not support PAE\0".as_ptr() as *const c_char);
@@ -109,7 +109,7 @@ pub extern "C" fn verify_cpu_features() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn complete_system_verification() {
+pub fn complete_system_verification() {
     verify_cpu_state();
     verify_memory_layout();
     check_stack_health();

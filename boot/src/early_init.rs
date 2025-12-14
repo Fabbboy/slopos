@@ -494,10 +494,18 @@ pub fn kernel_main_impl() {
     // Register boot callbacks early to break circular dependencies
     unsafe {
         use slopos_drivers::scheduler_callbacks::BootCallbacks;
+        use crate::shutdown::{kernel_shutdown, kernel_reboot};
+        use crate::limine_protocol::{get_hhdm_offset, is_hhdm_available, is_rsdp_available, get_rsdp_address};
         slopos_drivers::scheduler_callbacks::register_boot_callbacks(BootCallbacks {
             gdt_set_kernel_rsp0: Some(core::mem::transmute(gdt::gdt_set_kernel_rsp0 as *const ())),
             is_kernel_initialized: Some(core::mem::transmute(is_kernel_initialized as *const ())),
             kernel_panic: Some(core::mem::transmute(kernel_panic as *const ())),
+            kernel_shutdown: Some(core::mem::transmute(kernel_shutdown as *const ())),
+            kernel_reboot: Some(core::mem::transmute(kernel_reboot as *const ())),
+            get_hhdm_offset: Some(core::mem::transmute(get_hhdm_offset as *const ())),
+            is_hhdm_available: Some(core::mem::transmute(is_hhdm_available as *const ())),
+            is_rsdp_available: Some(core::mem::transmute(is_rsdp_available as *const ())),
+            get_rsdp_address: Some(core::mem::transmute(get_rsdp_address as *const ())),
         });
     }
     
@@ -536,6 +544,6 @@ pub fn kernel_main_impl() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_main_no_multiboot() {
+pub fn kernel_main_no_multiboot() {
     crate::ffi_boundary::kernel_main();
 }

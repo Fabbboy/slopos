@@ -1,4 +1,6 @@
 
+#![allow(improper_ctypes)]
+
 use core::ffi::{c_char, c_int, c_void};
 
 /// Task type for boot callbacks (opaque pointer to avoid dependency on sched)
@@ -9,17 +11,19 @@ pub struct Task {
 
 /// Callback functions that the scheduler can register with drivers
 /// This breaks the circular dependency between drivers and sched crates
+#[allow(improper_ctypes)]
+#[repr(C)]
 pub struct SchedulerCallbacks {
-    pub timer_tick: Option<fn()>,
-    pub handle_post_irq: Option<fn()>,
-    pub request_reschedule_from_interrupt: Option<fn()>,
-    pub get_current_task: Option<fn() -> *mut c_void>,
-    pub yield_fn: Option<fn()>,
-    pub schedule_fn: Option<fn()>,
-    pub task_terminate_fn: Option<fn(u32) -> c_int>,
-    pub scheduler_is_preemption_enabled_fn: Option<fn() -> c_int>,
-    pub get_task_stats_fn: Option<fn(*mut u32, *mut u32, *mut u64)>,
-    pub get_scheduler_stats_fn: Option<fn(*mut u64, *mut u64, *mut u32, *mut u32)>,
+    pub timer_tick: Option<extern "C" fn()>,
+    pub handle_post_irq: Option<extern "C" fn()>,
+    pub request_reschedule_from_interrupt: Option<extern "C" fn()>,
+    pub get_current_task: Option<extern "C" fn() -> *mut c_void>,
+    pub yield_fn: Option<extern "C" fn()>,
+    pub schedule_fn: Option<extern "C" fn()>,
+    pub task_terminate_fn: Option<extern "C" fn(u32) -> c_int>,
+    pub scheduler_is_preemption_enabled_fn: Option<extern "C" fn() -> c_int>,
+    pub get_task_stats_fn: Option<extern "C" fn(*mut u32, *mut u32, *mut u64)>,
+    pub get_scheduler_stats_fn: Option<extern "C" fn(*mut u64, *mut u64, *mut u32, *mut u32)>,
 }
 
 static mut CALLBACKS: SchedulerCallbacks = SchedulerCallbacks {
@@ -36,7 +40,9 @@ static mut CALLBACKS: SchedulerCallbacks = SchedulerCallbacks {
 };
 
 /// Register scheduler callbacks (called by scheduler during initialization)
-pub unsafe fn register_callbacks(callbacks: SchedulerCallbacks) {
+#[allow(improper_ctypes)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn register_callbacks(callbacks: SchedulerCallbacks) {
     CALLBACKS = callbacks;
 }
 
@@ -123,18 +129,28 @@ pub unsafe fn call_get_scheduler_stats(
 
 /// Callback functions that the scheduler can register for boot to use
 /// This breaks the circular dependency between boot and sched crates
+#[allow(improper_ctypes)]
+#[repr(C)]
 pub struct SchedulerCallbacksForBoot {
-    pub request_reschedule_from_interrupt: Option<fn()>,
-    pub get_current_task: Option<fn() -> *mut Task>,
-    pub task_terminate: Option<fn(u32) -> c_int>,
+    pub request_reschedule_from_interrupt: Option<extern "C" fn()>,
+    pub get_current_task: Option<extern "C" fn() -> *mut Task>,
+    pub task_terminate: Option<extern "C" fn(u32) -> c_int>,
 }
 
 /// Callback functions that boot can register for other crates to use
 /// This breaks circular dependencies between boot and other crates
+#[allow(improper_ctypes)]
+#[repr(C)]
 pub struct BootCallbacks {
-    pub gdt_set_kernel_rsp0: Option<fn(u64)>,
-    pub is_kernel_initialized: Option<fn() -> i32>,
-    pub kernel_panic: Option<fn(*const c_char) -> !>,
+    pub gdt_set_kernel_rsp0: Option<extern "C" fn(u64)>,
+    pub is_kernel_initialized: Option<extern "C" fn() -> i32>,
+    pub kernel_panic: Option<extern "C" fn(*const c_char) -> !>,
+    pub kernel_shutdown: Option<extern "C" fn(*const c_char) -> !>,
+    pub kernel_reboot: Option<extern "C" fn(*const c_char) -> !>,
+    pub get_hhdm_offset: Option<extern "C" fn() -> u64>,
+    pub is_hhdm_available: Option<extern "C" fn() -> i32>,
+    pub is_rsdp_available: Option<extern "C" fn() -> i32>,
+    pub get_rsdp_address: Option<extern "C" fn() -> *const c_void>,
 }
 
 static mut BOOT_CALLBACKS: SchedulerCallbacksForBoot = SchedulerCallbacksForBoot {
@@ -147,10 +163,18 @@ static mut BOOT_REGISTERED_CALLBACKS: BootCallbacks = BootCallbacks {
     gdt_set_kernel_rsp0: None,
     is_kernel_initialized: None,
     kernel_panic: None,
+    kernel_shutdown: None,
+    kernel_reboot: None,
+    get_hhdm_offset: None,
+    is_hhdm_available: None,
+    is_rsdp_available: None,
+    get_rsdp_address: None,
 };
 
 /// Register scheduler callbacks for boot (called by scheduler during initialization)
-pub unsafe fn register_scheduler_callbacks_for_boot(callbacks: SchedulerCallbacksForBoot) {
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn register_scheduler_callbacks_for_boot(callbacks: SchedulerCallbacksForBoot) {
     BOOT_CALLBACKS = callbacks;
 }
 
@@ -209,6 +233,136 @@ pub unsafe fn call_kernel_panic(msg: *const c_char) -> ! {
         loop {
             core::hint::spin_loop();
         }
+    }
+}
+
+/// Call the registered kernel_shutdown callback
+pub unsafe fn call_kernel_shutdown(reason: *const c_char) -> ! {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.kernel_shutdown {
+        cb(reason)
+    } else {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Call the registered kernel_reboot callback
+pub unsafe fn call_kernel_reboot(reason: *const c_char) -> ! {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.kernel_reboot {
+        cb(reason)
+    } else {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Call the registered get_hhdm_offset callback
+pub unsafe fn call_get_hhdm_offset() -> u64 {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.get_hhdm_offset {
+        cb()
+    } else {
+        0
+    }
+}
+
+/// Call the registered is_hhdm_available callback
+pub unsafe fn call_is_hhdm_available() -> i32 {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.is_hhdm_available {
+        cb()
+    } else {
+        0
+    }
+}
+
+/// Call the registered is_rsdp_available callback
+pub unsafe fn call_is_rsdp_available() -> i32 {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.is_rsdp_available {
+        cb()
+    } else {
+        0
+    }
+}
+
+/// Call the registered get_rsdp_address callback
+pub unsafe fn call_get_rsdp_address() -> *const c_void {
+    if let Some(cb) = BOOT_REGISTERED_CALLBACKS.get_rsdp_address {
+        cb()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// Callback functions that fs can register for drivers to use
+/// This breaks the circular dependency between drivers and fs crates
+#[allow(improper_ctypes)]
+#[repr(C)]
+pub struct FsCallbacks {
+    pub file_open_for_process: Option<extern "C" fn(u32, *const c_char, u32) -> c_int>,
+    pub file_close_fd: Option<extern "C" fn(u32, c_int) -> c_int>,
+    pub file_read_fd: Option<extern "C" fn(u32, c_int, *mut c_char, usize) -> c_int>,
+    pub file_write_fd: Option<extern "C" fn(u32, c_int, *const c_char, usize) -> c_int>,
+    pub file_unlink_path: Option<extern "C" fn(*const c_char) -> c_int>,
+}
+
+static mut FS_CALLBACKS: FsCallbacks = FsCallbacks {
+    file_open_for_process: None,
+    file_close_fd: None,
+    file_read_fd: None,
+    file_write_fd: None,
+    file_unlink_path: None,
+};
+
+/// Register fs callbacks (called by fs during initialization)
+#[allow(improper_ctypes)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn register_fs_callbacks(callbacks: FsCallbacks) {
+    FS_CALLBACKS = callbacks;
+}
+
+/// Call the registered file_open_for_process callback
+pub unsafe fn call_file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int {
+    if let Some(cb) = FS_CALLBACKS.file_open_for_process {
+        cb(process_id, path, flags)
+    } else {
+        -1
+    }
+}
+
+/// Call the registered file_close_fd callback
+pub unsafe fn call_file_close_fd(process_id: u32, fd: c_int) -> c_int {
+    if let Some(cb) = FS_CALLBACKS.file_close_fd {
+        cb(process_id, fd)
+    } else {
+        -1
+    }
+}
+
+/// Call the registered file_read_fd callback
+pub unsafe fn call_file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, len: usize) -> c_int {
+    if let Some(cb) = FS_CALLBACKS.file_read_fd {
+        cb(process_id, fd, buffer, len)
+    } else {
+        -1
+    }
+}
+
+/// Call the registered file_write_fd callback
+pub unsafe fn call_file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, len: usize) -> c_int {
+    if let Some(cb) = FS_CALLBACKS.file_write_fd {
+        cb(process_id, fd, buffer, len)
+    } else {
+        -1
+    }
+}
+
+/// Call the registered file_unlink_path callback
+pub unsafe fn call_file_unlink_path(path: *const c_char) -> c_int {
+    if let Some(cb) = FS_CALLBACKS.file_unlink_path {
+        cb(path)
+    } else {
+        -1
     }
 }
 
