@@ -26,6 +26,7 @@ non_upper_case_globals = "deny"
 
 [workspace.lints.clippy]
 type_complexity = "warn"
+non_camel_case_types = "deny"
 
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }

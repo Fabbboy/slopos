@@ -14,14 +14,14 @@ const TTY_MAX_WAITERS: usize = MAX_TASKS;
 const COM1_BASE: u16 = 0x3F8;
 
 #[repr(C)]
-struct tty_wait_queue {
+struct TtyWaitQueue {
     tasks: [*mut Task; TTY_MAX_WAITERS],
     head: usize,
     tail: usize,
     count: usize,
 }
 
-static mut TTY_WAIT_QUEUE: tty_wait_queue = tty_wait_queue {
+static mut TTY_WAIT_QUEUE: TtyWaitQueue = TtyWaitQueue {
     tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
