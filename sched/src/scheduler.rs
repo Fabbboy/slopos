@@ -744,33 +744,32 @@ pub fn boot_step_scheduler_init() -> c_int {
             use slopos_drivers::scheduler_callbacks::SchedulerCallbacks;
             use core::ffi::c_void;
             use crate::task::task_terminate;
-            // Cast the function pointer to use c_void pointer to avoid type mismatch
-            let get_current_task_fn: extern "C" fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as extern "C" fn() -> *mut Task);
+            // Cast the function pointer to use c_void pointer to avoid type mismatch, and convert extern "C" fn to fn
+            let get_current_task_fn: fn() -> *mut c_void = core::mem::transmute(scheduler_get_current_task as *const ());
             slopos_drivers::scheduler_callbacks::register_callbacks(SchedulerCallbacks {
-                timer_tick: Some(scheduler_timer_tick),
-                handle_post_irq: Some(scheduler_handle_post_irq),
-                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
+                timer_tick: Some(core::mem::transmute(scheduler_timer_tick as *const ())),
+                handle_post_irq: Some(core::mem::transmute(scheduler_handle_post_irq as *const ())),
+                request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
                 get_current_task: Some(get_current_task_fn),
-                yield_fn: Some(yield_ as extern "C" fn()),
-                schedule_fn: Some(schedule as extern "C" fn()),
-                task_terminate_fn: Some(task_terminate as extern "C" fn(u32) -> c_int),
-                scheduler_is_preemption_enabled_fn: Some(scheduler_is_preemption_enabled as extern "C" fn() -> c_int),
-                get_task_stats_fn: Some(crate::task::get_task_stats as extern "C" fn(*mut u32, *mut u32, *mut u64)),
-                get_scheduler_stats_fn: Some(get_scheduler_stats as extern "C" fn(*mut u64, *mut u64, *mut u32, *mut u32)),
+                yield_fn: Some(core::mem::transmute(yield_ as *const ())),
+                schedule_fn: Some(core::mem::transmute(schedule as *const ())),
+                task_terminate_fn: Some(core::mem::transmute(task_terminate as *const ())),
+                scheduler_is_preemption_enabled_fn: Some(core::mem::transmute(scheduler_is_preemption_enabled as *const ())),
+                get_task_stats_fn: Some(core::mem::transmute(crate::task::get_task_stats as *const ())),
+                get_scheduler_stats_fn: Some(core::mem::transmute(get_scheduler_stats as *const ())),
             });
         }
         
         // Register scheduler callbacks for boot to break circular dependency
         unsafe {
             use slopos_drivers::scheduler_callbacks::SchedulerCallbacksForBoot;
-            // Cast Task pointer to opaque Task type in drivers
-            let get_current_task_boot_fn: extern "C" fn() -> *mut slopos_drivers::scheduler_callbacks::Task = 
-                core::mem::transmute(scheduler_get_current_task as extern "C" fn() -> *mut Task);
-            let task_terminate_fn: extern "C" fn(u32) -> i32 = crate::task::task_terminate;
+            // Cast Task pointer to opaque Task type in drivers, and convert extern "C" fn to fn via pointer cast
+            let get_current_task_boot_fn: fn() -> *mut slopos_drivers::scheduler_callbacks::Task = 
+                core::mem::transmute(scheduler_get_current_task as *const ());
             slopos_drivers::scheduler_callbacks::register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
-                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
+                request_reschedule_from_interrupt: Some(core::mem::transmute(scheduler_request_reschedule_from_interrupt as *const ())),
                 get_current_task: Some(get_current_task_boot_fn),
-                task_terminate: Some(task_terminate_fn),
+                task_terminate: Some(core::mem::transmute(crate::task::task_terminate as *const ())),
             });
         }
     }

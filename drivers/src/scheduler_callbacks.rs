@@ -11,16 +11,16 @@ pub struct Task {
 /// Callback functions that the scheduler can register with drivers
 /// This breaks the circular dependency between drivers and sched crates
 pub struct SchedulerCallbacks {
-    pub timer_tick: Option<extern "C" fn()>,
-    pub handle_post_irq: Option<extern "C" fn()>,
-    pub request_reschedule_from_interrupt: Option<extern "C" fn()>,
-    pub get_current_task: Option<extern "C" fn() -> *mut c_void>,
-    pub yield_fn: Option<extern "C" fn()>,
-    pub schedule_fn: Option<extern "C" fn()>,
-    pub task_terminate_fn: Option<extern "C" fn(u32) -> c_int>,
-    pub scheduler_is_preemption_enabled_fn: Option<extern "C" fn() -> c_int>,
-    pub get_task_stats_fn: Option<extern "C" fn(*mut u32, *mut u32, *mut u64)>,
-    pub get_scheduler_stats_fn: Option<extern "C" fn(*mut u64, *mut u64, *mut u32, *mut u32)>,
+    pub timer_tick: Option<fn()>,
+    pub handle_post_irq: Option<fn()>,
+    pub request_reschedule_from_interrupt: Option<fn()>,
+    pub get_current_task: Option<fn() -> *mut c_void>,
+    pub yield_fn: Option<fn()>,
+    pub schedule_fn: Option<fn()>,
+    pub task_terminate_fn: Option<fn(u32) -> c_int>,
+    pub scheduler_is_preemption_enabled_fn: Option<fn() -> c_int>,
+    pub get_task_stats_fn: Option<fn(*mut u32, *mut u32, *mut u64)>,
+    pub get_scheduler_stats_fn: Option<fn(*mut u64, *mut u64, *mut u32, *mut u32)>,
 }
 
 static mut CALLBACKS: SchedulerCallbacks = SchedulerCallbacks {
@@ -125,17 +125,17 @@ pub unsafe fn call_get_scheduler_stats(
 /// Callback functions that the scheduler can register for boot to use
 /// This breaks the circular dependency between boot and sched crates
 pub struct SchedulerCallbacksForBoot {
-    pub request_reschedule_from_interrupt: Option<extern "C" fn()>,
-    pub get_current_task: Option<extern "C" fn() -> *mut Task>,
-    pub task_terminate: Option<extern "C" fn(u32) -> c_int>,
+    pub request_reschedule_from_interrupt: Option<fn()>,
+    pub get_current_task: Option<fn() -> *mut Task>,
+    pub task_terminate: Option<fn(u32) -> c_int>,
 }
 
 /// Callback functions that boot can register for other crates to use
 /// This breaks circular dependencies between boot and other crates
 pub struct BootCallbacks {
-    pub gdt_set_kernel_rsp0: Option<extern "C" fn(u64)>,
-    pub is_kernel_initialized: Option<extern "C" fn() -> i32>,
-    pub kernel_panic: Option<extern "C" fn(*const c_char) -> !>,
+    pub gdt_set_kernel_rsp0: Option<fn(u64)>,
+    pub is_kernel_initialized: Option<fn() -> i32>,
+    pub kernel_panic: Option<fn(*const c_char) -> !>,
 }
 
 static mut BOOT_CALLBACKS: SchedulerCallbacksForBoot = SchedulerCallbacksForBoot {

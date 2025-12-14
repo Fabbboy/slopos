@@ -509,6 +509,16 @@ pub extern "C" fn kernel_main() {
     serial::write_line("BOOT: after idt_load (early)");
     serial::write_line("BOOT: early GDT/IDT initialized");
 
+    // Register boot callbacks early to break circular dependencies
+    unsafe {
+        use slopos_drivers::scheduler_callbacks::BootCallbacks;
+        slopos_drivers::scheduler_callbacks::register_boot_callbacks(BootCallbacks {
+            gdt_set_kernel_rsp0: Some(core::mem::transmute(gdt::gdt_set_kernel_rsp0 as *const ())),
+            is_kernel_initialized: Some(core::mem::transmute(is_kernel_initialized as *const ())),
+            kernel_panic: Some(core::mem::transmute(kernel_panic as *const ())),
+        });
+    }
+    
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {
         kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);
