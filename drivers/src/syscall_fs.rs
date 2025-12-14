@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{c_char, c_int, c_void, CStr};

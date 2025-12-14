@@ -1,9 +1,15 @@
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::early_init::boot_init_priority;
+use crate::early_init::{boot_init_priority, boot_mark_initialized};
+use slopos_sched::{
+    boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
+};
+use slopos_video::framebuffer::{framebuffer_get_info, framebuffer_is_initialized};
 
+// FFI struct for reading framebuffer info from C pointers
+// Used via unsafe pointer dereferencing: `unsafe { &*fb_info }` in boot_step_framebuffer_demo_fn
 #[repr(C)]
 struct FramebufferInfo {
     physical_addr: u64,
@@ -17,25 +23,20 @@ struct FramebufferInfo {
     initialized: u8,
 }
 
-unsafe extern "C" {
-    fn boot_mark_initialized();
-    fn framebuffer_get_info() -> *mut FramebufferInfo;
-    fn framebuffer_is_initialized() -> i32;
-    fn boot_step_task_manager_init() -> c_int;
-    fn boot_step_scheduler_init() -> c_int;
-    fn boot_step_idle_task() -> c_int;
+// Force Rust to recognize this type as used (it's used via unsafe pointer dereferencing)
+// Using size_of ensures the type is recognized as used at compile time
+const _: usize = core::mem::size_of::<FramebufferInfo>();
+
+fn boot_step_task_manager_init_wrapper() -> i32 {
+    boot_step_task_manager_init()
 }
 
-extern "C" fn boot_step_task_manager_init_wrapper() -> i32 {
-    unsafe { boot_step_task_manager_init() }
+fn boot_step_scheduler_init_wrapper() -> i32 {
+    boot_step_scheduler_init()
 }
 
-extern "C" fn boot_step_scheduler_init_wrapper() -> i32 {
-    unsafe { boot_step_scheduler_init() }
-}
-
-extern "C" fn boot_step_idle_task_wrapper() -> i32 {
-    unsafe { boot_step_idle_task() }
+fn boot_step_idle_task_wrapper() -> i32 {
+    boot_step_idle_task()
 }
 
 crate::boot_init_step_with_flags!(
@@ -62,14 +63,14 @@ crate::boot_init_step_with_flags!(
     boot_init_priority(50)
 );
 
-extern "C" fn boot_step_mark_kernel_ready_fn() {
-    unsafe { boot_mark_initialized() };
+fn boot_step_mark_kernel_ready_fn() {
+    boot_mark_initialized();
     klog_info!("Kernel core services initialized.");
 }
 
-extern "C" fn boot_step_framebuffer_demo_fn() {
-    let fb_info = unsafe { framebuffer_get_info() };
-    if fb_info.is_null() || unsafe { framebuffer_is_initialized() } == 0 {
+fn boot_step_framebuffer_demo_fn() {
+    let fb_info = framebuffer_get_info();
+    if fb_info.is_null() || framebuffer_is_initialized() == 0 {
         klog_info!("Graphics demo: framebuffer not initialized, skipping");
         return;
     }

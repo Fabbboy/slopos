@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
@@ -14,7 +13,6 @@ const FONT_CHAR_COUNT: usize = (FONT_LAST_CHAR - FONT_FIRST_CHAR + 1) as usize;
 
 const FONT_SUCCESS: c_int = 0;
 const FONT_ERROR_NO_FB: c_int = -1;
-const FONT_ERROR_BOUNDS: c_int = -2;
 const FONT_ERROR_INVALID: c_int = -3;
 
 // Simple console state mirroring the legacy C implementation.

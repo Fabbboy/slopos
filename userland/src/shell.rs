@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(static_mut_refs)]
 
 use core::cmp;
@@ -141,19 +140,6 @@ fn u_strcmp(a: *const u8, b: *const u8) -> i32 {
         pa = unsafe { pa.add(1) };
         pb = unsafe { pb.add(1) };
     }
-}
-
-#[unsafe(link_section = ".user_text")]
-fn u_puts(s: *const u8) {
-    if s.is_null() {
-        return;
-    }
-    let len = runtime::u_strlen(s);
-    if len == 0 {
-        return;
-    }
-    let slice = unsafe { core::slice::from_raw_parts(s, len) };
-    let _ = sys_write(slice);
 }
 
 #[unsafe(link_section = ".user_text")]

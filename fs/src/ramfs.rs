@@ -23,23 +23,7 @@ pub struct ramfs_node_t {
     pub prev_sibling: *mut ramfs_node_t,
 }
 
-impl ramfs_node_t {
-    #[allow(dead_code)]
-    const fn empty() -> Self {
-        Self {
-            name: ptr::null_mut(),
-            type_: 0,
-            size: 0,
-            data: ptr::null_mut(),
-            refcount: 0,
-            pending_unlink: 0,
-            parent: ptr::null_mut(),
-            children: ptr::null_mut(),
-            next_sibling: ptr::null_mut(),
-            prev_sibling: ptr::null_mut(),
-        }
-    }
-}
+// ramfs_node_t implementation - methods are defined elsewhere as needed
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum RamfsCreateMode {

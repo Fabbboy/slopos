@@ -3,15 +3,14 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::boot_init_step;
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
-use crate::limine_protocol::LimineMemmapResponse;
 
 unsafe extern "C" {
-    fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> i32;
+    fn init_memory_system(memmap: *const crate::limine_protocol::LimineMemmapResponse, hhdm_offset: u64) -> i32;
 }
 
 const KERNEL_VIRTUAL_BASE: u64 = 0xFFFFFFFF80000000;
 
-extern "C" fn boot_step_memory_init() -> i32 {
+fn boot_step_memory_init() -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
         klog_info!("ERROR: Memory map not available");
@@ -31,7 +30,7 @@ extern "C" fn boot_step_memory_init() -> i32 {
     0
 }
 
-extern "C" fn boot_step_memory_verify() {
+fn boot_step_memory_verify() {
     let stack_ptr: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) stack_ptr, options(nomem, preserves_flags));

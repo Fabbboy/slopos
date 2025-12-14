@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use slopos_lib::{cpu, klog_debug};
 
@@ -11,9 +10,7 @@ struct KeyboardState {
     shift_left: bool,
     shift_right: bool,
     ctrl_left: bool,
-    ctrl_right: bool,
     alt_left: bool,
-    alt_right: bool,
     caps_lock: bool,
 }
 
@@ -23,9 +20,7 @@ impl KeyboardState {
             shift_left: false,
             shift_right: false,
             ctrl_left: false,
-            ctrl_right: false,
             alt_left: false,
-            alt_right: false,
             caps_lock: false,
         }
     }

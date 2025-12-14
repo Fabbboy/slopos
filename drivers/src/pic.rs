@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use slopos_lib::io;
 

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 // SlopOS Memory and Paging Constants (ported from mm_constants.h)
 

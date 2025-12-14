@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 /// Absolute value for 32-bit integers.
 #[inline(always)]

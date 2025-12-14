@@ -81,11 +81,14 @@ fn handler_ptr(f: unsafe extern "C" fn()) -> u64 {
 }
 
 #[repr(C, packed)]
-#[allow(dead_code)]
 struct Idtr {
     limit: u16,
     base: u64,
 }
+
+// Force Rust to recognize Idtr as used (it's used via IDT_POINTER static)
+// Using size_of ensures the type is recognized as used at compile time
+const _: usize = core::mem::size_of::<Idtr>();
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
@@ -342,8 +345,8 @@ pub fn idt_load() {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
+/// Implementation of common_exception_handler - called from FFI boundary
+pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
     let vector = (frame_ref.vector & 0xFF) as u8;
 

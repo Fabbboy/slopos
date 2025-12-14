@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::c_int;
 use core::ptr;
@@ -20,7 +19,6 @@ use crate::phys_virt::mm_phys_to_virt;
 use slopos_lib::{align_down, align_up};
 
 unsafe extern "C" {
-    fn get_hhdm_offset() -> u64;
     static _user_text_start: u8;
     static _user_text_end: u8;
     static _user_rodata_start: u8;
@@ -507,7 +505,6 @@ pub fn process_vm_load_elf(
     }
 
     const PT_LOAD: u32 = 1;
-    const PF_X: u32 = 0x1;
     const PF_W: u32 = 0x2;
 
     // Safety: payload points to in-kernel memory provided by caller.

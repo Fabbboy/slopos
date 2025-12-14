@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-use core::ffi::{c_char, c_void};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -10,11 +8,6 @@ use crate::wl_currency;
 unsafe extern "C" {
     fn is_hhdm_available() -> i32;
     fn get_hhdm_offset() -> u64;
-    fn is_rsdp_available() -> i32;
-    fn get_rsdp_address() -> *const c_void;
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn wl_award_win();
-    fn wl_award_loss();
 }
 
 // CPUID feature flags (leaf 1)

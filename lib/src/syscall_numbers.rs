@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 // Syscall numbers (rax on entry)
 pub const SYSCALL_YIELD: u64 = 0;

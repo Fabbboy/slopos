@@ -9,11 +9,30 @@ use slopos_tests::{
 };
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
+use crate::gdt::gdt_init;
+use crate::idt::{idt_init, idt_load};
 use crate::kernel_panic::kernel_panic;
 use crate::limine_protocol;
+use crate::safe_stack::safe_stack_init;
+use slopos_drivers::{
+    apic::{apic_detect, apic_init},
+    ioapic::ioapic_init,
+    interrupt_test::interrupt_test_request_shutdown,
+    interrupt_test_config::{
+        interrupt_test_config_init_defaults, interrupt_test_config_parse_cmdline,
+        interrupt_test_verbosity_string, interrupt_test_suite_string,
+    },
+    pci::{pci_get_primary_gpu, pci_init},
+    pic::pic_quiesce_disable,
+    pit::{pit_init, pit_poll_delay_ms},
+    virtio_gpu::virtio_gpu_register_driver,
+};
+use slopos_video::framebuffer::framebuffer_init;
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
+// FFI structs for reading PCI info from C pointers
+// These are used via unsafe pointer dereferencing: `unsafe { &*gpu }` in boot_step_pci_init_fn
 #[repr(C)]
 struct PciBarInfo {
     base: u64,
@@ -50,74 +69,49 @@ struct PciGpuInfo {
     mmio_size: u64,
 }
 
-unsafe extern "C" {
-    fn gdt_init();
-    fn idt_init();
-    fn safe_stack_init();
-    fn idt_load();
-
-    fn pit_init(freq: u32);
-    fn pit_poll_delay_ms(ms: u32);
-
-    fn framebuffer_init() -> i32;
-
-    fn apic_detect() -> i32;
-    fn apic_init() -> i32;
-    fn pic_quiesce_disable();
-
-    fn ioapic_init() -> i32;
-
-    fn virtio_gpu_register_driver();
-    fn pci_init() -> i32;
-    fn pci_get_primary_gpu() -> *const PciGpuInfo;
-
-    fn interrupt_test_config_init_defaults(cfg: *mut InterruptTestConfig);
-    fn interrupt_test_config_parse_cmdline(cfg: *mut InterruptTestConfig, cmdline: *const c_char);
-    fn interrupt_test_suite_string(mask: u32) -> *const c_char;
-    fn interrupt_test_verbosity_string(verbosity: InterruptTestVerbosity) -> *const c_char;
-
-    fn interrupt_test_request_shutdown(failed: i32);
-}
+// Force Rust to recognize these types as used (they're used via unsafe pointer dereferencing)
+// Using size_of ensures the types are recognized as used at compile time
+const _: usize = core::mem::size_of::<PciBarInfo>()
+    + core::mem::size_of::<PciDeviceInfo>()
+    + core::mem::size_of::<PciGpuInfo>();
 
 fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
-extern "C" fn boot_step_debug_subsystem_fn() {
+fn boot_step_debug_subsystem_fn() {
     klog_debug!("Debug/logging subsystem initialized.");
 }
 
-extern "C" fn boot_step_gdt_setup_fn() {
+fn boot_step_gdt_setup_fn() {
     klog_debug!("Initializing GDT/TSS...");
-    unsafe { gdt_init() };
+    gdt_init();
     klog_debug!("GDT/TSS initialized.");
 }
 
-extern "C" fn boot_step_idt_setup_fn() {
+fn boot_step_idt_setup_fn() {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
-    unsafe {
-        idt_init();
-        safe_stack_init();
-        idt_load();
-    }
+    idt_init();
+    safe_stack_init();
+    idt_load();
     serial_note("boot: idt setup done");
     klog_debug!("IDT initialized and loaded.");
 }
 
-extern "C" fn boot_step_irq_setup_fn() {
+fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
     klog_debug!("IRQ dispatcher ready.");
 }
 
-extern "C" fn boot_step_timer_setup_fn() {
+fn boot_step_timer_setup_fn() {
     klog_debug!("Initializing programmable interval timer...");
-    unsafe { pit_init(PIT_DEFAULT_FREQUENCY_HZ) };
+    pit_init(PIT_DEFAULT_FREQUENCY_HZ);
     klog_debug!("Programmable interval timer configured.");
 
     let ticks_before = slopos_drivers::irq::get_timer_ticks();
-    unsafe { pit_poll_delay_ms(100) };
+    pit_poll_delay_ms(100);
     let ticks_after = slopos_drivers::irq::get_timer_ticks();
     klog_info!(
         "BOOT: PIT ticks after 100ms poll: {} -> {}",
@@ -128,7 +122,7 @@ extern "C" fn boot_step_timer_setup_fn() {
         klog_info!("BOOT: WARNING - no PIT IRQs observed in 100ms window");
     }
 
-    if unsafe { framebuffer_init() } != 0 {
+    if framebuffer_init() != 0 {
         klog_info!(
             "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
@@ -137,27 +131,27 @@ extern "C" fn boot_step_timer_setup_fn() {
     video::init(fb);
 }
 
-extern "C" fn boot_step_apic_setup_fn() {
+fn boot_step_apic_setup_fn() {
     klog_debug!("Detecting Local APIC...");
-    if unsafe { apic_detect() } == 0 {
+    if apic_detect() == 0 {
         kernel_panic(
             b"SlopOS requires a Local APIC - legacy PIC is gone\0".as_ptr() as *const c_char,
         );
     }
 
     klog_debug!("Initializing Local APIC...");
-    if unsafe { apic_init() } != 0 {
+    if apic_init() != 0 {
         kernel_panic(b"Local APIC initialization failed\0".as_ptr() as *const c_char);
     }
 
-    unsafe { pic_quiesce_disable() };
+    pic_quiesce_disable();
 
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
 }
 
-extern "C" fn boot_step_ioapic_setup_fn() {
+fn boot_step_ioapic_setup_fn() {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
-    if unsafe { ioapic_init() } != 0 {
+    if ioapic_init() != 0 {
         kernel_panic(
             b"IOAPIC discovery failed - SlopOS cannot operate without it\0".as_ptr()
                 as *const c_char,
@@ -166,14 +160,12 @@ extern "C" fn boot_step_ioapic_setup_fn() {
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
 }
 
-extern "C" fn boot_step_pci_init_fn() {
+fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
-    unsafe {
-        virtio_gpu_register_driver();
-    }
-    if unsafe { pci_init() } == 0 {
+    virtio_gpu_register_driver();
+    if pci_init() == 0 {
         klog_debug!("PCI subsystem initialized.");
-        let gpu = unsafe { pci_get_primary_gpu() };
+        let gpu = pci_get_primary_gpu();
         if !gpu.is_null() {
             let info = unsafe { &*gpu };
             if info.present != 0 {
@@ -201,7 +193,7 @@ extern "C" fn boot_step_pci_init_fn() {
     }
 }
 
-extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
+fn boot_step_interrupt_tests_fn() -> i32 {
     let mut test_config = InterruptTestConfig {
         enabled: 0,
         verbosity: InterruptTestVerbosity::INTERRUPT_TEST_VERBOSITY_SUMMARY,
@@ -236,11 +228,11 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     klog_info!("INTERRUPT_TEST: Running orchestrated harness");
 
     if klog::is_enabled_level(KlogLevel::Debug) {
-        let suites = unsafe { interrupt_test_suite_string(test_config.suite_mask) };
+        let suites = interrupt_test_suite_string(test_config.suite_mask);
         let suites_str = unsafe { CStr::from_ptr(suites) }
             .to_str()
             .unwrap_or("?");
-        let verbosity = unsafe { interrupt_test_verbosity_string(test_config.verbosity) };
+        let verbosity = interrupt_test_verbosity_string(test_config.verbosity);
         let verbosity_str = unsafe { CStr::from_ptr(verbosity) }
             .to_str()
             .unwrap_or("?");
@@ -278,7 +270,7 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
 
     if test_config.shutdown_on_complete != 0 {
         klog_debug!("INTERRUPT_TEST: Auto shutdown enabled after harness");
-        unsafe { interrupt_test_request_shutdown(summary.failed as i32) };
+        interrupt_test_request_shutdown(summary.failed as i32);
     }
 
     if summary.failed > 0 {

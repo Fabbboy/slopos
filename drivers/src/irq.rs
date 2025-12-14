@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void, CStr};

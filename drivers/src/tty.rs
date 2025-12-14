@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::c_int;
 use core::ptr;

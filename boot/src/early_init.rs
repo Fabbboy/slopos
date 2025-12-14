@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use core::{
     cell::UnsafeCell,
     ffi::{c_char, CStr},
@@ -33,15 +31,15 @@ pub enum BootInitPhase {
 #[repr(C)]
 pub struct BootInitStep {
     name: *const c_char,
-    func: Option<extern "C" fn() -> i32>,
-    func_unit: Option<extern "C" fn() -> ()>,
+    func: Option<fn() -> i32>,
+    func_unit: Option<fn()>,
     flags: u32,
 }
 
 unsafe impl Sync for BootInitStep {}
 
 impl BootInitStep {
-    pub const fn new(label: &'static [u8], func: extern "C" fn() -> i32, flags: u32) -> Self {
+    pub const fn new(label: &'static [u8], func: fn() -> i32, flags: u32) -> Self {
         Self {
             name: label.as_ptr() as *const c_char,
             func: Some(func),
@@ -50,7 +48,7 @@ impl BootInitStep {
         }
     }
 
-    pub const fn new_unit(label: &'static [u8], func: extern "C" fn() -> (), flags: u32) -> Self {
+    pub const fn new_unit(label: &'static [u8], func: fn(), flags: u32) -> Self {
         Self {
             name: label.as_ptr() as *const c_char,
             func: None,
@@ -212,18 +210,13 @@ fn boot_init_report_failure(phase: &[u8], step_name: Option<&[u8]>) {
     klog_info!("[boot:init] FAILURE in {} -> {}", phase_str, step_str);
 }
 
-unsafe extern "C" {
-    static __start_boot_init_early_hw: BootInitStep;
-    static __stop_boot_init_early_hw: BootInitStep;
-    static __start_boot_init_memory: BootInitStep;
-    static __stop_boot_init_memory: BootInitStep;
-    static __start_boot_init_drivers: BootInitStep;
-    static __stop_boot_init_drivers: BootInitStep;
-    static __start_boot_init_services: BootInitStep;
-    static __stop_boot_init_services: BootInitStep;
-    static __start_boot_init_optional: BootInitStep;
-    static __stop_boot_init_optional: BootInitStep;
-}
+// Use linker symbols from FFI boundary
+use crate::ffi_boundary::{
+    __start_boot_init_drivers, __start_boot_init_early_hw, __start_boot_init_memory,
+    __start_boot_init_optional, __start_boot_init_services, __stop_boot_init_drivers,
+    __stop_boot_init_early_hw, __stop_boot_init_memory, __stop_boot_init_optional,
+    __stop_boot_init_services,
+};
 
 fn phase_bounds(phase: BootInitPhase) -> (*const BootInitStep, *const BootInitStep) {
     match phase {
@@ -281,8 +274,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
+pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     let (start, end) = phase_bounds(phase);
     if start.is_null() || end.is_null() {
         return 0;
@@ -345,8 +337,7 @@ pub extern "C" fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_init_run_all() -> i32 {
+pub fn boot_init_run_all() -> i32 {
     let mut phase = BootInitPhase::EarlyHw as u8;
     while phase <= BootInitPhase::Optional as u8 {
         let rc = boot_init_run_phase(unsafe { core::mem::transmute(phase) });
@@ -358,18 +349,15 @@ pub extern "C" fn boot_init_run_all() -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
+pub fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
     boot_state().ctx.memmap
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_get_hhdm_offset() -> u64 {
+pub fn boot_get_hhdm_offset() -> u64 {
     boot_state().ctx.hhdm_offset
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_get_cmdline() -> *const c_char {
+pub fn boot_get_cmdline() -> *const c_char {
     boot_state()
         .ctx
         .cmdline
@@ -377,18 +365,15 @@ pub extern "C" fn boot_get_cmdline() -> *const c_char {
         .unwrap_or(ptr::null())
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn boot_mark_initialized() {
+pub fn boot_mark_initialized() {
     boot_state_mut().initialized = true;
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn is_kernel_initialized() -> i32 {
+pub fn is_kernel_initialized() -> i32 {
     boot_state().initialized as i32
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn get_initialization_progress() -> i32 {
+pub fn get_initialization_progress() -> i32 {
     if boot_state().initialized {
         100
     } else {
@@ -396,8 +381,7 @@ pub extern "C" fn get_initialization_progress() -> i32 {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn report_kernel_status() {
+pub fn report_kernel_status() {
     if boot_state().initialized {
         boot_info(b"SlopOS: Kernel status - INITIALIZED\0");
     } else {
@@ -405,11 +389,9 @@ pub extern "C" fn report_kernel_status() {
     }
 }
 
-unsafe extern "C" {
-    fn start_scheduler() -> i32;
-}
+use slopos_sched::start_scheduler;
 
-extern "C" fn boot_step_serial_init_fn() {
+fn boot_step_serial_init_fn() {
     serial::write_line("BOOT: serial step -> init");
     serial::init();
     serial::write_line("BOOT: serial step -> after serial::init");
@@ -421,12 +403,12 @@ extern "C" fn boot_step_serial_init_fn() {
     boot_debug(b"Serial console ready on COM1\0");
 }
 
-extern "C" fn boot_step_boot_banner_fn() {
+fn boot_step_boot_banner_fn() {
     boot_info(b"SlopOS Kernel Started!\0");
     boot_info(b"Booting via Limine Protocol...\0");
 }
 
-extern "C" fn boot_step_limine_protocol_fn() -> i32 {
+fn boot_step_limine_protocol_fn() -> i32 {
     boot_debug(b"Initializing Limine protocol interface...\0");
     if limine_protocol::init_limine_protocol() != 0 {
         boot_info(b"ERROR: Limine protocol initialization failed\0");
@@ -455,7 +437,7 @@ extern "C" fn boot_step_limine_protocol_fn() -> i32 {
     0
 }
 
-extern "C" fn boot_step_boot_config_fn() {
+fn boot_step_boot_config_fn() {
     let cmdline = boot_state().ctx.cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
@@ -495,8 +477,8 @@ crate::boot_init_step_unit!(
     boot_step_boot_config_fn
 );
 
-#[unsafe(no_mangle)]
-pub extern "C" fn kernel_main() {
+/// Implementation of kernel_main - called from FFI boundary
+pub fn kernel_main_impl() {
     wl_currency::reset();
 
     // Install basic GDT/IDT early so faults have somewhere to land. IST
@@ -540,7 +522,7 @@ pub extern "C" fn kernel_main() {
         klog_newline();
     }
 
-    let rc = unsafe { start_scheduler() };
+    let rc = start_scheduler();
     if rc != 0 {
         klog_info!("ERROR: Scheduler startup failed");
         kernel_panic(b"Scheduler startup failed\0".as_ptr() as *const c_char);
@@ -555,5 +537,5 @@ pub extern "C" fn kernel_main() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main_no_multiboot() {
-    kernel_main();
+    crate::ffi_boundary::kernel_main();
 }

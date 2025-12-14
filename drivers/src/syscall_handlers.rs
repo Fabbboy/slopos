@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
@@ -68,9 +67,6 @@ use crate::scheduler_callbacks::{
 
 unsafe extern "C" {
     fn tty_read_line(buffer: *mut c_char, buffer_size: usize) -> usize;
-    fn tty_notify_input_ready();
-
-    fn serial_write(port: u16, buf: *const c_char, len: usize);
 
     fn pit_sleep_ms(ms: u32);
     fn pit_poll_delay_ms(ms: u32);

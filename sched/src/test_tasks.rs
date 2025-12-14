@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
@@ -13,10 +12,11 @@ use crate::task::{
     TASK_PRIORITY_NORMAL,
 };
 
+use crate::ffi_boundary::simple_context_switch;
+
 unsafe extern "C" {
     fn serial_putc_com1(ch: u8);
     fn kmalloc(size: usize) -> *mut c_void;
-    fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
     fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> c_int;
 }
 

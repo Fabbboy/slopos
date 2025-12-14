@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::{
     cell::UnsafeCell,
@@ -748,7 +747,6 @@ pub extern "C" fn get_rsdp_address() -> *const c_void {
     }
 }
 
-#[allow(dead_code)]
 pub fn get_memmap_entry(index: usize) -> Option<MemmapEntry> {
     let memmap = sysinfo().memmap?;
     if index >= memmap.entry_count as usize {

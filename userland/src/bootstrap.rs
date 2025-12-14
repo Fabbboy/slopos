@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use core::ffi::{c_char, CStr};
 use core::ptr;
 
@@ -139,7 +137,7 @@ extern "C" fn userland_fate_hook(res: *const FateResult) {
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn boot_step_userland_hook() -> i32 {
+fn boot_step_userland_hook() -> i32 {
     unsafe {
         fate_register_outcome_hook(userland_fate_hook);
     }
@@ -147,7 +145,7 @@ extern "C" fn boot_step_userland_hook() -> i32 {
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn boot_step_roulette_task() -> i32 {
+fn boot_step_roulette_task() -> i32 {
     userland_spawn_and_schedule(b"roulette\0", roulette_user_main, 5)
 }
 

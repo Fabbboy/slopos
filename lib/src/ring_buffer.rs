@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 /// Simple fixed-capacity ring buffer mirroring the old C macros.
 /// Uses a backing array with head/tail/count indices.

@@ -1,13 +1,10 @@
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_void};
 
 use slopos_video::roulette_core::{roulette_run, RouletteBackend};
 
-const SYSCALL_YIELD: u64 = 0;
 const SYSCALL_EXIT: u64 = 1;
 const SYSCALL_WRITE: u64 = 2;
-const SYSCALL_READ: u64 = 3;
 const SYSCALL_ROULETTE: u64 = 4;
 const SYSCALL_SLEEP_MS: u64 = 5;
 const SYSCALL_FB_INFO: u64 = 6;
@@ -16,7 +13,6 @@ const SYSCALL_GFX_DRAW_LINE: u64 = 8;
 const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
 const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
 const SYSCALL_FONT_DRAW: u64 = 11;
-const SYSCALL_RANDOM_NEXT: u64 = 12;
 const SYSCALL_ROULETTE_RESULT: u64 = 13;
 
 #[repr(C)]

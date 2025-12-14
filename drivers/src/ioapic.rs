@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -20,13 +19,11 @@ unsafe extern "C" {
 const IOAPIC_MAX_CONTROLLERS: usize = 8;
 const IOAPIC_MAX_ISO_ENTRIES: usize = 32;
 
-const IOAPIC_REG_ID: u8 = 0x00;
 const IOAPIC_REG_VER: u8 = 0x01;
 const IOAPIC_REG_REDIR_BASE: u8 = 0x10;
 
 const IOAPIC_REDIR_WRITABLE_MASK: u32 = (7 << 8) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16);
 
-const MADT_ENTRY_LOCAL_APIC: u8 = 0;
 const MADT_ENTRY_IOAPIC: u8 = 1;
 const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
 

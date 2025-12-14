@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_int, c_void, CStr};
 
@@ -55,6 +54,6 @@ pub fn kthread_join(thread_id: KthreadId) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kthread_exit() -> ! {
-    scheduler::scheduler_task_exit();
+    crate::ffi_boundary::scheduler_task_exit();
 }
 

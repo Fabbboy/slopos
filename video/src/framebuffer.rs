@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::ptr;
 
@@ -60,7 +59,6 @@ pub(crate) struct FbState {
     pub(crate) pitch: u32,
     pub(crate) bpp: u8,
     pub(crate) pixel_format: u8,
-    pub(crate) buffer_size: u32,
 }
 
 struct FramebufferState {
@@ -112,7 +110,7 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
     if bpp != 16 && bpp != 24 && bpp != 32 {
         return -1;
     }
-    let buffer_size = match pitch.checked_mul(height) {
+    let _buffer_size = match pitch.checked_mul(height) {
         Some(sz) if sz > 0 && sz <= MAX_BUFFER_SIZE => sz,
         _ => return -1,
     };
@@ -128,7 +126,6 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
         pitch,
         bpp,
         pixel_format: determine_pixel_format(bpp),
-        buffer_size,
     };
 
     let mut guard = FRAMEBUFFER.lock();

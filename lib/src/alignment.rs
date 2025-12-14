@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 /// Align `value` down to the nearest multiple of `alignment`.
 /// If `alignment` is zero, the input is returned unchanged (matching the C helper).

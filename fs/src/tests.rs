@@ -6,7 +6,7 @@ use slopos_drivers::serial_println;
 use crate::ramfs::{
     ramfs_create_directory, ramfs_create_file, ramfs_find_node, ramfs_get_root,
     ramfs_list_directory, ramfs_node_release, ramfs_read_file, ramfs_release_list,
-    ramfs_write_file, ramfs_node_t, RAMFS_TYPE_DIRECTORY, RAMFS_TYPE_FILE,
+    ramfs_write_file, ramfs_node_t, RAMFS_TYPE_DIRECTORY,
 };
 
 fn as_c(path: &[u8]) -> *const i8 {
@@ -19,17 +19,6 @@ fn expect_dir(path: &[u8]) -> bool {
         return false;
     }
     let ok = unsafe { (*node).type_ == RAMFS_TYPE_DIRECTORY };
-    ramfs_node_release(node);
-    ok
-}
-
-#[allow(dead_code)]
-fn expect_file(path: &[u8]) -> bool {
-    let node = ramfs_find_node(as_c(path));
-    if node.is_null() {
-        return false;
-    }
-    let ok = unsafe { (*node).type_ == RAMFS_TYPE_FILE };
     ramfs_node_release(node);
     ok
 }

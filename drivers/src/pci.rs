@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
@@ -119,7 +118,6 @@ const PCI_HEADER_TYPE_OFFSET: u8 = 0x0E;
 const PCI_INTERRUPT_LINE_OFFSET: u8 = 0x3C;
 const PCI_INTERRUPT_PIN_OFFSET: u8 = 0x3D;
 const PCI_BAR0_OFFSET: u8 = 0x10;
-const PCI_STATUS_OFFSET: u8 = 0x06;
 
 const PCI_HEADER_TYPE_MASK: u8 = 0x7F;
 const PCI_HEADER_TYPE_MULTI_FUNCTION: u8 = 0x80;
@@ -346,7 +344,6 @@ fn pci_log_bar(bar: &PciBarInfo, index: u8) {
 
 unsafe extern "C" {
     fn mm_map_mmio_region(base_phys: u64, size: usize) -> *mut core::ffi::c_void;
-    fn mm_unmap_mmio_region(virt: *mut core::ffi::c_void, size: usize);
 }
 
 fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {

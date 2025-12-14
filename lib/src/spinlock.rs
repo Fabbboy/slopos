@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 use core::arch::asm;
 use core::hint::spin_loop;

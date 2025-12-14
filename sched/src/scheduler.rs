@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
@@ -101,15 +99,8 @@ use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_drivers::pit::{pit_enable_irq, pit_disable_irq};
 use slopos_drivers::scheduler_callbacks::call_gdt_set_kernel_rsp0;
 
-unsafe extern "C" {
-    fn context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn context_switch_user(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn simple_context_switch(old_context: *mut TaskContext, new_context: *const TaskContext);
-    fn init_kernel_context(context: *mut TaskContext);
-    fn task_entry_wrapper();
-
-    static kernel_stack_top: u8;
-}
+// Use assembly functions from FFI boundary
+use crate::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
 
 #[repr(C)]
 pub struct ProcessPageDir {
@@ -341,12 +332,12 @@ fn switch_to_task(new_task: *mut Task) {
             let rsp0 = if (*new_task).kernel_stack_top != 0 {
                 (*new_task).kernel_stack_top
             } else {
-                &kernel_stack_top as *const u8 as u64
+                kernel_stack_top() as u64
             };
             call_gdt_set_kernel_rsp0(rsp0);
             context_switch_user(old_ctx_ptr, &(*new_task).context);
         } else {
-            call_gdt_set_kernel_rsp0(&kernel_stack_top as *const u8 as u64);
+            call_gdt_set_kernel_rsp0(kernel_stack_top() as u64);
             if !old_ctx_ptr.is_null() {
                 context_switch(old_ctx_ptr, &(*new_task).context);
             } else {
@@ -471,8 +462,8 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     schedule_task(task)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn scheduler_task_exit() -> ! {
+/// Implementation of scheduler_task_exit - called from FFI boundary
+pub fn scheduler_task_exit_impl() -> ! {
     let sched = unsafe { &mut *scheduler_mut() };
     let current = sched.current_task;
     if current.is_null() {
@@ -572,7 +563,7 @@ pub fn start_scheduler() -> c_int {
         return -1;
     }
     sched.enabled = 1;
-    unsafe { init_kernel_context(&mut sched.return_context) };
+    unsafe { crate::ffi_boundary::init_kernel_context(&mut sched.return_context) };
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
 
     klog_debug!("start_scheduler: ready_count={} idle_task={:p}", sched.ready_queue.count, sched.idle_task);

@@ -15,8 +15,6 @@ const REG_IIR: u16 = 2; // Interrupt Identification Register (read) / FIFO Contr
 const REG_LCR: u16 = 3; // Line Control Register
 const REG_MCR: u16 = 4; // Modem Control Register
 const REG_LSR: u16 = 5; // Line Status Register
-#[allow(dead_code)]
-const REG_MSR: u16 = 6; // Modem Status Register
 const REG_SCR: u16 = 7; // Scratch Register
 
 // LCR bits
@@ -306,28 +304,9 @@ impl SerialPort {
         }
     }
     
-    /// Read a byte if available (non-blocking)
-    #[allow(dead_code)]
-    fn read_byte(&self) -> Option<u8> {
-        unsafe {
-            // Check if data is ready
-            if (io::inb(self.base + REG_LSR) & LSR_DATA_READY) != 0 {
-                Some(io::inb(self.base + REG_RBR))
-            } else {
-                None
-            }
-        }
-    }
-    
     /// Get detected UART capabilities
     pub fn capabilities(&self) -> UartCapabilities {
         self.caps
-    }
-    
-    /// Get UART base address
-    #[allow(dead_code)]
-    pub fn base(&self) -> u16 {
-        self.base
     }
 }
 
