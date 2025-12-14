@@ -31,17 +31,24 @@ fn read_rsp() -> u64 {
     rsp
 }
 
-fn read_cr(reg: &str) -> u64 {
+#[derive(Clone, Copy)]
+enum ControlRegister {
+    Cr0,
+    Cr3,
+    Cr4,
+}
+
+fn read_cr(reg: ControlRegister) -> u64 {
     let value: u64;
     unsafe {
         match reg {
-            "cr0" => {
+            ControlRegister::Cr0 => {
                 core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags))
             }
-            "cr3" => {
+            ControlRegister::Cr3 => {
                 core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags))
             }
-            _ => {
+            ControlRegister::Cr4 => {
                 core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags))
             }
         }
@@ -70,9 +77,9 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     panic_output_str("Register snapshot:");
     klog_info!("RIP: 0x{:x}", rip);
     klog_info!("RSP: 0x{:x}", rsp);
-    klog_info!("CR0: 0x{:x}", read_cr("cr0"));
-    klog_info!("CR3: 0x{:x}", read_cr("cr3"));
-    klog_info!("CR4: 0x{:x}", read_cr("cr4"));
+    klog_info!("CR0: 0x{:x}", read_cr(ControlRegister::Cr0));
+    klog_info!("CR3: 0x{:x}", read_cr(ControlRegister::Cr3));
+    klog_info!("CR4: 0x{:x}", read_cr(ControlRegister::Cr4));
 
     panic_output_str("===================");
     panic_output_str("Skill issue lol");
