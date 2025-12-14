@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, CStr};
 use crate::memory_layout::{
     get_kernel_memory_layout, init_kernel_memory_layout,
 };
@@ -24,8 +24,9 @@ use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
 
+use slopos_lib::{klog_debug, klog_info};
+
 unsafe extern "C" {
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn klog_debug(msg: *const u8, ...);
     fn klog_info(msg: *const u8, ...);
     fn kernel_panic(msg: *const c_char) -> !;
@@ -137,12 +138,7 @@ fn configure_region_store(memmap: *const LimineMemmapResponse) {
         }
 
         if needed as usize > BOOT_REGION_STATIC_CAP {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"MM: region map estimate %u exceeds capacity %u, clamping\n\0".as_ptr() as *const c_char,
-                needed,
-                BOOT_REGION_STATIC_CAP,
-            );
+            klog_info!("MM: region map estimate {} exceeds capacity {}, clamping", needed, BOOT_REGION_STATIC_CAP);
             needed = BOOT_REGION_STATIC_CAP as u32;
         }
 
@@ -479,11 +475,7 @@ fn log_reserved_regions() {
             return;
         }
         let total_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"MM: Reserved device regions (%u)\n\0".as_ptr() as *const c_char,
-            count,
-        );
+        klog_info!("MM: Reserved device regions ({})", count);
         for i in 0..count {
             let region = mm_reservations_get(i);
             if region.is_null() {
@@ -496,88 +488,34 @@ fn log_reserved_regions() {
                 mm_reservation_type_name(region_ref.type_) as *const u8
             };
             let region_end = region_ref.phys_base + region_ref.length;
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"  %s: 0x%llx - 0x%llx (%u KB)\n\0".as_ptr() as *const c_char,
-                label_ptr,
-                region_ref.phys_base,
-                region_end - 1,
-                (region_ref.length / 1024) as u32,
-            );
+            let label_str = CStr::from_ptr(label_ptr as *const c_char)
+                .to_str()
+                .unwrap_or("<invalid utf-8>");
+            klog_info!("  {}: 0x{:x} - 0x{:x} ({} KB)", label_str, region_ref.phys_base, region_end - 1, region_ref.length / 1024);
         }
         if total_bytes > 0 {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"  Total reserved:      %u KB\n\0".as_ptr() as *const c_char,
-                (total_bytes / 1024) as u32,
-            );
+            klog_info!("  Total reserved:      {} KB", total_bytes / 1024);
         }
         if mm_reservations_overflow_count() > 0 {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"  Reservation drops:   %u (capacity %u)\n\0".as_ptr() as *const c_char,
-                mm_reservations_overflow_count(),
-                mm_reservations_capacity(),
-            );
+            klog_info!("  Reservation drops:   {} (capacity {})", mm_reservations_overflow_count(), mm_reservations_capacity());
         }
     }
 }
 
 fn display_memory_summary() {
     unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"\n========== SlopOS Memory System Initialized ==========\n\0".as_ptr() as *const c_char,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Early Paging:          %s\n\0".as_ptr() as *const c_char,
-            if EARLY_PAGING_OK { b"OK\0".as_ptr() } else { b"SKIPPED\0".as_ptr() },
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Reserved Regions:      %u\n\0".as_ptr() as *const c_char,
-            INIT_STATS.reserved_region_count,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Tracked Frames:        %u\n\0".as_ptr() as *const c_char,
-            INIT_STATS.tracked_page_frames,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Allocator Metadata:    %u KB\n\0".as_ptr() as *const c_char,
-            (INIT_STATS.allocator_metadata_bytes / 1024) as u32,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Reserved Device Mem:   %u KB\n\0".as_ptr() as *const c_char,
-            (INIT_STATS.reserved_device_bytes / 1024) as u32,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Total Memory:          %llu MB\n\0".as_ptr() as *const c_char,
-            INIT_STATS.total_memory_bytes / (1024 * 1024),
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Available Memory:      %llu MB\n\0".as_ptr() as *const c_char,
-            INIT_STATS.available_memory_bytes / (1024 * 1024),
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Memory Regions:        %u\n\0".as_ptr() as *const c_char,
-            INIT_STATS.memory_regions_count,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"HHDM Offset:           0x%llx\n\0".as_ptr() as *const c_char,
-            INIT_STATS.hhdm_offset,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"=====================================================\n\n\0".as_ptr() as *const c_char,
-        );
+        klog_info!("\n========== SlopOS Memory System Initialized ==========");
+        let early_paging_str = if EARLY_PAGING_OK { "OK" } else { "SKIPPED" };
+        klog_info!("Early Paging:          {}", early_paging_str);
+        klog_info!("Reserved Regions:      {}", INIT_STATS.reserved_region_count);
+        klog_info!("Tracked Frames:        {}", INIT_STATS.tracked_page_frames);
+        klog_info!("Allocator Metadata:    {} KB", INIT_STATS.allocator_metadata_bytes / 1024);
+        klog_info!("Reserved Device Mem:   {} KB", INIT_STATS.reserved_device_bytes / 1024);
+        klog_info!("Total Memory:          {} MB", INIT_STATS.total_memory_bytes / (1024 * 1024));
+        klog_info!("Available Memory:      {} MB", INIT_STATS.available_memory_bytes / (1024 * 1024));
+        klog_info!("Memory Regions:        {}", INIT_STATS.memory_regions_count);
+        klog_info!("HHDM Offset:           0x{:x}", INIT_STATS.hhdm_offset);
+        klog_info!("=====================================================\n");
     }
 }
 
@@ -613,10 +551,7 @@ pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_o
             kernel_panic(b"MM: Page allocator initialization failed\0".as_ptr() as *const c_char);
         }
         if finalize_page_allocator() != 0 {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"MM: WARNING - page allocator finalization reported issues\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("MM: WARNING - page allocator finalization reported issues");
         }
 
         init_paging();
@@ -633,10 +568,7 @@ pub extern "C" fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_o
         display_memory_summary();
 
         klog_info(b"MM: Complete memory system initialization successful!\0".as_ptr());
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"MM: Ready for scheduler and video subsystem initialization\n\n\0".as_ptr() as *const c_char,
-        );
+        klog_debug!("MM: Ready for scheduler and video subsystem initialization\n");
     }
     0
 }

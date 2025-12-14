@@ -4,6 +4,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use spin::Mutex;
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::mm_constants::{
     PAGE_KERNEL_RW, PAGE_SIZE_4KB,
@@ -13,7 +14,6 @@ use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
 
 unsafe extern "C" {
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn kernel_panic(msg: *const c_char) -> !;
     fn wl_award_win();
     fn wl_award_loss();
@@ -141,10 +141,7 @@ fn data_from_block(block: *mut HeapBlock) -> *mut u8 {
 fn add_to_free_list(heap: &mut KernelHeap, block: *mut HeapBlock) {
     unsafe {
         if block.is_null() || !validate_block(&*block) {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"add_to_free_list: Invalid block\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("add_to_free_list: Invalid block");
             return;
         }
         let size_class = get_size_class((*block).size) as usize;
@@ -169,10 +166,7 @@ fn add_to_free_list(heap: &mut KernelHeap, block: *mut HeapBlock) {
 fn remove_from_free_list(heap: &mut KernelHeap, block: *mut HeapBlock) {
     unsafe {
         if block.is_null() || !validate_block(&*block) {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"remove_from_free_list: Invalid block\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("remove_from_free_list: Invalid block");
             return;
         }
 
@@ -216,26 +210,14 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
         pages_needed = 4;
     }
 
-    unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Expanding heap by %u pages\n\0".as_ptr() as *const c_char,
-            pages_needed,
-        );
-    }
+    klog_debug!("Expanding heap by {} pages", pages_needed);
 
     let expansion_start = heap.current_break;
     let total_bytes = (pages_needed as u64) * PAGE_SIZE_4KB;
     let mut mapped_pages = 0u32;
 
     if expansion_start >= heap.end_addr || expansion_start + total_bytes > heap.end_addr {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"expand_heap: Heap growth denied - would exceed heap window\n\0".as_ptr()
-                    as *const c_char,
-            );
-        }
+        klog_info!("expand_heap: Heap growth denied - would exceed heap window");
         unsafe { wl_award_loss() };
         return -1;
     }
@@ -243,13 +225,13 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
     for i in 0..pages_needed {
         let phys_page = alloc_page_frame(0);
         if phys_page == 0 {
-            unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"expand_heap: Failed to allocate physical page\n\0".as_ptr() as *const c_char); }
+            klog_info!("expand_heap: Failed to allocate physical page");
             goto_rollback(expansion_start, mapped_pages);
             return -1;
         }
         let virt_page = expansion_start + (i as u64) * PAGE_SIZE_4KB;
         if map_page_4kb(virt_page, phys_page, PAGE_KERNEL_RW) != 0 {
-            unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"expand_heap: Failed to map heap page\n\0".as_ptr() as *const c_char); }
+            klog_info!("expand_heap: Failed to map heap page");
             free_page_frame(phys_page);
             goto_rollback(expansion_start, mapped_pages);
             return -1;
@@ -293,7 +275,7 @@ pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
     let mut heap = KERNEL_HEAP.lock();
 
     if !heap.initialized {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"kmalloc: Heap not initialized\n\0".as_ptr() as *const c_char); }
+        klog_info!("kmalloc: Heap not initialized");
         unsafe { wl_award_loss() };
         return ptr::null_mut();
     }
@@ -316,7 +298,7 @@ pub extern "C" fn kmalloc(size: usize) -> *mut c_void {
     }
 
     if block.is_null() {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"kmalloc: No suitable block found after expansion\n\0".as_ptr() as *const c_char); }
+        klog_info!("kmalloc: No suitable block found after expansion");
         unsafe { wl_award_loss() };
         return ptr::null_mut();
     }
@@ -374,10 +356,7 @@ pub extern "C" fn kfree(ptr_in: *mut c_void) {
     let block = block_from_ptr(ptr_in as *mut u8);
     unsafe {
         if block.is_null() || !validate_block(&*block) || (*block).magic != BLOCK_MAGIC_ALLOCATED {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"kfree: Invalid block or double free detected\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("kfree: Invalid block or double free detected");
             wl_award_loss();
             return;
         }
@@ -411,13 +390,7 @@ pub extern "C" fn init_kernel_heap() -> c_int {
     }
 
     heap.initialized = true;
-    unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Kernel heap initialized at 0x%llx\n\0".as_ptr() as *const c_char,
-            heap.start_addr,
-        );
-    }
+    klog_debug!("Kernel heap initialized at 0x{:x}", heap.start_addr);
 
     0
 }
@@ -442,44 +415,18 @@ pub extern "C" fn kernel_heap_enable_diagnostics(enable: c_int) {
 pub extern "C" fn print_heap_stats() {
     let heap = KERNEL_HEAP.lock();
     unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"=== Kernel Heap Statistics ===\n\0".as_ptr() as *const c_char,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Total size: %llu bytes\n\0".as_ptr() as *const c_char,
-            heap.stats.total_size,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Allocated: %llu bytes\n\0".as_ptr() as *const c_char,
-            heap.stats.allocated_size,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Free: %llu bytes\n\0".as_ptr() as *const c_char,
-            heap.stats.free_size,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Allocations: %u\n\0".as_ptr() as *const c_char,
-            heap.stats.allocation_count,
-        );
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Frees: %u\n\0".as_ptr() as *const c_char,
-            heap.stats.free_count,
-        );
+        klog_info!("=== Kernel Heap Statistics ===");
+        klog_info!("Total size: {} bytes", heap.stats.total_size);
+        klog_info!("Allocated: {} bytes", heap.stats.allocated_size);
+        klog_info!("Free: {} bytes", heap.stats.free_size);
+        klog_info!("Allocations: {}", heap.stats.allocation_count);
+        klog_info!("Frees: {}", heap.stats.free_count);
 
         if !heap.diagnostics_enabled {
             return;
         }
 
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Free blocks by class:\n\0".as_ptr() as *const c_char,
-        );
+        klog_info!("Free blocks by class:");
 
         let mut total_free_blocks = 0u64;
         let mut largest_free_block = 0u64;
@@ -505,33 +452,15 @@ pub extern "C" fn print_heap_stats() {
             }
 
             if i < 15 {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"  <= %u: %u blocks\n\0".as_ptr() as *const c_char,
-                    thresholds[i],
-                    class_count,
-                );
+                klog_info!("  <= {}: {} blocks", thresholds[i], class_count);
             } else {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"  > %u: %u blocks\n\0".as_ptr() as *const c_char,
-                    thresholds[14],
-                    class_count,
-                );
+                klog_info!("  > {}: {} blocks", thresholds[14], class_count);
             }
         }
 
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Total free blocks: %llu\n\0".as_ptr() as *const c_char,
-            total_free_blocks,
-        );
+        klog_info!("Total free blocks: {}", total_free_blocks);
 
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Largest free block: %llu bytes\n\0".as_ptr() as *const c_char,
-            largest_free_block,
-        );
+        klog_info!("Largest free block: {} bytes", largest_free_block);
 
         if total_free_blocks > 0 {
             let average_free = if heap.stats.free_size > 0 {
@@ -539,11 +468,7 @@ pub extern "C" fn print_heap_stats() {
             } else {
                 0
             };
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"Average free block: %llu bytes\n\0".as_ptr() as *const c_char,
-                average_free,
-            );
+            klog_info!("Average free block: {} bytes", average_free);
         }
 
         if heap.stats.free_size > 0 {
@@ -560,12 +485,7 @@ pub extern "C" fn print_heap_stats() {
                 0
             };
 
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"Fragmented bytes: %llu (%llu%%)\n\0".as_ptr() as *const c_char,
-                fragmented_bytes,
-                fragmentation_percent,
-            );
+            klog_info!("Fragmented bytes: {} ({}%)", fragmented_bytes, fragmentation_percent);
         }
     }
 }

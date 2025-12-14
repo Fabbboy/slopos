@@ -4,6 +4,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use spin::Mutex;
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::memory_reservations::{
@@ -328,7 +329,6 @@ static PAGE_ALLOCATOR: Mutex<PageAllocator> = Mutex::new(PageAllocator::new());
 
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
 }
 
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
@@ -375,15 +375,7 @@ pub extern "C" fn init_page_allocator(frame_array: *mut c_void, max_frames: u32)
         }
     }
 
-    unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Page frame allocator initialized with %u frame descriptors (max order %u)\n\0".as_ptr()
-                as *const c_char,
-            max_frames,
-            alloc.max_order,
-        );
-    }
+    klog_debug!("Page frame allocator initialized with {} frame descriptors (max order {})", max_frames, alloc.max_order);
 
     0
 }
@@ -404,13 +396,7 @@ pub extern "C" fn finalize_page_allocator() -> c_int {
         }
     }
 
-    unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Page allocator ready: %u pages available\n\0".as_ptr() as *const c_char,
-            alloc.free_frames,
-        );
-    }
+    klog_debug!("Page allocator ready: {} pages available", alloc.free_frames);
 
     0
 }
@@ -436,12 +422,7 @@ pub extern "C" fn alloc_page_frames(count: u32, flags: u32) -> u64 {
 
     let frame_num = alloc.allocate_block(order, flags);
     if frame_num == INVALID_PAGE_FRAME {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"alloc_page_frames: No suitable block available\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("alloc_page_frames: No suitable block available");
         return 0;
     }
 
@@ -472,12 +453,7 @@ pub extern "C" fn free_page_frame(phys_addr: u64) -> c_int {
     let frame_num = alloc.phys_to_frame(phys_addr);
 
     if !alloc.is_valid_frame(frame_num) {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"free_page_frame: Invalid physical address\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("free_page_frame: Invalid physical address");
         return -1;
     }
 

@@ -3,6 +3,8 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_lib::{klog_debug, klog_info};
+
 use crate::mm_constants::{
     ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
     PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
@@ -13,7 +15,6 @@ use crate::page_alloc::{
 use crate::phys_virt::mm_phys_to_virt;
 
 unsafe extern "C" {
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn kernel_panic(msg: *const c_char) -> !;
     fn is_hhdm_available() -> c_int;
 }
@@ -157,10 +158,7 @@ pub extern "C" fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
     }
     unsafe {
         if KERNEL_PAGE_DIR.pml4.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"paging_copy_kernel_mappings: Kernel PML4 unavailable\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("paging_copy_kernel_mappings: Kernel PML4 unavailable");
             return;
         }
         for i in 0..ENTRIES_PER_PAGE_TABLE {
@@ -174,12 +172,7 @@ pub extern "C" fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
 
 fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
     if page_dir.is_null() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"virt_to_phys: No page directory\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("virt_to_phys: No page directory");
         return 0;
     }
     unsafe {
@@ -193,10 +186,7 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
         }
         let pdpt = mm_phys_to_virt(pte_address(pml4_entry)) as *mut PageTable;
         if pdpt.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"virt_to_phys: Invalid PDPT address\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("virt_to_phys: Invalid PDPT address");
             return 0;
         }
         let pdpt_entry = (*pdpt).entries[pdpt_index(vaddr)];
@@ -210,10 +200,7 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
 
         let pd = mm_phys_to_virt(pte_address(pdpt_entry)) as *mut PageTable;
         if pd.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"virt_to_phys: Invalid PD address\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("virt_to_phys: Invalid PD address");
             return 0;
         }
         let pd_entry = (*pd).entries[pd_index(vaddr)];
@@ -227,10 +214,7 @@ fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
 
         let pt = mm_phys_to_virt(pte_address(pd_entry)) as *mut PageTable;
         if pt.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"virt_to_phys: Invalid PT address\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("virt_to_phys: Invalid PT address");
             return 0;
         }
         let pt_entry = (*pt).entries[pt_index(vaddr)];
@@ -274,22 +258,12 @@ fn map_page_in_directory(
     page_size: u64,
 ) -> c_int {
     if page_dir.is_null() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_page: No page directory provided\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("map_page: No page directory provided");
         return -1;
     }
 
     if (vaddr & (page_size - 1)) != 0 || (paddr & (page_size - 1)) != 0 {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_page: Addresses not aligned to requested size\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("map_page: Addresses not aligned to requested size");
         return -1;
     }
 
@@ -312,19 +286,13 @@ fn map_page_in_directory(
         if !pte_present(pml4_entry) {
             pdpt = alloc_page_table(&mut pdpt_phys);
             if pdpt.is_null() {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: Failed to allocate PDPT\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: Failed to allocate PDPT");
                 return -1;
             }
             (*pml4).entries[pml4_idx] = pdpt_phys | inter_flags;
         } else {
             if pte_huge(pml4_entry) {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: PML4 entry is huge (unexpected)\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: PML4 entry is huge (unexpected)");
                 return -1;
             }
             pdpt_phys = pte_address(pml4_entry);
@@ -340,10 +308,7 @@ fn map_page_in_directory(
 
         if page_size == PAGE_SIZE_1GB {
             if pte_present(pdpt_entry) {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: PDPT entry already present for 1GB mapping\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: PDPT entry already present for 1GB mapping");
                 return -1;
             }
             (*pdpt).entries[pdpt_idx] = paddr | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
@@ -354,19 +319,13 @@ fn map_page_in_directory(
         if !pte_present(pdpt_entry) {
             pd = alloc_page_table(&mut pd_phys);
             if pd.is_null() {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: Failed to allocate PD\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: Failed to allocate PD");
                 return -1;
             }
             (*pdpt).entries[pdpt_idx] = pd_phys | inter_flags;
         } else {
             if pte_huge(pdpt_entry) {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: PDPT entry is a huge page\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: PDPT entry is a huge page");
                 return -1;
             }
             pd_phys = pte_address(pdpt_entry);
@@ -379,10 +338,7 @@ fn map_page_in_directory(
         let pd_entry = (*pd).entries[pd_idx];
         if page_size == PAGE_SIZE_2MB {
             if pte_present(pd_entry) {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: PD entry already present for 2MB mapping\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: PD entry already present for 2MB mapping");
                 return -1;
             }
             (*pd).entries[pd_idx] = paddr | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
@@ -395,10 +351,7 @@ fn map_page_in_directory(
             let mut pt_phys = 0;
             let pt = alloc_page_table(&mut pt_phys);
             if pt.is_null() {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_page: Failed to allocate PT\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("map_page: Failed to allocate PT");
                 return -1;
             }
             (*pd).entries[pd_idx] = pt_phys | inter_flags;
@@ -406,27 +359,18 @@ fn map_page_in_directory(
         }
 
         if pte_huge(pd_entry) {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_page: PD entry is a large page\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("map_page: PD entry is a large page");
             return -1;
         }
 
         let pt = mm_phys_to_virt(pte_address(pt_entry)) as *mut PageTable;
         if pt.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_page: Invalid PT pointer\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("map_page: Invalid PT pointer");
             return -1;
         }
 
         if (*pt).entries[pt_idx] & PAGE_PRESENT != 0 {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_page: Virtual address already mapped\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("map_page: Virtual address already mapped");
             return -1;
         }
 
@@ -486,12 +430,7 @@ pub extern "C" fn paging_map_shared_kernel_page(
 
 fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
     if page_dir.is_null() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"unmap_page: No page directory provided\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("unmap_page: No page directory provided");
         return -1;
     }
     unsafe {
@@ -598,21 +537,13 @@ pub extern "C" fn unmap_page(vaddr: u64) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
     if page_dir.is_null() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"switch_page_directory: Invalid page directory\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("switch_page_directory: Invalid page directory");
         return -1;
     }
     unsafe {
         set_cr3((*page_dir).pml4_phys);
         CURRENT_PAGE_DIR = page_dir;
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Switched to process page directory\n\0".as_ptr() as *const c_char,
-        );
+        klog_debug!("Switched to process page directory");
     }
     0
 }
@@ -727,29 +658,16 @@ pub extern "C" fn init_paging() {
             kernel_panic(b"Higher-half kernel mapping not found\0".as_ptr() as *const c_char);
         }
 
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Higher-half kernel mapping verified at 0x%llx\n\0".as_ptr() as *const c_char,
-            kernel_phys,
-        );
+        klog_debug!("Higher-half kernel mapping verified at 0x{:x}", kernel_phys);
 
         let identity_phys = virt_to_phys(0x100000);
         if identity_phys == 0x100000 || is_hhdm_available() != 0 {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Debug,
-                b"Identity mapping verified\n\0".as_ptr() as *const c_char,
-            );
+            klog_debug!("Identity mapping verified");
         } else {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Debug,
-                b"Identity mapping not found (may be normal after early boot)\n\0".as_ptr() as *const c_char,
-            );
+            klog_debug!("Identity mapping not found (may be normal after early boot)");
         }
 
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Paging system initialized successfully\n\0".as_ptr() as *const c_char,
-        );
+        klog_debug!("Paging system initialized successfully");
     }
 }
 

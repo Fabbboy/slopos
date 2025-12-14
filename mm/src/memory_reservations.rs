@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, CStr, c_void};
 use core::ptr;
+
+use slopos_lib::{klog, klog_info};
 
 const MM_REGION_STATIC_CAP: usize = 4096;
 const PAGE_SIZE_4KB: u64 = 0x1000;
@@ -58,7 +60,6 @@ type MmRegionIterCb = Option<extern "C" fn(region: *const MmRegion, ctx: *mut c_
 
 unsafe extern "C" {
     fn kernel_panic(msg: *const c_char) -> !;
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
 }
 
 struct RegionStore {
@@ -264,13 +265,7 @@ fn overlay_region(
     }
 
     if phys_base >= KERNEL_VIRTUAL_BASE || phys_base >= HHDM_VIRT_BASE {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"MM: rejecting virtual overlay base 0x%llx\n\0".as_ptr() as *const c_char,
-                phys_base,
-            );
-        }
+        klog_info!("MM: rejecting virtual overlay base 0x{:x}", phys_base);
         return -1;
     }
 
@@ -602,18 +597,12 @@ pub extern "C" fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
             b"-\0".as_ptr()
         };
 
-        unsafe {
-            klog_printf(
-                level,
-                b"[MM] %s: 0x%llx - 0x%llx (%llu KB) label=%s flags=0x%x\n\0".as_ptr()
-                    as *const c_char,
-                kind,
-                region.phys_base,
-                end,
-                region.length / 1024,
-                label_ptr,
-                region.flags,
-            );
-        }
+        let kind_str = unsafe { CStr::from_ptr(kind as *const c_char) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        let label_str = unsafe { CStr::from_ptr(label_ptr as *const c_char) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog!(level, "[MM] {}: 0x{:x} - 0x{:x} ({} KB) label={} flags=0x{:x}", kind_str, region.phys_base, end, region.length / 1024, label_str, region.flags);
     }
 }

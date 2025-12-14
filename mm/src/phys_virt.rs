@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, CStr, c_void};
 use core::ptr;
+
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::memory_reservations::{
     mm_reservations_find_option, MmRegion, MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
@@ -15,7 +17,6 @@ unsafe extern "C" {
     fn get_hhdm_offset() -> u64;
     fn is_hhdm_available() -> c_int;
     fn virt_to_phys(vaddr: u64) -> u64;
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char;
 }
 
@@ -45,27 +46,16 @@ pub extern "C" fn mm_phys_to_virt(phys_addr: u64) -> u64 {
         let allowed = region.flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT | MM_RESERVATION_FLAG_MMIO);
         if allowed == 0 {
             let type_name = unsafe { mm_reservation_type_name(region.type_) };
-            unsafe {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Debug,
-                    b"mm_phys_to_virt: rejected reserved phys 0x%llx (%s)\n\0".as_ptr()
-                        as *const c_char,
-                    phys_addr,
-                    type_name,
-                );
-            }
+            let type_name_str = unsafe { CStr::from_ptr(type_name) }
+                .to_str()
+                .unwrap_or("<invalid utf-8>");
+            klog_debug!("mm_phys_to_virt: rejected reserved phys 0x{:x} ({})", phys_addr, type_name_str);
             return 0;
         }
     }
 
     if !hhdm_available() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"mm_phys_to_virt: HHDM unavailable for 0x%llx\n\0".as_ptr() as *const c_char,
-                phys_addr,
-            );
-        }
+        klog_info!("mm_phys_to_virt: HHDM unavailable for 0x{:x}", phys_addr);
         return 0;
     }
 
@@ -78,15 +68,7 @@ pub extern "C" fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     }
 
     if phys_addr > u64::MAX - hhdm {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"mm_phys_to_virt: overflow translating phys 0x%llx with hhdm 0x%llx\n\0".as_ptr()
-                    as *const c_char,
-                phys_addr,
-                hhdm,
-            );
-        }
+        klog_info!("mm_phys_to_virt: overflow translating phys 0x{:x} with hhdm 0x{:x}", phys_addr, hhdm);
         return 0;
     }
 
@@ -126,23 +108,12 @@ pub extern "C" fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void
 
     let end_addr = phys_addr.wrapping_add(size as u64).wrapping_sub(1);
     if end_addr < phys_addr {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"MM: mm_map_mmio_region overflow detected\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("MM: mm_map_mmio_region overflow detected");
         return ptr::null_mut();
     }
 
     if !hhdm_available() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"MM: mm_map_mmio_region requires HHDM (unavailable)\n\0".as_ptr()
-                    as *const c_char,
-            );
-        }
+        klog_info!("MM: mm_map_mmio_region requires HHDM (unavailable)");
         return ptr::null_mut();
     }
 

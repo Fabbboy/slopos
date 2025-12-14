@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::ptr;
 
 use spin::Mutex;
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::mm_constants::{
@@ -19,7 +20,6 @@ use crate::phys_virt::mm_phys_to_virt;
 use slopos_lib::{align_down, align_up};
 
 unsafe extern "C" {
-    fn klog_printf(level: slopos_lib::klog::KlogLevel, fmt: *const c_char, ...) -> c_int;
     fn get_hhdm_offset() -> u64;
     static _user_text_start: u8;
     static _user_text_end: u8;
@@ -141,21 +141,11 @@ fn map_user_range(
     pages_mapped_out: *mut u32,
 ) -> c_int {
     if page_dir.is_null() {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_user_range: Missing page directory\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("map_user_range: Missing page directory");
         return -1;
     }
     if (start_addr & (PAGE_SIZE_4KB - 1)) != 0 || (end_addr & (PAGE_SIZE_4KB - 1)) != 0 || end_addr <= start_addr {
-        unsafe {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"map_user_range: Unaligned or invalid range\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("map_user_range: Unaligned or invalid range");
         return -1;
     }
 
@@ -165,12 +155,7 @@ fn map_user_range(
     while current < end_addr {
         let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
         if phys == 0 {
-            unsafe {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_user_range: Physical allocation failed\n\0".as_ptr() as *const c_char,
-                );
-            }
+            klog_info!("map_user_range: Physical allocation failed");
             rollback_range(page_dir, current, start_addr, &mut mapped);
             if !pages_mapped_out.is_null() {
                 unsafe { *pages_mapped_out = 0 };
@@ -178,12 +163,7 @@ fn map_user_range(
             return -1;
         }
         if map_page_4kb_in_dir(page_dir, current, phys, map_flags) != 0 {
-            unsafe {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"map_user_range: Virtual mapping failed\n\0".as_ptr() as *const c_char,
-                );
-            }
+            klog_info!("map_user_range: Virtual mapping failed");
             free_page_frame(phys);
             rollback_range(page_dir, current, start_addr, &mut mapped);
             if !pages_mapped_out.is_null() {
@@ -263,26 +243,17 @@ fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: u32)
         }
         let next = *link;
         if !prev.is_null() && vma_overlaps_range(prev, start, end) && (*prev).flags != flags {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"add_vma_to_process: Overlap with incompatible VMA\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("add_vma_to_process: Overlap with incompatible VMA");
             return -1;
         }
         if !next.is_null() && vma_overlaps_range(next, start, end) && (*next).flags != flags {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"add_vma_to_process: Overlap with incompatible next VMA\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("add_vma_to_process: Overlap with incompatible next VMA");
             return -1;
         }
 
         let mut vma = VmArea::new(start, end, flags);
         if vma.is_null() {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"add_vma_to_process: Failed to allocate VMA\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("add_vma_to_process: Failed to allocate VMA");
             return -1;
         }
 
@@ -643,7 +614,7 @@ pub extern "C" fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
     let mut manager = VM_MANAGER.lock();
     if manager.num_processes >= MAX_PROCESSES as u32 {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: Maximum processes reached\n\0".as_ptr() as *const c_char); }
+        klog_info!("create_process_vm: Maximum processes reached");
         return INVALID_PROCESS_ID;
     }
     let mut process_ptr: *mut ProcessVm = ptr::null_mut();
@@ -654,18 +625,18 @@ pub extern "C" fn create_process_vm() -> u32 {
         }
     }
     if process_ptr.is_null() {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: No free process slots available\n\0".as_ptr() as *const c_char); }
+        klog_info!("create_process_vm: No free process slots available");
         return INVALID_PROCESS_ID;
     }
 
     let pml4_phys = alloc_page_frame(0);
     if pml4_phys == 0 {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: Failed to allocate PML4\n\0".as_ptr() as *const c_char); }
+        klog_info!("create_process_vm: Failed to allocate PML4");
         return INVALID_PROCESS_ID;
     }
     let pml4 = mm_phys_to_virt(pml4_phys) as *mut PageTable;
     if pml4.is_null() {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: No HHDM/identity map available for PML4\n\0".as_ptr() as *const c_char); }
+        klog_info!("create_process_vm: No HHDM/identity map available for PML4");
         free_page_frame(pml4_phys);
         return INVALID_PROCESS_ID;
     }
@@ -678,7 +649,7 @@ pub extern "C" fn create_process_vm() -> u32 {
 
     let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
     if page_dir_ptr.is_null() {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"create_process_vm: Failed to allocate page directory\n\0".as_ptr() as *const c_char); }
+        klog_info!("create_process_vm: Failed to allocate page directory");
         free_page_frame(pml4_phys);
         return INVALID_PROCESS_ID;
     }
@@ -718,10 +689,7 @@ pub extern "C" fn create_process_vm() -> u32 {
             || add_vma_to_process(process_ptr, proc.data_start, proc.heap_start, PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32) != 0
             || add_vma_to_process(process_ptr, proc.stack_start, proc.stack_end, PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32) != 0
         {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"create_process_vm: Failed to seed initial VMAs\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_process_mappings(process_ptr);
             free_page_frame((*page_dir_ptr).pml4_phys);
             kfree(page_dir_ptr as *mut _);
@@ -740,10 +708,7 @@ pub extern "C" fn create_process_vm() -> u32 {
             &mut stack_pages,
         ) != 0
         {
-            klog_printf(
-                slopos_lib::klog::KlogLevel::Info,
-                b"create_process_vm: Failed to map process stack\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("create_process_vm: Failed to map process stack");
             teardown_process_mappings(process_ptr);
             free_page_frame((*page_dir_ptr).pml4_phys);
             kfree(page_dir_ptr as *mut _);
@@ -755,11 +720,7 @@ pub extern "C" fn create_process_vm() -> u32 {
 
         manager.process_list = process_ptr;
         manager.num_processes += 1;
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Created process VM space for PID %u\n\0".as_ptr() as *const c_char,
-            process_id,
-        );
+        klog_info!("Created process VM space for PID {}", process_id);
     }
     process_id
 }
@@ -774,11 +735,7 @@ pub extern "C" fn destroy_process_vm(process_id: u32) -> c_int {
         if (*process_ptr).process_id == INVALID_PROCESS_ID {
             return 0;
         }
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Info,
-            b"Destroying process VM space for PID %u\n\0".as_ptr() as *const c_char,
-            process_id,
-        );
+        klog_info!("Destroying process VM space for PID {}", process_id);
     }
 
     unsafe {
@@ -835,7 +792,7 @@ pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u6
     let start_addr = process.heap_end;
     let end_addr = start_addr + size_aligned;
     if end_addr > layout.heap_max {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"process_vm_alloc: Heap overflow\n\0".as_ptr() as *const c_char); }
+        klog_info!("process_vm_alloc: Heap overflow");
         return 0;
     }
 
@@ -854,7 +811,7 @@ pub extern "C" fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u6
     }
 
     if add_vma_to_process(process_ptr, start_addr, end_addr, protection_flags | PAGE_USER as u32) != 0 {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"process_vm_alloc: Failed to record VMA\n\0".as_ptr() as *const c_char); }
+        klog_info!("process_vm_alloc: Failed to record VMA");
         unmap_user_range(process.page_dir, start_addr, end_addr);
         process.heap_end = start_addr;
         return 0;
@@ -876,13 +833,13 @@ pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_i
     let start = vaddr & !(PAGE_SIZE_4KB - 1);
     let end = (vaddr + size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
     if !vma_range_valid(start, end) {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"process_vm_free: Invalid or unaligned range\n\0".as_ptr() as *const c_char); }
+        klog_info!("process_vm_free: Invalid or unaligned range");
         return -1;
     }
 
     let vma = find_vma_covering(process_ptr, start, end);
     if vma.is_null() {
-        unsafe { klog_printf(slopos_lib::klog::KlogLevel::Info, b"process_vm_free: Range not covered by a VMA\n\0".as_ptr() as *const c_char); }
+        klog_info!("process_vm_free: Range not covered by a VMA");
         return -1;
     }
 
@@ -900,10 +857,7 @@ pub extern "C" fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_i
             let right_end = (*vma).end_addr;
             (*vma).end_addr = start;
             if add_vma_to_process(process_ptr, right_start, right_end, (*vma).flags) != 0 {
-                klog_printf(
-                    slopos_lib::klog::KlogLevel::Info,
-                    b"process_vm_free: Failed to create right split VMA\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("process_vm_free: Failed to create right split VMA");
                 return -1;
             }
         }
@@ -930,12 +884,8 @@ pub extern "C" fn init_process_vm() -> c_int {
     for i in 0..MAX_PROCESSES {
         manager.processes[i] = ProcessVm::empty();
     }
-    unsafe {
-        klog_printf(
-            slopos_lib::klog::KlogLevel::Debug,
-            b"Process VM manager initialized\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_debug!("Process VM manager initialized");
+
     0
 }
 
