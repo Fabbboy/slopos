@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use core::sync::OnceLock;
 use slopos_lib::tsc;
 use spin::Mutex;
 
@@ -32,11 +31,13 @@ impl Lfsr64 {
     }
 }
 
-static RNG: OnceLock<Mutex<Lfsr64>> = OnceLock::new();
+static RNG: Mutex<Option<Lfsr64>> = Mutex::new(None);
 
 pub fn random_next() -> u64 {
-    let rng = RNG.get_or_init(|| Mutex::new(Lfsr64::from_tsc()));
-    let mut guard = rng.lock();
-    guard.next()
+    let mut rng = RNG.lock();
+    if rng.is_none() {
+        *rng = Some(Lfsr64::from_tsc());
+    }
+    rng.as_mut().unwrap().next()
 }
 
