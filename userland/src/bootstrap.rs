@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use core::ffi::c_char;
+use core::ffi::{c_char, CStr};
 use core::ptr;
 
 use slopos_boot::early_init::{boot_init_priority, BootInitStep};
 use slopos_drivers::wl_currency;
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::klog_info;
 use slopos_sched::{
     schedule_task, task_get_info, task_terminate, Task, TaskEntry, INVALID_TASK_ID,
 };
@@ -34,38 +34,41 @@ fn is_win(res: &FateResult) -> bool {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn log_info(msg: &[u8]) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            msg.as_ptr() as *const c_char,
-        );
-    }
+fn log_info(msg: &str) {
+    klog_info!("{msg}");
 }
 
 #[unsafe(link_section = ".user_text")]
-fn log_info_name(msg: &[u8], name: *const c_char) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            msg.as_ptr() as *const c_char,
-            name,
-        );
-    }
+fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
+    let task_name = unsafe {
+        if name.is_null() {
+            "<null>"
+        } else {
+            CStr::from_ptr(name)
+                .to_str()
+                .unwrap_or("<invalid utf-8>")
+        }
+    };
+
+    f(task_name);
 }
 
 #[unsafe(link_section = ".user_text")]
 fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i32 {
     let task_id = user_spawn_program(name.as_ptr() as *const c_char, entry, ptr::null_mut(), priority);
     if task_id == INVALID_TASK_ID {
-        log_info_name(b"USERLAND: Failed to create task '%s'\n\0", name.as_ptr() as *const c_char);
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!("USERLAND: Failed to create task '{}'\n", task_name);
+        });
         wl_currency::award_loss();
         return -1;
     }
 
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
-        log_info_name(b"USERLAND: Failed to fetch task info for '%s'\n\0", name.as_ptr() as *const c_char);
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!("USERLAND: Failed to fetch task info for '{}'\n", task_name);
+        });
         wl_currency::award_loss();
         return -1;
     }
@@ -75,7 +78,9 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     const ROULETTE_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../builddir/roulette_payload.elf"));
     let pid = unsafe { (*task_info).process_id };
     if unsafe { process_vm_load_elf(pid, ROULETTE_ELF.as_ptr(), ROULETTE_ELF.len(), &mut new_entry) } != 0 || new_entry == 0 {
-        log_info_name(b"USERLAND: Failed to load roulette payload ELF for '%s'\n\0", name.as_ptr() as *const c_char);
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!("USERLAND: Failed to load roulette payload ELF for '{}'\n", task_name);
+        });
         wl_currency::award_loss();
         task_terminate(task_id);
         return -1;
@@ -87,7 +92,9 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     }
 
     if schedule_task(task_info) != 0 {
-        log_info_name(b"USERLAND: Failed to schedule task '%s'\n\0", name.as_ptr() as *const c_char);
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!("USERLAND: Failed to schedule task '{}'\n", task_name);
+        });
         wl_currency::award_loss();
         task_terminate(task_id);
         return -1;
@@ -108,7 +115,7 @@ fn userland_launch_shell_once() -> i32 {
         }
     }
     if userland_spawn_and_schedule(b"shell\0", shell_user_main, 5) != 0 {
-        log_info(b"USERLAND: Shell failed to start after roulette win\n\0");
+        log_info("USERLAND: Shell failed to start after roulette win\n");
         return -1;
     }
     unsafe {
@@ -127,7 +134,7 @@ extern "C" fn userland_fate_hook(res: *const FateResult) {
         return;
     }
     if userland_launch_shell_once() != 0 {
-        log_info(b"USERLAND: Shell bootstrap hook failed\n\0");
+        log_info("USERLAND: Shell bootstrap hook failed\n");
     }
 }
 
