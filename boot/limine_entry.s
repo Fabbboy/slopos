@@ -4,6 +4,20 @@
 
 .code64
 .intel_syntax noprefix
+
+.equ COM1_BASE, 0x3F8
+.equ COM1_IER, COM1_BASE + 1
+.equ COM1_FCR, COM1_BASE + 2
+.equ COM1_LCR, COM1_BASE + 3
+.equ COM1_MCR, COM1_BASE + 4
+.equ COM1_DLL, COM1_BASE + 0
+.equ COM1_DLH, COM1_BASE + 1
+
+.equ SERIAL_MARKER_L, 'L'
+.equ SERIAL_MARKER_S, 'S'
+
+.equ KERNEL_STACK_SIZE, 65536
+
 .section .text
 .global _start
 
@@ -27,11 +41,11 @@ _start:
 
     # Initialize COM1 properly and then emit markers
     call early_serial_init
-    mov dx, 0x3F8          # COM1 port
-    mov al, 0x4C           # 'L' after init
+    mov dx, COM1_BASE
+    mov al, SERIAL_MARKER_L
     out dx, al
-    mov dx, 0x3F8          # COM1 port
-    mov al, 0x53           # 'S'
+    mov dx, COM1_BASE
+    mov al, SERIAL_MARKER_S
     out dx, al
 
     # Enable SSE/FXSR so Rust-generated memcpy instructions don't #UD
@@ -77,36 +91,36 @@ early_serial_init:
     push rdx
 
     # Disable interrupts on COM1
-    mov dx, 0x3F9          # COM1 + 1 (IER)
+    mov dx, COM1_IER
     xor al, al
     out dx, al
 
     # Enable DLAB (Divisor Latch Access Bit)
-    mov dx, 0x3FB          # COM1 + 3 (LCR)
+    mov dx, COM1_LCR
     mov al, 0x80
     out dx, al
 
     # Set divisor to 1 (115200 baud)
-    mov dx, 0x3F8          # COM1 + 0 (DLL)
+    mov dx, COM1_DLL
     mov al, 0x01
     out dx, al
 
-    mov dx, 0x3F9          # COM1 + 1 (DLH)
+    mov dx, COM1_DLH
     xor al, al
     out dx, al
 
     # 8 bits, no parity, one stop bit (8N1)
-    mov dx, 0x3FB          # COM1 + 3 (LCR)
+    mov dx, COM1_LCR
     mov al, 0x03
     out dx, al
 
     # Enable FIFO, clear TX/RX queues, 14-byte threshold
-    mov dx, 0x3FA          # COM1 + 2 (FCR)
+    mov dx, COM1_FCR
     mov al, 0xC7
     out dx, al
 
     # Mark data terminal ready, request to send, auxiliary output 2
-    mov dx, 0x3FC          # COM1 + 4 (MCR)
+    mov dx, COM1_MCR
     mov al, 0x0B
     out dx, al
 
@@ -122,6 +136,6 @@ early_serial_init:
 .align 16
 .global kernel_stack_bottom
 kernel_stack_bottom:
-    .skip 65536             # 64KB stack
+    .skip KERNEL_STACK_SIZE             # 64KB stack
 .global kernel_stack_top
 kernel_stack_top:
