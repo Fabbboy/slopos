@@ -30,8 +30,7 @@ non_camel_case_types = "deny"
 
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }
-limine = { version = "0.2.0", default-features = false }
-linked-list-allocator = { version = "0.10", default-features = false }
+limine = { version = "0.5.0", default-features = false }
 slopos-boot = { path = "boot" }
 slopos-drivers = { path = "drivers" }
 slopos-fs = { path = "fs" }
@@ -41,6 +40,6 @@ slopos-sched = { path = "sched" }
 slopos-tests = { path = "tests" }
 slopos-userland = { path = "userland" }
 slopos-video = { path = "video" }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
-uart_16550 = { version = "0.2", default-features = false }
-x86_64 = { version = "0.14", default-features = false, features = ["instructions"] }
+spin = { version = "0.10.0", default-features = false, features = ["mutex", "spin_mutex"] }
+uart_16550 = { version = "0.4.0", default-features = false }
+x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
