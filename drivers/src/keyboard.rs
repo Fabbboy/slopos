@@ -96,7 +96,7 @@ const SCANCODE_SHIFTED: [u8; 0x80] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x78-0x7F
 ];
 
-#[inline]
+#[inline(always)]
 unsafe fn kb_buffer_push_overwrite(buf: *mut KeyboardBuffer, byte: u8) {
     let buf = unsafe { &mut *buf };
     if buf.count >= KEYBOARD_BUFFER_SIZE as u32 {
@@ -108,7 +108,7 @@ unsafe fn kb_buffer_push_overwrite(buf: *mut KeyboardBuffer, byte: u8) {
     buf.count = buf.count.saturating_add(1);
 }
 
-#[inline]
+#[inline(always)]
 unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
     let buf = unsafe { &mut *buf };
     let mut out = None;
@@ -123,7 +123,7 @@ unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
     out
 }
 
-#[inline]
+#[inline(always)]
 unsafe fn kb_buffer_has_data(buf: *const KeyboardBuffer) -> bool {
     let buf = unsafe { &*buf };
     cpu::disable_interrupts();
@@ -132,22 +132,22 @@ unsafe fn kb_buffer_has_data(buf: *const KeyboardBuffer) -> bool {
     has_data
 }
 
-#[inline]
+#[inline(always)]
 fn is_break_code(scancode: u8) -> bool {
     scancode & 0x80 != 0
 }
 
-#[inline]
+#[inline(always)]
 fn get_make_code(scancode: u8) -> u8 {
     scancode & 0x7F
 }
 
-#[inline]
+#[inline(always)]
 fn shift_pressed() -> bool {
     unsafe { KB_STATE.shift_left || KB_STATE.shift_right }
 }
 
-#[inline]
+#[inline(always)]
 fn caps_lock_enabled() -> bool {
     unsafe { KB_STATE.caps_lock }
 }
