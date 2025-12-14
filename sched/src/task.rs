@@ -6,7 +6,8 @@ use core::ptr;
 
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::klog::{klog_is_enabled, klog_printf, KlogLevel};
+use slopos_lib::klog::{klog_is_enabled, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
 
@@ -316,10 +317,7 @@ fn release_task_dependents(completed_task_id: u32) {
         dependent.waiting_on_task_id = INVALID_TASK_ID;
         unsafe {
             if scheduler::unblock_task(dependent as *mut Task) != 0 {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_terminate: Failed to unblock dependent task\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("task_terminate: Failed to unblock dependent task");
             }
         }
     }
@@ -449,12 +447,7 @@ pub extern "C" fn task_create(
     mut flags: u16,
 ) -> u32 {
     if entry_point as usize == 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_create: Invalid entry point\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_create: Invalid entry point");
         return INVALID_TASK_ID;
     }
 
@@ -463,35 +456,20 @@ pub extern "C" fn task_create(
     }
 
     if flags & TASK_FLAG_KERNEL_MODE != 0 && flags & TASK_FLAG_USER_MODE != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_create: Conflicting mode flags\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_create: Conflicting mode flags");
         return INVALID_TASK_ID;
     }
 
     let mgr = task_manager_mut();
 
     if mgr.num_tasks >= MAX_TASKS as u32 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_create: Maximum tasks reached\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_create: Maximum tasks reached");
         return INVALID_TASK_ID;
     }
 
     let task = find_free_task_slot();
     if task.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_create: No free task slots\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_create: No free task slots");
         return INVALID_TASK_ID;
     }
 
@@ -506,10 +484,7 @@ pub extern "C" fn task_create(
         if flags & TASK_FLAG_KERNEL_MODE != 0 {
             let stack = kmalloc(TASK_STACK_SIZE as usize);
             if stack.is_null() {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_create: Failed to allocate kernel stack\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("task_create: Failed to allocate kernel stack");
                 return INVALID_TASK_ID;
             }
             stack_base = stack as u64;
@@ -518,10 +493,7 @@ pub extern "C" fn task_create(
         } else {
             process_id = create_process_vm();
             if process_id == INVALID_PROCESS_ID {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_create: Failed to create process VM\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("task_create: Failed to create process VM");
                 return INVALID_TASK_ID;
             }
 
@@ -532,20 +504,14 @@ pub extern "C" fn task_create(
             );
 
             if stack_base == 0 {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_create: Failed to allocate stack\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("task_create: Failed to allocate stack");
                 destroy_process_vm(process_id);
                 return INVALID_TASK_ID;
             }
 
             let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
             if kstack.is_null() {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_create: Failed to allocate kernel RSP0 stack\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("task_create: Failed to allocate kernel RSP0 stack");
                 destroy_process_vm(process_id);
                 return INVALID_TASK_ID;
             }
@@ -579,12 +545,7 @@ pub extern "C" fn task_create(
     // Align for System V ABI expectations (rsp is 16-byte aligned before CALL, 8-byte inside).
     task_ref.stack_pointer = stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_create: user entry outside user_text window\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_create: user entry outside user_text window");
         if process_id != INVALID_PROCESS_ID {
             unsafe {
                 fileio_destroy_table_for_process(process_id);
@@ -649,12 +610,9 @@ pub extern "C" fn task_create(
     mgr.tasks_created = mgr.tasks_created.saturating_add(1);
 
     unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"Created task '%s' with ID %u\n\0".as_ptr() as *const c_char,
-            task_ref.name.as_ptr(),
-            task_id,
-        );
+        use core::ffi::CStr;
+        let name_str = CStr::from_ptr(task_ref.name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
+        klog_debug!("Created task '{}' with ID {}", name_str, task_id);
     }
 
     task_id
@@ -668,12 +626,7 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
     if task_id == u32::MAX {
         task_ptr = scheduler::scheduler_get_current_task();
         if task_ptr.is_null() {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"task_terminate: No current task to terminate\n\0".as_ptr() as *const c_char,
-                );
-            }
+            klog_info!("task_terminate: No current task to terminate");
             return -1;
         }
         resolved_id = unsafe { (*task_ptr).task_id };
@@ -682,22 +635,14 @@ pub extern "C" fn task_terminate(task_id: u32) -> c_int {
     }
 
     if task_ptr.is_null() || unsafe { (*task_ptr).state } == TASK_STATE_INVALID {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_terminate: Task not found\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("task_terminate: Task not found");
         return -1;
     }
 
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Terminating task '%s' (ID %u)\n\0".as_ptr() as *const c_char,
-            (*task_ptr).name.as_ptr(),
-            resolved_id,
-        );
+        use core::ffi::CStr;
+        let name_str = CStr::from_ptr((*task_ptr).name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
+        klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
     }
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
@@ -836,27 +781,13 @@ pub extern "C" fn task_set_state(task_id: u32, new_state: u8) -> c_int {
 
     let old_state = unsafe { (*task).state };
     if !task_state_transition_allowed(old_state, new_state) {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_set_state: invalid transition for task %u\n\0".as_ptr() as *const c_char,
-                task_id,
-            );
-        }
+        klog_info!("task_set_state: invalid transition for task {}", task_id);
     }
 
     unsafe { (*task).state = new_state };
 
     if unsafe { klog_is_enabled(KlogLevel::Debug) } != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"Task %u state: %u -> %u\n\0".as_ptr() as *const c_char,
-                task_id,
-                old_state as c_uint,
-                new_state as c_uint,
-            );
-        }
+        klog_debug!("Task {} state: {} -> {}", task_id, old_state as c_uint, new_state as c_uint);
     }
 
     0
@@ -964,10 +895,7 @@ pub extern "C" fn task_set_current(task: *mut Task) {
     }
     unsafe {
         if (*task).state != TASK_STATE_READY && (*task).state != TASK_STATE_RUNNING {
-            klog_printf(
-                KlogLevel::Info,
-                b"task_set_current: unexpected state transition\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("task_set_current: unexpected state transition");
         }
         (*task).state = TASK_STATE_RUNNING;
     }

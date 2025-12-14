@@ -5,7 +5,7 @@ use core::ptr;
 
 use slopos_drivers::wl_currency;
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::klog::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::task::{
     task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running, task_is_terminated,
@@ -252,12 +252,7 @@ pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
     let sched = scheduler_mut();
     if !task_is_ready(task) {
         unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"schedule_task: task %u not ready (state %u)\n\0".as_ptr() as *const i8,
-                (*task).task_id,
-                task_get_state(task) as u32,
-            );
+            klog_info!("schedule_task: task {} not ready (state {})", (*task).task_id, task_get_state(task) as u32);
         }
         return -1;
     }
@@ -265,23 +260,12 @@ pub extern "C" fn schedule_task(task: *mut Task) -> c_int {
         scheduler_reset_task_quantum(task);
     }
     if ready_queue_enqueue(&mut sched.ready_queue, task) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"schedule_task: ready queue full, request rejected\n\0".as_ptr() as *const i8,
-            );
-        }
+        klog_info!("schedule_task: ready queue full, request rejected");
         wl_currency::award_loss();
         return -1;
     }
     unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"schedule_task: enqueued task %u (flags=0x%x) ready_count=%u\n\0".as_ptr() as *const i8,
-            (*task).task_id,
-            (*task).flags as u32,
-            sched.ready_queue.count,
-        );
+        klog_debug!("schedule_task: enqueued task {} (flags=0x{:x}) ready_count={}", (*task).task_id, (*task).flags as u32, sched.ready_queue.count);
     }
     0
 }
@@ -327,13 +311,7 @@ fn switch_to_task(new_task: *mut Task) {
     sched.total_switches += 1;
 
     unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"switch_to_task: now running task %u (flags=0x%x pid=%u)\n\0".as_ptr() as *const i8,
-            (*new_task).task_id,
-            (*new_task).flags as u32,
-            (*new_task).process_id,
-        );
+        klog_debug!("switch_to_task: now running task {} (flags=0x{:x} pid={})", (*new_task).task_id, (*new_task).flags as u32, (*new_task).process_id);
     }
 
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
@@ -392,19 +370,9 @@ pub extern "C" fn schedule() {
     if !current.is_null() && current != sched.idle_task {
         if task_is_running(current) {
             if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
-                unsafe {
-                    klog_printf(
-                        KlogLevel::Info,
-                        b"schedule: failed to mark task ready\n\0".as_ptr() as *const i8,
-                    );
-                }
+                klog_info!("schedule: failed to mark task ready");
             } else if ready_queue_enqueue(&mut sched.ready_queue, current) != 0 {
-                unsafe {
-                    klog_printf(
-                        KlogLevel::Info,
-                        b"schedule: ready queue full when re-queuing task\n\0".as_ptr() as *const i8,
-                    );
-                }
+                klog_info!("schedule: ready queue full when re-queuing task");
                 task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
                 scheduler_reset_task_quantum(current);
                 sched.in_schedule = sched.in_schedule.saturating_sub(1);
@@ -414,11 +382,7 @@ pub extern "C" fn schedule() {
             }
         } else if !task_is_blocked(current) && !task_is_terminated(current) {
             unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"schedule: skipping requeue for task %u\n\0".as_ptr() as *const i8,
-                    (*current).task_id,
-                );
+                klog_info!("schedule: skipping requeue for task {}", (*current).task_id);
             }
         }
     }
@@ -467,12 +431,7 @@ pub extern "C" fn block_current_task() {
         return;
     }
     if task_set_state(unsafe { (*current).task_id }, TASK_STATE_BLOCKED) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"block_current_task: invalid state transition\n\0".as_ptr() as *const i8,
-            );
-        }
+        klog_info!("block_current_task: invalid state transition");
     }
     unschedule_task(current);
     schedule();
@@ -507,11 +466,7 @@ pub extern "C" fn unblock_task(task: *mut Task) -> c_int {
     }
     if task_set_state(unsafe { (*task).task_id }, TASK_STATE_READY) != 0 {
         unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"unblock_task: invalid state transition for task %u\n\0".as_ptr() as *const i8,
-                (*task).task_id,
-            );
+            klog_info!("unblock_task: invalid state transition for task {}", (*task).task_id);
         }
     }
     schedule_task(task)
@@ -522,12 +477,7 @@ pub extern "C" fn scheduler_task_exit() -> ! {
     let sched = scheduler_mut();
     let current = sched.current_task;
     if current.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"scheduler_task_exit: No current task\n\0".as_ptr() as *const i8,
-            );
-        }
+        klog_info!("scheduler_task_exit: No current task");
         schedule();
         loop {
             unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
@@ -539,10 +489,7 @@ pub extern "C" fn scheduler_task_exit() -> ! {
 
     unsafe {
         if crate::task::task_terminate(u32::MAX) != 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"scheduler_task_exit: Failed to terminate current task\n\0".as_ptr() as *const i8,
-            );
+            klog_info!("scheduler_task_exit: Failed to terminate current task");
         }
     }
 
@@ -550,12 +497,7 @@ pub extern "C" fn scheduler_task_exit() -> ! {
     task_set_current(ptr::null_mut());
     schedule();
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"scheduler_task_exit: Schedule returned unexpectedly\n\0".as_ptr() as *const i8,
-        );
-    }
+    klog_info!("scheduler_task_exit: Schedule returned unexpectedly");
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
@@ -639,12 +581,7 @@ pub extern "C" fn start_scheduler() -> c_int {
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
 
     unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"start_scheduler: ready_count=%u idle_task=%p\n\0".as_ptr() as *const i8,
-            sched.ready_queue.count,
-            sched.idle_task,
-        );
+        klog_debug!("start_scheduler: ready_count={} idle_task={:p}", sched.ready_queue.count, sched.idle_task);
     }
 
     if !ready_queue_empty(&sched.ready_queue) {

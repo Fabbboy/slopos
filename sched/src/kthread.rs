@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void, CStr};
 
-use slopos_lib::klog::{klog_printf, KlogLevel};
+use slopos_lib::{klog_info};
 
 use crate::scheduler;
 use crate::scheduler::task_wait_for;
@@ -28,12 +28,7 @@ pub extern "C" fn kthread_spawn_ex(
     flags: u16,
 ) -> KthreadId {
     if name.is_null() || entry_point.is_none() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"kthread_spawn_ex: invalid parameters\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("kthread_spawn_ex: invalid parameters");
         return INVALID_TASK_ID;
     }
 
@@ -41,13 +36,8 @@ pub extern "C" fn kthread_spawn_ex(
     let id = unsafe { task_create(name, entry_point.unwrap(), arg, priority, combined_flags) };
 
     if id == INVALID_TASK_ID {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"kthread_spawn_ex: failed to create thread '%s'\n\0".as_ptr() as *const c_char,
-                name,
-            );
-        }
+        let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>") };
+        klog_info!("kthread_spawn_ex: failed to create thread '{}'", name_str);
     }
 
     id

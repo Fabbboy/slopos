@@ -3,7 +3,8 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_lib::klog::{klog_printf, KlogLevel};
+use core::ffi::CStr;
+use slopos_lib::{klog_info};
 
 use crate::scheduler;
 use crate::task::{
@@ -44,40 +45,19 @@ pub extern "C" fn test_task_a(arg: *mut c_void) {
     let _ = arg;
     let mut counter: u32 = 0;
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Task A starting execution\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Task A starting execution");
 
     while counter < 20 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Task A: iteration %u\n\0".as_ptr() as *const c_char,
-                counter,
-            );
-        }
+        klog_info!("Task A: iteration {}", counter);
         counter = counter.wrapping_add(1);
 
         if counter % 3 == 0 {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"Task A: yielding CPU\n\0".as_ptr() as *const c_char,
-                );
-            }
+            klog_info!("Task A: yielding CPU");
             scheduler::r#yield();
         }
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Task A completed\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Task A completed");
 }
 
 #[unsafe(no_mangle)]
@@ -87,24 +67,14 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
     let mut current_char: u8 = b'A';
     let mut iterations: u32 = 0;
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Task B starting execution\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Task B starting execution");
 
     while iterations < 15 {
+        klog_info!("Task B: printing character '{}' ({}) (", current_char as char, current_char as c_int);
         unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Task B: printing character '%c' (%u) (\0".as_ptr() as *const c_char,
-                current_char as c_int,
-                current_char as c_int,
-            );
             serial_putc_com1(current_char);
-            klog_printf(KlogLevel::Info, b")\n\0".as_ptr() as *const c_char);
         }
+        klog_info!(")");
 
         current_char = current_char.wrapping_add(1);
         if current_char > b'Z' {
@@ -113,22 +83,12 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
 
         iterations = iterations.wrapping_add(1);
         if iterations % 2 == 0 {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"Task B: yielding CPU\n\0".as_ptr() as *const c_char,
-                );
-            }
+            klog_info!("Task B: yielding CPU");
             scheduler::r#yield();
         }
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Task B completed\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Task B completed");
 }
 
 /* ========================================================================
@@ -137,49 +97,24 @@ pub extern "C" fn test_task_b(arg: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn run_scheduler_test() -> c_int {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== Starting SlopOS Cooperative Scheduler Test ===\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("=== Starting SlopOS Cooperative Scheduler Test ===");
 
     if unsafe { crate::task::init_task_manager() } != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to initialize task manager\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to initialize task manager");
         return -1;
     }
 
     if scheduler::init_scheduler() != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to initialize scheduler\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to initialize scheduler");
         return -1;
     }
 
     if scheduler::create_idle_task() != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to create idle task\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to create idle task");
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Creating test tasks...\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Creating test tasks...");
 
     let task_a_id = unsafe {
         task_create(
@@ -192,22 +127,11 @@ pub extern "C" fn run_scheduler_test() -> c_int {
     };
 
     if task_a_id == INVALID_TASK_ID {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to create test task A\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to create test task A");
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Created Task A with ID %u\n\0".as_ptr() as *const c_char,
-            task_a_id,
-        );
-    }
+    klog_info!("Created Task A with ID {}", task_a_id);
 
     let task_b_id = unsafe {
         task_create(
@@ -220,53 +144,27 @@ pub extern "C" fn run_scheduler_test() -> c_int {
     };
 
     if task_b_id == INVALID_TASK_ID {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to create test task B\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to create test task B");
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Created Task B with ID %u\n\0".as_ptr() as *const c_char,
-            task_b_id,
-        );
-    }
+    klog_info!("Created Task B with ID {}", task_b_id);
 
     let mut task_a_info: *mut Task = ptr::null_mut();
     let mut task_b_info: *mut Task = ptr::null_mut();
 
     if task_get_info(task_a_id, &mut task_a_info) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to get task A info\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to get task A info");
         return -1;
     }
 
     if task_get_info(task_b_id, &mut task_b_info) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to get task B info\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to get task B info");
         return -1;
     }
 
     if scheduler::schedule_task(task_a_info) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to schedule task A\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to schedule task A");
         unsafe {
             crate::task::task_terminate(task_a_id);
             crate::task::task_terminate(task_b_id);
@@ -275,12 +173,7 @@ pub extern "C" fn run_scheduler_test() -> c_int {
     }
 
     if scheduler::schedule_task(task_b_info) != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to schedule task B\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to schedule task B");
         unsafe {
             crate::task::task_terminate(task_a_id);
             crate::task::task_terminate(task_b_id);
@@ -288,29 +181,14 @@ pub extern "C" fn run_scheduler_test() -> c_int {
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Tasks scheduled, starting scheduler...\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Tasks scheduled, starting scheduler...");
 
     if scheduler::start_scheduler() != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to start scheduler\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to start scheduler");
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Scheduler started successfully\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Scheduler started successfully");
 
     0
 }
@@ -335,23 +213,13 @@ extern "C" fn user_stub_task(arg: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PRIVSEP_TEST: Checking privilege separation invariants\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
     if unsafe { crate::task::init_task_manager() } != 0
         || scheduler::init_scheduler() != 0
         || scheduler::create_idle_task() != 0
     {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: init failed\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("PRIVSEP_TEST: init failed");
         return -1;
     }
 
@@ -365,23 +233,13 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
         )
     };
     if user_task_id == INVALID_TASK_ID {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: user task creation failed\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("PRIVSEP_TEST: user task creation failed");
         return -1;
     }
 
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(user_task_id, &mut task_info) != 0 || task_info.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: task lookup failed\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("PRIVSEP_TEST: task lookup failed");
         return -1;
     }
 
@@ -389,27 +247,17 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
 
     unsafe {
         if (*task_info).process_id == INVALID_PROCESS_ID {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: user task missing process VM\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("PRIVSEP_TEST: user task missing process VM");
             failed = 1;
         }
         if (*task_info).kernel_stack_top == 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: user task missing kernel RSP0 stack\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("PRIVSEP_TEST: user task missing kernel RSP0 stack");
             failed = 1;
         }
-        if (*task_info).context.cs != GDT_USER_CODE_SELECTOR || (*task_info).context.ss != GDT_USER_DATA_SELECTOR {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: user task selectors incorrect (cs=0x%lx ss=0x%lx)\n\0".as_ptr()
-                    as *const c_char,
-                (*task_info).context.cs,
-                (*task_info).context.ss,
-            );
+        let cs = (*task_info).context.cs;
+        let ss = (*task_info).context.ss;
+        if cs != GDT_USER_CODE_SELECTOR || ss != GDT_USER_DATA_SELECTOR {
+            klog_info!("PRIVSEP_TEST: user task selectors incorrect (cs=0x{:x} ss=0x{:x})", cs, ss);
             failed = 1;
         }
     }
@@ -425,23 +273,12 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
     };
 
     if unsafe { idt_get_gate(SYSCALL_VECTOR, &mut gate) } != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: cannot read syscall gate\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("PRIVSEP_TEST: cannot read syscall gate");
         failed = 1;
     } else {
         let dpl = (gate.type_attr >> 5) & 0x3;
         if dpl != 3 {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"PRIVSEP_TEST: syscall gate DPL=%u expected 3\n\0".as_ptr() as *const c_char,
-                    dpl as u32,
-                );
-            }
+            klog_info!("PRIVSEP_TEST: syscall gate DPL={} expected 3", dpl as u32);
             failed = 1;
         }
     }
@@ -452,21 +289,11 @@ pub extern "C" fn run_privilege_separation_invariant_test() -> c_int {
     }
 
     if failed != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PRIVSEP_TEST: FAILED\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("PRIVSEP_TEST: FAILED");
         return -1;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PRIVSEP_TEST: PASSED\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("PRIVSEP_TEST: PASSED");
     0
 }
 
@@ -511,12 +338,12 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     };
 
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"%s: Starting (initial RSP=0x%lx)\n\0".as_ptr() as *const c_char,
-            name,
-            stack_base,
-        );
+        let name_str = if name.is_null() {
+            "<null>"
+        } else {
+            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
+        };
+        klog_info!("{}: Starting (initial RSP=0x{:x})", name_str, stack_base);
     }
 
     let mut iteration: u32 = 0;
@@ -538,12 +365,12 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         let stack_growth = ctx_ref.initial_stack_top.saturating_sub(ctx_ref.min_stack_pointer);
         if stack_growth > 0x1000 {
             unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"%s: ERROR - Stack growth exceeds 4KB: 0x%lx bytes\n\0".as_ptr() as *const c_char,
-                    name,
-                    stack_growth,
-                );
+                let name_str = if name.is_null() {
+                    "<null>"
+                } else {
+                    CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
+                };
+                klog_info!("{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes", name_str, stack_growth);
             }
             ctx_ref.test_failed = 1;
             break;
@@ -552,14 +379,12 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         iteration = iteration.wrapping_add(1);
         if iteration % 50 == 0 {
             unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"%s: Iteration %u (yields: %u, RSP=0x%lx)\n\0".as_ptr() as *const c_char,
-                    name,
-                    iteration,
-                    ctx_ref.yield_count,
-                    current_rsp,
-                );
+                let name_str = if name.is_null() {
+                    "<null>"
+                } else {
+                    CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
+                };
+                klog_info!("{}: Iteration {} (yields: {}, RSP=0x{:x})", name_str, iteration, ctx_ref.yield_count, current_rsp);
             }
         }
 
@@ -568,32 +393,17 @@ pub extern "C" fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     }
 
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"%s: Completed %u yields\n\0".as_ptr() as *const c_char,
-            name,
-            ctx_ref.yield_count,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"%s: Stack range: min=0x%lx max=0x%lx growth=0x%lx bytes\n\0".as_ptr() as *const c_char,
-            name,
-            ctx_ref.min_stack_pointer,
-            ctx_ref.max_stack_pointer,
-            ctx_ref.initial_stack_top.saturating_sub(ctx_ref.min_stack_pointer),
-        );
-        if ctx_ref.test_failed != 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"%s: FAILED - Stack corruption detected\n\0".as_ptr() as *const c_char,
-                name,
-            );
+        let name_str = if name.is_null() {
+            "<null>"
         } else {
-            klog_printf(
-                KlogLevel::Info,
-                b"%s: PASSED - No stack corruption\n\0".as_ptr() as *const c_char,
-                name,
-            );
+            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
+        };
+        klog_info!("{}: Completed {} yields", name_str, ctx_ref.yield_count);
+        klog_info!("{}: Stack range: min=0x{:x} max=0x{:x} growth=0x{:x} bytes", name_str, ctx_ref.min_stack_pointer, ctx_ref.max_stack_pointer, ctx_ref.initial_stack_top.saturating_sub(ctx_ref.min_stack_pointer));
+        if ctx_ref.test_failed != 0 {
+            klog_info!("{}: FAILED - Stack corruption detected", name_str);
+        } else {
+            klog_info!("{}: PASSED - No stack corruption", name_str);
         }
     }
 }
@@ -620,16 +430,8 @@ pub extern "C" fn smoke_test_task_b(arg: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn run_context_switch_smoke_test() -> c_int {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== Context Switch Stack Discipline Smoke Test ===\n\0".as_ptr() as *const c_char,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Testing basic context switch functionality\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("=== Context Switch Stack Discipline Smoke Test ===");
+    klog_info!("Testing basic context switch functionality");
 
     static mut TEST_COMPLETED: c_int = 0;
     unsafe {
@@ -657,22 +459,12 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
 
     let stack = unsafe { kmalloc(4096) as *mut u64 };
     if stack.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"Failed to allocate stack for test task\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("Failed to allocate stack for test task");
         return -1;
     }
     test_ctx.rsp = unsafe { stack.add(1024) } as u64;
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Switching to test context...\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Switching to test context...");
 
     let mut current_rsp: u64 = 0;
     unsafe {
@@ -700,12 +492,7 @@ pub extern "C" fn run_context_switch_smoke_test() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Test task function executed successfully\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Test task function executed successfully");
     if !completed_flag.is_null() {
         unsafe {
             *completed_flag = 1;
@@ -722,12 +509,7 @@ pub extern "C" fn test_task_function(completed_flag: *mut c_int) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn context_switch_return_trampoline() -> c_int {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Context switch returned successfully\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Context switch returned successfully");
 
     let completed = unsafe {
         if TEST_COMPLETED_PTR.is_null() {
@@ -738,20 +520,10 @@ pub extern "C" fn context_switch_return_trampoline() -> c_int {
     };
 
     if completed != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"CONTEXT_SWITCH_TEST: Basic switch test PASSED\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("CONTEXT_SWITCH_TEST: Basic switch test PASSED");
         0
     } else {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"CONTEXT_SWITCH_TEST: Basic switch test FAILED\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("CONTEXT_SWITCH_TEST: Basic switch test FAILED");
         -1
     }
 }
@@ -769,19 +541,10 @@ extern "C" fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     let ctx = unsafe { &mut *(context as *mut TaskStatPrintCtx) };
     ctx.index = ctx.index.wrapping_add(1);
 
-    let name = unsafe { (*task).name.as_ptr() };
-    let state_str = task_state_to_string(unsafe { (*task).state });
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"  #%u '%s' (ID %u) [%s] runtime=%llu ticks yields=%llu\n\0".as_ptr() as *const c_char,
-            ctx.index,
-            name,
-            (*task).task_id,
-            state_str,
-            (*task).total_runtime as u64,
-            (*task).yield_count as u64,
-        );
+        let name_str = CStr::from_ptr((*task).name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
+        let state_str = CStr::from_ptr(task_state_to_string((*task).state)).to_str().unwrap_or("<invalid>");
+        klog_info!("  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}", ctx.index, name_str, (*task).task_id, state_str, (*task).total_runtime as u64, (*task).yield_count as u64);
     }
 }
 
@@ -816,60 +579,21 @@ pub extern "C" fn print_scheduler_stats() {
         get_task_stats(&mut total_tasks, &mut active_tasks, &mut task_switches);
     }
 
-    unsafe {
-        klog_printf(KlogLevel::Info, b"\n=== Scheduler Statistics ===\n\0".as_ptr() as *const c_char);
-        klog_printf(
-            KlogLevel::Info,
-            b"Context switches: %llu\n\0".as_ptr() as *const c_char,
-            sched_switches,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Voluntary yields: %llu\n\0".as_ptr() as *const c_char,
-            sched_yields,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Schedule calls: %u\n\0".as_ptr() as *const c_char,
-            schedule_calls,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Ready tasks: %u\n\0".as_ptr() as *const c_char,
-            ready_tasks,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Total tasks created: %u\n\0".as_ptr() as *const c_char,
-            total_tasks,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Active tasks: %u\n\0".as_ptr() as *const c_char,
-            active_tasks,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Task yields (aggregate): %llu\n\0".as_ptr() as *const c_char,
-            task_yields,
-        );
-
-        klog_printf(
-            KlogLevel::Info,
-            b"Active task metrics:\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("\n=== Scheduler Statistics ===");
+    klog_info!("Context switches: {}", sched_switches);
+    klog_info!("Voluntary yields: {}", sched_yields);
+    klog_info!("Schedule calls: {}", schedule_calls);
+    klog_info!("Ready tasks: {}", ready_tasks);
+    klog_info!("Total tasks created: {}", total_tasks);
+    klog_info!("Active tasks: {}", active_tasks);
+    klog_info!("Task yields (aggregate): {}", task_yields);
+    klog_info!("Active task metrics:");
 
     let mut ctx = TaskStatPrintCtx { index: 0 };
     let callback: TaskIterateCb = Some(print_task_stat_line);
     task_iterate_active(callback, &mut ctx as *mut _ as *mut c_void);
     if ctx.index == 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"  (no active tasks)\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("  (no active tasks)");
     }
 }
 
