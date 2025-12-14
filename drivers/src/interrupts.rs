@@ -7,6 +7,9 @@ const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
 const DEFAULT_TIMEOUT_MS: u32 = 500;
 const DEFAULT_SHUTDOWN: bool = false;
 
+#[cfg(feature = "qemu-exit")]
+const QEMU_DEBUG_EXIT_PORT: u16 = 0xf4;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Suite {
     All,
@@ -148,7 +151,7 @@ pub fn run(config: &InterruptTestConfig) -> bool {
 fn qemu_exit(success: bool) -> ! {
     let code: u8 = if success { 0 } else { 1 };
     unsafe {
-        io::outb(0xf4, code);
+        io::outb(QEMU_DEBUG_EXIT_PORT, code);
     }
     cpu::halt_loop();
 }
