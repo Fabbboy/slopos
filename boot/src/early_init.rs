@@ -35,6 +35,7 @@ pub enum BootInitPhase {
 pub struct BootInitStep {
     name: *const c_char,
     func: Option<extern "C" fn() -> i32>,
+    func_unit: Option<extern "C" fn() -> ()>,
     flags: u32,
 }
 
@@ -45,6 +46,16 @@ impl BootInitStep {
         Self {
             name: label.as_ptr() as *const c_char,
             func: Some(func),
+            func_unit: None,
+            flags,
+        }
+    }
+
+    pub const fn new_unit(label: &'static [u8], func: extern "C" fn() -> (), flags: u32) -> Self {
+        Self {
+            name: label.as_ptr() as *const c_char,
+            func: None,
+            func_unit: Some(func),
             flags,
         }
     }
@@ -65,6 +76,16 @@ macro_rules! boot_init_step {
 }
 
 #[macro_export]
+macro_rules! boot_init_step_unit {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
+        #[used]
+        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
+        static $static_name: $crate::early_init::BootInitStep =
+            $crate::early_init::BootInitStep::new_unit($label, $func, 0);
+    };
+}
+
+#[macro_export]
 macro_rules! boot_init_step_with_flags {
     ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
         #[used]
@@ -75,9 +96,32 @@ macro_rules! boot_init_step_with_flags {
 }
 
 #[macro_export]
+macro_rules! boot_init_step_with_flags_unit {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident, $flags:expr) => {
+        #[used]
+        #[unsafe(link_section = concat!(".boot_init_", stringify!($phase)))]
+        static $static_name: $crate::early_init::BootInitStep =
+            $crate::early_init::BootInitStep::new_unit($label, $func, $flags);
+    };
+}
+
+#[macro_export]
 macro_rules! boot_init_optional_step {
     ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
         $crate::boot_init_step_with_flags!(
+            $static_name,
+            $phase,
+            $label,
+            $func,
+            $crate::early_init::BOOT_INIT_FLAG_OPTIONAL
+        );
+    };
+}
+
+#[macro_export]
+macro_rules! boot_init_optional_step_unit {
+    ($static_name:ident, $phase:ident, $label:expr, $func:ident) => {
+        $crate::boot_init_step_with_flags_unit!(
             $static_name,
             $phase,
             $label,
@@ -202,10 +246,6 @@ fn phase_bounds(phase: BootInitPhase) -> (*const BootInitStep, *const BootInitSt
 }
 
 fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
-    let Some(func) = step.func else {
-        return 0;
-    };
-
     serial::write_line("BOOT: running init step");
     boot_init_report_step(
         KlogLevel::Debug,
@@ -217,7 +257,15 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
         ),
     );
 
-    let rc = func();
+    let rc = if let Some(func) = step.func {
+        func()
+    } else if let Some(func_unit) = step.func_unit {
+        func_unit();
+        0 // Unit return is always success
+    } else {
+        return 0;
+    };
+
     if rc != 0 {
         let optional = (step.flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
         boot_init_report_failure(
@@ -361,7 +409,7 @@ unsafe extern "C" {
     fn start_scheduler() -> i32;
 }
 
-extern "C" fn boot_step_serial_init_fn() -> i32 {
+extern "C" fn boot_step_serial_init_fn() {
     serial::write_line("BOOT: serial step -> init");
     serial::init();
     serial::write_line("BOOT: serial step -> after serial::init");
@@ -371,13 +419,11 @@ extern "C" fn boot_step_serial_init_fn() -> i32 {
 
     slopos_drivers::serial::write_line("SERIAL: init ok");
     boot_debug(b"Serial console ready on COM1\0");
-    0
 }
 
-extern "C" fn boot_step_boot_banner_fn() -> i32 {
+extern "C" fn boot_step_boot_banner_fn() {
     boot_info(b"SlopOS Kernel Started!\0");
     boot_info(b"Booting via Limine Protocol...\0");
-    0
 }
 
 extern "C" fn boot_step_limine_protocol_fn() -> i32 {
@@ -409,7 +455,7 @@ extern "C" fn boot_step_limine_protocol_fn() -> i32 {
     0
 }
 
-extern "C" fn boot_step_boot_config_fn() -> i32 {
+extern "C" fn boot_step_boot_config_fn() {
     let cmdline = boot_state().ctx.cmdline.unwrap_or_default();
     let enable_debug = cmdline.contains("boot.debug=on")
         || cmdline.contains("boot.debug=1")
@@ -427,24 +473,22 @@ extern "C" fn boot_step_boot_config_fn() -> i32 {
         klog_set_level(KlogLevel::Info);
         boot_debug(b"Boot option: debug logging disabled\0");
     }
-
-    0
 }
 
-boot_init_step!(
+crate::boot_init_step_unit!(
     BOOT_STEP_SERIAL_INIT,
     early_hw,
     b"serial\0",
     boot_step_serial_init_fn
 );
-boot_init_step!(
+crate::boot_init_step_unit!(
     BOOT_STEP_BOOT_BANNER,
     early_hw,
     b"boot banner\0",
     boot_step_boot_banner_fn
 );
 boot_init_step!(BOOT_STEP_LIMINE, early_hw, b"limine\0", boot_step_limine_protocol_fn);
-boot_init_step!(
+crate::boot_init_step_unit!(
     BOOT_STEP_BOOT_CONFIG,
     early_hw,
     b"boot config\0",

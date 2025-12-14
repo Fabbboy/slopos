@@ -8,7 +8,6 @@ use slopos_tests::{
     tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
 };
 
-use crate::boot_init_step_with_flags;
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::kernel_panic::kernel_panic;
 use crate::limine_protocol;
@@ -91,19 +90,17 @@ fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
-extern "C" fn boot_step_debug_subsystem_fn() -> i32 {
+extern "C" fn boot_step_debug_subsystem_fn() {
     klog_debug!("Debug/logging subsystem initialized.");
-    0
 }
 
-extern "C" fn boot_step_gdt_setup_fn() -> i32 {
+extern "C" fn boot_step_gdt_setup_fn() {
     klog_debug!("Initializing GDT/TSS...");
     unsafe { gdt_init() };
     klog_debug!("GDT/TSS initialized.");
-    0
 }
 
-extern "C" fn boot_step_idt_setup_fn() -> i32 {
+extern "C" fn boot_step_idt_setup_fn() {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
     unsafe {
@@ -113,10 +110,9 @@ extern "C" fn boot_step_idt_setup_fn() -> i32 {
     }
     serial_note("boot: idt setup done");
     klog_debug!("IDT initialized and loaded.");
-    0
 }
 
-extern "C" fn boot_step_irq_setup_fn() -> i32 {
+extern "C" fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     unsafe { irq_init() };
     let rc = unsafe { serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) };
@@ -126,10 +122,9 @@ extern "C" fn boot_step_irq_setup_fn() -> i32 {
         klog_debug!("COM1 serial interrupts armed.");
     }
     klog_debug!("IRQ dispatcher ready.");
-    0
 }
 
-extern "C" fn boot_step_timer_setup_fn() -> i32 {
+extern "C" fn boot_step_timer_setup_fn() {
     klog_debug!("Initializing programmable interval timer...");
     unsafe { pit_init(PIT_DEFAULT_FREQUENCY_HZ) };
     klog_debug!("Programmable interval timer configured.");
@@ -153,11 +148,9 @@ extern "C" fn boot_step_timer_setup_fn() -> i32 {
     }
     let fb = limine_protocol::boot_info().framebuffer;
     video::init(fb);
-
-    0
 }
 
-extern "C" fn boot_step_apic_setup_fn() -> i32 {
+extern "C" fn boot_step_apic_setup_fn() {
     klog_debug!("Detecting Local APIC...");
     if unsafe { apic_detect() } == 0 {
         kernel_panic(
@@ -173,10 +166,9 @@ extern "C" fn boot_step_apic_setup_fn() -> i32 {
     unsafe { pic_quiesce_disable() };
 
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
-    0
 }
 
-extern "C" fn boot_step_ioapic_setup_fn() -> i32 {
+extern "C" fn boot_step_ioapic_setup_fn() {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
     if unsafe { ioapic_init() } != 0 {
         kernel_panic(
@@ -185,10 +177,9 @@ extern "C" fn boot_step_ioapic_setup_fn() -> i32 {
         );
     }
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
-    0
 }
 
-extern "C" fn boot_step_pci_init_fn() -> i32 {
+extern "C" fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     unsafe {
         virtio_gpu_register_driver();
@@ -221,7 +212,6 @@ extern "C" fn boot_step_pci_init_fn() -> i32 {
     } else {
         klog_info!("WARNING: PCI initialization failed");
     }
-    0
 }
 
 extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
@@ -315,63 +305,63 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     rc
 }
 
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_DEBUG_SUBSYSTEM,
     drivers,
     b"debug\0",
     boot_step_debug_subsystem_fn,
     boot_init_priority(10)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_GDT_SETUP,
     drivers,
     b"gdt/tss\0",
     boot_step_gdt_setup_fn,
     boot_init_priority(20)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_IDT_SETUP,
     drivers,
     b"idt\0",
     boot_step_idt_setup_fn,
     boot_init_priority(30)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_APIC_SETUP,
     drivers,
     b"apic\0",
     boot_step_apic_setup_fn,
     boot_init_priority(40)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_IOAPIC_SETUP,
     drivers,
     b"ioapic\0",
     boot_step_ioapic_setup_fn,
     boot_init_priority(50)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_IRQ_SETUP,
     drivers,
     b"irq dispatcher\0",
     boot_step_irq_setup_fn,
     boot_init_priority(60)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_TIMER_SETUP,
     drivers,
     b"timer\0",
     boot_step_timer_setup_fn,
     boot_init_priority(70)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_PCI_INIT,
     drivers,
     b"pci\0",
     boot_step_pci_init_fn,
     boot_init_priority(80)
 );
-boot_init_step_with_flags!(
+crate::boot_init_step_with_flags!(
     BOOT_STEP_INTERRUPT_TESTS,
     drivers,
     b"interrupt tests\0",

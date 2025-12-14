@@ -3,7 +3,7 @@ use core::ffi::c_char;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::boot_init_step;
+use crate::{boot_init_step, boot_init_step_unit};
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 use crate::limine_protocol::LimineMemmapResponse;
 
@@ -33,7 +33,7 @@ extern "C" fn boot_step_memory_init() -> i32 {
     0
 }
 
-extern "C" fn boot_step_memory_verify() -> i32 {
+extern "C" fn boot_step_memory_verify() {
     let stack_ptr: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) stack_ptr, options(nomem, preserves_flags));
@@ -52,8 +52,6 @@ extern "C" fn boot_step_memory_verify() -> i32 {
             klog_info!("WARNING: Not running in higher-half virtual memory");
         }
     }
-
-    0
 }
 
 boot_init_step!(
@@ -62,7 +60,7 @@ boot_init_step!(
     b"memory init\0",
     boot_step_memory_init
 );
-boot_init_step!(
+crate::boot_init_step_unit!(
     BOOT_STEP_MEMORY_VERIFY,
     memory,
     b"address verification\0",
