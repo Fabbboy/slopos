@@ -3,10 +3,10 @@
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
-use core::ffi::c_int;
+use core::ffi::{c_char, c_int, CStr};
 use core::ptr;
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
 
@@ -152,6 +152,15 @@ static mut PRIMARY_GPU: pci_gpu_info_t = pci_gpu_info_t::zeroed();
 static mut PCI_REGISTERED_DRIVERS: [*const pci_driver_t; PCI_DRIVER_MAX] = [ptr::null(); PCI_DRIVER_MAX];
 static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
 
+fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
+    if ptr.is_null() {
+        return "<null>";
+    }
+    unsafe { CStr::from_ptr(ptr as *const c_char) }
+        .to_str()
+        .unwrap_or("<invalid utf-8>")
+}
+
 #[inline(always)]
 unsafe fn outl(port: u16, value: u32) {
     unsafe {
@@ -282,71 +291,57 @@ fn pci_probe_bar_size(bus: u8, device: u8, function: u8, offset: u8, original_va
 }
 
 fn pci_log_device_header(info: &pci_device_info_t) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PCI: [Bus %u Dev %u Func %u] VID=0x%04x DID=0x%04x Class=0x%02x:%02x ProgIF=0x%02x Rev=0x%02x\n\0".as_ptr() as *const i8,
-            info.bus as u32,
-            info.device as u32,
-            info.function as u32,
-            info.vendor_id as u32,
-            info.device_id as u32,
-            info.class_code as u32,
-            info.subclass as u32,
-            info.prog_if as u32,
-            info.revision as u32,
-        );
-    }
+    klog_info!(
+        "PCI: [Bus {} Dev {} Func {}] VID=0x{:04x} DID=0x{:04x} Class=0x{:02x}:{:02x} ProgIF=0x{:02x} Rev=0x{:02x}",
+        info.bus,
+        info.device,
+        info.function,
+        info.vendor_id,
+        info.device_id,
+        info.class_code,
+        info.subclass,
+        info.prog_if,
+        info.revision
+    );
 }
 
 fn pci_log_bar(bar: &pci_bar_info_t, index: u8) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"    BAR%u: ".as_ptr() as *const i8,
-            index as u32,
-        );
-        if bar.is_io != 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"IO base=0x%lx".as_ptr() as *const i8,
+    if bar.is_io != 0 {
+        if bar.size != 0 {
+            klog_info!(
+                "    BAR{}: IO base=0x{:x} size={}",
+                index,
                 bar.base,
+                bar.size
             );
-            if bar.size != 0 {
-                klog_printf(
-                    KlogLevel::Info,
-                    b" size=%lu".as_ptr() as *const i8,
-                    bar.size,
-                );
-            }
         } else {
-            klog_printf(
-                KlogLevel::Info,
-                b"MMIO base=0x%lx".as_ptr() as *const i8,
-                bar.base,
-            );
-            if bar.size != 0 {
-                klog_printf(
-                    KlogLevel::Info,
-                    b" size=0x%lx".as_ptr() as *const i8,
-                    bar.size,
-                );
-            }
-            klog_printf(
-                KlogLevel::Info,
-                if bar.prefetchable != 0 {
-                    b" prefetch\0".as_ptr() as *const i8
-                } else {
-                    b" non-prefetch\0".as_ptr() as *const i8
-                },
-            );
-            if bar.is_64bit != 0 {
-                klog_printf(KlogLevel::Info, b" 64bit\0".as_ptr() as *const i8);
-            } else {
-                klog_printf(KlogLevel::Info, b" 32bit\0".as_ptr() as *const i8);
-            }
+            klog_info!("    BAR{}: IO base=0x{:x}", index, bar.base);
         }
-        klog_printf(KlogLevel::Info, b"\n\0".as_ptr() as *const i8);
+    } else {
+        let prefetch = if bar.prefetchable != 0 {
+            "prefetch"
+        } else {
+            "non-prefetch"
+        };
+        let width = if bar.is_64bit != 0 { "64bit" } else { "32bit" };
+        if bar.size != 0 {
+            klog_info!(
+                "    BAR{}: MMIO base=0x{:x} size=0x{:x} {} {}",
+                index,
+                bar.base,
+                bar.size,
+                prefetch,
+                width
+            );
+        } else {
+            klog_info!(
+                "    BAR{}: MMIO base=0x{:x} {} {}",
+                index,
+                bar.base,
+                prefetch,
+                width
+            );
+        }
     }
 }
 
@@ -384,37 +379,30 @@ fn pci_consider_gpu_candidate(info: &pci_device_info_t) {
                     as *mut u8;
         }
 
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: Selected %s GPU candidate at MMIO phys=0x%lx size=0x%lx\0".as_ptr()
-                    as *const i8,
-                if virtio_candidate { b"virtio\0".as_ptr() } else { b"display-class\0".as_ptr() },
+        let gpu_kind = if virtio_candidate { "virtio" } else { "display-class" };
+        let virt = unsafe { PRIMARY_GPU.mmio_virt_base };
+        let size = unsafe { PRIMARY_GPU.mmio_size };
+        if !virt.is_null() {
+            klog_info!(
+                "PCI: Selected {} GPU candidate at MMIO phys=0x{:x} size=0x{:x} virt=0x{:x}",
+                gpu_kind,
                 bar.base,
-                if bar.size != 0 { bar.size } else { 0x1000 },
+                size,
+                virt as u64
             );
-            if !PRIMARY_GPU.mmio_virt_base.is_null() {
-                klog_printf(
-                    KlogLevel::Info,
-                    b" virt=0x%lx\n\0".as_ptr() as *const i8,
-                    PRIMARY_GPU.mmio_virt_base as u64,
-                );
-                wl_currency::award_win();
-            } else {
-                klog_printf(KlogLevel::Info, b" (mapping failed)\n\0".as_ptr() as *const i8);
-                wl_currency::award_loss();
-            }
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: GPU acceleration groundwork ready (MMIO mapped)\n\0".as_ptr() as *const i8,
+            wl_currency::award_win();
+        } else {
+            klog_info!(
+                "PCI: Selected {} GPU candidate at MMIO phys=0x{:x} size=0x{:x} (mapping failed)",
+                gpu_kind,
+                bar.base,
+                size
             );
-            if PRIMARY_GPU.mmio_virt_base.is_null() {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"PCI: WARNING GPU MMIO not accessible; check paging support\n\0".as_ptr()
-                        as *const i8,
-                );
-            }
+            wl_currency::award_loss();
+        }
+        klog_info!("PCI: GPU acceleration groundwork ready (MMIO mapped)");
+        if unsafe { PRIMARY_GPU.mmio_virt_base.is_null() } {
+            klog_info!("PCI: WARNING GPU MMIO not accessible; check paging support");
         }
         return;
     }
@@ -500,14 +488,12 @@ fn pci_notify_drivers(info: &pci_device_info_t) {
 
             if let Some(probe) = driver.probe {
                 if probe(info, driver.context) != 0 {
-                    klog_printf(
-                        KlogLevel::Debug,
-                        b"PCI: Driver %s probe failed for bus %u dev %u func %u\n\0".as_ptr()
-                            as *const i8,
-                        driver.name,
-                        info.bus as u32,
-                        info.device as u32,
-                        info.function as u32,
+                    klog_debug!(
+                        "PCI: Driver {} probe failed for bus {} dev {} func {}",
+                        cstr_or_placeholder(driver.name),
+                        info.bus,
+                        info.device,
+                        info.function
                     );
                 }
             }
@@ -533,10 +519,8 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
     unsafe {
         if DEVICE_COUNT >= PCI_MAX_DEVICES {
             if DEVICE_COUNT == PCI_MAX_DEVICES {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"PCI: Device buffer full, additional devices will not be tracked\n\0"
-                        .as_ptr() as *const i8,
+                klog_info!(
+                    "PCI: Device buffer full, additional devices will not be tracked"
                 );
             }
             return;
@@ -574,11 +558,7 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
         let secondary_bus = pci_config_read8(bus, device, function, 0x19);
         unsafe {
             if secondary_bus != 0 && BUS_VISITED[secondary_bus as usize] == 0 {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"PCI: Traversing to secondary bus %u\n\0".as_ptr() as *const i8,
-                    secondary_bus as u32,
-                );
+                klog_info!("PCI: Traversing to secondary bus {}", secondary_bus);
                 BUS_VISITED[secondary_bus as usize] = 1;
                 for dev in 0..32u8 {
                     let sec_vendor =
@@ -644,10 +624,6 @@ pub extern "C" fn pci_init() -> c_int {
     }
 
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PCI: Initializing PCI subsystem\n\0".as_ptr() as *const i8,
-        );
         DEVICE_COUNT = 0;
         PRIMARY_GPU.present = 0;
         PRIMARY_GPU.mmio_phys_base = 0;
@@ -657,20 +633,17 @@ pub extern "C" fn pci_init() -> c_int {
             *b = 0;
         }
     }
+    klog_info!("PCI: Initializing PCI subsystem");
 
     pci_enumerate_bus(0);
 
     unsafe {
         if PRIMARY_GPU.present == 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: No GPU-class device detected on primary bus\n\0".as_ptr() as *const i8,
-            );
+            klog_info!("PCI: No GPU-class device detected on primary bus");
         }
-        klog_printf(
-            KlogLevel::Info,
-            b"PCI: Enumeration complete. Devices discovered: %zu\n\0".as_ptr() as *const i8,
-            DEVICE_COUNT,
+        klog_info!(
+            "PCI: Enumeration complete. Devices discovered: {}",
+            DEVICE_COUNT
         );
         PCI_INITIALIZED = 1;
     }
@@ -717,29 +690,20 @@ pub extern "C" fn pci_get_registered_driver(index: usize) -> *const pci_driver_t
 #[unsafe(no_mangle)]
 pub extern "C" fn pci_register_driver(driver: *const pci_driver_t) -> c_int {
     if driver.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: Attempted to register invalid driver\n\0".as_ptr() as *const i8,
-            );
-        }
+        klog_info!("PCI: Attempted to register invalid driver");
         return -1;
     }
 
     unsafe {
         if PCI_REGISTERED_DRIVER_COUNT >= PCI_DRIVER_MAX {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: Driver registration queue is full\n\0".as_ptr() as *const i8,
-            );
+            klog_info!("PCI: Driver registration queue is full");
             return -1;
         }
         PCI_REGISTERED_DRIVERS[PCI_REGISTERED_DRIVER_COUNT] = driver;
         PCI_REGISTERED_DRIVER_COUNT += 1;
-        klog_printf(
-            KlogLevel::Debug,
-            b"PCI: Registered driver %s\n\0".as_ptr() as *const i8,
-            (*driver).name,
+        klog_debug!(
+            "PCI: Registered driver {}",
+            cstr_or_placeholder((*driver).name)
         );
     }
     0

@@ -1,8 +1,8 @@
 use core::arch::asm;
-use core::ffi::c_char;
+use core::ffi::{c_char, CStr};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{cpu, io, klog_printf, KlogLevel};
+use slopos_lib::{cpu, io, klog_info};
 
 static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
@@ -43,12 +43,7 @@ pub extern "C" fn kernel_quiesce_interrupts() {
         return;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Kernel shutdown: quiescing interrupt controllers\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Kernel shutdown: quiescing interrupt controllers");
 
     unsafe {
         if apic_is_available() != 0 {
@@ -64,12 +59,7 @@ pub extern "C" fn kernel_drain_serial_output() {
     if SERIAL_DRAINED.swap(true, Ordering::SeqCst) {
         return;
     }
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Kernel shutdown: draining serial output\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Kernel shutdown: draining serial output");
     serial_flush();
 }
 
@@ -83,18 +73,12 @@ pub extern "C" fn kernel_shutdown(reason: *const c_char) {
         halt();
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== Kernel Shutdown Requested ===\n\0".as_ptr() as *const c_char,
-        );
-        if !reason.is_null() {
-            klog_printf(
-                KlogLevel::Info,
-                b"Reason: %s\n\0".as_ptr() as *const c_char,
-                reason,
-            );
-        }
+    klog_info!("=== Kernel Shutdown Requested ===");
+    if !reason.is_null() {
+        let reason_str = unsafe { CStr::from_ptr(reason) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_info!("Reason: {}", reason_str);
     }
 
     unsafe {
@@ -103,10 +87,7 @@ pub extern "C" fn kernel_shutdown(reason: *const c_char) {
 
     unsafe {
         if task_shutdown_all() != 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"Warning: Failed to terminate one or more tasks\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("Warning: Failed to terminate one or more tasks");
         }
         task_set_current(core::ptr::null_mut());
     }
@@ -114,12 +95,7 @@ pub extern "C" fn kernel_shutdown(reason: *const c_char) {
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Kernel shutdown complete. Halting processors.\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Kernel shutdown complete. Halting processors.");
 
     halt();
 }
@@ -134,40 +110,24 @@ fn halt() -> ! {
 pub extern "C" fn kernel_reboot(reason: *const c_char) {
     cpu::disable_interrupts();
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== Kernel Reboot Requested ===\n\0".as_ptr() as *const c_char,
-        );
-        if !reason.is_null() {
-            klog_printf(
-                KlogLevel::Info,
-                b"Reason: %s\n\0".as_ptr() as *const c_char,
-                reason,
-            );
-        }
+    klog_info!("=== Kernel Reboot Requested ===");
+    if !reason.is_null() {
+        let reason_str = unsafe { CStr::from_ptr(reason) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_info!("Reason: {}", reason_str);
     }
 
     kernel_drain_serial_output();
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Rebooting via keyboard controller...\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Rebooting via keyboard controller...");
 
     unsafe {
         pit_poll_delay_ms(50);
         io::outb(0x64, 0xFE);
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"Keyboard reset failed, attempting triple fault...\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("Keyboard reset failed, attempting triple fault...");
 
     #[repr(C, packed)]
     struct InvalidIdt {
@@ -186,20 +146,10 @@ pub extern "C" fn kernel_reboot(reason: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn execute_kernel() {
+    klog_info!("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
+    klog_info!("Painting memory with the essence of slop (0x69)...");
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== EXECUTING KERNEL PURIFICATION RITUAL ===\n\0".as_ptr() as *const c_char,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Painting memory with the essence of slop (0x69)...\n\0".as_ptr() as *const c_char,
-        );
         page_allocator_paint_all(0x69);
-        klog_printf(
-            KlogLevel::Info,
-            b"Memory purification complete. The slop has been painted eternal.\n\0".as_ptr()
-                as *const c_char,
-        );
     }
+    klog_info!("Memory purification complete. The slop has been painted eternal.");
 }

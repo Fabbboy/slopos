@@ -1,7 +1,7 @@
-use core::ffi::c_char;
+use core::ffi::{c_char, CStr};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::gdt::gdt_set_ist;
 use crate::idt::idt_set_ist;
@@ -115,12 +115,11 @@ unsafe extern "C" {
     fn map_page_4kb(virt: u64, phys: u64, flags: u64) -> i32;
 }
 
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-fn log_debug(msg: &[u8]) {
-    log(KlogLevel::Debug, msg);
+fn bytes_to_str(bytes: &[u8]) -> &str {
+    CStr::from_bytes_with_nul(bytes)
+        .ok()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("<invalid>")
 }
 
 fn find_stack_index_by_vector(vector: u8) -> Option<usize> {
@@ -160,7 +159,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn safe_stack_init() {
-    log_debug(b"SAFE STACK: Initializing dedicated IST stacks\0");
+    klog_debug!("SAFE STACK: Initializing dedicated IST stacks");
 
     for (i, stack) in STACK_CONFIGS.iter().enumerate() {
         STACK_METRICS[i].reset();
@@ -170,19 +169,16 @@ pub extern "C" fn safe_stack_init() {
         gdt_set_ist(stack.ist_index, stack.stack_top);
         idt_set_ist(stack.vector, stack.ist_index);
 
-        unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"SAFE STACK: Vector %u uses IST%u @ 0x%llx - 0x%llx\n\0".as_ptr() as *const c_char,
-                stack.vector as u32,
-                stack.ist_index as u32,
-                stack.stack_base,
-                stack.stack_top,
-            );
-        }
+        klog_debug!(
+            "SAFE STACK: Vector {} uses IST{} @ 0x{:x} - 0x{:x}",
+            stack.vector,
+            stack.ist_index,
+            stack.stack_base,
+            stack.stack_top
+        );
     }
 
-    log_debug(b"SAFE STACK: IST stacks ready\0");
+    klog_debug!("SAFE STACK: IST stacks ready");
 }
 
 #[unsafe(no_mangle)]
@@ -195,38 +191,27 @@ pub extern "C" fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
 
     if frame_ptr < stack.stack_base || frame_ptr > stack.stack_top {
         if metrics.mark_out_of_bounds_once() {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"SAFE STACK WARNING: RSP outside managed stack for vector %u\n\0".as_ptr()
-                        as *const c_char,
-                    vector as u32,
-                );
-            }
+            klog_info!(
+                "SAFE STACK WARNING: RSP outside managed stack for vector {}",
+                vector
+            );
         }
         return;
     }
 
     let usage = stack.stack_top - frame_ptr;
     if metrics.record_usage(usage) {
-        unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"SAFE STACK: New peak usage on %s stack: %llu bytes\n\0".as_ptr() as *const c_char,
-                stack.name.as_ptr() as *const c_char,
-                usage,
-            );
-        }
+        klog_debug!(
+            "SAFE STACK: New peak usage on {} stack: {} bytes",
+            bytes_to_str(stack.name),
+            usage
+        );
 
         if usage > stack.stack_size - PAGE_SIZE_4KB {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"SAFE STACK WARNING: %s stack within one page of guard\n\0".as_ptr()
-                        as *const c_char,
-                    stack.name.as_ptr() as *const c_char,
-                );
-            }
+            klog_info!(
+                "SAFE STACK WARNING: {} stack within one page of guard",
+                bytes_to_str(stack.name)
+            );
         }
     }
 }

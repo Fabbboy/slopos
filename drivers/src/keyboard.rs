@@ -1,8 +1,6 @@
 #![allow(dead_code)]
 
-use core::ffi::c_char;
-
-use slopos_lib::{cpu, klog_printf, KlogLevel};
+use slopos_lib::{cpu, klog_debug};
 
 unsafe extern "C" {
     fn scheduler_request_reschedule_from_interrupt();
@@ -217,25 +215,16 @@ pub extern "C" fn keyboard_init() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"[KBD] Scancode: 0x%02x\n\0".as_ptr() as *const c_char,
-            scancode as u32,
-        );
-    }
+    klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
     let is_press = !is_break_code(scancode);
     let make_code = get_make_code(scancode);
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"[KBD] Make code: 0x%02x is_press: %u\n\0".as_ptr() as *const c_char,
-            make_code as u32,
-            is_press as u32,
-        );
-    }
+    klog_debug!(
+        "[KBD] Make code: 0x{:02x} is_press: {}",
+        make_code,
+        is_press as u32
+    );
 
     unsafe { kb_buffer_push_overwrite(&raw mut SCANCODE_BUFFER, scancode) };
 
@@ -252,22 +241,13 @@ pub extern "C" fn keyboard_handle_scancode(scancode: u8) {
     }
 
     let ascii = translate_scancode(scancode);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"[KBD] ASCII: 0x%02x\n\0".as_ptr() as *const c_char,
-            ascii as u32,
-        );
-    }
+    klog_debug!("[KBD] ASCII: 0x{:02x}\n", ascii);
 
     if ascii != 0 {
         unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"[KBD] Adding to buffer\n\0".as_ptr() as *const c_char,
-            );
             kb_buffer_push_overwrite(&raw mut CHAR_BUFFER, ascii);
         }
+        klog_debug!("[KBD] Adding to buffer");
         unsafe {
             scheduler_request_reschedule_from_interrupt();
         }

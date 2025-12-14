@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 use core::mem;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
 
@@ -178,11 +178,6 @@ static mut ISO_COUNT: usize = 0;
 static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
 
 #[inline]
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-#[inline]
 fn phys_to_virt(phys: u64) -> *mut u8 {
     if phys == 0 {
         return core::ptr::null_mut();
@@ -275,10 +270,7 @@ fn acpi_scan_table(
             continue;
         }
         if !acpi_validate_table(candidate) {
-            log(
-                KlogLevel::Info,
-                b"ACPI: Found table with invalid checksum, skipping\0",
-            );
+            klog_info!("ACPI: Found table with invalid checksum, skipping");
             continue;
         }
         return candidate;
@@ -361,31 +353,24 @@ fn ioapic_entry_high_index(pin: u32) -> u8 {
 }
 
 fn ioapic_log_controller(ctrl: &IoapicController) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"IOAPIC: ID 0x%x @ phys 0x%llx, GSIs %u-%u, version 0x%x\n\0".as_ptr()
-                as *const c_char,
-            ctrl.id as u32,
-            ctrl.phys_addr,
-            ctrl.gsi_base,
-            ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1),
-            ctrl.version & 0xFF,
-        );
-    }
+    klog_info!(
+        "IOAPIC: ID 0x{:x} @ phys 0x{:x}, GSIs {}-{}, version 0x{:x}",
+        ctrl.id,
+        ctrl.phys_addr,
+        ctrl.gsi_base,
+        ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1),
+        ctrl.version & 0xFF
+    );
 }
 
 fn ioapic_log_iso(iso: &IoapicIso) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"IOAPIC: ISO bus %u, IRQ %u -> GSI %u, flags 0x%x\n\0".as_ptr() as *const c_char,
-            iso.bus_source as u32,
-            iso.irq_source as u32,
-            iso.gsi,
-            iso.flags as u32,
-        );
-    }
+    klog_debug!(
+        "IOAPIC: ISO bus {}, IRQ {} -> GSI {}, flags 0x{:x}",
+        iso.bus_source,
+        iso.irq_source,
+        iso.gsi,
+        iso.flags
+    );
 }
 
 fn ioapic_flags_from_acpi(_bus_source: u8, flags: u16) -> u32 {
@@ -419,20 +404,14 @@ fn ioapic_find_iso(irq: u8) -> Option<&'static IoapicIso> {
 
 fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
     let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: No controller for requested GSI\0",
-        );
+        klog_info!("IOAPIC: No controller for requested GSI");
         return -1;
     };
 
     let ctrl = unsafe { &mut *ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: Pin out of range for mask request\0",
-        );
+        klog_info!("IOAPIC: Pin out of range for mask request");
         return -1;
     }
 
@@ -445,20 +424,13 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
     }
 
     ioapic_write(ctrl, reg, value);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"IOAPIC: %s GSI %u (pin %u) -> low=0x%x\n\0".as_ptr() as *const c_char,
-            if mask {
-                b"Masked\0".as_ptr() as *const c_char
-            } else {
-                b"Unmasked\0".as_ptr() as *const c_char
-            },
-            gsi,
-            pin,
-            value,
-        );
-    }
+    klog_debug!(
+        "IOAPIC: {} GSI {} (pin {}) -> low=0x{:x}",
+        if mask { "Masked" } else { "Unmasked" },
+        gsi,
+        pin,
+        value
+    );
     0
 }
 
@@ -487,9 +459,8 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIoapicEntry>() {
                     unsafe {
                         if IOAPIC_COUNT >= IOAPIC_MAX_CONTROLLERS {
-                            log(
-                                KlogLevel::Info,
-                                b"IOAPIC: Too many controllers, ignoring extra entries\0",
+                            klog_info!(
+                                "IOAPIC: Too many controllers, ignoring extra entries"
                             );
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIoapicEntry);
@@ -511,9 +482,8 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIsoEntry>() {
                     unsafe {
                         if ISO_COUNT >= IOAPIC_MAX_ISO_ENTRIES {
-                            log(
-                                KlogLevel::Info,
-                                b"IOAPIC: Too many source overrides, ignoring extras\0",
+                            klog_info!(
+                                "IOAPIC: Too many source overrides, ignoring extras"
                             );
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIsoEntry);
@@ -543,38 +513,32 @@ pub fn init() -> i32 {
     }
 
     if unsafe { is_hhdm_available() } == 0 {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: HHDM unavailable, cannot map MMIO registers\0",
-        );
+        klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         wl_currency::award_loss();
         return -1;
     }
 
     if unsafe { is_rsdp_available() } == 0 {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init\0",
-        );
+        klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         wl_currency::award_loss();
         return -1;
     }
 
     let rsdp = unsafe { get_rsdp_address() as *const AcpiRsdp };
     if !acpi_validate_rsdp(rsdp) {
-        log(KlogLevel::Info, b"IOAPIC: ACPI RSDP checksum failed\0");
+        klog_info!("IOAPIC: ACPI RSDP checksum failed");
         wl_currency::award_loss();
         return -1;
     }
 
     let madt_header = acpi_find_table(rsdp, b"APIC");
     if madt_header.is_null() {
-        log(KlogLevel::Info, b"IOAPIC: MADT not found in ACPI tables\0");
+        klog_info!("IOAPIC: MADT not found in ACPI tables");
         wl_currency::award_loss();
         return -1;
     }
     if !acpi_validate_table(madt_header) {
-        log(KlogLevel::Info, b"IOAPIC: MADT checksum invalid\0");
+        klog_info!("IOAPIC: MADT checksum invalid");
         wl_currency::award_loss();
         return -1;
     }
@@ -583,12 +547,12 @@ pub fn init() -> i32 {
 
     let count = unsafe { IOAPIC_COUNT };
     if count == 0 {
-        log(KlogLevel::Info, b"IOAPIC: No controllers discovered\0");
+        klog_info!("IOAPIC: No controllers discovered");
         wl_currency::award_loss();
         return -1;
     }
 
-    log(KlogLevel::Info, b"IOAPIC: Discovery complete\0");
+    klog_info!("IOAPIC: Discovery complete");
     IOAPIC_READY.store(true, Ordering::Relaxed);
     wl_currency::award_win();
     0
@@ -596,25 +560,19 @@ pub fn init() -> i32 {
 
 pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     if !IOAPIC_READY.load(Ordering::Relaxed) {
-        log(KlogLevel::Info, b"IOAPIC: Driver not initialized\0");
+        klog_info!("IOAPIC: Driver not initialized");
         return -1;
     }
 
     let Some(ctrl_ptr) = ioapic_find_controller(gsi) else {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: No IOAPIC handles requested GSI\0",
-        );
+        klog_info!("IOAPIC: No IOAPIC handles requested GSI");
         return -1;
     };
 
     let ctrl = unsafe { &mut *ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: Calculated pin outside controller range\0",
-        );
+        klog_info!("IOAPIC: Calculated pin outside controller range");
         return -1;
     }
 
@@ -625,19 +583,15 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     ioapic_write(ctrl, ioapic_entry_high_index(pin), high);
     ioapic_write(ctrl, ioapic_entry_low_index(pin), low);
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"IOAPIC: Configured GSI %u (pin %u) -> vector 0x%x, LAPIC 0x%x, low=0x%x, high=0x%x\n\0"
-                .as_ptr() as *const c_char,
-            gsi,
-            pin,
-            vector as u32,
-            lapic_id as u32,
-            low,
-            high,
-        );
-    }
+    klog_info!(
+        "IOAPIC: Configured GSI {} (pin {}) -> vector 0x{:x}, LAPIC 0x{:x}, low=0x{:x}, high=0x{:x}",
+        gsi,
+        pin,
+        vector,
+        lapic_id,
+        low,
+        high
+    );
 
     0
 }
@@ -660,10 +614,7 @@ pub fn is_ready() -> i32 {
 
 pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -> i32 {
     if IOAPIC_READY.load(Ordering::Relaxed) == false {
-        log(
-            KlogLevel::Info,
-            b"IOAPIC: Legacy route query before initialization\0",
-        );
+        klog_info!("IOAPIC: Legacy route query before initialization");
         return -1;
     }
 

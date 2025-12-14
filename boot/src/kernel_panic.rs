@@ -1,8 +1,8 @@
-use core::ffi::c_char;
+use core::ffi::{c_char, CStr};
 
 use slopos_drivers::serial;
 use slopos_lib::cpu;
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::klog_info;
 
 use crate::shutdown::kernel_shutdown;
 
@@ -56,13 +56,10 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
     if !message.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PANIC: %s\n\0".as_ptr() as *const c_char,
-                message,
-            );
-        }
+        let msg_str = unsafe { CStr::from_ptr(message) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_info!("PANIC: {}", msg_str);
     } else {
         panic_output_str("PANIC: No message provided");
     }
@@ -71,33 +68,11 @@ pub extern "C" fn kernel_panic(message: *const c_char) {
     let rsp = read_rsp();
 
     panic_output_str("Register snapshot:");
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"RIP: 0x%llx\n\0".as_ptr() as *const c_char,
-            rip,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"RSP: 0x%llx\n\0".as_ptr() as *const c_char,
-            rsp,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"CR0: 0x%llx\n\0".as_ptr() as *const c_char,
-            read_cr("cr0"),
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"CR3: 0x%llx\n\0".as_ptr() as *const c_char,
-            read_cr("cr3"),
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"CR4: 0x%llx\n\0".as_ptr() as *const c_char,
-            read_cr("cr4"),
-        );
-    }
+    klog_info!("RIP: 0x{:x}", rip);
+    klog_info!("RSP: 0x{:x}", rsp);
+    klog_info!("CR0: 0x{:x}", read_cr("cr0"));
+    klog_info!("CR3: 0x{:x}", read_cr("cr3"));
+    klog_info!("CR4: 0x{:x}", read_cr("cr4"));
 
     panic_output_str("===================");
     panic_output_str("Skill issue lol");
@@ -131,48 +106,31 @@ pub extern "C" fn kernel_panic_with_context(
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
     if !message.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PANIC: %s\n\0".as_ptr() as *const c_char,
-                message,
-            );
-        }
+        let msg_str = unsafe { CStr::from_ptr(message) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_info!("PANIC: {}", msg_str);
     }
 
     unsafe {
         if !function.is_null() {
-            klog_printf(
-                KlogLevel::Info,
-                b"Function: %s\n\0".as_ptr() as *const c_char,
-                function,
-            );
+            let function_str = CStr::from_ptr(function)
+                .to_str()
+                .unwrap_or("<invalid utf-8>");
+            klog_info!("Function: {}", function_str);
         }
         if !file.is_null() {
-            klog_printf(
-                KlogLevel::Info,
-                b"File: %s:%d\n\0".as_ptr() as *const c_char,
-                file,
-                line,
-            );
+            let file_str =
+                CStr::from_ptr(file).to_str().unwrap_or("<invalid utf-8>");
+            klog_info!("File: {}:{}", file_str, line);
         }
     }
 
     let rip = read_rip();
     let rsp = read_rsp();
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"RIP: 0x%llx\n\0".as_ptr() as *const c_char,
-            rip,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"RSP: 0x%llx\n\0".as_ptr() as *const c_char,
-            rsp,
-        );
-    }
+    klog_info!("RIP: 0x{:x}", rip);
+    klog_info!("RSP: 0x{:x}", rsp);
 
     panic_output_str("===================");
     panic_output_str("Skill issue lol");

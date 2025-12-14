@@ -1,6 +1,7 @@
-use core::ffi::c_char;
+use core::ffi::{c_char, CStr};
 
-use slopos_lib::{klog_is_enabled, klog_printf, KlogLevel};
+use slopos_lib::klog::{self, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 use slopos_video as video;
 use slopos_tests::{
     interrupt_suite_desc, tests_register_suite, tests_register_system_suites, tests_reset_registry,
@@ -86,36 +87,24 @@ unsafe extern "C" {
     fn interrupt_test_request_shutdown(failed: i32);
 }
 
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-fn log_info(msg: &[u8]) {
-    log(KlogLevel::Info, msg);
-}
-
-fn log_debug(msg: &[u8]) {
-    log(KlogLevel::Debug, msg);
-}
-
 fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
 extern "C" fn boot_step_debug_subsystem_fn() -> i32 {
-    log_debug(b"Debug/logging subsystem initialized.\0");
+    klog_debug!("Debug/logging subsystem initialized.");
     0
 }
 
 extern "C" fn boot_step_gdt_setup_fn() -> i32 {
-    log_debug(b"Initializing GDT/TSS...\0");
+    klog_debug!("Initializing GDT/TSS...");
     unsafe { gdt_init() };
-    log_debug(b"GDT/TSS initialized.\0");
+    klog_debug!("GDT/TSS initialized.");
     0
 }
 
 extern "C" fn boot_step_idt_setup_fn() -> i32 {
-    log_debug(b"Initializing IDT...\0");
+    klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
     unsafe {
         idt_init();
@@ -123,52 +112,43 @@ extern "C" fn boot_step_idt_setup_fn() -> i32 {
         idt_load();
     }
     serial_note("boot: idt setup done");
-    log_debug(b"IDT initialized and loaded.\0");
+    klog_debug!("IDT initialized and loaded.");
     0
 }
 
 extern "C" fn boot_step_irq_setup_fn() -> i32 {
-    log_debug(b"Configuring IRQ dispatcher...\0");
+    klog_debug!("Configuring IRQ dispatcher...");
     unsafe { irq_init() };
     let rc = unsafe { serial_enable_interrupts(COM1_BASE, SERIAL_COM1_IRQ) };
     if rc != 0 {
-        log_info(b"WARNING: Failed to enable COM1 serial interrupts\0");
+        klog_info!("WARNING: Failed to enable COM1 serial interrupts");
     } else {
-        log_debug(b"COM1 serial interrupts armed.\0");
+        klog_debug!("COM1 serial interrupts armed.");
     }
-    log_debug(b"IRQ dispatcher ready.\0");
+    klog_debug!("IRQ dispatcher ready.");
     0
 }
 
 extern "C" fn boot_step_timer_setup_fn() -> i32 {
-    log_debug(b"Initializing programmable interval timer...\0");
+    klog_debug!("Initializing programmable interval timer...");
     unsafe { pit_init(PIT_DEFAULT_FREQUENCY_HZ) };
-    log_debug(b"Programmable interval timer configured.\0");
+    klog_debug!("Programmable interval timer configured.");
 
     let ticks_before = unsafe { irq_get_timer_ticks() };
     unsafe { pit_poll_delay_ms(100) };
     let ticks_after = unsafe { irq_get_timer_ticks() };
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"BOOT: PIT ticks after 100ms poll: %llu -> %llu\n\0".as_ptr() as *const c_char,
-            ticks_before,
-            ticks_after,
-        );
-    }
+    klog_info!(
+        "BOOT: PIT ticks after 100ms poll: {} -> {}",
+        ticks_before,
+        ticks_after
+    );
     if ticks_after == ticks_before {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"BOOT: WARNING - no PIT IRQs observed in 100ms window\n\0".as_ptr()
-                    as *const c_char,
-            );
-        }
+        klog_info!("BOOT: WARNING - no PIT IRQs observed in 100ms window");
     }
 
     if unsafe { framebuffer_init() } != 0 {
-        log_info(
-            b"WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)\0",
+        klog_info!(
+            "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
     }
     let fb = limine_protocol::boot_info().framebuffer;
@@ -178,76 +158,68 @@ extern "C" fn boot_step_timer_setup_fn() -> i32 {
 }
 
 extern "C" fn boot_step_apic_setup_fn() -> i32 {
-    log_debug(b"Detecting Local APIC...\0");
+    klog_debug!("Detecting Local APIC...");
     if unsafe { apic_detect() } == 0 {
         kernel_panic(
             b"SlopOS requires a Local APIC - legacy PIC is gone\0".as_ptr() as *const c_char,
         );
     }
 
-    log_debug(b"Initializing Local APIC...\0");
+    klog_debug!("Initializing Local APIC...");
     if unsafe { apic_init() } != 0 {
         kernel_panic(b"Local APIC initialization failed\0".as_ptr() as *const c_char);
     }
 
     unsafe { pic_quiesce_disable() };
 
-    log_debug(b"Local APIC initialized (legacy PIC path removed).\0");
+    klog_debug!("Local APIC initialized (legacy PIC path removed).");
     0
 }
 
 extern "C" fn boot_step_ioapic_setup_fn() -> i32 {
-    log_debug(b"Discovering IOAPIC controllers via ACPI MADT...\0");
+    klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
     if unsafe { ioapic_init() } != 0 {
         kernel_panic(
             b"IOAPIC discovery failed - SlopOS cannot operate without it\0".as_ptr()
                 as *const c_char,
         );
     }
-    log_debug(b"IOAPIC: discovery complete, ready for redirection programming.\0");
+    klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
     0
 }
 
 extern "C" fn boot_step_pci_init_fn() -> i32 {
-    log_debug(b"Enumerating PCI devices...\0");
+    klog_debug!("Enumerating PCI devices...");
     unsafe {
         virtio_gpu_register_driver();
     }
     if unsafe { pci_init() } == 0 {
-        log_debug(b"PCI subsystem initialized.\0");
+        klog_debug!("PCI subsystem initialized.");
         let gpu = unsafe { pci_get_primary_gpu() };
         if !gpu.is_null() {
             let info = unsafe { &*gpu };
             if info.present != 0 {
-                unsafe {
-                    klog_printf(
-                        KlogLevel::Debug,
-                        b"PCI: Primary GPU detected (bus %u, device %u, function %u)\n\0".as_ptr()
-                            as *const c_char,
-                        info.device.bus as u32,
-                        info.device.device as u32,
-                        info.device.function as u32,
-                    );
-                }
+                klog_debug!(
+                    "PCI: Primary GPU detected (bus {}, device {}, function {})",
+                    info.device.bus,
+                    info.device.device,
+                    info.device.function
+                );
                 if !info.mmio_virt_base.is_null() {
-                    unsafe {
-                        klog_printf(
-                            KlogLevel::Debug,
-                            b"PCI: GPU MMIO virtual base 0x%llx, size 0x%llx\n\0".as_ptr()
-                                as *const c_char,
-                            info.mmio_virt_base as u64,
-                            info.mmio_size,
-                        );
-                    }
+                    klog_debug!(
+                        "PCI: GPU MMIO virtual base {:#x}, size {:#x}",
+                        info.mmio_virt_base as u64,
+                        info.mmio_size
+                    );
                 } else {
-                    log_info(b"PCI: WARNING GPU MMIO mapping unavailable\0");
+                    klog_info!("PCI: WARNING GPU MMIO mapping unavailable");
                 }
             } else {
-                log_debug(b"PCI: No GPU-class device discovered during enumeration\0");
+                klog_debug!("PCI: No GPU-class device discovered during enumeration");
             }
         }
     } else {
-        log_info(b"WARNING: PCI initialization failed\0");
+        klog_info!("WARNING: PCI initialization failed");
     }
     0
 }
@@ -274,36 +246,30 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     }
 
     if test_config.enabled != 0 && test_config.suite_mask == 0 {
-        log_info(b"INTERRUPT_TEST: No suites selected, skipping execution\0");
+        klog_info!("INTERRUPT_TEST: No suites selected, skipping execution");
         test_config.enabled = 0;
         test_config.shutdown_on_complete = 0;
     }
 
     if test_config.enabled == 0 {
-        log_debug(b"INTERRUPT_TEST: Harness disabled\0");
+        klog_debug!("INTERRUPT_TEST: Harness disabled");
         return 0;
     }
 
-    log_info(b"INTERRUPT_TEST: Running orchestrated harness\0");
+    klog_info!("INTERRUPT_TEST: Running orchestrated harness");
 
-    if unsafe { klog_is_enabled(KlogLevel::Debug) } != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"INTERRUPT_TEST: Suites -> %s\n\0".as_ptr() as *const c_char,
-                interrupt_test_suite_string(test_config.suite_mask),
-            );
-            klog_printf(
-                KlogLevel::Info,
-                b"INTERRUPT_TEST: Verbosity -> %s\n\0".as_ptr() as *const c_char,
-                interrupt_test_verbosity_string(test_config.verbosity),
-            );
-            klog_printf(
-                KlogLevel::Info,
-                b"INTERRUPT_TEST: Timeout (ms) -> %u\n\0".as_ptr() as *const c_char,
-                test_config.timeout_ms,
-            );
-        }
+    if klog::is_enabled_level(KlogLevel::Debug) {
+        let suites = unsafe { interrupt_test_suite_string(test_config.suite_mask) };
+        let suites_str = unsafe { CStr::from_ptr(suites) }
+            .to_str()
+            .unwrap_or("?");
+        let verbosity = unsafe { interrupt_test_verbosity_string(test_config.verbosity) };
+        let verbosity_str = unsafe { CStr::from_ptr(verbosity) }
+            .to_str()
+            .unwrap_or("?");
+        klog_info!("INTERRUPT_TEST: Suites -> {}", suites_str);
+        klog_info!("INTERRUPT_TEST: Verbosity -> {}", verbosity_str);
+        klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);
     }
 
     unsafe {
@@ -336,14 +302,14 @@ extern "C" fn boot_step_interrupt_tests_fn() -> i32 {
     let rc = unsafe { tests_run_all(&test_config, &mut summary) };
 
     if test_config.shutdown_on_complete != 0 {
-        log_debug(b"INTERRUPT_TEST: Auto shutdown enabled after harness\0");
+        klog_debug!("INTERRUPT_TEST: Auto shutdown enabled after harness");
         unsafe { interrupt_test_request_shutdown(summary.failed as i32) };
     }
 
     if summary.failed > 0 {
-        log_info(b"INTERRUPT_TEST: Failures detected\0");
+        klog_info!("INTERRUPT_TEST: Failures detected");
     } else {
-        log_info(b"INTERRUPT_TEST: Completed successfully\0");
+        klog_info!("INTERRUPT_TEST: Completed successfully");
     }
 
     rc

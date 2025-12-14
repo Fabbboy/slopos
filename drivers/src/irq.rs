@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_void};
+use core::ffi::{c_char, c_void, CStr};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::io;
-use slopos_lib::{cpu, interrupt_frame, kdiag_dump_interrupt_frame, klog_printf, tsc, KlogLevel};
+use slopos_lib::{cpu, interrupt_frame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 use slopos_lib::spinlock::Spinlock;
 
 use crate::{apic, ioapic, keyboard, wl_currency};
@@ -100,11 +100,6 @@ unsafe extern "C" {
 }
 
 #[inline]
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-#[inline]
 fn with_irq_tables<R>(
     f: impl FnOnce(&mut [IrqEntry; IRQ_LINES], &mut [IrqRouteState; IRQ_LINES]) -> R,
 ) -> R {
@@ -142,10 +137,7 @@ fn mask_irq_line(irq: u8) {
     if mask_hw {
         let _ = ioapic::mask_gsi(gsi);
     } else {
-        log(
-            KlogLevel::Info,
-            b"IRQ: Mask request ignored for line (no IOAPIC route)\0",
-        );
+        klog_info!("IRQ: Mask request ignored for line (no IOAPIC route)");
     }
 }
 
@@ -167,22 +159,13 @@ fn unmask_irq_line(irq: u8) {
     if unmask_hw {
         let _ = ioapic::unmask_gsi(gsi);
     } else {
-        log(
-            KlogLevel::Info,
-            b"IRQ: Cannot unmask line (no IOAPIC route configured)\0",
-        );
+        klog_info!("IRQ: Cannot unmask line (no IOAPIC route configured)");
     }
 }
 
 fn log_unhandled_irq(irq: u8, vector: u8) {
     if irq as usize >= IRQ_LINES {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"IRQ: Spurious vector %u received\n\0".as_ptr() as *const c_char,
-                vector as u32,
-            );
-        }
+        klog_info!("IRQ: Spurious vector {} received", vector);
         return;
     }
 
@@ -198,26 +181,20 @@ fn log_unhandled_irq(irq: u8, vector: u8) {
     if already_reported {
         return;
     }
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"IRQ: Unhandled IRQ %u (vector %u) - masking line\n\0".as_ptr() as *const c_char,
-            irq as u32,
-            vector as u32,
-        );
-    }
+    klog_info!(
+        "IRQ: Unhandled IRQ {} (vector {}) - masking line",
+        irq,
+        vector
+    );
 }
 
 extern "C" fn timer_irq_handler(irq: u8, _frame: *mut interrupt_frame, _ctx: *mut c_void) {
     (irq, _frame, _ctx);
     unsafe {
         TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
-        if TIMER_TICK_COUNTER <= 3 {
-            klog_printf(
-                KlogLevel::Debug,
-                b"IRQ: Timer tick #%llu\n\0".as_ptr() as *const c_char,
-                TIMER_TICK_COUNTER,
-            );
+        let tick = TIMER_TICK_COUNTER;
+        if tick <= 3 {
+            klog_debug!("IRQ: Timer tick #{}", tick);
         }
         scheduler_timer_tick();
     }
@@ -277,29 +254,25 @@ fn irq_program_ioapic_route(irq: u8) {
         table[irq as usize].masked
     });
 
-    let polarity: *const c_char = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
-        b"active-low\0".as_ptr() as *const c_char
+    let polarity = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
+        "active-low"
     } else {
-        b"active-high\0".as_ptr() as *const c_char
+        "active-high"
     };
-    let trigger: *const c_char = if legacy_flags & ioapic::IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
-        b"level\0".as_ptr() as *const c_char
+    let trigger = if legacy_flags & ioapic::IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
+        "level"
     } else {
-        b"edge\0".as_ptr() as *const c_char
+        "edge"
     };
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"IRQ: IOAPIC route IRQ %u -> GSI %u, vector 0x%x (%s, %s)\n\0".as_ptr()
-                as *const c_char,
-            irq as u32,
-            gsi,
-            vector as u32,
-            polarity,
-            trigger,
-        );
-    }
+    klog_info!(
+        "IRQ: IOAPIC route IRQ {} -> GSI {}, vector 0x{:x} ({}, {})",
+        irq,
+        gsi,
+        vector,
+        polarity,
+        trigger
+    );
 
     if masked {
         let _ = ioapic::mask_gsi(gsi);
@@ -370,10 +343,7 @@ pub extern "C" fn irq_register_handler(
     name: *const c_char,
 ) -> i32 {
     if irq as usize >= IRQ_LINES {
-        log(
-            KlogLevel::Info,
-            b"IRQ: Attempted to register handler for invalid line\0",
-        );
+        klog_info!("IRQ: Attempted to register handler for invalid line");
         wl_currency::award_loss();
         return -1;
     }
@@ -386,21 +356,16 @@ pub extern "C" fn irq_register_handler(
         entry.reported_unhandled = false;
     });
 
-    unsafe {
-        if !name.is_null() {
-            klog_printf(
-                KlogLevel::Debug,
-                b"IRQ: Registered handler for line %u (%s)\n\0".as_ptr() as *const c_char,
-                irq as u32,
-                name,
-            );
-        } else {
-            klog_printf(
-                KlogLevel::Debug,
-                b"IRQ: Registered handler for line %u\n\0".as_ptr() as *const c_char,
-                irq as u32,
-            );
-        }
+    if !name.is_null() {
+        let name_str =
+            unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("<invalid utf-8>");
+        klog_debug!(
+            "IRQ: Registered handler for line {} ({})",
+            irq,
+            name_str
+        );
+    } else {
+        klog_debug!("IRQ: Registered handler for line {}", irq);
     }
 
     unmask_irq_line(irq);
@@ -421,13 +386,7 @@ pub extern "C" fn irq_unregister_handler(irq: u8) {
         entry.reported_unhandled = false;
     });
     mask_irq_line(irq);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"IRQ: Unregistered handler for line %u\n\0".as_ptr() as *const c_char,
-            irq as u32,
-        );
-    }
+    klog_debug!("IRQ: Unregistered handler for line {}", irq);
 }
 
 #[unsafe(no_mangle)]
@@ -452,7 +411,7 @@ pub extern "C" fn irq_disable_line(irq: u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
     if frame.is_null() {
-        log(KlogLevel::Info, b"IRQ: Received null frame\0");
+        klog_info!("IRQ: Received null frame");
         return;
     }
 
@@ -462,10 +421,7 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
     let expected_rip = frame_ref.rip;
 
     if !IRQ_SYSTEM_INITIALIZED.load(Ordering::Relaxed) {
-        log(
-            KlogLevel::Info,
-            b"IRQ: Dispatch received before initialization\0",
-        );
+        klog_info!("IRQ: Dispatch received before initialization");
         if vector >= IRQ_BASE_VECTOR {
             acknowledge_irq();
         }
@@ -473,13 +429,7 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
     }
 
     if vector < IRQ_BASE_VECTOR {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"IRQ: Received non-IRQ vector %u\n\0".as_ptr() as *const c_char,
-                vector as u32,
-            );
-        }
+        klog_info!("IRQ: Received non-IRQ vector {}", vector);
         return;
     }
 
@@ -510,14 +460,10 @@ pub extern "C" fn irq_dispatch(frame: *mut interrupt_frame) {
     handler(irq, frame, context);
 
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"IRQ: Frame corruption detected on IRQ %u - aborting\n\0".as_ptr()
-                    as *const c_char,
-                irq as u32,
-            );
-        }
+        klog_info!(
+            "IRQ: Frame corruption detected on IRQ {} - aborting",
+            irq
+        );
         kdiag_dump_interrupt_frame(frame);
         unsafe { kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
     }

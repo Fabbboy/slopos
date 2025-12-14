@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use core::ffi::{c_char, c_int, c_void, CStr, VaList};
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::{io, numfmt, string};
@@ -70,6 +71,24 @@ pub(crate) fn log_line(level: KlogLevel, text: &str) {
     }
     write_bytes(text.as_bytes());
     putc(b'\n');
+}
+
+pub fn is_enabled_level(level: KlogLevel) -> bool {
+    is_enabled(level)
+}
+
+pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
+    if !is_enabled(level) {
+        return;
+    }
+    struct KlogWriter;
+    impl fmt::Write for KlogWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            write_bytes(s.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = fmt::write(&mut KlogWriter, args);
 }
 
 #[unsafe(no_mangle)]
@@ -351,3 +370,44 @@ pub unsafe extern "C" fn klog_printf(
     }
 }
 
+#[macro_export]
+macro_rules! klog {
+    ($level:expr, $($arg:tt)*) => {{
+        $crate::klog::log_args($level, ::core::format_args!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! klog_error {
+    ($($arg:tt)*) => {
+        $crate::klog::log_args($crate::klog::KlogLevel::Error, ::core::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! klog_warn {
+    ($($arg:tt)*) => {
+        $crate::klog::log_args($crate::klog::KlogLevel::Warn, ::core::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! klog_info {
+    ($($arg:tt)*) => {
+        $crate::klog::log_args($crate::klog::KlogLevel::Info, ::core::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! klog_debug {
+    ($($arg:tt)*) => {
+        $crate::klog::log_args($crate::klog::KlogLevel::Debug, ::core::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! klog_trace {
+    ($($arg:tt)*) => {
+        $crate::klog::log_args($crate::klog::KlogLevel::Trace, ::core::format_args!($($arg)*))
+    };
+}

@@ -10,7 +10,7 @@ use core::ptr;
 use slopos_drivers::interrupt_test as intr;
 use slopos_drivers::interrupt_test_config as intr_cfg;
 use slopos_drivers::wl_currency;
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::klog_info;
 
 pub type InterruptTestConfig = intr_cfg::interrupt_test_config;
 pub type InterruptTestVerbosity = intr_cfg::interrupt_test_verbosity;
@@ -204,21 +204,11 @@ pub extern "C" fn tests_run_all(
 
     let cfg = unsafe { &*config };
     if cfg.enabled == 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"TESTS: Harness disabled\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("TESTS: Harness disabled\n");
         return 0;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"TESTS: Starting orchestrated suites\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("TESTS: Starting orchestrated suites\n");
 
     let mut desc_list: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] =
         [None; TESTS_MAX_SUITES];
@@ -251,21 +241,17 @@ pub extern "C" fn tests_run_all(
             summary.suite_count += 1;
         }
 
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"SUITE%u total=%u pass=%u fail=%u exc=%u unexp=%u elapsed=%u timeout=%u\n\0"
-                    .as_ptr() as *const c_char,
-                idx as u32,
-                res.total,
-                res.passed,
-                res.failed,
-                res.exceptions_caught,
-                res.unexpected_exceptions,
-                res.elapsed_ms,
-                if res.timed_out != 0 { 1u32 } else { 0u32 },
-            );
-        }
+        klog_info!(
+            "SUITE{} total={} pass={} fail={} exc={} unexp={} elapsed={} timeout={}\n",
+            idx as u32,
+            res.total,
+            res.passed,
+            res.failed,
+            res.exceptions_caught,
+            res.unexpected_exceptions,
+            res.elapsed_ms,
+            if res.timed_out != 0 { 1u32 } else { 0u32 },
+        );
         fill_summary_from_result(summary, &res);
     }
     let end_cycles = slopos_lib::tsc::rdtsc();
@@ -274,29 +260,19 @@ pub extern "C" fn tests_run_all(
         summary.elapsed_ms = overall_ms;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"+----------------------+-------+-------+-------+-------+-------+---------+-----+\n\0"
-                .as_ptr() as *const c_char,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"TESTS SUMMARY: total=%u passed=%u failed=%u exceptions=%u unexpected=%u elapsed_ms=%u timed_out=%s\n\0"
-                .as_ptr() as *const c_char,
-            summary.total_tests,
-            summary.passed,
-            summary.failed,
-            summary.exceptions_caught,
-            summary.unexpected_exceptions,
-            summary.elapsed_ms,
-            if summary.timed_out != 0 {
-                b"yes\0".as_ptr() as *const c_char
-            } else {
-                b"no\0".as_ptr() as *const c_char
-            },
-        );
-    }
+    klog_info!(
+        "+----------------------+-------+-------+-------+-------+-------+---------+-----+\n"
+    );
+    klog_info!(
+        "TESTS SUMMARY: total={} passed={} failed={} exceptions={} unexpected={} elapsed_ms={} timed_out={}\n",
+        summary.total_tests,
+        summary.passed,
+        summary.failed,
+        summary.exceptions_caught,
+        summary.unexpected_exceptions,
+        summary.elapsed_ms,
+        if summary.timed_out != 0 { "yes" } else { "no" },
+    );
 
     if summary.failed == 0 { 0 } else { -1 }
 }

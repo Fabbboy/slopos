@@ -3,12 +3,14 @@
 use core::{
     cell::UnsafeCell,
     ffi::{c_char, CStr},
+    fmt,
     ptr,
 };
 
 use slopos_drivers::serial;
 use slopos_drivers::wl_currency;
-use slopos_lib::{klog_is_enabled, klog_newline, klog_printf, klog_set_level, KlogLevel};
+use slopos_lib::klog::{self, KlogLevel};
+use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
 
 use crate::{gdt, idt, kernel_panic::kernel_panic, safe_stack};
 use crate::limine_protocol;
@@ -127,55 +129,43 @@ fn boot_state_mut() -> &'static mut BootState {
     unsafe { &mut *BOOT_STATE.0.get() }
 }
 
+fn bytes_to_str(bytes: &[u8]) -> &str {
+    CStr::from_bytes_with_nul(bytes)
+        .ok()
+        .and_then(|c| c.to_str().ok())
+        .unwrap_or("<invalid>")
+}
+
 fn boot_info(msg: &'static [u8]) {
-    unsafe {
-        klog_printf(KlogLevel::Info, msg.as_ptr() as *const c_char);
-    }
+    klog_info!("{}", bytes_to_str(msg));
 }
 
 fn boot_debug(msg: &'static [u8]) {
-    unsafe {
-        klog_printf(KlogLevel::Debug, msg.as_ptr() as *const c_char);
-    }
+    klog_debug!("{}", bytes_to_str(msg));
 }
 
 fn boot_init_report_phase(level: KlogLevel, prefix: &[u8], value: Option<&[u8]>) {
-    if unsafe { klog_is_enabled(level) } == 0 {
+    if !klog::is_enabled_level(level) {
         return;
     }
-    unsafe {
-        klog_printf(
-            level,
-            b"[boot:init] %s%s\n\0".as_ptr() as *const c_char,
-            prefix.as_ptr() as *const c_char,
-            value.unwrap_or(b"\0").as_ptr() as *const c_char,
-        );
-    }
+    let prefix_str = bytes_to_str(prefix);
+    let value_str = value.map(bytes_to_str).unwrap_or("");
+    klog::log_args(level, format_args!("[boot:init] {}{}\n", prefix_str, value_str));
 }
 
 fn boot_init_report_step(level: KlogLevel, label: &[u8], value: Option<&[u8]>) {
-    if unsafe { klog_is_enabled(level) } == 0 {
+    if !klog::is_enabled_level(level) {
         return;
     }
-    unsafe {
-        klog_printf(
-            level,
-            b"    %s: %s\n\0".as_ptr() as *const c_char,
-            label.as_ptr() as *const c_char,
-            value.unwrap_or(b"(unnamed)\0").as_ptr() as *const c_char,
-        );
-    }
+    let label_str = bytes_to_str(label);
+    let value_str = value.map(bytes_to_str).unwrap_or("(unnamed)");
+    klog::log_args(level, format_args!("    {}: {}\n", label_str, value_str));
 }
 
 fn boot_init_report_failure(phase: &[u8], step_name: Option<&[u8]>) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"[boot:init] FAILURE in %s -> %s\n\0".as_ptr() as *const c_char,
-            phase.as_ptr() as *const c_char,
-            step_name.unwrap_or(b"(unnamed)\0").as_ptr() as *const c_char,
-        );
-    }
+    let phase_str = bytes_to_str(phase);
+    let step_str = step_name.map(bytes_to_str).unwrap_or("(unnamed)");
+    klog_info!("[boot:init] FAILURE in {} -> {}", phase_str, step_str);
 }
 
 unsafe extern "C" {
@@ -483,7 +473,7 @@ pub extern "C" fn kernel_main() {
     }
     serial::write_line("BOOT: boot init complete");
 
-    if klog_is_enabled(KlogLevel::Info) != 0 {
+    if klog::is_enabled_level(KlogLevel::Info) {
         klog_newline();
     }
 
@@ -494,27 +484,17 @@ pub extern "C" fn kernel_main() {
     boot_info(b"The kernel has initialized. Handing over to scheduler...\0");
     boot_info(b"Starting scheduler...\0");
 
-    if klog_is_enabled(KlogLevel::Info) != 0 {
+    if klog::is_enabled_level(KlogLevel::Info) {
         klog_newline();
     }
 
     let rc = unsafe { start_scheduler() };
     if rc != 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"ERROR: Scheduler startup failed\n\0".as_ptr() as *const c_char,
-            );
-        }
+        klog_info!("ERROR: Scheduler startup failed");
         kernel_panic(b"Scheduler startup failed\0".as_ptr() as *const c_char);
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"WARNING: Scheduler exited unexpectedly\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("WARNING: Scheduler exited unexpectedly");
 
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };

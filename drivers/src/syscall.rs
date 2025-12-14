@@ -1,10 +1,7 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
 
-use core::ffi::c_char;
-
-use slopos_lib::klog_printf;
-use slopos_lib::KlogLevel;
+use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
 use crate::syscall_types::{task_t, task_context_t, InterruptFrame, TASK_FLAG_USER_MODE};
@@ -73,12 +70,8 @@ pub extern "C" fn syscall_handle(frame: *mut InterruptFrame) {
     let sysno = unsafe { (*frame).rax };
     let entry = syscall_lookup(sysno);
     if entry.is_null() {
+        klog_info!("SYSCALL: Unknown syscall {}", sysno);
         unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"SYSCALL: Unknown syscall %llu\n\0".as_ptr() as *const c_char,
-                sysno,
-            );
             wl_currency::award_loss();
             (*frame).rax = u64::MAX;
         }

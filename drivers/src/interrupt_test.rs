@@ -2,10 +2,10 @@
 #![allow(non_camel_case_types)]
 #![allow(static_mut_refs)]
 
-use core::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int, CStr};
 use core::ptr;
 
-use slopos_lib::{io, klog_printf, KlogLevel};
+use slopos_lib::{io, klog_info};
 
 use crate::interrupt_test_config::{
     interrupt_test_config, INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL,
@@ -66,6 +66,15 @@ static mut TEST_CTX: test_context = test_context {
     last_recovery_reason: 0,
 };
 
+fn cstr_to_str(ptr: *const c_char) -> &'static str {
+    if ptr.is_null() {
+        return "<null>";
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .unwrap_or("<invalid utf-8>")
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_init(config: *const interrupt_test_config) {
     let _ = config;
@@ -95,22 +104,12 @@ pub extern "C" fn interrupt_test_init(config: *const interrupt_test_config) {
             timed_out: 0,
         };
     }
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"INTERRUPT_TEST: Initializing test framework (stub)\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("INTERRUPT_TEST: Initializing test framework (stub)");
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_cleanup() {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"INTERRUPT_TEST: Cleaning up test framework (stub)\n\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_info!("INTERRUPT_TEST: Cleaning up test framework (stub)");
 }
 
 #[unsafe(no_mangle)]
@@ -223,11 +222,8 @@ pub extern "C" fn test_record_simple(name: *const c_char, result: c_int) {
             TEST_STATS.failed_cases = TEST_STATS.failed_cases.saturating_add(1);
             TEST_STATS.unexpected_exceptions =
                 TEST_STATS.unexpected_exceptions.saturating_add(1);
-            klog_printf(
-                KlogLevel::Info,
-                b"INTERRUPT_TEST: Test '%s' FAILED (stub)\n\0".as_ptr() as *const c_char,
-                name,
-            );
+            let test_name = cstr_to_str(name);
+            klog_info!("INTERRUPT_TEST: Test '{test_name}' FAILED (stub)");
         }
     }
 }
@@ -293,13 +289,7 @@ pub extern "C" fn run_all_interrupt_tests(config: *const interrupt_test_config) 
     }
     let cfg = unsafe { *config };
     if cfg.enabled == 0 {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"INTERRUPT_TEST: Skipping interrupt tests (disabled)\n\0".as_ptr()
-                    as *const c_char,
-            );
-        }
+        klog_info!("INTERRUPT_TEST: Skipping interrupt tests (disabled)");
         return 0;
     }
 
@@ -331,11 +321,8 @@ pub extern "C" fn run_all_interrupt_tests(config: *const interrupt_test_config) 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn interrupt_test_request_shutdown(failed_tests: c_int) {
+    klog_info!("INTERRUPT_TEST: Auto shutdown requested");
     unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"INTERRUPT_TEST: Auto shutdown requested\n\0".as_ptr() as *const c_char,
-        );
         let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
         io::outb(0xF4, exit_value);
         kernel_shutdown(if failed_tests == 0 {
@@ -365,34 +352,24 @@ pub extern "C" fn get_test_result_string(result: c_int) -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dump_test_context() {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"=== TEST CONTEXT DUMP (stub) ===\n\0".as_ptr() as *const c_char,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Test active: %u\n\0".as_ptr() as *const c_char,
-            TEST_CTX.test_active as u32,
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Expected exception: %d\n\0".as_ptr() as *const c_char,
-            TEST_CTX.expected_exception,
-        );
-    }
+    klog_info!("=== TEST CONTEXT DUMP (stub) ===");
+    klog_info!("Test active: {}", unsafe { TEST_CTX.test_active });
+    klog_info!(
+        "Expected exception: {}",
+        unsafe { TEST_CTX.expected_exception }
+    );
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn log_test_exception(frame: *mut slopos_lib::interrupt_frame) {
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"TEST_EXCEPTION: Vector %u at RIP 0x%lx\n\0".as_ptr() as *const c_char,
-            if frame.is_null() { 0 } else { (*frame).vector as u32 },
-            if frame.is_null() { 0 } else { (*frame).rip },
-        );
-    }
+    let (vector, rip) = unsafe {
+        if frame.is_null() {
+            (0, 0)
+        } else {
+            ((*frame).vector as u32, (*frame).rip)
+        }
+    };
+    klog_info!("TEST_EXCEPTION: Vector {} at RIP 0x{:x}", vector, rip);
 }
 
 unsafe extern "C" {

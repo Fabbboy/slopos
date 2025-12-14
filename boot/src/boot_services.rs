@@ -1,6 +1,6 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::boot_init_priority;
 use crate::{boot_init_optional_step, boot_init_step_with_flags};
@@ -39,18 +39,6 @@ extern "C" fn boot_step_idle_task_wrapper() -> i32 {
     unsafe { boot_step_idle_task() }
 }
 
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-fn log_info(msg: &[u8]) {
-    log(KlogLevel::Info, msg);
-}
-
-fn log_debug(msg: &[u8]) {
-    log(KlogLevel::Debug, msg);
-}
-
 boot_init_step_with_flags!(
     BOOT_STEP_TASK_MANAGER,
     services,
@@ -77,18 +65,18 @@ boot_init_step_with_flags!(
 
 extern "C" fn boot_step_mark_kernel_ready_fn() -> i32 {
     unsafe { boot_mark_initialized() };
-    log_info(b"Kernel core services initialized.\0");
+    klog_info!("Kernel core services initialized.");
     0
 }
 
 extern "C" fn boot_step_framebuffer_demo_fn() -> i32 {
     let fb_info = unsafe { framebuffer_get_info() };
     if fb_info.is_null() || unsafe { framebuffer_is_initialized() } == 0 {
-        log_info(b"Graphics demo: framebuffer not initialized, skipping\0");
+        klog_info!("Graphics demo: framebuffer not initialized, skipping");
         return 0;
     }
 
-    log_debug(b"Graphics demo: framebuffer validation complete\0");
+    klog_debug!("Graphics demo: framebuffer validation complete");
     0
 }
 

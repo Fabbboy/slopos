@@ -1,9 +1,8 @@
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
-use core::ffi::c_char;
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::klog_debug;
 
 const GDT_CODE_SELECTOR: u16 = 0x08;
 const GDT_DATA_SELECTOR: u16 = 0x10;
@@ -113,12 +112,7 @@ unsafe fn load_tss() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gdt_init() {
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"GDT: Initializing descriptor tables\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_debug!("GDT: Initializing descriptor tables");
 
     unsafe {
         GDT_TABLE.entries = [
@@ -154,12 +148,7 @@ pub extern "C" fn gdt_init() {
         load_tss();
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"GDT: Initialized with TSS loaded\0".as_ptr() as *const c_char,
-        );
-    }
+    klog_debug!("GDT: Initialized with TSS loaded");
 }
 
 #[unsafe(no_mangle)]

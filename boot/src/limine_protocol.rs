@@ -6,7 +6,7 @@ use core::{
     ptr,
 };
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 const LIMINE_COMMON_MAGIC: [u64; 2] = [0xc7b1dd30df4c8b88, 0x0a82e883a194f07b];
 const LIMINE_BASE_REVISION_MAGIC: [u64; 3] = [
@@ -470,10 +470,7 @@ pub fn ensure_base_revision() {
 pub extern "C" fn init_limine_protocol() -> i32 {
     unsafe {
         if !BASE_REVISION.supported() {
-            klog_printf(
-                KlogLevel::Info,
-                b"ERROR: Limine base revision not supported!\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("ERROR: Limine base revision not supported!");
             return -1;
         }
     }
@@ -483,11 +480,18 @@ pub extern "C" fn init_limine_protocol() -> i32 {
     unsafe {
         if let Some(resp) = BOOTLOADER_INFO_REQUEST.response.as_ref() {
             if !resp.name.is_null() && !resp.version.is_null() {
-                klog_printf(
-                    KlogLevel::Debug,
-                    b"Bootloader: %s version %s\n\0".as_ptr() as *const c_char,
-                    resp.name,
-                    resp.version,
+                klog_debug!(
+                    "Bootloader: {} version {}",
+                    unsafe {
+                        CStr::from_ptr(resp.name as *const c_char)
+                            .to_str()
+                            .unwrap_or("<invalid utf-8>")
+                    },
+                    unsafe {
+                        CStr::from_ptr(resp.version as *const c_char)
+                            .to_str()
+                            .unwrap_or("<invalid utf-8>")
+                    }
                 );
             }
         }
@@ -497,11 +501,7 @@ pub extern "C" fn init_limine_protocol() -> i32 {
         if let Some(hhdm) = HHDM_REQUEST.response.as_ref() {
             info.hhdm_offset = hhdm.offset;
             info.flags.hhdm_available = true;
-            klog_printf(
-                KlogLevel::Debug,
-                b"HHDM offset: 0x%llx\n\0".as_ptr() as *const c_char,
-                hhdm.offset,
-            );
+            klog_debug!("HHDM offset: 0x{:x}", hhdm.offset);
         }
     }
 
@@ -509,11 +509,10 @@ pub extern "C" fn init_limine_protocol() -> i32 {
         if let Some(ka) = KERNEL_ADDRESS_REQUEST.response.as_ref() {
             info.kernel_phys_base = ka.physical_base;
             info.kernel_virt_base = ka.virtual_base;
-            klog_printf(
-                KlogLevel::Debug,
-                b"Kernel phys base: 0x%llx virt base: 0x%llx\n\0".as_ptr() as *const c_char,
+            klog_debug!(
+                "Kernel phys base: 0x{:x} virt base: 0x{:x}",
                 ka.physical_base,
-                ka.virtual_base,
+                ka.virtual_base
             );
         }
     }
@@ -526,16 +525,9 @@ pub extern "C" fn init_limine_protocol() -> i32 {
             info.flags.rsdp_available = rsdp_ptr != 0;
 
             if rsdp_ptr != 0 {
-                klog_printf(
-                    KlogLevel::Debug,
-                    b"ACPI RSDP pointer: 0x%llx\n\0".as_ptr() as *const c_char,
-                    rsdp_ptr,
-                );
+                klog_debug!("ACPI RSDP pointer: 0x{:x}", rsdp_ptr);
             } else {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"ACPI: Limine returned null RSDP pointer\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("ACPI: Limine returned null RSDP pointer");
             }
         }
     }
@@ -551,16 +543,9 @@ pub extern "C" fn init_limine_protocol() -> i32 {
 
                     if let Some(cmd) = info.cmdline {
                         if !cmd.is_empty() {
-                            klog_printf(
-                                KlogLevel::Debug,
-                                b"Kernel cmdline: %s\n\0".as_ptr() as *const c_char,
-                                raw,
-                            );
+                            klog_debug!("Kernel cmdline: {}", cmd);
                         } else {
-                            klog_printf(
-                                KlogLevel::Debug,
-                                b"Kernel cmdline: <empty>\n\0".as_ptr() as *const c_char,
-                            );
+                            klog_debug!("Kernel cmdline: <empty>");
                         }
                     }
                 }
@@ -588,19 +573,14 @@ pub extern "C" fn init_limine_protocol() -> i32 {
             info.memmap = Some(memmap);
             info.flags.memmap_available = true;
 
-            klog_printf(
-                KlogLevel::Debug,
-                b"Memory map: %llu entries, total %llu MB, available %llu MB\n\0".as_ptr()
-                    as *const c_char,
+            klog_debug!(
+                "Memory map: {} entries, total {} MB, available {} MB",
                 memmap.entry_count,
                 total / (1024 * 1024),
-                available / (1024 * 1024),
+                available / (1024 * 1024)
             );
         } else {
-            klog_printf(
-                KlogLevel::Info,
-                b"WARNING: No memory map available from Limine\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("WARNING: No memory map available from Limine");
         }
     }
 
@@ -617,32 +597,24 @@ pub extern "C" fn init_limine_protocol() -> i32 {
                     });
                     info.flags.framebuffer_available = true;
 
-                    klog_printf(
-                        KlogLevel::Debug,
-                        b"Framebuffer: %lux%lu @ %lu bpp\n\0".as_ptr() as *const c_char,
+                    klog_debug!(
+                        "Framebuffer: {}x{} @ {} bpp",
                         fb.width,
                         fb.height,
-                        fb.bpp as u64,
+                        fb.bpp
                     );
-                    klog_printf(
-                        KlogLevel::Debug,
-                        b"Framebuffer addr: 0x%llx pitch: %lu\n\0".as_ptr() as *const c_char,
+                    klog_debug!(
+                        "Framebuffer addr: 0x{:x} pitch: {}",
                         fb.address as u64,
-                        fb.pitch,
+                        fb.pitch
                     );
                 }
             } else {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"WARNING: No framebuffer provided by Limine\n\0".as_ptr() as *const c_char,
-                );
+                klog_info!("WARNING: No framebuffer provided by Limine");
                 info.flags.framebuffer_available = false;
             }
         } else {
-            klog_printf(
-                KlogLevel::Info,
-                b"WARNING: No framebuffer response from Limine\n\0".as_ptr() as *const c_char,
-            );
+            klog_info!("WARNING: No framebuffer response from Limine");
             info.flags.framebuffer_available = false;
         }
     }

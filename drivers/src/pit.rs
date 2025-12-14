@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::{cpu, io, klog_printf, KlogLevel};
+use slopos_lib::{cpu, io, klog_debug, klog_info};
 
 use crate::irq;
 
@@ -65,13 +65,7 @@ pub extern "C" fn pit_set_frequency(frequency_hz: u32) {
     pit_io_wait();
 
     let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"PIT: frequency set to %u Hz\n\0".as_ptr() as *const i8,
-            freq,
-        );
-    }
+    klog_debug!("PIT: frequency set to {} Hz\n", freq);
 }
 
 #[unsafe(no_mangle)]
@@ -81,13 +75,7 @@ pub extern "C" fn pit_init(frequency_hz: u32) {
     } else {
         frequency_hz
     };
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PIT: Initializing timer at %u Hz\n\0".as_ptr() as *const i8,
-            freq,
-        );
-    }
+    klog_info!("PIT: Initializing timer at {} Hz\n", freq);
     pit_set_frequency(freq);
     // Leave IRQ masked until scheduler enables preemption.
 }

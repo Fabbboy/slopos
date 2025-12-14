@@ -4,7 +4,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use slopos_lib::{klog_printf, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
 
 use crate::pci::{
     pci_bar_info_t, pci_config_read16, pci_config_read8, pci_config_write16, pci_config_write8,
@@ -66,10 +66,7 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
     let info = unsafe { &*info };
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {
-            klog_printf(
-                KlogLevel::Debug,
-                b"PCI: virtio-gpu driver already claimed a device\n\0".as_ptr() as *const i8,
-            );
+            klog_debug!("PCI: virtio-gpu driver already claimed a device");
             return -1;
         }
     }
@@ -86,12 +83,7 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
     let bar = match bar_opt {
         Some(b) => b,
         None => {
-            unsafe {
-                klog_printf(
-                    KlogLevel::Info,
-                    b"PCI: virtio-gpu missing MMIO BAR\n\0".as_ptr() as *const i8,
-                );
-            }
+            klog_info!("PCI: virtio-gpu missing MMIO BAR");
             wl_currency::award_loss();
             return -1;
         }
@@ -100,13 +92,10 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
     let mmio_size = if bar.size != 0 { bar.size as usize } else { VIRTIO_MMIO_DEFAULT_SIZE };
     let mmio_base = unsafe { mm_map_mmio_region(bar.base, mmio_size) };
     if mmio_base.is_null() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: virtio-gpu MMIO mapping failed for phys=0x%llx\n\0".as_ptr() as *const i8,
-                bar.base,
-            );
-        }
+        klog_info!(
+            "PCI: virtio-gpu MMIO mapping failed for phys=0x{:x}",
+            bar.base
+        );
         wl_currency::award_loss();
         return -1;
     }
@@ -114,49 +103,30 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
     virtio_gpu_enable_master(info);
 
     let status_before = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"PCI: virtio-gpu status read=0x%02x\n\0".as_ptr() as *const i8,
-            status_before as u32,
-        );
-    }
+    klog_debug!("PCI: virtio-gpu status read=0x{:02x}", status_before);
 
     pci_config_write8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET, 0x00);
     let status_zeroed = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"PCI: virtio-gpu status after clear=0x%02x\n\0".as_ptr() as *const i8,
-            status_zeroed as u32,
-        );
-    }
+    klog_debug!("PCI: virtio-gpu status after clear=0x{:02x}", status_zeroed);
 
     let handshake = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
     pci_config_write8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET, handshake);
     let status_handshake = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
     if (status_handshake & handshake) != handshake {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: virtio-gpu handshake incomplete (status=0x%02x)\n\0".as_ptr()
-                    as *const i8,
-                status_handshake as u32,
-            );
-        }
+        klog_info!(
+            "PCI: virtio-gpu handshake incomplete (status=0x{:02x})",
+            status_handshake
+        );
         unsafe { mm_unmap_mmio_region(mmio_base, mmio_size) };
         wl_currency::award_loss();
         return -1;
     }
 
     let sample_value = unsafe { *(mmio_base as *mut u32) };
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"PCI: virtio-gpu MMIO sample value=0x%08x\n\0".as_ptr() as *const i8,
-            sample_value,
-        );
-    }
+    klog_debug!(
+        "PCI: virtio-gpu MMIO sample value=0x{:08x}",
+        sample_value
+    );
 
     unsafe {
         VIRTIO_GPU_DEVICE.present = 1;
@@ -165,12 +135,7 @@ extern "C" fn virtio_gpu_probe(info: *const pci_device_info_t, _context: *mut c_
         VIRTIO_GPU_DEVICE.mmio_size = mmio_size;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"PCI: virtio-gpu driver probe succeeded (wheel gave a W)\n\0".as_ptr() as *const i8,
-        );
-    }
+    klog_info!("PCI: virtio-gpu driver probe succeeded (wheel gave a W)");
     wl_currency::award_win();
     0
 }
@@ -190,10 +155,7 @@ pub extern "C" fn virtio_gpu_register_driver() {
             return;
         }
         if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const pci_driver_t) != 0 {
-            klog_printf(
-                KlogLevel::Info,
-                b"PCI: virtio-gpu driver registration failed\n\0".as_ptr() as *const i8,
-            );
+            klog_info!("PCI: virtio-gpu driver registration failed");
         }
         REGISTERED = true;
     }

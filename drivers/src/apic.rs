@@ -1,10 +1,8 @@
 #![allow(dead_code)]
-
-use core::ffi::c_char;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use slopos_lib::{cpu, klog_printf, KlogLevel};
+use slopos_lib::{cpu, klog_debug, klog_info};
 
 use crate::wl_currency;
 
@@ -57,11 +55,6 @@ static APIC_BASE_ADDRESS: AtomicU64 = AtomicU64::new(0);
 static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
-fn log(level: KlogLevel, msg: &[u8]) {
-    unsafe { klog_printf(level, msg.as_ptr() as *const c_char) };
-}
-
-#[inline]
 fn hhdm_virt_for(phys: u64) -> Option<u64> {
     if phys == 0 {
         return None;
@@ -76,14 +69,11 @@ fn hhdm_virt_for(phys: u64) -> Option<u64> {
 }
 
 pub fn detect() -> bool {
-    log(
-        KlogLevel::Debug,
-        b"APIC: Detecting Local APIC availability...\0",
-    );
+    klog_debug!("APIC: Detecting Local APIC availability...");
 
     let (_, _, ecx, edx) = cpu::cpuid(1);
     if edx & CPUID_FEAT_EDX_APIC == 0 {
-        log(KlogLevel::Debug, b"APIC: Local APIC is not available\0");
+        klog_debug!("APIC: Local APIC is not available");
         APIC_AVAILABLE.store(false, Ordering::Relaxed);
         return false;
     }
@@ -98,40 +88,22 @@ pub fn detect() -> bool {
 
     if let Some(virt) = hhdm_virt_for(apic_phys) {
         APIC_BASE_ADDRESS.store(virt, Ordering::Relaxed);
-        unsafe {
-            klog_printf(
-                KlogLevel::Debug,
-                b"APIC: Physical base: 0x%llx, Virtual base (HHDM): 0x%llx\n\0".as_ptr()
-                    as *const c_char,
-                apic_phys,
-                virt,
-            );
-            klog_printf(
-                KlogLevel::Debug,
-                b"APIC: MSR flags:%s%s%s\n\0".as_ptr() as *const c_char,
-                if apic_base_msr & APIC_BASE_BSP != 0 {
-                    b" BSP\0".as_ptr() as *const c_char
-                } else {
-                    b"\0".as_ptr() as *const c_char
-                },
-                if apic_base_msr & APIC_BASE_X2APIC != 0 {
-                    b" X2APIC\0".as_ptr() as *const c_char
-                } else {
-                    b"\0".as_ptr() as *const c_char
-                },
-                if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
-                    b" ENABLED\0".as_ptr() as *const c_char
-                } else {
-                    b"\0".as_ptr() as *const c_char
-                },
-            );
-        }
+        let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 { " BSP" } else { "" };
+        let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 { " X2APIC" } else { "" };
+        let enable_flag = if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
+            " ENABLED"
+        } else {
+            ""
+        };
+        klog_debug!(
+            "APIC: Physical base: 0x{:x}, Virtual base (HHDM): 0x{:x}",
+            apic_phys,
+            virt
+        );
+        klog_debug!("APIC: MSR flags:{}{}{}", bsp_flag, x2apic_flag, enable_flag);
         true
     } else {
-        log(
-            KlogLevel::Info,
-            b"APIC: ERROR - HHDM not available, cannot map APIC registers\0",
-        );
+        klog_info!("APIC: ERROR - HHDM not available, cannot map APIC registers");
         APIC_AVAILABLE.store(false, Ordering::Relaxed);
         false
     }
@@ -139,21 +111,18 @@ pub fn detect() -> bool {
 
 pub fn init() -> i32 {
     if !is_available() {
-        log(
-            KlogLevel::Info,
-            b"APIC: Cannot initialize - APIC not available\0",
-        );
+        klog_info!("APIC: Cannot initialize - APIC not available");
         wl_currency::award_loss();
         return -1;
     }
 
-    log(KlogLevel::Debug, b"APIC: Initializing Local APIC\0");
+    klog_debug!("APIC: Initializing Local APIC");
 
     let mut apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
     if apic_base_msr & APIC_BASE_GLOBAL_ENABLE == 0 {
         apic_base_msr |= APIC_BASE_GLOBAL_ENABLE;
         cpu::write_msr(MSR_APIC_BASE, apic_base_msr);
-        log(KlogLevel::Debug, b"APIC: Enabled APIC globally via MSR\0");
+        klog_debug!("APIC: Enabled APIC globally via MSR");
     }
 
     enable();
@@ -176,17 +145,10 @@ pub fn init() -> i32 {
 
     let apic_id = get_id();
     let apic_version = get_version();
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"APIC: ID: 0x%x, Version: 0x%x\n\0".as_ptr() as *const c_char,
-            apic_id,
-            apic_version,
-        );
-    }
+    klog_debug!("APIC: ID: 0x{:x}, Version: 0x{:x}", apic_id, apic_version);
 
     APIC_ENABLED.store(true, Ordering::Relaxed);
-    log(KlogLevel::Debug, b"APIC: Initialization complete\0");
+    klog_debug!("APIC: Initialization complete");
     wl_currency::award_win();
     0
 }
@@ -220,7 +182,7 @@ pub fn enable() {
     spurious |= 0xFF;
     write_register(LAPIC_SPURIOUS, spurious);
     APIC_ENABLED.store(true, Ordering::Relaxed);
-    log(KlogLevel::Debug, b"APIC: Local APIC enabled\0");
+    klog_debug!("APIC: Local APIC enabled");
 }
 
 pub fn disable() {
@@ -231,7 +193,7 @@ pub fn disable() {
     spurious &= !LAPIC_SPURIOUS_ENABLE;
     write_register(LAPIC_SPURIOUS, spurious);
     APIC_ENABLED.store(false, Ordering::Relaxed);
-    log(KlogLevel::Debug, b"APIC: Local APIC disabled\0");
+    klog_debug!("APIC: Local APIC disabled");
 }
 
 pub fn send_eoi() {
@@ -259,15 +221,11 @@ pub fn timer_init(vector: u32, frequency: u32) {
     if !is_enabled() {
         return;
     }
-    unsafe {
-        klog_printf(
-            KlogLevel::Debug,
-            b"APIC: Initializing timer with vector 0x%x and frequency %u\n\0".as_ptr()
-                as *const c_char,
-            vector,
-            frequency,
-        );
-    }
+    klog_debug!(
+        "APIC: Initializing timer with vector 0x{:x} and frequency {}",
+        vector,
+        frequency
+    );
 
     timer_set_divisor(LAPIC_TIMER_DIV_16);
 
@@ -276,7 +234,7 @@ pub fn timer_init(vector: u32, frequency: u32) {
 
     let initial_count = 1_000_000u32.saturating_div(frequency.max(1));
     timer_start(initial_count);
-    log(KlogLevel::Debug, b"APIC: Timer initialized\0");
+    klog_debug!("APIC: Timer initialized");
 }
 
 pub fn timer_start(initial_count: u32) {
@@ -347,97 +305,49 @@ pub fn write_register(reg: u32, value: u32) {
 }
 
 pub fn dump_state() {
-    log(KlogLevel::Info, b"=== APIC STATE DUMP ===\0");
+    klog_info!("=== APIC STATE DUMP ===");
     if !is_available() {
-        log(KlogLevel::Info, b"APIC: Not available\0");
-        log(KlogLevel::Info, b"=== END APIC STATE DUMP ===\0");
+        klog_info!("APIC: Not available");
+        klog_info!("=== END APIC STATE DUMP ===");
         return;
     }
 
-    unsafe {
-        klog_printf(
-            KlogLevel::Info,
-            b"APIC Available: Yes, x2APIC: %s\n\0".as_ptr() as *const c_char,
-            if is_x2apic_available() {
-                b"Yes\0".as_ptr() as *const c_char
-            } else {
-                b"No\0".as_ptr() as *const c_char
-            },
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"APIC Enabled: %s\n\0".as_ptr() as *const c_char,
-            if is_enabled() {
-                b"Yes\0".as_ptr() as *const c_char
-            } else {
-                b"No\0".as_ptr() as *const c_char
-            },
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Bootstrap Processor: %s\n\0".as_ptr() as *const c_char,
-            if is_bsp() {
-                b"Yes\0".as_ptr() as *const c_char
-            } else {
-                b"No\0".as_ptr() as *const c_char
-            },
-        );
-        klog_printf(
-            KlogLevel::Info,
-            b"Base Address: 0x%llx\n\0".as_ptr() as *const c_char,
-            get_base_address(),
-        );
-    }
+    klog_info!(
+        "APIC Available: Yes, x2APIC: {}",
+        if is_x2apic_available() { "Yes" } else { "No" }
+    );
+    klog_info!(
+        "APIC Enabled: {}",
+        if is_enabled() { "Yes" } else { "No" }
+    );
+    klog_info!(
+        "Bootstrap Processor: {}",
+        if is_bsp() { "Yes" } else { "No" }
+    );
+    klog_info!("Base Address: 0x{:x}", get_base_address());
 
     if is_enabled() {
-        unsafe {
-            klog_printf(
-                KlogLevel::Info,
-                b"APIC ID: 0x%x\n\0".as_ptr() as *const c_char,
-                get_id(),
-            );
-            klog_printf(
-                KlogLevel::Info,
-                b"APIC Version: 0x%x\n\0".as_ptr() as *const c_char,
-                get_version(),
-            );
-
-            let spurious = read_register(LAPIC_SPURIOUS);
-            klog_printf(
-                KlogLevel::Info,
-                b"Spurious Vector Register: 0x%x\n\0".as_ptr() as *const c_char,
-                spurious,
-            );
-
-            let esr = read_register(LAPIC_ESR);
-            klog_printf(
-                KlogLevel::Info,
-                b"Error Status Register: 0x%x\n\0".as_ptr() as *const c_char,
-                esr,
-            );
-
-            let lvt_timer = read_register(LAPIC_LVT_TIMER);
-            klog_printf(
-                KlogLevel::Info,
-                b"Timer LVT: 0x%x%s\n\0".as_ptr() as *const c_char,
-                lvt_timer,
-                if lvt_timer & LAPIC_LVT_MASKED != 0 {
-                    b" (MASKED)\0".as_ptr() as *const c_char
-                } else {
-                    b"\0".as_ptr() as *const c_char
-                },
-            );
-
-            let timer_count = timer_get_current_count();
-            klog_printf(
-                KlogLevel::Info,
-                b"Timer Current Count: 0x%x\n\0".as_ptr() as *const c_char,
-                timer_count,
-            );
-        }
+        let spurious = read_register(LAPIC_SPURIOUS);
+        let esr = read_register(LAPIC_ESR);
+        let lvt_timer = read_register(LAPIC_LVT_TIMER);
+        let timer_count = timer_get_current_count();
+        klog_info!("APIC ID: 0x{:x}", get_id());
+        klog_info!("APIC Version: 0x{:x}", get_version());
+        klog_info!("Spurious Vector Register: 0x{:x}", spurious);
+        klog_info!("Error Status Register: 0x{:x}", esr);
+        klog_info!(
+            "Timer LVT: 0x{:x}{}",
+            lvt_timer,
+            if lvt_timer & LAPIC_LVT_MASKED != 0 {
+                " (MASKED)"
+            } else {
+                ""
+            }
+        );
+        klog_info!("Timer Current Count: 0x{:x}", timer_count);
     }
 
-    log(KlogLevel::Info, b"=== END APIC STATE DUMP ===\0");
+    klog_info!("=== END APIC STATE DUMP ===");
 }
 
 #[unsafe(no_mangle)]
