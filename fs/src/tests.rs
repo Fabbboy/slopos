@@ -4,7 +4,7 @@ use core::ptr;
 use slopos_drivers::serial_println;
 
 use crate::ramfs::{
-    ramfs_acquire_node, ramfs_create_directory, ramfs_create_file, ramfs_find_node, ramfs_get_root,
+    ramfs_create_directory, ramfs_create_file, ramfs_find_node, ramfs_get_root,
     ramfs_list_directory, ramfs_node_release, ramfs_read_file, ramfs_release_list,
     ramfs_write_file, ramfs_node_t, RAMFS_TYPE_DIRECTORY, RAMFS_TYPE_FILE,
 };
@@ -14,22 +14,23 @@ fn as_c(path: &[u8]) -> *const i8 {
 }
 
 fn expect_dir(path: &[u8]) -> bool {
-    let node = unsafe { ramfs_find_node(as_c(path)) };
+    let node = ramfs_find_node(as_c(path));
     if node.is_null() {
         return false;
     }
     let ok = unsafe { (*node).type_ == RAMFS_TYPE_DIRECTORY };
-    unsafe { ramfs_node_release(node) };
+    ramfs_node_release(node);
     ok
 }
 
+#[allow(dead_code)]
 fn expect_file(path: &[u8]) -> bool {
-    let node = unsafe { ramfs_find_node(as_c(path)) };
+    let node = ramfs_find_node(as_c(path));
     if node.is_null() {
         return false;
     }
     let ok = unsafe { (*node).type_ == RAMFS_TYPE_FILE };
-    unsafe { ramfs_node_release(node) };
+    ramfs_node_release(node);
     ok
 }
 
@@ -84,12 +85,12 @@ fn test_write_updates_file() -> c_int {
     {
         return -1;
     }
-    let node = unsafe { ramfs_find_node(as_c(b"/itests/hello.txt\0")) };
+    let node = ramfs_find_node(as_c(b"/itests/hello.txt\0"));
     if node.is_null() {
         return -1;
     }
     let size = unsafe { (*node).size };
-    unsafe { ramfs_node_release(node) };
+    ramfs_node_release(node);
     if size != content.len() {
         return -1;
     }
@@ -124,14 +125,14 @@ fn test_nested_directories() -> c_int {
         return -1;
     }
 
-    let via_dot = unsafe { ramfs_find_node(as_c(b"/itests/nested/./file.txt\0")) };
+    let via_dot = ramfs_find_node(as_c(b"/itests/nested/./file.txt\0"));
     if via_dot != nested_file {
         return -1;
     }
     if expect_dir(b"/itests/nested/../nested\0") == false {
         return -1;
     }
-    unsafe { ramfs_node_release(nested_file) };
+    ramfs_node_release(nested_file);
     0
 }
 
@@ -172,9 +173,7 @@ fn test_list_directory() -> c_int {
         }
     }
     if !entries.is_null() {
-        unsafe {
-            ramfs_release_list(entries, count);
-        }
+        ramfs_release_list(entries, count);
     }
     if !found_file || !found_nested {
         return -1;
@@ -186,30 +185,24 @@ fn test_list_directory() -> c_int {
 pub extern "C" fn run_ramfs_tests() -> c_int {
     serial_println!("RAMFS_TEST: running suite");
     let mut passed = 0;
-    let mut total = 0;
 
-    total += 1;
     if test_root_node() == 0 {
         passed += 1;
     }
-    total += 1;
     if test_file_roundtrip() == 0 {
         passed += 1;
     }
-    total += 1;
     if test_write_updates_file() == 0 {
         passed += 1;
     }
-    total += 1;
     if test_nested_directories() == 0 {
         passed += 1;
     }
-    total += 1;
     if test_list_directory() == 0 {
         passed += 1;
     }
 
-    serial_println!("RAMFS_TEST: {passed}/{total} passed");
+    serial_println!("RAMFS_TEST: {passed}/5 passed");
     passed
 }
 

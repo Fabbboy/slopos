@@ -11,6 +11,7 @@ use crate::ramfs::{
     RAMFS_TYPE_FILE,
 };
 
+#[allow(non_camel_case_types)]
 type ssize_t = isize;
 
 const FILE_OPEN_READ: u32 = 1 << 0;
@@ -103,10 +104,8 @@ fn with_tables<R>(f: impl FnOnce(&mut FileTableSlot, &mut [FileTableSlot; MAX_PR
 }
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
-    unsafe {
-        if !desc.node.is_null() {
-            ramfs_node_release(desc.node);
-        }
+    if !desc.node.is_null() {
+        ramfs_node_release(desc.node);
     }
     desc.node = ptr::null_mut();
     desc.position = 0;
@@ -269,17 +268,17 @@ pub extern "C" fn file_open_for_process(
             return -1;
         };
 
-        let mut node = unsafe { ramfs_acquire_node(path) };
+        let mut node = ramfs_acquire_node(path);
         if node.is_null() && (flags & FILE_OPEN_CREAT) != 0 {
-            node = unsafe { ramfs_create_file(path, ptr::null(), 0) };
+            node = ramfs_create_file(path, ptr::null(), 0);
             if !node.is_null() {
-                unsafe { ramfs_node_retain(node) };
+                ramfs_node_retain(node);
             }
         }
 
         if node.is_null() || unsafe { (*node).type_ } != RAMFS_TYPE_FILE {
             if !node.is_null() {
-                unsafe { ramfs_node_release(node) };
+                ramfs_node_release(node);
             }
             drop(guard);
             return -1;
@@ -289,7 +288,7 @@ pub extern "C" fn file_open_for_process(
         desc.node = node;
         desc.flags = flags;
         desc.position = if (flags & FILE_OPEN_APPEND) != 0 {
-            unsafe { ramfs_get_size(node) }
+            ramfs_get_size(node)
         } else {
             0
         };
@@ -333,15 +332,13 @@ pub extern "C" fn file_read_fd(
         }
 
         let mut read_len: usize = 0;
-        let rc = unsafe {
-            ramfs_read_bytes(
-                desc.node,
-                desc.position,
-                buffer as *mut _,
-                count,
-                &mut read_len as *mut usize,
-            )
-        };
+        let rc = ramfs_read_bytes(
+            desc.node,
+            desc.position,
+            buffer as *mut _,
+            count,
+            &mut read_len as *mut usize,
+        );
         if rc == 0 {
             desc.position = desc.position.saturating_add(read_len);
         }
@@ -385,8 +382,7 @@ pub extern "C" fn file_write_fd(
             return -1;
         }
 
-        let rc =
-            unsafe { ramfs_write_bytes(desc.node, desc.position, buffer as *const _, count) };
+        let rc = ramfs_write_bytes(desc.node, desc.position, buffer as *const _, count);
         if rc == 0 {
             desc.position = desc.position.saturating_add(count);
         }
@@ -444,7 +440,7 @@ pub extern "C" fn file_seek_fd(
             drop(guard);
             return -1;
         }
-        let size = unsafe { ramfs_get_size(desc.node) };
+        let size = ramfs_get_size(desc.node);
         let delta = offset as usize;
         let new_pos = match whence {
             0 => {
@@ -499,7 +495,7 @@ pub extern "C" fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         let desc = unsafe { get_descriptor(&mut *table_ptr, fd) };
         let size = if let Some(desc) = desc {
             if !desc.node.is_null() && unsafe { (*desc.node).type_ } == RAMFS_TYPE_FILE {
-                unsafe { ramfs_get_size(desc.node) }
+                ramfs_get_size(desc.node)
             } else {
                 usize::MAX
             }
@@ -516,7 +512,7 @@ pub extern "C" fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
     }
-    let node = unsafe { ramfs_find_node(path) };
+    let node = ramfs_find_node(path);
     if node.is_null() || unsafe { (*node).type_ } != RAMFS_TYPE_FILE {
         0
     } else {
@@ -529,5 +525,5 @@ pub extern "C" fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }
-    unsafe { ramfs_remove_file(path) }
+    ramfs_remove_file(path)
 }

@@ -24,6 +24,7 @@ pub struct ramfs_node_t {
 }
 
 impl ramfs_node_t {
+    #[allow(dead_code)]
     const fn empty() -> Self {
         Self {
             name: ptr::null_mut(),
@@ -338,19 +339,17 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     }
 
     // Optional sample content for quick sanity checks, like the C implementation.
-    unsafe {
-        static ETC: &[u8] = b"/etc\0";
-        static README: &[u8] = b"/etc/readme.txt\0";
-        static TMP: &[u8] = b"/tmp\0";
-        let _ = ramfs_create_directory(ETC.as_ptr() as *const c_char);
-        let sample = b"SlopOS ramfs online\n";
-        let _ = ramfs_create_file(
-            README.as_ptr() as *const c_char,
-            sample.as_ptr() as *const c_void,
-            sample.len(),
-        );
-        let _ = ramfs_create_directory(TMP.as_ptr() as *const c_char);
-    }
+    static ETC: &[u8] = b"/etc\0";
+    static README: &[u8] = b"/etc/readme.txt\0";
+    static TMP: &[u8] = b"/tmp\0";
+    let _ = ramfs_create_directory(ETC.as_ptr() as *const c_char);
+    let sample = b"SlopOS ramfs online\n";
+    let _ = ramfs_create_file(
+        README.as_ptr() as *const c_char,
+        sample.as_ptr() as *const c_void,
+        sample.len(),
+    );
+    let _ = ramfs_create_directory(TMP.as_ptr() as *const c_char);
 
     serial_println!("ramfs: initialized");
     wl_currency::award_win();
@@ -590,7 +589,7 @@ pub extern "C" fn ramfs_write_file(path: *const c_char, data: *const c_void, siz
     }
 
     let rc = if size == 0 {
-        let mut guard = RAMFS_STATE.lock();
+        let guard = RAMFS_STATE.lock();
         unsafe {
             if (*node).data.is_null() {
                 (*node).size = 0;
@@ -625,7 +624,7 @@ pub extern "C" fn ramfs_read_bytes(
         return -1;
     }
 
-    let mut guard = RAMFS_STATE.lock();
+    let guard = RAMFS_STATE.lock();
     unsafe {
         if offset >= (*node).size {
             return 0;
@@ -704,7 +703,7 @@ pub extern "C" fn ramfs_write_bytes(
         return -1;
     }
 
-    let mut guard = RAMFS_STATE.lock();
+    let guard = RAMFS_STATE.lock();
     unsafe {
         if ensure_capacity_locked(node, offset + size) != 0 {
             return -1;
