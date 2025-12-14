@@ -1,5 +1,6 @@
 use crate::kernel_panic::kernel_panic;
 use core::ffi::c_char;
+use slopos_mm::mm_constants::{HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 
 #[inline(always)]
 fn read_cr0() -> u64 {
@@ -59,12 +60,12 @@ pub extern "C" fn verify_cpu_state() {
 #[unsafe(no_mangle)]
 pub extern "C" fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
-    if addr < 0xFFFFFFFF80000000 {
+    if addr < KERNEL_VIRTUAL_BASE {
         kernel_panic(
             b"Kernel not running in higher-half virtual memory\0".as_ptr() as *const c_char,
         );
     }
-    if addr < 0xFFFF800000000000 {
+    if addr < HHDM_VIRT_BASE {
         kernel_panic(b"Kernel running in user space address range\0".as_ptr() as *const c_char);
     }
 
@@ -83,10 +84,10 @@ pub extern "C" fn check_stack_health() {
     if (rsp & 0xF) != 0 {
         kernel_panic(b"Stack pointer not properly aligned\0".as_ptr() as *const c_char);
     }
-    if rsp < 0x1000 {
+    if rsp < PAGE_SIZE_4KB {
         kernel_panic(b"Stack pointer too low (possible corruption)\0".as_ptr() as *const c_char);
     }
-    if rsp >= 0x4000_0000 && rsp < 0xFFFF_8000_0000_0000 {
+    if rsp >= PAGE_SIZE_1GB && rsp < HHDM_VIRT_BASE {
         kernel_panic(b"Stack pointer in invalid memory region\0".as_ptr() as *const c_char);
     }
 }

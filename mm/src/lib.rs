@@ -2,7 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 
-mod mm_constants;
+pub mod mm_constants;
 mod memory_layout;
 mod memory_reservations;
 mod memory_init;
