@@ -1,4 +1,3 @@
-
 use core::ffi::c_void;
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]
@@ -90,4 +89,3 @@ pub fn slice_from_cstr_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 }
-

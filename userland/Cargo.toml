@@ -17,3 +17,4 @@ slopos-video = { workspace = true }
 slopos-boot = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-sched = { workspace = true }
+slopos-mm = { workspace = true }

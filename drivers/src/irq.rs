@@ -1,13 +1,12 @@
-
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::io;
-use slopos_lib::{cpu, InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 use slopos_lib::spinlock::Spinlock;
+use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
-use crate::{apic, ioapic, keyboard, wl_currency, scheduler_callbacks};
+use crate::{apic, ioapic, keyboard, scheduler_callbacks, wl_currency};
 
 const IRQ_LINES: usize = 16;
 const IRQ_BASE_VECTOR: u8 = 32;
@@ -194,11 +193,7 @@ extern "C" fn timer_irq_handler(irq: u8, _frame: *mut InterruptFrame, _ctx: *mut
     }
 }
 
-extern "C" fn keyboard_irq_handler(
-    _irq: u8,
-    _frame: *mut InterruptFrame,
-    _ctx: *mut c_void,
-) {
+extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     unsafe {
         let status = io::inb(PS2_STATUS_PORT);
         if status & 0x01 == 0 {
@@ -228,7 +223,9 @@ fn irq_program_ioapic_route(irq: u8) {
     let mut gsi = 0u32;
     let mut legacy_flags = 0u32;
     if ioapic::legacy_irq_info(irq, &mut gsi, &mut legacy_flags) != 0 {
-        unsafe { call_kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char) };
+        unsafe {
+            call_kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char)
+        };
     }
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq) as u8;
@@ -239,7 +236,9 @@ fn irq_program_ioapic_route(irq: u8) {
         | ioapic::IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
-        unsafe { call_kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char) };
+        unsafe {
+            call_kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char)
+        };
     }
 
     let masked = with_irq_tables(|table, routes| {
@@ -348,13 +347,10 @@ pub fn register_handler(
     });
 
     if !name.is_null() {
-        let name_str =
-            unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("<invalid utf-8>");
-        klog_debug!(
-            "IRQ: Registered handler for line {} ({})",
-            irq,
-            name_str
-        );
+        let name_str = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_debug!("IRQ: Registered handler for line {} ({})", irq, name_str);
     } else {
         klog_debug!("IRQ: Registered handler for line {}", irq);
     }
@@ -448,10 +444,7 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     handler(irq, frame, context);
 
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
-        klog_info!(
-            "IRQ: Frame corruption detected on IRQ {} - aborting",
-            irq
-        );
+        klog_info!("IRQ: Frame corruption detected on IRQ {} - aborting", irq);
         kdiag_dump_interrupt_frame(frame);
         unsafe { call_kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
     }
@@ -470,11 +463,9 @@ pub fn get_stats(irq: u8, out_stats: *mut IrqStats) -> i32 {
     if irq as usize >= IRQ_LINES || out_stats.is_null() {
         return -1;
     }
-    with_irq_tables(|table, _| {
-        unsafe {
-            (*out_stats).count = table[irq as usize].count;
-            (*out_stats).last_timestamp = table[irq as usize].last_timestamp;
-        }
+    with_irq_tables(|table, _| unsafe {
+        (*out_stats).count = table[irq as usize].count;
+        (*out_stats).last_timestamp = table[irq as usize].last_timestamp;
     });
     0
 }

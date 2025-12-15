@@ -1,4 +1,3 @@
-
 use slopos_lib::io;
 
 const PIC1_COMMAND: u16 = 0x20;

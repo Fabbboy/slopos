@@ -1,4 +1,3 @@
-
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
@@ -8,7 +7,9 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
 
-use crate::scheduler_callbacks::{call_get_hhdm_offset, call_is_hhdm_available, call_is_rsdp_available, call_get_rsdp_address};
+use crate::scheduler_callbacks::{
+    call_get_hhdm_offset, call_get_rsdp_address, call_is_hhdm_available, call_is_rsdp_available,
+};
 
 const IOAPIC_MAX_CONTROLLERS: usize = 8;
 const IOAPIC_MAX_ISO_ENTRIES: usize = 32;
@@ -153,7 +154,9 @@ unsafe impl Sync for IoapicTable {}
 
 impl IoapicTable {
     const fn new() -> Self {
-        Self(UnsafeCell::new([IoapicController::new(); IOAPIC_MAX_CONTROLLERS]))
+        Self(UnsafeCell::new(
+            [IoapicController::new(); IOAPIC_MAX_CONTROLLERS],
+        ))
     }
 
     fn ptr(&self) -> *mut IoapicController {
@@ -448,9 +451,7 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIoapicEntry>() {
                     unsafe {
                         if IOAPIC_COUNT >= IOAPIC_MAX_CONTROLLERS {
-                            klog_info!(
-                                "IOAPIC: Too many controllers, ignoring extra entries"
-                            );
+                            klog_info!("IOAPIC: Too many controllers, ignoring extra entries");
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIoapicEntry);
                             let ctrl = &mut *IOAPIC_TABLE.ptr().add(IOAPIC_COUNT);
@@ -471,9 +472,7 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIsoEntry>() {
                     unsafe {
                         if ISO_COUNT >= IOAPIC_MAX_ISO_ENTRIES {
-                            klog_info!(
-                                "IOAPIC: Too many source overrides, ignoring extras"
-                            );
+                            klog_info!("IOAPIC: Too many source overrides, ignoring extras");
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIsoEntry);
                             let iso = &mut ISO_TABLE[ISO_COUNT];
@@ -647,11 +646,7 @@ pub fn ioapic_is_ready() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub fn ioapic_legacy_irq_info(
-    legacy_irq: u8,
-    out_gsi: *mut u32,
-    out_flags: *mut u32,
-) -> i32 {
+pub fn ioapic_legacy_irq_info(legacy_irq: u8, out_gsi: *mut u32, out_flags: *mut u32) -> i32 {
     if out_gsi.is_null() || out_flags.is_null() {
         return -1;
     }

@@ -1,16 +1,16 @@
 #![allow(non_camel_case_types)]
 #![allow(static_mut_refs)]
 
-use core::ffi::{c_char, c_int, CStr};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use slopos_lib::{io, klog_info};
 
-use crate::scheduler_callbacks::call_kernel_shutdown;
 use crate::interrupt_test_config::{
-    interrupt_test_config, INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL,
-    INTERRUPT_TEST_SUITE_MEMORY, INTERRUPT_TEST_SUITE_SCHEDULER,
+    INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY,
+    INTERRUPT_TEST_SUITE_SCHEDULER, interrupt_test_config,
 };
+use crate::scheduler_callbacks::call_kernel_shutdown;
 
 #[repr(C)]
 pub struct test_stats {
@@ -201,7 +201,7 @@ pub fn test_clear_resume_point() {
 
 #[unsafe(no_mangle)]
 pub fn safe_execute_test(
-    test_func: Option<extern "C" fn() -> c_int>,
+    test_func: Option<fn() -> c_int>,
     test_name: *const c_char,
     expected_exception: c_int,
 ) -> c_int {
@@ -220,8 +220,7 @@ pub fn test_record_simple(name: *const c_char, result: c_int) {
             TEST_STATS.passed_cases = TEST_STATS.passed_cases.saturating_add(1);
         } else {
             TEST_STATS.failed_cases = TEST_STATS.failed_cases.saturating_add(1);
-            TEST_STATS.unexpected_exceptions =
-                TEST_STATS.unexpected_exceptions.saturating_add(1);
+            TEST_STATS.unexpected_exceptions = TEST_STATS.unexpected_exceptions.saturating_add(1);
             let test_name = cstr_to_str(name);
             klog_info!("INTERRUPT_TEST: Test '{test_name}' FAILED (stub)");
         }
@@ -241,8 +240,9 @@ pub fn test_record_bulk(
         if total > passed {
             TEST_STATS.failed_cases = TEST_STATS.failed_cases.saturating_add(total - passed);
         }
-        TEST_STATS.exceptions_caught =
-            TEST_STATS.exceptions_caught.saturating_add(exceptions_caught);
+        TEST_STATS.exceptions_caught = TEST_STATS
+            .exceptions_caught
+            .saturating_add(exceptions_caught);
         TEST_STATS.unexpected_exceptions = TEST_STATS
             .unexpected_exceptions
             .saturating_add(unexpected_exceptions);
@@ -354,10 +354,9 @@ pub fn get_test_result_string(result: c_int) -> *const c_char {
 pub fn dump_test_context() {
     klog_info!("=== TEST CONTEXT DUMP (stub) ===");
     klog_info!("Test active: {}", unsafe { TEST_CTX.test_active });
-    klog_info!(
-        "Expected exception: {}",
-        unsafe { TEST_CTX.expected_exception }
-    );
+    klog_info!("Expected exception: {}", unsafe {
+        TEST_CTX.expected_exception
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -371,4 +370,3 @@ pub fn log_test_exception(frame: *mut slopos_lib::InterruptFrame) {
     };
     klog_info!("TEST_EXCEPTION: Vector {} at RIP 0x{:x}", vector, rip);
 }
-

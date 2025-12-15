@@ -6,8 +6,8 @@ use core::ffi::{c_int, c_void};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::pci::{
-    PciBarInfo, pci_config_read16, pci_config_read8, pci_config_write16, pci_config_write8,
-    PciDeviceInfo, pci_register_driver, PciDriver, PCI_COMMAND_OFFSET,
+    PCI_COMMAND_OFFSET, PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16,
+    pci_config_write8, pci_config_write16, pci_register_driver,
 };
 use crate::wl_currency;
 
@@ -42,15 +42,20 @@ static mut VIRTIO_GPU_DEVICE: virtio_gpu_device_t = virtio_gpu_device_t {
 };
 
 fn virtio_gpu_enable_master(info: &PciDeviceInfo) {
-    let command =
-        pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
+    let command = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
     let desired = command | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
     if command != desired {
-        pci_config_write16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET, desired);
+        pci_config_write16(
+            info.bus,
+            info.device,
+            info.function,
+            PCI_COMMAND_OFFSET,
+            desired,
+        );
     }
 }
 
-extern "C" fn virtio_gpu_match(info: *const PciDeviceInfo, _context: *mut c_void) -> bool {
+fn virtio_gpu_match(info: *const PciDeviceInfo, _context: *mut c_void) -> bool {
     let info = unsafe { &*info };
     if info.vendor_id != VIRTIO_GPU_VENDOR_ID {
         return false;
@@ -58,7 +63,7 @@ extern "C" fn virtio_gpu_match(info: *const PciDeviceInfo, _context: *mut c_void
     info.device_id == VIRTIO_GPU_DEVICE_ID_PRIMARY || info.device_id == VIRTIO_GPU_DEVICE_ID_TRANS
 }
 
-extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
+fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
     let info = unsafe { &*info };
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {
@@ -85,7 +90,11 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
         }
     };
 
-    let mmio_size = if bar.size != 0 { bar.size as usize } else { VIRTIO_MMIO_DEFAULT_SIZE };
+    let mmio_size = if bar.size != 0 {
+        bar.size as usize
+    } else {
+        VIRTIO_MMIO_DEFAULT_SIZE
+    };
     let mmio_base = mm_map_mmio_region(bar.base, mmio_size);
     if mmio_base.is_null() {
         klog_info!(
@@ -98,16 +107,43 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
 
     virtio_gpu_enable_master(info);
 
-    let status_before = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
+    let status_before = pci_config_read8(
+        info.bus,
+        info.device,
+        info.function,
+        VIRTIO_PCI_STATUS_OFFSET,
+    );
     klog_debug!("PCI: virtio-gpu status read=0x{:02x}", status_before);
 
-    pci_config_write8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET, 0x00);
-    let status_zeroed = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
+    pci_config_write8(
+        info.bus,
+        info.device,
+        info.function,
+        VIRTIO_PCI_STATUS_OFFSET,
+        0x00,
+    );
+    let status_zeroed = pci_config_read8(
+        info.bus,
+        info.device,
+        info.function,
+        VIRTIO_PCI_STATUS_OFFSET,
+    );
     klog_debug!("PCI: virtio-gpu status after clear=0x{:02x}", status_zeroed);
 
     let handshake = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
-    pci_config_write8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET, handshake);
-    let status_handshake = pci_config_read8(info.bus, info.device, info.function, VIRTIO_PCI_STATUS_OFFSET);
+    pci_config_write8(
+        info.bus,
+        info.device,
+        info.function,
+        VIRTIO_PCI_STATUS_OFFSET,
+        handshake,
+    );
+    let status_handshake = pci_config_read8(
+        info.bus,
+        info.device,
+        info.function,
+        VIRTIO_PCI_STATUS_OFFSET,
+    );
     if (status_handshake & handshake) != handshake {
         klog_info!(
             "PCI: virtio-gpu handshake incomplete (status=0x{:02x})",
@@ -119,10 +155,7 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
     }
 
     let sample_value = unsafe { *(mmio_base as *mut u32) };
-    klog_debug!(
-        "PCI: virtio-gpu MMIO sample value=0x{:08x}",
-        sample_value
-    );
+    klog_debug!("PCI: virtio-gpu MMIO sample value=0x{:08x}", sample_value);
 
     unsafe {
         VIRTIO_GPU_DEVICE.present = 1;
@@ -136,12 +169,14 @@ extern "C" fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void
     0
 }
 
-static VIRTIO_GPU_PCI_DRIVER: PciDriver = unsafe { PciDriver {
-    name: b"virtio-gpu\0".as_ptr(),
-    match_fn: Some(core::mem::transmute(virtio_gpu_match as *const ())),
-    probe: Some(core::mem::transmute(virtio_gpu_probe as *const ())),
-    context: core::ptr::null_mut(),
-} };
+static VIRTIO_GPU_PCI_DRIVER: PciDriver = unsafe {
+    PciDriver {
+        name: b"virtio-gpu\0".as_ptr(),
+        match_fn: Some(core::mem::transmute(virtio_gpu_match as *const ())),
+        probe: Some(core::mem::transmute(virtio_gpu_probe as *const ())),
+        context: core::ptr::null_mut(),
+    }
+};
 
 #[unsafe(no_mangle)]
 pub fn virtio_gpu_register_driver() {

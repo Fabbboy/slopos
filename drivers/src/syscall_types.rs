@@ -1,5 +1,4 @@
-
-use core::ffi::{c_void};
+use core::ffi::c_void;
 
 use slopos_lib::InterruptFrame as LibInterruptFrame;
 
@@ -99,4 +98,3 @@ pub struct Task {
 }
 
 pub type InterruptFrame = LibInterruptFrame;
-

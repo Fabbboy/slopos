@@ -1,4 +1,3 @@
-
 // SlopOS Memory and Paging Constants (ported from mm_constants.h)
 
 pub const BOOT_STACK_SIZE: u64 = 0x4000;
@@ -65,4 +64,3 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
 pub const EFI_PAGE_SIZE: u64 = 0x1000;
 pub const EFI_CONVENTIONAL_MEMORY: u64 = 7;
-

@@ -1,6 +1,6 @@
 use core::fmt::{self, Write};
-use spin::Mutex;
 use slopos_lib::io;
+use spin::Mutex;
 
 // Standard COM port base addresses
 pub const COM1_BASE: u16 = 0x3f8;
@@ -103,7 +103,9 @@ static INPUT_BUFFER: Mutex<SerialBuffer> = Mutex::new(SerialBuffer::new());
 /// Initialize the default serial port (COM1)
 pub fn init() {
     let mut port = SERIAL.lock();
-    unsafe { port.init(); }
+    unsafe {
+        port.init();
+    }
 }
 
 /// Initialize a specific serial port by base address
@@ -112,7 +114,9 @@ pub fn init_port(base: u16) -> Result<UartCapabilities, ()> {
     // Future enhancement: support multiple ports
     if base == COM1_BASE {
         let mut port = SERIAL.lock();
-        unsafe { port.init(); }
+        unsafe {
+            port.init();
+        }
         Ok(port.capabilities())
     } else {
         Err(())
@@ -201,19 +205,22 @@ impl SerialPort {
     unsafe fn detect_uart(&mut self) -> UartCapabilities {
         // Test for FIFO presence by writing to FCR (IIR when writing)
         // If FIFO exists, IIR bits 6-7 will be set when reading back
-        io::outb(self.base + REG_IIR, FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
-        
+        io::outb(
+            self.base + REG_IIR,
+            FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX,
+        );
+
         // Small delay to allow FIFO to initialize
         for _ in 0..10 {
             core::hint::spin_loop();
         }
-        
+
         let iir_after = io::inb(self.base + REG_IIR);
         let has_fifo = (iir_after & IIR_FIFO_MASK) == IIR_FIFO_ENABLED;
-        
+
         // Clear FIFO for clean state (will be reconfigured in init)
         io::outb(self.base + REG_IIR, 0);
-        
+
         if !has_fifo {
             // No FIFO - could be 8250 or 16450
             // 16450 is register-compatible with 16550 but lacks FIFO
@@ -225,16 +232,16 @@ impl SerialPort {
                 fifo_size: 0,
             };
         }
-        
+
         // Has FIFO - test if it's working (16550A vs buggy 16550)
         // Write test pattern to scratch register and read back
         let test_value = 0xAA;
         io::outb(self.base + REG_SCR, test_value);
         let scratch_read = io::inb(self.base + REG_SCR);
-        
+
         // Check if scratch register works (indicates 16550A or better)
         let fifo_working = scratch_read == test_value;
-        
+
         // Try to determine FIFO size by checking IIR bits
         // This is a heuristic - actual detection varies by chip
         let fifo_size = if fifo_working {
@@ -245,13 +252,13 @@ impl SerialPort {
         } else {
             16 // 16550 has FIFO but it may be buggy
         };
-        
+
         let uart_type = if fifo_working {
             UartType::Uart16550A
         } else {
             UartType::Uart16550
         };
-        
+
         UartCapabilities {
             uart_type,
             has_fifo: true,
@@ -264,36 +271,40 @@ impl SerialPort {
     unsafe fn init(&mut self) {
         // Detect UART capabilities first
         self.caps = self.detect_uart();
-        
+
         // Disable interrupts
         io::outb(self.base + REG_IER, 0x00);
-        
+
         // Enable DLAB to access baud rate divisor
         io::outb(self.base + REG_LCR, LCR_DLAB);
-        
+
         // Set baud rate divisor to 1 (115200 baud with 1.8432 MHz clock)
         // Low byte
         io::outb(self.base + REG_RBR, 0x01);
         // High byte
         io::outb(self.base + REG_IER, 0x00);
-        
+
         // Configure line: 8 bits, no parity, 1 stop bit (8N1)
         io::outb(self.base + REG_LCR, 0x03);
-        
+
         // Configure FIFO if available
         if self.caps.has_fifo {
             if self.caps.fifo_working {
                 // Enable FIFO with 14-byte threshold (16550A and better)
-                io::outb(self.base + REG_IIR, 
-                    FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX | FCR_14_BYTE_THRESHOLD);
+                io::outb(
+                    self.base + REG_IIR,
+                    FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX | FCR_14_BYTE_THRESHOLD,
+                );
             } else {
                 // 16550 - enable FIFO but be cautious
-                io::outb(self.base + REG_IIR, 
-                    FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX);
+                io::outb(
+                    self.base + REG_IIR,
+                    FCR_ENABLE_FIFO | FCR_CLEAR_RX | FCR_CLEAR_TX,
+                );
             }
         }
         // If no FIFO (8250/16450), FCR write is ignored, so it's safe
-        
+
         // Set modem control: DTR, RTS, and AUX2 (for loopback on some systems)
         io::outb(self.base + REG_MCR, MCR_DTR | MCR_RTS | MCR_AUX2);
     }
@@ -309,7 +320,7 @@ impl SerialPort {
             io::outb(self.base + REG_RBR, byte);
         }
     }
-    
+
     /// Get detected UART capabilities
     pub fn capabilities(&self) -> UartCapabilities {
         self.caps
@@ -350,4 +361,3 @@ macro_rules! serial_println {
         $crate::serial::print_args(core::format_args!(concat!($fmt, "\n"), $($arg)*));
     };
 }
-

@@ -1,7 +1,6 @@
-
 use core::ffi::{c_char, c_void};
 
-use slopos_sched::{task_create, TaskEntry, INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+use slopos_sched::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskEntry, task_create};
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]

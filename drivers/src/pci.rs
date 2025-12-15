@@ -1,7 +1,7 @@
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
-use core::ffi::{c_char, c_int, CStr};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
@@ -146,7 +146,8 @@ static mut DEVICES: [PciDeviceInfo; PCI_MAX_DEVICES] = [PciDeviceInfo::zeroed();
 static mut DEVICE_COUNT: usize = 0;
 static mut PCI_INITIALIZED: c_int = 0;
 static mut PRIMARY_GPU: PciGpuInfo = PciGpuInfo::zeroed();
-static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] = [ptr::null(); PCI_DRIVER_MAX];
+static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] =
+    [ptr::null(); PCI_DRIVER_MAX];
 static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
@@ -186,8 +187,11 @@ unsafe fn inl(port: u16) -> u32 {
 
 #[unsafe(no_mangle)]
 pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    let address: u32 =
-        0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         inl(PCI_CONFIG_DATA)
@@ -210,8 +214,11 @@ pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
 
 #[unsafe(no_mangle)]
 pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    let address: u32 =
-        0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         outl(PCI_CONFIG_DATA, value);
@@ -220,8 +227,11 @@ pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: 
 
 #[unsafe(no_mangle)]
 pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
-    let address: u32 =
-        0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         let current = inl(PCI_CONFIG_DATA);
@@ -235,8 +245,11 @@ pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: 
 
 #[unsafe(no_mangle)]
 pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
-    let address: u32 =
-        0x8000_0000 | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8) | (offset as u32 & 0xFC);
+    let address: u32 = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
     unsafe {
         outl(PCI_CONFIG_ADDRESS, address);
         let current = inl(PCI_CONFIG_DATA);
@@ -373,7 +386,11 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
                     as *mut u8;
         }
 
-        let gpu_kind = if virtio_candidate { "virtio" } else { "display-class" };
+        let gpu_kind = if virtio_candidate {
+            "virtio"
+        } else {
+            "display-class"
+        };
         let virt = unsafe { PRIMARY_GPU.mmio_virt_base };
         let size = unsafe { PRIMARY_GPU.mmio_size };
         if !virt.is_null() {
@@ -404,7 +421,8 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
 
 fn pci_is_virtio_gpu(info: &PciDeviceInfo) -> bool {
     info.vendor_id == PCI_VENDOR_ID_VIRTIO
-        && (info.device_id == PCI_DEVICE_ID_VIRTIO_GPU || info.device_id == PCI_DEVICE_ID_VIRTIO_GPU_TRANS)
+        && (info.device_id == PCI_DEVICE_ID_VIRTIO_GPU
+            || info.device_id == PCI_DEVICE_ID_VIRTIO_GPU_TRANS)
 }
 
 fn pci_is_gpu_candidate(info: &PciDeviceInfo) -> bool {
@@ -446,7 +464,11 @@ fn pci_collect_bars(info: &mut PciDeviceInfo) {
         } else {
             let bar_type = (raw & PCI_BAR_MEM_TYPE_MASK) >> 1;
             bar.is_io = 0;
-            bar.prefetchable = if (raw & PCI_BAR_MEM_PREFETCHABLE) != 0 { 1 } else { 0 };
+            bar.prefetchable = if (raw & PCI_BAR_MEM_PREFETCHABLE) != 0 {
+                1
+            } else {
+                0
+            };
             bar.is_64bit = if bar_type == 0x2 { 1 } else { 0 };
             let mut base = (raw & PCI_BAR_MEM_ADDRESS_MASK) as u64;
             if bar.is_64bit != 0 && bar_index + 1 < max_bars {
@@ -513,9 +535,7 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
     unsafe {
         if DEVICE_COUNT >= PCI_MAX_DEVICES {
             if DEVICE_COUNT == PCI_MAX_DEVICES {
-                klog_info!(
-                    "PCI: Device buffer full, additional devices will not be tracked"
-                );
+                klog_info!("PCI: Device buffer full, additional devices will not be tracked");
             }
             return;
         }
@@ -555,8 +575,7 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
                 klog_info!("PCI: Traversing to secondary bus {}", secondary_bus);
                 BUS_VISITED[secondary_bus as usize] = 1;
                 for dev in 0..32u8 {
-                    let sec_vendor =
-                        pci_config_read16(secondary_bus, dev, 0, PCI_VENDOR_ID_OFFSET);
+                    let sec_vendor = pci_config_read16(secondary_bus, dev, 0, PCI_VENDOR_ID_OFFSET);
                     if sec_vendor == 0xFFFF {
                         continue;
                     }

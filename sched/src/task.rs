@@ -4,7 +4,7 @@ use core::ptr;
 
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::klog::{klog_is_enabled, KlogLevel};
+use slopos_lib::klog::{KlogLevel, klog_is_enabled};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
@@ -254,13 +254,11 @@ impl TaskManager {
 
 static mut TASK_MANAGER: TaskManager = TaskManager::new();
 
-use slopos_mm::kernel_heap::{kmalloc, kfree};
-use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir};
-// Keep extern "C" for fs functions to break circular dependency
-unsafe extern "C" {
-    fn fileio_create_table_for_process(process_id: u32) -> c_int;
-    fn fileio_destroy_table_for_process(process_id: u32) -> c_int;
-}
+use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
+use slopos_mm::kernel_heap::{kfree, kmalloc};
+use slopos_mm::process_vm::{
+    create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir,
+};
 
 unsafe extern "C" {
     static _user_text_start: u8;
@@ -323,11 +321,7 @@ fn task_slot_index(task: *const Task) -> Option<usize> {
     }
     let start = unsafe { &(*mgr).tasks as *const Task as usize };
     let idx = (task as usize - start) / mem::size_of::<Task>();
-    if idx < MAX_TASKS {
-        Some(idx)
-    } else {
-        None
-    }
+    if idx < MAX_TASKS { Some(idx) } else { None }
 }
 
 fn clear_exit_record(task: *const Task) {
@@ -337,7 +331,12 @@ fn clear_exit_record(task: *const Task) {
     }
 }
 
-fn record_task_exit(task: *const Task, exit_reason: TaskExitReason, fault_reason: TaskFaultReason, exit_code: u32) {
+fn record_task_exit(
+    task: *const Task,
+    exit_reason: TaskExitReason,
+    fault_reason: TaskFaultReason,
+    exit_code: u32,
+) {
     if let Some(idx) = task_slot_index(task) {
         let mgr = unsafe { &mut *task_manager_mut() };
         mgr.exit_records[idx] = TaskExitRecord {
@@ -502,7 +501,7 @@ pub fn task_create(
         kernel_stack_base = kstack as u64;
         kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-        if unsafe { fileio_create_table_for_process(process_id) } != 0 {
+        if fileio_create_table_for_process(process_id) != 0 {
             kfree(kstack);
             destroy_process_vm(process_id);
             return INVALID_TASK_ID;
@@ -529,7 +528,7 @@ pub fn task_create(
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         if process_id != INVALID_PROCESS_ID {
-            unsafe { fileio_destroy_table_for_process(process_id) };
+            fileio_destroy_table_for_process(process_id);
             destroy_process_vm(process_id);
             if kernel_stack_base != 0 {
                 kfree(kernel_stack_base as *mut c_void);
@@ -591,7 +590,9 @@ pub fn task_create(
 
     unsafe {
         use core::ffi::CStr;
-        let name_str = CStr::from_ptr(task_ref.name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
+        let name_str = CStr::from_ptr(task_ref.name.as_ptr() as *const c_char)
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
         klog_debug!("Created task '{}' with ID {}", name_str, task_id);
     }
 
@@ -621,7 +622,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     unsafe {
         use core::ffi::CStr;
-        let name_str = CStr::from_ptr((*task_ptr).name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
+        let name_str = CStr::from_ptr((*task_ptr).name.as_ptr() as *const c_char)
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
         klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
     }
 
@@ -638,7 +641,12 @@ pub fn task_terminate(task_id: u32) -> c_int {
         if (*task_ptr).exit_reason == TaskExitReason::None {
             (*task_ptr).exit_reason = TaskExitReason::Kernel;
         }
-        record_task_exit(task_ptr, (*task_ptr).exit_reason, (*task_ptr).fault_reason, (*task_ptr).exit_code);
+        record_task_exit(
+            task_ptr,
+            (*task_ptr).exit_reason,
+            (*task_ptr).fault_reason,
+            (*task_ptr).exit_code,
+        );
         (*task_ptr).state = TASK_STATE_TERMINATED;
         (*task_ptr).fate_token = 0;
         (*task_ptr).fate_value = 0;
@@ -743,9 +751,13 @@ fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
                 || new_state == TASK_STATE_TERMINATED
         }
         TASK_STATE_BLOCKED => {
-            new_state == TASK_STATE_READY || new_state == TASK_STATE_TERMINATED || new_state == TASK_STATE_BLOCKED
+            new_state == TASK_STATE_READY
+                || new_state == TASK_STATE_TERMINATED
+                || new_state == TASK_STATE_BLOCKED
         }
-        TASK_STATE_TERMINATED => new_state == TASK_STATE_INVALID || new_state == TASK_STATE_TERMINATED,
+        TASK_STATE_TERMINATED => {
+            new_state == TASK_STATE_INVALID || new_state == TASK_STATE_TERMINATED
+        }
         _ => false,
     }
 }
@@ -765,18 +777,19 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     unsafe { (*task).state = new_state };
 
     if klog_is_enabled(KlogLevel::Debug) != 0 {
-        klog_debug!("Task {} state: {} -> {}", task_id, old_state as c_uint, new_state as c_uint);
+        klog_debug!(
+            "Task {} state: {} -> {}",
+            task_id,
+            old_state as c_uint,
+            new_state as c_uint
+        );
     }
 
     0
 }
 
 #[unsafe(no_mangle)]
-pub fn get_task_stats(
-    total_tasks: *mut u32,
-    active_tasks: *mut u32,
-    context_switches: *mut u64,
-) {
+pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
     let mgr = unsafe { &mut *task_manager_mut() };
     if !total_tasks.is_null() {
         unsafe { *total_tasks = mgr.tasks_created };

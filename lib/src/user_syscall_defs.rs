@@ -1,4 +1,3 @@
-
 use core::ffi::c_char;
 
 #[repr(C)]
@@ -103,4 +102,3 @@ pub struct user_sys_info {
     pub ready_tasks: u32,
     pub schedule_calls: u32,
 }
-

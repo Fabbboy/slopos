@@ -1,4 +1,3 @@
-
 use core::arch::asm;
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -72,4 +71,3 @@ fn read_rflags() -> u64 {
     }
     flags
 }
-

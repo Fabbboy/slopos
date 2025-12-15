@@ -14,5 +14,4 @@ crate-type = ["rlib"]
 [dependencies]
 slopos-mm = { workspace = true }
 slopos-lib = { workspace = true }
-slopos-drivers = { workspace = true }
 spin.workspace = true

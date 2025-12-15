@@ -1,29 +1,19 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use core::ptr;
 
-use slopos_boot::early_init::{boot_init_priority, BootInitStep};
-use slopos_drivers::wl_currency;
+use slopos_boot::early_init::{BootInitStep, boot_init_priority};
+use slopos_drivers::{fate, wl_currency};
 use slopos_lib::klog_info;
+use slopos_mm::process_vm::process_vm_load_elf;
 use slopos_sched::{
-    schedule_task, task_get_info, task_terminate, Task, TaskEntry, INVALID_TASK_ID,
+    INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_get_info, task_terminate,
 };
 
 use crate::loader::user_spawn_program;
 use crate::roulette::roulette_user_main;
 use crate::shell::shell_user_main;
 
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct FateResult {
-    pub token: u32,
-    pub value: u32,
-}
-
-// Keep extern "C" for these functions to break circular dependencies
-unsafe extern "C" {
-    fn fate_register_outcome_hook(cb: extern "C" fn(*const FateResult));
-    fn process_vm_load_elf(process_id: u32, payload: *const u8, payload_len: usize, entry_out: *mut u64) -> i32;
-}
+pub type FateResult = slopos_drivers::fate::FateResult;
 
 #[inline(always)]
 fn is_win(res: &FateResult) -> bool {
@@ -41,9 +31,7 @@ fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
         if name.is_null() {
             "<null>"
         } else {
-            CStr::from_ptr(name)
-                .to_str()
-                .unwrap_or("<invalid utf-8>")
+            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
         }
     };
 
@@ -52,7 +40,12 @@ fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
 
 #[unsafe(link_section = ".user_text")]
 fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i32 {
-    let task_id = user_spawn_program(name.as_ptr() as *const c_char, entry, ptr::null_mut(), priority);
+    let task_id = user_spawn_program(
+        name.as_ptr() as *const c_char,
+        entry,
+        ptr::null_mut(),
+        priority,
+    );
     if task_id == INVALID_TASK_ID {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
             klog_info!("USERLAND: Failed to create task '{}'\n", task_name);
@@ -72,11 +65,24 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
 
     // Load bundled user payload ELF into the new process address space and repoint entry.
     let mut new_entry: u64 = 0;
-    const ROULETTE_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../builddir/roulette_payload.elf"));
+    const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../builddir/roulette_payload.elf"
+    ));
     let pid = unsafe { (*task_info).process_id };
-    if unsafe { process_vm_load_elf(pid, ROULETTE_ELF.as_ptr(), ROULETTE_ELF.len(), &mut new_entry) } != 0 || new_entry == 0 {
+    if process_vm_load_elf(
+        pid,
+        ROULETTE_ELF.as_ptr(),
+        ROULETTE_ELF.len(),
+        &mut new_entry,
+    ) != 0
+        || new_entry == 0
+    {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to load roulette payload ELF for '{}'\n", task_name);
+            klog_info!(
+                "USERLAND: Failed to load roulette payload ELF for '{}'\n",
+                task_name
+            );
         });
         wl_currency::award_loss();
         task_terminate(task_id);
@@ -122,7 +128,7 @@ fn userland_launch_shell_once() -> i32 {
 }
 
 #[unsafe(link_section = ".user_text")]
-extern "C" fn userland_fate_hook(res: *const FateResult) {
+fn userland_fate_hook(res: *const FateResult) {
     if res.is_null() {
         return;
     }
@@ -137,9 +143,7 @@ extern "C" fn userland_fate_hook(res: *const FateResult) {
 
 #[unsafe(link_section = ".user_text")]
 fn boot_step_userland_hook() -> i32 {
-    unsafe {
-        fate_register_outcome_hook(userland_fate_hook);
-    }
+    fate::fate_register_outcome_hook(userland_fate_hook);
     0
 }
 

@@ -6,18 +6,18 @@
 
 extern crate alloc;
 
-use core::arch::global_asm;
 use core::alloc::Layout;
+use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 use slopos_boot as boot;
-use slopos_sched as sched;
-use slopos_fs as fs;
 use slopos_drivers::{serial, serial_println, wl_currency};
-use slopos_mm::BumpAllocator;
-use slopos_video as video;
+use slopos_fs as fs;
 use slopos_lib::cpu;
+use slopos_mm::BumpAllocator;
+use slopos_sched as sched;
 use slopos_userland as userland;
+use slopos_video as video;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: BumpAllocator = BumpAllocator::new();
@@ -35,7 +35,7 @@ static USERLAND_LINK_GUARD: fn() = userland::init;
 
 // Pull in other subsystems that the boot crate expects to call by making a volatile reference to them.
 #[unsafe(no_mangle)]
-extern "C" fn __link_boot_deps() {
+fn __link_boot_deps() {
     unsafe {
         core::ptr::read_volatile(&((sched::scheduler_shutdown as *const ()) as usize));
         core::ptr::read_volatile(&((sched::task_shutdown_all as *const ()) as usize));
@@ -54,7 +54,6 @@ extern "C" fn __link_boot_deps() {
         core::ptr::read_volatile(
             &((sched::scheduler_request_reschedule_from_interrupt as *const ()) as usize),
         );
-        core::ptr::read_volatile(&((video::framebuffer::framebuffer_init as *const ()) as usize));
         core::ptr::read_volatile(&((sched::start_scheduler as *const ()) as usize));
         core::ptr::read_volatile(&((sched::scheduler_timer_tick as *const ()) as usize));
         core::ptr::read_volatile(&((fs::fileio_create_table_for_process as *const ()) as usize));
@@ -63,7 +62,7 @@ extern "C" fn __link_boot_deps() {
 }
 
 #[used]
-static FORCE_LINK_BOOT_DEPS: extern "C" fn() = __link_boot_deps;
+static FORCE_LINK_BOOT_DEPS: fn() = __link_boot_deps;
 
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {

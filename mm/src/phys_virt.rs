@@ -1,37 +1,32 @@
-
-use core::ffi::{c_char, c_int, CStr, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::memory_init::{hhdm_is_available, hhdm_offset_value};
 use crate::memory_reservations::{
-    mm_reservations_find_option, MmRegion, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-    MM_RESERVATION_FLAG_MMIO,
+    MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_MMIO, MmRegion,
+    mm_reservations_find_option,
 };
 
 const PAGE_SIZE_4KB: usize = 0x1000;
 
-use crate::paging::virt_to_phys;
 use crate::memory_reservations::mm_reservation_type_name;
-// Keep extern "C" for boot functions to break circular dependency
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn get_hhdm_offset() -> u64;
-    fn is_hhdm_available() -> c_int;
-}
+use crate::paging::virt_to_phys;
 
 #[inline]
 fn hhdm_available() -> bool {
-    unsafe { is_hhdm_available() != 0 }
+    hhdm_is_available()
 }
 
 #[unsafe(no_mangle)]
 pub fn mm_init_phys_virt_helpers() {
     if !hhdm_available() {
         static MSG: &[u8] = b"MM: HHDM unavailable; cannot translate physical addresses\0";
-        unsafe {
-            kernel_panic(MSG.as_ptr() as *const c_char);
-        }
+        panic!(
+            "{}",
+            core::str::from_utf8(MSG).unwrap_or("MM: HHDM unavailable")
+        );
     }
 }
 
@@ -43,13 +38,18 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
 
     let reservation: Option<&'static MmRegion> = mm_reservations_find_option(phys_addr);
     if let Some(region) = reservation {
-        let allowed = region.flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT | MM_RESERVATION_FLAG_MMIO);
+        let allowed =
+            region.flags & (MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT | MM_RESERVATION_FLAG_MMIO);
         if allowed == 0 {
             let type_name = mm_reservation_type_name(region.type_);
             let type_name_str = unsafe { CStr::from_ptr(type_name) }
                 .to_str()
                 .unwrap_or("<invalid utf-8>");
-            klog_debug!("mm_phys_to_virt: rejected reserved phys 0x{:x} ({})", phys_addr, type_name_str);
+            klog_debug!(
+                "mm_phys_to_virt: rejected reserved phys 0x{:x} ({})",
+                phys_addr,
+                type_name_str
+            );
             return 0;
         }
     }
@@ -59,7 +59,7 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
         return 0;
     }
 
-    let hhdm = unsafe { get_hhdm_offset() };
+    let hhdm = hhdm_offset_value();
 
     // If we were handed something already in the higher-half window, treat it
     // as translated and return it directly rather than overflowing the add.
@@ -68,7 +68,11 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     }
 
     if phys_addr > u64::MAX - hhdm {
-        klog_info!("mm_phys_to_virt: overflow translating phys 0x{:x} with hhdm 0x{:x}", phys_addr, hhdm);
+        klog_info!(
+            "mm_phys_to_virt: overflow translating phys 0x{:x} with hhdm 0x{:x}",
+            phys_addr,
+            hhdm
+        );
         return 0;
     }
 
@@ -117,7 +121,7 @@ pub fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    unsafe { (phys_addr + get_hhdm_offset()) as *mut c_void }
+    (phys_addr + hhdm_offset_value()) as *mut c_void
 }
 
 #[unsafe(no_mangle)]

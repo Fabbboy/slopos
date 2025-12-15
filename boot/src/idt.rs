@@ -2,7 +2,7 @@
 #![allow(bad_asm_style)]
 
 use core::arch::{asm, global_asm};
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char, c_void};
 
 use slopos_drivers::serial_println;
 use slopos_lib::{klog_debug, klog_info};
@@ -100,11 +100,12 @@ pub enum ExceptionMode {
 // Import functions from other crates - they're now regular Rust functions
 use slopos_drivers::irq::irq_dispatch;
 use slopos_drivers::syscall::syscall_handle;
-use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_drivers::wl_currency::wl_award_loss;
+use slopos_lib::kdiag_dump_interrupt_frame;
 
 use slopos_drivers::scheduler_callbacks::{
-    call_boot_get_current_task, call_boot_request_reschedule_from_interrupt, call_boot_task_terminate,
+    call_boot_get_current_task, call_boot_request_reschedule_from_interrupt,
+    call_boot_task_terminate,
 };
 
 #[repr(C)]
@@ -276,6 +277,10 @@ pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
     0
 }
 
+pub fn idt_get_gate_opaque(vector: u8, out_entry: *mut c_void) -> i32 {
+    idt_get_gate(vector, out_entry as *mut IdtEntry)
+}
+
 #[unsafe(no_mangle)]
 pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
     if vector >= 32 {
@@ -286,28 +291,19 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         return;
     }
     if is_critical_exception_internal(vector) {
-        klog_info!(
-            "IDT: Refusing to override critical exception {}",
-            vector
-        );
+        klog_info!("IDT: Refusing to override critical exception {}", vector);
         return;
     }
     unsafe {
         OVERRIDE_HANDLERS[vector as usize] = Some(handler);
-        klog_debug!(
-            "IDT: Registered override handler for exception {}",
-            vector
-        );
+        klog_debug!("IDT: Registered override handler for exception {}", vector);
     }
 }
 
 #[unsafe(no_mangle)]
 pub fn idt_set_ist(vector: u8, ist_index: u8) {
     if vector as usize >= IDT_ENTRIES {
-        klog_info!(
-            "IDT: Invalid IST assignment for vector {}",
-            vector
-        );
+        klog_info!("IDT: Invalid IST assignment for vector {}", vector);
         return;
     }
     if ist_index > 7 {

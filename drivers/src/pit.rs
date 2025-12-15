@@ -1,4 +1,3 @@
-
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_lib::{cpu, io, klog_debug, klog_info};
@@ -56,7 +55,10 @@ pub fn pit_set_frequency(frequency_hz: u32) {
     unsafe {
         io::outb(
             PIT_COMMAND_PORT,
-            PIT_COMMAND_CHANNEL0 | PIT_COMMAND_ACCESS_LOHI | PIT_COMMAND_MODE_SQUARE | PIT_COMMAND_BINARY,
+            PIT_COMMAND_CHANNEL0
+                | PIT_COMMAND_ACCESS_LOHI
+                | PIT_COMMAND_MODE_SQUARE
+                | PIT_COMMAND_BINARY,
         );
         io::outb(PIT_CHANNEL0_PORT, (divisor & 0xFF) as u8);
         io::outb(PIT_CHANNEL0_PORT, ((divisor >> 8) & 0xFF) as u8);
@@ -132,9 +134,7 @@ pub fn pit_poll_delay_ms(ms: u32) {
         if current <= last {
             elapsed = elapsed.saturating_add((last - current) as u32);
         } else {
-            elapsed = elapsed.saturating_add(
-                last as u32 + (reload.saturating_sub(current as u32)),
-            );
+            elapsed = elapsed.saturating_add(last as u32 + (reload.saturating_sub(current as u32)));
         }
         last = current;
     }

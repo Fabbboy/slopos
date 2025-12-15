@@ -1,4 +1,4 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 
 use slopos_drivers::serial;
 use slopos_lib::cpu;
@@ -123,8 +123,7 @@ pub fn kernel_panic_with_context(
             klog_info!("Function: {}", function_str);
         }
         if !file.is_null() {
-            let file_str =
-                CStr::from_ptr(file).to_str().unwrap_or("<invalid utf-8>");
+            let file_str = CStr::from_ptr(file).to_str().unwrap_or("<invalid utf-8>");
             klog_info!("File: {}:{}", file_str, line);
         }
     }

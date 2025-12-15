@@ -47,7 +47,7 @@ impl Default for TestSuiteResult {
 pub struct TestSuiteDesc {
     pub name: *const c_char,
     pub mask_bit: u32,
-    pub run: Option<extern "C" fn(*const InterruptTestConfig, *mut TestSuiteResult) -> i32>,
+    pub run: Option<fn(*const InterruptTestConfig, *mut TestSuiteResult) -> i32>,
 }
 
 unsafe impl Sync for TestSuiteDesc {}
@@ -160,7 +160,7 @@ fn award_wl_for_result(res: &TestSuiteResult) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tests_reset_registry() {
+pub fn tests_reset_registry() {
     unsafe {
         (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
         *registry_count_mut() = 0;
@@ -168,7 +168,7 @@ pub extern "C" fn tests_reset_registry() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
+pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     if desc.is_null() {
         return -1;
     }
@@ -187,15 +187,12 @@ pub extern "C" fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tests_register_system_suites() {
+pub fn tests_register_system_suites() {
     suites::register_system_suites();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tests_run_all(
-    config: *const InterruptTestConfig,
-    summary: *mut TestRunSummary,
-) -> i32 {
+pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSummary) -> i32 {
     if config.is_null() {
         return -1;
     }
@@ -311,18 +308,14 @@ mod suites {
         run: Some(run_interrupt_suite),
     };
 
-    extern "C" fn run_interrupt_suite(
-        config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_interrupt_suite(config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         if config.is_null() {
             return -1;
         }
 
         let mut scoped = unsafe { *config };
-        scoped.suite_mask &= INTERRUPT_TEST_SUITE_BASIC
-            | INTERRUPT_TEST_SUITE_MEMORY
-            | INTERRUPT_TEST_SUITE_CONTROL;
+        scoped.suite_mask &=
+            INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_MEMORY | INTERRUPT_TEST_SUITE_CONTROL;
 
         if scoped.suite_mask == 0 {
             if let Some(out_ref) = unsafe { out.as_mut() } {
@@ -400,13 +393,16 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    use slopos_mm::tests::{test_heap_free_list_search, test_heap_fragmentation_behind_head, test_process_vm_slot_reuse, test_process_vm_counter_reset};
+    use slopos_mm::memory_layout::{mm_get_kernel_heap_start, mm_get_process_layout};
     #[cfg(feature = "builtin-tests")]
-    use slopos_mm::memory_layout::{mm_get_process_layout, mm_get_kernel_heap_start};
+    use slopos_mm::paging::paging_is_user_accessible;
     #[cfg(feature = "builtin-tests")]
     use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_get_page_dir};
     #[cfg(feature = "builtin-tests")]
-    use slopos_mm::paging::paging_is_user_accessible;
+    use slopos_mm::tests::{
+        test_heap_fragmentation_behind_head, test_heap_free_list_search,
+        test_process_vm_counter_reset, test_process_vm_slot_reuse,
+    };
 
     #[cfg(feature = "builtin-tests")]
     #[repr(C)]
@@ -449,10 +445,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_vm_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let mut passed = 0u32;
         let mut total = 0u32;
@@ -474,19 +467,13 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_vm_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         fill_simple_result(out, VM_NAME, 0, 0, 0);
         0
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_heap_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let mut passed = 0u32;
         let total = 2u32;
@@ -506,19 +493,13 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_heap_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         fill_simple_result(out, HEAP_NAME, 0, 0, 0);
         0
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_ramfs_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_ramfs_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let total = 5u32;
         let passed = slopos_fs::tests::run_ramfs_tests().max(0) as u32;
@@ -528,19 +509,13 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_ramfs_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_ramfs_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         fill_simple_result(out, RAMFS_NAME, 0, 0, 0);
         0
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_privsep_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let result = slopos_sched::run_privilege_separation_invariant_test();
         let passed = if result == 0 { 1 } else { 0 };
@@ -550,15 +525,12 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_privsep_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
+    fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         fill_simple_result(out, PRIVSEP_NAME, 0, 0, 0);
         0
     }
 
-    extern "C" fn run_context_switch_regression(
+    fn run_context_switch_regression(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -567,7 +539,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_roulette_mapping_suite(
+    fn run_roulette_mapping_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -591,8 +563,8 @@ mod suites {
                 let code_ok =
                     unsafe { paging_is_user_accessible(dir, intr::run_all_interrupt_tests as u64) }
                         != 0;
-                let stack_ok = layout.is_null()
-                    || unsafe { paging_is_user_accessible(dir, stack_probe) } != 0;
+                let stack_ok =
+                    layout.is_null() || unsafe { paging_is_user_accessible(dir, stack_probe) } != 0;
                 let heap_guard = unsafe { paging_is_user_accessible(dir, heap_probe) } == 0;
                 passed = (code_ok as u32) + (stack_ok as u32) + (heap_guard as u32);
             }
@@ -607,7 +579,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_roulette_mapping_suite(
+    fn run_roulette_mapping_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -616,13 +588,13 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_roulette_exec_suite(
+    fn run_roulette_exec_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
         use slopos_sched::{
-            schedule_task, task_create, task_get_info, task_terminate, Task, INVALID_TASK_ID,
-            TASK_FLAG_USER_MODE, TASK_STATE_READY,
+            INVALID_TASK_ID, TASK_FLAG_USER_MODE, TASK_STATE_READY, Task, schedule_task,
+            task_create, task_get_info, task_terminate,
         };
 
         let start = slopos_lib::tsc::rdtsc();
@@ -642,7 +614,8 @@ mod suites {
         if tid != INVALID_TASK_ID {
             let mut info: *mut Task = ptr::null_mut();
             if unsafe { task_get_info(tid, &mut info) } == 0 && !info.is_null() {
-                if unsafe { schedule_task(info) } == 0 && unsafe { (*info).state } == TASK_STATE_READY
+                if unsafe { schedule_task(info) } == 0
+                    && unsafe { (*info).state } == TASK_STATE_READY
                 {
                     passed = 1;
                 }
@@ -658,7 +631,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_roulette_exec_suite(
+    fn run_roulette_exec_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -667,7 +640,7 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    extern "C" fn run_virtio_gpu_driver_suite(
+    fn run_virtio_gpu_driver_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {
@@ -675,7 +648,7 @@ mod suites {
             pci_device_info_t, pci_get_registered_driver, pci_get_registered_driver_count,
         };
         use slopos_drivers::virtio_gpu::{
-            virtio_gpu_register_driver, VIRTIO_GPU_DEVICE_ID_PRIMARY, VIRTIO_GPU_VENDOR_ID,
+            VIRTIO_GPU_DEVICE_ID_PRIMARY, VIRTIO_GPU_VENDOR_ID, virtio_gpu_register_driver,
         };
 
         let start = slopos_lib::tsc::rdtsc();
@@ -728,7 +701,7 @@ mod suites {
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    extern "C" fn run_virtio_gpu_driver_suite(
+    fn run_virtio_gpu_driver_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,
     ) -> i32 {

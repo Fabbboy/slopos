@@ -1,9 +1,8 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::{mem, ptr, slice};
 
+use slopos_lib::klog_info;
 use spin::Mutex;
-use slopos_drivers::serial_println;
-use slopos_drivers::wl_currency;
 
 pub const RAMFS_TYPE_FILE: c_int = 1;
 pub const RAMFS_TYPE_DIRECTORY: c_int = 2;
@@ -48,7 +47,7 @@ static RAMFS_STATE: Mutex<RamfsState> = Mutex::new(RamfsState::new());
 
 unsafe impl Send for RamfsState {}
 
-use slopos_mm::kernel_heap::{kmalloc, kfree};
+use slopos_mm::kernel_heap::{kfree, kmalloc};
 
 const MAX_PATH: usize = 512;
 
@@ -178,10 +177,7 @@ unsafe fn ramfs_detach_node(node: *mut ramfs_node_t) {
     }
 }
 
-unsafe fn ramfs_find_child_component(
-    parent: *mut ramfs_node_t,
-    name: &[u8],
-) -> *mut ramfs_node_t {
+unsafe fn ramfs_find_child_component(parent: *mut ramfs_node_t, name: &[u8]) -> *mut ramfs_node_t {
     unsafe {
         if parent.is_null() || (*parent).type_ != RAMFS_TYPE_DIRECTORY {
             return ptr::null_mut();
@@ -311,7 +307,6 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     unsafe {
         let root = alloc_node(b"/", RAMFS_TYPE_DIRECTORY, ptr::null_mut());
         if root.is_null() {
-            wl_currency::award_loss();
             return -1;
         }
         state.root = root;
@@ -331,8 +326,7 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     );
     let _ = ramfs_create_directory(TMP.as_ptr() as *const c_char);
 
-        serial_println!("ramfs: initialized");
-        wl_currency::award_win();
+    klog_info!("ramfs: initialized");
     0
 }
 
@@ -398,7 +392,15 @@ pub fn ramfs_find_node(path: *const c_char) -> *mut ramfs_node_t {
     if ensure_initialized_locked(&mut state) != 0 {
         return ptr::null_mut();
     }
-    unsafe { ramfs_traverse_internal(&mut state, bytes.unwrap(), RamfsCreateMode::None, false, &mut None) }
+    unsafe {
+        ramfs_traverse_internal(
+            &mut state,
+            bytes.unwrap(),
+            RamfsCreateMode::None,
+            false,
+            &mut None,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -600,7 +602,10 @@ pub fn ramfs_read_bytes(
     if !bytes_read.is_null() {
         unsafe { *bytes_read = 0 };
     }
-    if node.is_null() || unsafe { (*node).type_ } != RAMFS_TYPE_FILE || (buffer.is_null() && buffer_len > 0) {
+    if node.is_null()
+        || unsafe { (*node).type_ } != RAMFS_TYPE_FILE
+        || (buffer.is_null() && buffer_len > 0)
+    {
         return -1;
     }
 
@@ -612,11 +617,7 @@ pub fn ramfs_read_bytes(
         let remaining = (*node).size - offset;
         let to_read = remaining.min(buffer_len);
         if to_read > 0 && !(*node).data.is_null() && !buffer.is_null() {
-            ptr::copy_nonoverlapping(
-                (*node).data.add(offset),
-                buffer,
-                to_read,
-            );
+            ptr::copy_nonoverlapping((*node).data.add(offset), buffer, to_read);
         }
         if !bytes_read.is_null() {
             *bytes_read = to_read;
@@ -739,8 +740,7 @@ pub fn ramfs_list_directory(
         return 0;
     }
 
-    let array_bytes = (child_count as usize)
-        .saturating_mul(mem::size_of::<*mut ramfs_node_t>());
+    let array_bytes = (child_count as usize).saturating_mul(mem::size_of::<*mut ramfs_node_t>());
     let array_ptr = kmalloc(array_bytes) as *mut *mut ramfs_node_t;
     if array_ptr.is_null() {
         ramfs_node_release(dir);
@@ -795,7 +795,13 @@ pub fn ramfs_remove_file(path: *const c_char) -> c_int {
         return -1;
     }
     unsafe {
-        let node = ramfs_traverse_internal(&mut guard, path_bytes(path).unwrap_or(&[]), RamfsCreateMode::None, false, &mut None);
+        let node = ramfs_traverse_internal(
+            &mut guard,
+            path_bytes(path).unwrap_or(&[]),
+            RamfsCreateMode::None,
+            false,
+            &mut None,
+        );
         if node.is_null() || (*node).type_ != RAMFS_TYPE_FILE || (*node).parent.is_null() {
             return -1;
         }
@@ -819,4 +825,3 @@ pub fn ramfs_get_size(node: *mut ramfs_node_t) -> usize {
     let _guard = RAMFS_STATE.lock();
     unsafe { (*node).size }
 }
-

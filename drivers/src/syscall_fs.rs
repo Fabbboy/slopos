@@ -1,32 +1,16 @@
 #![allow(clippy::too_many_arguments)]
 
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 
 use crate::syscall_common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
-    SyscallDisposition, syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES, USER_PATH_MAX,
+    SyscallDisposition, USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user,
+    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err, syscall_return_ok,
 };
-use crate::syscall_types::{Task, InterruptFrame, INVALID_PROCESS_ID};
+use crate::syscall_types::{INVALID_PROCESS_ID, InterruptFrame, Task};
 
 const USER_FS_MAX_ENTRIES: u32 = 64;
-
-const RAMFS_TYPE_FILE: i32 = 1;
-const RAMFS_TYPE_DIRECTORY: i32 = 2;
-
-#[repr(C)]
-pub struct RamfsNode {
-    pub name: *mut c_char,
-    pub type_: i32,
-    pub size: usize,
-    pub data: *mut c_void,
-    pub refcount: u32,
-    pub pending_unlink: u8,
-    pub parent: *mut RamfsNode,
-    pub children: *mut RamfsNode,
-    pub next_sibling: *mut RamfsNode,
-    pub prev_sibling: *mut RamfsNode,
-}
+type RamfsNode = ramfs_node_t;
 
 #[repr(C)]
 pub struct UserFsEntry {
@@ -48,25 +32,16 @@ pub struct UserFsList {
     pub count: u32,
 }
 
-use crate::scheduler_callbacks::{
-    call_file_open_for_process, call_file_close_fd, call_file_read_fd, call_file_write_fd, call_file_unlink_path,
+use slopos_fs::fileio::{
+    file_close_fd, file_open_for_process, file_read_fd, file_unlink_path, file_write_fd,
+};
+use slopos_fs::ramfs::{
+    RAMFS_TYPE_DIRECTORY, RAMFS_TYPE_FILE, ramfs_acquire_node, ramfs_create_directory,
+    ramfs_get_size, ramfs_list_directory, ramfs_node_release, ramfs_node_t, ramfs_release_list,
 };
 
-use slopos_mm::kernel_heap::{kmalloc, kfree};
+use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
-// Keep extern "C" for fs functions to break circular dependency
-unsafe extern "C" {
-    fn ramfs_acquire_node(path: *const c_char) -> *mut RamfsNode;
-    fn ramfs_get_size(node: *const RamfsNode) -> u64;
-    fn ramfs_node_release(node: *mut RamfsNode);
-    fn ramfs_list_directory(
-        path: *const c_char,
-        entries: *mut *mut *mut RamfsNode,
-        count: *mut c_int,
-    ) -> c_int;
-    fn ramfs_release_list(entries: *mut *mut RamfsNode, count: c_int);
-    fn ramfs_create_directory(path: *const c_char) -> *mut RamfsNode;
-}
 
 fn syscall_fs_error(frame: *mut InterruptFrame) -> SyscallDisposition {
     syscall_return_err(frame, u64::MAX)
@@ -80,14 +55,16 @@ pub fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     }
 
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
-        != 0
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
+        (*frame).rdi as *const c_char
+    }) != 0
     {
         return syscall_fs_error(frame);
     }
 
     let flags = unsafe { (*frame).rsi as u32 };
-    let fd = unsafe { call_file_open_for_process((*task).process_id, path.as_ptr(), flags) };
+    let pid = unsafe { (*task).process_id };
+    let fd = file_open_for_process(pid, path.as_ptr(), flags);
     if fd < 0 {
         return syscall_fs_error(frame);
     }
@@ -100,7 +77,9 @@ pub fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
             return syscall_fs_error(frame);
         }
     }
-    let rc = unsafe { call_file_close_fd((*task).process_id, (*frame).rdi as c_int) };
+    let pid = unsafe { (*task).process_id };
+    let fd = unsafe { (*frame).rdi as c_int };
+    let rc = file_close_fd(pid, fd);
     if rc != 0 {
         return syscall_fs_error(frame);
     }
@@ -118,14 +97,12 @@ pub fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     let request_len = unsafe { (*frame).rdx as usize };
     let capped_len = request_len.min(USER_IO_MAX_BYTES);
 
-    let bytes = unsafe {
-        call_file_read_fd(
-            (*task).process_id,
-            (*frame).rdi as c_int,
-            tmp.as_mut_ptr() as *mut c_char,
-            capped_len,
-        )
-    };
+    let bytes = file_read_fd(
+        unsafe { (*task).process_id },
+        unsafe { (*frame).rdi as c_int },
+        tmp.as_mut_ptr() as *mut c_char,
+        capped_len,
+    );
     if bytes < 0 {
         return syscall_fs_error(frame);
     }
@@ -164,14 +141,12 @@ pub fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
         return syscall_fs_error(frame);
     }
 
-    let bytes = unsafe {
-        call_file_write_fd(
-            (*task).process_id,
-            (*frame).rdi as c_int,
-            tmp.as_ptr() as *const c_char,
-            write_len,
-        )
-    };
+    let bytes = file_write_fd(
+        unsafe { (*task).process_id },
+        unsafe { (*frame).rdi as c_int },
+        tmp.as_ptr() as *const c_char,
+        write_len,
+    );
     if bytes < 0 {
         return syscall_fs_error(frame);
     }
@@ -187,13 +162,14 @@ pub fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     }
 
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
-        != 0
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
+        (*frame).rdi as *const c_char
+    }) != 0
     {
         return syscall_fs_error(frame);
     }
 
-    let node = unsafe { ramfs_acquire_node(path.as_ptr()) };
+    let node = ramfs_acquire_node(path.as_ptr());
     if node.is_null() {
         return syscall_fs_error(frame);
     }
@@ -227,13 +203,14 @@ pub fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
 pub fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
-        != 0
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
+        (*frame).rdi as *const c_char
+    }) != 0
     {
         return syscall_fs_error(frame);
     }
 
-    let created = unsafe { ramfs_create_directory(path.as_ptr()) };
+    let created = ramfs_create_directory(path.as_ptr());
     if !created.is_null() {
         return syscall_return_ok(frame, 0);
     }
@@ -243,13 +220,14 @@ pub fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
 pub fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = task;
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe { (*frame).rdi as *const c_char })
-        != 0
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
+        (*frame).rdi as *const c_char
+    }) != 0
     {
         return syscall_fs_error(frame);
     }
 
-    if unsafe { call_file_unlink_path(path.as_ptr()) } != 0 {
+    if file_unlink_path(path.as_ptr()) != 0 {
         return syscall_fs_error(frame);
     }
     syscall_return_ok(frame, 0)
@@ -290,7 +268,7 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
 
     let mut entries: *mut *mut RamfsNode = ptr::null_mut();
     let mut count: c_int = 0;
-    let rc = unsafe { ramfs_list_directory(path.as_ptr(), &mut entries, &mut count) };
+    let rc = ramfs_list_directory(path.as_ptr(), &mut entries, &mut count);
     if rc != 0 {
         return syscall_fs_error(frame);
     }
@@ -306,10 +284,8 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     let tmp_ptr = kmalloc(tmp_size) as *mut UserFsEntry;
     if tmp_ptr.is_null() {
         if !entries.is_null() {
-            unsafe {
-                ramfs_release_list(entries, count);
-                kfree(entries as *mut c_void);
-            }
+            ramfs_release_list(entries, count);
+            kfree(entries as *mut c_void);
         }
         return syscall_fs_error(frame);
     }
@@ -362,13 +338,11 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         };
     }
 
-    unsafe {
-        if !entries.is_null() {
-            ramfs_release_list(entries, count);
-            kfree(entries as *mut c_void);
-        }
-        kfree(tmp_ptr as *mut c_void);
+    if !entries.is_null() {
+        ramfs_release_list(entries, count);
+        kfree(entries as *mut c_void);
     }
+    kfree(tmp_ptr as *mut c_void);
 
     if rc_user != 0 {
         return syscall_fs_error(frame);

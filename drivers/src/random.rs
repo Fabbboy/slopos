@@ -1,4 +1,3 @@
-
 use slopos_lib::tsc;
 use spin::Mutex;
 
@@ -44,4 +43,3 @@ pub fn random_next() -> u64 {
 pub fn random_u64() -> u64 {
     random_next()
 }
-

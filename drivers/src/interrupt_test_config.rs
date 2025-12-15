@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
 
 use core::ffi::CStr;
-use core::ffi::{c_char};
+use core::ffi::c_char;
 
 pub const INTERRUPT_TESTS_DEFAULT_ENABLED: bool = false;
 pub const INTERRUPT_TESTS_DEFAULT_TIMEOUT_MS: u32 = 0;
@@ -40,11 +40,19 @@ pub struct interrupt_test_config {
 impl Default for interrupt_test_config {
     fn default() -> Self {
         Self {
-            enabled: if INTERRUPT_TESTS_DEFAULT_ENABLED { 1 } else { 0 },
+            enabled: if INTERRUPT_TESTS_DEFAULT_ENABLED {
+                1
+            } else {
+                0
+            },
             verbosity: verbosity_from_string(INTERRUPT_TESTS_DEFAULT_VERBOSITY),
             suite_mask: suite_from_string(INTERRUPT_TESTS_DEFAULT_SUITE),
             timeout_ms: INTERRUPT_TESTS_DEFAULT_TIMEOUT_MS,
-            shutdown_on_complete: if INTERRUPT_TESTS_DEFAULT_SHUTDOWN { 1 } else { 0 },
+            shutdown_on_complete: if INTERRUPT_TESTS_DEFAULT_SHUTDOWN {
+                1
+            } else {
+                0
+            },
             stacktrace_demo: 0,
         }
     }
@@ -73,11 +81,17 @@ fn suite_from_string(value: &str) -> u32 {
         INTERRUPT_TEST_SUITE_MEMORY
     } else if value.eq_ignore_ascii_case("control") {
         INTERRUPT_TEST_SUITE_CONTROL
-    } else if value.eq_ignore_ascii_case("basic+memory") || value.eq_ignore_ascii_case("memory+basic") {
+    } else if value.eq_ignore_ascii_case("basic+memory")
+        || value.eq_ignore_ascii_case("memory+basic")
+    {
         INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_MEMORY
-    } else if value.eq_ignore_ascii_case("basic+control") || value.eq_ignore_ascii_case("control+basic") {
+    } else if value.eq_ignore_ascii_case("basic+control")
+        || value.eq_ignore_ascii_case("control+basic")
+    {
         INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_CONTROL
-    } else if value.eq_ignore_ascii_case("memory+control") || value.eq_ignore_ascii_case("control+memory") {
+    } else if value.eq_ignore_ascii_case("memory+control")
+        || value.eq_ignore_ascii_case("control+memory")
+    {
         INTERRUPT_TEST_SUITE_MEMORY | INTERRUPT_TEST_SUITE_CONTROL
     } else {
         INTERRUPT_TEST_SUITE_ALL
@@ -105,7 +119,10 @@ fn parse_on_off_flag(value: &str, current: c_int) -> c_int {
 }
 
 fn apply_enable_token(config: &mut interrupt_test_config, value: &str) {
-    if value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("enabled") {
+    if value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("enabled")
+    {
         config.enabled = 1;
         return;
     } else if value.eq_ignore_ascii_case("off")
@@ -219,12 +236,14 @@ pub unsafe fn interrupt_test_config_parse_cmdline(
 }
 
 #[unsafe(no_mangle)]
-pub fn interrupt_test_verbosity_string(
-    verbosity: interrupt_test_verbosity,
-) -> *const c_char {
+pub fn interrupt_test_verbosity_string(verbosity: interrupt_test_verbosity) -> *const c_char {
     match verbosity {
-        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_QUIET => b"quiet\0".as_ptr() as *const c_char,
-        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_VERBOSE => b"verbose\0".as_ptr() as *const c_char,
+        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_QUIET => {
+            b"quiet\0".as_ptr() as *const c_char
+        }
+        interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_VERBOSE => {
+            b"verbose\0".as_ptr() as *const c_char
+        }
         _ => b"summary\0".as_ptr() as *const c_char,
     }
 }

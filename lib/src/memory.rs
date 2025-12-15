@@ -80,5 +80,3 @@ pub fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
 pub fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> c_int {
     unsafe { memcmp_internal(s1, s2, n) }
 }
-
-

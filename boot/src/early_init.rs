@@ -1,6 +1,6 @@
 use core::{
     cell::UnsafeCell,
-    ffi::{c_char, CStr},
+    ffi::{CStr, c_char},
     ptr,
 };
 
@@ -9,8 +9,8 @@ use slopos_drivers::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
 
-use crate::{gdt, idt, kernel_panic::kernel_panic};
 use crate::limine_protocol;
+use crate::{gdt, idt, kernel_panic::kernel_panic};
 
 pub const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
 const BOOT_INIT_PRIORITY_SHIFT: u32 = 8;
@@ -192,7 +192,10 @@ fn boot_init_report_phase(level: KlogLevel, prefix: &[u8], value: Option<&[u8]>)
     }
     let prefix_str = bytes_to_str(prefix);
     let value_str = value.map(bytes_to_str).unwrap_or("");
-    klog::log_args(level, format_args!("[boot:init] {}{}\n", prefix_str, value_str));
+    klog::log_args(
+        level,
+        format_args!("[boot:init] {}{}\n", prefix_str, value_str),
+    );
 }
 
 fn boot_init_report_step(level: KlogLevel, label: &[u8], value: Option<&[u8]>) {
@@ -374,11 +377,7 @@ pub fn is_kernel_initialized() -> i32 {
 }
 
 pub fn get_initialization_progress() -> i32 {
-    if boot_state().initialized {
-        100
-    } else {
-        50
-    }
+    if boot_state().initialized { 100 } else { 50 }
 }
 
 pub fn report_kernel_status() {
@@ -469,7 +468,12 @@ crate::boot_init_step_unit!(
     b"boot banner\0",
     boot_step_boot_banner_fn
 );
-boot_init_step!(BOOT_STEP_LIMINE, early_hw, b"limine\0", boot_step_limine_protocol_fn);
+boot_init_step!(
+    BOOT_STEP_LIMINE,
+    early_hw,
+    b"limine\0",
+    boot_step_limine_protocol_fn
+);
 crate::boot_init_step_unit!(
     BOOT_STEP_BOOT_CONFIG,
     early_hw,
@@ -493,9 +497,9 @@ pub fn kernel_main_impl() {
 
     // Register boot callbacks early to break circular dependencies
     unsafe {
+        use crate::limine_protocol::{get_rsdp_address, is_rsdp_available};
+        use crate::shutdown::{kernel_reboot, kernel_shutdown};
         use slopos_drivers::scheduler_callbacks::{BootCallbacks, register_boot_callbacks};
-        use crate::shutdown::{kernel_shutdown, kernel_reboot};
-        use crate::limine_protocol::{is_rsdp_available, get_rsdp_address};
         register_boot_callbacks(BootCallbacks {
             gdt_set_kernel_rsp0: Some(gdt::gdt_set_kernel_rsp0),
             is_kernel_initialized: Some(is_kernel_initialized),
@@ -506,9 +510,10 @@ pub fn kernel_main_impl() {
             is_hhdm_available: Some(limine_protocol::is_hhdm_available_rust),
             is_rsdp_available: Some(is_rsdp_available),
             get_rsdp_address: Some(get_rsdp_address),
+            idt_get_gate: Some(idt::idt_get_gate_opaque),
         });
     }
-    
+
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {
         kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);

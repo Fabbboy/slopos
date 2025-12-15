@@ -157,4 +157,3 @@ fn qemu_exit(success: bool) -> ! {
     }
     cpu::halt_loop();
 }
-

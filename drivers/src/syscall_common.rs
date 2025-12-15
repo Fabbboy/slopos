@@ -1,8 +1,7 @@
-
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use crate::syscall_types::{Task, InterruptFrame};
+use crate::syscall_types::{InterruptFrame, Task};
 
 pub const USER_IO_MAX_BYTES: usize = 512;
 pub const USER_PATH_MAX: usize = 128;
@@ -14,8 +13,7 @@ pub enum SyscallDisposition {
     NoReturn = 1,
 }
 
-pub type SyscallHandler =
-    fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
+pub type SyscallHandler = fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
 
 #[repr(C)]
 pub struct SyscallEntry {

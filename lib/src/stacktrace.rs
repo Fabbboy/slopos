@@ -1,6 +1,6 @@
-use core::ffi::c_int;
 use crate::cpu;
 use crate::klog::{self, KlogLevel};
+use core::ffi::c_int;
 
 const STACKTRACE_MAX_LOCAL: usize = 32;
 
@@ -74,10 +74,7 @@ pub fn stacktrace_capture_from(
 }
 
 #[unsafe(no_mangle)]
-pub fn stacktrace_capture(
-    entries: *mut StacktraceEntry,
-    max_entries: c_int,
-) -> c_int {
+pub fn stacktrace_capture(entries: *mut StacktraceEntry, max_entries: c_int) -> c_int {
     let rbp = read_frame_pointer();
     stacktrace_capture_from(rbp, entries, max_entries)
 }
@@ -89,8 +86,10 @@ pub fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     }
 
     let max = max_frames.clamp(0, STACKTRACE_MAX_LOCAL as c_int) as usize;
-    let mut local_entries: [StacktraceEntry; STACKTRACE_MAX_LOCAL] =
-        [StacktraceEntry { frame_pointer: 0, return_address: 0 }; STACKTRACE_MAX_LOCAL];
+    let mut local_entries: [StacktraceEntry; STACKTRACE_MAX_LOCAL] = [StacktraceEntry {
+        frame_pointer: 0,
+        return_address: 0,
+    }; STACKTRACE_MAX_LOCAL];
 
     let captured = stacktrace_capture_from(rbp, local_entries.as_mut_ptr(), max as c_int);
     if captured <= 0 {
@@ -115,4 +114,3 @@ pub fn stacktrace_dump(max_frames: c_int) {
     let rbp = read_frame_pointer();
     stacktrace_dump_from(rbp, max_frames);
 }
-

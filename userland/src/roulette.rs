@@ -1,7 +1,6 @@
-
 use core::ffi::{c_char, c_void};
 
-use slopos_video::roulette_core::{roulette_run, RouletteBackend};
+use slopos_video::roulette_core::{RouletteBackend, roulette_run};
 
 const SYSCALL_EXIT: u64 = 1;
 const SYSCALL_WRITE: u64 = 2;
@@ -68,35 +67,65 @@ struct UserText {
 impl Default for UserFbInfo {
     #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
-        Self { width: 0, height: 0, pitch: 0, bpp: 0, pixel_format: 0 }
+        Self {
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            pixel_format: 0,
+        }
     }
 }
 
 impl Default for UserRect {
     #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
-        Self { x: 0, y: 0, width: 0, height: 0, color: 0 }
+        Self {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            color: 0,
+        }
     }
 }
 
 impl Default for UserLine {
     #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
-        Self { x0: 0, y0: 0, x1: 0, y1: 0, color: 0 }
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+            color: 0,
+        }
     }
 }
 
 impl Default for UserCircle {
     #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
-        Self { cx: 0, cy: 0, radius: 0, color: 0 }
+        Self {
+            cx: 0,
+            cy: 0,
+            radius: 0,
+            color: 0,
+        }
     }
 }
 
 impl Default for UserText {
     #[unsafe(link_section = ".user_text")]
     fn default() -> Self {
-        Self { x: 0, y: 0, fg_color: 0, bg_color: 0, str_ptr: core::ptr::null(), len: 0 }
+        Self {
+            x: 0,
+            y: 0,
+            fg_color: 0,
+            bg_color: 0,
+            str_ptr: core::ptr::null(),
+            len: 0,
+        }
     }
 }
 
@@ -189,7 +218,14 @@ fn sys_gfx_draw_circle(circle: &UserCircle) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 fn sys_gfx_draw_circle_filled(circle: &UserCircle) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as *const _ as u64, 0, 0) as i64 }
+    unsafe {
+        syscall(
+            SYSCALL_GFX_DRAW_CIRCLE_FILLED,
+            circle as *const _ as u64,
+            0,
+            0,
+        ) as i64
+    }
 }
 
 #[inline(always)]
@@ -216,64 +252,53 @@ fn user_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> i32 {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn user_fill_rect(
-    _ctx: *mut c_void,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    color: u32,
-) -> i32 {
-    let rect = UserRect { x, y, width: w, height: h, color };
+fn user_fill_rect(_ctx: *mut c_void, x: i32, y: i32, w: i32, h: i32, color: u32) -> i32 {
+    let rect = UserRect {
+        x,
+        y,
+        width: w,
+        height: h,
+        color,
+    };
     sys_gfx_fill_rect(&rect) as i32
 }
 
 #[unsafe(link_section = ".user_text")]
-fn user_draw_line(
-    _ctx: *mut c_void,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    color: u32,
-) -> i32 {
-    let line = UserLine { x0, y0, x1, y1, color };
+fn user_draw_line(_ctx: *mut c_void, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32 {
+    let line = UserLine {
+        x0,
+        y0,
+        x1,
+        y1,
+        color,
+    };
     sys_gfx_draw_line(&line) as i32
 }
 
 #[unsafe(link_section = ".user_text")]
-fn user_draw_circle(
-    _ctx: *mut c_void,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    color: u32,
-) -> i32 {
-    let circle = UserCircle { cx, cy, radius, color };
+fn user_draw_circle(_ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
+    let circle = UserCircle {
+        cx,
+        cy,
+        radius,
+        color,
+    };
     sys_gfx_draw_circle(&circle) as i32
 }
 
 #[unsafe(link_section = ".user_text")]
-fn user_draw_circle_filled(
-    _ctx: *mut c_void,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    color: u32,
-) -> i32 {
-    let circle = UserCircle { cx, cy, radius, color };
+fn user_draw_circle_filled(_ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
+    let circle = UserCircle {
+        cx,
+        cy,
+        radius,
+        color,
+    };
     sys_gfx_draw_circle_filled(&circle) as i32
 }
 
 #[unsafe(link_section = ".user_text")]
-fn user_draw_text(
-    _ctx: *mut c_void,
-    x: i32,
-    y: i32,
-    text: *const u8,
-    fg: u32,
-    bg: u32,
-) -> i32 {
+fn user_draw_text(_ctx: *mut c_void, x: i32, y: i32, text: *const u8, fg: u32, bg: u32) -> i32 {
     if text.is_null() {
         return -1;
     }

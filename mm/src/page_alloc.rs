@@ -1,14 +1,11 @@
-
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use spin::Mutex;
 use slopos_lib::{klog_debug, klog_info};
+use spin::Mutex;
 
+use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
 use crate::mm_constants::PAGE_SIZE_4KB;
-use crate::memory_reservations::{
-    mm_region_count, mm_region_get, MmRegion, MmRegionKind,
-};
 use crate::phys_virt::{mm_phys_to_virt, mm_zero_physical_page};
 
 // Allocation flags (mirrors page_alloc.h)
@@ -86,7 +83,9 @@ impl PageAllocator {
     }
 
     fn frame_region_id(&self, frame_num: u32) -> u16 {
-        unsafe { self.frame_desc_mut(frame_num) }.map(|f| f.region_id).unwrap_or(INVALID_REGION_ID)
+        unsafe { self.frame_desc_mut(frame_num) }
+            .map(|f| f.region_id)
+            .unwrap_or(INVALID_REGION_ID)
     }
 
     fn order_block_pages(order: u32) -> u32 {
@@ -112,7 +111,10 @@ impl PageAllocator {
     }
 
     fn frame_state_is_allocated(state: u8) -> bool {
-        matches!(state, PAGE_FRAME_ALLOCATED | PAGE_FRAME_KERNEL | PAGE_FRAME_DMA)
+        matches!(
+            state,
+            PAGE_FRAME_ALLOCATED | PAGE_FRAME_KERNEL | PAGE_FRAME_DMA
+        )
     }
 
     fn free_lists_reset(&mut self) {
@@ -137,8 +139,9 @@ impl PageAllocator {
 
         while current != INVALID_PAGE_FRAME {
             if current == target_frame {
-                let next =
-                    unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
+                let next = unsafe { self.frame_desc_mut(current) }
+                    .map(|f| f.next_free)
+                    .unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
                     unsafe { *head_ptr = next };
                 } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
@@ -174,8 +177,9 @@ impl PageAllocator {
 
         while current != INVALID_PAGE_FRAME {
             if self.block_meets_flags(current, order, flags) {
-                let next =
-                    unsafe { self.frame_desc_mut(current) }.map(|f| f.next_free).unwrap_or(INVALID_PAGE_FRAME);
+                let next = unsafe { self.frame_desc_mut(current) }
+                    .map(|f| f.next_free)
+                    .unwrap_or(INVALID_PAGE_FRAME);
                 if prev == INVALID_PAGE_FRAME {
                     unsafe { *head_ptr = next };
                 } else if let Some(prev_desc) = unsafe { self.frame_desc_mut(prev) } {
@@ -215,7 +219,11 @@ impl PageAllocator {
             let buddy_desc = unsafe { self.frame_desc_mut(buddy) };
 
             let can_merge = buddy_desc
-                .map(|b| b.state == PAGE_FRAME_FREE && b.order == curr_order as u16 && b.region_id == region_id)
+                .map(|b| {
+                    b.state == PAGE_FRAME_FREE
+                        && b.order == curr_order as u16
+                        && b.region_id == region_id
+                })
                 .unwrap_or(false);
             if !can_merge {
                 break;
@@ -293,7 +301,11 @@ impl PageAllocator {
 
         let mut remaining = end_frame - start_frame;
         let mut frame = start_frame;
-        let seeded_id = if region_id == INVALID_REGION_ID { 0 } else { region_id };
+        let seeded_id = if region_id == INVALID_REGION_ID {
+            0
+        } else {
+            region_id
+        };
 
         while remaining > 0 {
             let mut order = 0;
@@ -326,11 +338,6 @@ impl PageAllocator {
 
 static PAGE_ALLOCATOR: Mutex<PageAllocator> = Mutex::new(PageAllocator::new());
 
-// Keep extern "C" for kernel_panic to break circular dependency with boot
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-}
-
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
 fn align_down_u64(value: u64, alignment: u64) -> u64 {
@@ -352,7 +359,7 @@ fn align_up_u64(value: u64, alignment: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
     if frame_array.is_null() || max_frames == 0 {
-        unsafe { kernel_panic(b"init_page_allocator: Invalid parameters\0".as_ptr() as *const c_char) };
+        panic!("init_page_allocator: Invalid parameters");
     }
 
     let mut alloc = PAGE_ALLOCATOR.lock();
@@ -375,7 +382,11 @@ pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
         }
     }
 
-    klog_debug!("Page frame allocator initialized with {} frame descriptors (max order {})", max_frames, alloc.max_order);
+    klog_debug!(
+        "Page frame allocator initialized with {} frame descriptors (max order {})",
+        max_frames,
+        alloc.max_order
+    );
 
     0
 }
@@ -396,7 +407,10 @@ pub fn finalize_page_allocator() -> c_int {
         }
     }
 
-    klog_debug!("Page allocator ready: {} pages available", alloc.free_frames);
+    klog_debug!(
+        "Page allocator ready: {} pages available",
+        alloc.free_frames
+    );
 
     0
 }

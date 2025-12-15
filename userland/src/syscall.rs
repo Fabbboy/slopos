@@ -1,4 +1,3 @@
-
 use core::arch::asm;
 use core::ffi::{c_char, c_void};
 
@@ -231,7 +230,14 @@ pub fn sys_gfx_draw_circle(circle: &UserCircle) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_draw_circle_filled(circle: &UserCircle) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as *const _ as u64, 0, 0) as i64 }
+    unsafe {
+        syscall(
+            SYSCALL_GFX_DRAW_CIRCLE_FILLED,
+            circle as *const _ as u64,
+            0,
+            0,
+        ) as i64
+    }
 }
 
 #[inline(always)]
@@ -308,4 +314,3 @@ pub fn sys_halt() -> ! {
     }
     loop {}
 }
-

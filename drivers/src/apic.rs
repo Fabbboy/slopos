@@ -3,8 +3,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use crate::scheduler_callbacks::{call_get_hhdm_offset, call_is_hhdm_available};
 use crate::wl_currency;
-use crate::scheduler_callbacks::{call_is_hhdm_available, call_get_hhdm_offset};
 
 // CPUID feature flags (leaf 1)
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
@@ -91,8 +91,16 @@ pub fn detect() -> bool {
 
     if let Some(virt) = hhdm_virt_for(apic_phys) {
         APIC_BASE_ADDRESS.store(virt, Ordering::Relaxed);
-        let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 { " BSP" } else { "" };
-        let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 { " X2APIC" } else { "" };
+        let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 {
+            " BSP"
+        } else {
+            ""
+        };
+        let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 {
+            " X2APIC"
+        } else {
+            ""
+        };
         let enable_flag = if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
             " ENABLED"
         } else {
@@ -360,10 +368,7 @@ pub fn dump_state() {
         "APIC Available: Yes, x2APIC: {}",
         if is_x2apic_available() { "Yes" } else { "No" }
     );
-    klog_info!(
-        "APIC Enabled: {}",
-        if is_enabled() { "Yes" } else { "No" }
-    );
+    klog_info!("APIC Enabled: {}", if is_enabled() { "Yes" } else { "No" });
     klog_info!(
         "Bootstrap Processor: {}",
         if is_bsp() { "Yes" } else { "No" }
@@ -396,11 +401,7 @@ pub fn dump_state() {
 
 #[unsafe(no_mangle)]
 pub fn apic_detect() -> i32 {
-    if detect() {
-        1
-    } else {
-        0
-    }
+    if detect() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
@@ -410,38 +411,22 @@ pub fn apic_init() -> i32 {
 
 #[unsafe(no_mangle)]
 pub fn apic_is_available() -> i32 {
-    if is_available() {
-        1
-    } else {
-        0
-    }
+    if is_available() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
 pub fn apic_is_x2apic_available() -> i32 {
-    if is_x2apic_available() {
-        1
-    } else {
-        0
-    }
+    if is_x2apic_available() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
 pub fn apic_is_bsp() -> i32 {
-    if is_bsp() {
-        1
-    } else {
-        0
-    }
+    if is_bsp() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
 pub fn apic_is_enabled() -> i32 {
-    if is_enabled() {
-        1
-    } else {
-        0
-    }
+    if is_enabled() { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]

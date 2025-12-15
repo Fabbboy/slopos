@@ -1,11 +1,12 @@
+use core::ffi::{CStr, c_char, c_int, c_void};
 
-use core::ffi::{c_char, c_int, c_void, CStr};
-
-use slopos_lib::{klog_info};
+use slopos_lib::klog_info;
 
 use crate::scheduler;
 use crate::scheduler::task_wait_for;
-use crate::task::{task_create, TaskEntry, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL};
+use crate::task::{
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskEntry, task_create,
+};
 
 pub type KthreadId = u32;
 
@@ -56,4 +57,3 @@ pub fn kthread_join(thread_id: KthreadId) -> c_int {
 pub fn kthread_exit() -> ! {
     crate::ffi_boundary::scheduler_task_exit();
 }
-

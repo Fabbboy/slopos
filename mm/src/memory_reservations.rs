@@ -1,5 +1,4 @@
-
-use core::ffi::{c_char, c_int, CStr, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 
 use slopos_lib::{klog, klog_info};
@@ -57,11 +56,6 @@ impl MmRegion {
 
 type MmRegionIterCb = Option<fn(region: *const MmRegion, ctx: *mut c_void)>;
 
-// Keep extern "C" for kernel_panic to break circular dependency with boot
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-}
-
 struct RegionStore {
     regions: *mut MmRegion,
     capacity: u32,
@@ -73,7 +67,8 @@ struct RegionStore {
 unsafe impl Send for RegionStore {}
 unsafe impl Sync for RegionStore {}
 
-static mut STATIC_REGION_STORE: [MmRegion; MM_REGION_STATIC_CAP] = [MmRegion::zeroed(); MM_REGION_STATIC_CAP];
+static mut STATIC_REGION_STORE: [MmRegion; MM_REGION_STATIC_CAP] =
+    [MmRegion::zeroed(); MM_REGION_STATIC_CAP];
 static mut REGION_STORE: RegionStore = RegionStore {
     regions: unsafe { STATIC_REGION_STORE.as_ptr() as *mut MmRegion },
     capacity: MM_REGION_STATIC_CAP as u32,
@@ -103,7 +98,7 @@ const fn align_up_u64(value: u64, alignment: u64) -> u64 {
 fn ensure_storage() -> &'static mut RegionStore {
     unsafe {
         if REGION_STORE.regions.is_null() || REGION_STORE.capacity == 0 {
-            kernel_panic(b"MM: region storage not configured\0".as_ptr() as *const c_char);
+            panic!("MM: region storage not configured");
         }
         &mut REGION_STORE
     }
@@ -332,9 +327,7 @@ fn overlay_region(
 #[unsafe(no_mangle)]
 pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
     if buffer.is_null() || capacity == 0 {
-        unsafe {
-            kernel_panic(b"MM: invalid region storage configuration\0".as_ptr() as *const c_char);
-        }
+        panic!("MM: invalid region storage configuration");
     }
     unsafe {
         REGION_STORE.regions = buffer;
@@ -357,11 +350,7 @@ pub fn mm_region_map_reset() {
 }
 
 #[unsafe(no_mangle)]
-pub fn mm_region_add_usable(
-    phys_base: u64,
-    length: u64,
-    label: *const c_char,
-) -> c_int {
+pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -> c_int {
     if length == 0 {
         return -1;
     }
@@ -386,7 +375,14 @@ pub fn mm_region_reserve(
     if length == 0 {
         return -1;
     }
-    overlay_region(phys_base, length, MmRegionKind::Reserved, type_, flags, label)
+    overlay_region(
+        phys_base,
+        length,
+        MmRegionKind::Reserved,
+        type_,
+        flags,
+        label,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -603,6 +599,15 @@ pub fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
         let label_str = unsafe { CStr::from_ptr(label_ptr as *const c_char) }
             .to_str()
             .unwrap_or("<invalid utf-8>");
-        klog!(level, "[MM] {}: 0x{:x} - 0x{:x} ({} KB) label={} flags=0x{:x}", kind_str, region.phys_base, end, region.length / 1024, label_str, region.flags);
+        klog!(
+            level,
+            "[MM] {}: 0x{:x} - 0x{:x} ({} KB) label={} flags=0x{:x}",
+            kind_str,
+            region.phys_base,
+            end,
+            region.length / 1024,
+            label_str,
+            region.flags
+        );
     }
 }

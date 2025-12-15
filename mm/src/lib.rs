@@ -2,18 +2,18 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 
-pub mod mm_constants;
+pub mod kernel_heap;
+pub mod memory_init;
 mod memory_layout;
 mod memory_reservations;
-pub mod memory_init;
+pub mod mm_constants;
 pub mod page_alloc;
 pub mod paging;
-pub mod kernel_heap;
+pub mod phys_virt;
 pub mod process_vm;
+mod tests;
 pub mod user_copy;
 pub mod user_copy_helpers;
-pub mod phys_virt;
-mod tests;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;

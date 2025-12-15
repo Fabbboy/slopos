@@ -1,4 +1,3 @@
-
 use slopos_lib::{cpu, klog_debug};
 
 use crate::scheduler_callbacks;
@@ -255,11 +254,7 @@ pub fn keyboard_getchar() -> u8 {
 #[unsafe(no_mangle)]
 pub fn keyboard_has_input() -> i32 {
     let has_data = unsafe { kb_buffer_has_data(&raw const CHAR_BUFFER) };
-    if has_data {
-        1
-    } else {
-        0
-    }
+    if has_data { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]

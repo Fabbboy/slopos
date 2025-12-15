@@ -140,11 +140,7 @@ pub unsafe fn u8_to_hex_internal(value: u8, buffer: *mut c_char, buffer_len: usi
     }
 }
 
-pub unsafe fn parse_u32_internal(
-    str_ptr: *const c_char,
-    out: *mut u32,
-    fallback: u32,
-) -> c_int {
+pub unsafe fn parse_u32_internal(str_ptr: *const c_char, out: *mut u32, fallback: u32) -> c_int {
     unsafe {
         if out.is_null() {
             return -1;
@@ -195,11 +191,7 @@ pub unsafe fn parse_u32_internal(
     }
 }
 
-pub unsafe fn parse_u64_internal(
-    str_ptr: *const c_char,
-    out: *mut u64,
-    fallback: u64,
-) -> c_int {
+pub unsafe fn parse_u64_internal(str_ptr: *const c_char, out: *mut u64, fallback: u64) -> c_int {
     unsafe {
         if out.is_null() {
             return -1;
@@ -248,20 +240,12 @@ pub unsafe fn parse_u64_internal(
 }
 
 #[unsafe(no_mangle)]
-pub fn numfmt_u64_to_decimal(
-    value: u64,
-    buffer: *mut c_char,
-    buffer_len: usize,
-) -> usize {
+pub fn numfmt_u64_to_decimal(value: u64, buffer: *mut c_char, buffer_len: usize) -> usize {
     unsafe { u64_to_decimal_internal(value, buffer, buffer_len) }
 }
 
 #[unsafe(no_mangle)]
-pub fn numfmt_i64_to_decimal(
-    value: i64,
-    buffer: *mut c_char,
-    buffer_len: usize,
-) -> usize {
+pub fn numfmt_i64_to_decimal(value: i64, buffer: *mut c_char, buffer_len: usize) -> usize {
     unsafe { i64_to_decimal_internal(value, buffer, buffer_len) }
 }
 
@@ -276,30 +260,16 @@ pub fn numfmt_u64_to_hex(
 }
 
 #[unsafe(no_mangle)]
-pub fn numfmt_u8_to_hex(
-    value: u8,
-    buffer: *mut c_char,
-    buffer_len: usize,
-) -> usize {
+pub fn numfmt_u8_to_hex(value: u8, buffer: *mut c_char, buffer_len: usize) -> usize {
     unsafe { u8_to_hex_internal(value, buffer, buffer_len) }
 }
 
 #[unsafe(no_mangle)]
-pub fn numfmt_parse_u32(
-    str_ptr: *const c_char,
-    out: *mut u32,
-    fallback: u32,
-) -> c_int {
+pub fn numfmt_parse_u32(str_ptr: *const c_char, out: *mut u32, fallback: u32) -> c_int {
     unsafe { parse_u32_internal(str_ptr, out, fallback) }
 }
 
 #[unsafe(no_mangle)]
-pub fn numfmt_parse_u64(
-    str_ptr: *const c_char,
-    out: *mut u64,
-    fallback: u64,
-) -> c_int {
+pub fn numfmt_parse_u64(str_ptr: *const c_char, out: *mut u64, fallback: u64) -> c_int {
     unsafe { parse_u64_internal(str_ptr, out, fallback) }
 }
-
-

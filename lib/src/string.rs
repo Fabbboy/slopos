@@ -357,5 +357,3 @@ pub fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
 pub fn str_has_token(str: *const c_char, token: *const c_char) -> c_int {
     unsafe { str_has_token_internal(str, token) }
 }
-
-

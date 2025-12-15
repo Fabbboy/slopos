@@ -1,4 +1,4 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
@@ -35,7 +35,8 @@ pub struct ExceptionStackInfoConfig {
 
 impl ExceptionStackInfoConfig {
     const fn new(index: usize, name: &'static [u8], vector: u8, ist_index: u8) -> Self {
-        let region_base = EXCEPTION_STACK_REGION_BASE + index as u64 * EXCEPTION_STACK_REGION_STRIDE;
+        let region_base =
+            EXCEPTION_STACK_REGION_BASE + index as u64 * EXCEPTION_STACK_REGION_STRIDE;
         let guard_start = region_base;
         let guard_end = guard_start + EXCEPTION_STACK_GUARD_SIZE;
         let stack_base = guard_end;
@@ -110,8 +111,8 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
 ];
 
 use slopos_mm::page_alloc::alloc_page_frame;
-use slopos_mm::phys_virt::mm_zero_physical_page;
 use slopos_mm::paging::map_page_4kb;
+use slopos_mm::phys_virt::mm_zero_physical_page;
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)
@@ -142,14 +143,12 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
         }
         if mm_zero_physical_page(phys_addr) != 0 {
             kernel_panic(
-                b"safe_stack_init: Failed to zero exception stack page\0".as_ptr()
-                    as *const c_char,
+                b"safe_stack_init: Failed to zero exception stack page\0".as_ptr() as *const c_char,
             );
         }
         if map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) != 0 {
             kernel_panic(
-                b"safe_stack_init: Failed to map exception stack page\0".as_ptr()
-                    as *const c_char,
+                b"safe_stack_init: Failed to map exception stack page\0".as_ptr() as *const c_char,
             );
         }
     }

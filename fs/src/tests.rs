@@ -1,12 +1,12 @@
 use core::ffi::c_int;
 use core::ptr;
 
-use slopos_drivers::serial_println;
+use slopos_lib::klog_info;
 
 use crate::ramfs::{
-    ramfs_create_directory, ramfs_create_file, ramfs_find_node, ramfs_get_root,
-    ramfs_list_directory, ramfs_node_release, ramfs_read_file, ramfs_release_list,
-    ramfs_write_file, ramfs_node_t, RAMFS_TYPE_DIRECTORY,
+    RAMFS_TYPE_DIRECTORY, ramfs_create_directory, ramfs_create_file, ramfs_find_node,
+    ramfs_get_root, ramfs_list_directory, ramfs_node_release, ramfs_node_t, ramfs_read_file,
+    ramfs_release_list, ramfs_write_file,
 };
 
 fn as_c(path: &[u8]) -> *const i8 {
@@ -24,7 +24,7 @@ fn expect_dir(path: &[u8]) -> bool {
 }
 
 fn test_root_node() -> c_int {
-    serial_println!("RAMFS_TEST: Verifying root node");
+    klog_info!("RAMFS_TEST: Verifying root node");
     let root = ramfs_get_root();
     if root.is_null() {
         return -1;
@@ -38,12 +38,16 @@ fn test_root_node() -> c_int {
 }
 
 fn test_file_roundtrip() -> c_int {
-    serial_println!("RAMFS_TEST: file roundtrip");
+    klog_info!("RAMFS_TEST: file roundtrip");
     let dir = ramfs_create_directory(as_c(b"/itests\0"));
     if dir.is_null() || unsafe { (*dir).type_ } != RAMFS_TYPE_DIRECTORY {
         return -1;
     }
-    let file = ramfs_create_file(as_c(b"/itests/hello.txt\0"), b"hello".as_ptr() as *const _, 5);
+    let file = ramfs_create_file(
+        as_c(b"/itests/hello.txt\0"),
+        b"hello".as_ptr() as *const _,
+        5,
+    );
     if file.is_null() {
         return -1;
     }
@@ -64,7 +68,7 @@ fn test_file_roundtrip() -> c_int {
 }
 
 fn test_write_updates_file() -> c_int {
-    serial_println!("RAMFS_TEST: overwrite path");
+    klog_info!("RAMFS_TEST: overwrite path");
     let content = b"goodbye world";
     if ramfs_write_file(
         as_c(b"/itests/hello.txt\0"),
@@ -100,7 +104,7 @@ fn test_write_updates_file() -> c_int {
 }
 
 fn test_nested_directories() -> c_int {
-    serial_println!("RAMFS_TEST: nested traversal");
+    klog_info!("RAMFS_TEST: nested traversal");
     let nested_dir = ramfs_create_directory(as_c(b"/itests/nested\0"));
     if nested_dir.is_null() || unsafe { (*nested_dir).type_ } != RAMFS_TYPE_DIRECTORY {
         return -1;
@@ -126,7 +130,7 @@ fn test_nested_directories() -> c_int {
 }
 
 fn test_list_directory() -> c_int {
-    serial_println!("RAMFS_TEST: list directory");
+    klog_info!("RAMFS_TEST: list directory");
     let mut entries_ptr: *mut *mut ramfs_node_t = ptr::null_mut();
     let mut count: c_int = 0;
     if ramfs_list_directory(
@@ -172,7 +176,7 @@ fn test_list_directory() -> c_int {
 
 #[unsafe(no_mangle)]
 pub fn run_ramfs_tests() -> c_int {
-    serial_println!("RAMFS_TEST: running suite");
+    klog_info!("RAMFS_TEST: running suite");
     let mut passed = 0;
 
     if test_root_node() == 0 {
@@ -191,7 +195,6 @@ pub fn run_ramfs_tests() -> c_int {
         passed += 1;
     }
 
-    serial_println!("RAMFS_TEST: {passed}/5 passed");
+    klog_info!("RAMFS_TEST: {passed}/5 passed");
     passed
 }
-

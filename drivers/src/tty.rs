@@ -1,10 +1,13 @@
-
 use core::ffi::c_int;
 use core::ptr;
 
 use slopos_lib::cpu;
 
 use crate::keyboard;
+use crate::scheduler_callbacks::{
+    call_register_idle_wakeup_callback, call_scheduler_is_enabled, call_task_is_blocked,
+    call_unblock_task, call_yield,
+};
 use crate::serial;
 use crate::syscall_types::Task;
 
@@ -26,14 +29,7 @@ static mut TTY_WAIT_QUEUE: TtyWaitQueue = TtyWaitQueue {
     count: 0,
 };
 
-// Keep extern "C" for scheduler functions to break circular dependency
-unsafe extern "C" {
-    fn scheduler_register_idle_wakeup_callback(callback: Option<extern "C" fn() -> c_int>);
-    fn scheduler_is_enabled() -> c_int;
-    fn task_is_blocked(task: *const Task) -> bool;
-    fn unblock_task(task: *mut Task) -> c_int;
-}
-use crate::serial::{serial_poll_receive, serial_buffer_pending, serial_buffer_read};
+use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
 
 #[inline]
 fn tty_cpu_relax() {
@@ -56,7 +52,7 @@ fn tty_input_available() -> c_int {
     0
 }
 
-extern "C" fn tty_input_available_cb() -> c_int {
+fn tty_input_available_cb() -> c_int {
     tty_input_available()
 }
 
@@ -66,7 +62,7 @@ fn tty_register_idle_callback() {
         if REGISTERED {
             return;
         }
-        scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
+        call_register_idle_wakeup_callback(Some(tty_input_available_cb));
         REGISTERED = true;
     }
 }
@@ -85,7 +81,7 @@ fn tty_wait_queue_pop() -> *mut Task {
 
 #[unsafe(no_mangle)]
 pub fn tty_notify_input_ready() {
-    if unsafe { scheduler_is_enabled() } == 0 {
+    if unsafe { call_scheduler_is_enabled() } == 0 {
         return;
     }
 
@@ -98,7 +94,7 @@ pub fn tty_notify_input_ready() {
             if candidate.is_null() {
                 continue;
             }
-            if !task_is_blocked(candidate as *const Task) {
+            if !call_task_is_blocked(candidate as *const Task as *const core::ffi::c_void) {
                 continue;
             }
             tasko_wake = candidate;
@@ -110,7 +106,7 @@ pub fn tty_notify_input_ready() {
 
     if !tasko_wake.is_null() {
         unsafe {
-            let _ = unblock_task(tasko_wake);
+            let _ = call_unblock_task(tasko_wake as *mut core::ffi::c_void);
         }
     }
 }
@@ -154,8 +150,8 @@ fn tty_block_until_input_ready() {
             break;
         }
         tty_service_serial_input();
-        if unsafe { scheduler_is_enabled() } != 0 {
-            unsafe { yield_() };
+        if unsafe { call_scheduler_is_enabled() } != 0 {
+            unsafe { call_yield() };
         } else {
             tty_cpu_relax();
         }
@@ -168,11 +164,6 @@ fn serial_putc(port: u16, c: u8) {
     let text = core::str::from_utf8(&s).unwrap_or("");
     serial::write_str(text);
     let _ = port; // keep signature parity
-}
-
-// Keep extern "C" for yield to break circular dependency
-unsafe extern "C" {
-    fn yield_();
 }
 
 #[unsafe(no_mangle)]

@@ -1,6 +1,6 @@
-use core::sync::atomic::{AtomicI64, Ordering};
-use slopos_lib::klog::{klog_is_enabled, KlogLevel};
 use crate::serial_println;
+use core::sync::atomic::{AtomicI64, Ordering};
+use slopos_lib::klog::{KlogLevel, klog_is_enabled};
 
 static BALANCE: AtomicI64 = AtomicI64::new(0);
 

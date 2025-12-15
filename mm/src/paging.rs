@@ -1,20 +1,15 @@
-
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
-// Keep extern "C" for kernel_panic and is_hhdm_available to break circular dependency with boot
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn is_hhdm_available() -> c_int;
-}
 
+use crate::memory_init::hhdm_is_available;
 use crate::mm_constants::{
     ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
     PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
 };
 use crate::page_alloc::{
-    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
 use crate::phys_virt::mm_phys_to_virt;
 
@@ -648,19 +643,19 @@ pub fn init_paging() {
 
         let pml4_ptr = mm_phys_to_virt(KERNEL_PAGE_DIR.pml4_phys) as *mut PageTable;
         if pml4_ptr.is_null() {
-            kernel_panic(b"Failed to translate kernel PML4 physical address\0".as_ptr() as *const c_char);
+            panic!("Failed to translate kernel PML4 physical address");
         }
         KERNEL_PAGE_DIR.pml4 = pml4_ptr;
 
         let kernel_phys = virt_to_phys(KERNEL_VIRTUAL_BASE);
         if kernel_phys == 0 {
-            kernel_panic(b"Higher-half kernel mapping not found\0".as_ptr() as *const c_char);
+            panic!("Higher-half kernel mapping not found");
         }
 
         klog_debug!("Higher-half kernel mapping verified at 0x{:x}", kernel_phys);
 
         let identity_phys = virt_to_phys(0x100000);
-        if identity_phys == 0x100000 || is_hhdm_available() != 0 {
+        if identity_phys == 0x100000 || hhdm_is_available() {
             klog_debug!("Identity mapping verified");
         } else {
             klog_debug!("Identity mapping not found (may be normal after early boot)");

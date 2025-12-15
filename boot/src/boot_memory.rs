@@ -1,3 +1,4 @@
+use slopos_drivers::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
@@ -16,13 +17,22 @@ fn boot_step_memory_init() -> i32 {
     }
 
     let hhdm = boot_get_hhdm_offset();
+    let hhdm_available = crate::limine_protocol::is_hhdm_available() != 0;
+    let framebuffer = crate::limine_protocol::boot_info().framebuffer;
 
     klog_debug!("Initializing memory management from Limine data...");
-    let rc = init_memory_system(memmap as *const slopos_mm::memory_init::LimineMemmapResponse, hhdm);
+    let rc = init_memory_system(
+        memmap as *const slopos_mm::memory_init::LimineMemmapResponse,
+        hhdm,
+        hhdm_available,
+        framebuffer,
+    );
     if rc != 0 {
         klog_info!("ERROR: Memory system initialization failed");
         return -1;
     }
+
+    slopos_mm::kernel_heap::register_wl_hooks(wl_currency::award_win, wl_currency::award_loss);
 
     klog_debug!("Memory management initialized.");
     0

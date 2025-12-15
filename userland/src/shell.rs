@@ -6,9 +6,9 @@ use core::ptr;
 
 use crate::runtime;
 use crate::syscall::{
-    sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_halt, sys_read, sys_sys_info, sys_write, UserFsEntry, UserFsList, UserSysInfo,
-    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry, UserFsList,
+    UserSysInfo, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink,
+    sys_fs_write, sys_halt, sys_read, sys_sys_info, sys_write,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -196,10 +196,7 @@ fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
             break;
         }
         let start = cursor;
-        while cursor < line.len()
-            && line[cursor] != 0
-            && !is_space(line[cursor])
-        {
+        while cursor < line.len() && line[cursor] != 0 && !is_space(line[cursor]) {
             cursor += 1;
         }
         if count >= tokens.len() {
@@ -375,7 +372,8 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
         let entry = unsafe { &LIST_ENTRIES[i as usize] };
         if entry.r#type == 1 {
             let _ = sys_write(b"[");
-            let _ = sys_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
+            let _ =
+                sys_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
             let _ = sys_write(b"]\n");
         } else {
             let name_len = runtime::u_strnlen(entry.name.as_ptr(), entry.name.len());
@@ -520,11 +518,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
     loop {
         let _ = sys_write(PROMPT);
         unsafe {
-            runtime::u_memset(
-                LINE_BUF.as_mut_ptr() as *mut c_void,
-                0,
-                LINE_BUF.len(),
-            );
+            runtime::u_memset(LINE_BUF.as_mut_ptr() as *mut c_void, 0, LINE_BUF.len());
         }
         let len = sys_read(unsafe { &mut LINE_BUF[..LINE_BUF.len() - 1] });
         if len <= 0 {

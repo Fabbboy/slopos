@@ -1,11 +1,10 @@
 use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
-use crate::syscall_types::{Task, TaskContext, InterruptFrame, TASK_FLAG_USER_MODE};
-use crate::{wl_currency, scheduler_callbacks};
+use crate::syscall_types::{InterruptFrame, TASK_FLAG_USER_MODE, Task, TaskContext};
+use crate::{scheduler_callbacks, wl_currency};
 
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
-
 
 fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     if frame.is_null() || task.is_null() {

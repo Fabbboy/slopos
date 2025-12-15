@@ -1,4 +1,3 @@
-
 // Syscall numbers (rax on entry)
 pub const SYSCALL_YIELD: u64 = 0;
 pub const SYSCALL_EXIT: u64 = 1;
@@ -24,4 +23,3 @@ pub const SYSCALL_FS_UNLINK: u64 = 20;
 pub const SYSCALL_FS_LIST: u64 = 21;
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
-

@@ -1,20 +1,6 @@
-use core::ffi::c_int;
-
-// Keep extern "C" for drivers functions to break circular dependency
-unsafe extern "C" {
-    fn random_u64() -> u64;
-    fn wl_award_win();
-    fn wl_award_loss();
-}
-
 use crate::task::{task_find_by_id, Task};
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct fate_result {
-    pub token: u32,
-    pub value: u32,
-}
+use core::ffi::c_int;
+use slopos_drivers::{fate::FateResult, random, wl_currency};
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
@@ -31,16 +17,16 @@ where
 }
 
 #[unsafe(no_mangle)]
-pub fn fate_spin() -> fate_result {
-    let val = unsafe { random_u64() } as u32;
-    fate_result {
+pub fn fate_spin() -> FateResult {
+    let val = random::random_u64() as u32;
+    FateResult {
         token: val,
         value: val,
     }
 }
 
 #[unsafe(no_mangle)]
-pub fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
+pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
     with_task(task_id, |t| {
         t.fate_token = res.token;
         t.fate_value = res.value;
@@ -49,13 +35,13 @@ pub fn fate_set_pending(res: fate_result, task_id: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int {
+pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
     let mut result = -1;
     let _ = with_task(task_id, |t| {
         if t.fate_pending != 0 {
             if !out.is_null() {
                 unsafe {
-                    *out = fate_result {
+                    *out = FateResult {
                         token: t.fate_token,
                         value: t.fate_value,
                     };
@@ -69,13 +55,13 @@ pub fn fate_take_pending(task_id: u32, out: *mut fate_result) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub fn fate_apply_outcome(res: *const fate_result, _resolution: u32, award: bool) {
+pub fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool) {
     if res.is_null() {
         return;
     }
     if award {
-        unsafe { wl_award_win() };
+        wl_currency::award_win();
     } else {
-        unsafe { wl_award_loss() };
+        wl_currency::award_loss();
     }
 }

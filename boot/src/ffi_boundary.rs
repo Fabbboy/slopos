@@ -41,4 +41,3 @@ unsafe extern "C" {
     pub static __start_boot_init_optional: crate::early_init::BootInitStep;
     pub static __stop_boot_init_optional: crate::early_init::BootInitStep;
 }
-

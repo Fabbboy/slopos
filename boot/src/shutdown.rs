@@ -1,5 +1,5 @@
 use core::arch::asm;
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{cpu, io, klog_info};
@@ -8,11 +8,11 @@ static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
 static SERIAL_DRAINED: AtomicBool = AtomicBool::new(false);
 
-use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 use slopos_drivers::apic::apic_is_available;
-use slopos_drivers::apic::{apic_send_eoi, apic_timer_stop, apic_disable, apic_send_ipi_halt_all};
+use slopos_drivers::apic::{apic_disable, apic_send_eoi, apic_send_ipi_halt_all, apic_timer_stop};
 use slopos_drivers::pit::pit_poll_delay_ms;
 use slopos_mm::page_alloc::page_allocator_paint_all;
+use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 
 fn serial_flush() {
     // Best-effort drain by waiting for line status transmit empty bit.

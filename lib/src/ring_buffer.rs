@@ -1,4 +1,3 @@
-
 /// Simple fixed-capacity ring buffer mirroring the old C macros.
 /// Uses a backing array with head/tail/count indices.
 #[derive(Debug)]
@@ -83,4 +82,3 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         &self.data
     }
 }
-

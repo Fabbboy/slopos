@@ -3,12 +3,11 @@
 
 pub mod bootstrap;
 pub mod loader;
+pub mod roulette;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
-pub mod roulette;
 
 pub fn init() {
     // Userland init remains lightweight; boot steps registered via bootstrap.
 }
-

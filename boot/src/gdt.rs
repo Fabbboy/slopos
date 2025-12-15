@@ -13,7 +13,7 @@ const GDT_TSS_SELECTOR: u16 = 0x28;
 const GDT_ACCESS_PRESENT: u8 = 1 << 7;
 // Bits 45-46: Descriptor Privilege Level (DPL)
 const GDT_ACCESS_DPL_KERNEL: u8 = 0 << 5; // Ring 0
-const GDT_ACCESS_DPL_USER: u8 = 3 << 5;   // Ring 3
+const GDT_ACCESS_DPL_USER: u8 = 3 << 5; // Ring 3
 // Bit 44: Segment type (S) - 1 for code/data segment
 const GDT_ACCESS_SEGMENT: u8 = 1 << 4;
 // Bits 43-40: Type field
@@ -42,7 +42,7 @@ const GDT_BASE_MID: u8 = 0x00;
 const GDT_BASE_HIGH: u8 = 0x00;
 
 /// Constructs a 64-bit GDT descriptor from individual fields.
-/// 
+///
 /// According to OSDev GDT structure:
 /// - Bits 0-15: Limit (low 16 bits)
 /// - Bits 16-31: Base (low 16 bits)

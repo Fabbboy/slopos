@@ -1,20 +1,9 @@
-
 use core::ptr;
 
 use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use slopos_mm::phys_virt::mm_phys_to_virt;
 use spin::Mutex;
-// Keep extern "C" for get_framebuffer_info to break circular dependency with boot
-unsafe extern "C" {
-    fn get_framebuffer_info(
-        addr: *mut u64,
-        width: *mut u32,
-        height: *mut u32,
-        pitch: *mut u32,
-        bpp: *mut u8,
-    ) -> i32;
-}
 
 const PIXEL_FORMAT_RGB: u8 = 0x01;
 const PIXEL_FORMAT_BGR: u8 = 0x02;
@@ -72,11 +61,11 @@ impl FramebufferState {
 }
 
 static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
-static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> = Mutex::new(const { FramebufferInfoC::new() });
+static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> =
+    Mutex::new(const { FramebufferInfoC::new() });
 
 unsafe impl Send for FbState {}
 unsafe impl Send for FramebufferState {}
-
 
 fn determine_pixel_format(bpp: u8) -> u8 {
     match bpp {
@@ -94,7 +83,10 @@ fn bytes_per_pixel(bpp: u8) -> u32 {
 fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
     match state.pixel_format {
         PIXEL_FORMAT_BGR | PIXEL_FORMAT_BGRA => {
-            ((color & 0xFF0000) >> 16) | (color & 0x00FF00) | ((color & 0x0000FF) << 16) | (color & 0xFF000000)
+            ((color & 0xFF0000) >> 16)
+                | (color & 0x00FF00)
+                | ((color & 0x0000FF) << 16)
+                | (color & 0xFF000000)
         }
         _ => color,
     }
@@ -168,22 +160,6 @@ pub fn init_with_info(info: FramebufferInfo) -> i32 {
     }
 
     rc
-}
-
-#[unsafe(no_mangle)]
-pub fn framebuffer_init() -> i32 {
-    let mut addr = 0u64;
-    let mut width = 0u32;
-    let mut height = 0u32;
-    let mut pitch = 0u32;
-    let mut bpp = 0u8;
-
-    let ok = unsafe { get_framebuffer_info(&mut addr, &mut width, &mut height, &mut pitch, &mut bpp) };
-    if ok == 0 {
-        return -1;
-    }
-
-    init_state_from_raw(addr, width, height, pitch, bpp)
 }
 
 #[unsafe(no_mangle)]

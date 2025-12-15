@@ -1,5 +1,5 @@
 use core::arch::asm;
-use core::ffi::{c_char, c_int, CStr};
+use core::ffi::{CStr, c_char, c_int};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
@@ -115,7 +115,22 @@ pub fn kdiag_dump_cpu_state() {
     crate::klog_info!("=== CPU STATE DUMP ===");
     crate::klog_info!(
         "General Purpose Registers:\n  RAX: 0x{:x}  RBX: 0x{:x}  RCX: 0x{:x}  RDX: 0x{:x}\n  RSI: 0x{:x}  RDI: 0x{:x}  RBP: 0x{:x}  RSP: 0x{:x}\n  R8 : 0x{:x}  R9 : 0x{:x}  R10: 0x{:x}  R11: 0x{:x}\n  R12: 0x{:x}  R13: 0x{:x}  R14: 0x{:x}  R15: 0x{:x}",
-        rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15
+        rax,
+        rbx,
+        rcx,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        rsp,
+        r8,
+        r9,
+        r10,
+        r11,
+        r12,
+        r13,
+        r14,
+        r15
     );
     crate::klog_info!(
         "Flags Register:\n  RFLAGS: 0x{:x} [CF:{} PF:{} AF:{} ZF:{} SF:{} TF:{} IF:{} DF:{} OF:{}]",
@@ -132,11 +147,19 @@ pub fn kdiag_dump_cpu_state() {
     );
     crate::klog_info!(
         "Segment Registers:\n  CS: 0x{:04x}  DS: 0x{:04x}  ES: 0x{:04x}  FS: 0x{:04x}  GS: 0x{:04x}  SS: 0x{:04x}",
-        cs, ds, es, fs, gs, ss
+        cs,
+        ds,
+        es,
+        fs,
+        gs,
+        ss
     );
     crate::klog_info!(
         "Control Registers:\n  CR0: 0x{:x}  CR2: 0x{:x}\n  CR3: 0x{:x}  CR4: 0x{:x}",
-        cr0, cr2, cr3, cr4
+        cr0,
+        cr2,
+        cr3,
+        cr4
     );
     crate::klog_info!("=== END CPU STATE DUMP ===");
 }
@@ -158,7 +181,12 @@ pub fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
             exc_name,
             f.error_code
         );
-        crate::klog_info!("RIP: 0x{:x}  CS: 0x{:x}  RFLAGS: 0x{:x}", f.rip, f.cs, f.rflags);
+        crate::klog_info!(
+            "RIP: 0x{:x}  CS: 0x{:x}  RFLAGS: 0x{:x}",
+            f.rip,
+            f.cs,
+            f.rflags
+        );
         crate::klog_info!("RSP: 0x{:x}  SS: 0x{:x}", f.rsp, f.ss);
         crate::klog_info!("RAX: 0x{:x}  RBX: 0x{:x}  RCX: 0x{:x}", f.rax, f.rbx, f.rcx);
         crate::klog_info!("RDX: 0x{:x}  RSI: 0x{:x}  RDI: 0x{:x}", f.rdx, f.rsi, f.rdi);
@@ -179,11 +207,16 @@ pub fn kdiag_dump_stack_trace() {
 
 #[unsafe(no_mangle)]
 pub fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
-    let mut entries: [StacktraceEntry; KDIAG_STACK_TRACE_DEPTH] =
-        [StacktraceEntry { frame_pointer: 0, return_address: 0 }; KDIAG_STACK_TRACE_DEPTH];
+    let mut entries: [StacktraceEntry; KDIAG_STACK_TRACE_DEPTH] = [StacktraceEntry {
+        frame_pointer: 0,
+        return_address: 0,
+    }; KDIAG_STACK_TRACE_DEPTH];
 
-    let frame_count =
-        stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), KDIAG_STACK_TRACE_DEPTH as c_int);
+    let frame_count = stacktrace::stacktrace_capture_from(
+        rbp,
+        entries.as_mut_ptr(),
+        KDIAG_STACK_TRACE_DEPTH as c_int,
+    );
 
     if frame_count == 0 {
         crate::klog_info!("No stack frames found");
@@ -248,7 +281,11 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
         let mut j = 0usize;
         while j < 16 && i + j < length {
             let c = bytes[i + j];
-            let display = if (32..=126).contains(&c) { c as char } else { '.' };
+            let display = if (32..=126).contains(&c) {
+                c as char
+            } else {
+                '.'
+            };
             crate::klog_info!("{}", display);
             j += 1;
         }

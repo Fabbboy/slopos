@@ -1,4 +1,3 @@
-
 /// Absolute value for 32-bit integers.
 #[inline(always)]
 pub const fn abs_i32(x: i32) -> i32 {
@@ -33,4 +32,3 @@ pub const fn min_u32(a: u32, b: u32) -> u32 {
 pub const fn max_u32(a: u32, b: u32) -> u32 {
     if a > b { a } else { b }
 }
-

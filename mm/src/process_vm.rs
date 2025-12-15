@@ -1,19 +1,18 @@
-
 use core::ffi::c_int;
 use core::ptr;
 
-use spin::Mutex;
 use slopos_lib::{klog_debug, klog_info};
+use spin::Mutex;
 
 use crate::kernel_heap::{kfree, kmalloc};
+use crate::memory_layout::mm_get_process_layout;
 use crate::mm_constants::{
     INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_PRESENT, PAGE_SIZE_4KB, PAGE_USER, PAGE_WRITABLE,
 };
-use crate::memory_layout::mm_get_process_layout;
-use crate::page_alloc::{alloc_page_frame, free_page_frame, page_frame_can_free, ALLOC_FLAG_ZERO};
+use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
 use crate::paging::{
-    paging_copy_kernel_mappings, paging_free_user_space, map_page_4kb_in_dir, unmap_page_in_dir,
-    virt_to_phys_in_dir, ProcessPageDir, PageTable,
+    PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
+    paging_free_user_space, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::phys_virt::mm_phys_to_virt;
 use slopos_lib::{align_down, align_up};
@@ -142,7 +141,10 @@ fn map_user_range(
         klog_info!("map_user_range: Missing page directory");
         return -1;
     }
-    if (start_addr & (PAGE_SIZE_4KB - 1)) != 0 || (end_addr & (PAGE_SIZE_4KB - 1)) != 0 || end_addr <= start_addr {
+    if (start_addr & (PAGE_SIZE_4KB - 1)) != 0
+        || (end_addr & (PAGE_SIZE_4KB - 1)) != 0
+        || end_addr <= start_addr
+    {
         klog_info!("map_user_range: Unaligned or invalid range");
         return -1;
     }
@@ -179,7 +181,12 @@ fn map_user_range(
     0
 }
 
-fn rollback_range(page_dir: *mut ProcessPageDir, mut current: u64, start_addr: u64, mapped: &mut u32) {
+fn rollback_range(
+    page_dir: *mut ProcessPageDir,
+    mut current: u64,
+    start_addr: u64,
+    mapped: &mut u32,
+) {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
         let phys = virt_to_phys_in_dir(page_dir, current);
@@ -314,7 +321,8 @@ fn find_vma_covering(process: *mut ProcessVm, start: u64, end: u64) -> *mut VmAr
 }
 
 fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
-    if process.is_null() || unsafe { (*process).page_dir.is_null() } || !vma_range_valid(start, end) {
+    if process.is_null() || unsafe { (*process).page_dir.is_null() } || !vma_range_valid(start, end)
+    {
         return 0;
     }
     let mut freed = 0u32;
@@ -347,7 +355,8 @@ fn merge_adjacent(process: *mut ProcessVm, mut vma: *mut VmArea) {
             cursor = (*cursor).next;
         }
 
-        if !prev.is_null() && (*prev).end_addr == (*vma).start_addr && (*prev).flags == (*vma).flags {
+        if !prev.is_null() && (*prev).end_addr == (*vma).start_addr && (*prev).flags == (*vma).flags
+        {
             (*prev).end_addr = (*vma).end_addr;
             (*prev).next = (*vma).next;
             kfree(vma as *mut _);
@@ -410,7 +419,11 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
             // .user_text: executable, read-only
             (section_bounds(&_user_text_start, &_user_text_end), 0, false),
             // .user_rodata: read-only
-            (section_bounds(&_user_rodata_start, &_user_rodata_end), 0, false),
+            (
+                section_bounds(&_user_rodata_start, &_user_rodata_end),
+                0,
+                false,
+            ),
             // .user_data: writable
             (section_bounds(&_user_data_start, &_user_data_end), 1, false),
             // .user_bss: zeroed writable
@@ -424,7 +437,7 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
         }
 
         let size = src_end - src_start;
-        let dst_start = base + (src_start - sections[0].0 .0);
+        let dst_start = base + (src_start - sections[0].0.0);
         let dst_end = dst_start + size;
 
         let mut src = src_start;
@@ -451,7 +464,11 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
                 }
                 let copy_len = core::cmp::min(PAGE_SIZE_4KB, dst_end - dst) as usize;
                 unsafe {
-                    core::ptr::copy_nonoverlapping(src as *const u8, dest_virt as *mut u8, copy_len);
+                    core::ptr::copy_nonoverlapping(
+                        src as *const u8,
+                        dest_virt as *mut u8,
+                        copy_len,
+                    );
                 }
             }
 
@@ -682,9 +699,24 @@ pub fn create_process_vm() -> u32 {
         proc.total_pages = 1;
         proc.flags = 0;
         proc.next = manager.process_list;
-        if add_vma_to_process(process_ptr, proc.code_start, proc.data_start, PAGE_PRESENT as u32 | PAGE_USER as u32 | 0x04) != 0
-            || add_vma_to_process(process_ptr, proc.data_start, proc.heap_start, PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32) != 0
-            || add_vma_to_process(process_ptr, proc.stack_start, proc.stack_end, PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32) != 0
+        if add_vma_to_process(
+            process_ptr,
+            proc.code_start,
+            proc.data_start,
+            PAGE_PRESENT as u32 | PAGE_USER as u32 | 0x04,
+        ) != 0
+            || add_vma_to_process(
+                process_ptr,
+                proc.data_start,
+                proc.heap_start,
+                PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32,
+            ) != 0
+            || add_vma_to_process(
+                process_ptr,
+                proc.stack_start,
+                proc.stack_end,
+                PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32,
+            ) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_process_mappings(process_ptr);
@@ -803,11 +835,24 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     if protection_flags & PAGE_WRITABLE as u32 != 0 {
         map_flags |= PAGE_WRITABLE;
     }
-    if map_user_range(process.page_dir, start_addr, end_addr, map_flags, &mut pages_mapped) != 0 {
+    if map_user_range(
+        process.page_dir,
+        start_addr,
+        end_addr,
+        map_flags,
+        &mut pages_mapped,
+    ) != 0
+    {
         return 0;
     }
 
-    if add_vma_to_process(process_ptr, start_addr, end_addr, protection_flags | PAGE_USER as u32) != 0 {
+    if add_vma_to_process(
+        process_ptr,
+        start_addr,
+        end_addr,
+        protection_flags | PAGE_USER as u32,
+    ) != 0
+    {
         klog_info!("process_vm_alloc: Failed to record VMA");
         unmap_user_range(process.page_dir, start_addr, end_addr);
         process.heap_end = start_addr;

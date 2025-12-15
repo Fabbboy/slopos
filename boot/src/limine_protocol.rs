@@ -1,7 +1,6 @@
-
 use core::{
     cell::UnsafeCell,
-    ffi::{c_char, c_void, CStr},
+    ffi::{CStr, c_char, c_void},
     ptr,
 };
 
@@ -591,12 +590,7 @@ pub fn init_limine_protocol() -> i32 {
                     });
                     info.flags.framebuffer_available = true;
 
-                    klog_debug!(
-                        "Framebuffer: {}x{} @ {} bpp",
-                        fb.width,
-                        fb.height,
-                        fb.bpp
-                    );
+                    klog_debug!("Framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
                     klog_debug!(
                         "Framebuffer addr: 0x{:x} pitch: {}",
                         fb.address as u64,
@@ -681,12 +675,12 @@ pub fn is_memory_map_available() -> i32 {
 
 // Exported extern "C" functions for mm crate to call via extern "C" blocks
 #[unsafe(no_mangle)]
-pub extern "C" fn get_hhdm_offset() -> u64 {
+pub fn get_hhdm_offset() -> u64 {
     sysinfo().hhdm_offset
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn is_hhdm_available() -> i32 {
+pub fn is_hhdm_available() -> i32 {
     sysinfo().flags.hhdm_available as i32
 }
 

@@ -1,22 +1,39 @@
-
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use spin::Mutex;
 use slopos_lib::{klog_debug, klog_info};
-// Keep extern "C" for kernel_panic and wl_currency to break circular dependencies
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn wl_award_loss();
-    fn wl_award_win();
-}
+use spin::Mutex;
 
-use crate::mm_constants::{
-    PAGE_KERNEL_RW, PAGE_SIZE_4KB,
-};
+use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
+use crate::mm_constants::{PAGE_KERNEL_RW, PAGE_SIZE_4KB};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
-use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
+
+static mut WL_WIN_HOOK: Option<fn()> = None;
+static mut WL_LOSS_HOOK: Option<fn()> = None;
+
+pub fn register_wl_hooks(win: fn(), loss: fn()) {
+    unsafe {
+        WL_WIN_HOOK = Some(win);
+        WL_LOSS_HOOK = Some(loss);
+    }
+}
+
+fn wl_award_win() {
+    unsafe {
+        if let Some(cb) = WL_WIN_HOOK {
+            cb();
+        }
+    }
+}
+
+    fn wl_award_loss() {
+        unsafe {
+            if let Some(cb) = WL_LOSS_HOOK {
+                cb();
+            }
+        }
+    }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -112,10 +129,39 @@ fn validate_block(block: &HeapBlock) -> bool {
 }
 
 fn get_size_class(size: u32) -> usize {
-    if size <= 16 { 0 } else if size <= 32 { 1 } else if size <= 64 { 2 } else if size <= 128 { 3 }
-    else if size <= 256 { 4 } else if size <= 512 { 5 } else if size <= 1024 { 6 } else if size <= 2048 { 7 }
-    else if size <= 4096 { 8 } else if size <= 8192 { 9 } else if size <= 16_384 { 10 } else if size <= 32_768 { 11 }
-    else if size <= 65_536 { 12 } else if size <= 131_072 { 13 } else if size <= 262_144 { 14 } else { 15 }
+    if size <= 16 {
+        0
+    } else if size <= 32 {
+        1
+    } else if size <= 64 {
+        2
+    } else if size <= 128 {
+        3
+    } else if size <= 256 {
+        4
+    } else if size <= 512 {
+        5
+    } else if size <= 1024 {
+        6
+    } else if size <= 2048 {
+        7
+    } else if size <= 4096 {
+        8
+    } else if size <= 8192 {
+        9
+    } else if size <= 16_384 {
+        10
+    } else if size <= 32_768 {
+        11
+    } else if size <= 65_536 {
+        12
+    } else if size <= 131_072 {
+        13
+    } else if size <= 262_144 {
+        14
+    } else {
+        15
+    }
 }
 
 fn round_up_size(size: u32) -> u32 {
@@ -217,7 +263,7 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
 
     if expansion_start >= heap.end_addr || expansion_start + total_bytes > heap.end_addr {
         klog_info!("expand_heap: Heap growth denied - would exceed heap window");
-        unsafe { wl_award_loss() };
+        wl_award_loss();
         return -1;
     }
 
@@ -275,12 +321,12 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     if !heap.initialized {
         klog_info!("kmalloc: Heap not initialized");
-        unsafe { wl_award_loss() };
+        wl_award_loss();
         return ptr::null_mut();
     }
 
     if size == 0 || size as u32 > MAX_ALLOC_SIZE {
-        unsafe { wl_award_loss() };
+        wl_award_loss();
         return ptr::null_mut();
     }
 
@@ -290,7 +336,7 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     let mut block = find_free_block(&heap, total_size);
     if block.is_null() {
         if expand_heap(&mut heap, total_size) != 0 {
-            unsafe { wl_award_loss() };
+            wl_award_loss();
             return ptr::null_mut();
         }
         block = find_free_block(&heap, total_size);
@@ -298,7 +344,7 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     if block.is_null() {
         klog_info!("kmalloc: No suitable block found after expansion");
-        unsafe { wl_award_loss() };
+        wl_award_loss();
         return ptr::null_mut();
     }
 
@@ -306,7 +352,9 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     unsafe {
         if (*block).size > total_size + core::mem::size_of::<HeapBlock>() as u32 + MIN_ALLOC_SIZE {
-            let new_block = (block as *mut u8).add(core::mem::size_of::<HeapBlock>() + rounded_size as usize) as *mut HeapBlock;
+            let new_block = (block as *mut u8)
+                .add(core::mem::size_of::<HeapBlock>() + rounded_size as usize)
+                as *mut HeapBlock;
             (*new_block).magic = BLOCK_MAGIC_FREE;
             (*new_block).size = (*block).size - total_size;
             (*new_block).flags = 0;
@@ -360,7 +408,10 @@ pub fn kfree(ptr_in: *mut c_void) {
             return;
         }
 
-        heap.stats.allocated_size = heap.stats.allocated_size.saturating_sub((*block).size as u64);
+        heap.stats.allocated_size = heap
+            .stats
+            .allocated_size
+            .saturating_sub((*block).size as u64);
         heap.stats.free_size += (*block).size as u64;
         heap.stats.free_count += 1;
 
@@ -385,7 +436,7 @@ pub fn init_kernel_heap() -> c_int {
     heap.stats = HeapStats::default();
 
     if expand_heap(&mut heap, (PAGE_SIZE_4KB * 4) as u32) != 0 {
-        unsafe { kernel_panic(b"Failed to initialize kernel heap\0".as_ptr() as *const c_char) };
+        panic!("Failed to initialize kernel heap");
     }
 
     heap.initialized = true;
@@ -484,7 +535,11 @@ pub fn print_heap_stats() {
                 0
             };
 
-            klog_info!("Fragmented bytes: {} ({}%)", fragmented_bytes, fragmentation_percent);
+            klog_info!(
+                "Fragmented bytes: {} ({}%)",
+                fragmented_bytes,
+                fragmentation_percent
+            );
         }
     }
 }

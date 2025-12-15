@@ -1,4 +1,3 @@
-
 use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -102,11 +101,7 @@ pub fn klog_get_level() -> KlogLevel {
 
 #[unsafe(no_mangle)]
 pub fn klog_is_enabled(level: KlogLevel) -> c_int {
-    if is_enabled(level) {
-        1
-    } else {
-        0
-    }
+    if is_enabled(level) { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]

@@ -1,14 +1,15 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use slopos_lib::FramebufferInfo;
 use slopos_drivers::serial_println;
+use slopos_drivers::video_bridge::{self, VideoCallbacks};
+use slopos_lib::FramebufferInfo;
 
+pub mod font;
 pub mod framebuffer;
 pub mod graphics;
-pub mod font;
-pub mod splash;
 pub mod roulette_core;
+pub mod splash;
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     if let Some(fb) = framebuffer {
@@ -24,6 +25,19 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             serial_println!("Framebuffer init failed; skipping banner paint.");
             return;
         }
+
+        fn fb_info_bridge() -> *mut slopos_drivers::video_bridge::FramebufferInfoC {
+            framebuffer::framebuffer_get_info() as *mut slopos_drivers::video_bridge::FramebufferInfoC
+        }
+
+        video_bridge::register_video_callbacks(VideoCallbacks {
+            draw_rect_filled_fast: Some(graphics::graphics_draw_rect_filled_fast),
+            draw_line: Some(graphics::graphics_draw_line),
+            draw_circle: Some(graphics::graphics_draw_circle),
+            draw_circle_filled: Some(graphics::graphics_draw_circle_filled),
+            font_draw_string: Some(font::font_draw_string),
+            framebuffer_get_info: Some(fb_info_bridge),
+        });
 
         if splash::splash_show_boot_screen() != 0 {
             serial_println!("Splash paint failed; falling back to banner stripe.");

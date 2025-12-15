@@ -31,7 +31,10 @@ fn clip_coords(fb: &FbState, x: &mut i32, y: &mut i32) {
 fn convert_color(fb: &FbState, color: u32) -> u32 {
     match fb.pixel_format {
         0x02 | 0x04 => {
-            ((color & 0xFF0000) >> 16) | (color & 0x00FF00) | ((color & 0x0000FF) << 16) | (color & 0xFF000000)
+            ((color & 0xFF0000) >> 16)
+                | (color & 0x00FF00)
+                | ((color & 0x0000FF) << 16)
+                | (color & 0xFF000000)
         }
         _ => color,
     }
@@ -107,7 +110,11 @@ pub fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32
 
     let width = fb.width as i32;
     let height = fb.height as i32;
-    if (x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= width && x1 >= width) || (y0 >= height && y1 >= height) {
+    if (x0 < 0 && x1 < 0)
+        || (y0 < 0 && y1 < 0)
+        || (x0 >= width && x1 >= width)
+        || (y0 >= height && y1 >= height)
+    {
         return GRAPHICS_ERROR_BOUNDS;
     }
 
@@ -198,13 +205,7 @@ pub fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: i32, color:
 }
 
 #[unsafe(no_mangle)]
-pub fn graphics_draw_rect_filled_fast(
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    color: u32,
-) -> i32 {
+pub fn graphics_draw_rect_filled_fast(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
         None => return GRAPHICS_ERROR_NO_FB,
@@ -259,7 +260,9 @@ pub fn graphics_draw_rect_filled_fast(
                         2 => (pixel_ptr as *mut u16).write_volatile(pixel_value as u16),
                         3 => {
                             pixel_ptr.write_volatile(((pixel_value >> 16) & 0xFF) as u8);
-                            pixel_ptr.add(1).write_volatile(((pixel_value >> 8) & 0xFF) as u8);
+                            pixel_ptr
+                                .add(1)
+                                .write_volatile(((pixel_value >> 8) & 0xFF) as u8);
                             pixel_ptr.add(2).write_volatile((pixel_value & 0xFF) as u8);
                         }
                         _ => {}

@@ -6,12 +6,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::ramfs::{
-    ramfs_acquire_node, ramfs_create_file, ramfs_find_node, ramfs_get_size, ramfs_node_release,
-    ramfs_node_retain, ramfs_read_bytes, ramfs_remove_file, ramfs_write_bytes, ramfs_node_t,
-    RAMFS_TYPE_FILE,
+    RAMFS_TYPE_FILE, ramfs_acquire_node, ramfs_create_file, ramfs_find_node, ramfs_get_size,
+    ramfs_node_release, ramfs_node_retain, ramfs_node_t, ramfs_read_bytes, ramfs_remove_file,
+    ramfs_write_bytes,
 };
-
-use slopos_drivers::scheduler_callbacks::{register_fs_callbacks, FsCallbacks};
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -74,8 +72,9 @@ struct FileioStateStorage {
 
 impl FileioStateStorage {
     const fn uninitialized() -> Self {
-        let processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] =
-            unsafe { MaybeUninit::<[MaybeUninit<FileTableSlot>; MAX_PROCESSES]>::uninit().assume_init() };
+        let processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] = unsafe {
+            MaybeUninit::<[MaybeUninit<FileTableSlot>; MAX_PROCESSES]>::uninit().assume_init()
+        };
         Self {
             initialized: false,
             kernel: MaybeUninit::uninit(),
@@ -94,7 +93,9 @@ fn with_state<R>(f: impl FnOnce(&mut FileioStateStorage) -> R) -> R {
     f(&mut *guard)
 }
 
-fn with_tables<R>(f: impl FnOnce(&mut FileTableSlot, &mut [FileTableSlot; MAX_PROCESSES]) -> R) -> R {
+fn with_tables<R>(
+    f: impl FnOnce(&mut FileTableSlot, &mut [FileTableSlot; MAX_PROCESSES]) -> R,
+) -> R {
     with_state(|state| {
         ensure_initialized(state);
         let kernel = unsafe { state.kernel.assume_init_mut() };
@@ -146,10 +147,7 @@ fn table_for_pid<'a>(
     None
 }
 
-fn get_descriptor<'a>(
-    table: &'a mut FileTableSlot,
-    fd: c_int,
-) -> Option<&'a mut FileDescriptor> {
+fn get_descriptor<'a>(table: &'a mut FileTableSlot, fd: c_int) -> Option<&'a mut FileDescriptor> {
     if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
@@ -181,30 +179,14 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
     // Now that memory is populated, clear descriptors and mark free.
     let kernel = unsafe { state.kernel.assume_init_mut() };
     reset_table(kernel);
-    let processes = unsafe { mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes) };
+    let processes =
+        unsafe { mem::transmute::<_, &mut [FileTableSlot; MAX_PROCESSES]>(&mut state.processes) };
     for slot in processes.iter_mut() {
         reset_table(slot);
         slot.process_id = INVALID_PROCESS_ID;
         slot.in_use = false;
     }
     state.initialized = true;
-
-    // Register callbacks with drivers to break circular dependency
-    unsafe {
-        fn file_read_fd_wrapper(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> c_int {
-            file_read_fd(process_id, fd, buffer, count) as c_int
-        }
-        fn file_write_fd_wrapper(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> c_int {
-            file_write_fd(process_id, fd, buffer, count) as c_int
-        }
-        register_fs_callbacks(FsCallbacks {
-            file_open_for_process: Some(file_open_for_process),
-            file_close_fd: Some(file_close_fd),
-            file_read_fd: Some(file_read_fd_wrapper),
-            file_write_fd: Some(file_write_fd_wrapper),
-            file_unlink_path: Some(file_unlink_path),
-        });
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -250,11 +232,7 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub fn file_open_for_process(
-    process_id: u32,
-    path: *const c_char,
-    flags: u32,
-) -> c_int {
+pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int {
     if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
         return -1;
     }
@@ -319,12 +297,7 @@ pub fn file_open_for_process(
 }
 
 #[unsafe(no_mangle)]
-pub fn file_read_fd(
-    process_id: u32,
-    fd: c_int,
-    buffer: *mut c_char,
-    count: usize,
-) -> ssize_t {
+pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
     }
@@ -362,21 +335,12 @@ pub fn file_read_fd(
             desc.position = desc.position.saturating_add(read_len);
         }
         drop(guard);
-        if rc == 0 {
-            read_len as ssize_t
-        } else {
-            -1
-        }
+        if rc == 0 { read_len as ssize_t } else { -1 }
     })
 }
 
 #[unsafe(no_mangle)]
-pub fn file_write_fd(
-    process_id: u32,
-    fd: c_int,
-    buffer: *const c_char,
-    count: usize,
-) -> ssize_t {
+pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
     }
@@ -406,11 +370,7 @@ pub fn file_write_fd(
             desc.position = desc.position.saturating_add(count);
         }
         drop(guard);
-        if rc == 0 {
-            count as ssize_t
-        } else {
-            -1
-        }
+        if rc == 0 { count as ssize_t } else { -1 }
     })
 }
 
@@ -436,12 +396,7 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub fn file_seek_fd(
-    process_id: u32,
-    fd: c_int,
-    offset: u64,
-    whence: c_int,
-) -> c_int {
+pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return -1;

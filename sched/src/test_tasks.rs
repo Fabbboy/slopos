@@ -1,25 +1,21 @@
-
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use core::ffi::CStr;
-use slopos_lib::{klog_info};
+use slopos_drivers::scheduler_callbacks;
+use slopos_drivers::serial::serial_putc_com1;
+use slopos_lib::klog_info;
 
 use crate::scheduler;
 use crate::task::{
-    task_create, task_get_info, task_get_total_yields, task_iterate_active, task_shutdown_all, task_state_to_string,
-    Task, TaskContext, TaskIterateCb, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_NORMAL,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    TASK_PRIORITY_NORMAL, Task, TaskContext, TaskIterateCb, task_create, task_get_info,
+    task_get_total_yields, task_iterate_active, task_shutdown_all, task_state_to_string,
 };
 
 use crate::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
-// Keep extern "C" for serial and idt functions to break circular dependencies
-unsafe extern "C" {
-    fn serial_putc_com1(ch: u8);
-    fn idt_get_gate(vector: u8, entry: *mut IdtEntry) -> c_int;
-}
 
 #[repr(C, packed)]
 pub struct IdtEntry {
@@ -71,10 +67,12 @@ pub fn test_task_b(arg: *mut c_void) {
     klog_info!("Task B starting execution");
 
     while iterations < 15 {
-        klog_info!("Task B: printing character '{}' ({}) (", current_char as char, current_char as c_int);
-        unsafe {
-            serial_putc_com1(current_char);
-        }
+        klog_info!(
+            "Task B: printing character '{}' ({}) (",
+            current_char as char,
+            current_char as c_int
+        );
+        serial_putc_com1(current_char);
         klog_info!(")");
 
         current_char = current_char.wrapping_add(1);
@@ -248,7 +246,11 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
         let cs = (*task_info).context.cs;
         let ss = (*task_info).context.ss;
         if cs != GDT_USER_CODE_SELECTOR || ss != GDT_USER_DATA_SELECTOR {
-            klog_info!("PRIVSEP_TEST: user task selectors incorrect (cs=0x{:x} ss=0x{:x})", cs, ss);
+            klog_info!(
+                "PRIVSEP_TEST: user task selectors incorrect (cs=0x{:x} ss=0x{:x})",
+                cs,
+                ss
+            );
             failed = 1;
         }
     }
@@ -263,7 +265,8 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
         zero: 0,
     };
 
-    if unsafe { idt_get_gate(SYSCALL_VECTOR, &mut gate) } != 0 {
+    let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
+    if unsafe { scheduler_callbacks::call_idt_get_gate(SYSCALL_VECTOR, gate_ptr) } != 0 {
         klog_info!("PRIVSEP_TEST: cannot read syscall gate");
         failed = 1;
     } else {
@@ -351,7 +354,9 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
             ctx_ref.max_stack_pointer = current_rsp;
         }
 
-        let stack_growth = ctx_ref.initial_stack_top.saturating_sub(ctx_ref.min_stack_pointer);
+        let stack_growth = ctx_ref
+            .initial_stack_top
+            .saturating_sub(ctx_ref.min_stack_pointer);
         if stack_growth > 0x1000 {
             unsafe {
                 let name_str = if name.is_null() {
@@ -359,7 +364,11 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
                 } else {
                     CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
                 };
-                klog_info!("{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes", name_str, stack_growth);
+                klog_info!(
+                    "{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes",
+                    name_str,
+                    stack_growth
+                );
             }
             ctx_ref.test_failed = 1;
             break;
@@ -373,7 +382,13 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
                 } else {
                     CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
                 };
-                klog_info!("{}: Iteration {} (yields: {}, RSP=0x{:x})", name_str, iteration, ctx_ref.yield_count, current_rsp);
+                klog_info!(
+                    "{}: Iteration {} (yields: {}, RSP=0x{:x})",
+                    name_str,
+                    iteration,
+                    ctx_ref.yield_count,
+                    current_rsp
+                );
             }
         }
 
@@ -388,7 +403,15 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
             CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
         };
         klog_info!("{}: Completed {} yields", name_str, ctx_ref.yield_count);
-        klog_info!("{}: Stack range: min=0x{:x} max=0x{:x} growth=0x{:x} bytes", name_str, ctx_ref.min_stack_pointer, ctx_ref.max_stack_pointer, ctx_ref.initial_stack_top.saturating_sub(ctx_ref.min_stack_pointer));
+        klog_info!(
+            "{}: Stack range: min=0x{:x} max=0x{:x} growth=0x{:x} bytes",
+            name_str,
+            ctx_ref.min_stack_pointer,
+            ctx_ref.max_stack_pointer,
+            ctx_ref
+                .initial_stack_top
+                .saturating_sub(ctx_ref.min_stack_pointer)
+        );
         if ctx_ref.test_failed != 0 {
             klog_info!("{}: FAILED - Stack corruption detected", name_str);
         } else {
@@ -527,9 +550,21 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     ctx.index = ctx.index.wrapping_add(1);
 
     unsafe {
-        let name_str = CStr::from_ptr((*task).name.as_ptr() as *const c_char).to_str().unwrap_or("<invalid utf-8>");
-        let state_str = CStr::from_ptr(task_state_to_string((*task).state)).to_str().unwrap_or("<invalid>");
-        klog_info!("  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}", ctx.index, name_str, (*task).task_id, state_str, (*task).total_runtime as u64, (*task).yield_count as u64);
+        let name_str = CStr::from_ptr((*task).name.as_ptr() as *const c_char)
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        let state_str = CStr::from_ptr(task_state_to_string((*task).state))
+            .to_str()
+            .unwrap_or("<invalid>");
+        klog_info!(
+            "  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}",
+            ctx.index,
+            name_str,
+            (*task).task_id,
+            state_str,
+            (*task).total_runtime as u64,
+            (*task).yield_count as u64
+        );
     }
 }
 
@@ -572,4 +607,3 @@ pub fn print_scheduler_stats() {
         klog_info!("  (no active tasks)");
     }
 }
-

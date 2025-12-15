@@ -1,20 +1,20 @@
-
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::random;
 use crate::serial;
 use crate::syscall_common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, SyscallDisposition,
-    syscall_return_err, syscall_return_ok, USER_IO_MAX_BYTES,
+    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
+    syscall_return_err, syscall_return_ok,
 };
 use crate::syscall_fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_types::{Task, InterruptFrame};
+use crate::syscall_types::{InterruptFrame, Task};
+use crate::video_bridge;
 use slopos_lib::klog_debug;
-use slopos_mm::user_copy_helpers::{UserRect, UserLine, UserCircle, UserText};
+use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
 
 #[repr(C)]
 pub struct UserFbInfo {
@@ -39,53 +39,23 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct FateResult {
-    pub token: u32,
-    pub value: u32,
-}
+use crate::fate::FateResult;
 
-
-use slopos_mm::user_copy_helpers::{user_copy_rect_checked, user_copy_line_checked, user_copy_circle_checked, user_copy_text_header};
-use slopos_mm::user_copy::user_copy_from_user;
 use slopos_mm::page_alloc::get_page_allocator_stats;
-
-use crate::scheduler_callbacks::{
-    call_get_scheduler_stats, call_get_task_stats, call_schedule, call_scheduler_is_preemption_enabled,
-    call_task_terminate, call_yield,
+use slopos_mm::user_copy::user_copy_from_user;
+use slopos_mm::user_copy_helpers::{
+    user_copy_circle_checked, user_copy_line_checked, user_copy_rect_checked, user_copy_text_header,
 };
 
+use crate::scheduler_callbacks::{
+    call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
+    call_get_scheduler_stats, call_get_task_stats, call_schedule,
+    call_scheduler_is_preemption_enabled, call_task_terminate, call_yield,
+};
+
+use crate::pit::{pit_poll_delay_ms, pit_sleep_ms};
+use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::tty_read_line;
-use crate::pit::{pit_sleep_ms, pit_poll_delay_ms};
-use crate::scheduler_callbacks::{call_kernel_shutdown, call_kernel_reboot};
-// Keep extern "C" for fate functions to break circular dependency with sched
-unsafe extern "C" {
-    fn fate_spin() -> FateResult;
-    fn fate_set_pending(res: FateResult, task_id: u32) -> c_int;
-    fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int;
-    fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool);
-}
-
-#[repr(C)]
-struct FramebufferInfoC {
-    initialized: u8,
-    width: u32,
-    height: u32,
-    pitch: u32,
-    bpp: u32,
-    pixel_format: u32,
-}
-
-// Keep extern "C" for video functions to break circular dependency
-unsafe extern "C" {
-    fn graphics_draw_rect_filled_fast(x: i32, y: i32, w: i32, h: i32, color: u32) -> i32;
-    fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32;
-    fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32) -> i32;
-    fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32) -> i32;
-    fn font_draw_string(x: i32, y: i32, str_ptr: *const c_char, fg_color: u32, bg_color: u32) -> c_int;
-    fn framebuffer_get_info() -> *mut FramebufferInfoC;
-}
 
 fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDisposition {
     if rc == 0 {
@@ -108,16 +78,17 @@ pub fn syscall_exit(task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisp
             (*task).fault_reason = crate::syscall_types::TaskFaultReason::None;
             (*task).exit_code = 0;
         }
-        call_task_terminate(if task.is_null() { u32::MAX } else { (*task).task_id });
+        call_task_terminate(if task.is_null() {
+            u32::MAX
+        } else {
+            (*task).task_id
+        });
     }
     unsafe { call_schedule() };
     SyscallDisposition::NoReturn
 }
 
-pub fn syscall_user_write(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_user_write(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let mut write_len: usize = 0;
 
@@ -142,10 +113,7 @@ pub fn syscall_user_write(
     syscall_return_ok(frame, write_len as u64)
 }
 
-pub fn syscall_user_read(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_user_read(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     unsafe {
         if (*frame).rdi == 0 || (*frame).rsi == 0 {
@@ -180,26 +148,20 @@ pub fn syscall_user_read(
     syscall_return_ok(frame, read_len as u64)
 }
 
-pub fn syscall_roulette_spin(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
-    let res = unsafe { fate_spin() };
+pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let res = unsafe { call_fate_spin() };
     if task.is_null() {
         return syscall_return_err(frame, u64::MAX);
     }
 
-    if unsafe { fate_set_pending(res, (*task).task_id) } != 0 {
+    if unsafe { call_fate_set_pending(res, (*task).task_id) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let packed = ((res.token as u64) << 32) | res.value as u64;
     syscall_return_ok(frame, packed)
 }
 
-pub fn syscall_sleep_ms(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_sleep_ms(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut ms = unsafe { (*frame).rdi };
     if ms > 60000 {
         ms = 60000;
@@ -212,11 +174,8 @@ pub fn syscall_sleep_ms(
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_fb_info(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
-    let info = unsafe { framebuffer_get_info() };
+pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let info = video_bridge::framebuffer_get_info();
     if info.is_null() {
         return syscall_return_err(frame, u64::MAX);
     }
@@ -246,10 +205,7 @@ pub fn syscall_fb_info(
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_gfx_fill_rect(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_gfx_fill_rect(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut rect = UserRect {
         x: 0,
         y: 0,
@@ -260,14 +216,12 @@ pub fn syscall_gfx_fill_rect(
     if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
-    let rc = unsafe { graphics_draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color) };
+    let rc =
+        video_bridge::draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_gfx_draw_line(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_gfx_draw_line(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut line = UserLine {
         x0: 0,
         y0: 0,
@@ -278,14 +232,11 @@ pub fn syscall_gfx_draw_line(
     if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const UserLine) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
-    let rc = unsafe { graphics_draw_line(line.x0, line.y0, line.x1, line.y1, line.color) };
+    let rc = video_bridge::draw_line(line.x0, line.y0, line.x1, line.y1, line.color);
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_gfx_draw_circle(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_gfx_draw_circle(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut circle = UserCircle {
         cx: 0,
         cy: 0,
@@ -295,7 +246,7 @@ pub fn syscall_gfx_draw_circle(
     if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
-    let rc = unsafe { graphics_draw_circle(circle.cx, circle.cy, circle.radius, circle.color) };
+    let rc = video_bridge::draw_circle(circle.cx, circle.cy, circle.radius, circle.color);
     syscall_finish_gfx(frame, rc)
 }
 
@@ -312,14 +263,11 @@ pub fn syscall_gfx_draw_circle_filled(
     if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
-    let rc = unsafe { graphics_draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color) };
+    let rc = video_bridge::draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color);
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_font_draw(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut text = UserText {
         x: 0,
         y: 0,
@@ -340,58 +288,56 @@ pub fn syscall_font_draw(
         buf.as_mut_ptr() as *mut c_void,
         text.str_ptr as *const c_void,
         text.len as usize,
-    ) != 0 {
+    ) != 0
+    {
         return syscall_return_err(frame, u64::MAX);
     }
     buf[text.len as usize] = 0;
-    let rc = unsafe { font_draw_string(text.x, text.y, buf.as_ptr() as *const c_char, text.fg_color, text.bg_color) };
+    let rc = video_bridge::font_draw_string(
+        text.x,
+        text.y,
+        buf.as_ptr() as *const c_char,
+        text.fg_color,
+        text.bg_color,
+    );
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_random_next(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
 }
 
-pub fn syscall_roulette_result(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if task.is_null() {
         return syscall_return_err(frame, u64::MAX);
     }
     let mut stored = FateResult { token: 0, value: 0 };
-    if unsafe { fate_take_pending((*task).task_id, &mut stored as *mut _) } != 0 {
+    if unsafe { call_fate_take_pending((*task).task_id, &mut stored) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
     let token = unsafe { ((*frame).rdi >> 32) as u32 };
     if token != stored.token {
         return syscall_return_err(frame, u64::MAX);
     }
-    
+
     // Check if the fate value is even (loss) or odd (win)
     let is_win = (stored.value & 1) == 1;
-    
+
     unsafe {
         if is_win {
-            // Win: award the win and continue
-            fate_apply_outcome(&stored, 0, true);
+        // Win: award the win and continue
+            call_fate_apply_outcome(&stored, 0, true);
             syscall_return_ok(frame, 0)
         } else {
             // Loss: award the loss and reboot to spin again
-            fate_apply_outcome(&stored as *const _, 0, false);
+            call_fate_apply_outcome(&stored, 0, false);
             call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
         }
     }
 }
 
-pub fn syscall_sys_info(
-    _task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
+pub fn syscall_sys_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if unsafe { (*frame).rdi } == 0 {
         return syscall_return_err(frame, u64::MAX);
     }

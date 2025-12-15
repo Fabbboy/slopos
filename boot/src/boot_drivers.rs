@@ -1,12 +1,13 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
-use slopos_video as video;
 use slopos_tests::{
+    InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
     interrupt_suite_desc, tests_register_suite, tests_register_system_suites, tests_reset_registry,
-    tests_run_all, InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
+    tests_run_all,
 };
+use slopos_video as video;
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::gdt::gdt_init;
@@ -16,18 +17,17 @@ use crate::limine_protocol;
 use crate::safe_stack::safe_stack_init;
 use slopos_drivers::{
     apic::{apic_detect, apic_init},
-    ioapic::ioapic_init,
     interrupt_test::interrupt_test_request_shutdown,
     interrupt_test_config::{
         interrupt_test_config_init_defaults, interrupt_test_config_parse_cmdline,
-        interrupt_test_verbosity_string, interrupt_test_suite_string,
+        interrupt_test_suite_string, interrupt_test_verbosity_string,
     },
+    ioapic::ioapic_init,
     pci::{pci_get_primary_gpu, pci_init},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
     virtio_gpu::virtio_gpu_register_driver,
 };
-use slopos_video::framebuffer::framebuffer_init;
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
@@ -122,12 +122,12 @@ fn boot_step_timer_setup_fn() {
         klog_info!("BOOT: WARNING - no PIT IRQs observed in 100ms window");
     }
 
-    if framebuffer_init() != 0 {
+    let fb = limine_protocol::boot_info().framebuffer;
+    if fb.is_none() {
         klog_info!(
             "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
     }
-    let fb = limine_protocol::boot_info().framebuffer;
     video::init(fb);
 }
 
@@ -229,13 +229,9 @@ fn boot_step_interrupt_tests_fn() -> i32 {
 
     if klog::is_enabled_level(KlogLevel::Debug) {
         let suites = interrupt_test_suite_string(test_config.suite_mask);
-        let suites_str = unsafe { CStr::from_ptr(suites) }
-            .to_str()
-            .unwrap_or("?");
+        let suites_str = unsafe { CStr::from_ptr(suites) }.to_str().unwrap_or("?");
         let verbosity = interrupt_test_verbosity_string(test_config.verbosity);
-        let verbosity_str = unsafe { CStr::from_ptr(verbosity) }
-            .to_str()
-            .unwrap_or("?");
+        let verbosity_str = unsafe { CStr::from_ptr(verbosity) }.to_str().unwrap_or("?");
         klog_info!("INTERRUPT_TEST: Suites -> {}", suites_str);
         klog_info!("INTERRUPT_TEST: Verbosity -> {}", verbosity_str);
         klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);

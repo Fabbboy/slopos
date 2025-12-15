@@ -1,4 +1,3 @@
-
 use core::arch::asm;
 use core::ffi::{c_char, c_int, c_void};
 use core::hint::unreachable_unchecked;
@@ -149,4 +148,3 @@ pub extern "C" fn sys_halt() -> ! {
     invoke(SYSCALL_HALT, 0, 0, 0);
     unsafe { unreachable_unchecked() }
 }
-

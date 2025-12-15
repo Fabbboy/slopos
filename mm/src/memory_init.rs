@@ -1,42 +1,26 @@
-
-use core::ffi::{c_char, c_int, CStr};
-use crate::memory_layout::{
-    get_kernel_memory_layout, init_kernel_memory_layout,
-};
+use crate::kernel_heap::init_kernel_heap;
+use crate::memory_layout::{get_kernel_memory_layout, init_kernel_memory_layout};
 use crate::memory_reservations::{
-    mm_region_add_usable, mm_region_count, mm_region_get, mm_region_highest_usable_frame,
-    mm_region_map_configure, mm_region_map_reset, mm_region_total_bytes, mm_region_reserve,
-    mm_reservation_type_name, mm_reservations_capacity, mm_reservations_count,
-    mm_reservations_get, mm_reservations_overflow_count, mm_reservations_total_bytes, MmRegion,
-    MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-    MM_RESERVATION_FLAG_MMIO, MmRegionKind,
+    MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+    MM_RESERVATION_FLAG_MMIO, MmRegion, MmRegionKind, MmReservationType, mm_region_add_usable,
+    mm_region_count, mm_region_get, mm_region_highest_usable_frame, mm_region_map_configure,
+    mm_region_map_reset, mm_region_reserve, mm_region_total_bytes, mm_reservation_type_name,
+    mm_reservations_capacity, mm_reservations_count, mm_reservations_get,
+    mm_reservations_overflow_count, mm_reservations_total_bytes,
 };
 use crate::mm_constants::{
-    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PDPT_PHYS_ADDR, EARLY_PD_PHYS_ADDR, EARLY_PML4_PHYS_ADDR,
-    HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB,
+    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
+    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB,
 };
 use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
 };
 use crate::paging::init_paging;
 use crate::phys_virt::mm_init_phys_virt_helpers;
-use crate::kernel_heap::init_kernel_heap;
 use crate::process_vm::init_process_vm;
+use core::ffi::{CStr, c_char, c_int};
 
-use slopos_lib::{klog_debug, klog_info, cpu};
-// Keep extern "C" for boot functions to break circular dependency
-unsafe extern "C" {
-    fn kernel_panic(msg: *const c_char) -> !;
-    fn get_hhdm_offset() -> u64;
-    fn is_hhdm_available() -> c_int;
-    fn get_framebuffer_info(
-        phys_base: *mut u64,
-        width: *mut u32,
-        height: *mut u32,
-        pitch: *mut u32,
-        bpp: *mut u8,
-    ) -> c_int;
-}
+use slopos_lib::{FramebufferInfo, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
 const MSR_APIC_BASE: u32 = 0x1B;
@@ -88,7 +72,8 @@ pub struct AllocatorPlan {
     capacity_frames: u32,
 }
 
-static mut REGION_BOOT_BUFFER: [MmRegion; BOOT_REGION_STATIC_CAP] = [MmRegion::zeroed(); BOOT_REGION_STATIC_CAP];
+static mut REGION_BOOT_BUFFER: [MmRegion; BOOT_REGION_STATIC_CAP] =
+    [MmRegion::zeroed(); BOOT_REGION_STATIC_CAP];
 static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
     total_memory_bytes: 0,
     available_memory_bytes: 0,
@@ -101,6 +86,25 @@ static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
 };
 static mut EARLY_PAGING_OK: bool = false;
 static mut MEMORY_SYSTEM_INITIALIZED: bool = false;
+static mut HHDM_OFFSET: u64 = 0;
+static mut HHDM_AVAILABLE: bool = false;
+static mut FRAMEBUFFER_BOOT_INFO: Option<FramebufferInfo> = None;
+
+fn mm_panic(msg: &str) -> ! {
+    panic!("{msg}");
+}
+
+pub fn hhdm_offset_value() -> u64 {
+    unsafe { HHDM_OFFSET }
+}
+
+pub fn hhdm_is_available() -> bool {
+    unsafe { HHDM_AVAILABLE }
+}
+
+fn framebuffer_boot_info() -> Option<FramebufferInfo> {
+    unsafe { FRAMEBUFFER_BOOT_INFO }
+}
 
 fn align_down_u64(value: u64, alignment: u64) -> u64 {
     if alignment == 0 {
@@ -133,7 +137,11 @@ fn configure_region_store(memmap: *const LimineMemmapResponse) {
         }
 
         if needed as usize > BOOT_REGION_STATIC_CAP {
-            klog_info!("MM: region map estimate {} exceeds capacity {}, clamping", needed, BOOT_REGION_STATIC_CAP);
+            klog_info!(
+                "MM: region map estimate {} exceeds capacity {}, clamping",
+                needed,
+                BOOT_REGION_STATIC_CAP
+            );
             needed = BOOT_REGION_STATIC_CAP as u32;
         }
 
@@ -148,15 +156,21 @@ fn configure_region_store(memmap: *const LimineMemmapResponse) {
     }
 }
 
-fn add_reservation_or_panic(base: u64, length: u64, type_: MmReservationType, flags: u32, label: *const c_char) {
+fn add_reservation_or_panic(
+    base: u64,
+    length: u64,
+    type_: MmReservationType,
+    flags: u32,
+    label: *const c_char,
+) {
     if mm_region_reserve(base, length, type_, flags, label) != 0 {
-        unsafe { kernel_panic(b"MM: Failed to record reserved region\0".as_ptr() as *const c_char) };
+        mm_panic("MM: Failed to record reserved region");
     }
 }
 
 fn add_usable_or_panic(base: u64, length: u64, label: *const c_char) {
     if mm_region_add_usable(base, length, label) != 0 {
-        unsafe { kernel_panic(b"MM: Failed to record usable region\0".as_ptr() as *const c_char) };
+        mm_panic("MM: Failed to record usable region");
     }
 }
 
@@ -172,12 +186,12 @@ fn virt_to_phys_kernel(virt: u64) -> u64 {
 
 fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
     if memmap.is_null() {
-        unsafe { kernel_panic(b"MM: Missing Limine memmap for usable regions\0".as_ptr() as *const c_char) };
+        mm_panic("MM: Missing Limine memmap for usable regions");
     }
     unsafe {
         let response = &*memmap;
         if response.entry_count == 0 || response.entries.is_null() {
-            kernel_panic(b"MM: Missing Limine memmap for usable regions\0".as_ptr() as *const c_char);
+            mm_panic("MM: Missing Limine memmap for usable regions");
         }
         INIT_STATS.total_memory_bytes = 0;
         for i in 0..response.entry_count {
@@ -189,7 +203,8 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
             if entry.length == 0 {
                 continue;
             }
-            INIT_STATS.total_memory_bytes = INIT_STATS.total_memory_bytes.saturating_add(entry.length);
+            INIT_STATS.total_memory_bytes =
+                INIT_STATS.total_memory_bytes.saturating_add(entry.length);
             if entry.type_ != LIMINE_MEMMAP_USABLE {
                 continue;
             }
@@ -220,10 +235,11 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
             };
         }
         if INIT_STATS.tracked_page_frames == 0 && INIT_STATS.available_memory_bytes > 0 {
-            kernel_panic(b"MM: Usable memory exceeds supported frame range\0".as_ptr() as *const c_char);
+            mm_panic("MM: Usable memory exceeds supported frame range");
         }
         INIT_STATS.reserved_region_count = mm_reservations_count();
-        INIT_STATS.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+        INIT_STATS.reserved_device_bytes =
+            mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
     }
 }
 
@@ -335,41 +351,33 @@ fn record_memmap_reservations(memmap: *const LimineMemmapResponse) {
 }
 
 fn record_framebuffer_reservation() {
-    unsafe {
-        let mut fb_addr = 0u64;
-        let mut width = 0u32;
-        let mut height = 0u32;
-        let mut pitch = 0u32;
-        let mut bpp = 0u8;
+    let Some(fb) = framebuffer_boot_info() else {
+        return;
+    };
 
-        if get_framebuffer_info(&mut fb_addr, &mut width, &mut height, &mut pitch, &mut bpp) == 0 {
-            return;
+    let mut phys_base = fb.address as u64;
+    if hhdm_is_available() {
+        let offset = hhdm_offset_value();
+        if phys_base >= offset {
+            phys_base -= offset;
         }
-
-        let mut phys_base = fb_addr;
-        if is_hhdm_available() != 0 {
-            let hhdm_offset = get_hhdm_offset();
-            if phys_base >= hhdm_offset {
-                phys_base -= hhdm_offset;
-            }
-        }
-        if phys_base == 0 || pitch == 0 || height == 0 {
-            return;
-        }
-        let length = (pitch as u64) * (height as u64);
-        if length == 0 {
-            return;
-        }
-        add_reservation_or_panic(
-            phys_base,
-            length,
-            MmReservationType::Framebuffer,
-            MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS
-                | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT
-                | MM_RESERVATION_FLAG_MMIO,
-            b"Framebuffer\0".as_ptr() as *const c_char,
-        );
     }
+    if phys_base == 0 || fb.pitch == 0 || fb.height == 0 {
+        return;
+    }
+    let length = fb.pitch.saturating_mul(fb.height);
+    if length == 0 {
+        return;
+    }
+    add_reservation_or_panic(
+        phys_base,
+        length,
+        MmReservationType::Framebuffer,
+        MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS
+            | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT
+            | MM_RESERVATION_FLAG_MMIO,
+        b"Framebuffer\0".as_ptr() as *const c_char,
+    );
 }
 
 fn record_apic_reservation() {
@@ -413,19 +421,23 @@ fn select_allocator_window(reserved_bytes: u64) -> u64 {
     0
 }
 
-fn plan_allocator_metadata(_memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> AllocatorPlan {
+fn plan_allocator_metadata(
+    _memmap: *const LimineMemmapResponse,
+    hhdm_offset: u64,
+) -> AllocatorPlan {
     unsafe {
         if INIT_STATS.tracked_page_frames == 0 {
-            kernel_panic(b"MM: No tracked frames available for allocator sizing\0".as_ptr() as *const c_char);
+            mm_panic("MM: No tracked frames available for allocator sizing");
         }
-        let desc_bytes = (INIT_STATS.tracked_page_frames as u64) * page_allocator_descriptor_size() as u64;
+        let desc_bytes =
+            (INIT_STATS.tracked_page_frames as u64) * page_allocator_descriptor_size() as u64;
         let mut aligned_bytes = align_up_u64(desc_bytes, DESC_ALIGN_BYTES);
         aligned_bytes = align_up_u64(aligned_bytes, PAGE_SIZE_4KB);
         INIT_STATS.allocator_metadata_bytes = desc_bytes;
 
         let phys_base = select_allocator_window(aligned_bytes);
         if phys_base == 0 {
-            kernel_panic(b"MM: Failed to find window for allocator metadata\0".as_ptr() as *const c_char);
+            mm_panic("MM: Failed to find window for allocator metadata");
         }
         add_reservation_or_panic(
             phys_base,
@@ -446,12 +458,13 @@ fn plan_allocator_metadata(_memmap: *const LimineMemmapResponse, hhdm_offset: u6
 fn finalize_reserved_regions() {
     unsafe {
         INIT_STATS.reserved_region_count = mm_reservations_count();
-        INIT_STATS.reserved_device_bytes = mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
+        INIT_STATS.reserved_device_bytes =
+            mm_reservations_total_bytes(MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS);
 
         log_reserved_regions();
 
         if mm_reservations_overflow_count() > 0 {
-            kernel_panic(b"MM: Reserved region capacity exceeded\0".as_ptr() as *const c_char);
+            mm_panic("MM: Reserved region capacity exceeded");
         }
     }
 }
@@ -480,13 +493,23 @@ fn log_reserved_regions() {
             let label_str = CStr::from_ptr(label_ptr as *const c_char)
                 .to_str()
                 .unwrap_or("<invalid utf-8>");
-            klog_info!("  {}: 0x{:x} - 0x{:x} ({} KB)", label_str, region_ref.phys_base, region_end - 1, region_ref.length / 1024);
+            klog_info!(
+                "  {}: 0x{:x} - 0x{:x} ({} KB)",
+                label_str,
+                region_ref.phys_base,
+                region_end - 1,
+                region_ref.length / 1024
+            );
         }
         if total_bytes > 0 {
             klog_info!("  Total reserved:      {} KB", total_bytes / 1024);
         }
         if mm_reservations_overflow_count() > 0 {
-            klog_info!("  Reservation drops:   {} (capacity {})", mm_reservations_overflow_count(), mm_reservations_capacity());
+            klog_info!(
+                "  Reservation drops:   {} (capacity {})",
+                mm_reservations_overflow_count(),
+                mm_reservations_capacity()
+            );
         }
     }
 }
@@ -496,12 +519,27 @@ fn display_memory_summary() {
         klog_info!("\n========== SlopOS Memory System Initialized ==========");
         let early_paging_str = if EARLY_PAGING_OK { "OK" } else { "SKIPPED" };
         klog_info!("Early Paging:          {}", early_paging_str);
-        klog_info!("Reserved Regions:      {}", INIT_STATS.reserved_region_count);
+        klog_info!(
+            "Reserved Regions:      {}",
+            INIT_STATS.reserved_region_count
+        );
         klog_info!("Tracked Frames:        {}", INIT_STATS.tracked_page_frames);
-        klog_info!("Allocator Metadata:    {} KB", INIT_STATS.allocator_metadata_bytes / 1024);
-        klog_info!("Reserved Device Mem:   {} KB", INIT_STATS.reserved_device_bytes / 1024);
-        klog_info!("Total Memory:          {} MB", INIT_STATS.total_memory_bytes / (1024 * 1024));
-        klog_info!("Available Memory:      {} MB", INIT_STATS.available_memory_bytes / (1024 * 1024));
+        klog_info!(
+            "Allocator Metadata:    {} KB",
+            INIT_STATS.allocator_metadata_bytes / 1024
+        );
+        klog_info!(
+            "Reserved Device Mem:   {} KB",
+            INIT_STATS.reserved_device_bytes / 1024
+        );
+        klog_info!(
+            "Total Memory:          {} MB",
+            INIT_STATS.total_memory_bytes / (1024 * 1024)
+        );
+        klog_info!(
+            "Available Memory:      {} MB",
+            INIT_STATS.available_memory_bytes / (1024 * 1024)
+        );
         klog_info!("Memory Regions:        {}", INIT_STATS.memory_regions_count);
         klog_info!("HHDM Offset:           0x{:x}", INIT_STATS.hhdm_offset);
         klog_info!("=====================================================\n");
@@ -509,13 +547,22 @@ fn display_memory_summary() {
 }
 
 #[unsafe(no_mangle)]
-pub fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64) -> c_int {
+pub fn init_memory_system(
+    memmap: *const LimineMemmapResponse,
+    hhdm_offset: u64,
+    hhdm_available: bool,
+    framebuffer: Option<FramebufferInfo>,
+) -> c_int {
     unsafe {
         klog_debug!("========== SlopOS Memory System Initialization ==========");
         klog_debug!("Initializing complete memory management system...");
 
+        HHDM_OFFSET = hhdm_offset;
+        HHDM_AVAILABLE = hhdm_available;
+        FRAMEBUFFER_BOOT_INFO = framebuffer;
+
         if memmap.is_null() {
-            kernel_panic(b"MM: Missing Limine memory map\0".as_ptr() as *const c_char);
+            mm_panic("MM: Missing Limine memory map");
         }
 
         init_kernel_memory_layout();
@@ -536,8 +583,12 @@ pub fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64)
 
         EARLY_PAGING_OK = true;
 
-        if init_page_allocator(allocator_plan.buffer as *mut _, allocator_plan.capacity_frames) != 0 {
-            kernel_panic(b"MM: Page allocator initialization failed\0".as_ptr() as *const c_char);
+        if init_page_allocator(
+            allocator_plan.buffer as *mut _,
+            allocator_plan.capacity_frames,
+        ) != 0
+        {
+            mm_panic("MM: Page allocator initialization failed");
         }
         if finalize_page_allocator() != 0 {
             klog_info!("MM: WARNING - page allocator finalization reported issues");
@@ -546,11 +597,11 @@ pub fn init_memory_system(memmap: *const LimineMemmapResponse, hhdm_offset: u64)
         init_paging();
 
         if init_kernel_heap() != 0 {
-            kernel_panic(b"MM: Kernel heap initialization failed\0".as_ptr() as *const c_char);
+            mm_panic("MM: Kernel heap initialization failed");
         }
 
         if init_process_vm() != 0 {
-            kernel_panic(b"MM: Process VM initialization failed\0".as_ptr() as *const c_char);
+            mm_panic("MM: Process VM initialization failed");
         }
 
         MEMORY_SYSTEM_INITIALIZED = true;
