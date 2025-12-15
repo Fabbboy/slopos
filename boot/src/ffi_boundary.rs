@@ -17,7 +17,6 @@
 pub extern "C" fn kernel_main() {
     crate::early_init::kernel_main_impl();
 }
-
 #[unsafe(no_mangle)]
 pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
     crate::idt::common_exception_handler_impl(frame);

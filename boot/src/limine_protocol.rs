@@ -464,8 +464,6 @@ pub fn ensure_base_revision() {
         panic!("Limine base revision not supported");
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn init_limine_protocol() -> i32 {
     if !BASE_REVISION.supported() {
         klog_info!("ERROR: Limine base revision not supported!");
@@ -619,8 +617,6 @@ pub fn boot_info() -> BootInfo {
         memmap_entries: info.memmap.map(|m| m.entry_count).unwrap_or(0),
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn get_framebuffer_info(
     addr: *mut u64,
     width: *mut u32,
@@ -652,34 +648,23 @@ pub fn get_framebuffer_info(
         0
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn is_framebuffer_available() -> i32 {
     sysinfo().flags.framebuffer_available as i32
 }
-
-#[unsafe(no_mangle)]
 pub fn get_total_memory() -> u64 {
     sysinfo().total_memory
 }
-
-#[unsafe(no_mangle)]
 pub fn get_available_memory() -> u64 {
     sysinfo().available_memory
 }
-
-#[unsafe(no_mangle)]
 pub fn is_memory_map_available() -> i32 {
     sysinfo().flags.memmap_available as i32
 }
 
 // Exported extern "C" functions for mm crate to call via extern "C" blocks
-#[unsafe(no_mangle)]
 pub fn get_hhdm_offset() -> u64 {
     sysinfo().hhdm_offset
 }
-
-#[unsafe(no_mangle)]
 pub fn is_hhdm_available() -> i32 {
     sysinfo().flags.hhdm_available as i32
 }
@@ -692,18 +677,12 @@ pub fn get_hhdm_offset_rust() -> u64 {
 pub fn is_hhdm_available_rust() -> i32 {
     is_hhdm_available()
 }
-
-#[unsafe(no_mangle)]
 pub fn get_kernel_phys_base() -> u64 {
     sysinfo().kernel_phys_base
 }
-
-#[unsafe(no_mangle)]
 pub fn get_kernel_virt_base() -> u64 {
     sysinfo().kernel_virt_base
 }
-
-#[unsafe(no_mangle)]
 pub fn get_kernel_cmdline() -> *const c_char {
     sysinfo().cmdline_ptr
 }
@@ -711,31 +690,21 @@ pub fn get_kernel_cmdline() -> *const c_char {
 pub fn kernel_cmdline_str() -> Option<&'static str> {
     sysinfo().cmdline
 }
-
-#[unsafe(no_mangle)]
 pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
     sysinfo()
         .memmap
         .map(|m| m as *const _)
         .unwrap_or(ptr::null())
 }
-
-#[unsafe(no_mangle)]
 pub fn limine_get_hhdm_response() -> *const LimineHhdmResponse {
     HHDM_REQUEST.response
 }
-
-#[unsafe(no_mangle)]
 pub fn is_rsdp_available() -> i32 {
     sysinfo().flags.rsdp_available as i32
 }
-
-#[unsafe(no_mangle)]
 pub fn get_rsdp_phys_address() -> u64 {
     sysinfo().rsdp_phys_addr
 }
-
-#[unsafe(no_mangle)]
 pub fn get_rsdp_address() -> *const c_void {
     let info = sysinfo();
     if !info.flags.rsdp_available {

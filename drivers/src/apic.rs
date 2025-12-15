@@ -398,113 +398,69 @@ pub fn dump_state() {
 
     klog_info!("=== END APIC STATE DUMP ===");
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_detect() -> i32 {
     if detect() { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_init() -> i32 {
     init()
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_is_available() -> i32 {
     if is_available() { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_is_x2apic_available() -> i32 {
     if is_x2apic_available() { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_is_bsp() -> i32 {
     if is_bsp() { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_is_enabled() -> i32 {
     if is_enabled() { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_enable() {
     enable();
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_disable() {
     disable();
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_send_eoi() {
     send_eoi();
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_get_id() -> u32 {
     get_id()
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_get_version() -> u32 {
     get_version()
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_timer_init(vector: u32, frequency: u32) {
     timer_init(vector, frequency);
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_timer_start(initial_count: u32) {
     timer_start(initial_count);
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_timer_stop() {
     timer_stop();
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_timer_get_current_count() -> u32 {
     timer_get_current_count()
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_timer_set_divisor(divisor: u32) {
     timer_set_divisor(divisor);
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_dump_state() {
     dump_state();
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_get_base_address() -> u64 {
     get_base_address()
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_set_base_address(base: u64) {
     set_base_address(base);
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_read_register(reg: u32) -> u32 {
     read_register(reg)
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_write_register(reg: u32, value: u32) {
     write_register(reg, value);
 }
-
-#[unsafe(no_mangle)]
 pub fn apic_send_ipi_halt_all() {
     send_ipi_halt_all();
 }

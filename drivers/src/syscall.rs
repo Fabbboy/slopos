@@ -42,8 +42,6 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
         (*task).user_started = 1;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn syscall_handle(frame: *mut InterruptFrame) {
     if frame.is_null() {
         wl_currency::award_loss();

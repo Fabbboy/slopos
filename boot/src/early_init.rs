@@ -547,8 +547,6 @@ pub fn kernel_main_impl() {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_main_no_multiboot() {
     crate::ffi_boundary::kernel_main();
 }

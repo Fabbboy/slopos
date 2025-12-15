@@ -33,13 +33,9 @@ pub fn mask_all() {
 pub fn disable() {
     disable_impl();
 }
-
-#[unsafe(no_mangle)]
 pub fn pic_quiesce_mask_all() {
     mask_all_impl();
 }
-
-#[unsafe(no_mangle)]
 pub fn pic_quiesce_disable() {
     disable_impl();
 }

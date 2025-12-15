@@ -391,8 +391,6 @@ pub fn disable_line(irq: u8) {
     }
     mask_irq_line(irq);
 }
-
-#[unsafe(no_mangle)]
 pub fn irq_dispatch(frame: *mut InterruptFrame) {
     if frame.is_null() {
         klog_info!("IRQ: Received null frame");

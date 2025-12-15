@@ -21,13 +21,9 @@ pub fn award_loss() {
         serial_println!("Took an L (-10 W). Balance now {}", new);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn wl_award_loss() {
     award_loss();
 }
-
-#[unsafe(no_mangle)]
 pub fn wl_award_win() {
     award_win();
 }
@@ -35,8 +31,6 @@ pub fn wl_award_win() {
 pub fn check_balance() -> i64 {
     BALANCE.load(Ordering::Relaxed)
 }
-
-#[unsafe(no_mangle)]
 pub fn wl_check_balance() -> i64 {
     check_balance()
 }

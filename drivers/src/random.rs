@@ -38,8 +38,6 @@ pub fn random_next() -> u64 {
     }
     rng.as_mut().unwrap().next()
 }
-
-#[unsafe(no_mangle)]
 pub fn random_u64() -> u64 {
     random_next()
 }

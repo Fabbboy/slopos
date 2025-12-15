@@ -151,8 +151,6 @@ fn splash_draw_progress_bar(x: i32, y: i32, width: i32, height: i32, progress: i
 
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn splash_show_boot_screen() -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -203,8 +201,6 @@ pub fn splash_show_boot_screen() -> i32 {
     state.progress = 0;
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn splash_update_progress(progress: i32, message: *const c_char) -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -231,8 +227,6 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> i32 {
     );
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn splash_report_progress(progress: i32, message: *const c_char) -> i32 {
     if !framebuffer_ready() {
         return -1;
@@ -263,8 +257,6 @@ pub fn splash_report_progress(progress: i32, message: *const c_char) -> i32 {
     pit::pit_poll_delay_ms(delay_ms as u32);
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn splash_finish() -> i32 {
     let mut state = STATE.lock();
     if state.active {
@@ -274,8 +266,6 @@ pub fn splash_finish() -> i32 {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn splash_clear() -> i32 {
     if !framebuffer_ready() {
         return -1;

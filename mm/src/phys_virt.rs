@@ -18,8 +18,6 @@ use crate::paging::virt_to_phys;
 fn hhdm_available() -> bool {
     hhdm_is_available()
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_init_phys_virt_helpers() {
     if !hhdm_available() {
         static MSG: &[u8] = b"MM: HHDM unavailable; cannot translate physical addresses\0";
@@ -29,8 +27,6 @@ pub fn mm_init_phys_virt_helpers() {
         );
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
     if phys_addr == 0 {
         return 0;
@@ -78,16 +74,12 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
 
     phys_addr + hhdm
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_virt_to_phys(virt_addr: u64) -> u64 {
     if virt_addr == 0 {
         return 0;
     }
     virt_to_phys(virt_addr)
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_zero_physical_page(phys_addr: u64) -> c_int {
     if phys_addr == 0 {
         return -1;
@@ -103,8 +95,6 @@ pub fn mm_zero_physical_page(phys_addr: u64) -> c_int {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void {
     if phys_addr == 0 || size == 0 {
         return ptr::null_mut();
@@ -123,8 +113,6 @@ pub fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void {
 
     (phys_addr + hhdm_offset_value()) as *mut c_void
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_unmap_mmio_region(_virt_addr: *mut c_void, _size: usize) -> c_int {
     /* HHDM mappings are static; nothing to do yet. */
     0

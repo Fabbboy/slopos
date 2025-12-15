@@ -510,8 +510,6 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]
 pub fn shell_user_main(_arg: *mut c_void) {
     let _ = sys_write(WELCOME);

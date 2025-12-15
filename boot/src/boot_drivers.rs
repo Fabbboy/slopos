@@ -4,8 +4,8 @@ use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
     InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
-    interrupt_suite_desc, tests_register_suite, tests_register_system_suites, tests_reset_registry,
-    tests_run_all,
+    tests_register_suite, tests_register_system_suites, tests_reset_registry, tests_run_all,
+    INTERRUPT_SUITE_DESC,
 };
 use slopos_video as video;
 
@@ -238,7 +238,7 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     }
 
     tests_reset_registry();
-    tests_register_suite(&interrupt_suite_desc);
+    tests_register_suite(&INTERRUPT_SUITE_DESC);
     tests_register_system_suites();
 
     let mut summary = TestRunSummary {

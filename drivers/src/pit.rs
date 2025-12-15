@@ -47,8 +47,6 @@ fn pit_calculate_divisor(mut frequency_hz: u32) -> u16 {
     CURRENT_RELOAD_DIVISOR.store(divisor, Ordering::SeqCst);
     divisor as u16
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_set_frequency(frequency_hz: u32) {
     let divisor = pit_calculate_divisor(frequency_hz);
 
@@ -68,8 +66,6 @@ pub fn pit_set_frequency(frequency_hz: u32) {
     let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
     klog_debug!("PIT: frequency set to {} Hz\n", freq);
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_init(frequency_hz: u32) {
     let freq = if frequency_hz == 0 {
         PIT_DEFAULT_FREQUENCY_HZ
@@ -80,8 +76,6 @@ pub fn pit_init(frequency_hz: u32) {
     pit_set_frequency(freq);
     // Leave IRQ masked until scheduler enables preemption.
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_get_frequency() -> u32 {
     let freq = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
     if freq == 0 {
@@ -90,13 +84,9 @@ pub fn pit_get_frequency() -> u32 {
         freq
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_enable_irq() {
     irq::enable_line(PIT_IRQ_LINE);
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_disable_irq() {
     irq::disable_line(PIT_IRQ_LINE);
 }
@@ -109,8 +99,6 @@ fn pit_read_count() -> u16 {
         ((high as u16) << 8) | (low as u16)
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_poll_delay_ms(ms: u32) {
     if ms == 0 {
         return;
@@ -139,8 +127,6 @@ pub fn pit_poll_delay_ms(ms: u32) {
         last = current;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pit_sleep_ms(ms: u32) {
     if ms == 0 {
         return;

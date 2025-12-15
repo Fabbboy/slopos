@@ -53,8 +53,6 @@ fn read_cr(reg: ControlRegister) -> u64 {
     }
     value
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_panic(message: *const c_char) {
     cpu::disable_interrupts();
 
@@ -96,8 +94,6 @@ pub fn kernel_panic(message: *const c_char) {
     };
     kernel_shutdown(reason);
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_panic_with_context(
     message: *const c_char,
     function: *const c_char,
@@ -151,8 +147,6 @@ pub fn kernel_panic_with_context(
     };
     kernel_shutdown(reason);
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_assert(condition: i32, message: *const c_char) {
     if condition == 0 {
         let msg = if message.is_null() {

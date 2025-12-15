@@ -376,8 +376,6 @@ fn backend() -> RouletteBackend {
         sleep_ms: Some(user_sleep_ms),
     }
 }
-
-#[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]
 pub fn roulette_user_main(_arg: *mut c_void) {
     let _ = sys_write(b"ROULETTE: start\n");

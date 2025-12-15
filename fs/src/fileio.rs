@@ -188,8 +188,6 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
     }
     state.initialized = true;
 }
-
-#[unsafe(no_mangle)]
 pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
@@ -207,8 +205,6 @@ pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
         0
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn fileio_destroy_table_for_process(process_id: u32) {
     if process_id == INVALID_PROCESS_ID {
         return;
@@ -230,8 +226,6 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
         }
     });
 }
-
-#[unsafe(no_mangle)]
 pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int {
     if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
         return -1;
@@ -295,8 +289,6 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         slot_idx as c_int
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
@@ -338,8 +330,6 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
         if rc == 0 { read_len as ssize_t } else { -1 }
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
@@ -373,8 +363,6 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
         if rc == 0 { count as ssize_t } else { -1 }
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -394,8 +382,6 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
         0
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -454,8 +440,6 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
         0
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -480,8 +464,6 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         size
     })
 }
-
-#[unsafe(no_mangle)]
 pub fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
@@ -493,8 +475,6 @@ pub fn file_exists_path(path: *const c_char) -> c_int {
         1
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;

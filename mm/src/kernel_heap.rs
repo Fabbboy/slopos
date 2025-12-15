@@ -314,8 +314,6 @@ fn goto_rollback(expansion_start: u64, mapped_pages: u32) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kmalloc(size: usize) -> *mut c_void {
     let mut heap = KERNEL_HEAP.lock();
 
@@ -376,8 +374,6 @@ pub fn kmalloc(size: usize) -> *mut c_void {
         data_from_block(block) as *mut c_void
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kzalloc(size: usize) -> *mut c_void {
     let ptr = kmalloc(size);
     if ptr.is_null() {
@@ -388,8 +384,6 @@ pub fn kzalloc(size: usize) -> *mut c_void {
     }
     ptr
 }
-
-#[unsafe(no_mangle)]
 pub fn kfree(ptr_in: *mut c_void) {
     if ptr_in.is_null() {
         return;
@@ -419,8 +413,6 @@ pub fn kfree(ptr_in: *mut c_void) {
         wl_award_win();
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn init_kernel_heap() -> c_int {
     let mut heap = KERNEL_HEAP.lock();
     heap.start_addr = mm_get_kernel_heap_start();
@@ -444,8 +436,6 @@ pub fn init_kernel_heap() -> c_int {
 
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn get_heap_stats(stats: *mut HeapStats) {
     let heap = KERNEL_HEAP.lock();
     if !stats.is_null() {
@@ -454,14 +444,10 @@ pub fn get_heap_stats(stats: *mut HeapStats) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_heap_enable_diagnostics(enable: c_int) {
     let mut heap = KERNEL_HEAP.lock();
     heap.diagnostics_enabled = enable != 0;
 }
-
-#[unsafe(no_mangle)]
 pub fn print_heap_stats() {
     let heap = KERNEL_HEAP.lock();
     unsafe {

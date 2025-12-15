@@ -195,8 +195,6 @@ fn handle_modifier_key(make_code: u8, is_press: bool) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_init() {
     unsafe {
         KB_STATE = KeyboardState::new();
@@ -204,8 +202,6 @@ pub fn keyboard_init() {
         SCANCODE_BUFFER = KeyboardBuffer::new();
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_handle_scancode(scancode: u8) {
     klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
@@ -245,24 +241,16 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_getchar() -> u8 {
     unsafe { kb_buffer_pop(&raw mut CHAR_BUFFER).unwrap_or(0) }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_has_input() -> i32 {
     let has_data = unsafe { kb_buffer_has_data(&raw const CHAR_BUFFER) };
     if has_data { 1 } else { 0 }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_buffer_pending() -> i32 {
     unsafe { (CHAR_BUFFER.count > 0) as i32 }
 }
-
-#[unsafe(no_mangle)]
 pub fn keyboard_get_scancode() -> u8 {
     unsafe { kb_buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
 }

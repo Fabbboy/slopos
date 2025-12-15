@@ -619,33 +619,21 @@ pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -
     *out_flags = flags;
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_init() -> i32 {
     init()
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     config_irq(gsi, vector, lapic_id, flags)
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_mask_gsi(gsi: u32) -> i32 {
     mask_gsi(gsi)
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_unmask_gsi(gsi: u32) -> i32 {
     unmask_gsi(gsi)
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_is_ready() -> i32 {
     is_ready()
 }
-
-#[unsafe(no_mangle)]
 pub fn ioapic_legacy_irq_info(legacy_irq: u8, out_gsi: *mut u32, out_flags: *mut u32) -> i32 {
     if out_gsi.is_null() || out_flags.is_null() {
         return -1;

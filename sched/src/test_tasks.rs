@@ -36,8 +36,6 @@ const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 /* ========================================================================
  * TEST TASK IMPLEMENTATIONS
  * ======================================================================== */
-
-#[unsafe(no_mangle)]
 pub fn test_task_a(arg: *mut c_void) {
     let _ = arg;
     let mut counter: u32 = 0;
@@ -56,8 +54,6 @@ pub fn test_task_a(arg: *mut c_void) {
 
     klog_info!("Task A completed");
 }
-
-#[unsafe(no_mangle)]
 pub fn test_task_b(arg: *mut c_void) {
     let _ = arg;
 
@@ -93,8 +89,6 @@ pub fn test_task_b(arg: *mut c_void) {
 /* ========================================================================
  * SCHEDULER TEST FUNCTIONS
  * ======================================================================== */
-
-#[unsafe(no_mangle)]
 pub fn run_scheduler_test() -> c_int {
     klog_info!("=== Starting SlopOS Cooperative Scheduler Test ===");
 
@@ -201,8 +195,6 @@ fn user_stub_task(arg: *mut c_void) {
         );
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn run_privilege_separation_invariant_test() -> c_int {
     klog_info!("PRIVSEP_TEST: Checking privilege separation invariants");
 
@@ -305,8 +297,6 @@ pub struct SmokeTestContext {
 
 static mut KERNEL_RETURN_CONTEXT: TaskContext = const { TaskContext::zero() };
 static mut TEST_COMPLETED_PTR: *mut c_int = ptr::null_mut();
-
-#[unsafe(no_mangle)]
 pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
     if ctx.is_null() {
         return;
@@ -419,8 +409,6 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn smoke_test_task_a(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
@@ -429,8 +417,6 @@ pub fn smoke_test_task_a(arg: *mut c_void) {
     unsafe { (*ctx).task_name = b"SmokeTestA\0".as_ptr() as *const c_char };
     smoke_test_task_impl(ctx);
 }
-
-#[unsafe(no_mangle)]
 pub fn smoke_test_task_b(arg: *mut c_void) {
     let ctx = arg as *mut SmokeTestContext;
     if ctx.is_null() {
@@ -439,8 +425,6 @@ pub fn smoke_test_task_b(arg: *mut c_void) {
     unsafe { (*ctx).task_name = b"SmokeTestB\0".as_ptr() as *const c_char };
     smoke_test_task_impl(ctx);
 }
-
-#[unsafe(no_mangle)]
 pub fn run_context_switch_smoke_test() -> c_int {
     klog_info!("=== Context Switch Stack Discipline Smoke Test ===");
     klog_info!("Testing basic context switch functionality");
@@ -499,8 +483,6 @@ pub fn run_context_switch_smoke_test() -> c_int {
 
     unsafe { core::hint::unreachable_unchecked() }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_task_function(completed_flag: *mut c_int) {
     klog_info!("Test task function executed successfully");
     if !completed_flag.is_null() {
@@ -514,8 +496,6 @@ pub fn test_task_function(completed_flag: *mut c_int) {
         simple_context_switch(&mut dummy, &raw const KERNEL_RETURN_CONTEXT);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn context_switch_return_trampoline() -> c_int {
     klog_info!("Context switch returned successfully");
 
@@ -567,8 +547,6 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
         );
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn print_scheduler_stats() {
     use crate::scheduler::get_scheduler_stats;
     use crate::task::get_task_stats;

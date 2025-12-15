@@ -33,8 +33,6 @@ fn get_stack_pointer() -> u64 {
     }
     rsp
 }
-
-#[unsafe(no_mangle)]
 pub fn verify_cpu_state() {
     let cr0 = read_cr0();
     let cr4 = read_cr4();
@@ -56,8 +54,6 @@ pub fn verify_cpu_state() {
         kernel_panic(b"Long mode not active in EFER\0".as_ptr() as *const c_char);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
     if addr < KERNEL_VIRTUAL_BASE {
@@ -74,8 +70,6 @@ pub fn verify_memory_layout() {
     }
     let _ = unsafe { core::ptr::read_volatile(&_start) };
 }
-
-#[unsafe(no_mangle)]
 pub fn check_stack_health() {
     let rsp = get_stack_pointer();
     if rsp == 0 {
@@ -91,8 +85,6 @@ pub fn check_stack_health() {
         kernel_panic(b"Stack pointer in invalid memory region\0".as_ptr() as *const c_char);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn verify_cpu_features() {
     let (_eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
     if (edx1 & (1 << 6)) == 0 {
@@ -107,8 +99,6 @@ pub fn verify_cpu_features() {
         kernel_panic(b"CPU does not support long mode\0".as_ptr() as *const c_char);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn complete_system_verification() {
     verify_cpu_state();
     verify_memory_layout();

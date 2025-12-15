@@ -26,8 +26,6 @@ fn serial_flush() {
         cpu::pause();
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_quiesce_interrupts() {
     cpu::disable_interrupts();
     if INTERRUPTS_QUIESCED.swap(true, Ordering::SeqCst) {
@@ -48,8 +46,6 @@ pub fn kernel_quiesce_interrupts() {
         apic_disable();
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_drain_serial_output() {
     if SERIAL_DRAINED.swap(true, Ordering::SeqCst) {
         return;
@@ -57,8 +53,6 @@ pub fn kernel_drain_serial_output() {
     klog_info!("Kernel shutdown: draining serial output");
     serial_flush();
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_shutdown(reason: *const c_char) {
     cpu::disable_interrupts();
 
@@ -105,8 +99,6 @@ fn halt() -> ! {
         unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn kernel_reboot(reason: *const c_char) {
     cpu::disable_interrupts();
 
@@ -144,8 +136,6 @@ pub fn kernel_reboot(reason: *const c_char) {
 
     halt();
 }
-
-#[unsafe(no_mangle)]
 pub fn execute_kernel() {
     klog_info!("=== EXECUTING KERNEL PURIFICATION RITUAL ===");
     klog_info!("Painting memory with the essence of slop (0x69)...");

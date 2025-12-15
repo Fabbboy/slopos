@@ -215,8 +215,6 @@ fn find_process_vm(process_id: u32) -> *mut ProcessVm {
     }
     ptr::null_mut()
 }
-
-#[unsafe(no_mangle)]
 pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -467,8 +465,6 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
 
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn process_vm_load_elf(
     process_id: u32,
     payload: *const u8,
@@ -610,8 +606,6 @@ pub fn process_vm_load_elf(
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
     let mut manager = VM_MANAGER.lock();
@@ -741,8 +735,6 @@ pub fn create_process_vm() -> u32 {
     }
     process_id
 }
-
-#[unsafe(no_mangle)]
 pub fn destroy_process_vm(process_id: u32) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -792,8 +784,6 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -851,8 +841,6 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
     process.total_pages += pages_mapped;
     start_addr
 }
-
-#[unsafe(no_mangle)]
 pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() || size == 0 {
@@ -903,8 +891,6 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn init_process_vm() -> c_int {
     let mut manager = VM_MANAGER.lock();
     manager.num_processes = 0;
@@ -918,8 +904,6 @@ pub fn init_process_vm() -> c_int {
 
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
     let manager = VM_MANAGER.lock();
     unsafe {
@@ -931,8 +915,6 @@ pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u3
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn get_current_process_id() -> u32 {
     let manager = VM_MANAGER.lock();
     if manager.active_process.is_null() {

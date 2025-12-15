@@ -177,8 +177,6 @@ static VIRTIO_GPU_PCI_DRIVER: PciDriver = unsafe {
         context: core::ptr::null_mut(),
     }
 };
-
-#[unsafe(no_mangle)]
 pub fn virtio_gpu_register_driver() {
     static mut REGISTERED: bool = false;
     unsafe {
@@ -191,8 +189,6 @@ pub fn virtio_gpu_register_driver() {
         REGISTERED = true;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {
     unsafe {
         if VIRTIO_GPU_DEVICE.present != 0 {

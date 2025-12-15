@@ -1,8 +1,6 @@
 use core::ffi::{c_char, c_void};
 
 use slopos_sched::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskEntry, task_create};
-
-#[unsafe(no_mangle)]
 #[unsafe(link_section = ".user_text")]
 pub fn user_spawn_program(
     name: *const c_char,

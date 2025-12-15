@@ -158,16 +158,12 @@ fn award_wl_for_result(res: &TestSuiteResult) {
         wl_currency::award_loss();
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn tests_reset_registry() {
     unsafe {
         (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
         *registry_count_mut() = 0;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     if desc.is_null() {
         return -1;
@@ -185,13 +181,9 @@ pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn tests_register_system_suites() {
     suites::register_system_suites();
 }
-
-#[unsafe(no_mangle)]
 pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSummary) -> i32 {
     if config.is_null() {
         return -1;
@@ -298,9 +290,7 @@ mod suites {
     const ROULETTE_NAME: &[u8] = b"roulette\0";
     const ROULETTE_EXEC_NAME: &[u8] = b"roulette_exec\0";
     const VIRTIO_GPU_NAME: &[u8] = b"virtio_gpu\0";
-
-    #[unsafe(no_mangle)]
-    pub static interrupt_suite_desc: TestSuiteDesc = TestSuiteDesc {
+    pub static INTERRUPT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
         name: INTERRUPT_NAME.as_ptr() as *const c_char,
         mask_bit: INTERRUPT_TEST_SUITE_BASIC
             | INTERRUPT_TEST_SUITE_MEMORY
@@ -762,4 +752,4 @@ mod suites {
     }
 }
 
-pub use suites::interrupt_suite_desc;
+pub use suites::INTERRUPT_SUITE_DESC;

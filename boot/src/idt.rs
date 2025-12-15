@@ -188,8 +188,6 @@ unsafe extern "C" {
     fn irq14();
     fn irq15();
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_init() {
     serial_println!("IDT: init start");
     unsafe {
@@ -247,8 +245,6 @@ pub fn idt_init() {
     let limit = unsafe { IDT_POINTER.limit };
     serial_println!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
     unsafe {
         IDT[vector as usize].offset_low = (handler & 0xFFFF) as u16;
@@ -260,13 +256,9 @@ pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: 
         IDT[vector as usize].zero = 0;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_set_gate(vector: u8, handler: u64, selector: u16, typ: u8) {
     idt_set_gate_priv(vector, handler, selector, typ, 0);
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
     if out_entry.is_null() || vector as usize >= IDT_ENTRIES {
         return -1;
@@ -280,8 +272,6 @@ pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
 pub fn idt_get_gate_opaque(vector: u8, out_entry: *mut c_void) -> i32 {
     idt_get_gate(vector, out_entry as *mut IdtEntry)
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
     if vector >= 32 {
         klog_info!(
@@ -299,8 +289,6 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
         klog_debug!("IDT: Registered override handler for exception {}", vector);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_set_ist(vector: u8, ist_index: u8) {
     if vector as usize >= IDT_ENTRIES {
         klog_info!("IDT: Invalid IST assignment for vector {}", vector);
@@ -315,8 +303,6 @@ pub fn idt_set_ist(vector: u8, ist_index: u8) {
         IDT[vector as usize].ist = ist_index & 0x7;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_set_mode(mode: ExceptionMode) {
     unsafe {
         CURRENT_EXCEPTION_MODE = mode;
@@ -325,13 +311,9 @@ pub fn exception_set_mode(mode: ExceptionMode) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_is_critical(vector: u8) -> i32 {
     is_critical_exception_internal(vector) as i32
 }
-
-#[unsafe(no_mangle)]
 pub fn idt_load() {
     unsafe {
         IDT_POINTER.limit = (core::mem::size_of::<IdtEntry>() * IDT_ENTRIES - 1) as u16;
@@ -397,8 +379,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     handler(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn get_exception_name(vector: u8) -> *const c_char {
     match vector {
         0 => b"Divide Error\0".as_ptr() as *const c_char,
@@ -493,46 +473,32 @@ fn exception_default_panic(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Unhandled exception\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_divide_error(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Divide by zero error");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Divide by zero error\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_debug(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("DEBUG: Debug exception occurred");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_nmi(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Non-maskable interrupt");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Non-maskable interrupt\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_breakpoint(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("DEBUG: Breakpoint exception");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_overflow(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: Overflow exception");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_bound_range(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: Bound range exceeded");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
@@ -546,8 +512,6 @@ pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Invalid opcode\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
@@ -560,36 +524,26 @@ pub fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: Device not available");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_double_fault(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Double fault");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Double fault\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_invalid_tss(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Invalid TSS");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Invalid TSS\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_segment_not_present(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Segment not present");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Segment not present\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_stack_fault(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Stack segment fault");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Stack segment fault\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
@@ -603,8 +557,6 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"General protection fault\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     let fault_addr: u64;
     unsafe {
@@ -666,27 +618,19 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Page fault\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_fpu_error(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: x87 FPU error");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_alignment_check(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: Alignment check");
     kdiag_dump_interrupt_frame(frame);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_machine_check(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("FATAL: Machine check");
     kdiag_dump_interrupt_frame(frame);
     kernel_panic(b"Machine check\0".as_ptr() as *const c_char);
 }
-
-#[unsafe(no_mangle)]
 pub fn exception_simd_fp_exception(frame: *mut slopos_lib::InterruptFrame) {
     klog_info!("ERROR: SIMD floating-point exception");
     kdiag_dump_interrupt_frame(frame);

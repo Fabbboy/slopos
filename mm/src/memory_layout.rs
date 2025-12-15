@@ -69,8 +69,6 @@ static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
 fn ptr_as_u64(p: *const c_void) -> u64 {
     p as usize as u64
 }
-
-#[unsafe(no_mangle)]
 pub fn init_kernel_memory_layout() {
     unsafe {
         let (start, end) = symbols::kernel_bounds();
@@ -98,8 +96,6 @@ pub fn init_kernel_memory_layout() {
         klog_debug!("SlopOS: Kernel memory layout initialized");
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
     unsafe {
         if LAYOUT_INITIALIZED {
@@ -109,48 +105,12 @@ pub fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
         }
     }
 }
-
-#[unsafe(no_mangle)]
-pub fn mm_get_kernel_phys_start() -> u64 {
-    unsafe { KERNEL_LAYOUT.kernel_start_phys }
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_get_kernel_phys_end() -> u64 {
-    unsafe { KERNEL_LAYOUT.kernel_end_phys }
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_get_kernel_virt_start() -> u64 {
-    unsafe { KERNEL_LAYOUT.kernel_start_virt }
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_get_identity_map_limit() -> u64 {
-    unsafe { KERNEL_LAYOUT.identity_map_end }
-}
-
-#[unsafe(no_mangle)]
 pub fn mm_get_kernel_heap_start() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_start }
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_get_kernel_heap_end() -> u64 {
     unsafe { KERNEL_LAYOUT.kernel_heap_end }
 }
-
-#[unsafe(no_mangle)]
-pub fn mm_get_user_space_start() -> u64 {
-    unsafe { KERNEL_LAYOUT.user_space_start }
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_get_user_space_end() -> u64 {
-    unsafe { KERNEL_LAYOUT.user_space_end }
-}
-
-#[unsafe(no_mangle)]
 pub fn mm_get_process_layout() -> *const ProcessMemoryLayout {
     &PROCESS_LAYOUT as *const ProcessMemoryLayout
 }

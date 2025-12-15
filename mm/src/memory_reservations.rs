@@ -1,7 +1,7 @@
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_lib::{klog, klog_info};
+use slopos_lib::klog_info;
 
 const MM_REGION_STATIC_CAP: usize = 4096;
 const PAGE_SIZE_4KB: u64 = 0x1000;
@@ -53,9 +53,6 @@ impl MmRegion {
         }
     }
 }
-
-type MmRegionIterCb = Option<fn(region: *const MmRegion, ctx: *mut c_void)>;
-
 struct RegionStore {
     regions: *mut MmRegion,
     capacity: u32,
@@ -323,8 +320,6 @@ fn overlay_region(
 
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
     if buffer.is_null() || capacity == 0 {
         panic!("MM: invalid region storage configuration");
@@ -336,8 +331,6 @@ pub fn mm_region_map_configure(buffer: *mut MmRegion, capacity: u32) {
     }
     clear_store();
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_map_reset() {
     unsafe {
         if !REGION_STORE.configured {
@@ -348,8 +341,6 @@ pub fn mm_region_map_reset() {
     }
     clear_store();
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -> c_int {
     if length == 0 {
         return -1;
@@ -363,8 +354,6 @@ pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -
         label,
     )
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_reserve(
     phys_base: u64,
     length: u64,
@@ -384,13 +373,9 @@ pub fn mm_region_reserve(
         label,
     )
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_count() -> u32 {
     ensure_storage().count
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_get(index: u32) -> *const MmRegion {
     let store = ensure_storage();
     if index >= store.count {
@@ -398,8 +383,6 @@ pub fn mm_region_get(index: u32) -> *const MmRegion {
     }
     unsafe { store.regions.add(index as usize) }
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_count() -> u32 {
     let store = ensure_storage();
     let mut count = 0;
@@ -411,18 +394,12 @@ pub fn mm_reservations_count() -> u32 {
     }
     count
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_capacity() -> u32 {
     ensure_storage().capacity
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_overflow_count() -> u32 {
     ensure_storage().overflows
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_get(index: u32) -> *const MmRegion {
     let store = ensure_storage();
     let mut seen = 0;
@@ -438,8 +415,6 @@ pub fn mm_reservations_get(index: u32) -> *const MmRegion {
     }
     ptr::null()
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_find(phys_addr: u64) -> *const MmRegion {
     let store = ensure_storage();
     for i in 0..store.count {
@@ -463,59 +438,6 @@ pub fn mm_reservations_find_option(phys_addr: u64) -> Option<&'static MmRegion> 
         Some(unsafe { &*ptr })
     }
 }
-
-#[unsafe(no_mangle)]
-pub fn mm_is_reserved(phys_addr: u64) -> c_int {
-    if mm_reservations_find(phys_addr).is_null() {
-        0
-    } else {
-        1
-    }
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_is_range_reserved(phys_base: u64, length: u64) -> c_int {
-    if length == 0 {
-        return 0;
-    }
-
-    let end = phys_base.wrapping_add(length);
-    if end <= phys_base {
-        return 1;
-    }
-
-    let store = ensure_storage();
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
-            continue;
-        }
-        let region_end = region.phys_base + region.length;
-        if region.phys_base < end && region_end > phys_base {
-            return 1;
-        }
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_iterate_reserved(cb: MmRegionIterCb, ctx: *mut c_void) {
-    if cb.is_none() {
-        return;
-    }
-    let store = ensure_storage();
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        if !matches!(region.kind, MmRegionKind::Reserved) || region.length == 0 {
-            continue;
-        }
-        if let Some(func) = cb {
-            func(region as *const MmRegion, ctx);
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
 pub fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char {
     match type_ {
         MmReservationType::AllocatorMetadata => b"allocator metadata\0".as_ptr() as *const c_char,
@@ -526,8 +448,6 @@ pub fn mm_reservation_type_name(type_: MmReservationType) -> *const c_char {
         MmReservationType::FirmwareOther => b"firmware\0".as_ptr() as *const c_char,
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
     let store = ensure_storage();
     let mut total = 0u64;
@@ -543,8 +463,6 @@ pub fn mm_reservations_total_bytes(required_flags: u32) -> u64 {
     }
     total
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
     let store = ensure_storage();
     let mut total = 0u64;
@@ -556,8 +474,6 @@ pub fn mm_region_total_bytes(kind: MmRegionKind) -> u64 {
     }
     total
 }
-
-#[unsafe(no_mangle)]
 pub fn mm_region_highest_usable_frame() -> u64 {
     let store = ensure_storage();
     let mut highest = 0u64;
@@ -573,41 +489,4 @@ pub fn mm_region_highest_usable_frame() -> u64 {
         }
     }
     highest
-}
-
-#[unsafe(no_mangle)]
-pub fn mm_region_dump(level: slopos_lib::klog::KlogLevel) {
-    let store = ensure_storage();
-    for i in 0..store.count {
-        let region = unsafe { &*store.regions.add(i as usize) };
-        let kind = if matches!(region.kind, MmRegionKind::Usable) {
-            b"usable\0".as_ptr()
-        } else {
-            b"reserved\0".as_ptr()
-        };
-
-        let end = region.phys_base + region.length - 1;
-        let label_ptr = if region.label[0] != 0 {
-            region.label.as_ptr()
-        } else {
-            b"-\0".as_ptr()
-        };
-
-        let kind_str = unsafe { CStr::from_ptr(kind as *const c_char) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        let label_str = unsafe { CStr::from_ptr(label_ptr as *const c_char) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog!(
-            level,
-            "[MM] {}: 0x{:x} - 0x{:x} ({} KB) label={} flags=0x{:x}",
-            kind_str,
-            region.phys_base,
-            end,
-            region.length / 1024,
-            label_str,
-            region.flags
-        );
-    }
 }

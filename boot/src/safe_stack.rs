@@ -153,8 +153,6 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn safe_stack_init() {
     klog_debug!("SAFE STACK: Initializing dedicated IST stacks");
 
@@ -177,8 +175,6 @@ pub fn safe_stack_init() {
 
     klog_debug!("SAFE STACK: IST stacks ready");
 }
-
-#[unsafe(no_mangle)]
 pub fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
     let Some(idx) = find_stack_index_by_vector(vector) else {
         return;
@@ -212,8 +208,6 @@ pub fn safe_stack_record_usage(vector: u8, frame_ptr: u64) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn safe_stack_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
     if let Some(idx) = find_stack_index_by_address(fault_addr) {
         let stack = &STACK_CONFIGS[idx];

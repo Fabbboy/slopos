@@ -159,8 +159,6 @@ pub mod io {
             outb(0x80, 0);
         }
     }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn cpuid_ffi(
         leaf: u32,
         eax: *mut u32,
@@ -184,8 +182,6 @@ pub mod io {
             }
         }
     }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn cpu_read_msr_ffi(msr: u32) -> u64 {
         crate::cpu::read_msr(msr)
     }

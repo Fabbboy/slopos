@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Exposed to the external test harness crate
+
 use core::mem::MaybeUninit;
 
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc};
@@ -5,8 +7,6 @@ use crate::process_vm::{
     create_process_vm, destroy_process_vm, get_process_vm_stats, init_process_vm,
     process_vm_get_page_dir,
 };
-
-#[unsafe(no_mangle)]
 pub fn test_heap_free_list_search() -> i32 {
     let mut stats_before = MaybeUninit::uninit();
     get_heap_stats(stats_before.as_mut_ptr());
@@ -50,8 +50,6 @@ pub fn test_heap_free_list_search() -> i32 {
     kfree(medium);
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn test_heap_fragmentation_behind_head() -> i32 {
     let mut ptrs: [*mut core::ffi::c_void; 5] = [core::ptr::null_mut(); 5];
     let sizes = [128usize, 256, 128, 512, 256];
@@ -82,8 +80,6 @@ pub fn test_heap_fragmentation_behind_head() -> i32 {
     kfree(ptrs[4]);
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn test_process_vm_slot_reuse() -> i32 {
     init_process_vm();
 
@@ -146,8 +142,6 @@ pub fn test_process_vm_slot_reuse() -> i32 {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn test_process_vm_counter_reset() -> i32 {
     init_process_vm();
 

@@ -173,8 +173,6 @@ fn test_list_directory() -> c_int {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn run_ramfs_tests() -> c_int {
     klog_info!("RAMFS_TEST: running suite");
     let mut passed = 0;

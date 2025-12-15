@@ -510,8 +510,6 @@ fn roulette_handoff_to_demo(b: &RouletteBackend, width: i32, height: i32) {
     }
     roulette_draw_demo_scene(b, width, height);
 }
-
-#[unsafe(no_mangle)]
 pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;

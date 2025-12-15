@@ -74,8 +74,6 @@ fn cstr_to_str(ptr: *const c_char) -> &'static str {
         .to_str()
         .unwrap_or("<invalid utf-8>")
 }
-
-#[unsafe(no_mangle)]
 pub fn interrupt_test_init(config: *const interrupt_test_config) {
     let _ = config;
     unsafe {
@@ -106,13 +104,9 @@ pub fn interrupt_test_init(config: *const interrupt_test_config) {
     }
     klog_info!("INTERRUPT_TEST: Initializing test framework (stub)");
 }
-
-#[unsafe(no_mangle)]
 pub fn interrupt_test_cleanup() {
     klog_info!("INTERRUPT_TEST: Cleaning up test framework (stub)");
 }
-
-#[unsafe(no_mangle)]
 pub fn test_start(name: *const c_char, expected_exception: c_int) {
     unsafe {
         TEST_CTX.test_active = 1;
@@ -135,8 +129,6 @@ pub fn test_start(name: *const c_char, expected_exception: c_int) {
         TEST_STATS.total_cases = TEST_STATS.total_cases.saturating_add(1);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_end() -> c_int {
     unsafe {
         if TEST_CTX.abort_requested != 0 || TEST_CTX.context_corrupted != 0 {
@@ -157,8 +149,6 @@ pub fn test_end() -> c_int {
         0
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_expect_exception(vector: c_int) {
     unsafe {
         TEST_CTX.expected_exception = vector;
@@ -170,11 +160,7 @@ pub fn test_expect_exception(vector: c_int) {
         TEST_CTX.last_recovery_reason = 0;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_set_flags(_flags: u32) {}
-
-#[unsafe(no_mangle)]
 pub fn test_is_exception_expected() -> c_int {
     unsafe {
         if TEST_CTX.test_active != 0 && TEST_CTX.expected_exception >= 0 {
@@ -184,22 +170,16 @@ pub fn test_is_exception_expected() -> c_int {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_set_resume_point(rip: *const core::ffi::c_void) {
     unsafe {
         TEST_CTX.resume_rip = rip as u64;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_clear_resume_point() {
     unsafe {
         TEST_CTX.resume_rip = 0;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn safe_execute_test(
     test_func: Option<fn() -> c_int>,
     test_name: *const c_char,
@@ -211,8 +191,6 @@ pub fn safe_execute_test(
     }
     test_end()
 }
-
-#[unsafe(no_mangle)]
 pub fn test_record_simple(name: *const c_char, result: c_int) {
     unsafe {
         TEST_STATS.total_cases = TEST_STATS.total_cases.saturating_add(1);
@@ -226,8 +204,6 @@ pub fn test_record_simple(name: *const c_char, result: c_int) {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_record_bulk(
     total: u32,
     passed: u32,
@@ -248,8 +224,6 @@ pub fn test_record_bulk(
             .saturating_add(unexpected_exceptions);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
     unsafe {
         TEST_CTX.exception_occurred = 1;
@@ -261,28 +235,18 @@ pub fn test_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
         TEST_STATS.exceptions_caught = TEST_STATS.exceptions_caught.saturating_add(1);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn run_basic_exception_tests() -> c_int {
     3 // pretend three tests passed
 }
-
-#[unsafe(no_mangle)]
 pub fn run_memory_access_tests() -> c_int {
     5
 }
-
-#[unsafe(no_mangle)]
 pub fn run_control_flow_tests() -> c_int {
     2
 }
-
-#[unsafe(no_mangle)]
 pub fn run_scheduler_tests() -> c_int {
     1
 }
-
-#[unsafe(no_mangle)]
 pub fn run_all_interrupt_tests(config: *const interrupt_test_config) -> c_int {
     if config.is_null() {
         return 0;
@@ -318,8 +282,6 @@ pub fn run_all_interrupt_tests(config: *const interrupt_test_config) -> c_int {
 
     total_passed
 }
-
-#[unsafe(no_mangle)]
 pub fn interrupt_test_request_shutdown(failed_tests: c_int) {
     klog_info!("INTERRUPT_TEST: Auto shutdown requested");
     unsafe {
@@ -332,13 +294,9 @@ pub fn interrupt_test_request_shutdown(failed_tests: c_int) {
         });
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn test_get_stats() -> *const test_stats {
     unsafe { &TEST_STATS as *const test_stats }
 }
-
-#[unsafe(no_mangle)]
 pub fn get_test_result_string(result: c_int) -> *const c_char {
     match result {
         0 => b"PASSED\0".as_ptr() as *const c_char,
@@ -349,8 +307,6 @@ pub fn get_test_result_string(result: c_int) -> *const c_char {
         _ => b"UNKNOWN\0".as_ptr() as *const c_char,
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn dump_test_context() {
     klog_info!("=== TEST CONTEXT DUMP (stub) ===");
     klog_info!("Test active: {}", unsafe { TEST_CTX.test_active });
@@ -358,8 +314,6 @@ pub fn dump_test_context() {
         TEST_CTX.expected_exception
     });
 }
-
-#[unsafe(no_mangle)]
 pub fn log_test_exception(frame: *mut slopos_lib::InterruptFrame) {
     let (vector, rip) = unsafe {
         if frame.is_null() {

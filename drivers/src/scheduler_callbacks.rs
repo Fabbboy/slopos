@@ -56,7 +56,6 @@ static mut CALLBACKS: SchedulerCallbacks = SchedulerCallbacks {
 
 /// Register scheduler callbacks (called by scheduler during initialization)
 #[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
 pub unsafe fn register_callbacks(callbacks: SchedulerCallbacks) {
     CALLBACKS = callbacks;
 }
@@ -248,7 +247,6 @@ static mut BOOT_REGISTERED_CALLBACKS: BootCallbacks = BootCallbacks {
 
 /// Register scheduler callbacks for boot (called by scheduler during initialization)
 #[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
 pub unsafe fn register_scheduler_callbacks_for_boot(callbacks: SchedulerCallbacksForBoot) {
     BOOT_CALLBACKS = callbacks;
 }
@@ -279,7 +277,6 @@ pub unsafe fn call_boot_task_terminate(task_id: u32) -> c_int {
 }
 
 /// Register boot callbacks (called during boot initialization)
-#[unsafe(no_mangle)]
 pub unsafe fn register_boot_callbacks(callbacks: BootCallbacks) {
     BOOT_REGISTERED_CALLBACKS = callbacks;
 }

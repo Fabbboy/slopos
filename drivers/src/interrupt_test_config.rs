@@ -207,16 +207,12 @@ fn process_token(config: &mut interrupt_test_config, token: &str) {
         return;
     }
 }
-
-#[unsafe(no_mangle)]
 pub unsafe fn interrupt_test_config_init_defaults(config: *mut interrupt_test_config) {
     if config.is_null() {
         return;
     }
     *config = interrupt_test_config::default();
 }
-
-#[unsafe(no_mangle)]
 pub unsafe fn interrupt_test_config_parse_cmdline(
     config: *mut interrupt_test_config,
     cmdline: *const c_char,
@@ -234,8 +230,6 @@ pub unsafe fn interrupt_test_config_parse_cmdline(
         *config = cfg;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn interrupt_test_verbosity_string(verbosity: interrupt_test_verbosity) -> *const c_char {
     match verbosity {
         interrupt_test_verbosity::INTERRUPT_TEST_VERBOSITY_QUIET => {
@@ -247,8 +241,6 @@ pub fn interrupt_test_verbosity_string(verbosity: interrupt_test_verbosity) -> *
         _ => b"summary\0".as_ptr() as *const c_char,
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn interrupt_test_suite_string(suite_mask: u32) -> *const c_char {
     match suite_mask {
         0 => b"none\0".as_ptr() as *const c_char,

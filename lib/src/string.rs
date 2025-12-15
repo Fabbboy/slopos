@@ -287,73 +287,45 @@ pub unsafe fn str_has_token_internal(str: *const c_char, token: *const c_char) -
         0
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn strlen(str: *const c_char) -> usize {
     unsafe { strlen_internal(str) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
     unsafe { strcmp_internal(lhs, rhs) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
     unsafe { strncmp_internal(lhs, rhs, n) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char {
     unsafe { strcpy_internal(dest, src) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strncpy(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
     unsafe { strncpy_internal(dest, src, n) }
 }
-
-#[unsafe(no_mangle)]
 pub fn isspace_k(c: c_int) -> c_int {
     from_bool(isspace(c as u8))
 }
-
-#[unsafe(no_mangle)]
 pub fn isdigit_k(c: c_int) -> c_int {
     from_bool(isdigit(c as u8))
 }
-
-#[unsafe(no_mangle)]
 pub fn tolower_k(c: c_int) -> c_int {
     tolower(c as u8) as c_int
 }
-
-#[unsafe(no_mangle)]
 pub fn toupper_k(c: c_int) -> c_int {
     toupper(c as u8) as c_int
 }
-
-#[unsafe(no_mangle)]
 pub fn strcasecmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
     unsafe { strcasecmp_internal(lhs, rhs) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strncasecmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
     unsafe { strncasecmp_internal(lhs, rhs, n) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strchr(str: *const c_char, c: c_int) -> *mut c_char {
     unsafe { strchr_internal(str, c) }
 }
-
-#[unsafe(no_mangle)]
 pub fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
     unsafe { strstr_internal(haystack, needle) }
 }
-
-#[unsafe(no_mangle)]
 pub fn str_has_token(str: *const c_char, token: *const c_char) -> c_int {
     unsafe { str_has_token_internal(str, token) }
 }

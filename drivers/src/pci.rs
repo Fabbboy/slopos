@@ -184,8 +184,6 @@ unsafe fn inl(port: u16) -> u32 {
     }
     value
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let address: u32 = 0x8000_0000
         | ((bus as u32) << 16)
@@ -197,22 +195,16 @@ pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         inl(PCI_CONFIG_DATA)
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x2) * 8) as u32;
     ((value >> shift) & 0xFFFF) as u16
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     let value = pci_config_read32(bus, device, function, offset);
     let shift = ((offset & 0x3) * 8) as u32;
     ((value >> shift) & 0xFF) as u8
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     let address: u32 = 0x8000_0000
         | ((bus as u32) << 16)
@@ -224,8 +216,6 @@ pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: 
         outl(PCI_CONFIG_DATA, value);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
     let address: u32 = 0x8000_0000
         | ((bus as u32) << 16)
@@ -242,8 +232,6 @@ pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: 
         outl(PCI_CONFIG_DATA, new_value);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
     let address: u32 = 0x8000_0000
         | ((bus as u32) << 16)
@@ -627,8 +615,6 @@ fn pci_enumerate_bus(bus: u8) {
         pci_scan_device(bus, device);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_init() -> c_int {
     unsafe {
         if PCI_INITIALIZED != 0 {
@@ -662,18 +648,12 @@ pub fn pci_init() -> c_int {
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_get_device_count() -> usize {
     unsafe { DEVICE_COUNT }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_get_devices() -> *const PciDeviceInfo {
     unsafe { DEVICES.as_ptr() }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_get_primary_gpu() -> *const PciGpuInfo {
     unsafe {
         if PRIMARY_GPU.present != 0 {
@@ -683,13 +663,9 @@ pub fn pci_get_primary_gpu() -> *const PciGpuInfo {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_get_registered_driver_count() -> usize {
     unsafe { PCI_REGISTERED_DRIVER_COUNT }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_get_registered_driver(index: usize) -> *const PciDriver {
     unsafe {
         if index >= PCI_REGISTERED_DRIVER_COUNT {
@@ -699,8 +675,6 @@ pub fn pci_get_registered_driver(index: usize) -> *const PciDriver {
         }
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn pci_register_driver(driver: *const PciDriver) -> c_int {
     if driver.is_null() {
         klog_info!("PCI: Attempted to register invalid driver");

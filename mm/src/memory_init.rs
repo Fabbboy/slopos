@@ -545,8 +545,6 @@ fn display_memory_summary() {
         klog_info!("=====================================================\n");
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn init_memory_system(
     memmap: *const LimineMemmapResponse,
     hhdm_offset: u64,
@@ -612,13 +610,9 @@ pub fn init_memory_system(
     }
     0
 }
-
-#[unsafe(no_mangle)]
 pub fn is_memory_system_initialized() -> c_int {
     unsafe { MEMORY_SYSTEM_INITIALIZED as c_int }
 }
-
-#[unsafe(no_mangle)]
 pub fn get_memory_statistics(
     total_memory_out: *mut u64,
     available_memory_out: *mut u64,

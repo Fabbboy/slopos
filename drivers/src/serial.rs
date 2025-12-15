@@ -147,8 +147,6 @@ pub fn serial_putc_com1(ch: u8) {
 pub fn print_args(args: fmt::Arguments<'_>) {
     let _ = SERIAL.lock().write_fmt(args);
 }
-
-#[unsafe(no_mangle)]
 pub fn serial_poll_receive(port: u16) {
     // Poll the UART Line Status Register for data ready.
     // This works with all UART types (8250/16450/16550 family)
@@ -158,16 +156,12 @@ pub fn serial_poll_receive(port: u16) {
         buf.push(byte);
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn serial_buffer_pending(port: u16) -> i32 {
     // Ensure we service the port before reporting availability.
     serial_poll_receive(port);
     let buf = INPUT_BUFFER.lock();
     (!buf.is_empty()) as i32
 }
-
-#[unsafe(no_mangle)]
 pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
     // Refresh buffer then attempt to pop one byte.
     serial_poll_receive(port);

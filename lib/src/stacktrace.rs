@@ -30,8 +30,6 @@ fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
     }
     true
 }
-
-#[unsafe(no_mangle)]
 pub fn stacktrace_capture_from(
     mut rbp: u64,
     entries: *mut StacktraceEntry,
@@ -72,14 +70,10 @@ pub fn stacktrace_capture_from(
 
     count as c_int
 }
-
-#[unsafe(no_mangle)]
 pub fn stacktrace_capture(entries: *mut StacktraceEntry, max_entries: c_int) -> c_int {
     let rbp = read_frame_pointer();
     stacktrace_capture_from(rbp, entries, max_entries)
 }
-
-#[unsafe(no_mangle)]
 pub fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
     if max_frames <= 0 {
         return;
@@ -108,8 +102,6 @@ pub fn stacktrace_dump_from(rbp: u64, max_frames: c_int) {
         );
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn stacktrace_dump(max_frames: c_int) {
     let rbp = read_frame_pointer();
     stacktrace_dump_from(rbp, max_frames);

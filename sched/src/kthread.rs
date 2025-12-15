@@ -9,8 +9,6 @@ use crate::task::{
 };
 
 pub type KthreadId = u32;
-
-#[unsafe(no_mangle)]
 pub fn kthread_spawn(
     name: *const c_char,
     entry_point: Option<TaskEntry>,
@@ -18,8 +16,6 @@ pub fn kthread_spawn(
 ) -> KthreadId {
     kthread_spawn_ex(name, entry_point, arg, TASK_PRIORITY_NORMAL, 0)
 }
-
-#[unsafe(no_mangle)]
 pub fn kthread_spawn_ex(
     name: *const c_char,
     entry_point: Option<TaskEntry>,
@@ -42,18 +38,12 @@ pub fn kthread_spawn_ex(
 
     id
 }
-
-#[unsafe(no_mangle)]
 pub fn kthread_yield() {
     scheduler::r#yield();
 }
-
-#[unsafe(no_mangle)]
 pub fn kthread_join(thread_id: KthreadId) -> c_int {
     task_wait_for(thread_id)
 }
-
-#[unsafe(no_mangle)]
 pub fn kthread_exit() -> ! {
     crate::ffi_boundary::scheduler_task_exit();
 }

@@ -78,8 +78,6 @@ fn tty_wait_queue_pop() -> *mut Task {
         task
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn tty_notify_input_ready() {
     if unsafe { call_scheduler_is_enabled() } == 0 {
         return;
@@ -165,8 +163,6 @@ fn serial_putc(port: u16, c: u8) {
     serial::write_str(text);
     let _ = port; // keep signature parity
 }
-
-#[unsafe(no_mangle)]
 pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     if buffer.is_null() || buffer_size == 0 {
         return 0;

@@ -204,8 +204,6 @@ unsafe fn load_tss() {
     let selector = GDT_TSS_SELECTOR;
     unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };
 }
-
-#[unsafe(no_mangle)]
 pub fn gdt_init() {
     klog_debug!("GDT: Initializing descriptor tables");
 
@@ -245,15 +243,11 @@ pub fn gdt_init() {
 
     klog_debug!("GDT: Initialized with TSS loaded");
 }
-
-#[unsafe(no_mangle)]
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
     unsafe {
         KERNEL_TSS.rsp0 = rsp0;
     }
 }
-
-#[unsafe(no_mangle)]
 pub fn gdt_set_ist(index: u8, stack_top: u64) {
     if index == 0 || index > 7 {
         return;
