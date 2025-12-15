@@ -14,6 +14,7 @@ pub mod process_vm;
 mod tests;
 pub mod user_copy;
 pub mod user_copy_helpers;
+pub mod symbols;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;

@@ -9,6 +9,7 @@ use crate::mm_constants::{
     PROCESS_HEAP_MAX_VA, PROCESS_HEAP_START_VA, PROCESS_STACK_SIZE_BYTES, PROCESS_STACK_TOP_VA,
     USER_SPACE_END_VA, USER_SPACE_START_VA,
 };
+use crate::symbols;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -65,11 +66,6 @@ static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     user_space_end: USER_SPACE_END_VA,
 };
 
-unsafe extern "C" {
-    static _kernel_start: c_void;
-    static _kernel_end: c_void;
-}
-
 fn ptr_as_u64(p: *const c_void) -> u64 {
     p as usize as u64
 }
@@ -77,8 +73,9 @@ fn ptr_as_u64(p: *const c_void) -> u64 {
 #[unsafe(no_mangle)]
 pub fn init_kernel_memory_layout() {
     unsafe {
-        let start_phys = ptr_as_u64(&_kernel_start);
-        let end_phys = ptr_as_u64(&_kernel_end);
+        let (start, end) = symbols::kernel_bounds();
+        let start_phys = ptr_as_u64(start.cast());
+        let end_phys = ptr_as_u64(end.cast());
 
         KERNEL_LAYOUT.kernel_start_phys = start_phys;
         KERNEL_LAYOUT.kernel_end_phys = end_phys;

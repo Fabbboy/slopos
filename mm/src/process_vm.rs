@@ -15,18 +15,8 @@ use crate::paging::{
     paging_free_user_space, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::phys_virt::mm_phys_to_virt;
+use crate::symbols;
 use slopos_lib::{align_down, align_up};
-
-unsafe extern "C" {
-    static _user_text_start: u8;
-    static _user_text_end: u8;
-    static _user_rodata_start: u8;
-    static _user_rodata_end: u8;
-    static _user_data_start: u8;
-    static _user_data_end: u8;
-    static _user_bss_start: u8;
-    static _user_bss_end: u8;
-}
 
 #[repr(C)]
 struct VmArea {
@@ -414,22 +404,20 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
 
     // Layout user sections contiguously in the low-half user window, copying into fresh frames.
     let base = crate::mm_constants::PROCESS_CODE_START_VA;
-    let sections = unsafe {
-        [
-            // .user_text: executable, read-only
-            (section_bounds(&_user_text_start, &_user_text_end), 0, false),
-            // .user_rodata: read-only
-            (
-                section_bounds(&_user_rodata_start, &_user_rodata_end),
-                0,
-                false,
-            ),
-            // .user_data: writable
-            (section_bounds(&_user_data_start, &_user_data_end), 1, false),
-            // .user_bss: zeroed writable
-            (section_bounds(&_user_bss_start, &_user_bss_end), 1, true),
-        ]
-    };
+    let sections = [
+        // .user_text: executable, read-only
+        (section_bounds(symbols::user_text_bounds().0, symbols::user_text_bounds().1), 0, false),
+        // .user_rodata: read-only
+        (
+            section_bounds(symbols::user_rodata_bounds().0, symbols::user_rodata_bounds().1),
+            0,
+            false,
+        ),
+        // .user_data: writable
+        (section_bounds(symbols::user_data_bounds().0, symbols::user_data_bounds().1), 1, false),
+        // .user_bss: zeroed writable
+        (section_bounds(symbols::user_bss_bounds().0, symbols::user_bss_bounds().1), 1, true),
+    ];
 
     for &((src_start, src_end), writable, zeroed) in sections.iter() {
         if src_start == 0 || src_end <= src_start {

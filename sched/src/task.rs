@@ -259,11 +259,7 @@ use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir,
 };
-
-unsafe extern "C" {
-    static _user_text_start: u8;
-    static _user_text_end: u8;
-}
+use slopos_mm::symbols;
 
 fn task_manager_mut() -> *mut TaskManager {
     &raw mut TASK_MANAGER
@@ -306,8 +302,9 @@ fn release_task_dependents(completed_task_id: u32) {
 }
 
 fn user_entry_is_allowed(addr: u64) -> bool {
-    let start = unsafe { &_user_text_start as *const u8 as u64 };
-    let end = unsafe { &_user_text_end as *const u8 as u64 };
+    let (start_ptr, end_ptr) = symbols::user_text_bounds();
+    let start = start_ptr as u64;
+    let end = end_ptr as u64;
     if start == 0 || end == 0 || start >= end {
         return false;
     }
@@ -545,8 +542,9 @@ pub fn task_create(
     task_ref.kernel_stack_size = kernel_stack_size;
     if flags & TASK_FLAG_USER_MODE != 0 {
         let entry_addr = entry_point as u64;
-        let text_start = unsafe { &_user_text_start as *const u8 as u64 };
-        let text_end = unsafe { &_user_text_end as *const u8 as u64 };
+        let (text_start, text_end) = slopos_mm::symbols::user_text_bounds();
+        let text_start = text_start as u64;
+        let text_end = text_end as u64;
         if entry_addr >= text_start && entry_addr < text_end {
             let offset = entry_addr - text_start;
             task_ref.entry_point = USER_CODE_BASE + offset;
