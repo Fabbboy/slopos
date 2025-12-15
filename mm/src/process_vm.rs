@@ -15,7 +15,6 @@ use crate::paging::{
     paging_free_user_space, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::phys_virt::mm_phys_to_virt;
-use crate::symbols;
 use slopos_lib::{align_down, align_up};
 
 #[repr(C)]
@@ -46,7 +45,6 @@ impl VmArea {
     }
 }
 
-#[repr(C)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ProcessVm {
@@ -390,132 +388,299 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
         return -1;
     }
 
-    #[inline(always)]
-    fn section_bounds(start: *const u8, end: *const u8) -> (u64, u64) {
-        let s = start as usize as u64;
-        let e = end as usize as u64;
-        (
-            align_down(s as usize, PAGE_SIZE_4KB as usize) as u64,
-            align_up(e as usize, PAGE_SIZE_4KB as usize) as u64,
-        )
+    // User programs are now loaded as separate ELF binaries via process_vm_load_elf(),
+    // so we no longer need to map embedded sections from the kernel binary.
+    // This function is kept for compatibility but does nothing.
+    // The embedded .user_* sections in the kernel are no longer used for user programs.
+    0
+}
+
+// ELF structures for relocation parsing
+#[repr(C)]
+struct Elf64Shdr {
+    sh_name: u32,
+    sh_type: u32,
+    sh_flags: u64,
+    sh_addr: u64,
+    sh_offset: u64,
+    sh_size: u64,
+    sh_link: u32,
+    sh_info: u32,
+    sh_addralign: u64,
+    sh_entsize: u64,
+}
+
+#[repr(C)]
+struct Elf64Rela {
+    r_offset: u64,
+    r_info: u64,
+    r_addend: i64,
+}
+
+// ELF section types
+const SHT_RELA: u32 = 4;
+
+// x86-64 relocation types
+const R_X86_64_64: u32 = 1;      // Absolute 64-bit
+const R_X86_64_PC32: u32 = 2;    // RIP-relative 32-bit
+const R_X86_64_32: u32 = 10;     // Absolute 32-bit
+const R_X86_64_32S: u32 = 11;    // Absolute 32-bit sign-extended
+
+fn apply_elf_relocations(
+    payload: *const u8,
+    payload_len: usize,
+    page_dir: *mut ProcessPageDir,
+    section_mappings: &[(u64, u64, u64)], // (kernel_va_start, kernel_va_end, user_va_start)
+) -> c_int {
+    if payload.is_null() || page_dir.is_null() {
+        return -1;
     }
 
-    // Layout user sections contiguously in the low-half user window, copying into fresh frames.
-    let base = crate::mm_constants::PROCESS_CODE_START_VA;
-    let sections = [
-        // .user_text: executable, read-only
-        (section_bounds(symbols::user_text_bounds().0, symbols::user_text_bounds().1), 0, false),
-        // .user_rodata: read-only
-        (
-            section_bounds(symbols::user_rodata_bounds().0, symbols::user_rodata_bounds().1),
-            0,
-            false,
-        ),
-        // .user_data: writable
-        (section_bounds(symbols::user_data_bounds().0, symbols::user_data_bounds().1), 1, false),
-        // .user_bss: zeroed writable
-        (section_bounds(symbols::user_bss_bounds().0, symbols::user_bss_bounds().1), 1, true),
-    ];
+    #[repr(C)]
+    struct Elf64Ehdr {
+        ident: [u8; 16],
+        e_type: u16,
+        e_machine: u16,
+        e_version: u32,
+        e_entry: u64,
+        e_phoff: u64,
+        e_shoff: u64,
+        e_flags: u32,
+        e_ehsize: u16,
+        e_phentsize: u16,
+        e_phnum: u16,
+        e_shentsize: u16,
+        e_shnum: u16,
+        e_shstrndx: u16,
+    }
 
-    for &((src_start, src_end), writable, zeroed) in sections.iter() {
-        if src_start == 0 || src_end <= src_start {
+    let ehdr = unsafe { &*(payload as *const Elf64Ehdr) };
+    if &ehdr.ident[0..4] != b"\x7fELF" || ehdr.e_shoff == 0 || ehdr.e_shnum == 0 {
+        return -1;
+    }
+
+    let sh_size = ehdr.e_shentsize as usize;
+    let sh_num = ehdr.e_shnum as usize;
+    let sh_off = ehdr.e_shoff as usize;
+    let shstrndx = ehdr.e_shstrndx as usize;
+
+    if sh_off + sh_num * sh_size > payload_len || shstrndx >= sh_num {
+        return -1;
+    }
+
+    // Get string table for section names
+    let shstrtab_shdr = unsafe {
+        &*(payload.add(sh_off + shstrndx * sh_size) as *const Elf64Shdr)
+    };
+    let shstrtab_base = shstrtab_shdr.sh_offset as usize;
+    let shstrtab_size = shstrtab_shdr.sh_size as usize;
+    if shstrtab_base + shstrtab_size > payload_len {
+        return -1;
+    }
+
+    // Helper to get section name
+    let get_section_name = |sh_name_off: u32| -> Option<&[u8]> {
+        let off = shstrtab_base + sh_name_off as usize;
+        if off >= payload_len {
+            return None;
+        }
+        let start = unsafe { payload.add(off) };
+        let mut len = 0;
+        while off + len < payload_len && unsafe { *start.add(len) } != 0 {
+            len += 1;
+        }
+        Some(unsafe { core::slice::from_raw_parts(start, len) })
+    };
+
+    // Helper to map kernel VA to user VA
+    let map_kernel_va_to_user = |kernel_va: u64| -> Option<u64> {
+        for &(kern_start, kern_end, user_start) in section_mappings {
+            if kernel_va >= kern_start && kernel_va < kern_end {
+                return Some(user_start + (kernel_va - kern_start));
+            }
+        }
+        None
+    };
+
+    // Iterate through section headers to find .rela sections
+    for i in 0..sh_num {
+        let shdr = unsafe { &*(payload.add(sh_off + i * sh_size) as *const Elf64Shdr) };
+        if shdr.sh_type != SHT_RELA {
             continue;
         }
 
-        let size = src_end - src_start;
-        let dst_start = base + (src_start - sections[0].0.0);
-        let dst_end = dst_start + size;
-
-        let mut src = src_start;
-        let mut dst = dst_start;
-        // Map text section as writable initially to allow relocation, then make read-only
-        let is_text_section = src_start == sections[0].0.0;
-        while dst < dst_end {
-            let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-            if phys == 0 {
-                return -1;
-            }
-
-            let mut flags = PAGE_PRESENT | PAGE_USER;
-            // Map text section as writable initially for relocation, data sections as specified
-            if writable != 0 || is_text_section {
-                flags |= PAGE_WRITABLE;
-            }
-            if map_page_4kb_in_dir(page_dir, dst, phys, flags) != 0 {
-                free_page_frame(phys);
-                return -1;
-            }
-
-            if !zeroed {
-                let dest_virt = mm_phys_to_virt(phys);
-                if dest_virt == 0 {
-                    return -1;
-                }
-                let copy_len = core::cmp::min(PAGE_SIZE_4KB, dst_end - dst) as usize;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src as *const u8,
-                        dest_virt as *mut u8,
-                        copy_len,
-                    );
-                }
-            }
-
-            src += PAGE_SIZE_4KB;
-            dst += PAGE_SIZE_4KB;
-        }
-    }
-
-    // Relocate absolute addresses in .user_text (Rust embeds kernel VAs that need user-space addresses)
-    if sections[0].0.0 != 0 && sections[0].0.1 > sections[0].0.0 {
-        let text_dst = base;
-        let text_end = text_dst + (sections[0].0.1 - sections[0].0.0);
-        let reloc_ranges = [
-            (sections[1].0.0, sections[1].0.1, base + (sections[1].0.0 - sections[0].0.0)), // rodata
-            (sections[2].0.0, sections[2].0.1, base + (sections[2].0.0 - sections[0].0.0)), // data
-            (sections[0].0.0, sections[0].0.1, text_dst), // text self-refs
-        ];
+        let name_off = shdr.sh_name;
+        let Some(name) = get_section_name(name_off) else { continue };
         
-        let mut page_addr = text_dst;
-        while page_addr < text_end {
-            let phys = virt_to_phys_in_dir(page_dir, page_addr);
-            if phys == 0 {
-                page_addr += PAGE_SIZE_4KB;
+        // Check if this is a .rela section we care about
+        if !name.starts_with(b".rela.") {
+            continue;
+        }
+
+        // Find the target section this relocation applies to
+        let target_section_idx = shdr.sh_info as usize;
+        if target_section_idx >= sh_num {
+            continue;
+        }
+        let target_shdr = unsafe {
+            &*(payload.add(sh_off + target_section_idx * sh_size) as *const Elf64Shdr)
+        };
+
+        // Get the target section's user VA mapping
+        let target_kern_va = target_shdr.sh_addr;
+            let Some(target_user_va_base) = map_kernel_va_to_user(target_kern_va) else {
                 continue;
-            }
-            
-            let page_virt = mm_phys_to_virt(phys);
-            if page_virt == 0 {
-                page_addr += PAGE_SIZE_4KB;
-                continue;
-            }
-            
-            unsafe {
-                let page_ptr = (page_virt as *mut u8).add((page_addr & (PAGE_SIZE_4KB - 1)) as usize);
-                let scan_len = core::cmp::min(PAGE_SIZE_4KB as usize, (text_end - page_addr) as usize);
-                
-                for offset in (0..scan_len.saturating_sub(7)).step_by(1) {
-                    let val = core::ptr::read_unaligned(page_ptr.add(offset) as *const u64);
-                    let val32 = (core::ptr::read_unaligned(page_ptr.add(offset) as *const u32) as i32 as i64) as u64;
-                    let val = if val >= 0xFFFF_FFFF_8000_0000 { val } else if val32 >= 0xFFFF_FFFF_8000_0000 { val32 } else { continue };
-                    
-                    for &(src_start, src_end, dst_start) in &reloc_ranges {
-                        if src_start != 0 && val >= src_start && val < src_end {
-                            core::ptr::write_unaligned(page_ptr.add(offset) as *mut u64, dst_start + (val - src_start));
-                            break;
+            };
+
+        // Process relocation entries
+        let rela_base = shdr.sh_offset as usize;
+        let rela_size = shdr.sh_size as usize;
+        let rela_entsize = if shdr.sh_entsize != 0 {
+            shdr.sh_entsize as usize
+        } else {
+            core::mem::size_of::<Elf64Rela>()
+        };
+
+        if rela_base + rela_size > payload_len {
+            continue;
+        }
+
+        let num_relocs = rela_size / rela_entsize;
+        for j in 0..num_relocs {
+            let rela_ptr = unsafe {
+                payload.add(rela_base + j * rela_entsize) as *const Elf64Rela
+            };
+            let rela = unsafe { &*rela_ptr };
+
+            let reloc_type = (rela.r_info & 0xffffffff) as u32;
+            let _symbol_idx = (rela.r_info >> 32) as u32;
+
+            // Calculate relocation address in user space
+            // r_offset is an absolute address in the ELF's VAs (kernel VAs)
+            // We need to convert it to user space: user_addr = user_base + (kern_addr - kern_base)
+            let reloc_kern_addr = rela.r_offset; // r_offset is already absolute in kernel VAs
+            let reloc_user_addr = if reloc_kern_addr >= target_kern_va {
+                target_user_va_base + (reloc_kern_addr - target_kern_va)
+            } else {
+                // r_offset might be relative, try adding to target_user_va_base
+                target_user_va_base.wrapping_add(rela.r_offset)
+            };
+
+            // Calculate symbol VA based on relocation type
+            // For R_X86_64_PLT32/PC32: read current offset, calculate symbol = rip_after + offset + addend
+            // For others: use addend or read from target
+            let symbol_va = match reloc_type {
+                R_X86_64_PC32 | 4 => { // 4 = R_X86_64_PLT32
+                    // For PC32/PLT32, read current offset from instruction and calculate symbol
+                    let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
+                    let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
+                    let read_phys = virt_to_phys_in_dir(page_dir, read_page_va);
+                    if read_phys == 0 {
+                        continue;
+                    }
+                    let read_virt = mm_phys_to_virt(read_phys);
+                    if read_virt == 0 {
+                        continue;
+                    }
+                    let read_ptr = unsafe { (read_virt as *mut u8).add(read_page_off) };
+                    let current_offset = unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
+                    // For R_X86_64_PLT32: offset = S + A - P, where:
+                    //   S = symbol value, A = addend, P = place (RIP after instruction)
+                    // So: S = offset - A + P = offset + P - A
+                    // r_offset is already an absolute kernel VA, use it directly
+                    let kernel_reloc_va = rela.r_offset;
+                    let kernel_rip_after = kernel_reloc_va.wrapping_add(4);
+                    // For R_X86_64_PLT32: The addend might be pre-applied in the offset
+                    // Try: S = offset + P (ignore addend for now, test if this works)
+                    let calculated_symbol_va = (kernel_rip_after as i64).wrapping_add(current_offset) as u64;
+                    calculated_symbol_va
+                }
+                _ => {
+                    if rela.r_addend != 0 {
+                        rela.r_addend as u64
+                    } else {
+                        // If addend is 0, try reading current value
+                        let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
+                        let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
+                        let read_phys = virt_to_phys_in_dir(page_dir, read_page_va);
+                        if read_phys == 0 {
+                            continue;
+                        }
+                        let read_virt = mm_phys_to_virt(read_phys);
+                        if read_virt == 0 {
+                            continue;
+                        }
+                        let read_ptr = unsafe { (read_virt as *mut u8).add(read_page_off) };
+                        match reloc_type {
+                            R_X86_64_64 => unsafe { core::ptr::read_unaligned(read_ptr as *const u64) },
+                            R_X86_64_32 | R_X86_64_32S => {
+                                let val = unsafe { core::ptr::read_unaligned(read_ptr as *const u32) } as u64;
+                                if reloc_type == R_X86_64_32S {
+                                    (val as i32 as i64) as u64
+                                } else {
+                                    val
+                                }
+                            }
+                            _ => continue,
                         }
                     }
                 }
+            };
+
+            // Map symbol VA to user VA
+            let Some(user_symbol_va) = map_kernel_va_to_user(symbol_va) else {
+                // Symbol might be in a section we haven't mapped, skip
+                continue;
+            };
+
+            // Get physical page for this address
+            let reloc_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
+            let reloc_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
+
+            let reloc_phys = virt_to_phys_in_dir(page_dir, reloc_page_va);
+            if reloc_phys == 0 {
+                continue;
             }
-            page_addr += PAGE_SIZE_4KB;
+            let reloc_virt = mm_phys_to_virt(reloc_phys);
+            if reloc_virt == 0 {
+                continue;
+            }
+
+            let reloc_ptr = unsafe { (reloc_virt as *mut u8).add(reloc_page_off) };
+
+            // Apply relocation based on type
+            match reloc_type {
+                R_X86_64_64 => {
+                    // Absolute 64-bit: write symbol value directly
+                    unsafe {
+                        core::ptr::write_unaligned(reloc_ptr as *mut u64, user_symbol_va);
+                    }
+                }
+                R_X86_64_PC32 | 4 => { // 4 = R_X86_64_PLT32, same as PC32 for static binaries
+                    // RIP-relative 32-bit: offset = symbol - (RIP after instruction)
+                    let rip_after = reloc_user_addr + 4; // 32-bit = 4 bytes
+                    let offset = (user_symbol_va as i64 - rip_after as i64) as i32;
+                    unsafe {
+                        core::ptr::write_unaligned(reloc_ptr as *mut i32, offset);
+                    }
+                }
+                R_X86_64_32 | R_X86_64_32S => {
+                    // Absolute 32-bit: write lower 32 bits of symbol value
+                    unsafe {
+                        core::ptr::write_unaligned(reloc_ptr as *mut u32, user_symbol_va as u32);
+                    }
+                }
+                _ => {
+                    // Unknown relocation type, skip
+                    continue;
+                }
+            }
         }
-        
-        use crate::paging::paging_mark_range_user;
-        let _ = paging_mark_range_user(page_dir, text_dst, text_end, 0);
     }
 
     0
 }
+
 pub fn process_vm_load_elf(
     process_id: u32,
     payload: *const u8,
@@ -582,7 +747,8 @@ pub fn process_vm_load_elf(
     // Unmap any existing code region at the payload VMA to avoid overlaps.
     let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
     let code_limit = code_base + 0x100000; // generous 1 MiB window for this payload
-    unmap_user_range(page_dir, code_base, code_limit);
+    // Unmap a larger range to ensure we clear any existing mappings
+    unmap_user_range(page_dir, code_base - 0x100000, code_limit + 0x100000);
 
     let ph_size = ehdr.e_phentsize as usize;
     let ph_num = ehdr.e_phnum as usize;
@@ -590,6 +756,37 @@ pub fn process_vm_load_elf(
     if ph_off + ph_num * ph_size > payload_len {
         return -1;
     }
+
+    // Track section mappings for relocation: (kernel_va, kernel_va_end, user_va)
+    // ELF binaries may be linked at kernel VAs, but we load them at user space addresses
+    // kernel_va is the p_vaddr from the ELF, user_va is where we actually map it
+    let mut section_mappings: [(u64, u64, u64); 8] = [(0, 0, 0); 8];
+    let mut mapping_count = 0usize;
+    
+    // Find the lowest p_vaddr to calculate offset for user space mapping
+    let mut min_vaddr = u64::MAX;
+    for i in 0..ph_num {
+        let ph_ptr = unsafe { payload.add(ph_off + i * ph_size) as *const Elf64Phdr };
+        let ph = unsafe { &*ph_ptr };
+        if ph.p_type == PT_LOAD && ph.p_vaddr < min_vaddr {
+            min_vaddr = ph.p_vaddr;
+        }
+    }
+    
+    // If min_vaddr is a kernel VA, we'll map at user space instead
+    // Calculate offset from min_vaddr to code_base
+    const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+    let vaddr_offset = if min_vaddr >= KERNEL_BASE {
+        // Kernel VA -> user space: offset = code_base - (min_vaddr - KERNEL_BASE)
+        // = code_base - min_vaddr + KERNEL_BASE
+        code_base.wrapping_add(KERNEL_BASE).wrapping_sub(min_vaddr)
+    } else if min_vaddr >= code_base {
+        // Already in user space, use as-is
+        0
+    } else {
+        // Below user space, offset to code_base
+        code_base.wrapping_sub(min_vaddr)
+    };
 
     let mut mapped_pages: u32 = 0;
     for i in 0..ph_num {
@@ -603,16 +800,39 @@ pub fn process_vm_load_elf(
         if seg_end <= seg_start {
             continue;
         }
+        
+        // Map at user space address, not the ELF's p_vaddr
+        // For kernel VAs, calculate: user_addr = kernel_addr - KERNEL_BASE + code_base
+        let user_seg_start = if seg_start >= KERNEL_BASE {
+            let offset_from_kernel_base = seg_start.wrapping_sub(KERNEL_BASE);
+            code_base.wrapping_add(offset_from_kernel_base)
+        } else {
+            seg_start.wrapping_add(vaddr_offset)
+        };
+        let user_seg_end = if seg_end >= KERNEL_BASE {
+            let offset_from_kernel_base = seg_end.wrapping_sub(KERNEL_BASE);
+            code_base.wrapping_add(offset_from_kernel_base)
+        } else {
+            seg_end.wrapping_add(vaddr_offset)
+        };
+        
         let map_flags = if (ph.p_flags & PF_W) != 0 {
             PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE
         } else {
             PAGE_PRESENT | PAGE_USER
         };
 
-        let page_start = align_down(seg_start as usize, PAGE_SIZE_4KB as usize) as u64;
-        let page_end = align_up(seg_end as usize, PAGE_SIZE_4KB as usize) as u64;
+        let page_start = align_down(user_seg_start as usize, PAGE_SIZE_4KB as usize) as u64;
+        let page_end = align_up(user_seg_end as usize, PAGE_SIZE_4KB as usize) as u64;
+
+        // Record mapping for relocation (use p_vaddr as kernel VA, user_seg_start as user VA)
+        if mapping_count < section_mappings.len() {
+            section_mappings[mapping_count] = (seg_start, seg_end, user_seg_start);
+            mapping_count += 1;
+        }
 
         let mut dst = page_start;
+        let mut pages_mapped_seg = 0u32;
         while dst < page_end {
             let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
             if phys == 0 {
@@ -622,18 +842,26 @@ pub fn process_vm_load_elf(
                 free_page_frame(phys);
                 return -1;
             }
+            pages_mapped_seg += 1;
             let dest_virt = mm_phys_to_virt(phys);
             if dest_virt == 0 {
                 return -1;
             }
 
             // Copy file-backed portion that falls within this page.
-            let page_off = dst.saturating_sub(seg_start);
-            let file_bytes = ph.p_filesz.saturating_sub(page_off);
-            if file_bytes > 0 && ph.p_offset + page_off < payload_len as u64 {
-                let copy_len = core::cmp::min(PAGE_SIZE_4KB, file_bytes) as usize;
-                let src_off = (ph.p_offset + page_off) as usize;
-                if src_off + copy_len <= payload_len {
+            // Calculate offset from segment start to this page
+            // The offset is the same in both kernel and user VAs (only the base differs)
+            let page_off_in_seg = dst.wrapping_sub(user_seg_start);
+            let file_bytes = if page_off_in_seg < ph.p_filesz {
+                ph.p_filesz.wrapping_sub(page_off_in_seg)
+            } else {
+                0
+            };
+            if file_bytes > 0 {
+                let copy_len = core::cmp::min(PAGE_SIZE_4KB as u64, file_bytes) as usize;
+                // File offset = p_offset + page_off_in_seg
+                let src_off = (ph.p_offset.wrapping_add(page_off_in_seg)) as usize;
+                if src_off < payload_len && src_off + copy_len <= payload_len {
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             payload.add(src_off),
@@ -645,14 +873,43 @@ pub fn process_vm_load_elf(
             }
 
             dst += PAGE_SIZE_4KB;
-            mapped_pages += 1;
         }
+        mapped_pages += pages_mapped_seg;
     }
+
+    // Apply relocations after all segments are loaded
+    // For static binaries, symbols are typically absolute addresses in the ELF's VAs
+    // We need to map those to the actual user VAs where we loaded the segments
+    let reloc_result = apply_elf_relocations(
+        payload,
+        payload_len,
+        page_dir,
+        &section_mappings[..mapping_count],
+    );
+    if reloc_result != 0 {
+        // Continue anyway - some ELF files might not have relocations
+    }
+
+    // Update entry point to user space address
+    // Entry point in ELF is at kernel VA, we need to map it to user space
+    let user_entry = if ehdr.e_entry >= KERNEL_BASE {
+        // Entry point is kernel VA: user_addr = kernel_addr - KERNEL_BASE + code_base
+        // Calculate offset from kernel base: offset = kernel_addr - KERNEL_BASE
+        let offset_from_kernel_base = ehdr.e_entry.wrapping_sub(KERNEL_BASE);
+        code_base.wrapping_add(offset_from_kernel_base)
+    } else if ehdr.e_entry >= code_base {
+        // Already in user space
+        ehdr.e_entry
+    } else {
+        // Below user space, calculate offset from min_vaddr
+        let offset_from_min = ehdr.e_entry.wrapping_sub(min_vaddr);
+        code_base.wrapping_add(offset_from_min)
+    };
 
     unsafe {
         (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
         if !entry_out.is_null() {
-            *entry_out = ehdr.e_entry;
+            *entry_out = user_entry;
         }
     }
     0

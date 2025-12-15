@@ -1,8 +1,12 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+// Bootstrap and loader are only used by the kernel, not by standalone binaries
+#[cfg(not(feature = "standalone-bin"))]
 pub mod bootstrap;
+#[cfg(not(feature = "standalone-bin"))]
 pub mod loader;
+
 pub mod roulette;
 pub mod runtime;
 pub mod shell;

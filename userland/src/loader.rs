@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_void};
 
-use slopos_sched::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskEntry, task_create};
+use slopos_sched::{TASK_FLAG_USER_MODE, TaskEntry, task_create};
 #[unsafe(link_section = ".user_text")]
 pub fn user_spawn_program(
     name: *const c_char,
@@ -8,8 +8,13 @@ pub fn user_spawn_program(
     arg: *mut c_void,
     priority: u8,
 ) -> u32 {
-    if entry_point as usize == 0 {
-        return INVALID_TASK_ID;
-    }
-    task_create(name, entry_point, arg, priority, TASK_FLAG_USER_MODE)
+    // Allow null entry point - it will be set by ELF loader
+    // Use a dummy function pointer if null to satisfy task_create
+    let entry = if entry_point as usize == 0 {
+        // Dummy entry point - will be replaced by ELF loader
+        unsafe { core::mem::transmute(0x400000usize) }
+    } else {
+        entry_point
+    };
+    task_create(name, entry, arg, priority, TASK_FLAG_USER_MODE)
 }

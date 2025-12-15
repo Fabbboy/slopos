@@ -302,13 +302,18 @@ fn release_task_dependents(completed_task_id: u32) {
 }
 
 fn user_entry_is_allowed(addr: u64) -> bool {
+    // Allow entry points in embedded user_text section (for legacy compatibility)
     let (start_ptr, end_ptr) = symbols::user_text_bounds();
     let start = start_ptr as u64;
     let end = end_ptr as u64;
-    if start == 0 || end == 0 || start >= end {
-        return false;
+    if start != 0 && end != 0 && start < end && addr >= start && addr < end {
+        return true;
     }
-    addr >= start && addr < end
+    // Allow entry points in PROCESS_CODE_START_VA range (for ELF binaries)
+    // ELF binaries are loaded at 0x400000, allow a reasonable range
+    const PROCESS_CODE_START: u64 = 0x0000_0000_0040_0000;
+    const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000; // 1MB range
+    addr >= PROCESS_CODE_START && addr < PROCESS_CODE_END
 }
 
 fn task_slot_index(task: *const Task) -> Option<usize> {
@@ -374,6 +379,16 @@ fn init_task_context(task: &mut Task) {
         task.context.ss = 0x1B;
         task.context.rdi = task.entry_arg as u64;
         task.context.rsi = 0;
+        // #region agent log
+        {
+            use slopos_lib::klog_info;
+            let rip = task.context.rip;
+            let rsp = task.context.rsp;
+            let rdi = task.context.rdi;
+            let entry_point = task.entry_point;
+            klog_info!("init_task_context: user task rip=0x{:x} rsp=0x{:x} rdi=0x{:x} entry_point=0x{:x}\n", rip, rsp, rdi, entry_point);
+        }
+        // #endregion
     }
 
     task.context.cr3 = 0;
@@ -541,6 +556,12 @@ pub fn task_create(
         let (text_start, text_end) = slopos_mm::symbols::user_text_bounds();
         let text_start = text_start as u64;
         let text_end = text_end as u64;
+        // #region agent log
+        {
+            use slopos_lib::klog_info;
+            klog_info!("task_create: user entry_addr=0x{:x} text_start=0x{:x} text_end=0x{:x} USER_CODE_BASE=0x{:x}\n", entry_addr, text_start, text_end, USER_CODE_BASE);
+        }
+        // #endregion
         if entry_addr >= text_start && entry_addr < text_end {
             // Align to page boundaries to match map_user_sections behavior
             use slopos_mm::mm_constants::PAGE_SIZE_4KB;
@@ -549,8 +570,20 @@ pub fn task_create(
             // Calculate offset from aligned start to match map_user_sections mapping
             let offset = entry_addr - text_start_aligned;
             task_ref.entry_point = USER_CODE_BASE + offset;
+            // #region agent log
+            {
+                use slopos_lib::klog_info;
+                klog_info!("task_create: calculated entry_point=0x{:x} (offset=0x{:x} from aligned 0x{:x})\n", task_ref.entry_point, offset, text_start_aligned);
+            }
+            // #endregion
         } else {
             task_ref.entry_point = entry_addr;
+            // #region agent log
+            {
+                use slopos_lib::klog_info;
+                klog_info!("task_create: entry outside text bounds, using entry_addr=0x{:x}\n", task_ref.entry_point);
+            }
+            // #endregion
         }
     } else {
         task_ref.entry_point = entry_point as usize as u64;

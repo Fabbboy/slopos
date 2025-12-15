@@ -11,8 +11,17 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "roulette"
+path = "src/bin/roulette.rs"
+
+[[bin]]
+name = "shell"
+path = "src/bin/shell.rs"
+
 [features]
 default = []
+standalone-bin = []
 # Enable this to bundle an external user payload ELF from builddir/roulette_payload.elf
 external_payload = []
 

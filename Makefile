@@ -1,6 +1,6 @@
 # Convenience targets for building, booting, and testing SlopOS (Rust rewrite)
 
-.PHONY: setup build iso iso-notests iso-tests boot boot-log test clean distclean
+.PHONY: setup build build-userland iso iso-notests iso-tests boot boot-log test clean distclean
 
 BUILD_DIR ?= builddir
 CARGO ?= cargo
@@ -166,7 +166,30 @@ setup:
 	@mkdir -p $(BUILD_DIR)
 	@CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) $(CARGO) +$(RUST_CHANNEL) metadata --format-version 1 >/dev/null
 
-build:
+build-userland:
+	@set -e; \
+	$(call ensure_rust_toolchain) \
+	mkdir -p $(BUILD_DIR); \
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
+	$(CARGO) +$(RUST_CHANNEL) build \
+	  -Zbuild-std=core,alloc \
+	  -Zunstable-options \
+	  --target targets/x86_64-slos-userland.json \
+	  --package slopos-userland \
+	  --bin roulette \
+	  --bin shell \
+	  --features standalone-bin \
+	  --no-default-features \
+	  --release; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos/release/roulette ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
+	fi; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos/release/shell ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos/release/shell" "$(BUILD_DIR)/shell.elf"; \
+	fi; \
+	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/shell.elf"
+
+build: build-userland
 	@$(call build_kernel)
 
 iso: build

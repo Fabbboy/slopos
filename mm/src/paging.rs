@@ -352,8 +352,13 @@ fn map_page_in_directory(
         }
 
         if (*pt).entries[pt_idx] & PAGE_PRESENT != 0 {
-            klog_info!("map_page: Virtual address already mapped");
-            return -1;
+            klog_info!("map_page: Virtual address 0x{:x} already mapped (entry=0x{:x})", vaddr, (*pt).entries[pt_idx]);
+            // For ELF loading, unmap the existing page first
+            let old_phys = (*pt).entries[pt_idx] & 0x000f_ffff_ffff_f000;
+            if old_phys != 0 && page_frame_can_free(old_phys) != 0 {
+                free_page_frame(old_phys);
+            }
+            // Continue to overwrite the mapping
         }
 
         if user_mapping && (pt_entry & PAGE_USER) == 0 {

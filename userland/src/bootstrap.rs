@@ -4,15 +4,12 @@ use core::ptr;
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_drivers::{fate, wl_currency};
 use slopos_lib::klog_info;
-#[cfg(feature = "external_payload")]
 use slopos_mm::process_vm::process_vm_load_elf;
 use slopos_sched::{
     INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_get_info, task_terminate,
 };
 
 use crate::loader::user_spawn_program;
-use crate::roulette::roulette_user_main;
-use crate::shell::shell_user_main;
 
 pub type FateResult = slopos_drivers::fate::FateResult;
 
@@ -40,10 +37,13 @@ fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i32 {
+fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
+    // Create task with dummy entry point - will be replaced by ELF loader
+    // Use a dummy function pointer that points to 0x400000 (user code base)
+    let dummy_entry: TaskEntry = unsafe { core::mem::transmute(0x400000usize) };
     let task_id = user_spawn_program(
         name.as_ptr() as *const c_char,
-        entry,
+        dummy_entry,
         ptr::null_mut(),
         priority,
     );
@@ -64,41 +64,69 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
         return -1;
     }
 
-    // Load bundled user payload ELF into the new process address space and repoint entry.
-    #[cfg(feature = "external_payload")]
-    {
-        let mut new_entry: u64 = 0;
+    // Load user program ELF into the new process address space and repoint entry.
+    let mut new_entry: u64 = 0;
+    let pid = unsafe { (*task_info).process_id };
+    
+    // Determine which ELF binary to load based on task name
+    let elf_data: &[u8] = if name == b"roulette\0" {
         const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../builddir/roulette_payload.elf"
+            "/../builddir/roulette.elf"
         ));
-        let pid = unsafe { (*task_info).process_id };
-        if process_vm_load_elf(
-            pid,
-            ROULETTE_ELF.as_ptr(),
-            ROULETTE_ELF.len(),
-            &mut new_entry,
-        ) != 0
-            || new_entry == 0
-        {
-            with_task_name(name.as_ptr() as *const c_char, |task_name| {
-                klog_info!(
-                    "USERLAND: Failed to load roulette payload ELF for '{}'\n",
-                    task_name
-                );
-            });
-            wl_currency::award_loss();
-            task_terminate(task_id);
-            return -1;
-        }
+        ROULETTE_ELF
+    } else if name == b"shell\0" {
+        const SHELL_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../builddir/shell.elf"
+        ));
+        SHELL_ELF
+    } else {
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!("USERLAND: Unknown task name '{}', cannot load ELF\n", task_name);
+        });
+        wl_currency::award_loss();
+        task_terminate(task_id);
+        return -1;
+    };
 
-        unsafe {
-            (*task_info).entry_point = new_entry;
-            (*task_info).context.rip = new_entry;
-        }
+    if process_vm_load_elf(
+        pid,
+        elf_data.as_ptr(),
+        elf_data.len(),
+        &mut new_entry,
+    ) != 0
+        || new_entry == 0
+    {
+        with_task_name(name.as_ptr() as *const c_char, |task_name| {
+            klog_info!(
+                "USERLAND: Failed to load ELF for '{}' (new_entry=0x{:x})\n",
+                task_name,
+                new_entry
+            );
+        });
+        wl_currency::award_loss();
+        task_terminate(task_id);
+        return -1;
     }
-    // When external_payload is disabled, use the embedded user sections.
-    // The entry point is already set correctly by task creation, so no action needed.
+
+    with_task_name(name.as_ptr() as *const c_char, |task_name| {
+        klog_info!(
+            "USERLAND: Loaded ELF for '{}', entry point=0x{:x}\n",
+            task_name,
+            new_entry
+        );
+    });
+
+    unsafe {
+        (*task_info).entry_point = new_entry;
+        (*task_info).context.rip = new_entry;
+        // Copy to local variables to avoid unaligned access
+        let entry_point = (*task_info).entry_point;
+        let context_rip = (*task_info).context.rip;
+        klog_info!("USERLAND: Updated task entry_point=0x{:x} context.rip=0x{:x}\n", 
+                   entry_point, context_rip);
+    }
 
     if schedule_task(task_info) != 0 {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
@@ -123,7 +151,7 @@ fn userland_launch_shell_once() -> i32 {
             return 0;
         }
     }
-    if userland_spawn_and_schedule(b"shell\0", shell_user_main, 5) != 0 {
+    if userland_spawn_and_schedule(b"shell\0", 5) != 0 {
         log_info("USERLAND: Shell failed to start after roulette win\n");
         return -1;
     }
@@ -155,7 +183,7 @@ fn boot_step_userland_hook() -> i32 {
 
 #[unsafe(link_section = ".user_text")]
 fn boot_step_roulette_task() -> i32 {
-    userland_spawn_and_schedule(b"roulette\0", roulette_user_main, 5)
+    userland_spawn_and_schedule(b"roulette\0", 5)
 }
 
 #[used]
