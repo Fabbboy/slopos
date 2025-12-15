@@ -542,7 +542,12 @@ pub fn task_create(
         let text_start = text_start as u64;
         let text_end = text_end as u64;
         if entry_addr >= text_start && entry_addr < text_end {
-            let offset = entry_addr - text_start;
+            // Align to page boundaries to match map_user_sections behavior
+            use slopos_mm::mm_constants::PAGE_SIZE_4KB;
+            use slopos_lib::align_down;
+            let text_start_aligned = align_down(text_start as usize, PAGE_SIZE_4KB as usize) as u64;
+            // Calculate offset from aligned start to match map_user_sections mapping
+            let offset = entry_addr - text_start_aligned;
             task_ref.entry_point = USER_CODE_BASE + offset;
         } else {
             task_ref.entry_point = entry_addr;

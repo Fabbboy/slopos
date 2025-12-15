@@ -394,9 +394,18 @@ fn backend() -> RouletteBackend {
         sleep_ms: Some(user_sleep_ms),
     }
 }
+#[unsafe(link_section = ".user_rodata")]
+static MSG_START: [u8; 16] = *b"ROULETTE: start\n";
+#[unsafe(link_section = ".user_rodata")]
+static MSG_FB_INFO_FAILED: [u8; 47] = *b"ROULETTE: fb_info failed, falling back to text\n";
+#[unsafe(link_section = ".user_rodata")]
+static MSG_FB_INFO_OK: [u8; 36] = *b"ROULETTE: fb_info ok, drawing wheel\n";
+#[unsafe(link_section = ".user_rodata")]
+static MSG_DRAW_FAILED: [u8; 44] = *b"ROULETTE: draw failed, falling back to text\n";
+
 #[unsafe(link_section = ".user_text")]
 pub fn roulette_user_main(_arg: *mut c_void) {
-    let _ = sys_write(b"ROULETTE: start\n");
+    let _ = sys_write(&MSG_START);
     let spin = sys_roulette();
     let fate = spin as u32;
 
@@ -406,14 +415,14 @@ pub fn roulette_user_main(_arg: *mut c_void) {
     let mut rc = -1;
 
     if !fb_ok {
-        let _ = sys_write(b"ROULETTE: fb_info failed, falling back to text\n");
+        let _ = sys_write(&MSG_FB_INFO_FAILED);
         text_fallback(fate);
     } else {
-        let _ = sys_write(b"ROULETTE: fb_info ok, drawing wheel\n");
+        let _ = sys_write(&MSG_FB_INFO_OK);
         let backend = backend();
         rc = roulette_run(&backend as *const RouletteBackend, fate);
         if rc != 0 {
-            let _ = sys_write(b"ROULETTE: draw failed, falling back to text\n");
+            let _ = sys_write(&MSG_DRAW_FAILED);
             text_fallback(fate);
         }
     }

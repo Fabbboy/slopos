@@ -428,6 +428,8 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
 
         let mut src = src_start;
         let mut dst = dst_start;
+        // Map text section as writable initially to allow relocation, then make read-only
+        let is_text_section = src_start == sections[0].0.0;
         while dst < dst_end {
             let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
             if phys == 0 {
@@ -435,7 +437,8 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
             }
 
             let mut flags = PAGE_PRESENT | PAGE_USER;
-            if writable != 0 {
+            // Map text section as writable initially for relocation, data sections as specified
+            if writable != 0 || is_text_section {
                 flags |= PAGE_WRITABLE;
             }
             if map_page_4kb_in_dir(page_dir, dst, phys, flags) != 0 {
@@ -461,6 +464,54 @@ fn map_user_sections(page_dir: *mut ProcessPageDir) -> c_int {
             src += PAGE_SIZE_4KB;
             dst += PAGE_SIZE_4KB;
         }
+    }
+
+    // Relocate absolute addresses in .user_text (Rust embeds kernel VAs that need user-space addresses)
+    if sections[0].0.0 != 0 && sections[0].0.1 > sections[0].0.0 {
+        let text_dst = base;
+        let text_end = text_dst + (sections[0].0.1 - sections[0].0.0);
+        let reloc_ranges = [
+            (sections[1].0.0, sections[1].0.1, base + (sections[1].0.0 - sections[0].0.0)), // rodata
+            (sections[2].0.0, sections[2].0.1, base + (sections[2].0.0 - sections[0].0.0)), // data
+            (sections[0].0.0, sections[0].0.1, text_dst), // text self-refs
+        ];
+        
+        let mut page_addr = text_dst;
+        while page_addr < text_end {
+            let phys = virt_to_phys_in_dir(page_dir, page_addr);
+            if phys == 0 {
+                page_addr += PAGE_SIZE_4KB;
+                continue;
+            }
+            
+            let page_virt = mm_phys_to_virt(phys);
+            if page_virt == 0 {
+                page_addr += PAGE_SIZE_4KB;
+                continue;
+            }
+            
+            unsafe {
+                let page_ptr = (page_virt as *mut u8).add((page_addr & (PAGE_SIZE_4KB - 1)) as usize);
+                let scan_len = core::cmp::min(PAGE_SIZE_4KB as usize, (text_end - page_addr) as usize);
+                
+                for offset in (0..scan_len.saturating_sub(7)).step_by(1) {
+                    let val = core::ptr::read_unaligned(page_ptr.add(offset) as *const u64);
+                    let val32 = (core::ptr::read_unaligned(page_ptr.add(offset) as *const u32) as i32 as i64) as u64;
+                    let val = if val >= 0xFFFF_FFFF_8000_0000 { val } else if val32 >= 0xFFFF_FFFF_8000_0000 { val32 } else { continue };
+                    
+                    for &(src_start, src_end, dst_start) in &reloc_ranges {
+                        if src_start != 0 && val >= src_start && val < src_end {
+                            core::ptr::write_unaligned(page_ptr.add(offset) as *mut u64, dst_start + (val - src_start));
+                            break;
+                        }
+                    }
+                }
+            }
+            page_addr += PAGE_SIZE_4KB;
+        }
+        
+        use crate::paging::paging_mark_range_user;
+        let _ = paging_mark_range_user(page_dir, text_dst, text_end, 0);
     }
 
     0
