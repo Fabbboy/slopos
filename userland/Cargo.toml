@@ -11,6 +11,11 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+default = []
+# Enable this to bundle an external user payload ELF from builddir/roulette_payload.elf
+external_payload = []
+
 [dependencies]
 slopos-drivers = { workspace = true }
 slopos-video = { workspace = true }

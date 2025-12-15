@@ -4,6 +4,7 @@ use core::ptr;
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_drivers::{fate, wl_currency};
 use slopos_lib::klog_info;
+#[cfg(feature = "external_payload")]
 use slopos_mm::process_vm::process_vm_load_elf;
 use slopos_sched::{
     INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_get_info, task_terminate,
@@ -64,35 +65,40 @@ fn userland_spawn_and_schedule(name: &[u8], entry: TaskEntry, priority: u8) -> i
     }
 
     // Load bundled user payload ELF into the new process address space and repoint entry.
-    let mut new_entry: u64 = 0;
-    const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../builddir/roulette_payload.elf"
-    ));
-    let pid = unsafe { (*task_info).process_id };
-    if process_vm_load_elf(
-        pid,
-        ROULETTE_ELF.as_ptr(),
-        ROULETTE_ELF.len(),
-        &mut new_entry,
-    ) != 0
-        || new_entry == 0
+    #[cfg(feature = "external_payload")]
     {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!(
-                "USERLAND: Failed to load roulette payload ELF for '{}'\n",
-                task_name
-            );
-        });
-        wl_currency::award_loss();
-        task_terminate(task_id);
-        return -1;
-    }
+        let mut new_entry: u64 = 0;
+        const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../builddir/roulette_payload.elf"
+        ));
+        let pid = unsafe { (*task_info).process_id };
+        if process_vm_load_elf(
+            pid,
+            ROULETTE_ELF.as_ptr(),
+            ROULETTE_ELF.len(),
+            &mut new_entry,
+        ) != 0
+            || new_entry == 0
+        {
+            with_task_name(name.as_ptr() as *const c_char, |task_name| {
+                klog_info!(
+                    "USERLAND: Failed to load roulette payload ELF for '{}'\n",
+                    task_name
+                );
+            });
+            wl_currency::award_loss();
+            task_terminate(task_id);
+            return -1;
+        }
 
-    unsafe {
-        (*task_info).entry_point = new_entry;
-        (*task_info).context.rip = new_entry;
+        unsafe {
+            (*task_info).entry_point = new_entry;
+            (*task_info).context.rip = new_entry;
+        }
     }
+    // When external_payload is disabled, use the embedded user sections.
+    // The entry point is already set correctly by task creation, so no action needed.
 
     if schedule_task(task_info) != 0 {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
