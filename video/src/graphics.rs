@@ -1,9 +1,11 @@
 use crate::framebuffer::{self, FbState};
+use slopos_drivers::video_bridge::{VideoError, VideoResult};
 
-const GRAPHICS_SUCCESS: i32 = 0;
-const GRAPHICS_ERROR_NO_FB: i32 = -1;
-const GRAPHICS_ERROR_BOUNDS: i32 = -2;
-const GRAPHICS_ERROR_INVALID: i32 = -3;
+pub type GraphicsResult<T = ()> = Result<T, VideoError>;
+
+fn snapshot() -> GraphicsResult<FbState> {
+    framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)
+}
 
 fn bytes_per_pixel(bpp: u8) -> u32 {
     ((bpp as u32) + 7) / 8
@@ -39,27 +41,23 @@ fn convert_color(fb: &FbState, color: u32) -> u32 {
         _ => color,
     }
 }
-pub fn graphics_draw_pixel(x: i32, y: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_pixel(x: i32, y: i32, color: u32) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if !bounds_check(&fb, x, y) {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     framebuffer::framebuffer_set_pixel(x as u32, y as u32, color);
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_hline(x1: i32, x2: i32, y: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_hline(x1: i32, x2: i32, y: i32, color: u32) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if !bounds_check(&fb, x1, y) && !bounds_check(&fb, x2, y) {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     let (mut xa, mut xb) = if x1 > x2 { (x2, x1) } else { (x1, x2) };
@@ -71,16 +69,14 @@ pub fn graphics_draw_hline(x1: i32, x2: i32, y: i32, color: u32) -> i32 {
         framebuffer::framebuffer_set_pixel(x as u32, y_clipped as u32, color);
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_vline(x: i32, y1: i32, y2: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_vline(x: i32, y1: i32, y2: i32, color: u32) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if !bounds_check(&fb, x, y1) && !bounds_check(&fb, x, y2) {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     let (mut ya, mut yb) = if y1 > y2 { (y2, y1) } else { (y1, y2) };
@@ -92,13 +88,17 @@ pub fn graphics_draw_vline(x: i32, y1: i32, y2: i32, color: u32) -> i32 {
         framebuffer::framebuffer_set_pixel(x_clipped as u32, y as u32, color);
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_line(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: u32,
+) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     let width = fb.width as i32;
     let height = fb.height as i32;
@@ -107,7 +107,7 @@ pub fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32
         || (x0 >= width && x1 >= width)
         || (y0 >= height && y1 >= height)
     {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     let dx = (x1 - x0).abs();
@@ -136,29 +136,38 @@ pub fn graphics_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> i32
         }
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_rect(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
+
+pub fn graphics_draw_rect(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+) -> GraphicsResult<()> {
     if width <= 0 || height <= 0 {
-        return GRAPHICS_ERROR_INVALID;
+        return Err(VideoError::Invalid);
     }
 
-    if graphics_draw_hline(x, x + width - 1, y, color) == GRAPHICS_ERROR_NO_FB {
-        return GRAPHICS_ERROR_NO_FB;
-    }
-    graphics_draw_hline(x, x + width - 1, y + height - 1, color);
-    graphics_draw_vline(x, y, y + height - 1, color);
-    graphics_draw_vline(x + width - 1, y, y + height - 1, color);
-    GRAPHICS_SUCCESS
+    graphics_draw_hline(x, x + width - 1, y, color)?;
+    graphics_draw_hline(x, x + width - 1, y + height - 1, color)?;
+    graphics_draw_vline(x, y, y + height - 1, color)?;
+    graphics_draw_vline(x + width - 1, y, y + height - 1, color)?;
+    Ok(())
 }
-pub fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_rect_filled(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if width <= 0 || height <= 0 {
-        return GRAPHICS_ERROR_INVALID;
+        return Err(VideoError::Invalid);
     }
 
     let mut x1 = x;
@@ -180,7 +189,7 @@ pub fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: i32, color:
     }
 
     if x1 > x2 || y1 > y2 {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     for row in y1..=y2 {
@@ -189,16 +198,20 @@ pub fn graphics_draw_rect_filled(x: i32, y: i32, width: i32, height: i32, color:
         }
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_rect_filled_fast(x: i32, y: i32, width: i32, height: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_rect_filled_fast(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if width <= 0 || height <= 0 {
-        return GRAPHICS_ERROR_INVALID;
+        return Err(VideoError::Invalid);
     }
 
     let mut x1 = x;
@@ -220,7 +233,7 @@ pub fn graphics_draw_rect_filled_fast(x: i32, y: i32, width: i32, height: i32, c
     }
 
     if x1 > x2 || y1 > y2 {
-        return GRAPHICS_ERROR_BOUNDS;
+        return Err(VideoError::OutOfBounds);
     }
 
     let pixel_value = convert_color(&fb, color);
@@ -259,16 +272,19 @@ pub fn graphics_draw_rect_filled_fast(x: i32, y: i32, width: i32, height: i32, c
         }
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_circle(
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if radius <= 0 {
-        return GRAPHICS_ERROR_INVALID;
+        return Err(VideoError::Invalid);
     }
 
     let mut x = 0;
@@ -315,16 +331,19 @@ pub fn graphics_draw_circle(cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
         }
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
 }
-pub fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32) -> i32 {
-    let fb = match framebuffer::snapshot() {
-        Some(fb) => fb,
-        None => return GRAPHICS_ERROR_NO_FB,
-    };
+
+pub fn graphics_draw_circle_filled(
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> GraphicsResult<()> {
+    let fb = snapshot()?;
 
     if radius <= 0 {
-        return GRAPHICS_ERROR_INVALID;
+        return Err(VideoError::Invalid);
     }
 
     let radius_sq = radius * radius;
@@ -340,5 +359,38 @@ pub fn graphics_draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32) ->
         }
     }
 
-    GRAPHICS_SUCCESS
+    Ok(())
+}
+
+pub fn graphics_draw_rect_filled_fast_status(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+) -> VideoResult {
+    graphics_draw_rect_filled_fast(x, y, width, height, color)
+}
+
+pub fn graphics_draw_line_status(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: u32,
+) -> VideoResult {
+    graphics_draw_line(x0, y0, x1, y1, color)
+}
+
+pub fn graphics_draw_circle_status(cx: i32, cy: i32, radius: i32, color: u32) -> VideoResult {
+    graphics_draw_circle(cx, cy, radius, color)
+}
+
+pub fn graphics_draw_circle_filled_status(
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> VideoResult {
+    graphics_draw_circle_filled(cx, cy, radius, color)
 }

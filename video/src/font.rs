@@ -556,9 +556,9 @@ pub fn font_draw_char(x: i32, y: i32, c: c_char, fg_color: u32, bg_color: u32) -
                 continue;
             }
             if byte & (0x80 >> col) != 0 {
-                graphics::graphics_draw_pixel(px, py, fg_color);
+                let _ = graphics::graphics_draw_pixel(px, py, fg_color);
             } else if bg_color != 0 {
-                graphics::graphics_draw_pixel(px, py, bg_color);
+                let _ = graphics::graphics_draw_pixel(px, py, bg_color);
             }
         }
     }
@@ -657,7 +657,7 @@ pub fn font_draw_string_clear(
 
     let width = font_get_string_width(str_ptr);
     let height = FONT_CHAR_HEIGHT;
-    graphics::graphics_draw_rect_filled(x, y, width, height, bg_color);
+    let _ = graphics::graphics_draw_rect_filled(x, y, width, height, bg_color);
     font_draw_string(x, y, str_ptr, fg_color, bg_color)
 }
 pub fn font_get_string_width(str_ptr: *const c_char) -> i32 {
@@ -716,7 +716,7 @@ fn console_scroll_up(state: &mut ConsoleState) {
     }
 
     if fb.height <= FONT_CHAR_HEIGHT as u32 {
-        graphics::graphics_draw_rect_filled(
+        let _ = graphics::graphics_draw_rect_filled(
             0,
             0,
             fb.width as i32,
@@ -734,7 +734,7 @@ fn console_scroll_up(state: &mut ConsoleState) {
         ptr::copy(fb.base.add(src_offset), fb.base, copy_bytes);
     }
 
-    graphics::graphics_draw_rect_filled(
+    let _ = graphics::graphics_draw_rect_filled(
         0,
         fb.height as i32 - FONT_CHAR_HEIGHT,
         fb.width as i32,
@@ -814,7 +814,7 @@ pub fn font_console_clear() -> c_int {
     }
     {
         let mut console = FONT_CONSOLE.lock();
-        graphics::graphics_draw_rect_filled(
+        let _ = graphics::graphics_draw_rect_filled(
             0,
             0,
             framebuffer::framebuffer_get_width() as i32,

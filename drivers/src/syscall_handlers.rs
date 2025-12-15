@@ -46,6 +46,7 @@ use slopos_mm::user_copy::user_copy_from_user;
 use slopos_mm::user_copy_helpers::{
     user_copy_circle_checked, user_copy_line_checked, user_copy_rect_checked, user_copy_text_header,
 };
+use crate::video_bridge::{VideoError, VideoResult};
 
 use crate::scheduler_callbacks::{
     call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
@@ -57,11 +58,19 @@ use crate::pit::{pit_poll_delay_ms, pit_sleep_ms};
 use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::tty_read_line;
 
-fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: c_int) -> SyscallDisposition {
-    if rc == 0 {
+fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: VideoResult) -> SyscallDisposition {
+    if rc.is_ok() {
         syscall_return_ok(frame, 0)
     } else {
         syscall_return_err(frame, u64::MAX)
+    }
+}
+
+fn video_result_from_font(rc: c_int) -> VideoResult {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(VideoError::Invalid)
     }
 }
 
@@ -293,13 +302,13 @@ pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> Syscal
         return syscall_return_err(frame, u64::MAX);
     }
     buf[text.len as usize] = 0;
-    let rc = video_bridge::font_draw_string(
+    let rc = video_result_from_font(video_bridge::font_draw_string(
         text.x,
         text.y,
         buf.as_ptr() as *const c_char,
         text.fg_color,
         text.bg_color,
-    );
+    ));
     syscall_finish_gfx(frame, rc)
 }
 

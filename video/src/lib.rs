@@ -31,16 +31,19 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
         }
 
         video_bridge::register_video_callbacks(VideoCallbacks {
-            draw_rect_filled_fast: Some(graphics::graphics_draw_rect_filled_fast),
-            draw_line: Some(graphics::graphics_draw_line),
-            draw_circle: Some(graphics::graphics_draw_circle),
-            draw_circle_filled: Some(graphics::graphics_draw_circle_filled),
+            draw_rect_filled_fast: Some(graphics::graphics_draw_rect_filled_fast_status),
+            draw_line: Some(graphics::graphics_draw_line_status),
+            draw_circle: Some(graphics::graphics_draw_circle_status),
+            draw_circle_filled: Some(graphics::graphics_draw_circle_filled_status),
             font_draw_string: Some(font::font_draw_string),
             framebuffer_get_info: Some(fb_info_bridge),
         });
 
-        if splash::splash_show_boot_screen() != 0 {
-            serial_println!("Splash paint failed; falling back to banner stripe.");
+        if let Err(err) = splash::splash_show_boot_screen() {
+            serial_println!(
+                "Splash paint failed ({:?}); falling back to banner stripe.",
+                err
+            );
             paint_banner();
         }
     } else {
