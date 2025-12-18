@@ -181,11 +181,11 @@ build-userland:
 	  --features standalone-bin \
 	  --no-default-features \
 	  --release; \
-	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos/release/roulette ]; then \
-		cp "$(CARGO_TARGET_DIR)/x86_64-slos/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
 	fi; \
-	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos/release/shell ]; then \
-		cp "$(CARGO_TARGET_DIR)/x86_64-slos/release/shell" "$(BUILD_DIR)/shell.elf"; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell" "$(BUILD_DIR)/shell.elf"; \
 	fi; \
 	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/shell.elf"
 
