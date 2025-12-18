@@ -58,6 +58,11 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
 
     save_user_context(frame, task);
 
+    // Temporarily set current task provider to use this task's process_id
+    // This ensures user_copy_from_user can find the correct page directory
+    let pid = unsafe { (*task).process_id };
+    let original_provider = slopos_mm::user_copy::set_syscall_process_id(pid);
+
     let sysno = unsafe { (*frame).rax };
     let entry = syscall_lookup(sysno);
     if entry.is_null() {
@@ -66,6 +71,7 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
             wl_currency::award_loss();
             (*frame).rax = u64::MAX;
         }
+        slopos_mm::user_copy::restore_task_provider(original_provider);
         return;
     }
 
@@ -73,4 +79,6 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
     if let Some(func) = handler {
         func(task, frame);
     }
+    
+    slopos_mm::user_copy::restore_task_provider(original_provider);
 }

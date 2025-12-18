@@ -15,8 +15,33 @@ pub struct Task {
 static KERNEL_GUARD_CHECKED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TASK_PROVIDER: Mutex<Option<fn() -> u32>> = Mutex::new(None);
 
+// Static to store process_id during syscall handling
+static mut SYSCALL_CURRENT_PID: u32 = crate::mm_constants::INVALID_PROCESS_ID;
+
+fn syscall_process_id_provider() -> u32 {
+    unsafe { SYSCALL_CURRENT_PID }
+}
+
 pub fn register_current_task_provider(provider: fn() -> u32) {
     *CURRENT_TASK_PROVIDER.lock() = Some(provider);
+}
+
+/// Temporarily set the current task provider to use a specific process_id
+/// Returns the previous provider so it can be restored
+pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
+    unsafe {
+        SYSCALL_CURRENT_PID = pid;
+    }
+    let mut guard = CURRENT_TASK_PROVIDER.lock();
+    let original = *guard;
+    *guard = Some(syscall_process_id_provider);
+    original
+}
+
+/// Restore the previous task provider
+pub fn restore_task_provider(provider: Option<fn() -> u32>) {
+    let mut guard = CURRENT_TASK_PROVIDER.lock();
+    *guard = provider;
 }
 
 fn current_process_id() -> u32 {
@@ -74,6 +99,9 @@ fn validate_user_buffer(
 pub fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const c_void, len: usize) -> c_int {
     let dir = current_process_dir();
     if kernel_dst.is_null() || user_src.is_null() {
+        return -1;
+    }
+    if dir.is_null() {
         return -1;
     }
     if validate_user_buffer(user_src as u64, len, dir) != 0 {

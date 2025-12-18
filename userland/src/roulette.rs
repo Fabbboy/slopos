@@ -364,33 +364,51 @@ fn text_fallback(fate: u32) {
 }
 
 #[unsafe(link_section = ".user_text")]
+fn backend_get_size_wrapper(ctx: *mut c_void, w: *mut i32, h: *mut i32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_get_size(ctx, w, h);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn backend_fill_rect_wrapper(ctx: *mut c_void, x: i32, y: i32, w: i32, h: i32, c: u32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_fill_rect(ctx, x, y, w, h, c);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn backend_draw_line_wrapper(ctx: *mut c_void, x0: i32, y0: i32, x1: i32, y1: i32, c: u32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_draw_line(ctx, x0, y0, x1, y1, c);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn backend_draw_circle_wrapper(ctx: *mut c_void, cx: i32, cy: i32, r: i32, c: u32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_draw_circle(ctx, cx, cy, r, c);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn backend_draw_circle_filled_wrapper(ctx: *mut c_void, cx: i32, cy: i32, r: i32, c: u32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_draw_circle_filled(ctx, cx, cy, r, c);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn backend_draw_text_wrapper(ctx: *mut c_void, x: i32, y: i32, text: *const u8, fg: u32, bg: u32) -> slopos_drivers::video_bridge::VideoResult {
+    let rc = user_draw_text(ctx, x, y, text, fg, bg);
+    if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
+}
+
+#[unsafe(link_section = ".user_text")]
 fn backend() -> RouletteBackend {
     RouletteBackend {
         ctx: core::ptr::null_mut(),
-        get_size: Some(|ctx, w, h| {
-            let rc = user_get_size(ctx, w, h);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
-        fill_rect: Some(|ctx, x, y, w, h, c| {
-            let rc = user_fill_rect(ctx, x, y, w, h, c);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
-        draw_line: Some(|ctx, x0, y0, x1, y1, c| {
-            let rc = user_draw_line(ctx, x0, y0, x1, y1, c);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
-        draw_circle: Some(|ctx, cx, cy, r, c| {
-            let rc = user_draw_circle(ctx, cx, cy, r, c);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
-        draw_circle_filled: Some(|ctx, cx, cy, r, c| {
-            let rc = user_draw_circle_filled(ctx, cx, cy, r, c);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
-        draw_text: Some(|ctx, x, y, text, fg, bg| {
-            let rc = user_draw_text(ctx, x, y, text, fg, bg);
-            if rc == 0 { Ok(()) } else { Err(slopos_drivers::video_bridge::VideoError::Invalid) }
-        }),
+        get_size: Some(backend_get_size_wrapper),
+        fill_rect: Some(backend_fill_rect_wrapper),
+        draw_line: Some(backend_draw_line_wrapper),
+        draw_circle: Some(backend_draw_circle_wrapper),
+        draw_circle_filled: Some(backend_draw_circle_filled_wrapper),
+        draw_text: Some(backend_draw_text_wrapper),
         sleep_ms: Some(user_sleep_ms),
     }
 }
