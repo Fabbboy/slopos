@@ -115,7 +115,7 @@ fn pte_user(pte: u64) -> bool {
 }
 
 fn is_user_address(vaddr: u64) -> bool {
-    vaddr < KERNEL_VIRTUAL_BASE && vaddr >= 0x0000_0000_0040_0000
+    vaddr < KERNEL_VIRTUAL_BASE && vaddr >= crate::mm_constants::USER_SPACE_START_VA
 }
 
 #[inline(always)]

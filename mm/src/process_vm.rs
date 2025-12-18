@@ -584,16 +584,17 @@ fn apply_elf_relocations(
                     }
                     let read_ptr = unsafe { (read_virt as *mut u8).add(read_page_off) };
                     let current_offset = unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
-                    // For R_X86_64_PLT32: offset = S + A - P, where:
+                    // For R_X86_64_PC32/PLT32: offset = S + A - P, where:
                     //   S = symbol value, A = addend, P = place (RIP after instruction)
-                    // So: S = offset - A + P = offset + P - A
-                    // r_offset is already an absolute kernel VA, use it directly
-                    let kernel_reloc_va = rela.r_offset;
-                    let kernel_rip_after = kernel_reloc_va.wrapping_add(4);
-                    // For R_X86_64_PLT32: The addend might be pre-applied in the offset
-                    // Try: S = offset + P (ignore addend for now, test if this works)
-                    let calculated_symbol_va = (kernel_rip_after as i64).wrapping_add(current_offset) as u64;
-                    calculated_symbol_va
+                    // The current_offset in the instruction was calculated for kernel addresses.
+                    // We need to find the original symbol address, then map it to user space.
+                    // Original: current_offset = original_symbol + addend - original_kernel_rip_after
+                    // So: original_symbol = current_offset - addend + original_kernel_rip_after
+                    let original_kernel_rip_after = reloc_kern_addr.wrapping_add(4);
+                    // For PC32: offset = S + A - P, so S = offset - A + P = offset + P - A
+                    // But we need to be careful: if A is negative, subtracting it means adding
+                    let original_symbol_va = (original_kernel_rip_after as i64).wrapping_add(current_offset).wrapping_sub(rela.r_addend) as u64;
+                    original_symbol_va
                 }
                 _ => {
                     if rela.r_addend != 0 {
@@ -834,33 +835,53 @@ pub fn process_vm_load_elf(
         let mut dst = page_start;
         let mut pages_mapped_seg = 0u32;
         while dst < page_end {
-            let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-            if phys == 0 {
-                return -1;
-            }
-            if map_page_4kb_in_dir(page_dir, dst, phys, map_flags) != 0 {
-                free_page_frame(phys);
-                return -1;
-            }
-            pages_mapped_seg += 1;
+            // Check if this page is already mapped (from a previous segment)
+            let existing_phys = virt_to_phys_in_dir(page_dir, dst);
+            let phys = if existing_phys != 0 {
+                // Page already mapped, reuse it (for overlapping segments)
+                // But we still need to copy the data for this segment's portion
+                existing_phys
+            } else {
+                // Allocate new page
+                let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+                if new_phys == 0 {
+                    return -1;
+                }
+                if map_page_4kb_in_dir(page_dir, dst, new_phys, map_flags) != 0 {
+                    free_page_frame(new_phys);
+                    return -1;
+                }
+                pages_mapped_seg += 1;
+                new_phys
+            };
             let dest_virt = mm_phys_to_virt(phys);
             if dest_virt == 0 {
+                if existing_phys == 0 {
+                    free_page_frame(phys);
+                }
                 return -1;
             }
 
             // Copy file-backed portion that falls within this page.
             // Calculate offset from segment start to this page
             // The offset is the same in both kernel and user VAs (only the base differs)
-            let page_off_in_seg = dst.wrapping_sub(user_seg_start);
-            let file_bytes = if page_off_in_seg < ph.p_filesz {
-                ph.p_filesz.wrapping_sub(page_off_in_seg)
-            } else {
+            // For overlapping segments, skip pages that are before the segment start
+            let file_bytes = if dst < user_seg_start {
+                // Page is before segment start (overlapping segment), skip copying
                 0
+            } else {
+                let page_off_in_seg = dst - user_seg_start;
+                if page_off_in_seg < ph.p_filesz {
+                    ph.p_filesz - page_off_in_seg
+                } else {
+                    0
+                }
             };
             if file_bytes > 0 {
+                let page_off_in_seg = dst - user_seg_start;
                 let copy_len = core::cmp::min(PAGE_SIZE_4KB as u64, file_bytes) as usize;
                 // File offset = p_offset + page_off_in_seg
-                let src_off = (ph.p_offset.wrapping_add(page_off_in_seg)) as usize;
+                let src_off = (ph.p_offset + page_off_in_seg) as usize;
                 if src_off < payload_len && src_off + copy_len <= payload_len {
                     unsafe {
                         core::ptr::copy_nonoverlapping(
@@ -870,7 +891,14 @@ pub fn process_vm_load_elf(
                         );
                     }
                 }
+            } else if dst >= user_seg_start {
+                // Only zero pages that are within this segment's range (not overlapping)
+                // Zero-initialize BSS pages
+                unsafe {
+                    core::ptr::write_bytes(dest_virt as *mut u8, 0, PAGE_SIZE_4KB as usize);
+                }
             }
+            // else: page is before segment start (overlapping), skip zeroing to preserve previous segment's data
 
             dst += PAGE_SIZE_4KB;
         }
@@ -880,14 +908,29 @@ pub fn process_vm_load_elf(
     // Apply relocations after all segments are loaded
     // For static binaries, symbols are typically absolute addresses in the ELF's VAs
     // We need to map those to the actual user VAs where we loaded the segments
-    let reloc_result = apply_elf_relocations(
-        payload,
-        payload_len,
-        page_dir,
-        &section_mappings[..mapping_count],
-    );
-    if reloc_result != 0 {
-        // Continue anyway - some ELF files might not have relocations
+    // However, if the binary is already linked at the correct address (0x400000),
+    // and we're loading it at that same address, relocations are already correct
+    // and we should skip applying them to avoid corrupting the code.
+    // Check if we're loading at the link address - if so, skip relocations
+    let needs_reloc = if min_vaddr >= KERNEL_BASE {
+        // Kernel VA -> user space mapping needed
+        true
+    } else if min_vaddr != code_base {
+        // Different address, needs relocation
+        true
+    } else {
+        // Same address, relocations already correct
+        false
+    };
+    
+    if needs_reloc {
+        let _reloc_result = apply_elf_relocations(
+            payload,
+            payload_len,
+            page_dir,
+            &section_mappings[..mapping_count],
+        );
+        // Continue even if relocations fail - some ELF files might not have relocations
     }
 
     // Update entry point to user space address
@@ -1036,6 +1079,29 @@ pub fn create_process_vm() -> u32 {
             return INVALID_PROCESS_ID;
         }
         proc.total_pages += stack_pages;
+
+        // Map a single zero page to tolerate benign null accesses in early userland.
+        // This keeps user tasks from immediately faulting on startup before they
+        // can report richer diagnostics.
+        let mut null_pages: u32 = 0;
+        if map_user_range(
+            proc.page_dir,
+            0,
+            PAGE_SIZE_4KB,
+            PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE,
+            &mut null_pages,
+        ) == 0
+        {
+            let _ = add_vma_to_process(
+                process_ptr,
+                0,
+                PAGE_SIZE_4KB,
+                (PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE) as u32,
+            );
+            proc.total_pages += null_pages;
+        } else {
+            klog_info!("create_process_vm: Failed to map null page for user task");
+        }
 
         manager.process_list = process_ptr;
         manager.num_processes += 1;

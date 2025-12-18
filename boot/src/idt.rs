@@ -102,6 +102,8 @@ use slopos_drivers::irq::irq_dispatch;
 use slopos_drivers::syscall::syscall_handle;
 use slopos_drivers::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
+use slopos_mm::{paging, process_vm};
+use slopos_mm::phys_virt::mm_phys_to_virt;
 
 use slopos_drivers::scheduler_callbacks::{
     call_boot_get_current_task, call_boot_request_reschedule_from_interrupt,
@@ -454,7 +456,40 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: 
         unsafe { (*task).task_id }
     };
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
-    klog_info!("Terminating user task {}: {}", tid, detail_str);
+    let (cr2, rip, rsp, vec, err) = unsafe {
+        let cr2_val: u64;
+        asm!("mov {}, cr2", out(reg) cr2_val, options(nomem, nostack, preserves_flags));
+        (cr2_val, frame.rip, frame.rsp, frame.vector, frame.error_code)
+    };
+    let (entry_point, proc_id, flags, name_str) = if task.is_null() {
+        (0, 0, 0, "<no task>")
+    } else {
+        let name_raw = unsafe { &(*task).name };
+        let len = name_raw
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_raw.len());
+        let name = core::str::from_utf8(&name_raw[..len]).unwrap_or("<invalid utf-8>");
+        let ep = unsafe { (*task).entry_point };
+        let pid = unsafe { (*task).process_id };
+        let fl = unsafe { (*task).flags };
+        (ep, pid, fl, name)
+    };
+    klog_info!(
+        "Terminating user task {} ('{}'): {} | vec={} err=0x{:x} cr2=0x{:x} rip=0x{:x} rsp=0x{:x} entry=0x{:x} pid={} flags=0x{:x}",
+        tid,
+        name_str,
+        detail_str,
+        vec,
+        err,
+        cr2,
+        rip,
+        rsp,
+        entry_point,
+        proc_id,
+        flags
+    );
+    kdiag_dump_interrupt_frame(frame as *const _);
     if !task.is_null() {
         unsafe {
             (*task).exit_reason = TASK_EXIT_REASON_USER_FAULT;
@@ -607,6 +642,56 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     );
 
     if from_user {
+        let mut pid = INVALID_TASK_ID;
+        let mut cr3 = 0u64;
+        let mut fault_phys = 0u64;
+        let mut rsp_phys = 0u64;
+        let mut rip_phys = 0u64;
+        let mut ctx_rip = 0u64;
+        let mut ctx_rsp = 0u64;
+        let task_ptr = unsafe { call_boot_get_current_task() as *mut Task };
+        if !task_ptr.is_null() {
+            pid = unsafe { (*task_ptr).process_id };
+            unsafe {
+                let ctx_bytes = (*task_ptr).context.as_ptr();
+                ctx_rip = core::ptr::read_unaligned(ctx_bytes.add(0x80) as *const u64);
+                ctx_rsp = core::ptr::read_unaligned(ctx_bytes.add(0x38) as *const u64);
+            }
+            let dir = process_vm::process_vm_get_page_dir(pid);
+            if !dir.is_null() {
+                cr3 = unsafe { (*dir).pml4_phys };
+                fault_phys = paging::virt_to_phys_process(fault_addr, dir);
+                rsp_phys = paging::virt_to_phys_process(frame_ref.rsp, dir);
+                rip_phys = paging::virt_to_phys_process(frame_ref.rip, dir);
+            }
+        }
+        if rsp_phys != 0 {
+            let base = mm_phys_to_virt(rsp_phys) as *const u64;
+            unsafe {
+                let s0 = core::ptr::read_unaligned(base);
+                let s1 = core::ptr::read_unaligned(base.add(1));
+                let s2 = core::ptr::read_unaligned(base.add(2));
+                klog_info!(
+                    "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
+                    s0,
+                    s1,
+                    s2
+                );
+            }
+        }
+        klog_info!(
+            "User PF debug: pid={} cr3=0x{:x} fault_phys=0x{:x} rip_phys=0x{:x} rsp_phys=0x{:x}",
+            pid,
+            cr3,
+            fault_phys,
+            rip_phys,
+            rsp_phys
+        );
+        klog_info!(
+            "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",
+            ctx_rip,
+            ctx_rsp
+        );
         terminate_user_task(
             TASK_FAULT_USER_PAGE,
             unsafe { &*frame },

@@ -120,12 +120,8 @@ fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
 
     unsafe {
         (*task_info).entry_point = new_entry;
-        (*task_info).context.rip = new_entry;
-        // Copy to local variables to avoid unaligned access
-        let entry_point = (*task_info).entry_point;
-        let context_rip = (*task_info).context.rip;
-        klog_info!("USERLAND: Updated task entry_point=0x{:x} context.rip=0x{:x}\n", 
-                   entry_point, context_rip);
+        // TaskContext is packed; use unaligned stores/loads when touching it directly.
+        ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), new_entry);
     }
 
     if schedule_task(task_info) != 0 {
