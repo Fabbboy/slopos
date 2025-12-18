@@ -138,20 +138,20 @@ fn unmask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
     }
-    let (unmask_hw, gsi) = with_irq_tables(|table, routes| {
+    let (unmask_hw, gsi, was_masked) = with_irq_tables(|table, routes| {
         if !table[irq as usize].masked {
-            return (false, 0);
+            return (false, 0, false);
         }
         table[irq as usize].masked = false;
         if routes[irq as usize].via_ioapic {
-            (true, routes[irq as usize].gsi)
+            (true, routes[irq as usize].gsi, true)
         } else {
-            (false, 0)
+            (false, 0, true)
         }
     });
     if unmask_hw {
         let _ = ioapic::unmask_gsi(gsi);
-    } else {
+    } else if was_masked {
         klog_info!("IRQ: Cannot unmask line (no IOAPIC route configured)");
     }
 }
