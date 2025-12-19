@@ -8,6 +8,8 @@ use slopos_drivers::serial;
 use slopos_drivers::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
+use slopos_video::splash;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::limine_protocol;
 use crate::{gdt, idt, kernel_panic::kernel_panic};
@@ -162,6 +164,9 @@ static BOOT_STATE: BootStateCell = BootStateCell(UnsafeCell::new(BootState {
     ctx: BootRuntimeContext::new(),
 }));
 
+static BOOT_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
+static BOOT_DONE_STEPS: AtomicUsize = AtomicUsize::new(0);
+
 fn boot_state() -> &'static BootState {
     unsafe { &*BOOT_STATE.0.get() }
 }
@@ -241,6 +246,39 @@ fn phase_bounds(phase: BootInitPhase) -> (*const BootInitStep, *const BootInitSt
     }
 }
 
+fn boot_init_count_phase(phase: BootInitPhase) -> usize {
+    let (start, stop) = phase_bounds(phase);
+    let mut count = 0usize;
+    let mut ptr = start;
+    while ptr < stop {
+        count += 1;
+        unsafe {
+            ptr = ptr.add(1);
+        }
+    }
+    count
+}
+
+fn boot_init_prepare_progress() {
+    let total = boot_init_count_phase(BootInitPhase::EarlyHw)
+        + boot_init_count_phase(BootInitPhase::Memory)
+        + boot_init_count_phase(BootInitPhase::Drivers)
+        + boot_init_count_phase(BootInitPhase::Services)
+        + boot_init_count_phase(BootInitPhase::Optional);
+    BOOT_TOTAL_STEPS.store(total.max(1), Ordering::Relaxed);
+    BOOT_DONE_STEPS.store(0, Ordering::Relaxed);
+}
+
+fn boot_init_report_progress(step: &BootInitStep) {
+    let total = BOOT_TOTAL_STEPS.load(Ordering::Relaxed);
+    if total == 0 {
+        return;
+    }
+    let done = BOOT_DONE_STEPS.fetch_add(1, Ordering::Relaxed) + 1;
+    let progress = ((done * 100) / total).min(100) as i32;
+    let _ = splash::splash_report_progress(progress, step.name);
+}
+
 fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
     serial::write_line("BOOT: running init step");
     boot_init_report_step(
@@ -270,10 +308,12 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
         );
         if optional {
             boot_info(b"Optional boot step failed, continuing...\0");
+            boot_init_report_progress(step);
             return 0;
         }
         kernel_panic(b"Boot init step failed\0".as_ptr() as *const c_char);
     }
+    boot_init_report_progress(step);
     0
 }
 
@@ -341,6 +381,7 @@ pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
 }
 
 pub fn boot_init_run_all() -> i32 {
+    boot_init_prepare_progress();
     let mut phase = BootInitPhase::EarlyHw as u8;
     while phase <= BootInitPhase::Optional as u8 {
         let rc = boot_init_run_phase(unsafe { core::mem::transmute(phase) });
