@@ -1,9 +1,13 @@
-# Convenience targets for building, booting, and testing SlopOS
+# Convenience targets for building, booting, and testing SlopOS (Rust rewrite)
 
-.PHONY: setup build iso iso-notests iso-tests boot boot-log test clean distclean
+.PHONY: setup build build-userland iso iso-notests iso-tests boot boot-log test clean distclean
 
 BUILD_DIR ?= builddir
-CROSS_FILE ?= metal.ini
+CARGO ?= cargo
+RUST_TOOLCHAIN_FILE ?= rust-toolchain.toml
+RUST_CHANNEL ?= $(shell sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(RUST_TOOLCHAIN_FILE))
+RUST_TARGET_JSON ?= targets/x86_64-slos.json
+CARGO_TARGET_DIR ?= $(BUILD_DIR)/target
 QEMU_BIN ?= qemu-system-x86_64
 
 ISO := $(BUILD_DIR)/slop.iso
@@ -75,6 +79,43 @@ define ensure_ovmf
 	fi;
 endef
 
+define ensure_rust_toolchain
+	if ! command -v rustup >/dev/null 2>&1; then \
+		echo "rustup is required to install the pinned nightly toolchain" >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(RUST_CHANNEL)" ]; then \
+		echo "Failed to read Rust channel from $(RUST_TOOLCHAIN_FILE)" >&2; \
+		exit 1; \
+	fi; \
+	if ! rustup toolchain list | grep -q "^$(RUST_CHANNEL)"; then \
+		rustup toolchain install $(RUST_CHANNEL) --component=rust-src --component=rustfmt --component=clippy --component=llvm-tools-preview; \
+	fi; \
+	if ! rustup target list --toolchain $(RUST_CHANNEL) --installed | grep -q "^x86_64-unknown-none"; then \
+		rustup target add x86_64-unknown-none --toolchain $(RUST_CHANNEL); \
+	fi;
+endef
+
+define build_kernel
+	set -e; \
+	FEATURES="$(1)"; \
+	mkdir -p $(BUILD_DIR); \
+	rm -f $(BUILD_DIR)/kernel $(BUILD_DIR)/kernel.elf; \
+	$(call ensure_rust_toolchain) \
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
+	$(CARGO) +$(RUST_CHANNEL) build \
+	  -Zbuild-std=core,alloc \
+	  -Zunstable-options \
+	  --target $(RUST_TARGET_JSON) \
+	  --package kernel \
+	  --bin kernel \
+	  $(if $$FEATURES,--features "$$FEATURES",) \
+	  --artifact-dir $(BUILD_DIR); \
+	if [ -f $(BUILD_DIR)/kernel ]; then \
+		mv "$(BUILD_DIR)/kernel" "$(BUILD_DIR)/kernel.elf"; \
+	fi;
+endef
+
 define build_iso
 	set -e; \
 	OUTPUT="$(1)"; \
@@ -120,27 +161,45 @@ define build_iso
 	rm -rf "$$STAGING"
 endef
 
-$(BUILD_DIR)/build.ninja:
-	@meson setup $(BUILD_DIR) --cross-file=$(CROSS_FILE)
+setup:
+	@$(call ensure_rust_toolchain)
+	@mkdir -p $(BUILD_DIR)
+	@CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) $(CARGO) +$(RUST_CHANNEL) metadata --format-version 1 >/dev/null
 
-setup: $(BUILD_DIR)/build.ninja
+build-userland:
+	@set -e; \
+	$(call ensure_rust_toolchain) \
+	mkdir -p $(BUILD_DIR); \
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
+	$(CARGO) +$(RUST_CHANNEL) build \
+	  -Zbuild-std=core,alloc \
+	  -Zunstable-options \
+	  --target targets/x86_64-slos-userland.json \
+	  --package slopos-userland \
+	  --bin roulette \
+	  --bin shell \
+	  --features standalone-bin \
+	  --no-default-features \
+	  --release; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
+	fi; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell" "$(BUILD_DIR)/shell.elf"; \
+	fi; \
+	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/shell.elf"
 
-build: $(BUILD_DIR)/build.ninja
-	@meson compile -C $(BUILD_DIR)
+build: build-userland
+	@$(call build_kernel)
 
 iso: build
-	@meson configure $(BUILD_DIR) -Denable_builtin_tests=false
-	@meson compile -C $(BUILD_DIR)
 	@$(call build_iso,$(ISO),)
 
 iso-notests: build
-	@meson configure $(BUILD_DIR) -Denable_builtin_tests=false
-	@meson compile -C $(BUILD_DIR)
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
-iso-tests: build
-	@meson configure $(BUILD_DIR) -Denable_builtin_tests=true
-	@meson compile -C $(BUILD_DIR)
+iso-tests:
+	@$(call build_kernel,slopos-drivers/qemu-exit)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
 boot: iso-notests
@@ -280,7 +339,8 @@ test: iso-tests
 	fi
 
 clean:
-	@meson compile -C $(BUILD_DIR) --clean || true
+	@$(CARGO) +$(RUST_CHANNEL) clean --target-dir $(CARGO_TARGET_DIR) || true
+	@rm -f $(BUILD_DIR)/kernel.elf
 
 distclean: clean
 	@rm -rf $(BUILD_DIR) $(ISO) $(ISO_NO_TESTS) $(ISO_TESTS) $(LOG_FILE)

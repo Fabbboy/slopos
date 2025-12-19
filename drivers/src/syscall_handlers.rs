@@ -1,0 +1,583 @@
+use core::ffi::{c_char, c_int, c_void};
+use core::ptr;
+
+use crate::random;
+use crate::serial;
+use crate::wl_currency;
+use crate::syscall_common::{
+    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
+    syscall_return_err, syscall_return_ok,
+};
+use crate::syscall_fs::{
+    syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
+    syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
+};
+use crate::syscall_types::{InterruptFrame, Task};
+use crate::video_bridge;
+use slopos_lib::klog_debug;
+use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
+
+#[repr(C)]
+pub struct UserFbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u8,
+    pub pixel_format: u8,
+}
+
+#[repr(C)]
+pub struct UserSysInfo {
+    pub total_pages: u32,
+    pub free_pages: u32,
+    pub allocated_pages: u32,
+    pub total_tasks: u32,
+    pub active_tasks: u32,
+    pub task_context_switches: u64,
+    pub scheduler_context_switches: u64,
+    pub scheduler_yields: u64,
+    pub ready_tasks: u32,
+    pub schedule_calls: u32,
+}
+
+use crate::fate::FateResult;
+
+use slopos_mm::page_alloc::get_page_allocator_stats;
+use slopos_mm::user_copy::user_copy_from_user;
+use slopos_mm::paging;
+use slopos_mm::user_copy_helpers::{
+    user_copy_circle_checked, user_copy_line_checked, user_copy_rect_checked, user_copy_text_header,
+};
+use crate::video_bridge::{VideoError, VideoResult};
+
+use crate::scheduler_callbacks::{
+    call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
+    call_get_scheduler_stats, call_get_task_stats, call_schedule,
+    call_scheduler_is_preemption_enabled, call_task_terminate, call_yield,
+};
+
+use crate::pit::{pit_poll_delay_ms, pit_sleep_ms};
+use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
+use crate::tty::tty_read_line;
+
+fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: VideoResult) -> SyscallDisposition {
+    if rc.is_ok() {
+        syscall_return_ok(frame, 0)
+    } else {
+        syscall_return_err(frame, u64::MAX)
+    }
+}
+
+fn video_result_from_font(rc: c_int) -> VideoResult {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(VideoError::Invalid)
+    }
+}
+
+pub fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let _ = syscall_return_ok(frame, 0);
+    unsafe { call_yield() };
+    SyscallDisposition::Ok
+}
+
+pub fn syscall_exit(task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+    unsafe {
+        if !task.is_null() {
+            (*task).exit_reason = crate::syscall_types::TaskExitReason::Normal;
+            (*task).fault_reason = crate::syscall_types::TaskFaultReason::None;
+            (*task).exit_code = 0;
+        }
+        call_task_terminate(if task.is_null() {
+            u32::MAX
+        } else {
+            (*task).task_id
+        });
+    }
+    unsafe { call_schedule() };
+    SyscallDisposition::NoReturn
+}
+
+pub fn syscall_user_write(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    let mut write_len: usize = 0;
+
+    unsafe {
+        if (*frame).rdi == 0
+            || syscall_bounded_from_user(
+                tmp.as_mut_ptr() as *mut c_void,
+                tmp.len(),
+                (*frame).rdi as *const c_void,
+                (*frame).rsi,
+                USER_IO_MAX_BYTES,
+                &mut write_len as *mut usize,
+            ) != 0
+        {
+            return syscall_return_err(frame, u64::MAX);
+        }
+    }
+
+    // Best-effort raw serial write; ignore port for the Rust serial wrapper.
+    let text = core::str::from_utf8(&tmp[..write_len]).unwrap_or("");
+    serial::write_str(text);
+    syscall_return_ok(frame, write_len as u64)
+}
+
+pub fn syscall_user_read(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    unsafe {
+        if (*frame).rdi == 0 || (*frame).rsi == 0 {
+            return syscall_return_err(frame, u64::MAX);
+        }
+    }
+
+    let max_len = unsafe {
+        if (*frame).rsi as usize > USER_IO_MAX_BYTES {
+            USER_IO_MAX_BYTES
+        } else {
+            (*frame).rsi as usize
+        }
+    };
+
+    let mut read_len = tty_read_line(tmp.as_mut_ptr(), max_len);
+    if max_len > 0 {
+        read_len = read_len.min(max_len.saturating_sub(1));
+        tmp[read_len] = 0;
+    }
+
+    let copy_len = read_len.saturating_add(1).min(max_len);
+    if syscall_copy_to_user_bounded(
+        unsafe { (*frame).rdi as *mut c_void },
+        tmp.as_ptr() as *const c_void,
+        copy_len,
+    ) != 0
+    {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    syscall_return_ok(frame, read_len as u64)
+}
+
+pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let res = unsafe { call_fate_spin() };
+    if task.is_null() {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    if unsafe { call_fate_set_pending(res, (*task).task_id) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let packed = ((res.token as u64) << 32) | res.value as u64;
+    syscall_return_ok(frame, packed)
+}
+
+pub fn syscall_sleep_ms(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut ms = unsafe { (*frame).rdi };
+    if ms > 60000 {
+        ms = 60000;
+    }
+    if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
+        pit_sleep_ms(ms as u32);
+    } else {
+        pit_poll_delay_ms(ms as u32);
+    }
+    syscall_return_ok(frame, 0)
+}
+
+pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let info = video_bridge::framebuffer_get_info();
+    if info.is_null() {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let info_local = unsafe { core::ptr::read(info) };
+    if info_local.initialized == 0 {
+        klog_debug!("syscall_fb_info: framebuffer not initialized");
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let user_info = UserFbInfo {
+        width: info_local.width,
+        height: info_local.height,
+        pitch: info_local.pitch,
+        bpp: info_local.bpp as u8,
+        pixel_format: info_local.pixel_format as u8,
+    };
+
+    if syscall_copy_to_user_bounded(
+        unsafe { (*frame).rdi as *mut c_void },
+        &user_info as *const _ as *const c_void,
+        core::mem::size_of::<UserFbInfo>(),
+    ) != 0
+    {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    syscall_return_ok(frame, 0)
+}
+
+pub fn syscall_gfx_fill_rect(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut rect = UserRect {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        color: 0,
+    };
+    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let rc =
+        video_bridge::draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_gfx_draw_line(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut line = UserLine {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+        color: 0,
+    };
+    if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const UserLine) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let rc = video_bridge::draw_line(line.x0, line.y0, line.x1, line.y1, line.color);
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_gfx_draw_circle(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut circle = UserCircle {
+        cx: 0,
+        cy: 0,
+        radius: 0,
+        color: 0,
+    };
+    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let rc = video_bridge::draw_circle(circle.cx, circle.cy, circle.radius, circle.color);
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_gfx_draw_circle_filled(
+    _task: *mut Task,
+    frame: *mut InterruptFrame,
+) -> SyscallDisposition {
+    let mut circle = UserCircle {
+        cx: 0,
+        cy: 0,
+        radius: 0,
+        color: 0,
+    };
+    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let rc = video_bridge::draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color);
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut text = UserText {
+        x: 0,
+        y: 0,
+        fg_color: 0,
+        bg_color: 0,
+        str_ptr: ptr::null(),
+        len: 0,
+    };
+    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const UserText) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    if text.len == 0 || text.len as usize >= USER_IO_MAX_BYTES {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let mut buf = [0u8; USER_IO_MAX_BYTES];
+    if user_copy_from_user(
+        buf.as_mut_ptr() as *mut c_void,
+        text.str_ptr as *const c_void,
+        text.len as usize,
+    ) != 0
+    {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    buf[text.len as usize] = 0;
+    let rc = video_result_from_font(video_bridge::font_draw_string(
+        text.x,
+        text.y,
+        buf.as_ptr() as *const c_char,
+        text.fg_color,
+        text.bg_color,
+    ));
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let value = random::random_next();
+    syscall_return_ok(frame, value as u64)
+}
+
+pub fn syscall_roulette_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let fate = unsafe { (*frame).rdi as u32 };
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::roulette_draw(fate);
+    let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+    }
+    syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let mut stored = FateResult { token: 0, value: 0 };
+    if unsafe { call_fate_take_pending((*task).task_id, &mut stored) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let token = unsafe { ((*frame).rdi >> 32) as u32 };
+    if token != stored.token {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Check if the fate value is even (loss) or odd (win)
+    let is_win = (stored.value & 1) == 1;
+
+    unsafe {
+        if is_win {
+        // Win: award the win and continue
+            call_fate_apply_outcome(&stored, 0, true);
+            syscall_return_ok(frame, 0)
+        } else {
+            // Loss: award the loss and reboot to spin again
+            call_fate_apply_outcome(&stored, 0, false);
+            call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
+        }
+    }
+}
+
+pub fn syscall_sys_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if unsafe { (*frame).rdi } == 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let mut info = UserSysInfo {
+        total_pages: 0,
+        free_pages: 0,
+        allocated_pages: 0,
+        total_tasks: 0,
+        active_tasks: 0,
+        task_context_switches: 0,
+        scheduler_context_switches: 0,
+        scheduler_yields: 0,
+        ready_tasks: 0,
+        schedule_calls: 0,
+    };
+
+    unsafe {
+        get_page_allocator_stats(
+            &mut info.total_pages,
+            &mut info.free_pages,
+            &mut info.allocated_pages,
+        );
+        call_get_task_stats(
+            &mut info.total_tasks,
+            &mut info.active_tasks,
+            &mut info.task_context_switches,
+        );
+        call_get_scheduler_stats(
+            &mut info.scheduler_context_switches,
+            &mut info.scheduler_yields,
+            &mut info.ready_tasks,
+            &mut info.schedule_calls,
+        );
+    }
+
+    if syscall_copy_to_user_bounded(
+        unsafe { (*frame).rdi as *mut c_void },
+        &info as *const _ as *const c_void,
+        core::mem::size_of::<UserSysInfo>(),
+    ) != 0
+    {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    syscall_return_ok(frame, 0)
+}
+
+pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+    unsafe {
+        call_kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
+    }
+    #[allow(unreachable_code)]
+    // This should never be reached, but Rust needs a return value
+    SyscallDisposition::Ok
+}
+
+use crate::syscall_common::SyscallHandler;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyscallEntry {
+    pub handler: Option<SyscallHandler>,
+    pub name: *const c_char,
+}
+
+unsafe impl Sync for SyscallEntry {}
+
+static SYSCALL_TABLE: [SyscallEntry; 32] = {
+    use self::lib_syscall_numbers::*;
+    let mut table: [SyscallEntry; 32] = [SyscallEntry {
+        handler: None,
+        name: core::ptr::null(),
+    }; 32];
+    table[SYSCALL_YIELD as usize] = SyscallEntry {
+        handler: Some(syscall_yield),
+        name: b"yield\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_EXIT as usize] = SyscallEntry {
+        handler: Some(syscall_exit),
+        name: b"exit\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_WRITE as usize] = SyscallEntry {
+        handler: Some(syscall_user_write),
+        name: b"write\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_READ as usize] = SyscallEntry {
+        handler: Some(syscall_user_read),
+        name: b"read\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_ROULETTE as usize] = SyscallEntry {
+        handler: Some(syscall_roulette_spin),
+        name: b"roulette\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SLEEP_MS as usize] = SyscallEntry {
+        handler: Some(syscall_sleep_ms),
+        name: b"sleep_ms\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FB_INFO as usize] = SyscallEntry {
+        handler: Some(syscall_fb_info),
+        name: b"fb_info\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GFX_FILL_RECT as usize] = SyscallEntry {
+        handler: Some(syscall_gfx_fill_rect),
+        name: b"gfx_fill_rect\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GFX_DRAW_LINE as usize] = SyscallEntry {
+        handler: Some(syscall_gfx_draw_line),
+        name: b"gfx_draw_line\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GFX_DRAW_CIRCLE as usize] = SyscallEntry {
+        handler: Some(syscall_gfx_draw_circle),
+        name: b"gfx_draw_circle\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GFX_DRAW_CIRCLE_FILLED as usize] = SyscallEntry {
+        handler: Some(syscall_gfx_draw_circle_filled),
+        name: b"gfx_draw_circle_filled\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FONT_DRAW as usize] = SyscallEntry {
+        handler: Some(syscall_font_draw),
+        name: b"font_draw\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
+        handler: Some(syscall_random_next),
+        name: b"random_next\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_ROULETTE_DRAW as usize] = SyscallEntry {
+        handler: Some(syscall_roulette_draw),
+        name: b"roulette_draw\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_ROULETTE_RESULT as usize] = SyscallEntry {
+        handler: Some(syscall_roulette_result),
+        name: b"roulette_result\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_OPEN as usize] = SyscallEntry {
+        handler: Some(syscall_fs_open),
+        name: b"fs_open\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_CLOSE as usize] = SyscallEntry {
+        handler: Some(syscall_fs_close),
+        name: b"fs_close\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_READ as usize] = SyscallEntry {
+        handler: Some(syscall_fs_read),
+        name: b"fs_read\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_WRITE as usize] = SyscallEntry {
+        handler: Some(syscall_fs_write),
+        name: b"fs_write\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_STAT as usize] = SyscallEntry {
+        handler: Some(syscall_fs_stat),
+        name: b"fs_stat\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_MKDIR as usize] = SyscallEntry {
+        handler: Some(syscall_fs_mkdir),
+        name: b"fs_mkdir\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_UNLINK as usize] = SyscallEntry {
+        handler: Some(syscall_fs_unlink),
+        name: b"fs_unlink\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FS_LIST as usize] = SyscallEntry {
+        handler: Some(syscall_fs_list),
+        name: b"fs_list\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SYS_INFO as usize] = SyscallEntry {
+        handler: Some(syscall_sys_info),
+        name: b"sys_info\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_HALT as usize] = SyscallEntry {
+        handler: Some(syscall_halt),
+        name: b"halt\0".as_ptr() as *const c_char,
+    };
+    table
+};
+
+pub mod lib_syscall_numbers {
+    #![allow(non_upper_case_globals)]
+    pub const SYSCALL_YIELD: u64 = 0;
+    pub const SYSCALL_EXIT: u64 = 1;
+    pub const SYSCALL_WRITE: u64 = 2;
+    pub const SYSCALL_READ: u64 = 3;
+    pub const SYSCALL_ROULETTE: u64 = 4;
+    pub const SYSCALL_SLEEP_MS: u64 = 5;
+    pub const SYSCALL_FB_INFO: u64 = 6;
+    pub const SYSCALL_GFX_FILL_RECT: u64 = 7;
+    pub const SYSCALL_GFX_DRAW_LINE: u64 = 8;
+    pub const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
+    pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
+    pub const SYSCALL_FONT_DRAW: u64 = 11;
+    pub const SYSCALL_RANDOM_NEXT: u64 = 12;
+    pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
+    pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
+    pub const SYSCALL_FS_OPEN: u64 = 14;
+    pub const SYSCALL_FS_CLOSE: u64 = 15;
+    pub const SYSCALL_FS_READ: u64 = 16;
+    pub const SYSCALL_FS_WRITE: u64 = 17;
+    pub const SYSCALL_FS_STAT: u64 = 18;
+    pub const SYSCALL_FS_MKDIR: u64 = 19;
+    pub const SYSCALL_FS_UNLINK: u64 = 20;
+    pub const SYSCALL_FS_LIST: u64 = 21;
+    pub const SYSCALL_SYS_INFO: u64 = 22;
+    pub const SYSCALL_HALT: u64 = 23;
+}
+
+pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
+    if (sysno as usize) >= SYSCALL_TABLE.len() {
+        return ptr::null();
+    }
+    let entry = &SYSCALL_TABLE[sysno as usize];
+    if entry.handler.is_none() {
+        ptr::null()
+    } else {
+        entry as *const SyscallEntry
+    }
+}

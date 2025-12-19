@@ -1,0 +1,19 @@
+[package]
+name = "slopos-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+[dependencies]
+spin.workspace = true
+x86_64.workspace = true
+

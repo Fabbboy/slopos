@@ -1,0 +1,23 @@
+[package]
+name = "slopos-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+[features]
+qemu-exit = []
+
+[dependencies]
+slopos-lib = { workspace = true }
+slopos-mm = { workspace = true }
+slopos-fs = { workspace = true }
+spin.workspace = true

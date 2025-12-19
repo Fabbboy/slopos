@@ -1,6 +1,6 @@
 # SlopOS
 
-SlopOS is a gloriously sloppy x86-64 kernel where every boot spins the Wheel of Fate. Subsystems live under familiar directories (`boot/`, `mm/`, `drivers/`, `sched/`, `video/`) while lore and contributor guidance stay in `AGENTS.md`. Read that file first—it sets the tone and workflow expectations.
+SlopOS is a gloriously sloppy x86-64 kernel where every boot spins the Wheel of Fate. Subsystems live under familiar directories (`boot/`, `mm/`, `drivers/`, `sched/`, `video/`) while lore and contributor guidance stay in `AGENTS.md`. Read that file first—it sets the tone and workflow expectations. The kernel is now a Rust-first build on nightly, keeping the same module split while we retire the legacy C sources.
 
 ## Key Features
 
@@ -13,15 +13,13 @@ SlopOS is a gloriously sloppy x86-64 kernel where every boot spins the Wheel of 
 
 For detailed documentation on privilege separation and segment switching, see [`docs/PRIVILEGE_SEPARATION.md`](docs/PRIVILEGE_SEPARATION.md).
 
-## Build Workflow
+## Build Workflow (Rust)
 
-All day-to-day work goes through the Makefile. Typical targets:
+- `make setup` installs the pinned nightly from `rust-toolchain.toml` (via rustup) and primes `builddir/`.
+- `make build` compiles the Rust kernel with `cargo` using the custom target JSON at `targets/x86_64-slos.json`.
+- `make iso`, `make boot`, `make boot-log`, `make test` keep the same UX as before; the Makefile still handles Limine/OVMF fetching and ISO assembly.
 
-- `make setup` (once per checkout) to configure Meson/Ninja
-- `make build` to compile the kernel
-- `make boot`, `make boot-log`, `make test` when you need QEMU runs
-
-Artifacts land in `builddir/`, and `test_output.log` captures non-interactive boots.
+Artifacts land in `builddir/` (kernel at `builddir/kernel.elf`, cargo intermediates in `builddir/target/`), and `test_output.log` captures non-interactive boots.
 
 ### Video requirement
 

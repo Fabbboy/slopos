@@ -3,56 +3,79 @@
 # No 32-bit entry code needed - Limine handles the transition
 
 .code64
+.intel_syntax noprefix
+
+.equ COM1_BASE, 0x3F8
+.equ COM1_IER, COM1_BASE + 1
+.equ COM1_FCR, COM1_BASE + 2
+.equ COM1_LCR, COM1_BASE + 3
+.equ COM1_MCR, COM1_BASE + 4
+.equ COM1_DLL, COM1_BASE + 0
+.equ COM1_DLH, COM1_BASE + 1
+
+.equ SERIAL_MARKER_L, 'L'
+.equ SERIAL_MARKER_S, 'S'
+
+.equ KERNEL_STACK_SIZE, 65536
+
 .section .text
 .global _start
 
 _start:
     # Limine provides 64-bit long mode with paging enabled
     # Set up our own kernel stack for safety
-    
-    # Send 'L' IMMEDIATELY to verify entry (before doing ANYTHING else)
-    movw $0x3F8, %dx        # COM1 port
-    movb $'L', %al          # Character 'L' for Limine  
-    outb %al, %dx
-    
+    cli
+
     # Load kernel stack pointer (use absolute address in higher half)
-    movabs $kernel_stack_top, %rsp
-    
+    lea rax, [rip + kernel_stack_top]
+    mov rsp, rax
+
     # Ensure 16-byte stack alignment (required by System V ABI)
-    andq $-16, %rsp
-    
+    and rsp, -16
+
     # Clear direction flag for string operations
     cld
 
     # Zero out base pointer for clean stack traces
-    xorq %rbp, %rbp
+    xor rbp, rbp
 
-    # Initialize COM1 properly
+    # Initialize COM1 properly and then emit markers
     call early_serial_init
-    
-    # Send another character to show we survived
-    movw $0x3F8, %dx        # COM1 port
-    movb $'S', %al          # Character 'S' for Stack OK
-    outb %al, %dx
-    
+    mov dx, COM1_BASE
+    mov al, SERIAL_MARKER_L
+    out dx, al
+    mov dx, COM1_BASE
+    mov al, SERIAL_MARKER_S
+    out dx, al
+
+    # Enable SSE/FXSR so Rust-generated memcpy instructions don't #UD
+    mov rax, cr0
+    or rax, 1 << 1          # CR0.MP
+    and rax, ~(1 << 2)      # clear CR0.EM
+    mov cr0, rax
+
+    mov rax, cr4
+    or rax, (1 << 9) | (1 << 10)   # CR4.OSFXSR | CR4.OSXMMEXCPT
+    mov cr4, rax
+    fninit
+
     # Zero out registers for clean state
-    xorq %rax, %rax
-    xorq %rbx, %rbx
-    xorq %rcx, %rcx
-    xorq %rdx, %rdx
-    xorq %rsi, %rsi
-    xorq %rdi, %rdi
-    xorq %r8, %r8
-    xorq %r9, %r9
-    xorq %r10, %r10
-    xorq %r11, %r11
-    xorq %r12, %r12
-    xorq %r13, %r13
-    xorq %r14, %r14
-    xorq %r15, %r15
+    xor rax, rax
+    xor rbx, rbx
+    xor rcx, rcx
+    xor rdx, rdx
+    xor rsi, rsi
+    xor rdi, rdi
+    xor r8, r8
+    xor r9, r9
+    xor r10, r10
+    xor r11, r11
+    xor r12, r12
+    xor r13, r13
+    xor r14, r14
+    xor r15, r15
 
     # Call kernel_main with no parameters
-    # Boot information is available via static Limine request structures
     call kernel_main
 
     # If kernel_main returns (it shouldn't), halt
@@ -64,45 +87,45 @@ _start:
 # Minimal serial port initialization
 # Initializes COM1 for 115200 baud, 8N1
 early_serial_init:
-    pushq %rax
-    pushq %rdx
-    
+    push rax
+    push rdx
+
     # Disable interrupts on COM1
-    movw $0x3F9, %dx        # COM1 + 1 (IER)
-    xorb %al, %al
-    outb %al, %dx
-    
+    mov dx, COM1_IER
+    xor al, al
+    out dx, al
+
     # Enable DLAB (Divisor Latch Access Bit)
-    movw $0x3FB, %dx        # COM1 + 3 (LCR)
-    movb $0x80, %al
-    outb %al, %dx
-    
+    mov dx, COM1_LCR
+    mov al, 0x80
+    out dx, al
+
     # Set divisor to 1 (115200 baud)
-    movw $0x3F8, %dx        # COM1 + 0 (DLL)
-    movb $0x01, %al
-    outb %al, %dx
-    
-    movw $0x3F9, %dx        # COM1 + 1 (DLH)
-    xorb %al, %al
-    outb %al, %dx
-    
+    mov dx, COM1_DLL
+    mov al, 0x01
+    out dx, al
+
+    mov dx, COM1_DLH
+    xor al, al
+    out dx, al
+
     # 8 bits, no parity, one stop bit (8N1)
-    movw $0x3FB, %dx        # COM1 + 3 (LCR)
-    movb $0x03, %al
-    outb %al, %dx
-    
+    mov dx, COM1_LCR
+    mov al, 0x03
+    out dx, al
+
     # Enable FIFO, clear TX/RX queues, 14-byte threshold
-    movw $0x3FA, %dx        # COM1 + 2 (FCR)
-    movb $0xC7, %al
-    outb %al, %dx
-    
+    mov dx, COM1_FCR
+    mov al, 0xC7
+    out dx, al
+
     # Mark data terminal ready, request to send, auxiliary output 2
-    movw $0x3FC, %dx        # COM1 + 4 (MCR)
-    movb $0x0B, %al
-    outb %al, %dx
-    
-    popq %rdx
-    popq %rax
+    mov dx, COM1_MCR
+    mov al, 0x0B
+    out dx, al
+
+    pop rdx
+    pop rax
     ret
 
 .size _start, . - _start
@@ -113,7 +136,6 @@ early_serial_init:
 .align 16
 .global kernel_stack_bottom
 kernel_stack_bottom:
-    .skip 65536             # 64KB stack
+    .skip KERNEL_STACK_SIZE             # 64KB stack
 .global kernel_stack_top
 kernel_stack_top:
-

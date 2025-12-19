@@ -1,0 +1,73 @@
+use slopos_drivers::wl_currency;
+use slopos_lib::klog::{self, KlogLevel};
+use slopos_lib::{klog_debug, klog_info};
+
+use crate::boot_init_step;
+use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
+
+use slopos_mm::memory_init::init_memory_system;
+
+const KERNEL_VIRTUAL_BASE: u64 = 0xFFFFFFFF80000000;
+
+fn boot_step_memory_init() -> i32 {
+    let memmap = boot_get_memmap();
+    if memmap.is_null() {
+        klog_info!("ERROR: Memory map not available");
+        return -1;
+    }
+
+    let hhdm = boot_get_hhdm_offset();
+    let hhdm_available = crate::limine_protocol::is_hhdm_available() != 0;
+    let framebuffer = crate::limine_protocol::boot_info().framebuffer;
+
+    klog_debug!("Initializing memory management from Limine data...");
+    let rc = init_memory_system(
+        memmap as *const slopos_mm::memory_init::LimineMemmapResponse,
+        hhdm,
+        hhdm_available,
+        framebuffer,
+    );
+    if rc != 0 {
+        klog_info!("ERROR: Memory system initialization failed");
+        return -1;
+    }
+
+    slopos_mm::kernel_heap::register_wl_hooks(wl_currency::award_win, wl_currency::award_loss);
+
+    klog_debug!("Memory management initialized.");
+    0
+}
+
+fn boot_step_memory_verify() {
+    let stack_ptr: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) stack_ptr, options(nomem, preserves_flags));
+    }
+
+    if klog::is_enabled_level(KlogLevel::Debug) {
+        klog_debug!("Stack pointer read successfully!");
+        klog_info!("Current Stack Pointer: 0x{:x}", stack_ptr);
+
+        let current_ip = boot_step_memory_verify as *const () as usize as u64;
+        klog_info!("Kernel Code Address: 0x{:x}", current_ip);
+
+        if current_ip >= KERNEL_VIRTUAL_BASE {
+            klog_debug!("Running in higher-half virtual memory - CORRECT");
+        } else {
+            klog_info!("WARNING: Not running in higher-half virtual memory");
+        }
+    }
+}
+
+boot_init_step!(
+    BOOT_STEP_MEMORY_INIT,
+    memory,
+    b"memory init\0",
+    boot_step_memory_init
+);
+crate::boot_init_step_unit!(
+    BOOT_STEP_MEMORY_VERIFY,
+    memory,
+    b"address verification\0",
+    boot_step_memory_verify
+);
