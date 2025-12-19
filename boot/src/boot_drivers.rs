@@ -22,7 +22,7 @@ use slopos_drivers::{
         interrupt_test_config_init_defaults, interrupt_test_config_parse_cmdline,
         interrupt_test_suite_string, interrupt_test_verbosity_string,
     },
-    ioapic::ioapic_init,
+    ioapic::init,
     pci::{pci_get_primary_gpu, pci_init},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
@@ -151,7 +151,7 @@ fn boot_step_apic_setup_fn() {
 
 fn boot_step_ioapic_setup_fn() {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
-    if ioapic_init() != 0 {
+    if init() != 0 {
         kernel_panic(
             b"IOAPIC discovery failed - SlopOS cannot operate without it\0".as_ptr()
                 as *const c_char,

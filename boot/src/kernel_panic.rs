@@ -13,14 +13,6 @@ fn panic_output_str(s: &str) {
     serial::write_line(s);
 }
 
-fn read_rip() -> u64 {
-    let rip: u64;
-    unsafe {
-        core::arch::asm!("lea {0}, [rip]", out(reg) rip, options(nomem, nostack, preserves_flags));
-    }
-    rip
-}
-
 fn read_rsp() -> u64 {
     let rsp: u64;
     unsafe {
@@ -53,6 +45,19 @@ fn read_cr(reg: ControlRegister) -> u64 {
     }
     value
 }
+
+fn log_register_snapshot(rip: Option<u64>, rsp: Option<u64>) {
+    panic_output_str("Register snapshot:");
+    if let Some(rip) = rip {
+        klog_info!("RIP: 0x{:x}", rip);
+    }
+    if let Some(rsp) = rsp {
+        klog_info!("RSP: 0x{:x}", rsp);
+    }
+    klog_info!("CR0: 0x{:x}", read_cr(ControlRegister::Cr0));
+    klog_info!("CR3: 0x{:x}", read_cr(ControlRegister::Cr3));
+    klog_info!("CR4: 0x{:x}", read_cr(ControlRegister::Cr4));
+}
 pub fn kernel_panic(message: *const c_char) {
     cpu::disable_interrupts();
 
@@ -67,15 +72,8 @@ pub fn kernel_panic(message: *const c_char) {
         panic_output_str("PANIC: No message provided");
     }
 
-    let rip = read_rip();
     let rsp = read_rsp();
-
-    panic_output_str("Register snapshot:");
-    klog_info!("RIP: 0x{:x}", rip);
-    klog_info!("RSP: 0x{:x}", rsp);
-    klog_info!("CR0: 0x{:x}", read_cr(ControlRegister::Cr0));
-    klog_info!("CR3: 0x{:x}", read_cr(ControlRegister::Cr3));
-    klog_info!("CR4: 0x{:x}", read_cr(ControlRegister::Cr4));
+    log_register_snapshot(None, Some(rsp));
 
     panic_output_str("===================");
     panic_output_str("Kernel panic: unrecoverable error");
@@ -124,11 +122,42 @@ pub fn kernel_panic_with_context(
         }
     }
 
-    let rip = read_rip();
     let rsp = read_rsp();
+    log_register_snapshot(None, Some(rsp));
 
-    klog_info!("RIP: 0x{:x}", rip);
-    klog_info!("RSP: 0x{:x}", rsp);
+    panic_output_str("===================");
+    panic_output_str("Kernel panic: unrecoverable error");
+    panic_output_str("System halted.");
+
+    if is_memory_system_initialized() != 0 {
+        execute_kernel();
+    } else {
+        panic_output_str("Memory system unavailable; skipping paint ritual");
+    }
+
+    let reason = if message.is_null() {
+        b"panic\0".as_ptr() as *const c_char
+    } else {
+        message
+    };
+    kernel_shutdown(reason);
+}
+
+pub fn kernel_panic_with_state(message: *const c_char, rip: u64, rsp: u64) {
+    cpu::disable_interrupts();
+
+    panic_output_str("\n\n=== KERNEL PANIC ===");
+
+    if !message.is_null() {
+        let msg_str = unsafe { CStr::from_ptr(message) }
+            .to_str()
+            .unwrap_or("<invalid utf-8>");
+        klog_info!("PANIC: {}", msg_str);
+    } else {
+        panic_output_str("PANIC: No message provided");
+    }
+
+    log_register_snapshot(Some(rip), Some(rsp));
 
     panic_output_str("===================");
     panic_output_str("Kernel panic: unrecoverable error");

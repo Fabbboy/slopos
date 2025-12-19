@@ -183,6 +183,7 @@ static ISO_TABLE: IoapicIsoTable = IoapicIsoTable::new();
 static IOAPIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
+static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn phys_to_virt(phys: u64) -> *mut u8 {
@@ -513,39 +514,53 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
 }
 
 pub fn init() -> i32 {
-    if IOAPIC_READY.load(Ordering::Relaxed) {
+    if IOAPIC_READY.load(Ordering::Acquire) {
         return 0;
     }
+    if IOAPIC_INIT_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        while !IOAPIC_READY.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        return 0;
+    }
+
+    let init_fail = || {
+        IOAPIC_INIT_IN_PROGRESS.store(false, Ordering::Release);
+        -1
+    };
 
     if unsafe { call_is_hhdm_available() } == 0 {
         klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
 
     if unsafe { call_is_rsdp_available() } == 0 {
         klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
 
     let rsdp = unsafe { call_get_rsdp_address() } as *const AcpiRsdp;
     if !acpi_validate_rsdp(rsdp) {
         klog_info!("IOAPIC: ACPI RSDP checksum failed");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
 
     let madt_header = acpi_find_table(rsdp, b"APIC");
     if madt_header.is_null() {
         klog_info!("IOAPIC: MADT not found in ACPI tables");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
     if !acpi_validate_table(madt_header) {
         klog_info!("IOAPIC: MADT checksum invalid");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
 
     ioapic_parse_madt(madt_header as *const AcpiMadt);
@@ -554,17 +569,18 @@ pub fn init() -> i32 {
     if count == 0 {
         klog_info!("IOAPIC: No controllers discovered");
         wl_currency::award_loss();
-        return -1;
+        return init_fail();
     }
 
     klog_info!("IOAPIC: Discovery complete");
-    IOAPIC_READY.store(true, Ordering::Relaxed);
+    IOAPIC_READY.store(true, Ordering::Release);
+    IOAPIC_INIT_IN_PROGRESS.store(false, Ordering::Release);
     wl_currency::award_win();
     0
 }
 
 pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
-    if !IOAPIC_READY.load(Ordering::Relaxed) {
+    if !IOAPIC_READY.load(Ordering::Acquire) {
         klog_info!("IOAPIC: Driver not initialized");
         return -1;
     }
@@ -610,7 +626,7 @@ pub fn unmask_gsi(gsi: u32) -> i32 {
 }
 
 pub fn is_ready() -> i32 {
-    if IOAPIC_READY.load(Ordering::Relaxed) {
+    if IOAPIC_READY.load(Ordering::Acquire) {
         1
     } else {
         0
@@ -618,7 +634,7 @@ pub fn is_ready() -> i32 {
 }
 
 pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -> i32 {
-    if IOAPIC_READY.load(Ordering::Relaxed) == false {
+    if IOAPIC_READY.load(Ordering::Acquire) == false {
         klog_info!("IOAPIC: Legacy route query before initialization");
         return -1;
     }
@@ -635,25 +651,4 @@ pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -
     *out_gsi = gsi;
     *out_flags = flags;
     0
-}
-pub fn ioapic_init() -> i32 {
-    init()
-}
-pub fn ioapic_config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
-    config_irq(gsi, vector, lapic_id, flags)
-}
-pub fn ioapic_mask_gsi(gsi: u32) -> i32 {
-    mask_gsi(gsi)
-}
-pub fn ioapic_unmask_gsi(gsi: u32) -> i32 {
-    unmask_gsi(gsi)
-}
-pub fn ioapic_is_ready() -> i32 {
-    is_ready()
-}
-pub fn ioapic_legacy_irq_info(legacy_irq: u8, out_gsi: *mut u32, out_flags: *mut u32) -> i32 {
-    if out_gsi.is_null() || out_flags.is_null() {
-        return -1;
-    }
-    unsafe { legacy_irq_info(legacy_irq, &mut *out_gsi, &mut *out_flags) }
 }

@@ -6,8 +6,8 @@ use slopos_lib::cpu;
 
 use crate::keyboard;
 use crate::scheduler_callbacks::{
-    call_register_idle_wakeup_callback, call_scheduler_is_enabled, call_task_is_blocked,
-    call_unblock_task, call_yield,
+    call_get_current_task, call_register_idle_wakeup_callback, call_scheduler_is_enabled,
+    call_task_is_blocked, call_unblock_task, call_yield,
 };
 use crate::serial;
 use crate::syscall_types::Task;
@@ -70,6 +70,21 @@ fn tty_register_idle_callback() {
         call_register_idle_wakeup_callback(Some(tty_input_available_cb));
         REGISTERED = true;
     }
+}
+
+fn tty_wait_queue_push(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    let mut queue = TTY_WAIT_QUEUE.lock();
+    if queue.count >= TTY_MAX_WAITERS {
+        return false;
+    }
+    let head = queue.head;
+    queue.tasks[head] = task;
+    queue.head = (head + 1) % TTY_MAX_WAITERS;
+    queue.count = queue.count.saturating_add(1);
+    true
 }
 
 fn tty_wait_queue_pop() -> *mut Task {
@@ -153,6 +168,10 @@ fn tty_block_until_input_ready() {
         }
         tty_service_serial_input();
         if unsafe { call_scheduler_is_enabled() } != 0 {
+            let task = unsafe { call_get_current_task() } as *mut Task;
+            if !task.is_null() {
+                let _ = tty_wait_queue_push(task);
+            }
             unsafe { call_yield() };
         } else {
             tty_cpu_relax();
