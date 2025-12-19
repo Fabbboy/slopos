@@ -142,20 +142,13 @@ unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let mut ret = num;
     unsafe {
         asm!(
-            "mov rdi, {a0}",
-            "mov rsi, {a1}",
-            "mov rdx, {a2}",
             "int 0x80",
-            a0 = in(reg) arg0,
-            a1 = in(reg) arg1,
-            a2 = in(reg) arg2,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
             inout("rax") ret,
-            lateout("rcx") _,
-            lateout("r8") _,
-            lateout("r9") _,
-            lateout("r10") _,
-            lateout("r11") _,
-            options(nostack, preserves_flags),
+            clobber_abi("sysv64"),
+            options(nostack),
         );
     }
     ret
