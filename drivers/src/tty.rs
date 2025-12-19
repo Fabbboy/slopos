@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use core::ptr;
 
+use spin::Mutex;
 use slopos_lib::cpu;
 
 use crate::keyboard;
@@ -22,12 +23,16 @@ struct TtyWaitQueue {
     count: usize,
 }
 
-static mut TTY_WAIT_QUEUE: TtyWaitQueue = TtyWaitQueue {
+// SAFETY: The wait queue only stores task pointers managed by the scheduler,
+// and access is synchronized through the TTY_WAIT_QUEUE mutex.
+unsafe impl Send for TtyWaitQueue {}
+
+static TTY_WAIT_QUEUE: Mutex<TtyWaitQueue> = Mutex::new(TtyWaitQueue {
     tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
     count: 0,
-};
+});
 
 use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
 
@@ -68,15 +73,14 @@ fn tty_register_idle_callback() {
 }
 
 fn tty_wait_queue_pop() -> *mut Task {
-    unsafe {
-        if TTY_WAIT_QUEUE.count == 0 {
-            return ptr::null_mut();
-        }
-        let task = TTY_WAIT_QUEUE.tasks[TTY_WAIT_QUEUE.tail];
-        TTY_WAIT_QUEUE.tail = (TTY_WAIT_QUEUE.tail + 1) % TTY_MAX_WAITERS;
-        TTY_WAIT_QUEUE.count = TTY_WAIT_QUEUE.count.saturating_sub(1);
-        task
+    let mut queue = TTY_WAIT_QUEUE.lock();
+    if queue.count == 0 {
+        return ptr::null_mut();
     }
+    let task = queue.tasks[queue.tail];
+    queue.tail = (queue.tail + 1) % TTY_MAX_WAITERS;
+    queue.count = queue.count.saturating_sub(1);
+    task
 }
 pub fn tty_notify_input_ready() {
     if unsafe { call_scheduler_is_enabled() } == 0 {
@@ -86,18 +90,18 @@ pub fn tty_notify_input_ready() {
     cpu::disable_interrupts();
     let mut tasko_wake: *mut Task = ptr::null_mut();
 
-    unsafe {
-        while TTY_WAIT_QUEUE.count > 0 {
-            let candidate = tty_wait_queue_pop();
-            if candidate.is_null() {
-                continue;
-            }
-            if !call_task_is_blocked(candidate as *const Task as *const core::ffi::c_void) {
-                continue;
-            }
-            tasko_wake = candidate;
+    loop {
+        let candidate = tty_wait_queue_pop();
+        if candidate.is_null() {
             break;
         }
+        if unsafe {
+            !call_task_is_blocked(candidate as *const Task as *const core::ffi::c_void)
+        } {
+            continue;
+        }
+        tasko_wake = candidate;
+        break;
     }
 
     cpu::enable_interrupts();
@@ -130,7 +134,7 @@ fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
     tty_service_serial_input();
 
     let mut raw = 0u8;
-    if serial_buffer_read(COM1_BASE, &mut raw as *mut u8) != 0 {
+    if serial_buffer_read(COM1_BASE, &mut raw as *mut u8) == 0 {
         if raw == b'\r' {
             raw = b'\n';
         } else if raw == 0x7F {
@@ -157,11 +161,8 @@ fn tty_block_until_input_ready() {
 }
 
 #[inline]
-fn serial_putc(port: u16, c: u8) {
-    let s = [c];
-    let text = core::str::from_utf8(&s).unwrap_or("");
-    serial::write_str(text);
-    let _ = port; // keep signature parity
+fn serial_putc(c: u8) {
+    serial::serial_putc_com1(c);
 }
 pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     if buffer.is_null() || buffer_size == 0 {
@@ -185,22 +186,20 @@ pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
             continue;
         }
 
-        let port = COM1_BASE;
-
         if c == b'\n' || c == b'\r' {
             unsafe {
                 *buffer.add(pos) = 0;
             }
-            serial_putc(port, b'\n');
+            serial_putc(b'\n');
             return pos;
         }
 
         if c == b'\x08' {
             if pos > 0 {
                 pos -= 1;
-                serial_putc(port, b'\x08');
-                serial_putc(port, b' ');
-                serial_putc(port, b'\x08');
+                serial_putc(b'\x08');
+                serial_putc(b' ');
+                serial_putc(b'\x08');
             }
             continue;
         }
@@ -214,7 +213,7 @@ pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
                 *buffer.add(pos) = c;
             }
             pos += 1;
-            serial_putc(port, c);
+            serial_putc(c);
             continue;
         }
 
@@ -226,6 +225,6 @@ pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
             *buffer.add(pos) = c;
         }
         pos += 1;
-        serial_putc(port, c);
+        serial_putc(c);
     }
 }

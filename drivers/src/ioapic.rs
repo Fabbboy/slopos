@@ -1,7 +1,7 @@
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
@@ -164,11 +164,24 @@ impl IoapicTable {
     }
 }
 
+struct IoapicIsoTable(UnsafeCell<[IoapicIso; IOAPIC_MAX_ISO_ENTRIES]>);
+
+unsafe impl Sync for IoapicIsoTable {}
+
+impl IoapicIsoTable {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([IoapicIso::new(); IOAPIC_MAX_ISO_ENTRIES]))
+    }
+
+    fn ptr(&self) -> *mut IoapicIso {
+        self.0.get() as *mut IoapicIso
+    }
+}
+
 static IOAPIC_TABLE: IoapicTable = IoapicTable::new();
-static mut ISO_TABLE: [IoapicIso; IOAPIC_MAX_ISO_ENTRIES] =
-    [IoapicIso::new(); IOAPIC_MAX_ISO_ENTRIES];
-static mut IOAPIC_COUNT: usize = 0;
-static mut ISO_COUNT: usize = 0;
+static ISO_TABLE: IoapicIsoTable = IoapicIsoTable::new();
+static IOAPIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
 
 #[inline]
@@ -302,7 +315,8 @@ fn acpi_find_table(rsdp: *const AcpiRsdp, signature: &[u8; 4]) -> *const AcpiSdt
 fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
     unsafe {
         let base_ptr = IOAPIC_TABLE.ptr();
-        for i in 0..IOAPIC_COUNT {
+        let count = IOAPIC_COUNT.load(Ordering::Relaxed);
+        for i in 0..count {
             let ctrl = &*base_ptr.add(i);
             let start = ctrl.gsi_base;
             let end = ctrl.gsi_base + ctrl.gsi_count.saturating_sub(1);
@@ -385,9 +399,12 @@ fn ioapic_flags_from_acpi(_bus_source: u8, flags: u16) -> u32 {
 
 fn ioapic_find_iso(irq: u8) -> Option<&'static IoapicIso> {
     unsafe {
-        for i in 0..ISO_COUNT {
-            if ISO_TABLE[i].irq_source == irq {
-                return Some(&ISO_TABLE[i]);
+        let count = ISO_COUNT.load(Ordering::Relaxed);
+        let base_ptr = ISO_TABLE.ptr();
+        for i in 0..count {
+            let iso = &*base_ptr.add(i);
+            if iso.irq_source == irq {
+                return Some(iso);
             }
         }
     }
@@ -431,10 +448,8 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
         return;
     }
 
-    unsafe {
-        IOAPIC_COUNT = 0;
-        ISO_COUNT = 0;
-    }
+    IOAPIC_COUNT.store(0, Ordering::Relaxed);
+    ISO_COUNT.store(0, Ordering::Relaxed);
 
     let cursor = madt as *const u8;
     let end = unsafe { cursor.add((*madt).header.length as usize) };
@@ -450,12 +465,13 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
             MADT_ENTRY_IOAPIC => {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIoapicEntry>() {
                     unsafe {
-                        if IOAPIC_COUNT >= IOAPIC_MAX_CONTROLLERS {
+                        let ioapic_index = IOAPIC_COUNT.load(Ordering::Relaxed);
+                        if ioapic_index >= IOAPIC_MAX_CONTROLLERS {
                             klog_info!("IOAPIC: Too many controllers, ignoring extra entries");
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIoapicEntry);
-                            let ctrl = &mut *IOAPIC_TABLE.ptr().add(IOAPIC_COUNT);
-                            IOAPIC_COUNT += 1;
+                            let ctrl = &mut *IOAPIC_TABLE.ptr().add(ioapic_index);
+                            IOAPIC_COUNT.store(ioapic_index + 1, Ordering::Relaxed);
                             ctrl.id = entry.ioapic_id;
                             ctrl.gsi_base = entry.gsi_base;
                             ctrl.phys_addr = entry.ioapic_address as u64;
@@ -471,12 +487,13 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
             MADT_ENTRY_INTERRUPT_OVERRIDE => {
                 if hdr.length as usize >= mem::size_of::<AcpiMadtIsoEntry>() {
                     unsafe {
-                        if ISO_COUNT >= IOAPIC_MAX_ISO_ENTRIES {
+                        let iso_index = ISO_COUNT.load(Ordering::Relaxed);
+                        if iso_index >= IOAPIC_MAX_ISO_ENTRIES {
                             klog_info!("IOAPIC: Too many source overrides, ignoring extras");
                         } else {
                             let entry = &*(ptr as *const AcpiMadtIsoEntry);
-                            let iso = &mut ISO_TABLE[ISO_COUNT];
-                            ISO_COUNT += 1;
+                            let iso = &mut *ISO_TABLE.ptr().add(iso_index);
+                            ISO_COUNT.store(iso_index + 1, Ordering::Relaxed);
                             iso.bus_source = entry.bus_source;
                             iso.irq_source = entry.irq_source;
                             iso.gsi = entry.gsi;
@@ -533,7 +550,7 @@ pub fn init() -> i32 {
 
     ioapic_parse_madt(madt_header as *const AcpiMadt);
 
-    let count = unsafe { IOAPIC_COUNT };
+    let count = IOAPIC_COUNT.load(Ordering::Relaxed);
     if count == 0 {
         klog_info!("IOAPIC: No controllers discovered");
         wl_currency::award_loss();

@@ -2,6 +2,7 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::{c_int, c_void};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
@@ -154,7 +155,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         return -1;
     }
 
-    let sample_value = unsafe { *(mmio_base as *mut u32) };
+    let sample_value = unsafe { core::ptr::read_volatile(mmio_base as *const u32) };
     klog_debug!("PCI: virtio-gpu MMIO sample value=0x{:08x}", sample_value);
 
     unsafe {
@@ -169,24 +170,19 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
     0
 }
 
-static VIRTIO_GPU_PCI_DRIVER: PciDriver = unsafe {
-    PciDriver {
-        name: b"virtio-gpu\0".as_ptr(),
-        match_fn: Some(core::mem::transmute(virtio_gpu_match as *const ())),
-        probe: Some(core::mem::transmute(virtio_gpu_probe as *const ())),
-        context: core::ptr::null_mut(),
-    }
+static VIRTIO_GPU_PCI_DRIVER: PciDriver = PciDriver {
+    name: b"virtio-gpu\0".as_ptr(),
+    match_fn: Some(virtio_gpu_match),
+    probe: Some(virtio_gpu_probe),
+    context: core::ptr::null_mut(),
 };
 pub fn virtio_gpu_register_driver() {
-    static mut REGISTERED: bool = false;
-    unsafe {
-        if REGISTERED {
-            return;
-        }
-        if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const PciDriver) != 0 {
-            klog_info!("PCI: virtio-gpu driver registration failed");
-        }
-        REGISTERED = true;
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const PciDriver) != 0 {
+        klog_info!("PCI: virtio-gpu driver registration failed");
     }
 }
 pub fn virtio_gpu_get_device() -> *const virtio_gpu_device_t {

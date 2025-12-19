@@ -103,6 +103,11 @@ pub struct PciDriver {
     pub context: *mut core::ffi::c_void,
 }
 
+// SAFETY: PciDriver stores raw pointers for static driver metadata and an
+// optional context pointer. The driver registry is populated during
+// single-threaded boot and then treated as immutable; any context data is
+// either immutable or otherwise synchronized by the driver itself. Under these
+// rules, sharing PciDriver references across threads is safe.
 unsafe impl Sync for PciDriver {}
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
@@ -521,10 +526,10 @@ fn pci_scan_function(bus: u8, device: u8, function: u8) {
     let irq_pin = pci_config_read8(bus, device, function, PCI_INTERRUPT_PIN_OFFSET);
 
     unsafe {
+        if DEVICE_COUNT == PCI_MAX_DEVICES {
+            klog_info!("PCI: Device buffer full, additional devices will not be tracked");
+        }
         if DEVICE_COUNT >= PCI_MAX_DEVICES {
-            if DEVICE_COUNT == PCI_MAX_DEVICES {
-                klog_info!("PCI: Device buffer full, additional devices will not be tracked");
-            }
             return;
         }
     }

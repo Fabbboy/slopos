@@ -17,6 +17,7 @@ slopos-sched = { workspace = true }
 slopos-userland = { workspace = true }
 slopos-video = { workspace = true }
 
-[lib]
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
 test = false
-doctest = false

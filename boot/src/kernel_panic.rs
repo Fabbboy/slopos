@@ -78,7 +78,7 @@ pub fn kernel_panic(message: *const c_char) {
     klog_info!("CR4: 0x{:x}", read_cr(ControlRegister::Cr4));
 
     panic_output_str("===================");
-    panic_output_str("Skill issue lol");
+    panic_output_str("Kernel panic: unrecoverable error");
     panic_output_str("System halted.");
 
     if is_memory_system_initialized() != 0 {
@@ -131,7 +131,7 @@ pub fn kernel_panic_with_context(
     klog_info!("RSP: 0x{:x}", rsp);
 
     panic_output_str("===================");
-    panic_output_str("Skill issue lol");
+    panic_output_str("Kernel panic: unrecoverable error");
     panic_output_str("System halted.");
 
     if is_memory_system_initialized() != 0 {
