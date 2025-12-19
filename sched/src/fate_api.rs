@@ -16,7 +16,7 @@ where
     0
 }
 pub fn fate_spin() -> FateResult {
-    let val = random::random_u64() as u32;
+    let val = random::random_next() as u32;
     FateResult {
         token: val,
         value: val,

@@ -666,16 +666,24 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
             }
         }
         if rsp_phys != 0 {
-            let base = mm_phys_to_virt(rsp_phys) as *const u64;
-            unsafe {
-                let s0 = core::ptr::read_unaligned(base);
-                let s1 = core::ptr::read_unaligned(base.add(1));
-                let s2 = core::ptr::read_unaligned(base.add(2));
+            let base_addr = mm_phys_to_virt(rsp_phys);
+            if base_addr != 0 {
+                let base = base_addr as *const u64;
+                unsafe {
+                    let s0 = core::ptr::read_unaligned(base);
+                    let s1 = core::ptr::read_unaligned(base.add(1));
+                    let s2 = core::ptr::read_unaligned(base.add(2));
+                    klog_info!(
+                        "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
+                        s0,
+                        s1,
+                        s2
+                    );
+                }
+            } else {
                 klog_info!(
-                    "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
-                    s0,
-                    s1,
-                    s2
+                    "User PF stack top unavailable (phys 0x{:x} unmapped)",
+                    rsp_phys
                 );
             }
         }

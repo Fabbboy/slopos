@@ -1,5 +1,5 @@
 use slopos_lib::tsc;
-use spin::Mutex;
+use spin::{Mutex, Once};
 
 const DEFAULT_LFSR_SEED: u64 = 0xACE1u64;
 
@@ -29,15 +29,10 @@ impl Lfsr64 {
     }
 }
 
-static RNG: Mutex<Option<Lfsr64>> = Mutex::new(None);
+static RNG: Once<Mutex<Lfsr64>> = Once::new();
 
 pub fn random_next() -> u64 {
-    let mut rng = RNG.lock();
-    if rng.is_none() {
-        *rng = Some(Lfsr64::from_tsc());
-    }
-    rng.as_mut().unwrap().next()
-}
-pub fn random_u64() -> u64 {
-    random_next()
+    RNG.call_once(|| Mutex::new(Lfsr64::from_tsc()));
+    let rng = RNG.get().expect("RNG missing");
+    rng.lock().next()
 }
