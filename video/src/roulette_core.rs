@@ -1,5 +1,8 @@
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 use slopos_drivers::video_bridge::{VideoError, VideoResult};
+use slopos_drivers::pit::pit_poll_delay_ms;
+
+use crate::{framebuffer, font, graphics};
 
 const ROULETTE_BLANK_COLOR: u32 = 0x1818_18FF;
 const ROULETTE_BLANK_HIGHLIGHT: u32 = 0x4444_44FF;
@@ -374,8 +377,13 @@ fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, 
         }
     }
     let text_x = cx - (len as i32 * 8) / 2;
+    let mut text_len = len;
+    if len < num_str.len() {
+        num_str[len] = 0;
+        text_len = len + 1;
+    }
     unsafe {
-        let _ = backend_draw_text(b, text_x, y_pos + 20, &num_str[..len], 0x0000_00FF, 0);
+        let _ = backend_draw_text(b, text_x, y_pos + 20, &num_str[..text_len], 0x0000_00FF, 0);
     }
 }
 
@@ -536,11 +544,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         || width <= 0
         || height <= 0
     {
-        return -1;
+        return -2;
     }
 
     if unsafe { backend_fill_rect(backend, 0, 0, width, height, ROULETTE_BG_COLOR) }.is_err() {
-        return -1;
+        return -3;
     }
 
     unsafe {
@@ -616,7 +624,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
 
     for frame in 1..=total_frames {
         let p_q16 = ((frame as u32) << 16) / (total_frames as u32);
-        let eased_q16 = (p_q16 * (131072u32 - p_q16)) >> 16; // p * (2 - p)
+        let eased_q16 = (((p_q16 as u64) * (131072u64 - p_q16 as u64)) >> 16) as u32; // p * (2 - p)
         let pointer_angle_frame =
             start_angle + ((total_rotation as i64 * eased_q16 as i64) >> 16) as i32;
         let _ = render_wheel_frame(
@@ -789,4 +797,97 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     }
 
     0
+}
+
+fn kernel_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
+    let fb = framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)?;
+    unsafe {
+        if !w.is_null() {
+            *w = fb.width as i32;
+        }
+        if !h.is_null() {
+            *h = fb.height as i32;
+        }
+    }
+    Ok(())
+}
+
+fn kernel_fill_rect(
+    _ctx: *mut c_void,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: u32,
+) -> VideoResult {
+    graphics::graphics_draw_rect_filled_fast_status(x, y, w, h, color)
+}
+
+fn kernel_draw_line(
+    _ctx: *mut c_void,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: u32,
+) -> VideoResult {
+    graphics::graphics_draw_line_status(x0, y0, x1, y1, color)
+}
+
+fn kernel_draw_circle(
+    _ctx: *mut c_void,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> VideoResult {
+    graphics::graphics_draw_circle_status(cx, cy, radius, color)
+}
+
+fn kernel_draw_circle_filled(
+    _ctx: *mut c_void,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: u32,
+) -> VideoResult {
+    graphics::graphics_draw_circle_filled_status(cx, cy, radius, color)
+}
+
+fn kernel_draw_text(
+    _ctx: *mut c_void,
+    x: i32,
+    y: i32,
+    text: *const u8,
+    fg: u32,
+    bg: u32,
+) -> VideoResult {
+    if text.is_null() {
+        return Err(VideoError::Invalid);
+    }
+    let rc = font::font_draw_string(x, y, text as *const c_char, fg, bg);
+    if rc == 0 { Ok(()) } else { Err(VideoError::Invalid) }
+}
+
+fn kernel_sleep_ms(_ctx: *mut c_void, ms: u32) {
+    pit_poll_delay_ms(ms);
+}
+
+pub fn roulette_draw_kernel(fate_number: u32) -> VideoResult {
+    let backend = RouletteBackend {
+        ctx: core::ptr::null_mut(),
+        get_size: Some(kernel_get_size),
+        fill_rect: Some(kernel_fill_rect),
+        draw_line: Some(kernel_draw_line),
+        draw_circle: Some(kernel_draw_circle),
+        draw_circle_filled: Some(kernel_draw_circle_filled),
+        draw_text: Some(kernel_draw_text),
+        sleep_ms: Some(kernel_sleep_ms),
+    };
+
+    if roulette_run(&backend as *const RouletteBackend, fate_number) == 0 {
+        Ok(())
+    } else {
+        Err(VideoError::Invalid)
+    }
 }

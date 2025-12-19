@@ -3,6 +3,7 @@ use core::ptr;
 
 use crate::random;
 use crate::serial;
+use crate::wl_currency;
 use crate::syscall_common::{
     SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
     syscall_return_err, syscall_return_ok,
@@ -43,6 +44,7 @@ use crate::fate::FateResult;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::user_copy_from_user;
+use slopos_mm::paging;
 use slopos_mm::user_copy_helpers::{
     user_copy_circle_checked, user_copy_line_checked, user_copy_rect_checked, user_copy_text_header,
 };
@@ -317,6 +319,21 @@ pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     syscall_return_ok(frame, value as u64)
 }
 
+pub fn syscall_roulette_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let fate = unsafe { (*frame).rdi as u32 };
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::roulette_draw(fate);
+    let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+    }
+    syscall_finish_gfx(frame, rc)
+}
+
 pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if task.is_null() {
         return syscall_return_err(frame, u64::MAX);
@@ -473,6 +490,10 @@ static SYSCALL_TABLE: [SyscallEntry; 32] = {
         handler: Some(syscall_random_next),
         name: b"random_next\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_ROULETTE_DRAW as usize] = SyscallEntry {
+        handler: Some(syscall_roulette_draw),
+        name: b"roulette_draw\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_ROULETTE_RESULT as usize] = SyscallEntry {
         handler: Some(syscall_roulette_result),
         name: b"roulette_result\0".as_ptr() as *const c_char,
@@ -536,6 +557,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_FONT_DRAW: u64 = 11;
     pub const SYSCALL_RANDOM_NEXT: u64 = 12;
     pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
+    pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
     pub const SYSCALL_FS_OPEN: u64 = 14;
     pub const SYSCALL_FS_CLOSE: u64 = 15;
     pub const SYSCALL_FS_READ: u64 = 16;

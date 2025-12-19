@@ -30,6 +30,7 @@ pub struct VideoCallbacks {
     pub draw_circle_filled: Option<fn(i32, i32, i32, u32) -> VideoResult>,
     pub font_draw_string: Option<fn(i32, i32, *const c_char, u32, u32) -> c_int>,
     pub framebuffer_get_info: Option<fn() -> *mut FramebufferInfoC>,
+    pub roulette_draw: Option<fn(u32) -> VideoResult>,
 }
 
 static mut VIDEO_CALLBACKS: VideoCallbacks = VideoCallbacks {
@@ -39,6 +40,7 @@ static mut VIDEO_CALLBACKS: VideoCallbacks = VideoCallbacks {
     draw_circle_filled: None,
     font_draw_string: None,
     framebuffer_get_info: None,
+    roulette_draw: None,
 };
 
 static FRAMEBUFFER_INFO: AtomicPtr<FramebufferInfoC> = AtomicPtr::new(core::ptr::null_mut());
@@ -113,4 +115,13 @@ pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
         return ptr;
     }
     FRAMEBUFFER_INFO.load(Ordering::Relaxed)
+}
+
+pub fn roulette_draw(fate: u32) -> VideoResult {
+    unsafe {
+        if let Some(cb) = VIDEO_CALLBACKS.roulette_draw {
+            return cb(fate);
+        }
+    }
+    Err(VideoError::NoFramebuffer)
 }

@@ -37,6 +37,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             draw_circle_filled: Some(graphics::graphics_draw_circle_filled_status),
             font_draw_string: Some(font::font_draw_string),
             framebuffer_get_info: Some(fb_info_bridge),
+            roulette_draw: Some(roulette_core::roulette_draw_kernel),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

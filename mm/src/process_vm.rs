@@ -863,42 +863,40 @@ pub fn process_vm_load_elf(
             }
 
             // Copy file-backed portion that falls within this page.
-            // Calculate offset from segment start to this page
-            // The offset is the same in both kernel and user VAs (only the base differs)
-            // For overlapping segments, skip pages that are before the segment start
-            let file_bytes = if dst < user_seg_start {
-                // Page is before segment start (overlapping segment), skip copying
-                0
-            } else {
-                let page_off_in_seg = dst - user_seg_start;
-                if page_off_in_seg < ph.p_filesz {
-                    ph.p_filesz - page_off_in_seg
-                } else {
-                    0
-                }
-            };
-            if file_bytes > 0 {
-                let page_off_in_seg = dst - user_seg_start;
-                let copy_len = core::cmp::min(PAGE_SIZE_4KB as u64, file_bytes) as usize;
-                // File offset = p_offset + page_off_in_seg
+            let page_end = dst.wrapping_add(PAGE_SIZE_4KB as u64);
+            let seg_file_end = user_seg_start.wrapping_add(ph.p_filesz);
+            let seg_mem_end = user_seg_start.wrapping_add(ph.p_memsz);
+
+            let copy_start = core::cmp::max(dst, user_seg_start);
+            let copy_end = core::cmp::min(page_end, seg_file_end);
+            if copy_start < copy_end {
+                let page_off_in_seg = copy_start - user_seg_start;
+                let dest_off = (copy_start - dst) as usize;
+                let copy_len = (copy_end - copy_start) as usize;
                 let src_off = (ph.p_offset + page_off_in_seg) as usize;
                 if src_off < payload_len && src_off + copy_len <= payload_len {
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             payload.add(src_off),
-                            dest_virt as *mut u8,
+                            (dest_virt as *mut u8).add(dest_off),
                             copy_len,
                         );
                     }
                 }
-            } else if dst >= user_seg_start {
-                // Only zero pages that are within this segment's range (not overlapping)
-                // Zero-initialize BSS pages
-                unsafe {
-                    core::ptr::write_bytes(dest_virt as *mut u8, 0, PAGE_SIZE_4KB as usize);
+            }
+
+            // Zero-fill BSS region that falls within this page (if any).
+            if seg_mem_end > seg_file_end {
+                let zero_start = core::cmp::max(dst, seg_file_end);
+                let zero_end = core::cmp::min(page_end, seg_mem_end);
+                if zero_start < zero_end {
+                    let zero_off = (zero_start - dst) as usize;
+                    let zero_len = (zero_end - zero_start) as usize;
+                    unsafe {
+                        core::ptr::write_bytes((dest_virt as *mut u8).add(zero_off), 0, zero_len);
+                    }
                 }
             }
-            // else: page is before segment start (overlapping), skip zeroing to preserve previous segment's data
 
             dst += PAGE_SIZE_4KB;
         }

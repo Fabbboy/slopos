@@ -15,6 +15,7 @@ pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
 pub const SYSCALL_FONT_DRAW: u64 = 11;
 pub const SYSCALL_RANDOM_NEXT: u64 = 12;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
+pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
 pub const SYSCALL_FS_OPEN: u64 = 14;
 pub const SYSCALL_FS_CLOSE: u64 = 15;
 pub const SYSCALL_FS_READ: u64 = 16;
@@ -192,6 +193,12 @@ pub fn sys_roulette_result(fate_packed: u64) {
     unsafe {
         syscall(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
     }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_roulette_draw(fate: u32) -> i64 {
+    unsafe { syscall(SYSCALL_ROULETTE_DRAW, fate as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
