@@ -16,3 +16,7 @@ slopos-mm = { workspace = true }
 slopos-sched = { workspace = true }
 slopos-userland = { workspace = true }
 slopos-video = { workspace = true }
+
+[lib]
+test = false
+doctest = false

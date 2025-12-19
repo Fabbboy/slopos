@@ -11,6 +11,8 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+test = false
+doctest = false
 [dependencies]
 slopos-lib = { workspace = true }
 slopos-drivers = { workspace = true }
