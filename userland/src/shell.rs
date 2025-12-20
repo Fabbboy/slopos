@@ -6,10 +6,10 @@ use core::ptr;
 
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
+    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserBlit, UserFbInfo, UserFsEntry,
     UserFsList, UserRect, UserSysInfo, UserText, sys_fb_info, sys_font_draw, sys_fs_close,
     sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_gfx_fill_rect, sys_halt, sys_read_char, sys_sys_info, sys_write,
+    sys_gfx_blit, sys_gfx_fill_rect, sys_halt, sys_read_char, sys_sys_info, sys_write,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -47,6 +47,10 @@ const FONT_CHAR_HEIGHT: i32 = 16;
 const SHELL_BG_COLOR: u32 = 0x0000_0000;
 const SHELL_FG_COLOR: u32 = 0xE6E6_E6FF;
 const SHELL_TAB_WIDTH: i32 = 4;
+const SHELL_SCROLLBACK_LINES: usize = 256;
+const SHELL_SCROLLBACK_COLS: usize = 160;
+const KEY_PAGE_UP: u8 = 0x80;
+const KEY_PAGE_DOWN: u8 = 0x81;
 
 #[unsafe(link_section = ".user_bss")]
 static mut LINE_BUF: [u8; 256] = [0; 256];
@@ -57,6 +61,11 @@ static mut TOKEN_STORAGE: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS] =
 static mut PATH_BUF: [u8; SHELL_PATH_BUF] = [0; SHELL_PATH_BUF];
 #[unsafe(link_section = ".user_bss")]
 static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::new(); 32];
+#[unsafe(link_section = ".user_bss")]
+static mut SHELL_SCROLLBACK: [u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS] =
+    [0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS];
+#[unsafe(link_section = ".user_bss")]
+static mut SHELL_SCROLLBACK_LEN: [u16; SHELL_SCROLLBACK_LINES] = [0; SHELL_SCROLLBACK_LINES];
 
 struct ShellConsole {
     enabled: bool,
@@ -65,7 +74,11 @@ struct ShellConsole {
     cols: i32,
     rows: i32,
     cursor_col: i32,
-    cursor_row: i32,
+    cursor_line: i32,
+    origin: i32,
+    total_lines: i32,
+    view_top: i32,
+    follow: bool,
     fg: u32,
     bg: u32,
 }
@@ -79,7 +92,11 @@ impl ShellConsole {
             cols: 0,
             rows: 0,
             cursor_col: 0,
-            cursor_row: 0,
+            cursor_line: 0,
+            origin: 0,
+            total_lines: 1,
+            view_top: 0,
+            follow: true,
             fg: SHELL_FG_COLOR,
             bg: SHELL_BG_COLOR,
         }
@@ -88,15 +105,21 @@ impl ShellConsole {
     fn init(&mut self, width: i32, height: i32) {
         self.width = width;
         self.height = height;
-        self.cols = width / FONT_CHAR_WIDTH;
-        self.rows = height / FONT_CHAR_HEIGHT;
+        let cols = width / FONT_CHAR_WIDTH;
+        let rows = height / FONT_CHAR_HEIGHT;
+        self.cols = cols.clamp(1, SHELL_SCROLLBACK_COLS as i32);
+        self.rows = rows.clamp(1, SHELL_SCROLLBACK_LINES as i32);
         if self.cols <= 0 || self.rows <= 0 {
             self.enabled = false;
             return;
         }
         self.enabled = true;
         self.cursor_col = 0;
-        self.cursor_row = 0;
+        self.cursor_line = 0;
+        self.origin = 0;
+        self.total_lines = 1;
+        self.view_top = 0;
+        self.follow = true;
         self.fg = SHELL_FG_COLOR;
         self.bg = SHELL_BG_COLOR;
         self.clear();
@@ -115,7 +138,19 @@ impl ShellConsole {
         };
         let _ = sys_gfx_fill_rect(&rect);
         self.cursor_col = 0;
-        self.cursor_row = 0;
+        self.cursor_line = 0;
+        self.origin = 0;
+        self.total_lines = 1;
+        self.view_top = 0;
+        self.follow = true;
+        unsafe {
+            for len in SHELL_SCROLLBACK_LEN.iter_mut() {
+                *len = 0;
+            }
+            for byte in SHELL_SCROLLBACK.iter_mut() {
+                *byte = 0;
+            }
+        }
     }
 
     fn clear_line(&mut self, row: i32) {
@@ -133,53 +168,81 @@ impl ShellConsole {
         let _ = sys_gfx_fill_rect(&rect);
     }
 
-    fn set_cursor(&mut self, col: i32, row: i32) {
-        self.cursor_col = col.clamp(0, self.cols.saturating_sub(1));
-        self.cursor_row = row.clamp(0, self.rows.saturating_sub(1));
-    }
-
     fn cursor(&self) -> (i32, i32) {
-        (self.cursor_col, self.cursor_row)
+        let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
+        (self.cursor_col, row)
     }
 
-    fn new_line(&mut self) {
-        self.cursor_col = 0;
-        self.cursor_row += 1;
-        if self.cursor_row >= self.rows {
-            self.clear();
+    fn line_slot(&self, logical: i32) -> usize {
+        let max_lines = SHELL_SCROLLBACK_LINES as i32;
+        ((self.origin + logical).rem_euclid(max_lines)) as usize
+    }
+
+    fn line_ptr(&self, slot: usize) -> *mut u8 {
+        unsafe { SHELL_SCROLLBACK.as_mut_ptr().add(slot * SHELL_SCROLLBACK_COLS) }
+    }
+
+    fn clear_line_buffer(&mut self, slot: usize) {
+        unsafe {
+            SHELL_SCROLLBACK_LEN[slot] = 0;
+            let line = self.line_ptr(slot);
+            core::ptr::write_bytes(line, 0, SHELL_SCROLLBACK_COLS);
         }
     }
 
-    fn backspace(&mut self) {
+    fn redraw_view(&mut self) {
         if !self.enabled {
             return;
         }
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        } else if self.cursor_row > 0 {
-            self.cursor_row -= 1;
-            self.cursor_col = self.cols.saturating_sub(1);
-        } else {
-            return;
-        }
-        let x = self.cursor_col * FONT_CHAR_WIDTH;
-        let y = self.cursor_row * FONT_CHAR_HEIGHT;
         let rect = UserRect {
-            x,
-            y,
-            width: FONT_CHAR_WIDTH,
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+            color: self.bg,
+        };
+        let _ = sys_gfx_fill_rect(&rect);
+        for row in 0..self.rows {
+            self.draw_row_from_scrollback(self.view_top + row, row);
+        }
+    }
+
+    fn clear_row(&mut self, row: i32) {
+        let rect = UserRect {
+            x: 0,
+            y: row * FONT_CHAR_HEIGHT,
+            width: self.width,
             height: FONT_CHAR_HEIGHT,
             color: self.bg,
         };
         let _ = sys_gfx_fill_rect(&rect);
     }
 
-    fn draw_char(&mut self, c: u8) {
-        if !self.enabled {
+    fn draw_row_from_scrollback(&mut self, logical: i32, row: i32) {
+        self.clear_row(row);
+        if logical < 0 || logical >= self.total_lines {
             return;
         }
-        let x = self.cursor_col * FONT_CHAR_WIDTH;
-        let y = self.cursor_row * FONT_CHAR_HEIGHT;
+        let slot = self.line_slot(logical);
+        let len = unsafe { SHELL_SCROLLBACK_LEN[slot] as usize };
+        let draw_len = len.min(self.cols as usize);
+        if draw_len == 0 {
+            return;
+        }
+        let line = unsafe {
+            core::slice::from_raw_parts(self.line_ptr(slot) as *const u8, draw_len)
+        };
+        for (col, &ch) in line.iter().enumerate() {
+            if ch == 0 {
+                continue;
+            }
+            self.draw_char_at(col as i32, row, ch);
+        }
+    }
+
+    fn draw_char_at(&mut self, col: i32, row: i32, c: u8) {
+        let x = col * FONT_CHAR_WIDTH;
+        let y = row * FONT_CHAR_HEIGHT;
         let buf = [c];
         let text = UserText {
             x,
@@ -190,9 +253,249 @@ impl ShellConsole {
             len: 1,
         };
         let _ = sys_font_draw(&text);
+    }
+
+    fn scroll_up_fast(&mut self) -> bool {
+        if !self.enabled || self.height <= FONT_CHAR_HEIGHT {
+            return false;
+        }
+        let blit = UserBlit {
+            src_x: 0,
+            src_y: FONT_CHAR_HEIGHT,
+            dst_x: 0,
+            dst_y: 0,
+            width: self.width,
+            height: self.height - FONT_CHAR_HEIGHT,
+        };
+        if sys_gfx_blit(&blit) != 0 {
+            return false;
+        }
+        let rect = UserRect {
+            x: 0,
+            y: self.height - FONT_CHAR_HEIGHT,
+            width: self.width,
+            height: FONT_CHAR_HEIGHT,
+            color: self.bg,
+        };
+        let _ = sys_gfx_fill_rect(&rect);
+        true
+    }
+
+    fn ensure_follow_visible(&mut self) {
+        let max_top = (self.total_lines - self.rows).max(0);
+        self.view_top = max_top;
+        self.follow = true;
+        self.redraw_view();
+    }
+
+    fn page_up(&mut self) {
+        if self.total_lines <= self.rows {
+            return;
+        }
+        let step = self.rows.max(1);
+        let new_top = (self.view_top - step).max(0);
+        let delta = (self.view_top - new_top).max(0);
+        if delta == 0 {
+            return;
+        }
+        self.view_top = new_top;
+        self.follow = false;
+        if delta < self.rows {
+            let shift = delta * FONT_CHAR_HEIGHT;
+            let blit = UserBlit {
+                src_x: 0,
+                src_y: 0,
+                dst_x: 0,
+                dst_y: shift,
+                width: self.width,
+                height: self.height - shift,
+            };
+            if sys_gfx_blit(&blit) == 0 {
+                for row in 0..delta {
+                    self.draw_row_from_scrollback(self.view_top + row, row);
+                }
+                return;
+            }
+        }
+        self.redraw_view();
+    }
+
+    fn page_down(&mut self) {
+        if self.total_lines <= self.rows {
+            return;
+        }
+        let max_top = (self.total_lines - self.rows).max(0);
+        let step = self.rows.max(1);
+        let new_top = (self.view_top + step).min(max_top);
+        let delta = (new_top - self.view_top).max(0);
+        if delta == 0 {
+            return;
+        }
+        self.view_top = new_top;
+        if self.view_top == max_top {
+            self.follow = true;
+        } else {
+            self.follow = false;
+        }
+        if delta < self.rows {
+            let shift = delta * FONT_CHAR_HEIGHT;
+            let blit = UserBlit {
+                src_x: 0,
+                src_y: shift,
+                dst_x: 0,
+                dst_y: 0,
+                width: self.width,
+                height: self.height - shift,
+            };
+            if sys_gfx_blit(&blit) == 0 {
+                let start = self.rows - delta;
+                for row in start..self.rows {
+                    let logical = self.view_top + row;
+                    self.draw_row_from_scrollback(logical, row);
+                }
+                return;
+            }
+        }
+        self.redraw_view();
+    }
+
+    fn new_line(&mut self) {
+        self.cursor_col = 0;
+        self.cursor_line += 1;
+        if self.cursor_line >= self.total_lines {
+            if self.total_lines < SHELL_SCROLLBACK_LINES as i32 {
+                self.total_lines += 1;
+            } else {
+                self.origin = (self.origin + 1) % SHELL_SCROLLBACK_LINES as i32;
+                self.cursor_line = self.total_lines - 1;
+                if self.view_top > 0 {
+                    self.view_top -= 1;
+                }
+            }
+            let slot = self.line_slot(self.cursor_line);
+            self.clear_line_buffer(slot);
+        }
+        if self.follow {
+            let max_top = (self.total_lines - self.rows).max(0);
+            if self.view_top != max_top {
+                let step = max_top - self.view_top;
+                self.view_top = max_top;
+                if step == 1 {
+                    if !self.scroll_up_fast() {
+                        self.redraw_view();
+                    }
+                } else {
+                    self.redraw_view();
+                }
+            }
+        }
+    }
+
+    fn backspace(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+        } else if self.cursor_line > 0 {
+            self.cursor_line -= 1;
+            let slot = self.line_slot(self.cursor_line);
+            let len = unsafe { SHELL_SCROLLBACK_LEN[slot] as i32 };
+            if len > 0 {
+                self.cursor_col = (len - 1).clamp(0, self.cols.saturating_sub(1));
+            } else {
+                self.cursor_col = 0;
+            }
+        } else {
+            return;
+        }
+        let slot = self.line_slot(self.cursor_line);
+        unsafe {
+            let line = self.line_ptr(slot);
+            if (self.cursor_col as usize) < SHELL_SCROLLBACK_COLS {
+                *line.add(self.cursor_col as usize) = 0;
+                let mut len = SHELL_SCROLLBACK_LEN[slot] as i32;
+                while len > 0 {
+                    let idx = len as usize - 1;
+                    if *line.add(idx) != 0 {
+                        break;
+                    }
+                    len -= 1;
+                }
+                SHELL_SCROLLBACK_LEN[slot] = len as u16;
+            }
+        }
+        if self.follow {
+            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
+            let x = self.cursor_col * FONT_CHAR_WIDTH;
+            let y = row * FONT_CHAR_HEIGHT;
+            let rect = UserRect {
+                x,
+                y,
+                width: FONT_CHAR_WIDTH,
+                height: FONT_CHAR_HEIGHT,
+                color: self.bg,
+            };
+            let _ = sys_gfx_fill_rect(&rect);
+        }
+    }
+
+    fn draw_char(&mut self, c: u8) {
+        if !self.enabled {
+            return;
+        }
+        let slot = self.line_slot(self.cursor_line);
+        unsafe {
+            let line = self.line_ptr(slot);
+            if (self.cursor_col as usize) < SHELL_SCROLLBACK_COLS {
+                *line.add(self.cursor_col as usize) = c;
+                let need_len = self.cursor_col + 1;
+                let len = &mut SHELL_SCROLLBACK_LEN[slot];
+                if need_len as u16 > *len {
+                    *len = need_len as u16;
+                }
+            }
+        }
+        if self.follow {
+            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
+            self.draw_char_at(self.cursor_col, row, c);
+        }
         self.cursor_col += 1;
         if self.cursor_col >= self.cols {
             self.new_line();
+        }
+    }
+
+    fn rewrite_input_line(&mut self, prompt: &[u8], buf: &[u8]) {
+        if !self.enabled {
+            return;
+        }
+        let slot = self.line_slot(self.cursor_line);
+        let max_cols = self.cols as usize;
+        unsafe {
+            let line = self.line_ptr(slot);
+            core::ptr::write_bytes(line, 0, SHELL_SCROLLBACK_COLS);
+            let mut col = 0usize;
+            for &b in prompt.iter().chain(buf.iter()) {
+                if col >= max_cols {
+                    break;
+                }
+                *line.add(col) = b;
+                col += 1;
+            }
+            SHELL_SCROLLBACK_LEN[slot] = col as u16;
+            self.cursor_col = col as i32;
+        }
+        if self.follow {
+            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
+            self.clear_line(row);
+            let draw_len = prompt.len().saturating_add(buf.len()).min(max_cols);
+            for (col, &ch) in prompt.iter().chain(buf.iter()).take(draw_len).enumerate() {
+                if ch == 0 {
+                    continue;
+                }
+                self.draw_char_at(col as i32, row, ch);
+            }
         }
     }
 
@@ -274,30 +577,39 @@ fn shell_console_get_cursor() -> (i32, i32) {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn shell_console_set_cursor(col: i32, row: i32) {
+fn shell_console_page_up() {
     unsafe {
         if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.set_cursor(col, row);
+            SHELL_CONSOLE.page_up();
         }
     }
 }
 
 #[unsafe(link_section = ".user_text")]
-fn shell_console_clear_line(row: i32) {
+fn shell_console_page_down() {
     unsafe {
         if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.clear_line(row);
+            SHELL_CONSOLE.page_down();
         }
     }
 }
 
 #[unsafe(link_section = ".user_text")]
-fn shell_redraw_input(line_row: i32, buf: &[u8]) {
-    shell_console_set_cursor(0, line_row);
-    shell_console_clear_line(line_row);
-    shell_console_write(PROMPT);
-    shell_console_write(buf);
-    shell_console_set_cursor(PROMPT.len() as i32 + buf.len() as i32, line_row);
+fn shell_console_follow_bottom() {
+    unsafe {
+        if SHELL_CONSOLE.enabled {
+            SHELL_CONSOLE.ensure_follow_visible();
+        }
+    }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn shell_redraw_input(_line_row: i32, buf: &[u8]) {
+    unsafe {
+        if SHELL_CONSOLE.enabled {
+            SHELL_CONSOLE.rewrite_input_line(PROMPT, buf);
+        }
+    }
 }
 
 type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;
@@ -775,6 +1087,19 @@ pub fn shell_user_main(_arg: *mut c_void) {
                 continue;
             }
             let c = rc as u8;
+            if c == KEY_PAGE_UP {
+                shell_console_page_up();
+                continue;
+            }
+            if c == KEY_PAGE_DOWN {
+                shell_console_page_down();
+                continue;
+            }
+            unsafe {
+                if SHELL_CONSOLE.enabled && !SHELL_CONSOLE.follow {
+                    shell_console_follow_bottom();
+                }
+            }
             if c == b'\n' || c == b'\r' {
                 shell_echo_char(b'\n');
                 break;

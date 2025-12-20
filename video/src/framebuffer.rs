@@ -1,3 +1,4 @@
+use core::ffi::c_int;
 use core::ptr;
 
 use slopos_drivers::serial_println;
@@ -270,6 +271,74 @@ pub fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
     }
 
     framebuffer_convert_color_internal(&fb, color)
+}
+
+pub fn framebuffer_blit(
+    src_x: i32,
+    src_y: i32,
+    dst_x: i32,
+    dst_y: i32,
+    width: i32,
+    height: i32,
+) -> c_int {
+    if width <= 0 || height <= 0 {
+        return -1;
+    }
+    let fb = match FRAMEBUFFER.lock().fb {
+        Some(fb) => fb,
+        None => return -1,
+    };
+    let bpp = fb.bpp as usize;
+    if bpp == 0 {
+        return -1;
+    }
+    let bytes_per_pixel = bpp.div_ceil(8);
+    if bytes_per_pixel == 0 {
+        return -1;
+    }
+    let fb_width = fb.width as i32;
+    let fb_height = fb.height as i32;
+    if src_x < 0
+        || src_y < 0
+        || dst_x < 0
+        || dst_y < 0
+        || src_x.saturating_add(width) > fb_width
+        || src_y.saturating_add(height) > fb_height
+        || dst_x.saturating_add(width) > fb_width
+        || dst_y.saturating_add(height) > fb_height
+    {
+        return -1;
+    }
+
+    let row_bytes = width as usize * bytes_per_pixel;
+    let src_pitch = fb.pitch as usize;
+    let base = fb.base;
+    if base.is_null() {
+        return -1;
+    }
+
+    if dst_y > src_y {
+        for row in (0..height).rev() {
+            let src_offset =
+                (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
+            let dst_offset =
+                (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
+            unsafe {
+                ptr::copy(base.add(src_offset), base.add(dst_offset), row_bytes);
+            }
+        }
+    } else {
+        for row in 0..height {
+            let src_offset =
+                (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
+            let dst_offset =
+                (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
+            unsafe {
+                ptr::copy(base.add(src_offset), base.add(dst_offset), row_bytes);
+            }
+        }
+    }
+    0
 }
 pub fn framebuffer_get_width() -> u32 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.width).unwrap_or(0)

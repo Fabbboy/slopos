@@ -48,6 +48,10 @@ impl KeyboardBuffer {
 static mut KB_STATE: KeyboardState = KeyboardState::new();
 static mut CHAR_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
 static mut SCANCODE_BUFFER: KeyboardBuffer = KeyboardBuffer::new(); // For debugging
+static mut EXTENDED_CODE: bool = false;
+
+const KEY_PAGE_UP: u8 = 0x80;
+const KEY_PAGE_DOWN: u8 = 0x81;
 
 // Base scancode map for letters (a-z) and symbols
 const SCANCODE_LETTERS: [u8; 0x80] = [
@@ -206,6 +210,13 @@ pub fn keyboard_init() {
 pub fn keyboard_handle_scancode(scancode: u8) {
     klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
+    if scancode == 0xE0 {
+        unsafe {
+            EXTENDED_CODE = true;
+        }
+        return;
+    }
+
     let is_press = !is_break_code(scancode);
     let make_code = get_make_code(scancode);
 
@@ -222,6 +233,30 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         0x2A | 0x36 | 0x1D | 0x38 | 0x3A // Shift / Ctrl / Alt / Caps
     ) {
         handle_modifier_key(make_code, is_press);
+        return;
+    }
+
+    if unsafe { EXTENDED_CODE } {
+        unsafe {
+            EXTENDED_CODE = false;
+        }
+        if !is_press {
+            return;
+        }
+        let extended_key = match make_code {
+            0x49 => KEY_PAGE_UP,
+            0x51 => KEY_PAGE_DOWN,
+            _ => 0,
+        };
+        if extended_key != 0 {
+            unsafe {
+                kb_buffer_push_overwrite(&raw mut CHAR_BUFFER, extended_key);
+            }
+            tty_notify_input_ready();
+            unsafe {
+                scheduler_callbacks::call_request_reschedule_from_interrupt();
+            }
+        }
         return;
     }
 

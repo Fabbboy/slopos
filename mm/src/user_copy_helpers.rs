@@ -38,6 +38,16 @@ pub struct UserText {
     pub len: u32,
 }
 
+#[repr(C)]
+pub struct UserBlit {
+    pub src_x: i32,
+    pub src_y: i32,
+    pub dst_x: i32,
+    pub dst_y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 pub const USER_TEXT_MAX_BYTES: u32 = 256;
 pub fn user_copy_rect_checked(dst: *mut UserRect, user_rect: *const UserRect) -> c_int {
     if dst.is_null() || user_rect.is_null() {
@@ -112,6 +122,29 @@ pub fn user_copy_text_header(dst: *mut UserText, user_text: *const UserText) -> 
         }
         if (*dst).len >= USER_TEXT_MAX_BYTES {
             (*dst).len = USER_TEXT_MAX_BYTES - 1;
+        }
+    }
+    0
+}
+
+pub fn user_copy_blit_checked(dst: *mut UserBlit, user_blit: *const UserBlit) -> c_int {
+    if dst.is_null() || user_blit.is_null() {
+        return -1;
+    }
+    if user_copy_from_user(
+        dst as *mut _,
+        user_blit as *const _,
+        core::mem::size_of::<UserBlit>(),
+    ) != 0
+    {
+        return -1;
+    }
+    unsafe {
+        if (*dst).width <= 0 || (*dst).height <= 0 {
+            return -1;
+        }
+        if (*dst).width > 8192 || (*dst).height > 8192 {
+            return -1;
         }
     }
     0

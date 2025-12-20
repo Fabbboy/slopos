@@ -46,7 +46,8 @@ use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::user_copy_from_user;
 use slopos_mm::paging;
 use slopos_mm::user_copy_helpers::{
-    user_copy_circle_checked, user_copy_line_checked, user_copy_rect_checked, user_copy_text_header,
+    UserBlit, user_copy_blit_checked, user_copy_circle_checked, user_copy_line_checked,
+    user_copy_rect_checked, user_copy_text_header,
 };
 use crate::video_bridge::{VideoError, VideoResult};
 
@@ -342,6 +343,33 @@ pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     syscall_finish_gfx(frame, rc)
 }
 
+pub fn syscall_gfx_blit(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut blit = UserBlit {
+        src_x: 0,
+        src_y: 0,
+        dst_x: 0,
+        dst_y: 0,
+        width: 0,
+        height: 0,
+    };
+    if unsafe { user_copy_blit_checked(&mut blit, (*frame).rdi as *const UserBlit) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::framebuffer_blit(
+        blit.src_x,
+        blit.src_y,
+        blit.dst_x,
+        blit.dst_y,
+        blit.width,
+        blit.height,
+    );
+    let _ = paging::switch_page_directory(original_dir);
+    syscall_finish_gfx(frame, rc)
+}
+
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
@@ -519,6 +547,10 @@ static SYSCALL_TABLE: [SyscallEntry; 32] = {
         handler: Some(syscall_font_draw),
         name: b"font_draw\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_GFX_BLIT as usize] = SyscallEntry {
+        handler: Some(syscall_gfx_blit),
+        name: b"gfx_blit\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
         handler: Some(syscall_random_next),
         name: b"random_next\0".as_ptr() as *const c_char,
@@ -589,6 +621,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
     pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
     pub const SYSCALL_FONT_DRAW: u64 = 11;
+    pub const SYSCALL_GFX_BLIT: u64 = 26;
     pub const SYSCALL_RANDOM_NEXT: u64 = 12;
     pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
     pub const SYSCALL_ROULETTE_DRAW: u64 = 24;

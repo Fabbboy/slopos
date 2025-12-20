@@ -40,6 +40,17 @@ fn font_draw_string_bridge(
     font::font_draw_string(x, y, str_ptr, fg_color, bg_color)
 }
 
+fn framebuffer_blit_bridge(
+    src_x: i32,
+    src_y: i32,
+    dst_x: i32,
+    dst_y: i32,
+    width: i32,
+    height: i32,
+) -> c_int {
+    framebuffer::framebuffer_blit(src_x, src_y, dst_x, dst_y, width, height)
+}
+
 fn framebuffer_get_info_bridge() -> *mut slopos_drivers::video_bridge::FramebufferInfoC {
     framebuffer::framebuffer_get_info()
         as *mut slopos_drivers::video_bridge::FramebufferInfoC
@@ -70,6 +81,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             draw_circle: Some(draw_circle_bridge),
             draw_circle_filled: Some(draw_circle_filled_bridge),
             font_draw_string: Some(font_draw_string_bridge),
+            framebuffer_blit: Some(framebuffer_blit_bridge),
             framebuffer_get_info: Some(framebuffer_get_info_bridge),
             roulette_draw: Some(roulette_draw_bridge),
         });

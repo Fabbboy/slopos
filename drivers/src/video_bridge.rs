@@ -30,6 +30,7 @@ pub struct VideoCallbacks {
     pub draw_circle: Option<fn(i32, i32, i32, u32) -> c_int>,
     pub draw_circle_filled: Option<fn(i32, i32, i32, u32) -> c_int>,
     pub font_draw_string: Option<fn(i32, i32, *const c_char, u32, u32) -> c_int>,
+    pub framebuffer_blit: Option<fn(i32, i32, i32, i32, i32, i32) -> c_int>,
     pub framebuffer_get_info: Option<fn() -> *mut FramebufferInfoC>,
     pub roulette_draw: Option<fn(u32) -> c_int>,
 }
@@ -97,6 +98,22 @@ pub fn font_draw_string(
         }
     }
     -1
+}
+
+pub fn framebuffer_blit(
+    src_x: i32,
+    src_y: i32,
+    dst_x: i32,
+    dst_y: i32,
+    width: i32,
+    height: i32,
+) -> VideoResult {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.framebuffer_blit {
+            return video_result_from_code(cb(src_x, src_y, dst_x, dst_y, width, height));
+        }
+    }
+    Err(VideoError::NoFramebuffer)
 }
 
 pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
