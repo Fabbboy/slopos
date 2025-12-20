@@ -326,9 +326,9 @@ static BUILTINS: &[BuiltinEntry] = &[
         desc: b"Clear the terminal display",
     },
     BuiltinEntry {
-        name: b"halt",
-        func: cmd_halt,
-        desc: b"Shut down the kernel",
+        name: b"shutdown",
+        func: cmd_shutdown,
+        desc: b"Power off the system",
     },
     BuiltinEntry {
         name: b"info",
@@ -548,7 +548,7 @@ fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn cmd_halt(_argc: i32, _argv: &[*const u8]) -> i32 {
+fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
     let _ = shell_write(HALTED);
     sys_halt();
 }

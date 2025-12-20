@@ -11,6 +11,7 @@ static SERIAL_DRAINED: AtomicBool = AtomicBool::new(false);
 use slopos_drivers::apic::apic_is_available;
 use slopos_drivers::apic::{apic_disable, apic_send_eoi, apic_send_ipi_halt_all, apic_timer_stop};
 use slopos_drivers::pit::pit_poll_delay_ms;
+use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_mm::page_alloc::page_allocator_paint_all;
 use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 
@@ -26,7 +27,23 @@ fn serial_flush() {
         cpu::pause();
     }
 }
+fn ensure_kernel_page_dir() {
+    // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
+    let kernel_dir = paging_get_kernel_directory();
+    if !kernel_dir.is_null() {
+        let _ = switch_page_directory(kernel_dir);
+    }
+}
+fn poweroff_hardware() {
+    // QEMU/Bochs/SeaBIOS ACPI poweroff ports.
+    unsafe {
+        io::outw(0x604, 0x2000);
+        io::outw(0xB004, 0x2000);
+        io::outw(0x4004, 0x3400);
+    }
+}
 pub fn kernel_quiesce_interrupts() {
+    ensure_kernel_page_dir();
     cpu::disable_interrupts();
     if INTERRUPTS_QUIESCED.swap(true, Ordering::SeqCst) {
         return;
@@ -54,6 +71,7 @@ pub fn kernel_drain_serial_output() {
     serial_flush();
 }
 pub fn kernel_shutdown(reason: *const c_char) {
+    ensure_kernel_page_dir();
     cpu::disable_interrupts();
 
     if SHUTDOWN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
@@ -82,6 +100,7 @@ pub fn kernel_shutdown(reason: *const c_char) {
 
     klog_info!("Kernel shutdown complete. Coordinating APIC shutdown and halting processors.");
 
+    poweroff_hardware();
     halt();
 }
 
@@ -95,11 +114,14 @@ fn halt() -> ! {
         }
     }
 
+    poweroff_hardware();
+
     loop {
         unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
 pub fn kernel_reboot(reason: *const c_char) {
+    ensure_kernel_page_dir();
     cpu::disable_interrupts();
 
     klog_info!("=== Kernel Reboot Requested ===");
