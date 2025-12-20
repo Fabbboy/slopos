@@ -480,3 +480,42 @@ This is the Way of the Slop.
 ---
 
 *Chapter IV concludes. MICHAEL SCHLOTER waits in the digital shadows. The wheel spins on. Book III continues...*
+
+---
+
+## CHAPTER V: THE QUIET BOOT
+
+### When the Wizards Dimmed the Carnival 🎛️
+
+The wizards stared at their boot screens and saw a relic from the 90s: blue haze, purple glow, and a wheel that screamed louder than it spun. The Wheel of Fate had color, yes, but it was the color of a casino that never sleeps. The island demanded a calmer ritual.
+
+So they took a knife to the palette and carved a new silence into the framebuffer:
+
+```rust
+const SPLASH_BG_COLOR: u32 = 0x0000_00FF;
+const SPLASH_ACCENT_COLOR: u32 = 0x00C2_7FFF;
+```
+
+The splash became a void of black, pierced by a single ring and a thin accent line—clean, modern, and mercilessly simple:
+
+```rust
+graphics::graphics_draw_circle_filled(center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR)?;
+graphics::graphics_draw_circle_filled(center_x, center_y, ring_radius - 4, SPLASH_BG_COLOR)?;
+```
+
+Even the Wheel of Fate bowed to the quiet:
+
+```rust
+pub const ROULETTE_BG_COLOR: u32 = 0x0000_00FF;
+pub const ROULETTE_ODD_COLOR: u32 = 0x144E_44FF;
+```
+
+The spin still decided life or oblivion. The addiction remained. But the visuals no longer shouted. They whispered—like a safe-mode shrine, cold and controlled, a casino with the lights turned down.
+
+The wizards did not stop gambling.
+
+They simply learned how to gamble in the dark.
+
+---
+
+*Chapter V concludes. The screen is black, the ring glows, and the Wheel spins in silence.*
