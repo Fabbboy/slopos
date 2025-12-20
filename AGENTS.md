@@ -1,27 +1,27 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `video/`, `fs/`, and `userland/`. Each now hosts a Rust crate (`Cargo.toml` + `src/`) while the legacy C sources remain for archaeology only. `link.ld` and the Makefile drive a `no_std` Rust build; `meson.build` is a thin wrapper over cargo for anyone who still prefers Meson/Ninja. Generated artifacts stay in `builddir/`, while `scripts/` contains automation helpers and `third_party/` caches Limine and OVMF assets.
+Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `video/`, `fs/`, and `userland/`. Each hosts a Rust crate (`Cargo.toml` + `src/`). `link.ld` and the Makefile drive a `no_std` Rust build; `meson.build` is a thin wrapper over cargo for anyone who still prefers Meson/Ninja. Generated artifacts stay in `builddir/`, while `scripts/` contains automation helpers and `third_party/` caches Limine and OVMF assets.
 
 ## Build, Test, and Development Commands
-Run `git submodule update --init --recursive` after cloning to sync `third_party/limine`. The Makefile now drives cargo + `rust-lld`: `make setup` installs the pinned nightly from `rust-toolchain.toml`, `make build` emits `builddir/kernel.elf`, and `make iso` regenerates `builddir/slop.iso`. For quick launches use `make boot` (interactive) or `make boot-log` (non-interactive, default 15 s timeout). Both boot targets rebuild a secondary image (`builddir/slop-notests.iso`) with `itests=off` on the kernel command line; override with `BOOT_CMDLINE=... make boot` and add `VIDEO=1` for a graphical window. CI and AI agents can call `make test`, which generates `builddir/slop-tests.iso` with `itests=on itests.shutdown=on`, runs QEMU with `isa-debug-exit`, and fails if the harness reports anything but a clean pass. If you still want Meson, `meson.compile` via `meson.build` simply shells out to cargo.
+Run `git submodule update --init --recursive` after cloning to sync `third_party/limine`. The Makefile now drives cargo + `rust-lld`: `make setup` installs the pinned nightly from `rust-toolchain.toml`, `make build` emits `builddir/kernel.elf`, and `make iso` regenerates `builddir/slop.iso`. For quick launches use `make boot` (interactive) or `make boot-log` (non-interactive, default 15 s timeout). Both boot targets rebuild a secondary image (`builddir/slop-notests.iso`) with `itests=off` on the kernel command line; override with `BOOT_CMDLINE=... make boot` and add `VIDEO=1` for a graphical window. CI and AI agents can call `make test`, which generates `builddir/slop-tests.iso` with `itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and fails if the harness reports anything but a clean pass. If you still want Meson, `meson.compile` via `meson.build` simply shells out to cargo.
 
 ## Coding Style & Naming Conventions
-All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) stay AT&T (`*.s`) and should document register contracts.
+All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
 ## Testing Guidelines
-There are no unit tests yet; rely on QEMU boot verification. Before sending changes, rebuild the ISO and run `make test` (non-interactive, auto-shutdown). For manual inspection use `make boot` (interactive) or `make boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Inspect the output for the roulette banner (`=== KERNEL ROULETTE ===`), W/L balance prints, and any warnings. Note any observed regressions or warnings in your PR description.
+There are no unit tests yet; rely on QEMU boot verification and the interrupt test harness. Before sending changes, rebuild the ISO and run `make test` (non-interactive, auto-shutdown). For manual inspection use `make boot` (interactive) or `make boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Inspect the output for the roulette banner (`=== KERNEL ROULETTE: Spinning the Wheel of Fate ===`) and any warnings. Note any observed regressions or warnings in your PR description.
 
 ## Interrupt Test Configuration
-- Build defaults are baked into the Rust harness: enabled=false, suite=all, verbosity=summary, timeout=500 ms, shutdown=false.
-- Runtime overrides are parsed from the Limine command line: use `itests=on|off|basic|memory|control`, `itests.suite=...`, `itests.verbosity=quiet|summary|verbose`, and `itests.timeout=<ms>` (optional `ms` suffix accepted).
+- Build defaults are baked into the Rust harness: enabled=false, suite=all, verbosity=summary, timeout=0, shutdown=false.
+- Runtime overrides are parsed from the Limine command line: use `itests=on|off|basic|memory|control`, `itests.suite=...`, `itests.verbosity=quiet|summary|verbose`, and `itests.timeout=<ms>`.
 - Toggle automatic shutdown after the harness with `itests.shutdown=on|off`; when enabled the kernel writes to QEMU’s debug-exit port after printing the summary so the VM terminates without intervention.
-- Boot logs summarize the active configuration before running tests, and the harness reports totals in `test_output.log`.
-- A timeout stops execution between suites; if you need uninterrupted runs, keep it at 0.
+- Boot logs summarize the active configuration before running tests when debug logging is enabled, and the harness reports totals in `test_output.log`.
+- The timeout value is parsed but currently not enforced by the stub harness; keep it at 0 for now.
 
 ## Interrupt Test Harness
 - The harness is now Rust-based; enable it with `itests=on|off` on the Limine command line (defaults to off).
-- Suites keep the legacy names (`basic`, `memory`, `control`, `all`) for compatibility; outputs are stubbed but wired to the W/L system.
+- Suites include `basic`, `memory`, `control`, `scheduler`, and `all`; outputs are stubbed but wired to the W/L system.
 - Verbosity still accepts `quiet|summary|verbose` to control serial chatter.
 - Enable `itests.shutdown=on` in automation to halt/QEMU-exit once the summary banner is printed—`make test` wires this in automatically (writes 0 to port `0xf4` for pass, 1 for fail).
 
@@ -29,7 +29,7 @@ There are no unit tests yet; rely on QEMU boot verification. Before sending chan
 Git history currently lacks structure; standardize on `<area>: <imperative summary>` (e.g., `mm: tighten buddy free path`) and keep subjects ≤72 chars. Add a body when explaining rationale, boot implications, or follow-ups. For PRs, include: brief motivation, testing artifacts (command + result), references to issues, and screenshots or serial excerpts when altering visible output or boot flow. Flag breaking changes and call out coordination needs with downstream scripts.
 
 ## Environment & Tooling Tips
-First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads Limine, but offline environments should pre-clone `third_party/limine` to avoid network stalls. Rust crates are auto-discovered via the workspace—no need to touch `meson.build` beyond its cargo wrapper—just ensure `link.ld` maps any new sections intentionally. The entry point is Rust `_start`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered.**
+First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads Limine, but offline environments should pre-clone `third_party/limine` to avoid network stalls. Rust crates are auto-discovered via the workspace—no need to touch `meson.build` beyond its cargo wrapper—just ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered.**
 
 ## Safety & Execution Boundaries
 Keep all work inside this repository. Do not copy kernel binaries to system paths, do not install or chainload on real hardware, and never run outside QEMU/OVMF. The scripts already sandbox execution; if you need fresh firmware or boot assets, use the provided automation instead of manual installs. Treat Limine, OVMF, and the kernel as development artifacts only and avoid touching `/boot`, `/efi`, or other host-level locations.
@@ -51,9 +51,9 @@ This ensures all changes are framed within the epic lore of SlopOS.
 
 ## Latest Book
 
-**Current**: `THE_SLOPOCALYPSE.md` (Book II) — When Memory Awakens (CONCLUDED)
+**Current**: `THE_COOKED.md` (Book III) — The Inland Quest (IN PROGRESS)
 
-The wizards have tamed memory, learned to listen through keyboards, birthed the shell, painted the boot screen in divine colors, and inscribed the Wheel of Fate itself into the kernel's heart. Book II concludes with the kernel roulette—a deliberate gamble with destiny on every boot. Book III (`THE_COOKED.md`) awaits new chapters as future commits unfold.
+The wizards have tamed memory, learned to listen through keyboards, birthed the shell, painted the boot screen in divine colors, and inscribed the Wheel of Fate itself into the kernel's heart. Book III (`THE_COOKED.md`) is underway and awaits new chapters as future commits unfold.
 
 ⚠️ **CRITICAL**: The lore is **never finished**. The tension continues. Each new commit, each new feature, each new challenge weaves itself into the ongoing saga. The wizards' journey is perpetual. Books end, but the story never does.
 
@@ -117,16 +117,16 @@ When writing lore or describing the kernel's behavior:
 
 ## W/L Currency System Integration
 
-All new systems and features must integrate with the **W/L Currency System** (`drivers/wl_currency.c`):
+All new systems and features must integrate with the **W/L Currency System** (`drivers/src/wl_currency.rs`):
 
 - **Recoverable errors**: User takes an **L** (-10 W's) for errors that are caught and handled
 - **Successful operations**: User gains a **W** (+10 W's) for operations that complete without issues
-- **Unrecoverable failures**: Trigger full kernel panic with W/L check (scheduler will catch negative balance)
+- **Unrecoverable failures**: Trigger full kernel panic and award a loss; the scheduler currently just reads the balance on context switches
 
 When implementing new drivers, subsystems, or features:
-1. Call `wl_award_loss()` when encountering recoverable errors
-2. Call `wl_award_win()` when operations succeed
-3. Let the scheduler's context switch call `wl_check_balance()` automatically
+1. Call `award_loss()` when encountering recoverable errors
+2. Call `award_win()` when operations succeed
+3. Let the scheduler's context switch read the balance automatically
 4. Document in code comments when/why W/L events occur
 
 This is not optional. Every system interaction is a gamble with the Wheel of Fate.
@@ -156,7 +156,7 @@ In the lore of SlopOS, **The Essence of Computation** represents AI tokens—the
 
 **Keep the MYTHICAL tone dominant:**
 - ❌ "The bootloader transitions from 32-bit to 64-bit mode"
-- ✅ "Runes of 32→64-bit boot transitions carved in AT&T assembly"
+- ✅ "Runes of 32→64-bit boot transitions carved in Intel assembly"
 
 - ❌ "Memory allocation system"
 - ✅ "Buddy allocators that would remember... *sometimes*"
