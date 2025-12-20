@@ -12,7 +12,7 @@ use crate::mm_constants::{
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
 use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
-    paging_free_user_space, unmap_page_in_dir, virt_to_phys_in_dir,
+    paging_free_user_space, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::phys_virt::mm_phys_to_virt;
 use slopos_lib::{align_down, align_up};
@@ -840,6 +840,9 @@ pub fn process_vm_load_elf(
             let phys = if existing_phys != 0 {
                 // Page already mapped, reuse it (for overlapping segments)
                 // But we still need to copy the data for this segment's portion
+                if (map_flags & PAGE_WRITABLE) != 0 {
+                    let _ = paging_mark_range_user(page_dir, dst, dst + PAGE_SIZE_4KB, 1);
+                }
                 existing_phys
             } else {
                 // Allocate new page

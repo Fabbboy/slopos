@@ -303,6 +303,8 @@ fn switch_to_task(new_task: *mut Task) {
     let sched = unsafe { &mut *scheduler_mut() };
     let old_task = sched.current_task;
     if old_task == new_task {
+        task_set_current(new_task);
+        scheduler_reset_task_quantum(new_task);
         return;
     }
 
@@ -744,6 +746,7 @@ pub fn boot_step_scheduler_init() -> c_int {
                 scheduler_is_enabled: Some(scheduler_is_enabled),
                 task_is_blocked: Some(task_is_blocked_fn),
                 unblock_task: Some(unblock_task_fn),
+                block_current_task: Some(block_current_task),
                 fate_spin: Some(crate::fate_api::fate_spin),
                 fate_set_pending: Some(crate::fate_api::fate_set_pending),
                 fate_take_pending: Some(crate::fate_api::fate_take_pending),

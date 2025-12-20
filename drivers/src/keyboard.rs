@@ -1,6 +1,7 @@
 use slopos_lib::{cpu, klog_debug};
 
 use crate::scheduler_callbacks;
+use crate::tty::tty_notify_input_ready;
 
 const KEYBOARD_BUFFER_SIZE: usize = 256;
 
@@ -236,6 +237,7 @@ pub fn keyboard_handle_scancode(scancode: u8) {
             kb_buffer_push_overwrite(&raw mut CHAR_BUFFER, ascii);
         }
         klog_debug!("[KBD] Adding to buffer");
+        tty_notify_input_ready();
         unsafe {
             scheduler_callbacks::call_request_reschedule_from_interrupt();
         }

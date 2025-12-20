@@ -5,6 +5,7 @@ pub const SYSCALL_YIELD: u64 = 0;
 pub const SYSCALL_EXIT: u64 = 1;
 pub const SYSCALL_WRITE: u64 = 2;
 pub const SYSCALL_READ: u64 = 3;
+pub const SYSCALL_READ_CHAR: u64 = 25;
 pub const SYSCALL_ROULETTE: u64 = 4;
 pub const SYSCALL_SLEEP_MS: u64 = 5;
 pub const SYSCALL_FB_INFO: u64 = 6;
@@ -160,10 +161,17 @@ pub fn sys_write(buf: &[u8]) -> i64 {
     unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
+
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_read(buf: &mut [u8]) -> i64 {
     unsafe { syscall(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_read_char() -> i64 {
+    unsafe { syscall(SYSCALL_READ_CHAR, 0, 0, 0) as i64 }
 }
 
 #[inline(always)]

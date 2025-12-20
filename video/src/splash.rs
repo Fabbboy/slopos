@@ -15,9 +15,12 @@ const SPLASH_ACCENT_COLOR: u32 = 0x00C2_7FFF;
 const SPLASH_PROGRESS_TRACK_COLOR: u32 = 0x1A1A_1AFF;
 const SPLASH_PROGRESS_FRAME_COLOR: u32 = 0x2E2E_2EFF;
 
-const SPLASH_PROGRESS_WIDTH: i32 = 260;
-const SPLASH_PROGRESS_HEIGHT: i32 = 10;
-const SPLASH_MESSAGE_WIDTH: i32 = 320;
+const SPLASH_PROGRESS_MIN_WIDTH: i32 = 220;
+const SPLASH_PROGRESS_MAX_WIDTH: i32 = 360;
+const SPLASH_PROGRESS_MIN_HEIGHT: i32 = 8;
+const SPLASH_PROGRESS_MAX_HEIGHT: i32 = 12;
+const SPLASH_MESSAGE_MIN_WIDTH: i32 = 240;
+const SPLASH_MESSAGE_MAX_WIDTH: i32 = 420;
 const SPLASH_MESSAGE_HEIGHT: i32 = 18;
 
 const TEXT_TITLE: &[u8] = b"SLOPOS\0";
@@ -40,6 +43,62 @@ impl SplashState {
 
 static STATE: Mutex<SplashState> = Mutex::new(SplashState::new());
 
+struct SplashLayout {
+    center_x: i32,
+    ring_center_y: i32,
+    ring_radius: i32,
+    title_x: i32,
+    title_y: i32,
+    subtitle_x: i32,
+    subtitle_y: i32,
+    message_x: i32,
+    message_y: i32,
+    message_w: i32,
+    progress_x: i32,
+    progress_y: i32,
+    progress_w: i32,
+    progress_h: i32,
+}
+
+fn text_center_x(center_x: i32, text: &[u8]) -> i32 {
+    let chars = text.len().saturating_sub(1) as i32;
+    center_x - (chars * 8 / 2)
+}
+
+fn splash_layout(width: i32, height: i32) -> SplashLayout {
+    let min_dim = width.min(height);
+    let ring_radius = (min_dim / 20).clamp(18, 32);
+    let center_x = width / 2;
+    let ring_center_y = height / 2 - (min_dim / 8).clamp(30, 60);
+    let title_y = ring_center_y + ring_radius + 12;
+    let subtitle_y = title_y + 18;
+    let message_y = subtitle_y + 22;
+    let progress_w = (min_dim * 5 / 10).clamp(SPLASH_PROGRESS_MIN_WIDTH, SPLASH_PROGRESS_MAX_WIDTH);
+    let progress_h =
+        (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
+    let progress_x = center_x - (progress_w / 2);
+    let progress_y = message_y + 22;
+    let message_w = (min_dim * 55 / 100).clamp(SPLASH_MESSAGE_MIN_WIDTH, SPLASH_MESSAGE_MAX_WIDTH);
+    let message_x = center_x - (message_w / 2);
+
+    SplashLayout {
+        center_x,
+        ring_center_y,
+        ring_radius,
+        title_x: text_center_x(center_x, TEXT_TITLE),
+        title_y,
+        subtitle_x: text_center_x(center_x, TEXT_SUBTITLE),
+        subtitle_y,
+        message_x,
+        message_y,
+        message_w,
+        progress_x,
+        progress_y,
+        progress_w,
+        progress_h,
+    }
+}
+
 fn framebuffer_ready() -> bool {
     framebuffer::framebuffer_is_initialized() != 0
 }
@@ -52,10 +111,9 @@ fn ensure_framebuffer_ready() -> GraphicsResult<()> {
     }
 }
 
-fn splash_draw_logo(center_x: i32, center_y: i32) -> GraphicsResult<()> {
+fn splash_draw_logo(center_x: i32, center_y: i32, ring_radius: i32) -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
 
-    let ring_radius = 28;
     graphics::graphics_draw_circle_filled(center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR)?;
     graphics::graphics_draw_circle_filled(
         center_x,
@@ -107,14 +165,12 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
 
     let width = framebuffer::framebuffer_get_width() as i32;
     let height = framebuffer::framebuffer_get_height() as i32;
-    let center_x = width / 2;
-    let center_y = height / 2;
+    let layout = splash_layout(width, height);
 
-    splash_draw_logo(center_x, center_y - 90)?;
-    let title_x = center_x - ((TEXT_TITLE.len() as i32 - 1) * 8 / 2);
+    splash_draw_logo(layout.center_x, layout.ring_center_y, layout.ring_radius)?;
     if font_draw_string(
-        title_x,
-        center_y - 35,
+        layout.title_x,
+        layout.title_y,
         TEXT_TITLE.as_ptr() as *const c_char,
         SPLASH_TEXT_COLOR,
         0,
@@ -122,10 +178,9 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     {
         return Err(VideoError::Invalid);
     }
-    let subtitle_x = center_x - ((TEXT_SUBTITLE.len() as i32 - 1) * 8 / 2);
     if font_draw_string(
-        subtitle_x,
-        center_y - 15,
+        layout.subtitle_x,
+        layout.subtitle_y,
         TEXT_SUBTITLE.as_ptr() as *const c_char,
         SPLASH_SUBTEXT_COLOR,
         0,
@@ -133,10 +188,9 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     {
         return Err(VideoError::Invalid);
     }
-    let message_x = center_x - (SPLASH_MESSAGE_WIDTH / 2);
     if font_draw_string(
-        message_x,
-        center_y + 15,
+        layout.message_x,
+        layout.message_y,
         TEXT_INIT.as_ptr() as *const c_char,
         SPLASH_SUBTEXT_COLOR,
         0,
@@ -145,13 +199,11 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         return Err(VideoError::Invalid);
     }
 
-    let progress_bar_x = center_x - SPLASH_PROGRESS_WIDTH / 2;
-    let progress_bar_y = center_y + 40;
     splash_draw_progress_bar(
-        progress_bar_x,
-        progress_bar_y,
-        SPLASH_PROGRESS_WIDTH,
-        SPLASH_PROGRESS_HEIGHT,
+        layout.progress_x,
+        layout.progress_y,
+        layout.progress_w,
+        layout.progress_h,
         0,
     )?;
 
@@ -164,20 +216,19 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
 
     let width = framebuffer::framebuffer_get_width() as i32;
     let height = framebuffer::framebuffer_get_height() as i32;
-    let center_x = width / 2;
-    let center_y = height / 2;
+    let layout = splash_layout(width, height);
 
     graphics::graphics_draw_rect_filled(
-        center_x - (SPLASH_MESSAGE_WIDTH / 2),
-        center_y + 15,
-        SPLASH_MESSAGE_WIDTH,
+        layout.message_x,
+        layout.message_y,
+        layout.message_w,
         SPLASH_MESSAGE_HEIGHT,
         SPLASH_BG_COLOR,
     )?;
     if !message.is_null()
         && font_draw_string(
-            center_x - (SPLASH_MESSAGE_WIDTH / 2),
-            center_y + 15,
+            layout.message_x,
+            layout.message_y,
             message,
             SPLASH_SUBTEXT_COLOR,
             0,
@@ -186,13 +237,11 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
         return Err(VideoError::Invalid);
     }
 
-    let progress_bar_x = center_x - SPLASH_PROGRESS_WIDTH / 2;
-    let progress_bar_y = center_y + 40;
     splash_draw_progress_bar(
-        progress_bar_x,
-        progress_bar_y,
-        SPLASH_PROGRESS_WIDTH,
-        SPLASH_PROGRESS_HEIGHT,
+        layout.progress_x,
+        layout.progress_y,
+        layout.progress_w,
+        layout.progress_h,
         progress,
     )?;
     Ok(())

@@ -516,7 +516,6 @@ pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
     unsafe {
         set_cr3((*page_dir).pml4_phys);
         CURRENT_PAGE_DIR = page_dir;
-        klog_debug!("Switched to process page directory");
     }
     0
 }
@@ -705,6 +704,8 @@ pub fn paging_mark_range_user(
                 let mut flags = *pdpte | PAGE_USER;
                 if writable == 0 {
                     flags &= !PAGE_WRITABLE;
+                } else {
+                    flags |= PAGE_WRITABLE;
                 }
                 *pdpte = flags;
                 addr += PAGE_SIZE_1GB;
@@ -722,6 +723,8 @@ pub fn paging_mark_range_user(
                 let mut flags = *pde | PAGE_USER;
                 if writable == 0 {
                     flags &= !PAGE_WRITABLE;
+                } else {
+                    flags |= PAGE_WRITABLE;
                 }
                 *pde = flags;
                 addr += PAGE_SIZE_2MB;
@@ -738,6 +741,8 @@ pub fn paging_mark_range_user(
             let mut flags = *pte | PAGE_USER;
             if writable == 0 {
                 flags &= !PAGE_WRITABLE;
+            } else {
+                flags |= PAGE_WRITABLE;
             }
             *pte = flags;
             addr += PAGE_SIZE_4KB;

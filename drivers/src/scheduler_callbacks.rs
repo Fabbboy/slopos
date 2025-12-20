@@ -27,6 +27,7 @@ pub struct SchedulerCallbacks {
     pub scheduler_is_enabled: Option<fn() -> c_int>,
     pub task_is_blocked: Option<fn(*const c_void) -> bool>,
     pub unblock_task: Option<fn(*mut c_void) -> c_int>,
+    pub block_current_task: Option<fn()>,
     pub fate_spin: Option<fn() -> FateResult>,
     pub fate_set_pending: Option<fn(FateResult, u32) -> c_int>,
     pub fate_take_pending: Option<fn(u32, *mut FateResult) -> c_int>,
@@ -48,6 +49,7 @@ static mut CALLBACKS: SchedulerCallbacks = SchedulerCallbacks {
     scheduler_is_enabled: None,
     task_is_blocked: None,
     unblock_task: None,
+    block_current_task: None,
     fate_spin: None,
     fate_set_pending: None,
     fate_take_pending: None,
@@ -168,6 +170,12 @@ pub unsafe fn call_unblock_task(task: *mut c_void) -> c_int {
         cb(task)
     } else {
         -1
+    }
+}
+
+pub unsafe fn call_block_current_task() {
+    if let Some(cb) = CALLBACKS.block_current_task {
+        cb();
     }
 }
 

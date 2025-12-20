@@ -13,6 +13,19 @@ pub fn fate_register_outcome_hook(cb: fn(*const FateResult)) {
     OUTCOME_HOOK.store(cb as usize, core::sync::atomic::Ordering::SeqCst);
 }
 
+pub fn fate_notify_outcome(res: *const FateResult) {
+    if res.is_null() {
+        return;
+    }
+    let hook = OUTCOME_HOOK.load(core::sync::atomic::Ordering::SeqCst);
+    if hook != 0 {
+        unsafe {
+            let cb: fn(*const FateResult) = core::mem::transmute(hook);
+            cb(res);
+        }
+    }
+}
+
 pub enum RouletteOutcome {
     Survive,
     Panic,

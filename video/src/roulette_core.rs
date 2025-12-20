@@ -14,7 +14,6 @@ const ROULETTE_SEGMENT_COUNT: i32 = 12;
 const ROULETTE_TRIG_SCALE: i32 = 1024;
 const ROULETTE_WHEEL_RADIUS: i32 = 120;
 const ROULETTE_INNER_RADIUS: i32 = 36;
-const ROULETTE_POINTER_WIDTH: i32 = 18;
 const ROULETTE_DEGREE_STEPS: i32 = 360;
 const ROULETTE_SEGMENT_DEGREES: i32 = 360 / ROULETTE_SEGMENT_COUNT;
 const ROULETTE_SPIN_LOOPS: i32 = 4;
@@ -68,10 +67,6 @@ const TEXT_WIN: &[u8] = b"W I N !\0";
 const TEXT_WIN_SUB: &[u8] = b"Fortune smiles upon the slop!\0";
 const TEXT_LOSE: &[u8] = b"L O S E\0";
 const TEXT_LOSE_SUB: &[u8] = b"L bozzo lol - try again!\0";
-const TEXT_DEMO_TITLE: &[u8] = b"*** SLOPOS GRAPHICS SYSTEM OPERATIONAL ***\0";
-const TEXT_DEMO_FB: &[u8] = b"Framebuffer: WORKING | Resolution: 1024x768\0";
-const TEXT_DEMO_STATUS: &[u8] = b"Memory: OK | Graphics: OK | Text: OK\0";
-const TEXT_HANDOFF: &[u8] = b"Shell launching... enjoy the demo\0";
 const TEXT_WHEEL_TITLE: &[u8] = b"=== THE WHEEL OF FATE ===\0";
 const TEXT_WHEEL_SUB: &[u8] = b"Pointers choose your destiny...\0";
 const TEXT_CURRENCY_WIN: &[u8] = b"+10 W's (currency units)\0";
@@ -245,6 +240,14 @@ fn segment_center_angle(segment_index: i32) -> i32 {
     segment_index * ROULETTE_SEGMENT_DEGREES + (ROULETTE_SEGMENT_DEGREES / 2)
 }
 
+struct RouletteLayout {
+    radius: i32,
+    inner_radius: i32,
+    pointer_width: i32,
+    pointer_tip_radius: i32,
+    pointer_base_radius: i32,
+}
+
 fn draw_filled_triangle(
     b: &RouletteBackend,
     mut x0: i32,
@@ -301,10 +304,11 @@ fn draw_segment_wedge(
     cx: i32,
     cy: i32,
     start_idx: usize,
+    inner_radius: i32,
     radius: i32,
     color: u32,
 ) -> VideoResult {
-    let inner = ROULETTE_INNER_RADIUS;
+    let inner = inner_radius;
     let start_deg = (start_idx as i32) * ROULETTE_SEGMENT_DEGREES;
     let end_deg = start_deg + ROULETTE_SEGMENT_DEGREES;
 
@@ -350,6 +354,7 @@ fn draw_roulette_wheel(
     b: &RouletteBackend,
     cx: i32,
     cy: i32,
+    inner_radius: i32,
     radius: i32,
     highlight_segment: i32,
 ) -> VideoResult {
@@ -372,14 +377,14 @@ fn draw_roulette_wheel(
                 ROULETTE_BLANK_HIGHLIGHT
             };
         }
-        draw_segment_wedge(b, cx, cy, i as usize, radius, base_color)?;
+        draw_segment_wedge(b, cx, cy, i as usize, inner_radius, radius, base_color)?;
         draw_segment_divider(b, cx, cy, i as usize, radius)?;
     }
     draw_segment_divider(b, cx, cy, ROULETTE_SEGMENT_COUNT as usize, radius)?;
 
     unsafe {
-        backend_draw_circle_filled(b, cx, cy, ROULETTE_INNER_RADIUS + 6, ROULETTE_WHEEL_COLOR)?;
-        backend_draw_circle_filled(b, cx, cy, ROULETTE_INNER_RADIUS, ROULETTE_BG_COLOR)?;
+        backend_draw_circle_filled(b, cx, cy, inner_radius + 6, ROULETTE_WHEEL_COLOR)?;
+        backend_draw_circle_filled(b, cx, cy, inner_radius, ROULETTE_BG_COLOR)?;
     }
     Ok(())
 }
@@ -388,7 +393,9 @@ fn draw_pointer_for_angle(
     b: &RouletteBackend,
     cx: i32,
     cy: i32,
-    radius: i32,
+    pointer_width: i32,
+    tip_radius: i32,
+    base_radius: i32,
     angle_deg: i32,
     color: u32,
 ) -> VideoResult {
@@ -397,16 +404,13 @@ fn draw_pointer_for_angle(
     let perp_x = -dir_y;
     let perp_y = dir_x;
 
-    let tip_radius = radius + 24;
-    let base_radius = radius + 8;
-
     let tip_x = cx + scale(dir_x, tip_radius);
     let tip_y = cy + scale(dir_y, tip_radius);
     let base_x = cx + scale(dir_x, base_radius);
     let base_y = cy + scale(dir_y, base_radius);
 
-    let offset_x = scale(perp_x, ROULETTE_POINTER_WIDTH);
-    let offset_y = scale(perp_y, ROULETTE_POINTER_WIDTH);
+    let offset_x = scale(perp_x, pointer_width);
+    let offset_y = scale(perp_y, pointer_width);
 
     let left_x = base_x + offset_x;
     let left_y = base_y + offset_y;
@@ -425,12 +429,32 @@ fn draw_pointer_ticks(
     b: &RouletteBackend,
     cx: i32,
     cy: i32,
-    radius: i32,
+    pointer_width: i32,
+    tip_radius: i32,
+    base_radius: i32,
     angle_deg: i32,
     color: u32,
 ) {
-    let _ = draw_pointer_for_angle(b, cx, cy, radius, angle_deg, color);
-    let _ = draw_pointer_for_angle(b, cx, cy, radius, angle_deg + 180, color);
+    let _ = draw_pointer_for_angle(
+        b,
+        cx,
+        cy,
+        pointer_width,
+        tip_radius,
+        base_radius,
+        angle_deg,
+        color,
+    );
+    let _ = draw_pointer_for_angle(
+        b,
+        cx,
+        cy,
+        pointer_width,
+        tip_radius,
+        base_radius,
+        angle_deg + 180,
+        color,
+    );
 }
 
 fn draw_fate_number(b: &RouletteBackend, cx: i32, y_pos: i32, fate_number: u32, revealed: bool) {
@@ -544,7 +568,11 @@ fn render_wheel_frame(
     screen_height: i32,
     cx: i32,
     cy: i32,
+    inner_radius: i32,
     radius: i32,
+    pointer_width: i32,
+    pointer_tip_radius: i32,
+    pointer_base_radius: i32,
     highlight_segment: i32,
     pointer_angle_deg: i32,
     last_pointer_angle: &mut i32,
@@ -560,7 +588,16 @@ fn render_wheel_frame(
     let mut region_h = region * 2;
 
     if !clear_background && *last_pointer_angle >= 0 {
-        draw_pointer_ticks(b, cx, cy, radius, *last_pointer_angle, ROULETTE_BG_COLOR);
+        draw_pointer_ticks(
+            b,
+            cx,
+            cy,
+            pointer_width,
+            pointer_tip_radius,
+            pointer_base_radius,
+            *last_pointer_angle,
+            ROULETTE_BG_COLOR,
+        );
     }
 
     if clear_background {
@@ -584,9 +621,18 @@ fn render_wheel_frame(
     }
 
     if draw_wheel {
-        draw_roulette_wheel(b, cx, cy, radius, highlight_segment)?;
+        draw_roulette_wheel(b, cx, cy, inner_radius, radius, highlight_segment)?;
     }
-    draw_pointer_ticks(b, cx, cy, radius, pointer_angle_deg, ROULETTE_POINTER_COLOR);
+    draw_pointer_ticks(
+        b,
+        cx,
+        cy,
+        pointer_width,
+        pointer_tip_radius,
+        pointer_base_radius,
+        pointer_angle_deg,
+        ROULETTE_POINTER_COLOR,
+    );
     draw_fate_number(b, cx, cy + radius + 30, fate_number, reveal_number);
 
     *last_pointer_angle = pointer_angle_deg;
@@ -613,53 +659,6 @@ fn choose_segment_for_parity(fate_number: u32, need_colored: bool) -> i32 {
     start
 }
 
-fn roulette_draw_demo_scene(b: &RouletteBackend, width: i32, height: i32) {
-    unsafe {
-        let _ = backend_fill_rect(b, 0, 0, width, height, ROULETTE_BG_COLOR);
-        let _ = backend_fill_rect(b, 20, 20, width - 40, 2, ROULETTE_WHEEL_COLOR);
-        let _ = backend_fill_rect(
-            b,
-            20,
-            height - 48,
-            width - 40,
-            2,
-            ROULETTE_WHEEL_COLOR,
-        );
-    }
-
-    let cx = width / 2;
-    let cy = height / 2;
-    let mut radius = if width < height { width } else { height } / 8;
-    if radius < 60 {
-        radius = 60;
-    }
-    unsafe {
-        let _ = backend_draw_circle(b, cx, cy, radius, ROULETTE_COLORED_HIGHLIGHT);
-        let _ = backend_fill_rect(b, 0, 0, width, 2, ROULETTE_WHEEL_COLOR);
-        let _ = backend_fill_rect(b, 0, height - 2, width, 2, ROULETTE_WHEEL_COLOR);
-        let _ = backend_fill_rect(b, 0, 0, 2, height, ROULETTE_WHEEL_COLOR);
-        let _ = backend_fill_rect(b, width - 2, 0, 2, height, ROULETTE_WHEEL_COLOR);
-        let _ = backend_draw_text(b, 20, height - 140, TEXT_DEMO_TITLE, ROULETTE_TEXT_COLOR, 0);
-        let _ = backend_draw_text(b, 20, height - 124, TEXT_DEMO_FB, ROULETTE_TEXT_COLOR, 0);
-        let _ = backend_draw_text(b, 20, height - 108, TEXT_DEMO_STATUS, ROULETTE_TEXT_COLOR, 0);
-    }
-}
-
-fn roulette_handoff_to_demo(b: &RouletteBackend, width: i32, height: i32) {
-    unsafe {
-        let _ = backend_fill_rect(b, 0, 0, width, height, ROULETTE_BG_COLOR);
-        let _ = backend_draw_text(
-            b,
-            width / 2 - 140,
-            height / 2 - 20,
-            TEXT_HANDOFF,
-            ROULETTE_TEXT_COLOR,
-            0,
-        );
-        backend_sleep_ms(b, 400);
-    }
-    roulette_draw_demo_scene(b, width, height);
-}
 pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;
@@ -707,6 +706,18 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         radius = ROULETTE_INNER_RADIUS + 20;
     }
 
+    let inner_radius = (radius * 3 / 10).clamp(ROULETTE_INNER_RADIUS, radius - 24);
+    let pointer_width = (radius / 6).clamp(10, 18);
+    let pointer_base_radius = radius + (radius / 8).clamp(6, 18);
+    let pointer_tip_radius = radius + (radius / 3).clamp(18, 40);
+    let layout = RouletteLayout {
+        radius,
+        inner_radius,
+        pointer_width,
+        pointer_tip_radius,
+        pointer_base_radius,
+    };
+
     let want_colored = (fate_number & 1) != 0;
     let mut start_segment = (fate_number % ROULETTE_SEGMENT_COUNT as u32) as i32;
     let target_segment = choose_segment_for_parity(fate_number, want_colored);
@@ -735,7 +746,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         height,
         center_x,
         center_y,
-        radius,
+        layout.inner_radius,
+        layout.radius,
+        layout.pointer_width,
+        layout.pointer_tip_radius,
+        layout.pointer_base_radius,
         -1,
         start_angle,
         &mut last_pointer_angle,
@@ -761,7 +776,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             height,
             center_x,
             center_y,
-            radius,
+            layout.inner_radius,
+            layout.radius,
+            layout.pointer_width,
+            layout.pointer_tip_radius,
+            layout.pointer_base_radius,
             -1,
             pointer_angle_frame,
             &mut last_pointer_angle,
@@ -783,7 +802,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         height,
         center_x,
         center_y,
-        radius,
+        layout.inner_radius,
+        layout.radius,
+        layout.pointer_width,
+        layout.pointer_tip_radius,
+        layout.pointer_base_radius,
         landing_segment,
         pointer_angle,
         &mut last_pointer_angle,
@@ -804,7 +827,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             height,
             center_x,
             center_y,
-            radius,
+            layout.inner_radius,
+            layout.radius,
+            layout.pointer_width,
+            layout.pointer_tip_radius,
+            layout.pointer_base_radius,
             landing_segment,
             pointer_angle,
             &mut last_pointer_angle,
@@ -823,7 +850,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
                 height,
                 center_x,
                 center_y,
-                radius,
+                layout.inner_radius,
+                layout.radius,
+                layout.pointer_width,
+                layout.pointer_tip_radius,
+                layout.pointer_base_radius,
                 landing_segment,
                 pointer_angle,
                 &mut last_pointer_angle,
@@ -844,7 +875,11 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         height,
         center_x,
         center_y,
-        radius,
+        layout.inner_radius,
+        layout.radius,
+        layout.pointer_width,
+        layout.pointer_tip_radius,
+        layout.pointer_base_radius,
         landing_segment,
         pointer_angle,
         &mut last_pointer_angle,
@@ -857,7 +892,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         backend_sleep_ms(backend, 600);
     }
 
-    let mut info_y = center_y + radius + 60;
+    let mut info_y = center_y + layout.radius + 60;
     if info_y < 0 {
         info_y = 0;
     }
@@ -874,7 +909,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             ROULETTE_BG_COLOR,
         );
     }
-    draw_result_banner(backend, center_x, center_y + radius + 80, fate_number);
+    draw_result_banner(backend, center_x, center_y + layout.radius + 80, fate_number);
 
     let currency_text = if fate_number & 1 != 0 {
         TEXT_CURRENCY_WIN
@@ -885,7 +920,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         let _ = backend_draw_text(
             backend,
             center_x - 110,
-            center_y + radius + 170,
+            center_y + layout.radius + 170,
             currency_text,
             ROULETTE_TEXT_COLOR,
             0,
@@ -897,7 +932,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             let _ = backend_draw_text(
                 backend,
                 center_x - 130,
-                center_y + radius + 210,
+                center_y + layout.radius + 210,
                 TEXT_RESET,
                 ROULETTE_TEXT_COLOR,
                 0,
@@ -908,7 +943,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             let _ = backend_draw_text(
                 backend,
                 center_x - 130,
-                center_y + radius + 210,
+                center_y + layout.radius + 210,
                 TEXT_CONTINUE,
                 ROULETTE_TEXT_COLOR,
                 0,
@@ -918,10 +953,6 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
 
     unsafe {
         backend_sleep_ms(backend, ROULETTE_RESULT_DELAY_MS);
-    }
-
-    if fate_number & 1 != 0 {
-        roulette_handoff_to_demo(backend, width, height);
     }
 
     0
