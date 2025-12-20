@@ -8,7 +8,6 @@ use crate::syscall_common::{
     syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err, syscall_return_ok,
 };
 use crate::syscall_types::{INVALID_PROCESS_ID, InterruptFrame, Task};
-
 const USER_FS_MAX_ENTRIES: u32 = 64;
 type RamfsNode = ramfs_node_t;
 

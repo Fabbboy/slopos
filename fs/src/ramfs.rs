@@ -317,14 +317,15 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     static ETC: &[u8] = b"/etc\0";
     static README: &[u8] = b"/etc/readme.txt\0";
     static TMP: &[u8] = b"/tmp\0";
-    let _ = ramfs_create_directory(ETC.as_ptr() as *const c_char);
+    let _ = ramfs_create_directory_locked(state, ETC.as_ptr() as *const c_char);
     let sample = b"SlopOS ramfs online\n";
-    let _ = ramfs_create_file(
+    let _ = ramfs_create_file_locked(
+        state,
         README.as_ptr() as *const c_char,
         sample.as_ptr() as *const c_void,
         sample.len(),
     );
-    let _ = ramfs_create_directory(TMP.as_ptr() as *const c_char);
+    let _ = ramfs_create_directory_locked(state, TMP.as_ptr() as *const c_char);
 
     klog_info!("ramfs: initialized");
     0
@@ -404,16 +405,27 @@ pub fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t {
     if !validate_path(path) {
         return ptr::null_mut();
     }
-    let bytes = unsafe { path_bytes(path) }.unwrap_or(&[]);
     let mut state = RAMFS_STATE.lock();
     if ensure_initialized_locked(&mut state) != 0 {
         return ptr::null_mut();
     }
 
+    ramfs_create_directory_locked(&mut state, path)
+}
+
+fn ramfs_create_directory_locked(
+    state: &mut RamfsState,
+    path: *const c_char,
+) -> *mut ramfs_node_t {
+    if !validate_path(path) {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { path_bytes(path) }.unwrap_or(&[]);
+
     let mut last_component: Option<&[u8]> = None;
     let parent = unsafe {
         ramfs_traverse_internal(
-            &mut state,
+            state,
             bytes,
             RamfsCreateMode::Directories,
             true,
@@ -454,16 +466,29 @@ pub fn ramfs_create_file(
     if !validate_path(path) {
         return ptr::null_mut();
     }
-    let bytes = unsafe { path_bytes(path) }.unwrap_or(&[]);
     let mut state = RAMFS_STATE.lock();
     if ensure_initialized_locked(&mut state) != 0 {
         return ptr::null_mut();
     }
 
+    ramfs_create_file_locked(&mut state, path, data, size)
+}
+
+fn ramfs_create_file_locked(
+    state: &mut RamfsState,
+    path: *const c_char,
+    data: *const c_void,
+    size: usize,
+) -> *mut ramfs_node_t {
+    if !validate_path(path) {
+        return ptr::null_mut();
+    }
+    let bytes = unsafe { path_bytes(path) }.unwrap_or(&[]);
+
     let mut last_component: Option<&[u8]> = None;
     let parent = unsafe {
         ramfs_traverse_internal(
-            &mut state,
+            state,
             bytes,
             RamfsCreateMode::Directories,
             true,
@@ -727,7 +752,7 @@ pub fn ramfs_list_directory(
         unsafe {
             let mut child = (*dir).children;
             while !child.is_null() && filled < child_count {
-                ramfs_node_retain(child);
+                (*child).refcount = (*child).refcount.saturating_add(1);
                 *array_ptr.add(filled as usize) = child;
                 filled += 1;
                 child = (*child).next_sibling;
