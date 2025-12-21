@@ -177,6 +177,7 @@ build-userland:
 	  --target targets/x86_64-slos-userland.json \
 	  --package slopos-userland \
 	  --bin roulette \
+	  --bin compositor \
 	  --bin shell \
 	  --features standalone-bin \
 	  --no-default-features \
@@ -184,10 +185,13 @@ build-userland:
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/roulette" "$(BUILD_DIR)/roulette.elf"; \
 	fi; \
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/compositor ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/compositor" "$(BUILD_DIR)/compositor.elf"; \
+	fi; \
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell" "$(BUILD_DIR)/shell.elf"; \
 	fi; \
-	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/shell.elf"
+	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf"
 
 build: build-userland
 	@$(call build_kernel)

@@ -12,7 +12,9 @@ use crate::syscall_fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_types::{InterruptFrame, Task};
+use crate::syscall_types::{
+    InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE,
+};
 use crate::video_bridge;
 use slopos_lib::klog_debug;
 use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
@@ -50,6 +52,12 @@ use slopos_mm::user_copy_helpers::{
     user_copy_rect_checked, user_copy_text_header,
 };
 use crate::video_bridge::{VideoError, VideoResult};
+use core::sync::atomic::{AtomicU8, Ordering};
+const GFX_LOG_MAX_TASKS: usize = 32;
+static GFX_FAIL_LOGGED: [AtomicU8; GFX_LOG_MAX_TASKS] = {
+    const ZERO: AtomicU8 = AtomicU8::new(0);
+    [ZERO; GFX_LOG_MAX_TASKS]
+};
 
 use crate::scheduler_callbacks::{
     call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
@@ -74,6 +82,20 @@ fn video_result_from_font(rc: c_int) -> VideoResult {
         Ok(())
     } else {
         Err(VideoError::Invalid)
+    }
+}
+
+fn task_has_flag(task: *mut Task, flag: u16) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    unsafe { (*task).flags & flag != 0 }
+}
+
+fn log_gfx_failure(task_id: u32, label: &str) {
+    let idx = task_id as usize;
+    if idx < GFX_LOG_MAX_TASKS && GFX_FAIL_LOGGED[idx].swap(1, Ordering::Relaxed) == 0 {
+        klog_debug!("gfx: {} failed for task {}", label, task_id);
     }
 }
 
@@ -225,7 +247,7 @@ pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_gfx_fill_rect(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_gfx_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut rect = UserRect {
         x: 0,
         y: 0,
@@ -236,16 +258,33 @@ pub fn syscall_gfx_fill_rect(_task: *mut Task, frame: *mut InterruptFrame) -> Sy
     if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc =
-        video_bridge::draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
+    let rc = video_bridge::surface_draw_rect_filled_fast(
+        task_id,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        rect.color,
+    );
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "fill_rect");
+    }
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_gfx_draw_line(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_gfx_draw_line(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut line = UserLine {
         x0: 0,
         y0: 0,
@@ -256,15 +295,27 @@ pub fn syscall_gfx_draw_line(_task: *mut Task, frame: *mut InterruptFrame) -> Sy
     if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const UserLine) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::draw_line(line.x0, line.y0, line.x1, line.y1, line.color);
+    let rc =
+        video_bridge::surface_draw_line(task_id, line.x0, line.y0, line.x1, line.y1, line.color);
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "draw_line");
+    }
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_gfx_draw_circle(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_gfx_draw_circle(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut circle = UserCircle {
         cx: 0,
         cy: 0,
@@ -274,16 +325,28 @@ pub fn syscall_gfx_draw_circle(_task: *mut Task, frame: *mut InterruptFrame) -> 
     if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::draw_circle(circle.cx, circle.cy, circle.radius, circle.color);
+    let rc =
+        video_bridge::surface_draw_circle(task_id, circle.cx, circle.cy, circle.radius, circle.color);
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "draw_circle");
+    }
     syscall_finish_gfx(frame, rc)
 }
 
 pub fn syscall_gfx_draw_circle_filled(
-    _task: *mut Task,
+    task: *mut Task,
     frame: *mut InterruptFrame,
 ) -> SyscallDisposition {
     let mut circle = UserCircle {
@@ -295,15 +358,32 @@ pub fn syscall_gfx_draw_circle_filled(
     if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::draw_circle_filled(circle.cx, circle.cy, circle.radius, circle.color);
+    let rc = video_bridge::surface_draw_circle_filled(
+        task_id,
+        circle.cx,
+        circle.cy,
+        circle.radius,
+        circle.color,
+    );
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "draw_circle_filled");
+    }
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut text = UserText {
         x: 0,
         y: 0,
@@ -329,10 +409,16 @@ pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> Syscal
         return syscall_return_err(frame, u64::MAX);
     }
     buf[text.len as usize] = 0;
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_result_from_font(video_bridge::font_draw_string(
+    let rc = video_result_from_font(video_bridge::surface_font_draw_string(
+        task_id,
         text.x,
         text.y,
         buf.as_ptr() as *const c_char,
@@ -340,10 +426,16 @@ pub fn syscall_font_draw(_task: *mut Task, frame: *mut InterruptFrame) -> Syscal
         text.bg_color,
     ));
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "font_draw");
+    }
     syscall_finish_gfx(frame, rc)
 }
 
-pub fn syscall_gfx_blit(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_gfx_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let mut blit = UserBlit {
         src_x: 0,
         src_y: 0,
@@ -355,10 +447,16 @@ pub fn syscall_gfx_blit(_task: *mut Task, frame: *mut InterruptFrame) -> Syscall
     if unsafe { user_copy_blit_checked(&mut blit, (*frame).rdi as *const UserBlit) } != 0 {
         return syscall_return_err(frame, u64::MAX);
     }
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::framebuffer_blit(
+    let rc = video_bridge::surface_blit(
+        task_id,
         blit.src_x,
         blit.src_y,
         blit.dst_x,
@@ -367,7 +465,32 @@ pub fn syscall_gfx_blit(_task: *mut Task, frame: *mut InterruptFrame) -> Syscall
         blit.height,
     );
     let _ = paging::switch_page_directory(original_dir);
+    if rc.is_ok() {
+        wl_currency::award_win();
+    } else {
+        wl_currency::award_loss();
+        log_gfx_failure(task_id, "blit");
+    }
     syscall_finish_gfx(frame, rc)
+}
+
+pub fn syscall_compositor_present(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::compositor_present();
+    let _ = paging::switch_page_directory(original_dir);
+    match rc {
+        Ok(_) => syscall_return_ok(frame, 0),
+        Err(_) => {
+            wl_currency::award_loss();
+            syscall_return_err(frame, u64::MAX)
+        }
+    }
 }
 
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -375,7 +498,11 @@ pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     syscall_return_ok(frame, value as u64)
 }
 
-pub fn syscall_roulette_draw(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_roulette_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_DISPLAY_EXCLUSIVE) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
     let fate = unsafe { (*frame).rdi as u32 };
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
@@ -551,6 +678,10 @@ static SYSCALL_TABLE: [SyscallEntry; 32] = {
         handler: Some(syscall_gfx_blit),
         name: b"gfx_blit\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_COMPOSITOR_PRESENT as usize] = SyscallEntry {
+        handler: Some(syscall_compositor_present),
+        name: b"compositor_present\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
         handler: Some(syscall_random_next),
         name: b"random_next\0".as_ptr() as *const c_char,
@@ -622,6 +753,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
     pub const SYSCALL_FONT_DRAW: u64 = 11;
     pub const SYSCALL_GFX_BLIT: u64 = 26;
+    pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
     pub const SYSCALL_RANDOM_NEXT: u64 = 12;
     pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
     pub const SYSCALL_ROULETTE_DRAW: u64 = 24;

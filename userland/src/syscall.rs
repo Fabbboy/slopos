@@ -15,6 +15,7 @@ pub const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
 pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
 pub const SYSCALL_FONT_DRAW: u64 = 11;
 pub const SYSCALL_GFX_BLIT: u64 = 26;
+pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
 pub const SYSCALL_RANDOM_NEXT: u64 = 12;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
 pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
@@ -169,6 +170,14 @@ unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
+pub fn sys_yield() {
+    unsafe {
+        syscall(SYSCALL_YIELD, 0, 0, 0);
+    }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
 pub fn sys_write(buf: &[u8]) -> i64 {
     unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
@@ -270,6 +279,12 @@ pub fn sys_font_draw(text: &UserText) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_gfx_blit(blit: &UserBlit) -> i64 {
     unsafe { syscall(SYSCALL_GFX_BLIT, blit as *const _ as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_compositor_present() -> i64 {
+    unsafe { syscall(SYSCALL_COMPOSITOR_PRESENT, 0, 0, 0) as i64 }
 }
 
 #[inline(always)]

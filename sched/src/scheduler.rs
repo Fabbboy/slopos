@@ -4,7 +4,7 @@ use core::ptr;
 use slopos_drivers::scheduler_callbacks;
 use slopos_drivers::{pit, wl_currency};
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::klog_info;
 
 use crate::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
@@ -265,14 +265,6 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         wl_currency::award_loss();
         return -1;
     }
-    unsafe {
-        klog_debug!(
-            "schedule_task: enqueued task {} (flags=0x{:x}) ready_count={}",
-            (*task).task_id,
-            (*task).flags as u32,
-            sched.ready_queue.count
-        );
-    }
     0
 }
 pub fn unschedule_task(task: *mut Task) -> c_int {
@@ -315,15 +307,6 @@ fn switch_to_task(new_task: *mut Task) {
     task_set_current(new_task);
     scheduler_reset_task_quantum(new_task);
     sched.total_switches += 1;
-
-    unsafe {
-        klog_debug!(
-            "switch_to_task: now running task {} (flags=0x{:x} pid={})",
-            (*new_task).task_id,
-            (*new_task).flags as u32,
-            (*new_task).process_id
-        );
-    }
 
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
     unsafe {
@@ -573,12 +556,6 @@ pub fn start_scheduler() -> c_int {
     sched.enabled = 1;
     unsafe { crate::ffi_boundary::init_kernel_context(&mut sched.return_context) };
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
-
-    klog_debug!(
-        "start_scheduler: ready_count={} idle_task={:p}",
-        sched.ready_queue.count,
-        sched.idle_task
-    );
 
     if !ready_queue_empty(&sched.ready_queue) {
         schedule();

@@ -1,10 +1,9 @@
-use core::ffi::{c_char, c_int, c_uint, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::mem;
 use core::ptr;
 
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
-use slopos_lib::klog::{KlogLevel, klog_is_enabled};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
@@ -31,6 +30,8 @@ pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
+pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
+pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
 
 const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
 
@@ -779,15 +780,6 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     }
 
     unsafe { (*task).state = new_state };
-
-    if klog_is_enabled(KlogLevel::Debug) != 0 {
-        klog_debug!(
-            "Task {} state: {} -> {}",
-            task_id,
-            old_state as c_uint,
-            new_state as c_uint
-        );
-    }
 
     0
 }

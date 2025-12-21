@@ -4,11 +4,11 @@ use core::ptr;
 use crate::framebuffer;
 use crate::graphics;
 
-const FONT_CHAR_WIDTH: i32 = 8;
-const FONT_CHAR_HEIGHT: i32 = 16;
-const FONT_FIRST_CHAR: u8 = 32;
-const FONT_LAST_CHAR: u8 = 126;
-const FONT_CHAR_COUNT: usize = (FONT_LAST_CHAR - FONT_FIRST_CHAR + 1) as usize;
+pub(crate) const FONT_CHAR_WIDTH: i32 = 8;
+pub(crate) const FONT_CHAR_HEIGHT: i32 = 16;
+pub(crate) const FONT_FIRST_CHAR: u8 = 32;
+pub(crate) const FONT_LAST_CHAR: u8 = 126;
+pub(crate) const FONT_CHAR_COUNT: usize = (FONT_LAST_CHAR - FONT_FIRST_CHAR + 1) as usize;
 
 const FONT_SUCCESS: c_int = 0;
 const FONT_ERROR_NO_FB: c_int = -1;
@@ -39,7 +39,7 @@ static FONT_CONSOLE: spin::Mutex<ConsoleState> = spin::Mutex::new(const { Consol
 
 // Glyph data copied 1:1 from the original 8x16 bitmap font.
 #[allow(clippy::unreadable_literal)]
-static FONT_DATA: [[u8; FONT_CHAR_HEIGHT as usize]; FONT_CHAR_COUNT] = [
+pub(crate) static FONT_DATA: [[u8; FONT_CHAR_HEIGHT as usize]; FONT_CHAR_COUNT] = [
     // Space (32)
     [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -592,6 +592,14 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
         }
     }
     &buf[..len]
+}
+
+pub(crate) fn font_glyph(c: u8) -> Option<&'static [u8; FONT_CHAR_HEIGHT as usize]> {
+    if !(FONT_FIRST_CHAR..=FONT_LAST_CHAR).contains(&c) {
+        return None;
+    }
+    let idx = (c - FONT_FIRST_CHAR) as usize;
+    Some(&FONT_DATA[idx])
 }
 pub fn font_draw_string(
     x: i32,

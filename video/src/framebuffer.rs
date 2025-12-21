@@ -93,6 +93,18 @@ fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
     }
 }
 
+pub(crate) fn framebuffer_convert_color_for(pixel_format: u8, color: u32) -> u32 {
+    match pixel_format {
+        PIXEL_FORMAT_BGR | PIXEL_FORMAT_BGRA => {
+            ((color & 0xFF0000) >> 16)
+                | (color & 0x00FF00)
+                | ((color & 0x0000FF) << 16)
+                | (color & 0xFF000000)
+        }
+        _ => color,
+    }
+}
+
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > MAX_FRAMEBUFFER_WIDTH {
         return -1;

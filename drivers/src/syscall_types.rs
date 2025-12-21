@@ -6,6 +6,8 @@ pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
+pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
+pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
 
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;

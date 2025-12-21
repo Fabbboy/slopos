@@ -18,6 +18,10 @@ name = "roulette"
 path = "src/bin/roulette.rs"
 
 [[bin]]
+name = "compositor"
+path = "src/bin/compositor.rs"
+
+[[bin]]
 name = "shell"
 path = "src/bin/shell.rs"
 

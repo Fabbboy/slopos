@@ -2,21 +2,15 @@ use core::ffi::{CStr, c_char};
 use core::ptr;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
-use slopos_drivers::{fate, wl_currency};
+use slopos_drivers::wl_currency;
 use slopos_lib::klog_info;
 use slopos_mm::process_vm::process_vm_load_elf;
 use slopos_sched::{
-    INVALID_TASK_ID, Task, TaskEntry, schedule_task, task_get_info, task_terminate,
+    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, Task,
+    TaskEntry, schedule_task, task_get_info, task_set_state, task_terminate,
 };
 
-use crate::loader::user_spawn_program;
-
-pub type FateResult = slopos_drivers::fate::FateResult;
-
-#[inline(always)]
-fn is_win(res: &FateResult) -> bool {
-    res.value & 1 == 1
-}
+use crate::loader::user_spawn_program_with_flags;
 
 #[unsafe(link_section = ".user_text")]
 fn log_info(msg: &str) {
@@ -37,15 +31,16 @@ fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
+fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
     // Create task with dummy entry point - will be replaced by ELF loader
     // Use a dummy function pointer that points to 0x400000 (user code base)
     let dummy_entry: TaskEntry = unsafe { core::mem::transmute(0x400000usize) };
-    let task_id = user_spawn_program(
+    let task_id = user_spawn_program_with_flags(
         name.as_ptr() as *const c_char,
         dummy_entry,
         ptr::null_mut(),
         priority,
+        flags,
     );
     if task_id == INVALID_TASK_ID {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
@@ -81,6 +76,12 @@ fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
             "/../builddir/shell.elf"
         ));
         SHELL_ELF
+    } else if name == b"compositor\0" {
+        const COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../builddir/compositor.elf"
+        ));
+        COMPOSITOR_ELF
     } else {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
             klog_info!("USERLAND: Unknown task name '{}', cannot load ELF\n", task_name);
@@ -124,12 +125,99 @@ fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
         ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), new_entry);
     }
 
-    if schedule_task(task_info) != 0 {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to schedule task '{}'\n", task_name);
-        });
-        wl_currency::award_loss();
-        task_terminate(task_id);
+    wl_currency::award_win();
+    task_id as i32
+}
+
+#[unsafe(link_section = ".user_text")]
+fn block_task_on(task_id: u32, task_info: *mut Task, wait_on: u32) -> i32 {
+    if task_info.is_null() {
+        return -1;
+    }
+    unsafe {
+        (*task_info).waiting_on_task_id = wait_on;
+    }
+    if task_set_state(task_id, TASK_STATE_BLOCKED) != 0 {
+        return -1;
+    }
+    0
+}
+
+#[unsafe(link_section = ".user_text")]
+fn boot_step_userland_preinit() -> i32 {
+    let shell_id = userland_spawn_with_flags(b"shell\0", 5, 0);
+    if shell_id <= 0 {
+        log_info("USERLAND: Failed to create shell init task\n");
+        return -1;
+    }
+
+    let compositor_id = userland_spawn_with_flags(b"compositor\0", 4, TASK_FLAG_COMPOSITOR);
+    if compositor_id <= 0 {
+        log_info("USERLAND: Failed to create compositor task\n");
+        task_terminate(shell_id as u32);
+        return -1;
+    }
+
+    let roulette_id = userland_spawn_with_flags(
+        b"roulette\0",
+        5,
+        TASK_FLAG_DISPLAY_EXCLUSIVE,
+    );
+    if roulette_id <= 0 {
+        log_info("USERLAND: Failed to create roulette task\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        return -1;
+    }
+
+    let mut shell_info: *mut Task = ptr::null_mut();
+    if task_get_info(shell_id as u32, &mut shell_info) != 0 {
+        log_info("USERLAND: Failed to fetch shell init task info\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
+        return -1;
+    }
+
+    let mut compositor_info: *mut Task = ptr::null_mut();
+    if task_get_info(compositor_id as u32, &mut compositor_info) != 0 {
+        log_info("USERLAND: Failed to fetch compositor task info\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
+        return -1;
+    }
+
+    if block_task_on(shell_id as u32, shell_info, roulette_id as u32) != 0 {
+        log_info("USERLAND: Failed to block shell init task\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
+        return -1;
+    }
+
+    if block_task_on(compositor_id as u32, compositor_info, roulette_id as u32) != 0 {
+        log_info("USERLAND: Failed to block compositor task\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
+        return -1;
+    }
+
+    let mut roulette_info: *mut Task = ptr::null_mut();
+    if task_get_info(roulette_id as u32, &mut roulette_info) != 0 || roulette_info.is_null() {
+        log_info("USERLAND: Failed to fetch roulette task info\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
+        return -1;
+    }
+
+    if schedule_task(roulette_info) != 0 {
+        log_info("USERLAND: Failed to schedule roulette task\n");
+        task_terminate(shell_id as u32);
+        task_terminate(compositor_id as u32);
+        task_terminate(roulette_id as u32);
         return -1;
     }
 
@@ -137,63 +225,10 @@ fn userland_spawn_and_schedule(name: &[u8], priority: u8) -> i32 {
     0
 }
 
-#[unsafe(link_section = ".user_bss")]
-static mut SHELL_SPAWNED: bool = false;
-
-#[unsafe(link_section = ".user_text")]
-fn userland_launch_shell_once() -> i32 {
-    unsafe {
-        if SHELL_SPAWNED {
-            return 0;
-        }
-    }
-    if userland_spawn_and_schedule(b"shell\0", 5) != 0 {
-        log_info("USERLAND: Shell failed to start after roulette win\n");
-        return -1;
-    }
-    unsafe {
-        SHELL_SPAWNED = true;
-    }
-    0
-}
-
-#[unsafe(link_section = ".user_text")]
-fn userland_fate_hook(res: *const FateResult) {
-    if res.is_null() {
-        return;
-    }
-    let result = unsafe { *res };
-    if !is_win(&result) {
-        return;
-    }
-    if userland_launch_shell_once() != 0 {
-        log_info("USERLAND: Shell bootstrap hook failed\n");
-    }
-}
-
-#[unsafe(link_section = ".user_text")]
-fn boot_step_userland_hook() -> i32 {
-    fate::fate_register_outcome_hook(userland_fate_hook);
-    0
-}
-
-#[unsafe(link_section = ".user_text")]
-fn boot_step_roulette_task() -> i32 {
-    userland_spawn_and_schedule(b"roulette\0", 5)
-}
-
 #[used]
 #[unsafe(link_section = ".boot_init_services")]
 static BOOT_STEP_USERLAND_HOOK: BootInitStep = BootInitStep::new(
-    b"userland fate hook\0",
-    boot_step_userland_hook,
+    b"userland pre-init\0",
+    boot_step_userland_preinit,
     boot_init_priority(35),
-);
-
-#[used]
-#[unsafe(link_section = ".boot_init_services")]
-static BOOT_STEP_ROULETTE_TASK: BootInitStep = BootInitStep::new(
-    b"roulette task\0",
-    boot_step_roulette_task,
-    boot_init_priority(40),
 );

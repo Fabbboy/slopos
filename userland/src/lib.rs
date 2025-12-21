@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod loader;
 
 pub mod roulette;
+pub mod compositor;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
