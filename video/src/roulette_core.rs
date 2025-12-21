@@ -905,7 +905,9 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         backend_sleep_ms(backend, 600);
     }
 
-    let mut info_y = center_y + layout.radius + 60;
+    let fate_box_y = center_y + layout.radius + 30;
+    let fate_box_h = 60;
+    let mut info_y = fate_box_y + fate_box_h + 10;
     if info_y < 0 {
         info_y = 0;
     }
@@ -922,7 +924,8 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             ROULETTE_BG_COLOR,
         );
     }
-    draw_result_banner(backend, center_x, center_y + layout.radius + 80, fate_number);
+    let banner_y = info_y + 10;
+    draw_result_banner(backend, center_x, banner_y, fate_number);
 
     let currency_text = if fate_number & 1 != 0 {
         TEXT_CURRENCY_WIN
@@ -933,7 +936,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         let _ = backend_draw_text(
             backend,
             center_x - 110,
-            center_y + layout.radius + 170,
+            banner_y + 90,
             currency_text,
             ROULETTE_TEXT_COLOR,
             0,
@@ -945,18 +948,19 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
             let _ = backend_draw_text(
                 backend,
                 center_x - 130,
-                center_y + layout.radius + 210,
+                banner_y + 130,
                 TEXT_RESET,
                 ROULETTE_TEXT_COLOR,
                 0,
             );
         }
     } else {
+        let continue_x = center_x - text_width_px(TEXT_CONTINUE) / 2;
         unsafe {
             let _ = backend_draw_text(
                 backend,
-                center_x - 130,
-                center_y + layout.radius + 210,
+                continue_x,
+                banner_y + 130,
                 TEXT_CONTINUE,
                 ROULETTE_TEXT_COLOR,
                 0,

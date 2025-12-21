@@ -87,6 +87,6 @@ crate::boot_init_step_with_flags_unit!(
 crate::boot_init_optional_step_unit!(
     BOOT_STEP_FRAMEBUFFER_DEMO,
     optional,
-    b"framebuffer demo\0",
+    b"wheel of fate\0",
     boot_step_framebuffer_demo_fn
 );
