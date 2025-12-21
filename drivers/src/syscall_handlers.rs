@@ -274,14 +274,15 @@ pub fn syscall_gfx_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> Sys
         rect.height,
         rect.color,
     );
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "fill_rect");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_gfx_draw_line(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -305,14 +306,15 @@ pub fn syscall_gfx_draw_line(task: *mut Task, frame: *mut InterruptFrame) -> Sys
     let _ = paging::switch_page_directory(kernel_dir);
     let rc =
         video_bridge::surface_draw_line(task_id, line.x0, line.y0, line.x1, line.y1, line.color);
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "draw_line");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_gfx_draw_circle(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -335,14 +337,15 @@ pub fn syscall_gfx_draw_circle(task: *mut Task, frame: *mut InterruptFrame) -> S
     let _ = paging::switch_page_directory(kernel_dir);
     let rc =
         video_bridge::surface_draw_circle(task_id, circle.cx, circle.cy, circle.radius, circle.color);
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "draw_circle");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_gfx_draw_circle_filled(
@@ -373,14 +376,15 @@ pub fn syscall_gfx_draw_circle_filled(
         circle.radius,
         circle.color,
     );
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "draw_circle_filled");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -425,14 +429,15 @@ pub fn syscall_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
         text.fg_color,
         text.bg_color,
     ));
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "font_draw");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_gfx_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -464,14 +469,15 @@ pub fn syscall_gfx_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
         blit.width,
         blit.height,
     );
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
         log_gfx_failure(task_id, "blit");
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_compositor_present(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -483,14 +489,15 @@ pub fn syscall_compositor_present(task: *mut Task, frame: *mut InterruptFrame) -
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
     let rc = video_bridge::compositor_present();
-    let _ = paging::switch_page_directory(original_dir);
-    match rc {
+    let disp = match rc {
         Ok(_) => syscall_return_ok(frame, 0),
         Err(_) => {
             wl_currency::award_loss();
             syscall_return_err(frame, u64::MAX)
         }
-    }
+    };
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -508,13 +515,14 @@ pub fn syscall_roulette_draw(task: *mut Task, frame: *mut InterruptFrame) -> Sys
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
     let rc = video_bridge::roulette_draw(fate);
-    let _ = paging::switch_page_directory(original_dir);
     if rc.is_ok() {
         wl_currency::award_win();
     } else {
         wl_currency::award_loss();
     }
-    syscall_finish_gfx(frame, rc)
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
 }
 
 pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {

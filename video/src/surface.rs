@@ -317,7 +317,7 @@ pub fn surface_draw_rect_filled_fast(
     if w <= 0 || h <= 0 {
         return Err(VideoError::Invalid);
     }
-    with_surface_mut(task_id, |surface| {
+    let result = with_surface_mut(task_id, |surface| {
         let mut x0 = x;
         let mut y0 = y;
         let mut x1 = x + w - 1;
@@ -330,7 +330,8 @@ pub fn surface_draw_rect_filled_fast(
         }
         mark_dirty(surface, x0, y0, x1, y1);
         Ok(())
-    })
+    });
+    result
 }
 
 pub fn surface_draw_line(

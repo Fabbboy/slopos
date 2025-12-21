@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_int};
-use spin::Once;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use spin::Once;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

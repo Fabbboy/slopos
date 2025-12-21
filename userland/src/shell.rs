@@ -136,7 +136,9 @@ impl ShellConsole {
             height: self.height,
             color: self.bg,
         };
-        let _ = sys_gfx_fill_rect(&rect);
+        if sys_gfx_fill_rect(&rect) != 0 {
+            let _ = sys_write(b"shell: clear failed\n");
+        }
         self.cursor_col = 0;
         self.cursor_line = 0;
         self.origin = 0;
