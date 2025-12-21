@@ -659,6 +659,17 @@ fn choose_segment_for_parity(fate_number: u32, need_colored: bool) -> i32 {
     start
 }
 
+fn text_width_px(text: &[u8]) -> i32 {
+    let mut len = 0usize;
+    for &b in text {
+        if b == 0 {
+            break;
+        }
+        len += 1;
+    }
+    len as i32 * font::FONT_CHAR_WIDTH
+}
+
 pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     if backend.is_null() {
         return -1;
@@ -678,10 +689,12 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         return -3;
     }
 
+    let title_x = width / 2 - text_width_px(TEXT_WHEEL_TITLE) / 2;
+    let sub_x = width / 2 - text_width_px(TEXT_WHEEL_SUB) / 2;
     unsafe {
         let _ = backend_draw_text(
             backend,
-            width / 2 - 150,
+            title_x,
             50,
             TEXT_WHEEL_TITLE,
             ROULETTE_WHEEL_COLOR,
@@ -689,7 +702,7 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
         );
         let _ = backend_draw_text(
             backend,
-            width / 2 - 120,
+            sub_x,
             80,
             TEXT_WHEEL_SUB,
             ROULETTE_TEXT_COLOR,
