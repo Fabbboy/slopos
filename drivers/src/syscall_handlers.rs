@@ -67,7 +67,7 @@ use crate::scheduler_callbacks::{
 
 use crate::pit::{pit_poll_delay_ms, pit_sleep_ms};
 use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
-use crate::tty::{tty_read_char_blocking, tty_read_line};
+use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
 
 fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: VideoResult) -> SyscallDisposition {
     if rc.is_ok() {
@@ -188,6 +188,20 @@ pub fn syscall_user_read_char(_task: *mut Task, frame: *mut InterruptFrame) -> S
         return syscall_return_err(frame, u64::MAX);
     }
     syscall_return_ok(frame, c as u64)
+}
+
+pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let target = unsafe { (*frame).rdi as u32 };
+    if tty_set_focus(target) != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    wl_currency::award_win();
+    syscall_return_ok(frame, tty_get_focus() as u64)
 }
 
 pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -650,6 +664,10 @@ static SYSCALL_TABLE: [SyscallEntry; 32] = {
         handler: Some(syscall_user_read_char),
         name: b"read_char\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_TTY_SET_FOCUS as usize] = SyscallEntry {
+        handler: Some(syscall_tty_set_focus),
+        name: b"tty_set_focus\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_ROULETTE as usize] = SyscallEntry {
         handler: Some(syscall_roulette_spin),
         name: b"roulette\0".as_ptr() as *const c_char,
@@ -762,6 +780,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_FONT_DRAW: u64 = 11;
     pub const SYSCALL_GFX_BLIT: u64 = 26;
     pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
+    pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
     pub const SYSCALL_RANDOM_NEXT: u64 = 12;
     pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
     pub const SYSCALL_ROULETTE_DRAW: u64 = 24;

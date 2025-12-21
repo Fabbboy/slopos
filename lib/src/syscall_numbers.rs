@@ -13,6 +13,7 @@ pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
 pub const SYSCALL_FONT_DRAW: u64 = 11;
 pub const SYSCALL_RANDOM_NEXT: u64 = 12;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
+pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_FS_OPEN: u64 = 14;
 pub const SYSCALL_FS_CLOSE: u64 = 15;
 pub const SYSCALL_FS_READ: u64 = 16;

@@ -6,6 +6,7 @@ pub const SYSCALL_EXIT: u64 = 1;
 pub const SYSCALL_WRITE: u64 = 2;
 pub const SYSCALL_READ: u64 = 3;
 pub const SYSCALL_READ_CHAR: u64 = 25;
+pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_ROULETTE: u64 = 4;
 pub const SYSCALL_SLEEP_MS: u64 = 5;
 pub const SYSCALL_FB_INFO: u64 = 6;
@@ -285,6 +286,12 @@ pub fn sys_gfx_blit(blit: &UserBlit) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_compositor_present() -> i64 {
     unsafe { syscall(SYSCALL_COMPOSITOR_PRESENT, 0, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_tty_set_focus(task_id: u32) -> i64 {
+    unsafe { syscall(SYSCALL_TTY_SET_FOCUS, task_id as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]

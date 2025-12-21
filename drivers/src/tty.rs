@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Mutex;
 use slopos_lib::cpu;
@@ -33,6 +34,13 @@ static TTY_WAIT_QUEUE: Mutex<TtyWaitQueue> = Mutex::new(TtyWaitQueue {
     tail: 0,
     count: 0,
 });
+static TTY_FOCUS_QUEUE: Mutex<TtyWaitQueue> = Mutex::new(TtyWaitQueue {
+    tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
+    head: 0,
+    tail: 0,
+    count: 0,
+});
+static TTY_FOCUSED_TASK_ID: AtomicU32 = AtomicU32::new(0);
 
 use crate::serial::{serial_buffer_pending, serial_buffer_read, serial_poll_receive};
 
@@ -103,6 +111,73 @@ fn tty_wait_queue_push(task: *mut Task) -> bool {
     queue.count = queue.count.saturating_add(1);
     true
 }
+
+fn tty_focus_queue_push(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    let mut queue = TTY_FOCUS_QUEUE.lock();
+    if queue.count >= TTY_MAX_WAITERS {
+        return false;
+    }
+    for i in 0..queue.count {
+        let idx = (queue.tail + i) % TTY_MAX_WAITERS;
+        if queue.tasks[idx] == task {
+            return true;
+        }
+    }
+    let head = queue.head;
+    queue.tasks[head] = task;
+    queue.head = (head + 1) % TTY_MAX_WAITERS;
+    queue.count = queue.count.saturating_add(1);
+    true
+}
+
+fn tty_focus_queue_pop() -> *mut Task {
+    let mut queue = TTY_FOCUS_QUEUE.lock();
+    if queue.count == 0 {
+        return ptr::null_mut();
+    }
+    let task = queue.tasks[queue.tail];
+    queue.tail = (queue.tail + 1) % TTY_MAX_WAITERS;
+    queue.count = queue.count.saturating_sub(1);
+    task
+}
+
+fn tty_current_task_id() -> Option<u32> {
+    let task = unsafe { call_get_current_task() as *mut Task };
+    if task.is_null() {
+        return None;
+    }
+    unsafe { Some((*task).task_id) }
+}
+
+fn tty_task_has_focus(task_id: u32) -> bool {
+    let focused = TTY_FOCUSED_TASK_ID.load(Ordering::Relaxed);
+    focused != 0 && focused == task_id
+}
+
+fn tty_ensure_focus_for_task(task_id: u32) {
+    if TTY_FOCUSED_TASK_ID.load(Ordering::Relaxed) == 0 {
+        TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
+    }
+}
+
+fn tty_wait_for_focus(task_id: u32) {
+    if tty_task_has_focus(task_id) {
+        return;
+    }
+    if unsafe { call_scheduler_is_enabled() } != 0 {
+        let current = unsafe { call_get_current_task() as *mut Task };
+        if tty_focus_queue_push(current) {
+            unsafe { call_block_current_task() };
+            return;
+        }
+    }
+    while !tty_task_has_focus(task_id) {
+        tty_cpu_relax();
+    }
+}
 pub fn tty_notify_input_ready() {
     if unsafe { call_scheduler_is_enabled() } == 0 {
         return;
@@ -132,6 +207,30 @@ pub fn tty_notify_input_ready() {
             let _ = call_unblock_task(tasko_wake as *mut core::ffi::c_void);
         }
     }
+}
+
+pub fn tty_set_focus(task_id: u32) -> c_int {
+    TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
+    if unsafe { call_scheduler_is_enabled() } == 0 {
+        return 0;
+    }
+
+    cpu::disable_interrupts();
+    loop {
+        let candidate = tty_focus_queue_pop();
+        if candidate.is_null() {
+            break;
+        }
+        unsafe {
+            let _ = call_unblock_task(candidate as *mut core::ffi::c_void);
+        }
+    }
+    cpu::enable_interrupts();
+    0
+}
+
+pub fn tty_get_focus() -> u32 {
+    TTY_FOCUSED_TASK_ID.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -197,6 +296,11 @@ pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     }
 
     tty_register_idle_callback();
+    let task_id = match tty_current_task_id() {
+        Some(id) => id,
+        None => return 0,
+    };
+    tty_ensure_focus_for_task(task_id);
 
     if buffer_size < 2 {
         unsafe { *buffer = 0 };
@@ -207,6 +311,10 @@ pub fn tty_read_line(buffer: *mut u8, buffer_size: usize) -> usize {
     let max_pos = buffer_size - 1;
 
     loop {
+        if !tty_task_has_focus(task_id) {
+            tty_wait_for_focus(task_id);
+            continue;
+        }
         let mut c = 0u8;
         if !tty_dequeue_input_char(&mut c) {
             tty_block_until_input_ready();
@@ -261,7 +369,16 @@ pub fn tty_read_char_blocking(out_char: *mut u8) -> c_int {
         return -1;
     }
     tty_register_idle_callback();
+    let task_id = match tty_current_task_id() {
+        Some(id) => id,
+        None => return -1,
+    };
+    tty_ensure_focus_for_task(task_id);
     loop {
+        if !tty_task_has_focus(task_id) {
+            tty_wait_for_focus(task_id);
+            continue;
+        }
         let mut c = 0u8;
         if tty_dequeue_input_char(&mut c) {
             unsafe {
@@ -275,6 +392,14 @@ pub fn tty_read_char_blocking(out_char: *mut u8) -> c_int {
 
 pub fn tty_read_char_nonblocking(out_char: *mut u8) -> c_int {
     if out_char.is_null() {
+        return -1;
+    }
+    let task_id = match tty_current_task_id() {
+        Some(id) => id,
+        None => return -1,
+    };
+    tty_ensure_focus_for_task(task_id);
+    if !tty_task_has_focus(task_id) {
         return -1;
     }
     let mut c = 0u8;
