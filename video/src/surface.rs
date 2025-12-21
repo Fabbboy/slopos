@@ -323,9 +323,39 @@ pub fn surface_draw_rect_filled_fast(
         let mut x1 = x + w - 1;
         let mut y1 = y + h - 1;
         clip_rect(surface, &mut x0, &mut y0, &mut x1, &mut y1)?;
+        if surface.buffer.is_null() {
+            return Err(VideoError::Invalid);
+        }
+        let converted = framebuffer::framebuffer_convert_color_for(surface.pixel_format, color);
+        let bytes_pp = surface.bytes_pp as usize;
+        let pitch = surface.pitch as usize;
+        let span_w = (x1 - x0 + 1) as usize;
         for row in y0..=y1 {
-            for col in x0..=x1 {
-                let _ = surface_set_pixel(surface, col, row, color);
+            let row_off = row as usize * pitch + x0 as usize * bytes_pp;
+            unsafe {
+                let dst = surface.buffer.add(row_off);
+                match bytes_pp {
+                    4 => {
+                        if converted == 0 {
+                            ptr::write_bytes(dst, 0, span_w * 4);
+                        } else {
+                            let dst32 = dst as *mut u32;
+                            for col in 0..span_w {
+                                dst32.add(col).write_unaligned(converted);
+                            }
+                        }
+                    }
+                    3 => {
+                        let bytes = converted.to_le_bytes();
+                        for col in 0..span_w {
+                            let px = dst.add(col * 3);
+                            px.write(bytes[0]);
+                            px.add(1).write(bytes[1]);
+                            px.add(2).write(bytes[2]);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         mark_dirty(surface, x0, y0, x1, y1);
@@ -676,29 +706,8 @@ pub fn compositor_present() -> c_int {
             unsafe {
                 let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
                 let dst_ptr = fb.base.add(dst_off);
-                match bytes_pp {
-                    4 => {
-                        for col in 0..copy_w as usize {
-                            let src_px = src_ptr.add(col * 4) as *const u32;
-                            let dst_px = dst_ptr.add(col * 4) as *mut u32;
-                            let val = src_px.read_unaligned();
-                            ptr::write_volatile(dst_px, val);
-                        }
-                    }
-                    3 => {
-                        for col in 0..copy_w as usize {
-                            let src_px = src_ptr.add(col * 3);
-                            let dst_px = dst_ptr.add(col * 3);
-                            let b0 = src_px.read();
-                            let b1 = src_px.add(1).read();
-                            let b2 = src_px.add(2).read();
-                            ptr::write_volatile(dst_px, b0);
-                            ptr::write_volatile(dst_px.add(1), b1);
-                            ptr::write_volatile(dst_px.add(2), b2);
-                        }
-                    }
-                    _ => {}
-                }
+                let row_bytes = copy_w as usize * bytes_pp;
+                ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
             }
         }
         did_work = true;
