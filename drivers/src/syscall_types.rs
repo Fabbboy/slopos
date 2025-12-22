@@ -2,6 +2,12 @@ use core::ffi::c_void;
 
 use slopos_lib::InterruptFrame as LibInterruptFrame;
 
+pub const TASK_STATE_INVALID: u8 = 0;
+pub const TASK_STATE_READY: u8 = 1;
+pub const TASK_STATE_RUNNING: u8 = 2;
+pub const TASK_STATE_BLOCKED: u8 = 3;
+pub const TASK_STATE_TERMINATED: u8 = 4;
+
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;

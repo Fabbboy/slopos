@@ -8,10 +8,10 @@ use slopos_lib::cpu;
 use crate::keyboard;
 use crate::scheduler_callbacks::{
     call_block_current_task, call_get_current_task, call_register_idle_wakeup_callback,
-    call_scheduler_is_enabled, call_task_is_blocked, call_unblock_task,
+    call_scheduler_is_enabled, call_unblock_task,
 };
 use crate::serial;
-use crate::syscall_types::Task;
+use crate::syscall_types::{Task, TASK_STATE_BLOCKED, TASK_STATE_READY};
 
 const TTY_MAX_WAITERS: usize = 32;
 const COM1_BASE: u16 = 0x3F8;
@@ -184,27 +184,17 @@ pub fn tty_notify_input_ready() {
     }
 
     cpu::disable_interrupts();
-    let mut tasko_wake: *mut Task = ptr::null_mut();
-
-    loop {
-        let candidate = tty_wait_queue_pop();
-        if candidate.is_null() {
-            break;
-        }
-        if unsafe {
-            !call_task_is_blocked(candidate as *const Task as *const core::ffi::c_void)
-        } {
-            continue;
-        }
-        tasko_wake = candidate;
-        break;
-    }
-
+    let task = tty_wait_queue_pop();
     cpu::enable_interrupts();
 
-    if !tasko_wake.is_null() {
-        unsafe {
-            let _ = call_unblock_task(tasko_wake as *mut core::ffi::c_void);
+    if !task.is_null() {
+        let state = unsafe { (*task).state };
+        // Only wake tasks in valid waiting states (BLOCKED or READY)
+        // RUNNING tasks shouldn't be in the wait queue (would be a bug elsewhere)
+        if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
+            unsafe {
+                call_unblock_task(task as *mut core::ffi::c_void);
+            }
         }
     }
 }
