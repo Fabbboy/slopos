@@ -102,3 +102,42 @@ pub struct user_sys_info {
     pub ready_tasks: u32,
     pub schedule_calls: u32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct user_mouse_event {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+}
+
+// Window state constants
+pub const WINDOW_STATE_NORMAL: u8 = 0;
+pub const WINDOW_STATE_MINIMIZED: u8 = 1;
+pub const WINDOW_STATE_MAXIMIZED: u8 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct user_window_info {
+    pub task_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u8,
+    pub title: [c_char; 32],
+}
+
+impl Default for user_window_info {
+    fn default() -> Self {
+        Self {
+            task_id: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            state: WINDOW_STATE_NORMAL,
+            title: [0; 32],
+        }
+    }
+}

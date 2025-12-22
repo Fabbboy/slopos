@@ -132,6 +132,22 @@ fn compositor_present_bridge() -> c_int {
     surface::compositor_present()
 }
 
+fn surface_enumerate_windows_bridge(out_buffer: *mut video_bridge::WindowInfo, max_count: u32) -> u32 {
+    surface::surface_enumerate_windows(out_buffer as *mut surface::WindowInfo, max_count)
+}
+
+fn surface_set_window_position_bridge(task_id: u32, x: i32, y: i32) -> c_int {
+    surface::surface_set_window_position(task_id, x, y)
+}
+
+fn surface_set_window_state_bridge(task_id: u32, state: u8) -> c_int {
+    surface::surface_set_window_state(task_id, state)
+}
+
+fn surface_raise_window_bridge(task_id: u32) -> c_int {
+    surface::surface_raise_window(task_id)
+}
+
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     if let Some(fb) = framebuffer {
         serial_println!(
@@ -163,6 +179,10 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             surface_font_draw_string: Some(surface_font_draw_string_bridge),
             surface_blit: Some(surface_blit_bridge),
             compositor_present: Some(compositor_present_bridge),
+            surface_enumerate_windows: Some(surface_enumerate_windows_bridge),
+            surface_set_window_position: Some(surface_set_window_position_bridge),
+            surface_set_window_state: Some(surface_set_window_state_bridge),
+            surface_raise_window: Some(surface_raise_window_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

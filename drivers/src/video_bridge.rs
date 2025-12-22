@@ -13,6 +13,18 @@ pub struct FramebufferInfoC {
     pub pixel_format: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WindowInfo {
+    pub task_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u8,
+    pub title: [c_char; 32],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoError {
     NoFramebuffer,
@@ -40,6 +52,10 @@ pub struct VideoCallbacks {
     pub surface_font_draw_string: Option<fn(u32, i32, i32, *const c_char, u32, u32) -> c_int>,
     pub surface_blit: Option<fn(u32, i32, i32, i32, i32, i32, i32) -> c_int>,
     pub compositor_present: Option<fn() -> c_int>,
+    pub surface_enumerate_windows: Option<fn(*mut WindowInfo, u32) -> u32>,
+    pub surface_set_window_position: Option<fn(u32, i32, i32) -> c_int>,
+    pub surface_set_window_state: Option<fn(u32, u8) -> c_int>,
+    pub surface_raise_window: Option<fn(u32) -> c_int>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -249,6 +265,42 @@ pub fn compositor_present() -> Result<bool, VideoError> {
         }
     }
     Err(VideoError::NoFramebuffer)
+}
+
+pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_enumerate_windows {
+            return cb(out_buffer, max_count);
+        }
+    }
+    0
+}
+
+pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_window_position {
+            return cb(task_id, x, y);
+        }
+    }
+    -1
+}
+
+pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_window_state {
+            return cb(task_id, state);
+        }
+    }
+    -1
+}
+
+pub fn surface_raise_window(task_id: u32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_raise_window {
+            return cb(task_id);
+        }
+    }
+    -1
 }
 
 fn video_result_from_code(rc: c_int) -> VideoResult {

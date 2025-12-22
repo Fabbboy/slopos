@@ -23,6 +23,7 @@ use slopos_drivers::{
         interrupt_test_suite_string, interrupt_test_verbosity_string,
     },
     ioapic::init,
+    mouse::mouse_init,
     pci::{pci_get_primary_gpu, pci_init},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
@@ -103,6 +104,12 @@ fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
     klog_debug!("IRQ dispatcher ready.");
+}
+
+fn boot_step_mouse_init_fn() {
+    klog_debug!("Initializing PS/2 mouse...");
+    mouse_init();
+    klog_debug!("PS/2 mouse initialized.");
 }
 
 fn boot_step_timer_setup_fn() {
@@ -319,6 +326,13 @@ crate::boot_init_step_with_flags_unit!(
     b"irq dispatcher\0",
     boot_step_irq_setup_fn,
     boot_init_priority(60)
+);
+crate::boot_init_step_with_flags_unit!(
+    BOOT_STEP_MOUSE_INIT,
+    drivers,
+    b"mouse\0",
+    boot_step_mouse_init_fn,
+    boot_init_priority(65)
 );
 crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_TIMER_SETUP,

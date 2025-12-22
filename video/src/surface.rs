@@ -6,12 +6,17 @@ use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames};
 use slopos_mm::phys_virt::mm_phys_to_virt;
 use slopos_lib::klog_info;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_sched::MAX_TASKS;
 use spin::Mutex;
 
 use crate::framebuffer;
 use crate::font;
+
+// Window state constants
+pub const WINDOW_STATE_NORMAL: u8 = 0;
+pub const WINDOW_STATE_MINIMIZED: u8 = 1;
+pub const WINDOW_STATE_MAXIMIZED: u8 = 2;
 
 const SURFACE_BG_COLOR: u32 = 0x0000_0000;
 
@@ -62,6 +67,9 @@ struct SurfaceSlot {
     active: bool,
     task_id: u32,
     surface: Surface,
+    window_state: u8,
+    z_order: u32,
+    title: [c_char; 32],
 }
 
 unsafe impl Send for SurfaceSlot {}
@@ -72,6 +80,9 @@ impl SurfaceSlot {
             active: false,
             task_id: 0,
             surface: Surface::empty(),
+            window_state: WINDOW_STATE_NORMAL,
+            z_order: 0,
+            title: [0; 32],
         }
     }
 }
@@ -84,6 +95,7 @@ static SURFACE_CREATE_LOGGED: [AtomicU8; MAX_TASKS] = {
 };
 static COMPOSITOR_LOGGED: AtomicU8 = AtomicU8::new(0);
 static COMPOSITOR_EMPTY_LOGGED: AtomicU8 = AtomicU8::new(0);
+static NEXT_Z_ORDER: AtomicU32 = AtomicU32::new(1);
 
 fn bytes_per_pixel(bpp: u8) -> u32 {
     ((bpp as u32) + 7) / 8
@@ -202,6 +214,15 @@ fn create_surface_for_task(
             }
         };
 
+        // Calculate cascading window position
+        let active_count = slots.iter().filter(|s| s.active).count();
+        let cascade_offset = ((active_count as i32) * 32) % 200;
+        let window_x = 100 + cascade_offset;
+        let window_y = 100 + cascade_offset;
+
+        // Assign z-order (higher = on top)
+        let z_order = NEXT_Z_ORDER.fetch_add(1, Ordering::Relaxed);
+
         slots[slot] = SurfaceSlot {
             active: true,
             task_id,
@@ -218,9 +239,12 @@ fn create_surface_for_task(
                 dirty_x1: width as i32 - 1,
                 dirty_y1: height as i32 - 1,
                 buffer: virt as *mut u8,
-                x: 0,
-                y: 0,
+                x: window_x,
+                y: window_y,
             },
+            window_state: WINDOW_STATE_NORMAL,
+            z_order,
+            title: [0; 32],
         };
 
         if SURFACE_BG_COLOR != 0 {
@@ -635,11 +659,37 @@ pub fn compositor_present() -> c_int {
     let mut did_work = false;
     let fb_width = fb.width as i32;
     let fb_height = fb.height as i32;
-    for slot in slots_snapshot.iter() {
-        if !slot.active {
+
+    // Build sorted indices array by z-order (back to front)
+    let mut indices = [0usize; MAX_TASKS];
+    let mut index_count = 0usize;
+    for (idx, slot) in slots_snapshot.iter().enumerate() {
+        if slot.active {
+            indices[index_count] = idx;
+            index_count += 1;
+        }
+    }
+    // Sort indices by z-order (lowest first)
+    for i in 0..index_count {
+        for j in (i + 1)..index_count {
+            if slots_snapshot[indices[i]].z_order > slots_snapshot[indices[j]].z_order {
+                let tmp = indices[i];
+                indices[i] = indices[j];
+                indices[j] = tmp;
+            }
+        }
+    }
+
+    // Iterate windows back-to-front
+    for idx_pos in 0..index_count {
+        let slot = &slots_snapshot[indices[idx_pos]];
+        active = active.saturating_add(1);
+
+        // Skip minimized windows
+        if slot.window_state == WINDOW_STATE_MINIMIZED {
             continue;
         }
-        active = active.saturating_add(1);
+
         let surface = &slot.surface;
         if surface.buffer.is_null() {
             continue;
@@ -835,4 +885,86 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
         }
     }
     &buf[..len]
+}
+
+// Window management functions
+
+pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
+    let mut slots = SURFACES.lock();
+    let slot_idx = match find_slot(&slots, task_id) {
+        Some(idx) => idx,
+        None => return -1,
+    };
+    slots[slot_idx].surface.x = x;
+    slots[slot_idx].surface.y = y;
+    // Mark entire surface dirty to trigger redraw at new position
+    let surface = &mut slots[slot_idx].surface;
+    mark_dirty(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
+    0
+}
+
+pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
+    if state > WINDOW_STATE_MAXIMIZED {
+        return -1;
+    }
+    let mut slots = SURFACES.lock();
+    let slot_idx = match find_slot(&slots, task_id) {
+        Some(idx) => idx,
+        None => return -1,
+    };
+    slots[slot_idx].window_state = state;
+    0
+}
+
+pub fn surface_raise_window(task_id: u32) -> c_int {
+    let mut slots = SURFACES.lock();
+    let slot_idx = match find_slot(&slots, task_id) {
+        Some(idx) => idx,
+        None => return -1,
+    };
+    // Assign new z-order to bring window to front
+    slots[slot_idx].z_order = NEXT_Z_ORDER.fetch_add(1, Ordering::Relaxed);
+    0
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WindowInfo {
+    pub task_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u8,
+    pub title: [c_char; 32],
+}
+
+pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
+    if out_buffer.is_null() || max_count == 0 {
+        return 0;
+    }
+    let slots = SURFACES.lock();
+    let mut count = 0u32;
+
+    // Copy all active windows (compositor will sort by z-order if needed)
+    for slot in slots.iter() {
+        if !slot.active {
+            continue;
+        }
+        if count >= max_count {
+            break;
+        }
+        unsafe {
+            let info = &mut *out_buffer.add(count as usize);
+            info.task_id = slot.task_id;
+            info.x = slot.surface.x;
+            info.y = slot.surface.y;
+            info.width = slot.surface.width;
+            info.height = slot.surface.height;
+            info.state = slot.window_state;
+            info.title = slot.title;
+        }
+        count += 1;
+    }
+    count
 }

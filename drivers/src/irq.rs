@@ -6,7 +6,7 @@ use slopos_lib::io;
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
-use crate::{apic, ioapic, keyboard, scheduler_callbacks, wl_currency};
+use crate::{apic, ioapic, keyboard, mouse, scheduler_callbacks, wl_currency};
 
 const IRQ_LINES: usize = 16;
 const IRQ_BASE_VECTOR: u8 = 32;
@@ -14,6 +14,7 @@ const IRQ_BASE_VECTOR: u8 = 32;
 const LEGACY_IRQ_TIMER: u8 = 0;
 const LEGACY_IRQ_KEYBOARD: u8 = 1;
 const LEGACY_IRQ_COM1: u8 = 4;
+const LEGACY_IRQ_MOUSE: u8 = 12;
 
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
@@ -206,6 +207,19 @@ extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: 
     }
 }
 
+extern "C" fn mouse_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
+    unsafe {
+        let status = io::inb(PS2_STATUS_PORT);
+        if status & 0x20 == 0 {
+            // Bit 5 must be set for mouse data
+            return;
+        }
+
+        let data = io::inb(PS2_DATA_PORT);
+        mouse::mouse_handle_irq(data);
+    }
+}
+
 fn irq_program_ioapic_route(irq: u8) {
     if irq as usize >= IRQ_LINES {
         return;
@@ -285,6 +299,7 @@ fn irq_setup_ioapic_routes() {
 
     irq_program_ioapic_route(LEGACY_IRQ_TIMER);
     irq_program_ioapic_route(LEGACY_IRQ_KEYBOARD);
+    irq_program_ioapic_route(LEGACY_IRQ_MOUSE);
     irq_program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
@@ -308,6 +323,7 @@ pub fn init() {
 
     irq_setup_ioapic_routes();
     keyboard::keyboard_init();
+    mouse::mouse_init();
 
     let _ = register_handler(
         LEGACY_IRQ_TIMER,
@@ -318,6 +334,12 @@ pub fn init() {
     let _ = register_handler(
         LEGACY_IRQ_KEYBOARD,
         Some(keyboard_irq_handler),
+        core::ptr::null_mut(),
+        core::ptr::null(),
+    );
+    let _ = register_handler(
+        LEGACY_IRQ_MOUSE,
+        Some(mouse_irq_handler),
         core::ptr::null_mut(),
         core::ptr::null(),
     );

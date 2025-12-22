@@ -9,6 +9,7 @@ pub mod interrupts;
 pub mod ioapic;
 pub mod irq;
 pub mod keyboard;
+pub mod mouse;
 pub mod pci;
 pub mod pic;
 pub mod pit;

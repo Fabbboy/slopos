@@ -30,6 +30,13 @@ pub const SYSCALL_FS_UNLINK: u64 = 20;
 pub const SYSCALL_FS_LIST: u64 = 21;
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
+pub const SYSCALL_MOUSE_READ: u64 = 29;
+pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
+pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
+pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
+pub const SYSCALL_RAISE_WINDOW: u64 = 33;
+pub const SYSCALL_FB_FILL_RECT: u64 = 34;
+pub const SYSCALL_FB_FONT_DRAW: u64 = 35;
 
 pub const USER_FS_OPEN_READ: u32 = 0x1;
 pub const USER_FS_OPEN_WRITE: u32 = 0x2;
@@ -149,6 +156,40 @@ pub struct UserSysInfo {
     pub scheduler_yields: u64,
     pub ready_tasks: u32,
     pub schedule_calls: u32,
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserMouseEvent {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct UserWindowInfo {
+    pub task_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u8,
+    pub title: [c_char; 32],
+}
+
+impl Default for UserWindowInfo {
+    fn default() -> Self {
+        Self {
+            task_id: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            state: 0,
+            title: [0; 32],
+        }
+    }
 }
 
 #[inline(always)]
@@ -352,6 +393,55 @@ pub fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_mouse_read(event: &mut UserMouseEvent) -> i64 {
+    unsafe { syscall(SYSCALL_MOUSE_READ, event as *mut _ as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
+    unsafe {
+        syscall(
+            SYSCALL_ENUMERATE_WINDOWS,
+            windows.as_mut_ptr() as u64,
+            windows.len() as u64,
+            0,
+        )
+    }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
+    unsafe { syscall(SYSCALL_SET_WINDOW_POSITION, task_id as u64, x as u64, y as u64) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_set_window_state(task_id: u32, state: u8) -> i64 {
+    unsafe { syscall(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_raise_window(task_id: u32) -> i64 {
+    unsafe { syscall(SYSCALL_RAISE_WINDOW, task_id as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_fb_fill_rect(rect: &UserRect) -> i64 {
+    unsafe { syscall(SYSCALL_FB_FILL_RECT, rect as *const _ as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_fb_font_draw(text: &UserText) -> i64 {
+    unsafe { syscall(SYSCALL_FB_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]

@@ -16,7 +16,7 @@ use crate::syscall_types::{
     InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE,
 };
 use crate::video_bridge;
-use slopos_lib::klog_debug;
+use slopos_lib::{klog_debug, SYSCALL_FB_FILL_RECT, SYSCALL_FB_FONT_DRAW};
 use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
 
 #[repr(C)]
@@ -188,6 +188,31 @@ pub fn syscall_user_read_char(_task: *mut Task, frame: *mut InterruptFrame) -> S
         return syscall_return_err(frame, u64::MAX);
     }
     syscall_return_ok(frame, c as u64)
+}
+
+pub fn syscall_mouse_read(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let mut x: i32 = 0;
+    let mut y: i32 = 0;
+    let mut buttons: u8 = 0;
+
+    if crate::mouse::mouse_read_event(&mut x, &mut y, &mut buttons) {
+        // Pack result: buttons in low byte, x and y in return value
+        // Return x in lower 32 bits of rax, caller reads y and buttons via rdi
+        unsafe {
+            if (*frame).rdi != 0 {
+                let event_ptr = (*frame).rdi as *mut u8;
+                // Write x (4 bytes)
+                core::ptr::write_unaligned(event_ptr as *mut i32, x);
+                // Write y (4 bytes)
+                core::ptr::write_unaligned(event_ptr.add(4) as *mut i32, y);
+                // Write buttons (1 byte)
+                core::ptr::write(event_ptr.add(8), buttons);
+            }
+        }
+        syscall_return_ok(frame, 1)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
 }
 
 pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -514,6 +539,138 @@ pub fn syscall_compositor_present(task: *mut Task, frame: *mut InterruptFrame) -
     disp
 }
 
+pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let out_buffer = unsafe { (*frame).rdi as *mut video_bridge::WindowInfo };
+    let max_count = unsafe { (*frame).rsi as u32 };
+    if out_buffer.is_null() || max_count == 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let count = video_bridge::surface_enumerate_windows(out_buffer, max_count);
+    syscall_return_ok(frame, count as u64)
+}
+
+pub fn syscall_set_window_position(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let target_task_id = unsafe { (*frame).rdi as u32 };
+    let x = unsafe { (*frame).rsi as i32 };
+    let y = unsafe { (*frame).rdx as i32 };
+    let rc = video_bridge::surface_set_window_position(target_task_id, x, y);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
+}
+
+pub fn syscall_set_window_state(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let target_task_id = unsafe { (*frame).rdi as u32 };
+    let state = unsafe { (*frame).rsi as u8 };
+    let rc = video_bridge::surface_set_window_state(target_task_id, state);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
+}
+
+pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let target_task_id = unsafe { (*frame).rdi as u32 };
+    let rc = video_bridge::surface_raise_window(target_task_id);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
+}
+
+pub fn syscall_fb_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let mut rect = UserRect {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+        color: 0,
+    };
+    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
+}
+
+pub fn syscall_fb_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let mut text = UserText {
+        x: 0,
+        y: 0,
+        fg_color: 0,
+        bg_color: 0,
+        str_ptr: ptr::null(),
+        len: 0,
+    };
+    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const UserText) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    if text.len == 0 || text.len as usize >= USER_IO_MAX_BYTES {
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Copy string data from userspace into kernel buffer
+    let mut buf = [0u8; USER_IO_MAX_BYTES];
+    if user_copy_from_user(
+        buf.as_mut_ptr() as *mut c_void,
+        text.str_ptr as *const c_void,
+        text.len as usize,
+    ) != 0
+    {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    buf[text.len as usize] = 0;
+
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::font_draw_string(text.x, text.y, buf.as_ptr() as *const c_char, text.fg_color, text.bg_color);
+    let _ = paging::switch_page_directory(original_dir);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
+}
+
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
@@ -638,12 +795,12 @@ pub struct SyscallEntry {
 
 unsafe impl Sync for SyscallEntry {}
 
-static SYSCALL_TABLE: [SyscallEntry; 32] = {
+static SYSCALL_TABLE: [SyscallEntry; 64] = {
     use self::lib_syscall_numbers::*;
-    let mut table: [SyscallEntry; 32] = [SyscallEntry {
+    let mut table: [SyscallEntry; 64] = [SyscallEntry {
         handler: None,
         name: core::ptr::null(),
-    }; 32];
+    }; 64];
     table[SYSCALL_YIELD as usize] = SyscallEntry {
         handler: Some(syscall_yield),
         name: b"yield\0".as_ptr() as *const c_char,
@@ -760,6 +917,34 @@ static SYSCALL_TABLE: [SyscallEntry; 32] = {
         handler: Some(syscall_halt),
         name: b"halt\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_MOUSE_READ as usize] = SyscallEntry {
+        handler: Some(syscall_mouse_read),
+        name: b"mouse_read\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_ENUMERATE_WINDOWS as usize] = SyscallEntry {
+        handler: Some(syscall_enumerate_windows),
+        name: b"enumerate_windows\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SET_WINDOW_POSITION as usize] = SyscallEntry {
+        handler: Some(syscall_set_window_position),
+        name: b"set_window_position\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SET_WINDOW_STATE as usize] = SyscallEntry {
+        handler: Some(syscall_set_window_state),
+        name: b"set_window_state\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_RAISE_WINDOW as usize] = SyscallEntry {
+        handler: Some(syscall_raise_window),
+        name: b"raise_window\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FB_FILL_RECT as usize] = SyscallEntry {
+        handler: Some(syscall_fb_fill_rect),
+        name: b"fb_fill_rect\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FB_FONT_DRAW as usize] = SyscallEntry {
+        handler: Some(syscall_fb_font_draw),
+        name: b"fb_font_draw\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -794,6 +979,11 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_FS_LIST: u64 = 21;
     pub const SYSCALL_SYS_INFO: u64 = 22;
     pub const SYSCALL_HALT: u64 = 23;
+    pub const SYSCALL_MOUSE_READ: u64 = 29;
+    pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
+    pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
+    pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
+    pub const SYSCALL_RAISE_WINDOW: u64 = 33;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
