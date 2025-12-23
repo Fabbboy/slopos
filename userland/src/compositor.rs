@@ -31,6 +31,43 @@ const MAX_WINDOWS: usize = 32;
 const WINDOW_STATE_NORMAL: u8 = 0;
 const WINDOW_STATE_MINIMIZED: u8 = 1;
 
+// Cursor constants
+const CURSOR_SIZE: i32 = 9;
+const CURSOR_HALF: i32 = CURSOR_SIZE / 2;
+
+/// Tracks state for conditional taskbar redraws
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TaskbarState {
+    window_count: u32,
+    focused_task: u32,
+    // Packed window states (minimized/normal) as bits
+    window_states: u32,
+}
+
+impl TaskbarState {
+    const fn empty() -> Self {
+        Self {
+            window_count: 0,
+            focused_task: 0,
+            window_states: 0,
+        }
+    }
+
+    fn from_windows(windows: &[UserWindowInfo; MAX_WINDOWS], count: u32, focused: u32) -> Self {
+        let mut states = 0u32;
+        for i in 0..count.min(32) as usize {
+            if windows[i].state == WINDOW_STATE_MINIMIZED {
+                states |= 1 << i;
+            }
+        }
+        Self {
+            window_count: count,
+            focused_task: focused,
+            window_states: states,
+        }
+    }
+}
+
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
@@ -46,6 +83,9 @@ struct WindowManager {
     prev_mouse_x: i32,
     prev_mouse_y: i32,
     first_frame: bool,
+    // Taskbar state tracking for conditional redraws
+    prev_taskbar_state: TaskbarState,
+    taskbar_needs_redraw: bool,
 }
 
 impl WindowManager {
@@ -65,6 +105,8 @@ impl WindowManager {
             prev_mouse_x: 0,
             prev_mouse_y: 0,
             first_frame: true,
+            prev_taskbar_state: TaskbarState::empty(),
+            taskbar_needs_redraw: true, // First frame always needs taskbar
         }
     }
 
@@ -93,9 +135,16 @@ impl WindowManager {
         (self.mouse_buttons & 0x01) != 0
     }
 
-    /// Refresh window list from kernel
+    /// Refresh window list from kernel and detect taskbar state changes
     fn refresh_windows(&mut self) {
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
+
+        // Check if taskbar state changed (window count, focus, or minimize states)
+        let new_state = TaskbarState::from_windows(&self.windows, self.window_count, self.focused_task);
+        if new_state != self.prev_taskbar_state {
+            self.taskbar_needs_redraw = true;
+            self.prev_taskbar_state = new_state;
+        }
     }
 
     /// Handle all mouse events
@@ -233,26 +282,6 @@ impl WindowManager {
         }
     }
 
-    /// Draw all window decorations
-    fn draw_decorations(&self, fb: &UserFbInfo) {
-        // Note: Framebuffer is already cleared, no need to clear old cursor!
-        // We follow the Wayland pattern: clear → composite → decorate
-
-        // Draw title bars for all visible windows (back to front)
-        for i in 0..self.window_count as usize {
-            let window = &self.windows[i];
-            if window.state != WINDOW_STATE_MINIMIZED {
-                self.draw_title_bar(window);
-            }
-        }
-
-        // Draw taskbar
-        self.draw_taskbar(fb);
-
-        // Draw cursor on top of everything
-        self.draw_cursor();
-    }
-
     /// Draw window title bar
     fn draw_title_bar(&self, window: &UserWindowInfo) {
         let focused = window.task_id == self.focused_task;
@@ -381,9 +410,10 @@ impl WindowManager {
         }
     }
 
-    /// Calculate ALL damage regions: first frame, windows, and cursor
-    /// This ensures we never miss dirty windows or leave artifacts on screen
-    fn get_all_damage_regions(&self, fb: &UserFbInfo) -> ([UserDamageRegion; 64], usize) {
+    /// Calculate damage regions for windows and taskbar (NOT cursor).
+    /// Cursor damage is handled separately without clearing.
+    /// Returns (regions, count).
+    fn get_content_damage_regions(&self, fb: &UserFbInfo) -> ([UserDamageRegion; 64], usize) {
         let mut regions = [UserDamageRegion::default(); 64];
         let mut count = 0;
 
@@ -400,15 +430,13 @@ impl WindowManager {
         }
 
         // WINDOW DAMAGE: Only add windows that are actually dirty
-        // Use actual dirty rectangle bounds (surface-relative), not entire window
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             if window.state != WINDOW_STATE_MINIMIZED && window.dirty != 0 {
-                // Convert surface-relative dirty bounds to screen coordinates
                 let dirty_w = window.dirty_x1 - window.dirty_x0 + 1;
                 let dirty_h = window.dirty_y1 - window.dirty_y0 + 1;
 
-                if dirty_w > 0 && dirty_h > 0 {
+                if dirty_w > 0 && dirty_h > 0 && count < 64 {
                     regions[count] = UserDamageRegion {
                         x: window.x + window.dirty_x0,
                         y: window.y + window.dirty_y0,
@@ -416,15 +444,12 @@ impl WindowManager {
                         height: dirty_h,
                     };
                     count += 1;
-                    if count >= 62 { // Leave room for cursor and taskbar damage
-                        break;
-                    }
                 }
             }
         }
 
-        // TASKBAR DAMAGE: Always redraw taskbar (reflects window state changes)
-        if count < 63 {
+        // TASKBAR DAMAGE: Only when taskbar state actually changed
+        if self.taskbar_needs_redraw && count < 64 {
             regions[count] = UserDamageRegion {
                 x: 0,
                 y: fb.height as i32 - TASKBAR_HEIGHT,
@@ -434,35 +459,77 @@ impl WindowManager {
             count += 1;
         }
 
-        // CURSOR DAMAGE: Previous and current cursor positions
-        const CURSOR_SIZE: i32 = 9;
-        const CURSOR_HALF: i32 = CURSOR_SIZE / 2;
+        (regions, count)
+    }
 
-        // Add previous cursor position as damage (if it moved)
+    /// Get the old cursor damage region (if cursor moved)
+    fn get_cursor_damage_region(&self) -> Option<UserDamageRegion> {
         if self.prev_mouse_x != self.mouse_x || self.prev_mouse_y != self.mouse_y {
-            if count < 64 {
-                regions[count] = UserDamageRegion {
-                    x: (self.prev_mouse_x - CURSOR_HALF).max(0),
-                    y: (self.prev_mouse_y - CURSOR_HALF).max(0),
-                    width: CURSOR_SIZE,
-                    height: CURSOR_SIZE,
-                };
-                count += 1;
-            }
-        }
-
-        // Add current cursor position as damage
-        if count < 64 {
-            regions[count] = UserDamageRegion {
-                x: (self.mouse_x - CURSOR_HALF).max(0),
-                y: (self.mouse_y - CURSOR_HALF).max(0),
+            Some(UserDamageRegion {
+                x: (self.prev_mouse_x - CURSOR_HALF).max(0),
+                y: (self.prev_mouse_y - CURSOR_HALF).max(0),
                 width: CURSOR_SIZE,
                 height: CURSOR_SIZE,
-            };
-            count += 1;
+            })
+        } else {
+            None
         }
+    }
 
-        (regions, count)
+    /// Check if a rectangle overlaps with any damage region
+    fn overlaps_damage(
+        x: i32, y: i32, w: i32, h: i32,
+        regions: &[UserDamageRegion], count: usize
+    ) -> bool {
+        let r1_x1 = x + w - 1;
+        let r1_y1 = y + h - 1;
+
+        for i in 0..count {
+            let r = &regions[i];
+            let r2_x1 = r.x + r.width - 1;
+            let r2_y1 = r.y + r.height - 1;
+
+            // Rectangle overlap test
+            if x <= r2_x1 && r1_x1 >= r.x && y <= r2_y1 && r1_y1 >= r.y {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if taskbar overlaps any damage region
+    fn taskbar_overlaps_damage(&self, fb: &UserFbInfo, regions: &[UserDamageRegion], count: usize) -> bool {
+        let taskbar_y = fb.height as i32 - TASKBAR_HEIGHT;
+        Self::overlaps_damage(0, taskbar_y, fb.width as i32, TASKBAR_HEIGHT, regions, count)
+    }
+
+    /// Check if taskbar overlaps a specific region
+    fn taskbar_overlaps_region(fb: &UserFbInfo, region: &UserDamageRegion) -> bool {
+        let taskbar_y = fb.height as i32 - TASKBAR_HEIGHT;
+        Self::rects_overlap(0, taskbar_y, fb.width as i32, TASKBAR_HEIGHT,
+                           region.x, region.y, region.width, region.height)
+    }
+
+    /// Check if a window's title bar overlaps any damage region
+    fn title_bar_overlaps_damage(window: &UserWindowInfo, regions: &[UserDamageRegion], count: usize) -> bool {
+        let title_y = window.y - TITLE_BAR_HEIGHT;
+        Self::overlaps_damage(window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT, regions, count)
+    }
+
+    /// Check if a window's title bar overlaps a specific region
+    fn title_bar_overlaps_region(window: &UserWindowInfo, region: &UserDamageRegion) -> bool {
+        let title_y = window.y - TITLE_BAR_HEIGHT;
+        Self::rects_overlap(window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT,
+                           region.x, region.y, region.width, region.height)
+    }
+
+    /// Check if two rectangles overlap
+    fn rects_overlap(x1: i32, y1: i32, w1: i32, h1: i32, x2: i32, y2: i32, w2: i32, h2: i32) -> bool {
+        let r1_x1 = x1 + w1 - 1;
+        let r1_y1 = y1 + h1 - 1;
+        let r2_x1 = x2 + w2 - 1;
+        let r2_y1 = y2 + h2 - 1;
+        x1 <= r2_x1 && r1_x1 >= x2 && y1 <= r2_y1 && r1_y1 >= y2
     }
 
     /// Draw mouse cursor
@@ -552,29 +619,27 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         // 1. Update mouse state from kernel driver
         wm.update_mouse();
 
-        // 2. Refresh window list from kernel
+        // 2. Refresh window list from kernel (also detects taskbar state changes)
         wm.refresh_windows();
 
         // 3. Handle mouse events (dragging, clicking, etc.)
         wm.handle_mouse_events(&fb_info);
 
         // === RENDERING PHASE ===
-        // Wayland-style damage tracking: clear → composite → decorate
-        //
-        // DAMAGE SOURCES:
-        // 1. First frame: Full screen (clears boot artifacts like roulette)
-        // 2. Window damage: All visible windows (ensures dirty windows render)
-        // 3. Cursor damage: Old and new cursor positions
-        //
-        // This ensures correctness while still being more efficient than
-        // full-screen clear on every frame after the first one.
+        // Layer-based compositing with smart cursor handling:
+        //   - Content damage (windows, taskbar state): CLEAR then redraw
+        //   - Cursor damage (old position): NO CLEAR, directly redraw layers
+        // This prevents the blue rectangle artifact when cursor moves.
 
-        // 4. Get ALL damage regions (first frame, windows, cursor)
-        let (damage_regions, damage_count) = wm.get_all_damage_regions(&fb_info);
+        // 4. Get content damage regions (windows + taskbar state changes)
+        let (content_damage, content_count) = wm.get_content_damage_regions(&fb_info);
 
-        // 5. Clear only damaged regions (removes old content from background)
-        for i in 0..damage_count {
-            let region = &damage_regions[i];
+        // 5. Get cursor damage region (old cursor position, if moved)
+        let cursor_damage = wm.get_cursor_damage_region();
+
+        // 6. Clear ONLY content damage regions (NOT cursor damage)
+        for i in 0..content_count {
+            let region = &content_damage[i];
             let clear_rect = UserRect {
                 x: region.x,
                 y: region.y,
@@ -585,21 +650,61 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             sys_fb_fill_rect(&clear_rect);
         }
 
-        // 6. Composite windows in damaged regions only
-        //    Kernel checks dirty flags and only blits windows that overlap damage
-        sys_compositor_present_damage(&damage_regions[..damage_count]);
+        // 7. Build combined damage list for window compositing
+        // Kernel needs to know about both content and cursor damage to composite windows
+        let mut all_damage = [UserDamageRegion::default(); 64];
+        let mut all_count = 0;
+        for i in 0..content_count {
+            if all_count < 64 {
+                all_damage[all_count] = content_damage[i];
+                all_count += 1;
+            }
+        }
+        if let Some(ref cursor_region) = cursor_damage {
+            if all_count < 64 {
+                all_damage[all_count] = *cursor_region;
+                all_count += 1;
+            }
+        }
 
-        // 7. Mark first frame complete (subsequent frames use incremental damage)
+        // 8. Composite windows in all damaged regions
+        if all_count > 0 {
+            sys_compositor_present_damage(&all_damage[..all_count]);
+        }
+
+        // 9. Mark first frame complete
         if wm.first_frame {
             wm.first_frame = false;
         }
 
-        // 7. Draw decorations on top (title bars, taskbar, cursor)
-        //    Taskbar covers its area, title bars cover theirs
-        wm.draw_decorations(&fb_info);
+        // 10. Redraw title bars that overlap any damage (content OR cursor)
+        for i in 0..wm.window_count as usize {
+            let window = &wm.windows[i];
+            if window.state != WINDOW_STATE_MINIMIZED {
+                let overlaps_content = WindowManager::title_bar_overlaps_damage(window, &content_damage, content_count);
+                let overlaps_cursor = cursor_damage.as_ref()
+                    .map(|r| WindowManager::title_bar_overlaps_region(window, r))
+                    .unwrap_or(false);
+                if overlaps_content || overlaps_cursor {
+                    wm.draw_title_bar(window);
+                }
+            }
+        }
 
-        // 8. Yield to scheduler for cooperative multitasking
-        // This allows other tasks to run without blocking
+        // 11. Redraw taskbar if it overlaps any damage OR state changed
+        let taskbar_overlaps_content = wm.taskbar_overlaps_damage(&fb_info, &content_damage, content_count);
+        let taskbar_overlaps_cursor = cursor_damage.as_ref()
+            .map(|r| WindowManager::taskbar_overlaps_region(&fb_info, r))
+            .unwrap_or(false);
+        if taskbar_overlaps_content || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
+            wm.draw_taskbar(&fb_info);
+            wm.taskbar_needs_redraw = false;
+        }
+
+        // 12. Draw cursor on top of everything
+        wm.draw_cursor();
+
+        // 12. Yield to scheduler for cooperative multitasking
         sys_yield();
 
         frame_count = frame_count.wrapping_add(1);

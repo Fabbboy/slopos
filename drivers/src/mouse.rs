@@ -283,15 +283,6 @@ pub fn mouse_handle_irq(scancode: u8) {
         (*state).x = (*state).x.clamp(0, (*state).max_x - 1);
         (*state).y = (*state).y.clamp(0, (*state).max_y - 1);
 
-        klog_debug!(
-            "[MOUSE] pos=({},{}) dx={} dy={} btn=0x{:02x}",
-            (*state).x,
-            (*state).y,
-            dx,
-            dy,
-            (*state).buttons
-        );
-
         // Push event to buffer
         buffer_push(MouseEvent {
             x: (*state).x,
