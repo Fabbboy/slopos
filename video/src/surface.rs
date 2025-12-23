@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_drivers::video_bridge::{VideoError, VideoResult};
+use slopos_drivers::video_bridge::{DamageRegion, VideoError, VideoResult};
 use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames};
 use slopos_mm::phys_virt::mm_phys_to_virt;
@@ -17,6 +17,13 @@ use crate::font;
 pub const WINDOW_STATE_NORMAL: u8 = 0;
 pub const WINDOW_STATE_MINIMIZED: u8 = 1;
 pub const WINDOW_STATE_MAXIMIZED: u8 = 2;
+
+// Dirty region constants - represents an invalid/empty dirty region
+// When dirty=false, these bounds indicate no pending updates
+const DIRTY_REGION_INVALID_X0: i32 = 0;
+const DIRTY_REGION_INVALID_Y0: i32 = 0;
+const DIRTY_REGION_INVALID_X1: i32 = -1; // x1 < x0 means empty region
+const DIRTY_REGION_INVALID_Y1: i32 = -1; // y1 < y0 means empty region
 
 const SURFACE_BG_COLOR: u32 = 0x0000_0000;
 
@@ -51,10 +58,10 @@ impl Surface {
             bytes_pp: 0,
             pixel_format: 0,
             dirty: false,
-            dirty_x0: 0,
-            dirty_y0: 0,
-            dirty_x1: -1,
-            dirty_y1: -1,
+            dirty_x0: DIRTY_REGION_INVALID_X0,
+            dirty_y0: DIRTY_REGION_INVALID_Y0,
+            dirty_x1: DIRTY_REGION_INVALID_X1,
+            dirty_y1: DIRTY_REGION_INVALID_Y1,
             buffer: ptr::null_mut(),
             x: 0,
             y: 0,
@@ -773,16 +780,198 @@ pub fn compositor_present() -> c_int {
             if let Some(slot_idx) = find_slot(&slots, task_id) {
                 let surface = &mut slots[slot_idx].surface;
                 surface.dirty = false;
-                surface.dirty_x0 = 0;
-                surface.dirty_y0 = 0;
-                surface.dirty_x1 = -1;
-                surface.dirty_y1 = -1;
+                surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
+                surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
+                surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
+                surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
             }
         }
     }
     if active == 0 && COMPOSITOR_EMPTY_LOGGED.swap(1, Ordering::Relaxed) == 0 {
         klog_info!("compositor: no active surfaces to present");
     }
+    if did_work { 1 } else { 0 }
+}
+
+/// Compositor present with damage tracking (Wayland-style)
+/// Forces recomposition of windows in damaged regions, even if windows aren't dirty
+pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damage_count: u32) -> c_int {
+    if COMPOSITOR_LOGGED.swap(1, Ordering::Relaxed) == 0 {
+        klog_info!("compositor: present loop online (with damage tracking)");
+    }
+
+    if damage_regions.is_null() || damage_count == 0 {
+        // No damage - nothing to do!
+        return 0;
+    }
+
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return -1,
+    };
+    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let slots_snapshot = {
+        let slots = SURFACES.lock();
+        *slots
+    };
+    let fb_width = fb.width as i32;
+    let fb_height = fb.height as i32;
+
+    // Build sorted indices array by z-order (back to front)
+    let mut indices = [0usize; MAX_TASKS];
+    let mut index_count = 0usize;
+    for (idx, slot) in slots_snapshot.iter().enumerate() {
+        if slot.active {
+            indices[index_count] = idx;
+            index_count += 1;
+        }
+    }
+    // Sort indices by z-order (lowest first)
+    for i in 0..index_count {
+        for j in (i + 1)..index_count {
+            if slots_snapshot[indices[i]].z_order > slots_snapshot[indices[j]].z_order {
+                let tmp = indices[i];
+                indices[i] = indices[j];
+                indices[j] = tmp;
+            }
+        }
+    }
+
+    let mut did_work = false;
+    let mut composited_tasks = [0u32; MAX_TASKS];
+    let mut composited_count = 0usize;
+
+    // For each damage region, composite all windows that overlap it
+    for damage_idx in 0..damage_count as usize {
+        let damage = unsafe { &*damage_regions.add(damage_idx) };
+
+        // Iterate windows back-to-front
+        for idx_pos in 0..index_count {
+            let slot = &slots_snapshot[indices[idx_pos]];
+
+            // Skip minimized windows
+            if slot.window_state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+
+            let surface = &slot.surface;
+            if surface.buffer.is_null() {
+                continue;
+            }
+            if surface.bpp != fb.bpp {
+                return -1;
+            }
+
+            // Check if window overlaps damage region
+            let win_x0 = surface.x;
+            let win_y0 = surface.y;
+            let win_x1 = surface.x + surface.width as i32 - 1;
+            let win_y1 = surface.y + surface.height as i32 - 1;
+
+            let dmg_x0 = damage.x;
+            let dmg_y0 = damage.y;
+            let dmg_x1 = damage.x + damage.width - 1;
+            let dmg_y1 = damage.y + damage.height - 1;
+
+            // Rectangle overlap test
+            if win_x1 < dmg_x0 || win_x0 > dmg_x1 || win_y1 < dmg_y0 || win_y0 > dmg_y1 {
+                continue; // No overlap
+            }
+
+            // Calculate intersection (the part of the window in the damage region)
+            let isect_x0 = win_x0.max(dmg_x0);
+            let isect_y0 = win_y0.max(dmg_y0);
+            let isect_x1 = win_x1.min(dmg_x1);
+            let isect_y1 = win_y1.min(dmg_y1);
+
+            if isect_x0 > isect_x1 || isect_y0 > isect_y1 {
+                continue; // Invalid intersection
+            }
+
+            // Convert intersection to surface-relative coordinates
+            let src_x = isect_x0 - win_x0;
+            let src_y = isect_y0 - win_y0;
+            let copy_w = isect_x1 - isect_x0 + 1;
+            let copy_h = isect_y1 - isect_y0 + 1;
+
+            if copy_w <= 0 || copy_h <= 0 {
+                continue;
+            }
+
+            // Clip to framebuffer bounds
+            let mut dst_x = isect_x0;
+            let mut dst_y = isect_y0;
+            let mut final_w = copy_w;
+            let mut final_h = copy_h;
+
+            if dst_x < 0 {
+                final_w += dst_x;
+                dst_x = 0;
+            }
+            if dst_y < 0 {
+                final_h += dst_y;
+                dst_y = 0;
+            }
+            if dst_x + final_w > fb_width {
+                final_w = fb_width - dst_x;
+            }
+            if dst_y + final_h > fb_height {
+                final_h = fb_height - dst_y;
+            }
+
+            if final_w <= 0 || final_h <= 0 {
+                continue;
+            }
+
+            // Composite window into framebuffer at damage region
+            for row in 0..final_h {
+                let src_row = ((src_y + row) as usize) * surface.pitch as usize;
+                let dst_off = ((dst_y + row) as usize * fb.pitch as usize)
+                    + (dst_x as usize * bytes_pp);
+                unsafe {
+                    let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
+                    let dst_ptr = fb.base.add(dst_off);
+                    let row_bytes = final_w as usize * bytes_pp;
+                    ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
+                }
+            }
+
+            // Track which tasks we've composited so we can clear their dirty flags
+            if composited_count < MAX_TASKS {
+                let task_id = slot.task_id;
+                let mut already_tracked = false;
+                for i in 0..composited_count {
+                    if composited_tasks[i] == task_id {
+                        already_tracked = true;
+                        break;
+                    }
+                }
+                if !already_tracked {
+                    composited_tasks[composited_count] = task_id;
+                    composited_count += 1;
+                }
+            }
+
+            did_work = true;
+        }
+    }
+
+    // Clear dirty flags for all composited windows
+    if composited_count > 0 {
+        let mut slots = SURFACES.lock();
+        for i in 0..composited_count {
+            let task_id = composited_tasks[i];
+            if let Some(slot_idx) = find_slot(&slots, task_id) {
+                let surface = &mut slots[slot_idx].surface;
+                surface.dirty = false;
+                surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
+                surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
+                surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
+                surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+            }
+        }
+    }
+
     if did_work { 1 } else { 0 }
 }
 
@@ -913,6 +1102,9 @@ pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
         None => return -1,
     };
     slots[slot_idx].window_state = state;
+    // Mark entire surface dirty to trigger redraw when state changes (minimize/restore)
+    let surface = &mut slots[slot_idx].surface;
+    mark_dirty(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
     0
 }
 
@@ -936,6 +1128,11 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub state: u8,
+    pub dirty: u8,
+    pub dirty_x0: i32,
+    pub dirty_y0: i32,
+    pub dirty_x1: i32,
+    pub dirty_y1: i32,
     pub title: [c_char; 32],
 }
 
@@ -962,6 +1159,11 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.width = slot.surface.width;
             info.height = slot.surface.height;
             info.state = slot.window_state;
+            info.dirty = if slot.surface.dirty { 1 } else { 0 };
+            info.dirty_x0 = slot.surface.dirty_x0;
+            info.dirty_y0 = slot.surface.dirty_y0;
+            info.dirty_x1 = slot.surface.dirty_x1;
+            info.dirty_y1 = slot.surface.dirty_y1;
             info.title = slot.title;
         }
         count += 1;

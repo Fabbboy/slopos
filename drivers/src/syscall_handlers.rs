@@ -602,6 +602,55 @@ pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     }
 }
 
+pub fn syscall_compositor_present_with_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let damage_ptr = unsafe { (*frame).rdi as *const video_bridge::DamageRegion };
+    let damage_count = unsafe { (*frame).rsi as u32 };
+
+    if damage_ptr.is_null() || damage_count == 0 || damage_count > 64 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Copy damage regions from userspace to kernel buffer BEFORE switching page directories
+    let mut kernel_buffer = [video_bridge::DamageRegion {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    }; 64];
+
+    if user_copy_from_user(
+        kernel_buffer.as_mut_ptr() as *mut c_void,
+        damage_ptr as *const c_void,
+        (damage_count as usize) * core::mem::size_of::<video_bridge::DamageRegion>(),
+    ) != 0
+    {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Now safe to switch to kernel page directory
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+
+    let rc = video_bridge::compositor_present_with_damage(&kernel_buffer[..damage_count as usize]);
+
+    let disp = match rc {
+        Ok(_) => syscall_return_ok(frame, 0),
+        Err(_) => {
+            wl_currency::award_loss();
+            syscall_return_err(frame, u64::MAX)
+        }
+    };
+    let _ = paging::switch_page_directory(original_dir);
+    disp
+}
+
 pub fn syscall_fb_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
         wl_currency::award_loss();
@@ -945,6 +994,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_fb_font_draw),
         name: b"fb_font_draw\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_COMPOSITOR_PRESENT_DAMAGE as usize] = SyscallEntry {
+        handler: Some(syscall_compositor_present_with_damage),
+        name: b"compositor_present_damage\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -984,6 +1037,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
     pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
     pub const SYSCALL_RAISE_WINDOW: u64 = 33;
+    pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

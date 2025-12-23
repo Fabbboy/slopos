@@ -1,9 +1,9 @@
 use core::ffi::{c_char, c_void};
 
 use crate::syscall::{
-    sys_compositor_present, sys_enumerate_windows, sys_fb_fill_rect, sys_fb_font_draw,
+    sys_compositor_present_damage, sys_enumerate_windows, sys_fb_fill_rect, sys_fb_font_draw,
     sys_fb_info, sys_mouse_read, sys_raise_window, sys_set_window_position,
-    sys_set_window_state, sys_sleep_ms, sys_tty_set_focus, sys_yield, UserFbInfo,
+    sys_set_window_state, sys_tty_set_focus, sys_yield, UserDamageRegion, UserFbInfo,
     UserMouseEvent, UserRect, UserText, UserWindowInfo,
 };
 
@@ -24,6 +24,7 @@ const COLOR_BUTTON_CLOSE_HOVER: u32 = 0xE81123FF;
 const COLOR_TEXT: u32 = 0xE0E0E0FF;
 const COLOR_TASKBAR: u32 = 0x252526FF;
 const COLOR_CURSOR: u32 = 0xFFFFFFFF;
+const COLOR_BACKGROUND: u32 = 0x001122FF; // Background color for cursor clearing
 
 const MAX_WINDOWS: usize = 32;
 
@@ -42,6 +43,9 @@ struct WindowManager {
     mouse_y: i32,
     mouse_buttons: u8,
     mouse_buttons_prev: u8,
+    prev_mouse_x: i32,
+    prev_mouse_y: i32,
+    first_frame: bool,
 }
 
 impl WindowManager {
@@ -58,6 +62,9 @@ impl WindowManager {
             mouse_y: 0,
             mouse_buttons: 0,
             mouse_buttons_prev: 0,
+            prev_mouse_x: 0,
+            prev_mouse_y: 0,
+            first_frame: true,
         }
     }
 
@@ -66,6 +73,10 @@ impl WindowManager {
         let mut event = UserMouseEvent::default();
         if sys_mouse_read(&mut event) > 0 {
             self.mouse_buttons_prev = self.mouse_buttons;
+            // Save previous position for damage tracking
+            self.prev_mouse_x = self.mouse_x;
+            self.prev_mouse_y = self.mouse_y;
+            // Update to new position
             self.mouse_x = event.x;
             self.mouse_y = event.y;
             self.mouse_buttons = event.buttons;
@@ -224,6 +235,9 @@ impl WindowManager {
 
     /// Draw all window decorations
     fn draw_decorations(&self, fb: &UserFbInfo) {
+        // Note: Framebuffer is already cleared, no need to clear old cursor!
+        // We follow the Wayland pattern: clear → composite → decorate
+
         // Draw title bars for all visible windows (back to front)
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
@@ -235,7 +249,7 @@ impl WindowManager {
         // Draw taskbar
         self.draw_taskbar(fb);
 
-        // Draw cursor
+        // Draw cursor on top of everything
         self.draw_cursor();
     }
 
@@ -367,23 +381,127 @@ impl WindowManager {
         }
     }
 
+    /// Calculate ALL damage regions: first frame, windows, and cursor
+    /// This ensures we never miss dirty windows or leave artifacts on screen
+    fn get_all_damage_regions(&self, fb: &UserFbInfo) -> ([UserDamageRegion; 64], usize) {
+        let mut regions = [UserDamageRegion::default(); 64];
+        let mut count = 0;
+
+        // FIRST FRAME: Clear entire screen to remove boot artifacts (roulette, etc.)
+        if self.first_frame {
+            regions[count] = UserDamageRegion {
+                x: 0,
+                y: 0,
+                width: fb.width as i32,
+                height: fb.height as i32,
+            };
+            count += 1;
+            return (regions, count);
+        }
+
+        // WINDOW DAMAGE: Only add windows that are actually dirty
+        // Use actual dirty rectangle bounds (surface-relative), not entire window
+        for i in 0..self.window_count as usize {
+            let window = &self.windows[i];
+            if window.state != WINDOW_STATE_MINIMIZED && window.dirty != 0 {
+                // Convert surface-relative dirty bounds to screen coordinates
+                let dirty_w = window.dirty_x1 - window.dirty_x0 + 1;
+                let dirty_h = window.dirty_y1 - window.dirty_y0 + 1;
+
+                if dirty_w > 0 && dirty_h > 0 {
+                    regions[count] = UserDamageRegion {
+                        x: window.x + window.dirty_x0,
+                        y: window.y + window.dirty_y0,
+                        width: dirty_w,
+                        height: dirty_h,
+                    };
+                    count += 1;
+                    if count >= 62 { // Leave room for cursor and taskbar damage
+                        break;
+                    }
+                }
+            }
+        }
+
+        // TASKBAR DAMAGE: Always redraw taskbar (reflects window state changes)
+        if count < 63 {
+            regions[count] = UserDamageRegion {
+                x: 0,
+                y: fb.height as i32 - TASKBAR_HEIGHT,
+                width: fb.width as i32,
+                height: TASKBAR_HEIGHT,
+            };
+            count += 1;
+        }
+
+        // CURSOR DAMAGE: Previous and current cursor positions
+        const CURSOR_SIZE: i32 = 9;
+        const CURSOR_HALF: i32 = CURSOR_SIZE / 2;
+
+        // Add previous cursor position as damage (if it moved)
+        if self.prev_mouse_x != self.mouse_x || self.prev_mouse_y != self.mouse_y {
+            if count < 64 {
+                regions[count] = UserDamageRegion {
+                    x: (self.prev_mouse_x - CURSOR_HALF).max(0),
+                    y: (self.prev_mouse_y - CURSOR_HALF).max(0),
+                    width: CURSOR_SIZE,
+                    height: CURSOR_SIZE,
+                };
+                count += 1;
+            }
+        }
+
+        // Add current cursor position as damage
+        if count < 64 {
+            regions[count] = UserDamageRegion {
+                x: (self.mouse_x - CURSOR_HALF).max(0),
+                y: (self.mouse_y - CURSOR_HALF).max(0),
+                width: CURSOR_SIZE,
+                height: CURSOR_SIZE,
+            };
+            count += 1;
+        }
+
+        (regions, count)
+    }
+
     /// Draw mouse cursor
     fn draw_cursor(&self) {
-        // Simple crosshair cursor
+        // Simple crosshair cursor with bounds checking
+        // Clamp coordinates to ensure cursor is always visible and within framebuffer
+
+        // Horizontal line (9px wide centered on cursor)
+        let h_x = (self.mouse_x - 4).max(0);
+        let h_width = if self.mouse_x < 4 {
+            // Cursor near left edge - draw shorter line
+            (5 + self.mouse_x).min(9)
+        } else {
+            9
+        };
+
         let h_line = UserRect {
-            x: self.mouse_x - 4,
+            x: h_x,
             y: self.mouse_y,
-            width: 9,
+            width: h_width,
             height: 1,
             color: COLOR_CURSOR,
         };
         sys_fb_fill_rect(&h_line);
 
+        // Vertical line (9px tall centered on cursor)
+        let v_y = (self.mouse_y - 4).max(0);
+        let v_height = if self.mouse_y < 4 {
+            // Cursor near top edge - draw shorter line
+            (5 + self.mouse_y).min(9)
+        } else {
+            9
+        };
+
         let v_line = UserRect {
             x: self.mouse_x,
-            y: self.mouse_y - 4,
+            y: v_y,
             width: 1,
-            height: 9,
+            height: v_height,
             color: COLOR_CURSOR,
         };
         sys_fb_fill_rect(&v_line);
@@ -415,24 +533,75 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         }
     }
 
+    // High-performance compositor loop
+    // - NO artificial framerate limiting (no sleep)
+    // - Physics/logic runs every frame (deterministic behavior)
+    // - Rendering runs as fast as the CPU can handle
+    // - Yields to scheduler for cooperative multitasking
+    //
+    // This ensures:
+    // - Fast machines get high framerate and responsive feel
+    // - Slow machines get consistent physics (no skip/lag)
+    // - Same behavior across different hardware
+    let mut frame_count: u64 = 0;
+
     loop {
-        // 1. Update mouse state
+        // === PHYSICS/LOGIC PHASE ===
+        // Always runs exactly once per frame for deterministic behavior
+
+        // 1. Update mouse state from kernel driver
         wm.update_mouse();
 
-        // 2. Refresh window list
+        // 2. Refresh window list from kernel
         wm.refresh_windows();
 
-        // 3. Handle mouse events
+        // 3. Handle mouse events (dragging, clicking, etc.)
         wm.handle_mouse_events(&fb_info);
 
-        // 4. Present surfaces (kernel composites them)
-        sys_compositor_present();
+        // === RENDERING PHASE ===
+        // Wayland-style damage tracking: clear → composite → decorate
+        //
+        // DAMAGE SOURCES:
+        // 1. First frame: Full screen (clears boot artifacts like roulette)
+        // 2. Window damage: All visible windows (ensures dirty windows render)
+        // 3. Cursor damage: Old and new cursor positions
+        //
+        // This ensures correctness while still being more efficient than
+        // full-screen clear on every frame after the first one.
 
-        // 5. Draw decorations on top
+        // 4. Get ALL damage regions (first frame, windows, cursor)
+        let (damage_regions, damage_count) = wm.get_all_damage_regions(&fb_info);
+
+        // 5. Clear only damaged regions (removes old content from background)
+        for i in 0..damage_count {
+            let region = &damage_regions[i];
+            let clear_rect = UserRect {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+                color: COLOR_BACKGROUND,
+            };
+            sys_fb_fill_rect(&clear_rect);
+        }
+
+        // 6. Composite windows in damaged regions only
+        //    Kernel checks dirty flags and only blits windows that overlap damage
+        sys_compositor_present_damage(&damage_regions[..damage_count]);
+
+        // 7. Mark first frame complete (subsequent frames use incremental damage)
+        if wm.first_frame {
+            wm.first_frame = false;
+        }
+
+        // 7. Draw decorations on top (title bars, taskbar, cursor)
+        //    Taskbar covers its area, title bars cover theirs
         wm.draw_decorations(&fb_info);
 
-        // 6. Sleep and yield
-        sys_sleep_ms(16); // ~60fps
+        // 8. Yield to scheduler for cooperative multitasking
+        // This allows other tasks to run without blocking
         sys_yield();
+
+        frame_count = frame_count.wrapping_add(1);
     }
 }

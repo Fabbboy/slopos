@@ -17,6 +17,7 @@ pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
 pub const SYSCALL_FONT_DRAW: u64 = 11;
 pub const SYSCALL_GFX_BLIT: u64 = 26;
 pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
+pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
 pub const SYSCALL_RANDOM_NEXT: u64 = 12;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
 pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
@@ -175,6 +176,11 @@ pub struct UserWindowInfo {
     pub width: u32,
     pub height: u32,
     pub state: u8,
+    pub dirty: u8,
+    pub dirty_x0: i32,
+    pub dirty_y0: i32,
+    pub dirty_x1: i32,
+    pub dirty_y1: i32,
     pub title: [c_char; 32],
 }
 
@@ -187,9 +193,24 @@ impl Default for UserWindowInfo {
             width: 0,
             height: 0,
             state: 0,
+            dirty: 0,
+            dirty_x0: 0,
+            dirty_y0: 0,
+            dirty_x1: -1,
+            dirty_y1: -1,
             title: [0; 32],
         }
     }
+}
+
+/// Damage region for efficient damage tracking (Wayland-style)
+#[repr(C)]
+#[derive(Default, Copy, Clone, Debug)]
+pub struct UserDamageRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[inline(always)]
@@ -327,6 +348,21 @@ pub fn sys_gfx_blit(blit: &UserBlit) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_compositor_present() -> i64 {
     unsafe { syscall(SYSCALL_COMPOSITOR_PRESENT, 0, 0, 0) as i64 }
+}
+
+/// Compositor present with damage tracking (Wayland-style)
+/// Only recomposites regions that have damage
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_compositor_present_damage(damage_regions: &[UserDamageRegion]) -> i64 {
+    unsafe {
+        syscall(
+            SYSCALL_COMPOSITOR_PRESENT_DAMAGE,
+            damage_regions.as_ptr() as u64,
+            damage_regions.len() as u64,
+            0,
+        ) as i64
+    }
 }
 
 #[inline(always)]

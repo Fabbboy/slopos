@@ -22,7 +22,22 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub state: u8,
+    pub dirty: u8,  // 1 if window has pending updates, 0 otherwise
+    pub dirty_x0: i32,  // Dirty rectangle bounds (surface-relative)
+    pub dirty_y0: i32,
+    pub dirty_x1: i32,
+    pub dirty_y1: i32,
     pub title: [c_char; 32],
+}
+
+/// Damage region for compositor damage tracking (Wayland-style)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DamageRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +67,7 @@ pub struct VideoCallbacks {
     pub surface_font_draw_string: Option<fn(u32, i32, i32, *const c_char, u32, u32) -> c_int>,
     pub surface_blit: Option<fn(u32, i32, i32, i32, i32, i32, i32) -> c_int>,
     pub compositor_present: Option<fn() -> c_int>,
+    pub compositor_present_with_damage: Option<fn(*const DamageRegion, u32) -> c_int>,
     pub surface_enumerate_windows: Option<fn(*mut WindowInfo, u32) -> u32>,
     pub surface_set_window_position: Option<fn(u32, i32, i32) -> c_int>,
     pub surface_set_window_state: Option<fn(u32, u8) -> c_int>,
@@ -265,6 +281,22 @@ pub fn compositor_present() -> Result<bool, VideoError> {
         }
     }
     Err(VideoError::NoFramebuffer)
+}
+
+/// Compositor present with damage tracking (Wayland-style)
+/// Only recomposites regions that have damage
+pub fn compositor_present_with_damage(damage_regions: &[DamageRegion]) -> Result<bool, VideoError> {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.compositor_present_with_damage {
+            let rc = cb(damage_regions.as_ptr(), damage_regions.len() as u32);
+            if rc < 0 {
+                return Err(VideoError::Invalid);
+            }
+            return Ok(rc != 0);
+        }
+    }
+    // Fallback to full compositor_present if damage tracking not supported
+    compositor_present()
 }
 
 pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {

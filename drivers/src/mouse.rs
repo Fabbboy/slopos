@@ -184,9 +184,19 @@ pub fn mouse_init() {
         MOUSE_STATE.x = MOUSE_STATE.max_x / 2;
         MOUSE_STATE.y = MOUSE_STATE.max_y / 2;
         MOUSE_STATE.packet_byte = 0;
+
+        // Generate initial mouse event so compositor knows starting position
+        let initial_event = MouseEvent {
+            x: MOUSE_STATE.x,
+            y: MOUSE_STATE.y,
+            buttons: 0,
+        };
+        buffer_push(initial_event);
     }
 
-    klog_info!("PS/2 mouse initialized");
+    klog_info!("PS/2 mouse initialized at ({}, {})",
+        unsafe { MOUSE_STATE.x },
+        unsafe { MOUSE_STATE.y });
 }
 
 pub fn mouse_set_bounds(width: i32, height: i32) {
