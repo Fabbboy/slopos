@@ -71,6 +71,9 @@ impl TaskbarState {
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
+    // Previous window state for move damage tracking
+    prev_windows: [UserWindowInfo; MAX_WINDOWS],
+    prev_window_count: u32,
     focused_task: u32,
     dragging: bool,
     drag_task: u32,
@@ -93,6 +96,8 @@ impl WindowManager {
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
+            prev_windows: [UserWindowInfo::default(); MAX_WINDOWS],
+            prev_window_count: 0,
             focused_task: 0,
             dragging: false,
             drag_task: 0,
@@ -137,6 +142,11 @@ impl WindowManager {
 
     /// Refresh window list from kernel and detect taskbar state changes
     fn refresh_windows(&mut self) {
+        // Save previous window state for move damage tracking
+        self.prev_windows = self.windows;
+        self.prev_window_count = self.window_count;
+
+        // Get current window state from kernel
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
 
         // Check if taskbar state changed (window count, focus, or minimize states)
@@ -476,6 +486,54 @@ impl WindowManager {
         }
     }
 
+    /// Calculate damage regions for windows that moved (position changed but content same).
+    /// Returns (regions, count).
+    fn get_move_damage_regions(&self) -> ([UserDamageRegion; 64], usize) {
+        let mut regions = [UserDamageRegion::default(); 64];
+        let mut count = 0;
+
+        // For each current window, check if it moved from previous frame
+        for i in 0..self.window_count as usize {
+            let window = &self.windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+
+            // Find this window in previous frame
+            for j in 0..self.prev_window_count as usize {
+                let prev = &self.prev_windows[j];
+                if prev.task_id == window.task_id && prev.state != WINDOW_STATE_MINIMIZED {
+                    // Check if position changed
+                    if prev.x != window.x || prev.y != window.y {
+                        // Add OLD position as damage (clear what was there)
+                        if count < 64 {
+                            regions[count] = UserDamageRegion {
+                                x: prev.x,
+                                y: prev.y,
+                                width: prev.width as i32,
+                                height: prev.height as i32,
+                            };
+                            count += 1;
+                        }
+                        // Add NEW position as damage (draw window there)
+                        if count < 64 {
+                            regions[count] = UserDamageRegion {
+                                x: window.x,
+                                y: window.y,
+                                width: window.width as i32,
+                                height: window.height as i32,
+                            };
+                            count += 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        (regions, count)
+    }
+
     /// Check if a rectangle overlaps with any damage region
     fn overlaps_damage(
         x: i32, y: i32, w: i32, h: i32,
@@ -628,16 +686,20 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         // === RENDERING PHASE ===
         // Layer-based compositing with smart cursor handling:
         //   - Content damage (windows, taskbar state): CLEAR then redraw
+        //   - Move damage (window position changes): CLEAR then recomposite existing pixels
         //   - Cursor damage (old position): NO CLEAR, directly redraw layers
         // This prevents the blue rectangle artifact when cursor moves.
 
         // 4. Get content damage regions (windows + taskbar state changes)
         let (content_damage, content_count) = wm.get_content_damage_regions(&fb_info);
 
+        // 4a. Get move damage regions (windows that changed position but not content)
+        let (move_damage, move_count) = wm.get_move_damage_regions();
+
         // 5. Get cursor damage region (old cursor position, if moved)
         let cursor_damage = wm.get_cursor_damage_region();
 
-        // 6. Clear ONLY content damage regions (NOT cursor damage)
+        // 6. Clear content AND move damage regions (NOT cursor damage)
         for i in 0..content_count {
             let region = &content_damage[i];
             let clear_rect = UserRect {
@@ -649,14 +711,31 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             };
             sys_fb_fill_rect(&clear_rect);
         }
+        for i in 0..move_count {
+            let region = &move_damage[i];
+            let clear_rect = UserRect {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+                color: COLOR_BACKGROUND,
+            };
+            sys_fb_fill_rect(&clear_rect);
+        }
 
         // 7. Build combined damage list for window compositing
-        // Kernel needs to know about both content and cursor damage to composite windows
+        // Kernel needs to know about content, move, and cursor damage to composite windows
         let mut all_damage = [UserDamageRegion::default(); 64];
         let mut all_count = 0;
         for i in 0..content_count {
             if all_count < 64 {
                 all_damage[all_count] = content_damage[i];
+                all_count += 1;
+            }
+        }
+        for i in 0..move_count {
+            if all_count < 64 {
+                all_damage[all_count] = move_damage[i];
                 all_count += 1;
             }
         }
@@ -677,15 +756,16 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             wm.first_frame = false;
         }
 
-        // 10. Redraw title bars that overlap any damage (content OR cursor)
+        // 10. Redraw title bars that overlap any damage (content, move, OR cursor)
         for i in 0..wm.window_count as usize {
             let window = &wm.windows[i];
             if window.state != WINDOW_STATE_MINIMIZED {
                 let overlaps_content = WindowManager::title_bar_overlaps_damage(window, &content_damage, content_count);
+                let overlaps_move = WindowManager::title_bar_overlaps_damage(window, &move_damage, move_count);
                 let overlaps_cursor = cursor_damage.as_ref()
                     .map(|r| WindowManager::title_bar_overlaps_region(window, r))
                     .unwrap_or(false);
-                if overlaps_content || overlaps_cursor {
+                if overlaps_content || overlaps_move || overlaps_cursor {
                     wm.draw_title_bar(window);
                 }
             }
@@ -693,10 +773,11 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
         // 11. Redraw taskbar if it overlaps any damage OR state changed
         let taskbar_overlaps_content = wm.taskbar_overlaps_damage(&fb_info, &content_damage, content_count);
+        let taskbar_overlaps_move = wm.taskbar_overlaps_damage(&fb_info, &move_damage, move_count);
         let taskbar_overlaps_cursor = cursor_damage.as_ref()
             .map(|r| WindowManager::taskbar_overlaps_region(&fb_info, r))
             .unwrap_or(false);
-        if taskbar_overlaps_content || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
+        if taskbar_overlaps_content || taskbar_overlaps_move || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
             wm.draw_taskbar(&fb_info);
             wm.taskbar_needs_redraw = false;
         }

@@ -1086,9 +1086,8 @@ pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
     };
     slots[slot_idx].surface.x = x;
     slots[slot_idx].surface.y = y;
-    // Mark entire surface dirty to trigger redraw at new position
-    let surface = &mut slots[slot_idx].surface;
-    mark_dirty(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
+    // Note: Don't mark surface dirty - content is unchanged, only position changed.
+    // The userland compositor tracks old/new positions and adds screen-level damage.
     0
 }
 
