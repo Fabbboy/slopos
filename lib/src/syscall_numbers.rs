@@ -35,3 +35,4 @@ pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
 pub const SYSCALL_RAISE_WINDOW: u64 = 33;
 pub const SYSCALL_FB_FILL_RECT: u64 = 34;
 pub const SYSCALL_FB_FONT_DRAW: u64 = 35;
+pub const SYSCALL_FB_BLIT: u64 = 37;

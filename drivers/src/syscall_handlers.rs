@@ -16,7 +16,7 @@ use crate::syscall_types::{
     InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE,
 };
 use crate::video_bridge;
-use slopos_lib::{klog_debug, SYSCALL_FB_FILL_RECT, SYSCALL_FB_FONT_DRAW};
+use slopos_lib::{klog_debug, SYSCALL_FB_BLIT, SYSCALL_FB_FILL_RECT, SYSCALL_FB_FONT_DRAW};
 use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
 
 #[repr(C)]
@@ -720,6 +720,38 @@ pub fn syscall_fb_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     }
 }
 
+pub fn syscall_fb_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let mut blit = UserBlit {
+        src_x: 0,
+        src_y: 0,
+        dst_x: 0,
+        dst_y: 0,
+        width: 0,
+        height: 0,
+    };
+    if unsafe { user_copy_blit_checked(&mut blit, (*frame).rdi as *const UserBlit) } != 0 {
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+    let rc = video_bridge::framebuffer_blit(
+        blit.src_x,
+        blit.src_y,
+        blit.dst_x,
+        blit.dst_y,
+        blit.width,
+        blit.height,
+    );
+    let disp = syscall_finish_gfx(frame, rc);
+    let _ = paging::switch_page_directory(original_dir);
+    disp
+}
+
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
@@ -997,6 +1029,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
     table[SYSCALL_COMPOSITOR_PRESENT_DAMAGE as usize] = SyscallEntry {
         handler: Some(syscall_compositor_present_with_damage),
         name: b"compositor_present_damage\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FB_BLIT as usize] = SyscallEntry {
+        handler: Some(syscall_fb_blit),
+        name: b"fb_blit\0".as_ptr() as *const c_char,
     };
     table
 };

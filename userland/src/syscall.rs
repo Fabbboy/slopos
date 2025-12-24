@@ -38,6 +38,7 @@ pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
 pub const SYSCALL_RAISE_WINDOW: u64 = 33;
 pub const SYSCALL_FB_FILL_RECT: u64 = 34;
 pub const SYSCALL_FB_FONT_DRAW: u64 = 35;
+pub const SYSCALL_FB_BLIT: u64 = 37;
 
 pub const USER_FS_OPEN_READ: u32 = 0x1;
 pub const USER_FS_OPEN_WRITE: u32 = 0x2;
@@ -495,6 +496,12 @@ pub fn sys_fb_fill_rect(rect: &UserRect) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_font_draw(text: &UserText) -> i64 {
     unsafe { syscall(SYSCALL_FB_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_fb_blit(blit: &UserBlit) -> i64 {
+    unsafe { syscall(SYSCALL_FB_BLIT, blit as *const _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]

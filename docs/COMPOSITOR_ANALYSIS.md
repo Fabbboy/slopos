@@ -418,23 +418,29 @@ Implemented front-to-back rendering with `VisibleRegion` tracking:
 
 ---
 
-#### [ ] Checkpoint 2.3: Optimize Window Move (Blit Instead of Recomposite)
-**Location**: `userland/src/compositor.rs:703-724`
+#### [x] Checkpoint 2.3: Optimize Window Move (Blit Instead of Recomposite) ✅ **COMPLETED** (2025-12-24)
+**Location**: `userland/src/compositor.rs:834-932`
 
 **Problem**: Clears old position and recomposites everything.
 
 **Solution**:
-- For simple moves (no overlapping windows changed):
-  - Use `framebuffer_blit()` to copy existing pixels
-  - Only recomposite exposed regions
+Implemented blit optimization for window moves when no windows overlap:
+- Added `SYSCALL_FB_BLIT` (37) to expose kernel's `framebuffer_blit()` to compositor
+- Added `can_blit_move()` to detect simple moves (no overlapping windows)
+- Added `do_blit_move()` to perform blit and calculate exposed strips
+- Compositor now blits window pixels directly for simple moves
+- Only clears and recomposites the exposed edge strips
 
-**Files to modify**:
-- `userland/src/compositor.rs` - Add blit-based move path
-- May need new syscall for safe framebuffer-to-framebuffer blit
+**Files modified**:
+- `lib/src/syscall_numbers.rs` - Added SYSCALL_FB_BLIT constant
+- `drivers/src/syscall_handlers.rs` - Added syscall_fb_blit handler and table entry
+- `userland/src/syscall.rs` - Added sys_fb_blit wrapper
+- `userland/src/compositor.rs` - Added can_blit_move(), do_blit_move(), integrated into main loop
 
 **Verification**:
-- Drag window smoothly
-- Measure CPU usage before/after
+- Build succeeds with `make build`
+- Tests pass with `make test`
+- Window dragging uses blit when no overlapping windows
 
 ---
 

@@ -1,9 +1,9 @@
 use core::ffi::{c_char, c_void};
 
 use crate::syscall::{
-    sys_compositor_present_damage, sys_enumerate_windows, sys_fb_fill_rect, sys_fb_font_draw,
-    sys_fb_info, sys_mouse_read, sys_raise_window, sys_set_window_position,
-    sys_set_window_state, sys_tty_set_focus, sys_yield, UserDamageRegion, UserFbInfo,
+    sys_compositor_present_damage, sys_enumerate_windows, sys_fb_blit, sys_fb_fill_rect,
+    sys_fb_font_draw, sys_fb_info, sys_mouse_read, sys_raise_window, sys_set_window_position,
+    sys_set_window_state, sys_tty_set_focus, sys_yield, UserBlit, UserDamageRegion, UserFbInfo,
     UserMouseEvent, UserRect, UserText, UserWindowInfo,
 };
 
@@ -492,52 +492,136 @@ impl WindowManager {
         }
     }
 
-    /// Calculate damage regions for windows that moved (position changed but content same).
-    /// Returns (regions, count).
-    fn get_move_damage_regions(&self) -> ([UserDamageRegion; 64], usize) {
-        let mut regions = [UserDamageRegion::default(); 64];
-        let mut count = 0;
+    /// Check if a window move can use blit optimization.
+    /// A move is "simple" if no other visible windows overlap with either the old or new position.
+    fn can_blit_move(&self, window: &UserWindowInfo, prev_x: i32, prev_y: i32) -> bool {
+        // Include title bar in the overlap check
+        let total_height = window.height as i32 + TITLE_BAR_HEIGHT;
+        let prev_title_y = prev_y - TITLE_BAR_HEIGHT;
+        let new_title_y = window.y - TITLE_BAR_HEIGHT;
 
-        // For each current window, check if it moved from previous frame
         for i in 0..self.window_count as usize {
-            let window = &self.windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
+            let other = &self.windows[i];
+            if other.task_id == window.task_id || other.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
 
-            // Find this window in previous frame
-            for j in 0..self.prev_window_count as usize {
-                let prev = &self.prev_windows[j];
-                if prev.task_id == window.task_id && prev.state != WINDOW_STATE_MINIMIZED {
-                    // Check if position changed
-                    if prev.x != window.x || prev.y != window.y {
-                        // Add OLD position as damage (clear what was there)
-                        if count < 64 {
-                            regions[count] = UserDamageRegion {
-                                x: prev.x,
-                                y: prev.y,
-                                width: prev.width as i32,
-                                height: prev.height as i32,
-                            };
-                            count += 1;
-                        }
-                        // Add NEW position as damage (draw window there)
-                        if count < 64 {
-                            regions[count] = UserDamageRegion {
-                                x: window.x,
-                                y: window.y,
-                                width: window.width as i32,
-                                height: window.height as i32,
-                            };
-                            count += 1;
-                        }
-                    }
-                    break;
-                }
+            // Check overlap with old position (including title bar)
+            if Self::rects_overlap(
+                prev_x, prev_title_y, window.width as i32, total_height,
+                other.x, other.y - TITLE_BAR_HEIGHT, other.width as i32, other.height as i32 + TITLE_BAR_HEIGHT,
+            ) {
+                return false;
+            }
+
+            // Check overlap with new position (including title bar)
+            if Self::rects_overlap(
+                window.x, new_title_y, window.width as i32, total_height,
+                other.x, other.y - TITLE_BAR_HEIGHT, other.width as i32, other.height as i32 + TITLE_BAR_HEIGHT,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Perform blit-based window move. Returns exposed regions that need recompositing.
+    /// The blit copies the window content (including title bar) from old to new position,
+    /// and returns the exposed strips where the old window was but the new one isn't.
+    fn do_blit_move(
+        &self,
+        window: &UserWindowInfo,
+        prev_x: i32,
+        prev_y: i32,
+        fb: &UserFbInfo,
+    ) -> ([UserDamageRegion; 4], usize) {
+        let mut exposed = [UserDamageRegion::default(); 4];
+        let mut count = 0;
+
+        let dx = window.x - prev_x;
+        let dy = window.y - prev_y;
+
+        // Include title bar in the blit
+        let total_height = window.height as i32 + TITLE_BAR_HEIGHT;
+        let prev_title_y = prev_y - TITLE_BAR_HEIGHT;
+        let new_title_y = window.y - TITLE_BAR_HEIGHT;
+
+        // Calculate clipped blit region (ensure we're within screen bounds)
+        let src_x = prev_x.max(0);
+        let src_y = prev_title_y.max(0);
+        let dst_x = window.x.max(0);
+        let dst_y = new_title_y.max(0);
+        let blit_width = (window.width as i32).min(fb.width as i32 - dst_x.max(src_x));
+        let blit_height = total_height.min(fb.height as i32 - dst_y.max(src_y));
+
+        if blit_width > 0 && blit_height > 0 {
+            let blit = UserBlit {
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width: blit_width,
+                height: blit_height,
+            };
+            sys_fb_blit(&blit);
+        }
+
+        // Calculate exposed regions (strips where old window was but new isn't)
+        // Horizontal movement: expose vertical strip on trailing edge
+        if dx > 0 {
+            // Moved right: expose left strip
+            let strip_width = dx.min(window.width as i32);
+            if strip_width > 0 && count < 4 {
+                exposed[count] = UserDamageRegion {
+                    x: prev_x,
+                    y: prev_title_y,
+                    width: strip_width,
+                    height: total_height,
+                };
+                count += 1;
+            }
+        } else if dx < 0 {
+            // Moved left: expose right strip
+            let strip_width = (-dx).min(window.width as i32);
+            if strip_width > 0 && count < 4 {
+                exposed[count] = UserDamageRegion {
+                    x: prev_x + window.width as i32 - strip_width,
+                    y: prev_title_y,
+                    width: strip_width,
+                    height: total_height,
+                };
+                count += 1;
             }
         }
 
-        (regions, count)
+        // Vertical movement: expose horizontal strip on trailing edge
+        if dy > 0 {
+            // Moved down: expose top strip
+            let strip_height = dy.min(total_height);
+            if strip_height > 0 && count < 4 {
+                exposed[count] = UserDamageRegion {
+                    x: prev_x,
+                    y: prev_title_y,
+                    width: window.width as i32,
+                    height: strip_height,
+                };
+                count += 1;
+            }
+        } else if dy < 0 {
+            // Moved up: expose bottom strip
+            let strip_height = (-dy).min(total_height);
+            if strip_height > 0 && count < 4 {
+                exposed[count] = UserDamageRegion {
+                    x: prev_x,
+                    y: prev_title_y + total_height - strip_height,
+                    width: window.width as i32,
+                    height: strip_height,
+                };
+                count += 1;
+            }
+        }
+
+        (exposed, count)
     }
 
     /// Check if a rectangle overlaps with any damage region
@@ -699,13 +783,68 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         // 4. Get content damage regions (windows + taskbar state changes)
         let (content_damage, content_count) = wm.get_content_damage_regions(&fb_info);
 
-        // 4a. Get move damage regions (windows that changed position but not content)
-        let (move_damage, move_count) = wm.get_move_damage_regions();
+        // 4a. Handle window moves with blit optimization where possible
+        // For each moved window, check if we can use blit (no overlapping windows)
+        // If yes: blit pixels directly, only add exposed strips to damage
+        // If no: fall back to clear + recomposite (existing behavior)
+        let mut blit_exposed = [UserDamageRegion::default(); 32];
+        let mut blit_exposed_count = 0;
+        let mut fallback_move_damage = [UserDamageRegion::default(); 64];
+        let mut fallback_move_count = 0;
+
+        for i in 0..wm.window_count as usize {
+            let window = &wm.windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+
+            // Find this window in previous frame
+            for j in 0..wm.prev_window_count as usize {
+                let prev = &wm.prev_windows[j];
+                if prev.task_id == window.task_id && prev.state != WINDOW_STATE_MINIMIZED {
+                    // Check if position changed
+                    if prev.x != window.x || prev.y != window.y {
+                        // Check if we can use blit optimization
+                        if wm.can_blit_move(window, prev.x, prev.y) {
+                            // Use blit: copy pixels and get exposed regions
+                            let (exposed, count) = wm.do_blit_move(window, prev.x, prev.y, &fb_info);
+                            for k in 0..count {
+                                if blit_exposed_count < 32 {
+                                    blit_exposed[blit_exposed_count] = exposed[k];
+                                    blit_exposed_count += 1;
+                                }
+                            }
+                        } else {
+                            // Fallback: add old and new positions to damage list
+                            if fallback_move_count < 64 {
+                                fallback_move_damage[fallback_move_count] = UserDamageRegion {
+                                    x: prev.x,
+                                    y: prev.y - TITLE_BAR_HEIGHT,
+                                    width: prev.width as i32,
+                                    height: prev.height as i32 + TITLE_BAR_HEIGHT,
+                                };
+                                fallback_move_count += 1;
+                            }
+                            if fallback_move_count < 64 {
+                                fallback_move_damage[fallback_move_count] = UserDamageRegion {
+                                    x: window.x,
+                                    y: window.y - TITLE_BAR_HEIGHT,
+                                    width: window.width as i32,
+                                    height: window.height as i32 + TITLE_BAR_HEIGHT,
+                                };
+                                fallback_move_count += 1;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
 
         // 5. Get cursor damage region (old cursor position, if moved)
         let cursor_damage = wm.get_cursor_damage_region();
 
-        // 6. Clear content AND move damage regions (NOT cursor damage)
+        // 6. Clear content damage regions
         for i in 0..content_count {
             let region = &content_damage[i];
             let clear_rect = UserRect {
@@ -717,8 +856,23 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             };
             sys_fb_fill_rect(&clear_rect);
         }
-        for i in 0..move_count {
-            let region = &move_damage[i];
+
+        // 6a. Clear fallback move damage (windows that couldn't use blit)
+        for i in 0..fallback_move_count {
+            let region = &fallback_move_damage[i];
+            let clear_rect = UserRect {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+                color: COLOR_BACKGROUND,
+            };
+            sys_fb_fill_rect(&clear_rect);
+        }
+
+        // 6b. Clear blit-exposed regions (strips where old window was)
+        for i in 0..blit_exposed_count {
+            let region = &blit_exposed[i];
             let clear_rect = UserRect {
                 x: region.x,
                 y: region.y,
@@ -731,22 +885,31 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
         // 7. Build combined damage list for window compositing
         // Kernel needs to know about content, move, and cursor damage to composite windows
-        let mut all_damage = [UserDamageRegion::default(); 64];
+        // Note: Blit-optimized moves don't need full recomposite, only exposed strips
+        let mut all_damage = [UserDamageRegion::default(); 128];
         let mut all_count = 0;
         for i in 0..content_count {
-            if all_count < 64 {
+            if all_count < 128 {
                 all_damage[all_count] = content_damage[i];
                 all_count += 1;
             }
         }
-        for i in 0..move_count {
-            if all_count < 64 {
-                all_damage[all_count] = move_damage[i];
+        // Add fallback move damage (windows that couldn't use blit)
+        for i in 0..fallback_move_count {
+            if all_count < 128 {
+                all_damage[all_count] = fallback_move_damage[i];
+                all_count += 1;
+            }
+        }
+        // Add blit-exposed regions (need to composite background behind moved window)
+        for i in 0..blit_exposed_count {
+            if all_count < 128 {
+                all_damage[all_count] = blit_exposed[i];
                 all_count += 1;
             }
         }
         if let Some(ref cursor_region) = cursor_damage {
-            if all_count < 64 {
+            if all_count < 128 {
                 all_damage[all_count] = *cursor_region;
                 all_count += 1;
             }
@@ -767,11 +930,12 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             let window = &wm.windows[i];
             if window.state != WINDOW_STATE_MINIMIZED {
                 let overlaps_content = WindowManager::title_bar_overlaps_damage(window, &content_damage, content_count);
-                let overlaps_move = WindowManager::title_bar_overlaps_damage(window, &move_damage, move_count);
+                let overlaps_fallback_move = WindowManager::title_bar_overlaps_damage(window, &fallback_move_damage, fallback_move_count);
+                let overlaps_blit_exposed = WindowManager::title_bar_overlaps_damage(window, &blit_exposed, blit_exposed_count);
                 let overlaps_cursor = cursor_damage.as_ref()
                     .map(|r| WindowManager::title_bar_overlaps_region(window, r))
                     .unwrap_or(false);
-                if overlaps_content || overlaps_move || overlaps_cursor {
+                if overlaps_content || overlaps_fallback_move || overlaps_blit_exposed || overlaps_cursor {
                     wm.draw_title_bar(window);
                 }
             }
@@ -779,11 +943,12 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
         // 11. Redraw taskbar if it overlaps any damage OR state changed
         let taskbar_overlaps_content = wm.taskbar_overlaps_damage(&fb_info, &content_damage, content_count);
-        let taskbar_overlaps_move = wm.taskbar_overlaps_damage(&fb_info, &move_damage, move_count);
+        let taskbar_overlaps_fallback_move = wm.taskbar_overlaps_damage(&fb_info, &fallback_move_damage, fallback_move_count);
+        let taskbar_overlaps_blit_exposed = wm.taskbar_overlaps_damage(&fb_info, &blit_exposed, blit_exposed_count);
         let taskbar_overlaps_cursor = cursor_damage.as_ref()
             .map(|r| WindowManager::taskbar_overlaps_region(&fb_info, r))
             .unwrap_or(false);
-        if taskbar_overlaps_content || taskbar_overlaps_move || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
+        if taskbar_overlaps_content || taskbar_overlaps_fallback_move || taskbar_overlaps_blit_exposed || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
             wm.draw_taskbar(&fb_info);
             wm.taskbar_needs_redraw = false;
         }
