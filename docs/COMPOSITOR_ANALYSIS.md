@@ -329,7 +329,7 @@ SlopOS Compositor:
 
 ---
 
-#### [ ] Checkpoint 1.2: Add Basic Synchronization
+#### [x] Checkpoint 1.2: Add Basic Synchronization ✅ **COMPLETED** (2025-12-24)
 **Location**: `video/src/surface.rs` (new)
 
 **Problem**: Client can draw while compositor is copying, causing tearing.

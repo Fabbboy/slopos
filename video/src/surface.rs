@@ -8,6 +8,7 @@ use slopos_mm::phys_virt::mm_phys_to_virt;
 use slopos_lib::klog_info;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_sched::MAX_TASKS;
+use slopos_sched::scheduler::r#yield;
 use spin::Mutex;
 
 use crate::framebuffer;
@@ -43,6 +44,7 @@ struct Surface {
     buffer: *mut u8,
     x: i32,
     y: i32,
+    compositing: bool,
 }
 
 unsafe impl Send for Surface {}
@@ -65,6 +67,7 @@ impl Surface {
             buffer: ptr::null_mut(),
             x: 0,
             y: 0,
+            compositing: false,
         }
     }
 }
@@ -248,6 +251,7 @@ fn create_surface_for_task(
                 buffer: virt as *mut u8,
                 x: window_x,
                 y: window_y,
+                compositing: false,
             },
             window_state: WINDOW_STATE_NORMAL,
             z_order,
@@ -268,16 +272,48 @@ fn create_surface_for_task(
     Err(VideoError::Invalid)
 }
 
+/// Spin-wait with yield backoff until surface is not being composited
+fn wait_for_surface_available(task_id: u32) -> Result<usize, VideoError> {
+    const MAX_COMPOSITING_SPINS: u32 = 100;
+    let mut spin_count = 0;
+
+    loop {
+        let (slot_idx, is_compositing) = {
+            let mut slots = SURFACES.lock();
+            let slot = match find_slot(&slots, task_id) {
+                Some(idx) => idx,
+                None => create_surface_for_task(&mut slots, task_id)?,
+            };
+            let compositing = slots[slot].surface.compositing;
+            (slot, compositing)
+        };  // Lock released
+
+        if !is_compositing {
+            return Ok(slot_idx);
+        }
+
+        // Spin-wait with backoff
+        spin_count += 1;
+        if spin_count < MAX_COMPOSITING_SPINS {
+            core::hint::spin_loop();
+        } else {
+            r#yield();
+            spin_count = 0;
+        }
+    }
+}
+
 fn with_surface_mut(task_id: u32, f: impl FnOnce(&mut Surface) -> VideoResult) -> VideoResult {
+    // Wait until surface is not being composited
+    let slot = wait_for_surface_available(task_id)?;
+
+    // Get raw pointer while holding lock
     let surface_ptr = {
         let mut slots = SURFACES.lock();
-        let slot = match find_slot(&slots, task_id) {
-            Some(idx) => idx,
-            None => create_surface_for_task(&mut slots, task_id)?,
-        };
         &mut slots[slot].surface as *mut Surface
     };
-    // Avoid holding the global surface lock during long draws.
+
+    // Execute drawing closure without holding lock
     unsafe { f(&mut *surface_ptr) }
 }
 
@@ -660,6 +696,17 @@ pub fn compositor_present() -> c_int {
         let slots = SURFACES.lock();
         *slots
     };
+
+    // Set compositing=true for all active surfaces
+    {
+        let mut slots = SURFACES.lock();
+        for slot in slots.iter_mut() {
+            if slot.active && !slot.surface.buffer.is_null() {
+                slot.surface.compositing = true;
+            }
+        }
+    }  // Release lock before expensive pixel copy
+
     let mut active = 0u32;
     let mut dirty_tasks = [0u32; MAX_TASKS];
     let mut dirty_count = 0usize;
@@ -779,11 +826,19 @@ pub fn compositor_present() -> c_int {
             let task_id = dirty_tasks[idx];
             if let Some(slot_idx) = find_slot(&slots, task_id) {
                 let surface = &mut slots[slot_idx].surface;
+                surface.compositing = false;
                 surface.dirty = false;
                 surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
                 surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
                 surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
                 surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+            }
+        }
+
+        // Clear compositing for surfaces we didn't composite (fallback)
+        for slot in slots.iter_mut() {
+            if slot.active && slot.surface.compositing {
+                slot.surface.compositing = false;
             }
         }
     }
@@ -814,6 +869,17 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
         let slots = SURFACES.lock();
         *slots
     };
+
+    // Set compositing=true for all active surfaces
+    {
+        let mut slots = SURFACES.lock();
+        for slot in slots.iter_mut() {
+            if slot.active && !slot.surface.buffer.is_null() {
+                slot.surface.compositing = true;
+            }
+        }
+    }  // Release lock before expensive pixel copy
+
     let fb_width = fb.width as i32;
     let fb_height = fb.height as i32;
 
@@ -1030,7 +1096,10 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
             if let Some(slot_idx) = find_slot(&slots, cov.task_id) {
                 let surface = &mut slots[slot_idx].surface;
 
-                // Skip if surface is not currently dirty (defensive check)
+                // Always clear compositing flag
+                surface.compositing = false;
+
+                // Skip dirty check if surface is not currently dirty (defensive check)
                 if !surface.dirty {
                     continue;
                 }
@@ -1057,6 +1126,13 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                 }
                 // else: Partial coverage - keep dirty flag and bounds as-is
                 // The compositor will re-enumerate and process remaining damage next frame
+            }
+        }
+
+        // Clear compositing for surfaces we didn't composite (fallback)
+        for slot in slots.iter_mut() {
+            if slot.active && slot.surface.compositing {
+                slot.surface.compositing = false;
             }
         }
     }
