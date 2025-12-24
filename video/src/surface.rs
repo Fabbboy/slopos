@@ -338,6 +338,25 @@ static COMPOSITOR_LOGGED: AtomicU8 = AtomicU8::new(0);
 static COMPOSITOR_EMPTY_LOGGED: AtomicU8 = AtomicU8::new(0);
 static NEXT_Z_ORDER: AtomicU32 = AtomicU32::new(1);
 
+/// Sort indices array by z-order using insertion sort.
+/// O(n) for nearly-sorted data (typical case after window raise).
+fn sort_indices_by_z_order(
+    indices: &mut [usize; MAX_TASKS],
+    count: usize,
+    slots: &[SurfaceSlot; MAX_TASKS],
+) {
+    for i in 1..count {
+        let key_idx = indices[i];
+        let key_z = slots[key_idx].z_order;
+        let mut j = i;
+        while j > 0 && slots[indices[j - 1]].z_order > key_z {
+            indices[j] = indices[j - 1];
+            j -= 1;
+        }
+        indices[j] = key_idx;
+    }
+}
+
 fn bytes_per_pixel(bpp: u8) -> u32 {
     ((bpp as u32) + 7) / 8
 }
@@ -1003,15 +1022,8 @@ pub fn compositor_present() -> c_int {
         }
     }
     // Sort indices by z-order (lowest first)
-    for i in 0..index_count {
-        for j in (i + 1)..index_count {
-            if slots_snapshot[indices[i]].z_order > slots_snapshot[indices[j]].z_order {
-                let tmp = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp;
-            }
-        }
-    }
+    // Uses insertion sort - O(n) for nearly-sorted arrays (typical after window raise)
+    sort_indices_by_z_order(&mut indices, index_count, &slots_snapshot);
 
     // Iterate windows back-to-front
     for idx_pos in 0..index_count {
@@ -1173,15 +1185,8 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
         }
     }
     // Sort indices by z-order (lowest first)
-    for i in 0..index_count {
-        for j in (i + 1)..index_count {
-            if slots_snapshot[indices[i]].z_order > slots_snapshot[indices[j]].z_order {
-                let tmp = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp;
-            }
-        }
-    }
+    // Uses insertion sort - O(n) for nearly-sorted arrays (typical after window raise)
+    sort_indices_by_z_order(&mut indices, index_count, &slots_snapshot);
 
     let mut did_work = false;
     let mut composited_tasks = [0u32; MAX_TASKS];

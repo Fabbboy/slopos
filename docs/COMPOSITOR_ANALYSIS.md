@@ -444,22 +444,25 @@ Implemented blit optimization for window moves when no windows overlap:
 
 ---
 
-#### [ ] Checkpoint 2.4: Replace Bubble Sort with Better Algorithm
-**Location**: `video/src/surface.rs:679-688`
+#### [x] Checkpoint 2.4: Replace Bubble Sort with Insertion Sort ✅ **COMPLETED** (2025-12-24)
+**Location**: `video/src/surface.rs:341-358, 1024-1026, 1187-1189`
 
-**Problem**: O(n²) sort every frame.
+**Problem**: O(n²) bubble sort every frame.
 
 **Solution**:
-- Keep surfaces sorted by z-order in the array
-- Update on raise/create only
-- Or: Use insertion sort (nearly sorted = O(n))
+Replaced bubble sort with insertion sort - O(n) for nearly-sorted arrays:
+- Added `sort_indices_by_z_order()` helper function using insertion sort
+- After a window raise, only one element is out of place
+- Insertion sort handles this in O(n) by shifting one element to its correct position
+- Both `compositor_present()` and `compositor_present_with_damage()` now use the shared helper
 
-**Files to modify**:
-- `video/src/surface.rs` - Maintain sorted order
+**Files modified**:
+- `video/src/surface.rs` - Added helper function, replaced both bubble sort implementations
 
 **Verification**:
-- Create 32 windows
-- Verify composition time doesn't degrade
+- Build succeeds with `make build`
+- Tests pass with `make test`
+- Window z-ordering works correctly with rapid click/raise operations
 
 ---
 
