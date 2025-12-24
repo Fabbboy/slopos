@@ -9,6 +9,7 @@ pub const SYSCALL_READ_CHAR: u64 = 25;
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_ROULETTE: u64 = 4;
 pub const SYSCALL_SLEEP_MS: u64 = 5;
+pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_FB_INFO: u64 = 6;
 pub const SYSCALL_GFX_FILL_RECT: u64 = 7;
 pub const SYSCALL_GFX_DRAW_LINE: u64 = 8;
@@ -283,6 +284,14 @@ pub fn sys_sleep_ms(ms: u32) {
     unsafe {
         syscall(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
     }
+}
+
+/// Returns the current time in milliseconds since boot.
+/// Used for frame pacing in the compositor (60Hz target).
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_get_time_ms() -> u64 {
+    unsafe { syscall(SYSCALL_GET_TIME_MS, 0, 0, 0) }
 }
 
 #[inline(always)]

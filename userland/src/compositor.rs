@@ -2,9 +2,9 @@ use core::ffi::{c_char, c_void};
 
 use crate::syscall::{
     sys_compositor_present_damage, sys_enumerate_windows, sys_fb_blit, sys_fb_fill_rect,
-    sys_fb_font_draw, sys_fb_info, sys_mouse_read, sys_raise_window, sys_set_window_position,
-    sys_set_window_state, sys_tty_set_focus, sys_yield, UserBlit, UserDamageRegion, UserFbInfo,
-    UserMouseEvent, UserRect, UserText, UserWindowInfo,
+    sys_fb_font_draw, sys_fb_info, sys_get_time_ms, sys_mouse_read, sys_raise_window,
+    sys_set_window_position, sys_set_window_state, sys_sleep_ms, sys_tty_set_focus, sys_yield,
+    UserBlit, UserDamageRegion, UserFbInfo, UserMouseEvent, UserRect, UserText, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -748,19 +748,20 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         }
     }
 
-    // High-performance compositor loop
-    // - NO artificial framerate limiting (no sleep)
-    // - Physics/logic runs every frame (deterministic behavior)
-    // - Rendering runs as fast as the CPU can handle
-    // - Yields to scheduler for cooperative multitasking
+    // 60Hz fixed refresh rate compositor loop
+    // - Frame pacing: sleeps to maintain 16ms per frame (60 FPS)
+    // - Physics/logic runs exactly once per frame for deterministic behavior
+    // - Yields to scheduler for cooperative multitasking after each frame
     //
-    // This ensures:
-    // - Fast machines get high framerate and responsive feel
-    // - Slow machines get consistent physics (no skip/lag)
-    // - Same behavior across different hardware
+    // Frame timing uses PIT timer (100Hz resolution = 10ms granularity)
+    // Actual frame times will be 10-20ms due to timer resolution.
+    const TARGET_FRAME_MS: u64 = 16; // 60 Hz = 16.67ms, use 16ms
+
     let mut frame_count: u64 = 0;
 
     loop {
+        // Capture frame start time for pacing
+        let frame_start_ms = sys_get_time_ms();
         // === PHYSICS/LOGIC PHASE ===
         // Always runs exactly once per frame for deterministic behavior
 
@@ -956,7 +957,14 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         // 12. Draw cursor on top of everything
         wm.draw_cursor();
 
-        // 12. Yield to scheduler for cooperative multitasking
+        // 13. Frame pacing: sleep to maintain 60Hz (16ms per frame)
+        let frame_end_ms = sys_get_time_ms();
+        let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
+        if frame_time < TARGET_FRAME_MS {
+            sys_sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
+        }
+
+        // 14. Yield to scheduler for cooperative multitasking
         sys_yield();
 
         frame_count = frame_count.wrapping_add(1);

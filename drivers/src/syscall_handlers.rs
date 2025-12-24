@@ -65,7 +65,8 @@ use crate::scheduler_callbacks::{
     call_scheduler_is_preemption_enabled, call_task_terminate, call_yield,
 };
 
-use crate::pit::{pit_poll_delay_ms, pit_sleep_ms};
+use crate::irq;
+use crate::pit::{pit_get_frequency, pit_poll_delay_ms, pit_sleep_ms};
 use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
 
@@ -253,6 +254,15 @@ pub fn syscall_sleep_ms(_task: *mut Task, frame: *mut InterruptFrame) -> Syscall
         pit_poll_delay_ms(ms as u32);
     }
     syscall_return_ok(frame, 0)
+}
+
+/// Returns the current time in milliseconds since boot.
+/// Used for frame pacing in the compositor (60Hz target).
+pub fn syscall_get_time_ms(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    let ms = (ticks * 1000) / freq as u64;
+    syscall_return_ok(frame, ms)
 }
 
 pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -1056,6 +1066,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_surface_commit),
         name: b"surface_commit\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_GET_TIME_MS as usize] = SyscallEntry {
+        handler: Some(syscall_get_time_ms),
+        name: b"get_time_ms\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -1097,6 +1111,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_RAISE_WINDOW: u64 = 33;
     pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
     pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
+    pub const SYSCALL_GET_TIME_MS: u64 = 39;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
