@@ -5,7 +5,7 @@ use slopos_drivers::video_bridge::{DamageRegion, VideoError, VideoResult};
 use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames};
 use slopos_mm::phys_virt::mm_phys_to_virt;
-use slopos_lib::klog_info;
+use slopos_lib::{klog_info, klog_debug};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_sched::MAX_TASKS;
 use slopos_sched::scheduler::r#yield;
@@ -61,6 +61,189 @@ impl DamageRect {
 
     fn combined_area(&self, other: &DamageRect) -> i32 {
         self.union(other).area()
+    }
+
+    /// Returns the intersection of two rectangles, or None if they don't overlap
+    fn intersect(&self, other: &DamageRect) -> Option<DamageRect> {
+        if !self.is_valid() || !other.is_valid() {
+            return None;
+        }
+        let x0 = self.x0.max(other.x0);
+        let y0 = self.y0.max(other.y0);
+        let x1 = self.x1.min(other.x1);
+        let y1 = self.y1.min(other.y1);
+        if x0 <= x1 && y0 <= y1 {
+            Some(DamageRect { x0, y0, x1, y1 })
+        } else {
+            None
+        }
+    }
+
+}
+
+// Maximum number of visible region fragments for occlusion culling
+const MAX_VISIBLE_RECTS: usize = 16;
+
+/// Tracks the visible (non-occluded) portions of a damage region during front-to-back composition
+#[derive(Clone, Copy)]
+struct VisibleRegion {
+    rects: [DamageRect; MAX_VISIBLE_RECTS],
+    count: usize,
+}
+
+impl VisibleRegion {
+    /// Create a new visible region from a screen-space damage rectangle
+    fn new(initial: DamageRect) -> Self {
+        let mut rects = [DamageRect::invalid(); MAX_VISIBLE_RECTS];
+        if initial.is_valid() {
+            rects[0] = initial;
+            Self { rects, count: 1 }
+        } else {
+            Self { rects, count: 0 }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Subtracts an occluding rectangle from all visible regions.
+    /// Each rectangle may be split into up to 4 fragments (top, bottom, left, right strips).
+    fn subtract(&mut self, occluder: &DamageRect) {
+        if !occluder.is_valid() || self.count == 0 {
+            return;
+        }
+
+        let mut new_rects = [DamageRect::invalid(); MAX_VISIBLE_RECTS];
+        let mut new_count = 0usize;
+
+        for i in 0..self.count {
+            let rect = &self.rects[i];
+            if !rect.is_valid() {
+                continue;
+            }
+
+            // Check if occluder overlaps this rect
+            if rect.x1 < occluder.x0 || rect.x0 > occluder.x1 ||
+               rect.y1 < occluder.y0 || rect.y0 > occluder.y1 {
+                // No overlap - keep rect as-is
+                if new_count < MAX_VISIBLE_RECTS {
+                    new_rects[new_count] = *rect;
+                    new_count += 1;
+                }
+                continue;
+            }
+
+            // Occluder overlaps - split into up to 4 fragments
+            // We generate strips in order: top, bottom, left, right
+            // The left/right strips are bounded by the occluder's vertical extent
+
+            // Top strip (full width, above occluder)
+            if rect.y0 < occluder.y0 {
+                let top = DamageRect {
+                    x0: rect.x0,
+                    y0: rect.y0,
+                    x1: rect.x1,
+                    y1: occluder.y0 - 1,
+                };
+                if top.is_valid() && new_count < MAX_VISIBLE_RECTS {
+                    new_rects[new_count] = top;
+                    new_count += 1;
+                }
+            }
+
+            // Bottom strip (full width, below occluder)
+            if rect.y1 > occluder.y1 {
+                let bottom = DamageRect {
+                    x0: rect.x0,
+                    y0: occluder.y1 + 1,
+                    x1: rect.x1,
+                    y1: rect.y1,
+                };
+                if bottom.is_valid() && new_count < MAX_VISIBLE_RECTS {
+                    new_rects[new_count] = bottom;
+                    new_count += 1;
+                }
+            }
+
+            // Vertical bounds for left/right strips (clamped to occluder's vertical range)
+            let mid_y0 = rect.y0.max(occluder.y0);
+            let mid_y1 = rect.y1.min(occluder.y1);
+
+            // Left strip (between occluder's vertical extent, left of occluder)
+            if rect.x0 < occluder.x0 && mid_y0 <= mid_y1 {
+                let left = DamageRect {
+                    x0: rect.x0,
+                    y0: mid_y0,
+                    x1: occluder.x0 - 1,
+                    y1: mid_y1,
+                };
+                if left.is_valid() && new_count < MAX_VISIBLE_RECTS {
+                    new_rects[new_count] = left;
+                    new_count += 1;
+                }
+            }
+
+            // Right strip (between occluder's vertical extent, right of occluder)
+            if rect.x1 > occluder.x1 && mid_y0 <= mid_y1 {
+                let right = DamageRect {
+                    x0: occluder.x1 + 1,
+                    y0: mid_y0,
+                    x1: rect.x1,
+                    y1: mid_y1,
+                };
+                if right.is_valid() && new_count < MAX_VISIBLE_RECTS {
+                    new_rects[new_count] = right;
+                    new_count += 1;
+                }
+            }
+        }
+
+        // If we're at capacity, merge smallest pair to make room
+        while new_count > MAX_VISIBLE_RECTS {
+            Self::merge_smallest_pair_static(&mut new_rects, &mut new_count);
+        }
+
+        self.rects = new_rects;
+        self.count = new_count;
+    }
+
+    /// Merges the two rectangles with smallest combined area (static version for arrays)
+    fn merge_smallest_pair_static(rects: &mut [DamageRect; MAX_VISIBLE_RECTS], count: &mut usize) {
+        if *count < 2 {
+            return;
+        }
+
+        let mut best_i = 0;
+        let mut best_j = 1;
+        let mut best_area = i32::MAX;
+
+        for i in 0..*count {
+            if !rects[i].is_valid() {
+                continue;
+            }
+            for j in (i + 1)..*count {
+                if !rects[j].is_valid() {
+                    continue;
+                }
+                let combined = rects[i].combined_area(&rects[j]);
+                if combined < best_area {
+                    best_area = combined;
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+
+        // Merge i and j into i
+        rects[best_i] = rects[best_i].union(&rects[best_j]);
+
+        // Remove j by swapping with last element
+        if best_j < *count - 1 {
+            rects[best_j] = rects[*count - 1];
+        }
+        rects[*count - 1] = DamageRect::invalid();
+        *count -= 1;
     }
 }
 
@@ -1004,6 +1187,11 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
     let mut composited_tasks = [0u32; MAX_TASKS];
     let mut composited_count = 0usize;
 
+    // Debug counters for occlusion culling effectiveness
+    let mut windows_composited = 0u32;
+    let mut windows_culled = 0u32;
+    let mut early_exits = 0u32;
+
     // Per-surface coverage tracking (in surface-local coordinates)
     // Tracks which portions of each surface's dirty region were actually composited
     #[derive(Copy, Clone)]
@@ -1026,15 +1214,33 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
     }; MAX_TASKS];
     let mut coverage_count = 0usize;
 
-    // For each damage region, composite all windows that overlap it
+    // For each damage region, composite windows with occlusion culling
+    // Iterate front-to-back (highest z-order first) and track visible regions
     for damage_idx in 0..damage_count as usize {
         let damage = unsafe { &*damage_regions.add(damage_idx) };
 
-        // Iterate windows back-to-front
-        for idx_pos in 0..index_count {
+        // Create a VisibleRegion to track what's still visible (not yet occluded)
+        let initial_rect = DamageRect {
+            x0: damage.x,
+            y0: damage.y,
+            x1: damage.x + damage.width - 1,
+            y1: damage.y + damage.height - 1,
+        };
+        let mut visible = VisibleRegion::new(initial_rect);
+
+        // Iterate windows FRONT-TO-BACK (highest z-order first = reverse iteration)
+        // This allows us to skip compositing pixels that will be overwritten
+        for idx_pos in (0..index_count).rev() {
+            // Early exit if nothing visible remains (fully occluded by higher windows)
+            if visible.is_empty() {
+                early_exits += 1;
+                windows_culled += (index_count - idx_pos) as u32;
+                break;
+            }
+
             let slot = &slots_snapshot[indices[idx_pos]];
 
-            // Skip minimized windows
+            // Skip minimized windows (don't occlude and don't composite)
             if slot.window_state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
@@ -1047,136 +1253,137 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                 return -1;
             }
 
-            // Check if window overlaps damage region
-            let win_x0 = surface.x;
-            let win_y0 = surface.y;
-            let win_x1 = surface.x + surface.width as i32 - 1;
-            let win_y1 = surface.y + surface.height as i32 - 1;
+            // Window bounds in screen coordinates
+            let win_bounds = DamageRect {
+                x0: surface.x,
+                y0: surface.y,
+                x1: surface.x + surface.width as i32 - 1,
+                y1: surface.y + surface.height as i32 - 1,
+            };
 
-            let dmg_x0 = damage.x;
-            let dmg_y0 = damage.y;
-            let dmg_x1 = damage.x + damage.width - 1;
-            let dmg_y1 = damage.y + damage.height - 1;
-
-            // Rectangle overlap test
-            if win_x1 < dmg_x0 || win_x0 > dmg_x1 || win_y1 < dmg_y0 || win_y0 > dmg_y1 {
-                continue; // No overlap
-            }
-
-            // Calculate intersection (the part of the window in the damage region)
-            let isect_x0 = win_x0.max(dmg_x0);
-            let isect_y0 = win_y0.max(dmg_y0);
-            let isect_x1 = win_x1.min(dmg_x1);
-            let isect_y1 = win_y1.min(dmg_y1);
-
-            if isect_x0 > isect_x1 || isect_y0 > isect_y1 {
-                continue; // Invalid intersection
-            }
-
-            // Convert intersection to surface-relative coordinates
-            let src_x = isect_x0 - win_x0;
-            let src_y = isect_y0 - win_y0;
-            let copy_w = isect_x1 - isect_x0 + 1;
-            let copy_h = isect_y1 - isect_y0 + 1;
-
-            if copy_w <= 0 || copy_h <= 0 {
-                continue;
-            }
-
-            // Clip to framebuffer bounds
-            let mut dst_x = isect_x0;
-            let mut dst_y = isect_y0;
-            let mut final_w = copy_w;
-            let mut final_h = copy_h;
-
-            if dst_x < 0 {
-                final_w += dst_x;
-                dst_x = 0;
-            }
-            if dst_y < 0 {
-                final_h += dst_y;
-                dst_y = 0;
-            }
-            if dst_x + final_w > fb_width {
-                final_w = fb_width - dst_x;
-            }
-            if dst_y + final_h > fb_height {
-                final_h = fb_height - dst_y;
-            }
-
-            if final_w <= 0 || final_h <= 0 {
-                continue;
-            }
-
-            // Composite window into framebuffer at damage region
-            for row in 0..final_h {
-                let src_row = ((src_y + row) as usize) * surface.pitch as usize;
-                let dst_off = ((dst_y + row) as usize * fb.pitch as usize)
-                    + (dst_x as usize * bytes_pp);
-                unsafe {
-                    let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
-                    let dst_ptr = fb.base.add(dst_off);
-                    let row_bytes = final_w as usize * bytes_pp;
-                    ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
+            // Process each visible rect and composite any intersections with this window
+            for vis_idx in 0..visible.count {
+                let vis_rect = &visible.rects[vis_idx];
+                if !vis_rect.is_valid() {
+                    continue;
                 }
-            }
 
-            // Track coverage for this surface (in surface-local coordinates)
-            let composited_x0 = src_x;
-            let composited_y0 = src_y;
-            let composited_x1 = src_x + copy_w - 1;
-            let composited_y1 = src_y + copy_h - 1;
+                // Calculate intersection of visible rect with window bounds
+                let isect = match vis_rect.intersect(&win_bounds) {
+                    Some(r) => r,
+                    None => continue, // No overlap
+                };
 
-            // Find or create coverage entry for this task
-            let mut coverage_idx = None;
-            for i in 0..coverage_count {
-                if coverage_tracking[i].task_id == slot.task_id {
-                    coverage_idx = Some(i);
-                    break;
+                // Convert intersection to surface-relative coordinates
+                let src_x = isect.x0 - surface.x;
+                let src_y = isect.y0 - surface.y;
+                let copy_w = isect.x1 - isect.x0 + 1;
+                let copy_h = isect.y1 - isect.y0 + 1;
+
+                if copy_w <= 0 || copy_h <= 0 {
+                    continue;
                 }
-            }
-            if coverage_idx.is_none() && coverage_count < MAX_TASKS {
-                coverage_idx = Some(coverage_count);
-                coverage_tracking[coverage_count].task_id = slot.task_id;
-                coverage_count += 1;
-            }
 
-            // Update union bounds to include this composited region
-            if let Some(idx) = coverage_idx {
-                let cov = &mut coverage_tracking[idx];
-                if !cov.covered {
-                    // First region for this surface
-                    cov.covered = true;
-                    cov.union_x0 = composited_x0;
-                    cov.union_y0 = composited_y0;
-                    cov.union_x1 = composited_x1;
-                    cov.union_y1 = composited_y1;
-                } else {
-                    // Expand union to include new region
-                    cov.union_x0 = cov.union_x0.min(composited_x0);
-                    cov.union_y0 = cov.union_y0.min(composited_y0);
-                    cov.union_x1 = cov.union_x1.max(composited_x1);
-                    cov.union_y1 = cov.union_y1.max(composited_y1);
+                // Clip to framebuffer bounds
+                let mut dst_x = isect.x0;
+                let mut dst_y = isect.y0;
+                let mut final_w = copy_w;
+                let mut final_h = copy_h;
+
+                if dst_x < 0 {
+                    final_w += dst_x;
+                    dst_x = 0;
                 }
-            }
+                if dst_y < 0 {
+                    final_h += dst_y;
+                    dst_y = 0;
+                }
+                if dst_x + final_w > fb_width {
+                    final_w = fb_width - dst_x;
+                }
+                if dst_y + final_h > fb_height {
+                    final_h = fb_height - dst_y;
+                }
 
-            // Track which tasks we've composited so we can clear their dirty flags
-            if composited_count < MAX_TASKS {
-                let task_id = slot.task_id;
-                let mut already_tracked = false;
-                for i in 0..composited_count {
-                    if composited_tasks[i] == task_id {
-                        already_tracked = true;
+                if final_w <= 0 || final_h <= 0 {
+                    continue;
+                }
+
+                // Composite window into framebuffer
+                for row in 0..final_h {
+                    let src_row = ((src_y + row) as usize) * surface.pitch as usize;
+                    let dst_off = ((dst_y + row) as usize * fb.pitch as usize)
+                        + (dst_x as usize * bytes_pp);
+                    unsafe {
+                        let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
+                        let dst_ptr = fb.base.add(dst_off);
+                        let row_bytes = final_w as usize * bytes_pp;
+                        ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
+                    }
+                }
+
+                // Track coverage for this surface (in surface-local coordinates)
+                let composited_x0 = src_x;
+                let composited_y0 = src_y;
+                let composited_x1 = src_x + copy_w - 1;
+                let composited_y1 = src_y + copy_h - 1;
+
+                // Find or create coverage entry for this task
+                let mut coverage_idx = None;
+                for i in 0..coverage_count {
+                    if coverage_tracking[i].task_id == slot.task_id {
+                        coverage_idx = Some(i);
                         break;
                     }
                 }
-                if !already_tracked {
-                    composited_tasks[composited_count] = task_id;
-                    composited_count += 1;
+                if coverage_idx.is_none() && coverage_count < MAX_TASKS {
+                    coverage_idx = Some(coverage_count);
+                    coverage_tracking[coverage_count].task_id = slot.task_id;
+                    coverage_count += 1;
                 }
+
+                // Update union bounds to include this composited region
+                if let Some(idx) = coverage_idx {
+                    let cov = &mut coverage_tracking[idx];
+                    if !cov.covered {
+                        // First region for this surface
+                        cov.covered = true;
+                        cov.union_x0 = composited_x0;
+                        cov.union_y0 = composited_y0;
+                        cov.union_x1 = composited_x1;
+                        cov.union_y1 = composited_y1;
+                    } else {
+                        // Expand union to include new region
+                        cov.union_x0 = cov.union_x0.min(composited_x0);
+                        cov.union_y0 = cov.union_y0.min(composited_y0);
+                        cov.union_x1 = cov.union_x1.max(composited_x1);
+                        cov.union_y1 = cov.union_y1.max(composited_y1);
+                    }
+                }
+
+                // Track which tasks we've composited
+                if composited_count < MAX_TASKS {
+                    let task_id = slot.task_id;
+                    let mut already_tracked = false;
+                    for i in 0..composited_count {
+                        if composited_tasks[i] == task_id {
+                            already_tracked = true;
+                            break;
+                        }
+                    }
+                    if !already_tracked {
+                        composited_tasks[composited_count] = task_id;
+                        composited_count += 1;
+                    }
+                }
+
+                did_work = true;
+                windows_composited += 1;
             }
 
-            did_work = true;
+            // After compositing this window, subtract its bounds from visible region
+            // This ensures lower windows won't composite to areas covered by this window
+            visible.subtract(&win_bounds);
         }
     }
 
@@ -1225,6 +1432,14 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                 slot.surface.compositing = false;
             }
         }
+    }
+
+    // Debug logging for occlusion culling effectiveness (gated by boot.debug=on)
+    if windows_culled > 0 || early_exits > 0 {
+        klog_debug!(
+            "compositor: occlusion culling: {} composited, {} culled, {} early exits",
+            windows_composited, windows_culled, early_exits
+        );
     }
 
     if did_work { 1 } else { 0 }

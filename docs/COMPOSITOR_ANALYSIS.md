@@ -390,23 +390,31 @@ with smallest combined area, making room for new damage.
 
 ---
 
-#### [ ] Checkpoint 2.2: Add Occlusion Culling
-**Location**: `video/src/surface.rs:844-957`
+#### [x] Checkpoint 2.2: Add Occlusion Culling ✅ **COMPLETED** (2025-12-24)
+**Location**: `video/src/surface.rs:1231-1407`
 
 **Problem**: Draws pixels that will be overwritten by higher windows.
 
 **Solution**:
-- Build occlusion buffer from top windows down
-- Skip composition for fully occluded damage regions
-- Clip partially occluded regions
+Implemented front-to-back rendering with `VisibleRegion` tracking:
+- Added `VisibleRegion` struct with 16 rectangle slots
+- Iterate windows highest z-order first (front-to-back)
+- For each window, composite only visible (non-occluded) portions
+- Subtract window bounds from visible region after compositing
+- Early exit when damage region is fully occluded
+- Merge smallest pair when region array overflows
 
-**Files to modify**:
-- `video/src/surface.rs` - Add occlusion tracking to `compositor_present_with_damage()`
+**Files modified**:
+- `video/src/surface.rs`:
+  - Added `DamageRect::intersect()` method
+  - Added `VisibleRegion` struct with `subtract()` and `merge_smallest_pair_static()`
+  - Refactored `compositor_present_with_damage()` to use front-to-back iteration
+  - Added debug logging (gated by `boot.debug=on`) for culling statistics
 
 **Verification**:
-- Stack three windows
-- Damage bottom window
-- Verify only visible portion composited
+- Build succeeds with `make build`
+- Tests pass with `make test`
+- Debug logging shows "compositor: occlusion culling: X composited, Y culled, Z early exits"
 
 ---
 
@@ -570,7 +578,7 @@ struct Surface {
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `video/src/surface.rs` | 1172 | Core compositor, surface management |
+| `video/src/surface.rs` | ~1664 | Core compositor, surface management, occlusion culling |
 | `video/src/framebuffer.rs` | 381 | Framebuffer state, pixel operations |
 | `video/src/graphics.rs` | 397 | Drawing primitives |
 | `video/src/font.rs` | 841 | Text rendering |
