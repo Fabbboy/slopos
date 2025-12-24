@@ -1,6 +1,8 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 use core::ffi::{c_char, c_int};
 use slopos_drivers::serial_println;
 use slopos_drivers::video_bridge::{self, DamageRegion, VideoCallbacks, VideoResult};
