@@ -148,6 +148,13 @@ fn surface_raise_window_bridge(task_id: u32) -> c_int {
     surface::surface_raise_window(task_id)
 }
 
+fn surface_commit_bridge(task_id: u32) -> c_int {
+    match surface::surface_commit(task_id) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 fn compositor_present_with_damage_bridge(damage_regions: *const DamageRegion, damage_count: u32) -> c_int {
     surface::compositor_present_with_damage(damage_regions, damage_count)
 }
@@ -188,6 +195,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             surface_set_window_position: Some(surface_set_window_position_bridge),
             surface_set_window_state: Some(surface_set_window_state_bridge),
             surface_raise_window: Some(surface_raise_window_bridge),
+            surface_commit: Some(surface_commit_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

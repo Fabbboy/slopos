@@ -72,6 +72,7 @@ pub struct VideoCallbacks {
     pub surface_set_window_position: Option<fn(u32, i32, i32) -> c_int>,
     pub surface_set_window_state: Option<fn(u32, u8) -> c_int>,
     pub surface_raise_window: Option<fn(u32) -> c_int>,
+    pub surface_commit: Option<fn(u32) -> c_int>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -329,6 +330,16 @@ pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
 pub fn surface_raise_window(task_id: u32) -> c_int {
     if let Some(cbs) = VIDEO_CALLBACKS.get() {
         if let Some(cb) = cbs.surface_raise_window {
+            return cb(task_id);
+        }
+    }
+    -1
+}
+
+/// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
+pub fn surface_commit(task_id: u32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_commit {
             return cb(task_id);
         }
     }

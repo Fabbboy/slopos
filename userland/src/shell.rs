@@ -9,7 +9,8 @@ use crate::syscall::{
     USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserBlit, UserFbInfo, UserFsEntry,
     UserFsList, UserRect, UserSysInfo, UserText, sys_fb_info, sys_font_draw, sys_fs_close,
     sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_gfx_blit, sys_gfx_fill_rect, sys_halt, sys_read_char, sys_sys_info, sys_write,
+    sys_gfx_blit, sys_gfx_fill_rect, sys_halt, sys_read_char, sys_surface_commit, sys_sys_info,
+    sys_write,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -541,6 +542,7 @@ fn shell_console_clear() {
     unsafe {
         if SHELL_CONSOLE.enabled {
             SHELL_CONSOLE.clear();
+            let _ = sys_surface_commit();
         }
     }
 }
@@ -558,6 +560,7 @@ fn shell_console_write(buf: &[u8]) {
 fn shell_write(buf: &[u8]) {
     let _ = sys_write(buf);
     shell_console_write(buf);
+    shell_console_commit();
 }
 
 #[unsafe(link_section = ".user_text")]
@@ -565,6 +568,7 @@ fn shell_echo_char(c: u8) {
     let buf = [c];
     let _ = sys_write(&buf);
     shell_console_write(&buf);
+    shell_console_commit();
 }
 
 #[unsafe(link_section = ".user_text")]
@@ -583,6 +587,7 @@ fn shell_console_page_up() {
     unsafe {
         if SHELL_CONSOLE.enabled {
             SHELL_CONSOLE.page_up();
+            let _ = sys_surface_commit();
         }
     }
 }
@@ -592,6 +597,16 @@ fn shell_console_page_down() {
     unsafe {
         if SHELL_CONSOLE.enabled {
             SHELL_CONSOLE.page_down();
+            let _ = sys_surface_commit();
+        }
+    }
+}
+
+#[unsafe(link_section = ".user_text")]
+fn shell_console_commit() {
+    unsafe {
+        if SHELL_CONSOLE.enabled {
+            let _ = sys_surface_commit();
         }
     }
 }
@@ -601,6 +616,7 @@ fn shell_console_follow_bottom() {
     unsafe {
         if SHELL_CONSOLE.enabled {
             SHELL_CONSOLE.ensure_follow_visible();
+            let _ = sys_surface_commit();
         }
     }
 }
@@ -610,6 +626,7 @@ fn shell_redraw_input(_line_row: i32, buf: &[u8]) {
     unsafe {
         if SHELL_CONSOLE.enabled {
             SHELL_CONSOLE.rewrite_input_line(PROMPT, buf);
+            let _ = sys_surface_commit();
         }
     }
 }

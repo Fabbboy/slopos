@@ -468,45 +468,83 @@ Replaced bubble sort with insertion sort - O(n) for nearly-sorted arrays:
 
 ### Phase 3: Double Buffering
 
-#### [ ] Checkpoint 3.1: Add Front/Back Buffer to Surface
-**Location**: `video/src/surface.rs:31-46`
+#### [x] Checkpoint 3.1: Add Front/Back Buffer to Surface ✅ **COMPLETED** (2025-12-24)
+**Location**: `video/src/surface.rs:249-271`
 
 **Problem**: Client draws directly to compositor-visible buffer.
 
 **Solution**:
+Implemented Wayland-style double buffering with front/back buffer separation:
 ```rust
 struct Surface {
+    // Back buffer damage (client draws here, accumulates damage)
+    back_damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
+    back_damage_count: u8,
+    // Front buffer damage (compositor reads this, cleared after composite)
+    front_damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
+    front_damage_count: u8,
+    // Double buffer pointers - Wayland-style commit model
     front_buffer: *mut u8,  // Compositor reads from here
-    back_buffer: *mut u8,   // Client draws here
-    // ...
+    back_buffer: *mut u8,   // Client draws to here
+    buffer_size: usize,     // Size of each buffer in bytes
+    committed: bool,        // True when new content ready for compositor
 }
 ```
 
-**Files to modify**:
-- `video/src/surface.rs` - Allocate two buffers
-- Add swap/commit function
+- Allocates 2x memory during surface creation
+- All drawing operations target back_buffer
+- Compositor reads exclusively from front_buffer
+- Damage tracking split: back_damage (for drawing) and front_damage (for compositing)
+- Removed spin-wait synchronization (no longer needed with double buffering)
+
+**Files modified**:
+- `video/src/surface.rs` - Surface struct, allocation, all drawing functions, compositor functions
+- Removed `compositing` flag and `wait_for_surface_available()` (no longer needed)
 
 ---
 
-#### [ ] Checkpoint 3.2: Add Commit Syscall
-**Location**: New syscall
+#### [x] Checkpoint 3.2: Add Commit Syscall ✅ **COMPLETED** (2025-12-24)
+**Location**: `video/src/surface.rs:604-624`, syscall #38
 
 **Problem**: No way to atomically commit changes.
 
 **Solution**:
-- New syscall: `surface_commit(task_id)`
-- Swaps front/back buffer pointers
-- Damage applied atomically
+Implemented `surface_commit()` with atomic buffer pointer swap:
+```rust
+pub fn surface_commit(task_id: u32) -> VideoResult {
+    // Swap buffer pointers atomically
+    core::mem::swap(&mut surface.front_buffer, &mut surface.back_buffer);
 
-**Files to modify**:
-- `drivers/src/syscall_handlers.rs` - New handler
-- `userland/src/syscall.rs` - New wrapper
-- `video/src/surface.rs` - Commit logic
+    // Transfer damage: back -> front
+    surface.front_damage_regions = surface.back_damage_regions;
+    surface.front_damage_count = surface.back_damage_count;
+
+    // Clear back damage for next frame
+    surface.back_damage_count = 0;
+
+    // Signal compositor
+    surface.committed = true;
+    Ok(())
+}
+```
+
+- New syscall: `SYSCALL_SURFACE_COMMIT = 38`
+- O(1) pointer swap (no memcpy)
+- Damage transferred atomically on commit
+- W/L currency integration (win on success, loss on failure)
+- Client and compositor never contend for same buffer
+
+**Files modified**:
+- `lib/src/syscall_numbers.rs` - Added SYSCALL_SURFACE_COMMIT constant
+- `drivers/src/video_bridge.rs` - Added surface_commit callback
+- `drivers/src/syscall_handlers.rs` - Added syscall_surface_commit handler
+- `video/src/lib.rs` - Registered surface_commit_bridge callback
+- `userland/src/syscall.rs` - Added sys_surface_commit() wrapper
 
 **Verification**:
-- Draw complex scene in back buffer
-- Commit
-- Verify no partial state visible
+- Build succeeds with `make build`
+- Tests pass with `make test`
+- Clients can now: draw to back_buffer → commit → compositor sees front_buffer
 
 ---
 

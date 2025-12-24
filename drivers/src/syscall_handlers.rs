@@ -602,6 +602,24 @@ pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
     }
 }
 
+/// Commit surface back buffer to front buffer (Wayland-style double buffering)
+/// This is called by regular tasks to make their drawings visible to the compositor
+pub fn syscall_surface_commit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+    let task_id = unsafe { (*task).task_id };
+    let rc = video_bridge::surface_commit(task_id);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        wl_currency::award_win();
+        syscall_return_ok(frame, 0)
+    }
+}
+
 pub fn syscall_compositor_present_with_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
         wl_currency::award_loss();
@@ -1034,6 +1052,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_fb_blit),
         name: b"fb_blit\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_SURFACE_COMMIT as usize] = SyscallEntry {
+        handler: Some(syscall_surface_commit),
+        name: b"surface_commit\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -1074,6 +1096,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
     pub const SYSCALL_RAISE_WINDOW: u64 = 33;
     pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
+    pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

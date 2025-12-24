@@ -8,7 +8,6 @@ use slopos_mm::phys_virt::mm_phys_to_virt;
 use slopos_lib::{klog_info, klog_debug};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_sched::MAX_TASKS;
-use slopos_sched::scheduler::r#yield;
 use spin::Mutex;
 
 use crate::framebuffer;
@@ -255,13 +254,18 @@ struct Surface {
     bpp: u8,
     bytes_pp: u8,
     pixel_format: u8,
-    // Array of damage regions for fine-grained tracking
-    damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
-    damage_count: u8,
-    buffer: *mut u8,
+    // Back buffer damage (client draws here, accumulates damage)
+    back_damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
+    back_damage_count: u8,
+    // Front buffer damage (compositor reads this, cleared after composite)
+    front_damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
+    front_damage_count: u8,
+    // Double buffer pointers - Wayland-style commit model
+    front_buffer: *mut u8,  // Compositor reads from here
+    back_buffer: *mut u8,   // Client draws to here
     x: i32,
     y: i32,
-    compositing: bool,
+    committed: bool,        // True when new content ready for compositor
 }
 
 unsafe impl Send for Surface {}
@@ -276,28 +280,31 @@ impl Surface {
             bpp: 0,
             bytes_pp: 0,
             pixel_format: 0,
-            damage_regions: [DamageRect::invalid(); MAX_DAMAGE_REGIONS],
-            damage_count: 0,
-            buffer: ptr::null_mut(),
+            back_damage_regions: [DamageRect::invalid(); MAX_DAMAGE_REGIONS],
+            back_damage_count: 0,
+            front_damage_regions: [DamageRect::invalid(); MAX_DAMAGE_REGIONS],
+            front_damage_count: 0,
+            front_buffer: ptr::null_mut(),
+            back_buffer: ptr::null_mut(),
             x: 0,
             y: 0,
-            compositing: false,
+            committed: false,
         }
     }
 
-    /// Returns true if the surface has any pending damage
+    /// Returns true if the surface has committed content ready for compositing
     fn is_dirty(&self) -> bool {
-        self.damage_count > 0
+        self.committed && self.front_damage_count > 0
     }
 
-    /// Computes the bounding box union of all damage regions
-    fn damage_union(&self) -> DamageRect {
-        if self.damage_count == 0 {
+    /// Computes the bounding box union of all front damage regions (for compositor)
+    fn front_damage_union(&self) -> DamageRect {
+        if self.front_damage_count == 0 {
             return DamageRect::invalid();
         }
-        let mut result = self.damage_regions[0];
-        for i in 1..self.damage_count as usize {
-            result = result.union(&self.damage_regions[i]);
+        let mut result = self.front_damage_regions[0];
+        for i in 1..self.front_damage_count as usize {
+            result = result.union(&self.front_damage_regions[i]);
         }
         result
     }
@@ -381,13 +388,13 @@ fn find_free_slot(slots: &[SurfaceSlot; MAX_TASKS]) -> Option<usize> {
         .find_map(|(idx, slot)| if !slot.active { Some(idx) } else { None })
 }
 
-/// Merges the two damage regions with the smallest combined area
-fn merge_smallest_pair(surface: &mut Surface) {
-    if surface.damage_count < 2 {
+/// Merges the two back buffer damage regions with the smallest combined area
+fn merge_smallest_back_damage(surface: &mut Surface) {
+    if surface.back_damage_count < 2 {
         return;
     }
 
-    let count = surface.damage_count as usize;
+    let count = surface.back_damage_count as usize;
     let mut best_i = 0;
     let mut best_j = 1;
     let mut best_area = i32::MAX;
@@ -395,7 +402,7 @@ fn merge_smallest_pair(surface: &mut Surface) {
     // Find the pair with smallest combined area when merged
     for i in 0..count {
         for j in (i + 1)..count {
-            let combined = surface.damage_regions[i].combined_area(&surface.damage_regions[j]);
+            let combined = surface.back_damage_regions[i].combined_area(&surface.back_damage_regions[j]);
             if combined < best_area {
                 best_area = combined;
                 best_i = i;
@@ -405,19 +412,19 @@ fn merge_smallest_pair(surface: &mut Surface) {
     }
 
     // Merge i and j into i
-    let merged = surface.damage_regions[best_i].union(&surface.damage_regions[best_j]);
-    surface.damage_regions[best_i] = merged;
+    let merged = surface.back_damage_regions[best_i].union(&surface.back_damage_regions[best_j]);
+    surface.back_damage_regions[best_i] = merged;
 
     // Remove j by swapping with last element
     if best_j < count - 1 {
-        surface.damage_regions[best_j] = surface.damage_regions[count - 1];
+        surface.back_damage_regions[best_j] = surface.back_damage_regions[count - 1];
     }
-    surface.damage_count -= 1;
+    surface.back_damage_count -= 1;
 }
 
-/// Adds a damage region to the surface. If the array is full, merges the two
+/// Adds a damage region to the back buffer. If the array is full, merges the two
 /// closest regions first to make room.
-fn add_damage_region(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32) {
+fn add_back_damage_region(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32) {
     // Clip to surface bounds
     if x0 > x1 || y0 > y1 {
         return;
@@ -443,18 +450,18 @@ fn add_damage_region(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i3
     let new_rect = DamageRect { x0, y0, x1, y1 };
 
     // If array is full, merge two closest regions to make room
-    if (surface.damage_count as usize) >= MAX_DAMAGE_REGIONS {
-        merge_smallest_pair(surface);
+    if (surface.back_damage_count as usize) >= MAX_DAMAGE_REGIONS {
+        merge_smallest_back_damage(surface);
     }
 
     // Add the new region
-    surface.damage_regions[surface.damage_count as usize] = new_rect;
-    surface.damage_count += 1;
+    surface.back_damage_regions[surface.back_damage_count as usize] = new_rect;
+    surface.back_damage_count += 1;
 }
 
-/// Clears all damage regions from the surface
-fn clear_damage_regions(surface: &mut Surface) {
-    surface.damage_count = 0;
+/// Clears all front buffer damage regions (called after compositing)
+fn clear_front_damage(surface: &mut Surface) {
+    surface.front_damage_count = 0;
 }
 
 fn create_surface_for_task(
@@ -488,11 +495,13 @@ fn create_surface_for_task(
             continue;
         }
         let pitch = width.saturating_mul(bytes_pp as u32);
-        let size = (pitch as u64).saturating_mul(height as u64);
-        if size == 0 || size > usize::MAX as u64 {
+        let single_buffer_size = (pitch as u64).saturating_mul(height as u64);
+        if single_buffer_size == 0 || single_buffer_size > (usize::MAX / 2) as u64 {
             continue;
         }
-        let pages = (size + (PAGE_SIZE_4KB - 1)) / PAGE_SIZE_4KB;
+        // Allocate 2x memory for double buffering (front + back)
+        let total_size = single_buffer_size.saturating_mul(2);
+        let pages = (total_size + (PAGE_SIZE_4KB - 1)) / PAGE_SIZE_4KB;
         if pages == 0 || pages > u32::MAX as u64 {
             continue;
         }
@@ -502,6 +511,10 @@ fn create_surface_for_task(
         }
         let virt = mm_phys_to_virt(phys);
         let virt = if virt != 0 { virt } else { phys };
+
+        // Set up double buffer pointers
+        let front_buffer = virt as *mut u8;
+        let back_buffer = unsafe { front_buffer.add(single_buffer_size as usize) };
 
         let slot = match find_free_slot(slots) {
             Some(idx) => idx,
@@ -531,8 +544,10 @@ fn create_surface_for_task(
             x1: width as i32 - 1,
             y1: height as i32 - 1,
         };
-        let mut damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
-        damage_regions[0] = initial_damage;
+        let mut front_damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
+        front_damage_regions[0] = initial_damage;
+        let mut back_damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
+        back_damage_regions[0] = initial_damage;
 
         slots[slot] = SurfaceSlot {
             active: true,
@@ -544,12 +559,15 @@ fn create_surface_for_task(
                 bpp: fb.bpp,
                 bytes_pp,
                 pixel_format: fb.pixel_format,
-                damage_regions,
-                damage_count: 1,
-                buffer: virt as *mut u8,
+                back_damage_regions,
+                back_damage_count: 1,
+                front_damage_regions,
+                front_damage_count: 1,
+                front_buffer,
+                back_buffer,
                 x: window_x,
                 y: window_y,
-                compositing: false,
+                committed: true,  // Initial state needs compositing
             },
             window_state: WINDOW_STATE_NORMAL,
             z_order,
@@ -570,40 +588,19 @@ fn create_surface_for_task(
     Err(VideoError::Invalid)
 }
 
-/// Spin-wait with yield backoff until surface is not being composited
-fn wait_for_surface_available(task_id: u32) -> Result<usize, VideoError> {
-    const MAX_COMPOSITING_SPINS: u32 = 100;
-    let mut spin_count = 0;
-
-    loop {
-        let (slot_idx, is_compositing) = {
-            let mut slots = SURFACES.lock();
-            let slot = match find_slot(&slots, task_id) {
-                Some(idx) => idx,
-                None => create_surface_for_task(&mut slots, task_id)?,
-            };
-            let compositing = slots[slot].surface.compositing;
-            (slot, compositing)
-        };  // Lock released
-
-        if !is_compositing {
-            return Ok(slot_idx);
-        }
-
-        // Spin-wait with backoff
-        spin_count += 1;
-        if spin_count < MAX_COMPOSITING_SPINS {
-            core::hint::spin_loop();
-        } else {
-            r#yield();
-            spin_count = 0;
-        }
+/// Get or create surface slot for a task (no synchronization needed with double buffering)
+fn get_or_create_surface(task_id: u32) -> Result<usize, VideoError> {
+    let mut slots = SURFACES.lock();
+    match find_slot(&slots, task_id) {
+        Some(idx) => Ok(idx),
+        None => create_surface_for_task(&mut slots, task_id),
     }
 }
 
 fn with_surface_mut(task_id: u32, f: impl FnOnce(&mut Surface) -> VideoResult) -> VideoResult {
-    // Wait until surface is not being composited
-    let slot = wait_for_surface_available(task_id)?;
+    // With double buffering, no synchronization needed - clients draw to back_buffer
+    // while compositor reads from front_buffer
+    let slot = get_or_create_surface(task_id)?;
 
     // Get raw pointer while holding lock
     let surface_ptr = {
@@ -611,25 +608,25 @@ fn with_surface_mut(task_id: u32, f: impl FnOnce(&mut Surface) -> VideoResult) -
         &mut slots[slot].surface as *mut Surface
     };
 
-    // Execute drawing closure without holding lock
+    // Execute drawing closure without holding lock (safe: back_buffer is independent)
     unsafe { f(&mut *surface_ptr) }
 }
 
 fn surface_clear(surface: &mut Surface, color: u32) -> VideoResult {
-    if surface.buffer.is_null() {
+    if surface.back_buffer.is_null() {
         return Err(VideoError::Invalid);
     }
     let converted = framebuffer::framebuffer_convert_color_for(surface.pixel_format, color);
     let row_bytes = surface.width.saturating_mul(surface.bytes_pp as u32) as usize;
     for row in 0..surface.height as usize {
-        let row_ptr = unsafe { surface.buffer.add(row * surface.pitch as usize) };
+        let row_ptr = unsafe { surface.back_buffer.add(row * surface.pitch as usize) };
         for col in 0..surface.width as usize {
             let pixel_ptr = unsafe { row_ptr.add(col * surface.bytes_pp as usize) };
             unsafe { write_pixel(pixel_ptr, surface.bytes_pp, converted) };
         }
         let _ = row_bytes;
     }
-    add_damage_region(
+    add_back_damage_region(
         surface,
         0,
         0,
@@ -657,7 +654,7 @@ fn surface_set_pixel(surface: &mut Surface, x: i32, y: i32, color: u32) -> Video
     if x < 0 || y < 0 || x as u32 >= surface.width || y as u32 >= surface.height {
         return Err(VideoError::OutOfBounds);
     }
-    if surface.buffer.is_null() {
+    if surface.back_buffer.is_null() {
         return Err(VideoError::Invalid);
     }
 
@@ -665,7 +662,7 @@ fn surface_set_pixel(surface: &mut Surface, x: i32, y: i32, color: u32) -> Video
     let offset = (y as usize * surface.pitch as usize)
         + (x as usize * surface.bytes_pp as usize);
     unsafe {
-        let ptr = surface.buffer.add(offset);
+        let ptr = surface.back_buffer.add(offset);
         write_pixel(ptr, surface.bytes_pp, converted);
     }
     Ok(())
@@ -688,7 +685,7 @@ pub fn surface_draw_rect_filled_fast(
         let mut x1 = x + w - 1;
         let mut y1 = y + h - 1;
         clip_rect(surface, &mut x0, &mut y0, &mut x1, &mut y1)?;
-        if surface.buffer.is_null() {
+        if surface.back_buffer.is_null() {
             return Err(VideoError::Invalid);
         }
         let converted = framebuffer::framebuffer_convert_color_for(surface.pixel_format, color);
@@ -698,7 +695,7 @@ pub fn surface_draw_rect_filled_fast(
         for row in y0..=y1 {
             let row_off = row as usize * pitch + x0 as usize * bytes_pp;
             unsafe {
-                let dst = surface.buffer.add(row_off);
+                let dst = surface.back_buffer.add(row_off);
                 match bytes_pp {
                     4 => {
                         if converted == 0 {
@@ -723,7 +720,7 @@ pub fn surface_draw_rect_filled_fast(
                 }
             }
         }
-        add_damage_region(surface, x0, y0, x1, y1);
+        add_back_damage_region(surface, x0, y0, x1, y1);
         Ok(())
     });
     result
@@ -766,7 +763,7 @@ pub fn surface_draw_line(
                 y0 += sy;
             }
         }
-        add_damage_region(surface, min_x, min_y, max_x, max_y);
+        add_back_damage_region(surface, min_x, min_y, max_x, max_y);
         Ok(())
     })
 }
@@ -802,7 +799,7 @@ pub fn surface_draw_circle(
                 err += 2 * (y - x) + 1;
             }
         }
-        add_damage_region(
+        add_back_damage_region(
             surface,
             cx - radius,
             cy - radius,
@@ -840,7 +837,7 @@ pub fn surface_draw_circle_filled(
                 err += 2 * (y - x) + 1;
             }
         }
-        add_damage_region(
+        add_back_damage_region(
             surface,
             cx - radius,
             cy - radius,
@@ -915,7 +912,7 @@ pub fn surface_font_draw_string(
             }
         }
         if dirty {
-            add_damage_region(surface, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+            add_back_damage_region(surface, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
         }
         Ok(())
     });
@@ -935,7 +932,7 @@ pub fn surface_blit(
         return Err(VideoError::Invalid);
     }
     with_surface_mut(task_id, |surface| {
-        if surface.buffer.is_null() {
+        if surface.back_buffer.is_null() {
             return Err(VideoError::Invalid);
         }
         let bytes_pp = surface.bytes_pp as usize;
@@ -965,12 +962,12 @@ pub fn surface_blit(
             let dst_off = ((dst_y + row) as usize * surface.pitch as usize)
                 + (dst_x as usize * bytes_pp);
             unsafe {
-                let src_ptr = surface.buffer.add(src_off);
-                let dst_ptr = surface.buffer.add(dst_off);
+                let src_ptr = surface.back_buffer.add(src_off);
+                let dst_ptr = surface.back_buffer.add(dst_off);
                 ptr::copy(src_ptr, dst_ptr, (w as usize) * bytes_pp);
             }
         }
-        add_damage_region(
+        add_back_damage_region(
             surface,
             dst_x,
             dst_y,
@@ -979,6 +976,104 @@ pub fn surface_blit(
         );
         Ok(())
     })
+}
+
+/// Commits the back buffer to the front buffer (Wayland-style double buffering).
+/// This atomically:
+/// 1. Copies back buffer content to front buffer (maintains coherency)
+/// 2. Transfers back damage to front damage
+/// 3. Clears back damage for next frame
+/// 4. Sets committed=true to signal compositor
+///
+/// Note: We copy instead of swap so that the back buffer retains the current
+/// working state. This allows incremental rendering (like shells) to work
+/// correctly without needing full redraws after each commit.
+pub fn surface_commit(task_id: u32) -> VideoResult {
+    let mut slots = SURFACES.lock();
+    let slot_idx = match find_slot(&slots, task_id) {
+        Some(idx) => idx,
+        None => return Err(VideoError::Invalid),
+    };
+
+    let surface = &mut slots[slot_idx].surface;
+
+    // Validate buffers exist
+    if surface.front_buffer.is_null() || surface.back_buffer.is_null() {
+        return Err(VideoError::Invalid);
+    }
+
+    // Copy back buffer to front buffer (maintains working state in back buffer)
+    let buffer_size = (surface.pitch as usize) * (surface.height as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            surface.back_buffer,
+            surface.front_buffer,
+            buffer_size,
+        );
+    }
+
+    // Accumulate damage from back to front (don't replace, merge!)
+    // This allows multiple commits to accumulate damage until compositor runs
+    for i in 0..surface.back_damage_count as usize {
+        let back_region = surface.back_damage_regions[i];
+
+        // If front damage is full, merge two closest regions to make room
+        if (surface.front_damage_count as usize) >= MAX_DAMAGE_REGIONS {
+            // Find two closest regions and merge them
+            if surface.front_damage_count >= 2 {
+                let mut best_i = 0;
+                let mut best_j = 1;
+                let mut best_area = i32::MAX;
+
+                for ii in 0..surface.front_damage_count as usize {
+                    for jj in (ii + 1)..surface.front_damage_count as usize {
+                        let r1 = &surface.front_damage_regions[ii];
+                        let r2 = &surface.front_damage_regions[jj];
+                        let merged_x0 = r1.x0.min(r2.x0);
+                        let merged_y0 = r1.y0.min(r2.y0);
+                        let merged_x1 = r1.x1.max(r2.x1);
+                        let merged_y1 = r1.y1.max(r2.y1);
+                        let area = (merged_x1 - merged_x0 + 1) * (merged_y1 - merged_y0 + 1);
+                        if area < best_area {
+                            best_area = area;
+                            best_i = ii;
+                            best_j = jj;
+                        }
+                    }
+                }
+
+                // Merge best_i and best_j into best_i
+                let r1 = surface.front_damage_regions[best_i];
+                let r2 = surface.front_damage_regions[best_j];
+                surface.front_damage_regions[best_i] = DamageRect {
+                    x0: r1.x0.min(r2.x0),
+                    y0: r1.y0.min(r2.y0),
+                    x1: r1.x1.max(r2.x1),
+                    y1: r1.y1.max(r2.y1),
+                };
+
+                // Remove best_j by shifting
+                for k in best_j..(surface.front_damage_count as usize - 1) {
+                    surface.front_damage_regions[k] = surface.front_damage_regions[k + 1];
+                }
+                surface.front_damage_count -= 1;
+            }
+        }
+
+        // Add the back damage region to front
+        if (surface.front_damage_count as usize) < MAX_DAMAGE_REGIONS {
+            surface.front_damage_regions[surface.front_damage_count as usize] = back_region;
+            surface.front_damage_count += 1;
+        }
+    }
+
+    // Clear back damage for next frame
+    surface.back_damage_count = 0;
+
+    // Signal compositor that new content is ready
+    surface.committed = true;
+
+    Ok(())
 }
 
 pub fn compositor_present() -> c_int {
@@ -995,15 +1090,8 @@ pub fn compositor_present() -> c_int {
         *slots
     };
 
-    // Set compositing=true for all active surfaces
-    {
-        let mut slots = SURFACES.lock();
-        for slot in slots.iter_mut() {
-            if slot.active && !slot.surface.buffer.is_null() {
-                slot.surface.compositing = true;
-            }
-        }
-    }  // Release lock before expensive pixel copy
+    // With double buffering, no need to set compositing flag - we read from front_buffer
+    // which is independent from the back_buffer that clients draw to
 
     let mut active = 0u32;
     let mut dirty_tasks = [0u32; MAX_TASKS];
@@ -1036,7 +1124,7 @@ pub fn compositor_present() -> c_int {
         }
 
         let surface = &slot.surface;
-        if surface.buffer.is_null() {
+        if surface.front_buffer.is_null() {
             continue;
         }
         if !surface.is_dirty() {
@@ -1046,8 +1134,8 @@ pub fn compositor_present() -> c_int {
             return -1;
         }
 
-        // Get the union of all damage regions
-        let damage = surface.damage_union();
+        // Get the union of all front damage regions (what compositor needs to render)
+        let damage = surface.front_damage_union();
         if !damage.is_valid() {
             continue;
         }
@@ -1104,7 +1192,7 @@ pub fn compositor_present() -> c_int {
             let dst_off = ((dst_y + row) as usize * fb.pitch as usize)
                 + (dst_x as usize * bytes_pp);
             unsafe {
-                let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
+                let src_ptr = surface.front_buffer.add(src_row + (src_x as usize * bytes_pp));
                 let dst_ptr = fb.base.add(dst_off);
                 let row_bytes = copy_w as usize * bytes_pp;
                 ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
@@ -1122,15 +1210,9 @@ pub fn compositor_present() -> c_int {
             let task_id = dirty_tasks[idx];
             if let Some(slot_idx) = find_slot(&slots, task_id) {
                 let surface = &mut slots[slot_idx].surface;
-                surface.compositing = false;
-                clear_damage_regions(surface);
-            }
-        }
-
-        // Clear compositing for surfaces we didn't composite (fallback)
-        for slot in slots.iter_mut() {
-            if slot.active && slot.surface.compositing {
-                slot.surface.compositing = false;
+                // Clear committed flag and front damage after compositing
+                surface.committed = false;
+                clear_front_damage(surface);
             }
         }
     }
@@ -1162,15 +1244,8 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
         *slots
     };
 
-    // Set compositing=true for all active surfaces
-    {
-        let mut slots = SURFACES.lock();
-        for slot in slots.iter_mut() {
-            if slot.active && !slot.surface.buffer.is_null() {
-                slot.surface.compositing = true;
-            }
-        }
-    }  // Release lock before expensive pixel copy
+    // With double buffering, no need to set compositing flag - we read from front_buffer
+    // which is independent from the back_buffer that clients draw to
 
     let fb_width = fb.width as i32;
     let fb_height = fb.height as i32;
@@ -1251,7 +1326,7 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
             }
 
             let surface = &slot.surface;
-            if surface.buffer.is_null() {
+            if surface.front_buffer.is_null() {
                 continue;
             }
             if surface.bpp != fb.bpp {
@@ -1314,13 +1389,13 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                     continue;
                 }
 
-                // Composite window into framebuffer
+                // Composite window into framebuffer (read from front_buffer)
                 for row in 0..final_h {
                     let src_row = ((src_y + row) as usize) * surface.pitch as usize;
                     let dst_off = ((dst_y + row) as usize * fb.pitch as usize)
                         + (dst_x as usize * bytes_pp);
                     unsafe {
-                        let src_ptr = surface.buffer.add(src_row + (src_x as usize * bytes_pp));
+                        let src_ptr = surface.front_buffer.add(src_row + (src_x as usize * bytes_pp));
                         let dst_ptr = fb.base.add(dst_off);
                         let row_bytes = final_w as usize * bytes_pp;
                         ptr::copy_nonoverlapping(src_ptr, dst_ptr, row_bytes);
@@ -1405,16 +1480,13 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
             if let Some(slot_idx) = find_slot(&slots, cov.task_id) {
                 let surface = &mut slots[slot_idx].surface;
 
-                // Always clear compositing flag
-                surface.compositing = false;
-
                 // Skip dirty check if surface is not currently dirty (defensive check)
                 if !surface.is_dirty() {
                     continue;
                 }
 
-                // Get the union of all damage regions
-                let damage = surface.damage_union();
+                // Get the union of all front damage regions
+                let damage = surface.front_damage_union();
 
                 // Check if coverage fully contains damage region union
                 let fully_covered = cov.union_x0 <= damage.x0
@@ -1423,18 +1495,12 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                     && cov.union_y1 >= damage.y1;
 
                 if fully_covered {
-                    // Clear all damage regions completely
-                    clear_damage_regions(surface);
+                    // Clear committed flag and front damage regions completely
+                    surface.committed = false;
+                    clear_front_damage(surface);
                 }
                 // else: Partial coverage - keep damage regions as-is
                 // The compositor will re-enumerate and process remaining damage next frame
-            }
-        }
-
-        // Clear compositing for surfaces we didn't composite (fallback)
-        for slot in slots.iter_mut() {
-            if slot.active && slot.surface.compositing {
-                slot.surface.compositing = false;
             }
         }
     }
@@ -1578,7 +1644,12 @@ pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
     slots[slot_idx].window_state = state;
     // Mark entire surface dirty to trigger redraw when state changes (minimize/restore)
     let surface = &mut slots[slot_idx].surface;
-    add_damage_region(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
+    add_back_damage_region(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
+    // Auto-commit when window state changes so compositor sees the update
+    surface.front_damage_regions = surface.back_damage_regions;
+    surface.front_damage_count = surface.back_damage_count;
+    surface.back_damage_count = 0;
+    surface.committed = true;
     0
 }
 
@@ -1645,12 +1716,13 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.width = slot.surface.width;
             info.height = slot.surface.height;
             info.state = slot.window_state;
-            info.damage_count = slot.surface.damage_count;
+            // Report front damage (what compositor cares about)
+            info.damage_count = slot.surface.front_damage_count;
             info._padding = [0; 2];
-            // Copy individual damage regions
+            // Copy individual front damage regions
             for i in 0..MAX_WINDOW_DAMAGE_REGIONS {
-                if i < slot.surface.damage_count as usize {
-                    let r = &slot.surface.damage_regions[i];
+                if i < slot.surface.front_damage_count as usize {
+                    let r = &slot.surface.front_damage_regions[i];
                     info.damage_regions[i] = WindowDamageRect {
                         x0: r.x0,
                         y0: r.y0,
