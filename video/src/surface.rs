@@ -19,14 +19,50 @@ pub const WINDOW_STATE_NORMAL: u8 = 0;
 pub const WINDOW_STATE_MINIMIZED: u8 = 1;
 pub const WINDOW_STATE_MAXIMIZED: u8 = 2;
 
-// Dirty region constants - represents an invalid/empty dirty region
-// When dirty=false, these bounds indicate no pending updates
-const DIRTY_REGION_INVALID_X0: i32 = 0;
-const DIRTY_REGION_INVALID_Y0: i32 = 0;
-const DIRTY_REGION_INVALID_X1: i32 = -1; // x1 < x0 means empty region
-const DIRTY_REGION_INVALID_Y1: i32 = -1; // y1 < y0 means empty region
-
 const SURFACE_BG_COLOR: u32 = 0x0000_0000;
+
+// Maximum number of damage regions tracked per surface before merging
+pub const MAX_DAMAGE_REGIONS: usize = 8;
+
+/// A single damage rectangle in surface-local coordinates
+#[derive(Copy, Clone, Default)]
+struct DamageRect {
+    x0: i32,
+    y0: i32,
+    x1: i32, // Inclusive
+    y1: i32, // Inclusive
+}
+
+impl DamageRect {
+    const fn invalid() -> Self {
+        Self { x0: 0, y0: 0, x1: -1, y1: -1 }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.x0 <= self.x1 && self.y0 <= self.y1
+    }
+
+    fn area(&self) -> i32 {
+        if !self.is_valid() {
+            0
+        } else {
+            (self.x1 - self.x0 + 1) * (self.y1 - self.y0 + 1)
+        }
+    }
+
+    fn union(&self, other: &DamageRect) -> DamageRect {
+        DamageRect {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
+    fn combined_area(&self, other: &DamageRect) -> i32 {
+        self.union(other).area()
+    }
+}
 
 #[derive(Copy, Clone)]
 struct Surface {
@@ -36,11 +72,9 @@ struct Surface {
     bpp: u8,
     bytes_pp: u8,
     pixel_format: u8,
-    dirty: bool,
-    dirty_x0: i32,
-    dirty_y0: i32,
-    dirty_x1: i32,
-    dirty_y1: i32,
+    // Array of damage regions for fine-grained tracking
+    damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
+    damage_count: u8,
     buffer: *mut u8,
     x: i32,
     y: i32,
@@ -59,16 +93,30 @@ impl Surface {
             bpp: 0,
             bytes_pp: 0,
             pixel_format: 0,
-            dirty: false,
-            dirty_x0: DIRTY_REGION_INVALID_X0,
-            dirty_y0: DIRTY_REGION_INVALID_Y0,
-            dirty_x1: DIRTY_REGION_INVALID_X1,
-            dirty_y1: DIRTY_REGION_INVALID_Y1,
+            damage_regions: [DamageRect::invalid(); MAX_DAMAGE_REGIONS],
+            damage_count: 0,
             buffer: ptr::null_mut(),
             x: 0,
             y: 0,
             compositing: false,
         }
+    }
+
+    /// Returns true if the surface has any pending damage
+    fn is_dirty(&self) -> bool {
+        self.damage_count > 0
+    }
+
+    /// Computes the bounding box union of all damage regions
+    fn damage_union(&self) -> DamageRect {
+        if self.damage_count == 0 {
+            return DamageRect::invalid();
+        }
+        let mut result = self.damage_regions[0];
+        for i in 1..self.damage_count as usize {
+            result = result.union(&self.damage_regions[i]);
+        }
+        result
     }
 }
 
@@ -131,7 +179,44 @@ fn find_free_slot(slots: &[SurfaceSlot; MAX_TASKS]) -> Option<usize> {
         .find_map(|(idx, slot)| if !slot.active { Some(idx) } else { None })
 }
 
-fn mark_dirty(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32) {
+/// Merges the two damage regions with the smallest combined area
+fn merge_smallest_pair(surface: &mut Surface) {
+    if surface.damage_count < 2 {
+        return;
+    }
+
+    let count = surface.damage_count as usize;
+    let mut best_i = 0;
+    let mut best_j = 1;
+    let mut best_area = i32::MAX;
+
+    // Find the pair with smallest combined area when merged
+    for i in 0..count {
+        for j in (i + 1)..count {
+            let combined = surface.damage_regions[i].combined_area(&surface.damage_regions[j]);
+            if combined < best_area {
+                best_area = combined;
+                best_i = i;
+                best_j = j;
+            }
+        }
+    }
+
+    // Merge i and j into i
+    let merged = surface.damage_regions[best_i].union(&surface.damage_regions[best_j]);
+    surface.damage_regions[best_i] = merged;
+
+    // Remove j by swapping with last element
+    if best_j < count - 1 {
+        surface.damage_regions[best_j] = surface.damage_regions[count - 1];
+    }
+    surface.damage_count -= 1;
+}
+
+/// Adds a damage region to the surface. If the array is full, merges the two
+/// closest regions first to make room.
+fn add_damage_region(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i32, mut y1: i32) {
+    // Clip to surface bounds
     if x0 > x1 || y0 > y1 {
         return;
     }
@@ -152,18 +237,22 @@ fn mark_dirty(surface: &mut Surface, mut x0: i32, mut y0: i32, mut x1: i32, mut 
     if x0 > x1 || y0 > y1 {
         return;
     }
-    if !surface.dirty {
-        surface.dirty = true;
-        surface.dirty_x0 = x0;
-        surface.dirty_y0 = y0;
-        surface.dirty_x1 = x1;
-        surface.dirty_y1 = y1;
-    } else {
-        surface.dirty_x0 = surface.dirty_x0.min(x0);
-        surface.dirty_y0 = surface.dirty_y0.min(y0);
-        surface.dirty_x1 = surface.dirty_x1.max(x1);
-        surface.dirty_y1 = surface.dirty_y1.max(y1);
+
+    let new_rect = DamageRect { x0, y0, x1, y1 };
+
+    // If array is full, merge two closest regions to make room
+    if (surface.damage_count as usize) >= MAX_DAMAGE_REGIONS {
+        merge_smallest_pair(surface);
     }
+
+    // Add the new region
+    surface.damage_regions[surface.damage_count as usize] = new_rect;
+    surface.damage_count += 1;
+}
+
+/// Clears all damage regions from the surface
+fn clear_damage_regions(surface: &mut Surface) {
+    surface.damage_count = 0;
 }
 
 fn create_surface_for_task(
@@ -233,6 +322,16 @@ fn create_surface_for_task(
         // Assign z-order (higher = on top)
         let z_order = NEXT_Z_ORDER.fetch_add(1, Ordering::Relaxed);
 
+        // Initialize damage regions with full surface dirty
+        let initial_damage = DamageRect {
+            x0: 0,
+            y0: 0,
+            x1: width as i32 - 1,
+            y1: height as i32 - 1,
+        };
+        let mut damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
+        damage_regions[0] = initial_damage;
+
         slots[slot] = SurfaceSlot {
             active: true,
             task_id,
@@ -243,11 +342,8 @@ fn create_surface_for_task(
                 bpp: fb.bpp,
                 bytes_pp,
                 pixel_format: fb.pixel_format,
-                dirty: true,
-                dirty_x0: 0,
-                dirty_y0: 0,
-                dirty_x1: width as i32 - 1,
-                dirty_y1: height as i32 - 1,
+                damage_regions,
+                damage_count: 1,
                 buffer: virt as *mut u8,
                 x: window_x,
                 y: window_y,
@@ -331,7 +427,7 @@ fn surface_clear(surface: &mut Surface, color: u32) -> VideoResult {
         }
         let _ = row_bytes;
     }
-    mark_dirty(
+    add_damage_region(
         surface,
         0,
         0,
@@ -425,7 +521,7 @@ pub fn surface_draw_rect_filled_fast(
                 }
             }
         }
-        mark_dirty(surface, x0, y0, x1, y1);
+        add_damage_region(surface, x0, y0, x1, y1);
         Ok(())
     });
     result
@@ -468,7 +564,7 @@ pub fn surface_draw_line(
                 y0 += sy;
             }
         }
-        mark_dirty(surface, min_x, min_y, max_x, max_y);
+        add_damage_region(surface, min_x, min_y, max_x, max_y);
         Ok(())
     })
 }
@@ -504,7 +600,7 @@ pub fn surface_draw_circle(
                 err += 2 * (y - x) + 1;
             }
         }
-        mark_dirty(
+        add_damage_region(
             surface,
             cx - radius,
             cy - radius,
@@ -542,7 +638,7 @@ pub fn surface_draw_circle_filled(
                 err += 2 * (y - x) + 1;
             }
         }
-        mark_dirty(
+        add_damage_region(
             surface,
             cx - radius,
             cy - radius,
@@ -617,7 +713,7 @@ pub fn surface_font_draw_string(
             }
         }
         if dirty {
-            mark_dirty(surface, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+            add_damage_region(surface, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
         }
         Ok(())
     });
@@ -672,7 +768,7 @@ pub fn surface_blit(
                 ptr::copy(src_ptr, dst_ptr, (w as usize) * bytes_pp);
             }
         }
-        mark_dirty(
+        add_damage_region(
             surface,
             dst_x,
             dst_y,
@@ -748,17 +844,22 @@ pub fn compositor_present() -> c_int {
         if surface.buffer.is_null() {
             continue;
         }
-        if !surface.dirty {
+        if !surface.is_dirty() {
             continue;
         }
         if surface.bpp != fb.bpp {
             return -1;
         }
 
-        let mut src_x = surface.dirty_x0;
-        let mut src_y = surface.dirty_y0;
-        let mut src_x1 = surface.dirty_x1;
-        let mut src_y1 = surface.dirty_y1;
+        // Get the union of all damage regions
+        let damage = surface.damage_union();
+        if !damage.is_valid() {
+            continue;
+        }
+        let mut src_x = damage.x0;
+        let mut src_y = damage.y0;
+        let mut src_x1 = damage.x1;
+        let mut src_y1 = damage.y1;
         if src_x < 0 {
             src_x = 0;
         }
@@ -827,11 +928,7 @@ pub fn compositor_present() -> c_int {
             if let Some(slot_idx) = find_slot(&slots, task_id) {
                 let surface = &mut slots[slot_idx].surface;
                 surface.compositing = false;
-                surface.dirty = false;
-                surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
-                surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
-                surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
-                surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+                clear_damage_regions(surface);
             }
         }
 
@@ -1100,31 +1197,24 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                 surface.compositing = false;
 
                 // Skip dirty check if surface is not currently dirty (defensive check)
-                if !surface.dirty {
+                if !surface.is_dirty() {
                     continue;
                 }
 
-                // Original dirty bounds
-                let dirty_x0 = surface.dirty_x0;
-                let dirty_y0 = surface.dirty_y0;
-                let dirty_x1 = surface.dirty_x1;
-                let dirty_y1 = surface.dirty_y1;
+                // Get the union of all damage regions
+                let damage = surface.damage_union();
 
-                // Check if coverage fully contains dirty region
-                let fully_covered = cov.union_x0 <= dirty_x0
-                    && cov.union_y0 <= dirty_y0
-                    && cov.union_x1 >= dirty_x1
-                    && cov.union_y1 >= dirty_y1;
+                // Check if coverage fully contains damage region union
+                let fully_covered = cov.union_x0 <= damage.x0
+                    && cov.union_y0 <= damage.y0
+                    && cov.union_x1 >= damage.x1
+                    && cov.union_y1 >= damage.y1;
 
                 if fully_covered {
-                    // Clear dirty flag completely
-                    surface.dirty = false;
-                    surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
-                    surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
-                    surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
-                    surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+                    // Clear all damage regions completely
+                    clear_damage_regions(surface);
                 }
-                // else: Partial coverage - keep dirty flag and bounds as-is
+                // else: Partial coverage - keep damage regions as-is
                 // The compositor will re-enumerate and process remaining damage next frame
             }
         }
@@ -1268,7 +1358,7 @@ pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
     slots[slot_idx].window_state = state;
     // Mark entire surface dirty to trigger redraw when state changes (minimize/restore)
     let surface = &mut slots[slot_idx].surface;
-    mark_dirty(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
+    add_damage_region(surface, 0, 0, surface.width as i32 - 1, surface.height as i32 - 1);
     0
 }
 
@@ -1283,6 +1373,19 @@ pub fn surface_raise_window(task_id: u32) -> c_int {
     0
 }
 
+/// Exposed damage region for userland (matches DamageRect layout)
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct WindowDamageRect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+/// Maximum damage regions exposed per window (must match MAX_DAMAGE_REGIONS)
+pub const MAX_WINDOW_DAMAGE_REGIONS: usize = MAX_DAMAGE_REGIONS;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct WindowInfo {
@@ -1292,11 +1395,10 @@ pub struct WindowInfo {
     pub width: u32,
     pub height: u32,
     pub state: u8,
-    pub dirty: u8,
-    pub dirty_x0: i32,
-    pub dirty_y0: i32,
-    pub dirty_x1: i32,
-    pub dirty_y1: i32,
+    pub damage_count: u8,
+    pub _padding: [u8; 2],
+    // Individual damage regions
+    pub damage_regions: [WindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [c_char; 32],
 }
 
@@ -1323,11 +1425,22 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.width = slot.surface.width;
             info.height = slot.surface.height;
             info.state = slot.window_state;
-            info.dirty = if slot.surface.dirty { 1 } else { 0 };
-            info.dirty_x0 = slot.surface.dirty_x0;
-            info.dirty_y0 = slot.surface.dirty_y0;
-            info.dirty_x1 = slot.surface.dirty_x1;
-            info.dirty_y1 = slot.surface.dirty_y1;
+            info.damage_count = slot.surface.damage_count;
+            info._padding = [0; 2];
+            // Copy individual damage regions
+            for i in 0..MAX_WINDOW_DAMAGE_REGIONS {
+                if i < slot.surface.damage_count as usize {
+                    let r = &slot.surface.damage_regions[i];
+                    info.damage_regions[i] = WindowDamageRect {
+                        x0: r.x0,
+                        y0: r.y0,
+                        x1: r.x1,
+                        y1: r.y1,
+                    };
+                } else {
+                    info.damage_regions[i] = WindowDamageRect::default();
+                }
+            }
             info.title = slot.title;
         }
         count += 1;

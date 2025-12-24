@@ -350,28 +350,43 @@ SlopOS Compositor:
 
 ### Phase 2: Performance Improvements
 
-#### [ ] Checkpoint 2.1: Implement Damage Region List
-**Location**: `video/src/surface.rs:31-46`
+#### [x] Checkpoint 2.1: Implement Damage Region List ✅ **COMPLETED** (2025-12-24)
+**Location**: `video/src/surface.rs:24-128`
 
 **Problem**: Single bounding box grows with scattered draws.
 
 **Solution**:
+Implemented fixed-size array of 8 damage regions per surface with smart merging.
+No backward compatibility fields - clean implementation:
 ```rust
+const MAX_DAMAGE_REGIONS: usize = 8;
+
+struct DamageRect { x0: i32, y0: i32, x1: i32, y1: i32 }
+
 struct Surface {
-    // Replace single dirty rect with region list
-    damage_regions: [DamageRect; 8],  // Small fixed array
+    damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
     damage_count: u8,
-    // Fallback to bounding box when full
+    // ... other fields (no dirty/dirty_x0/y0/x1/y1)
+}
+
+impl Surface {
+    fn is_dirty(&self) -> bool { self.damage_count > 0 }
+    fn damage_union(&self) -> DamageRect { /* computes union on-the-fly */ }
 }
 ```
 
-**Files to modify**:
-- `video/src/surface.rs` - New damage accumulation logic
-- `drivers/src/video_bridge.rs` - Expose in WindowInfo
+When region array is full, `merge_smallest_pair()` combines the two regions
+with smallest combined area, making room for new damage.
+
+**Files modified**:
+- `video/src/surface.rs` - DamageRect struct, Surface with damage_regions array, is_dirty()/damage_union() methods, add_damage_region(), merge_smallest_pair(), clear_damage_regions(), WindowInfo with damage_regions
+- `userland/src/syscall.rs` - UserWindowDamageRect, UserWindowInfo with damage_regions and is_dirty() method
+- `userland/src/compositor.rs` - get_content_damage_regions() iterates per-window regions
 
 **Verification**:
-- Draw two small rects far apart
-- Verify only those regions composited, not entire bounding box
+- Build succeeds with `make build`
+- Tests pass with `make test`
+- Compositor uses per-window damage regions instead of single bounding box
 
 ---
 

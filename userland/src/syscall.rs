@@ -167,6 +167,19 @@ pub struct UserMouseEvent {
     pub buttons: u8,
 }
 
+/// Per-window damage region (surface-local coordinates)
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserWindowDamageRect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+/// Maximum damage regions per window
+pub const MAX_WINDOW_DAMAGE_REGIONS: usize = 8;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserWindowInfo {
@@ -176,12 +189,18 @@ pub struct UserWindowInfo {
     pub width: u32,
     pub height: u32,
     pub state: u8,
-    pub dirty: u8,
-    pub dirty_x0: i32,
-    pub dirty_y0: i32,
-    pub dirty_x1: i32,
-    pub dirty_y1: i32,
+    pub damage_count: u8,
+    pub _padding: [u8; 2],
+    // Individual damage regions
+    pub damage_regions: [UserWindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [c_char; 32],
+}
+
+impl UserWindowInfo {
+    /// Returns true if the window has any pending damage
+    pub fn is_dirty(&self) -> bool {
+        self.damage_count > 0
+    }
 }
 
 impl Default for UserWindowInfo {
@@ -193,11 +212,9 @@ impl Default for UserWindowInfo {
             width: 0,
             height: 0,
             state: 0,
-            dirty: 0,
-            dirty_x0: 0,
-            dirty_y0: 0,
-            dirty_x1: -1,
-            dirty_y1: -1,
+            damage_count: 0,
+            _padding: [0; 2],
+            damage_regions: [UserWindowDamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],
         }
     }

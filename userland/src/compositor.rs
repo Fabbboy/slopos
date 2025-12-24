@@ -439,21 +439,27 @@ impl WindowManager {
             return (regions, count);
         }
 
-        // WINDOW DAMAGE: Only add windows that are actually dirty
+        // WINDOW DAMAGE: Iterate over per-window damage regions (not just bounding box)
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
-            if window.state != WINDOW_STATE_MINIMIZED && window.dirty != 0 {
-                let dirty_w = window.dirty_x1 - window.dirty_x0 + 1;
-                let dirty_h = window.dirty_y1 - window.dirty_y0 + 1;
-
-                if dirty_w > 0 && dirty_h > 0 && count < 64 {
-                    regions[count] = UserDamageRegion {
-                        x: window.x + window.dirty_x0,
-                        y: window.y + window.dirty_y0,
-                        width: dirty_w,
-                        height: dirty_h,
-                    };
-                    count += 1;
+            if window.state != WINDOW_STATE_MINIMIZED && window.is_dirty() {
+                // Iterate over individual damage regions for finer-grained tracking
+                for j in 0..window.damage_count as usize {
+                    if count >= 64 {
+                        break;
+                    }
+                    let r = &window.damage_regions[j];
+                    let w = r.x1 - r.x0 + 1;
+                    let h = r.y1 - r.y0 + 1;
+                    if w > 0 && h > 0 {
+                        regions[count] = UserDamageRegion {
+                            x: window.x + r.x0,
+                            y: window.y + r.y0,
+                            width: w,
+                            height: h,
+                        };
+                        count += 1;
+                    }
                 }
             }
         }
