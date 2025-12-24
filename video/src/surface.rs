@@ -598,18 +598,9 @@ fn get_or_create_surface(task_id: u32) -> Result<usize, VideoError> {
 }
 
 fn with_surface_mut(task_id: u32, f: impl FnOnce(&mut Surface) -> VideoResult) -> VideoResult {
-    // With double buffering, no synchronization needed - clients draw to back_buffer
-    // while compositor reads from front_buffer
     let slot = get_or_create_surface(task_id)?;
-
-    // Get raw pointer while holding lock
-    let surface_ptr = {
-        let mut slots = SURFACES.lock();
-        &mut slots[slot].surface as *mut Surface
-    };
-
-    // Execute drawing closure without holding lock (safe: back_buffer is independent)
-    unsafe { f(&mut *surface_ptr) }
+    let mut slots = SURFACES.lock();
+    f(&mut slots[slot].surface)
 }
 
 fn surface_clear(surface: &mut Surface, color: u32) -> VideoResult {
