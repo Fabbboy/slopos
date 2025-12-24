@@ -289,11 +289,17 @@ pub fn surface_draw_rect_filled_fast(task_id: u32, x: i32, y: i32, w: i32, h: i3
 pub fn surface_draw_rect_filled_fast(task_id: u32, x: i32, y: i32, w: i32, h: i32, color: u32) -> VideoResult {
     with_back_buffer(task_id, |buffer| {
         let color_bytes = color.to_ne_bytes();
+        let bytes_pp = buffer.bytes_pp as usize;
+        let data = buffer.as_mut_slice();
 
         for row in y..(y + h) {
-            for col in x..(x + w) {
-                let offset = buffer.pixel_offset(col as u32, row as u32);
-                buffer.as_mut_slice()[offset..offset + 4].copy_from_slice(&color_bytes);
+            let row_start = buffer.pixel_offset(x as u32, row as u32);
+            let row_end = row_start + (w as usize) * bytes_pp;
+            let row_slice = &mut data[row_start..row_end];
+
+            // Fill entire row at once using chunks
+            for chunk in row_slice.chunks_exact_mut(bytes_pp) {
+                chunk.copy_from_slice(&color_bytes[..bytes_pp]);
             }
         }
 
