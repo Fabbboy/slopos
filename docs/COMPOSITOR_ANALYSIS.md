@@ -308,7 +308,7 @@ SlopOS Compositor:
 
 ### Phase 1: Correctness Fixes
 
-#### [ ] Checkpoint 1.1: Fix Partial Damage Dirty Flag Handling
+#### [x] Checkpoint 1.1: Fix Partial Damage Dirty Flag Handling ✅ **COMPLETED** (2025-12-24)
 **Location**: `video/src/surface.rs:959-973`
 
 **Problem**: Currently clears ALL dirty flags after any composition, even if only a partial region was composited.

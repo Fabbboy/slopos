@@ -841,6 +841,28 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
     let mut composited_tasks = [0u32; MAX_TASKS];
     let mut composited_count = 0usize;
 
+    // Per-surface coverage tracking (in surface-local coordinates)
+    // Tracks which portions of each surface's dirty region were actually composited
+    #[derive(Copy, Clone)]
+    struct SurfaceCoverage {
+        task_id: u32,
+        covered: bool,        // True if at least one region was composited
+        union_x0: i32,        // Union of all composited regions
+        union_y0: i32,
+        union_x1: i32,
+        union_y1: i32,
+    }
+
+    let mut coverage_tracking = [SurfaceCoverage {
+        task_id: 0,
+        covered: false,
+        union_x0: i32::MAX,
+        union_y0: i32::MAX,
+        union_x1: i32::MIN,
+        union_y1: i32::MIN,
+    }; MAX_TASKS];
+    let mut coverage_count = 0usize;
+
     // For each damage region, composite all windows that overlap it
     for damage_idx in 0..damage_count as usize {
         let damage = unsafe { &*damage_regions.add(damage_idx) };
@@ -936,6 +958,45 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
                 }
             }
 
+            // Track coverage for this surface (in surface-local coordinates)
+            let composited_x0 = src_x;
+            let composited_y0 = src_y;
+            let composited_x1 = src_x + copy_w - 1;
+            let composited_y1 = src_y + copy_h - 1;
+
+            // Find or create coverage entry for this task
+            let mut coverage_idx = None;
+            for i in 0..coverage_count {
+                if coverage_tracking[i].task_id == slot.task_id {
+                    coverage_idx = Some(i);
+                    break;
+                }
+            }
+            if coverage_idx.is_none() && coverage_count < MAX_TASKS {
+                coverage_idx = Some(coverage_count);
+                coverage_tracking[coverage_count].task_id = slot.task_id;
+                coverage_count += 1;
+            }
+
+            // Update union bounds to include this composited region
+            if let Some(idx) = coverage_idx {
+                let cov = &mut coverage_tracking[idx];
+                if !cov.covered {
+                    // First region for this surface
+                    cov.covered = true;
+                    cov.union_x0 = composited_x0;
+                    cov.union_y0 = composited_y0;
+                    cov.union_x1 = composited_x1;
+                    cov.union_y1 = composited_y1;
+                } else {
+                    // Expand union to include new region
+                    cov.union_x0 = cov.union_x0.min(composited_x0);
+                    cov.union_y0 = cov.union_y0.min(composited_y0);
+                    cov.union_x1 = cov.union_x1.max(composited_x1);
+                    cov.union_y1 = cov.union_y1.max(composited_y1);
+                }
+            }
+
             // Track which tasks we've composited so we can clear their dirty flags
             if composited_count < MAX_TASKS {
                 let task_id = slot.task_id;
@@ -956,18 +1017,46 @@ pub fn compositor_present_with_damage(damage_regions: *const DamageRegion, damag
         }
     }
 
-    // Clear dirty flags for all composited windows
-    if composited_count > 0 {
+    // Clear or update dirty flags based on coverage
+    // Only clear dirty flag if the ENTIRE dirty region was composited
+    if coverage_count > 0 {
         let mut slots = SURFACES.lock();
-        for i in 0..composited_count {
-            let task_id = composited_tasks[i];
-            if let Some(slot_idx) = find_slot(&slots, task_id) {
+        for i in 0..coverage_count {
+            let cov = &coverage_tracking[i];
+            if !cov.covered {
+                continue;  // No coverage for this surface
+            }
+
+            if let Some(slot_idx) = find_slot(&slots, cov.task_id) {
                 let surface = &mut slots[slot_idx].surface;
-                surface.dirty = false;
-                surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
-                surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
-                surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
-                surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+
+                // Skip if surface is not currently dirty (defensive check)
+                if !surface.dirty {
+                    continue;
+                }
+
+                // Original dirty bounds
+                let dirty_x0 = surface.dirty_x0;
+                let dirty_y0 = surface.dirty_y0;
+                let dirty_x1 = surface.dirty_x1;
+                let dirty_y1 = surface.dirty_y1;
+
+                // Check if coverage fully contains dirty region
+                let fully_covered = cov.union_x0 <= dirty_x0
+                    && cov.union_y0 <= dirty_y0
+                    && cov.union_x1 >= dirty_x1
+                    && cov.union_y1 >= dirty_y1;
+
+                if fully_covered {
+                    // Clear dirty flag completely
+                    surface.dirty = false;
+                    surface.dirty_x0 = DIRTY_REGION_INVALID_X0;
+                    surface.dirty_y0 = DIRTY_REGION_INVALID_Y0;
+                    surface.dirty_x1 = DIRTY_REGION_INVALID_X1;
+                    surface.dirty_y1 = DIRTY_REGION_INVALID_Y1;
+                }
+                // else: Partial coverage - keep dirty flag and bounds as-is
+                // The compositor will re-enumerate and process remaining damage next frame
             }
         }
     }
