@@ -3,9 +3,9 @@
 
 extern crate alloc;
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use slopos_drivers::serial_println;
-use slopos_drivers::video_bridge::{self, DamageRegion, VideoCallbacks, VideoResult};
+use slopos_drivers::video_bridge::{self, VideoCallbacks, VideoResult};
 use slopos_lib::FramebufferInfo;
 
 pub mod font;
@@ -15,45 +15,6 @@ pub mod roulette_core;
 pub mod surface;
 pub mod splash;
 
-fn draw_rect_filled_fast_bridge(x: i32, y: i32, w: i32, h: i32, color: u32) -> c_int {
-    video_result_to_code(graphics::graphics_draw_rect_filled_fast_status(x, y, w, h, color))
-}
-
-fn draw_line_bridge(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> c_int {
-    video_result_to_code(graphics::graphics_draw_line_status(x0, y0, x1, y1, color))
-}
-
-fn draw_circle_bridge(cx: i32, cy: i32, radius: i32, color: u32) -> c_int {
-    video_result_to_code(graphics::graphics_draw_circle_status(cx, cy, radius, color))
-}
-
-fn draw_circle_filled_bridge(cx: i32, cy: i32, radius: i32, color: u32) -> c_int {
-    video_result_to_code(graphics::graphics_draw_circle_filled_status(
-        cx, cy, radius, color,
-    ))
-}
-
-fn font_draw_string_bridge(
-    x: i32,
-    y: i32,
-    str_ptr: *const c_char,
-    fg_color: u32,
-    bg_color: u32,
-) -> c_int {
-    font::font_draw_string(x, y, str_ptr, fg_color, bg_color)
-}
-
-fn framebuffer_blit_bridge(
-    src_x: i32,
-    src_y: i32,
-    dst_x: i32,
-    dst_y: i32,
-    width: i32,
-    height: i32,
-) -> c_int {
-    framebuffer::framebuffer_blit(src_x, src_y, dst_x, dst_y, width, height)
-}
-
 fn framebuffer_get_info_bridge() -> *mut slopos_drivers::video_bridge::FramebufferInfoC {
     framebuffer::framebuffer_get_info()
         as *mut slopos_drivers::video_bridge::FramebufferInfoC
@@ -61,77 +22,6 @@ fn framebuffer_get_info_bridge() -> *mut slopos_drivers::video_bridge::Framebuff
 
 fn roulette_draw_bridge(fate: u32) -> c_int {
     video_result_to_code(roulette_core::roulette_draw_kernel(fate))
-}
-
-fn surface_draw_rect_filled_fast_bridge(
-    task_id: u32,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    color: u32,
-) -> c_int {
-    video_result_to_code(surface::surface_draw_rect_filled_fast(task_id, x, y, w, h, color))
-}
-
-fn surface_draw_line_bridge(
-    task_id: u32,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    color: u32,
-) -> c_int {
-    video_result_to_code(surface::surface_draw_line(task_id, x0, y0, x1, y1, color))
-}
-
-fn surface_draw_circle_bridge(
-    task_id: u32,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    color: u32,
-) -> c_int {
-    video_result_to_code(surface::surface_draw_circle(task_id, cx, cy, radius, color))
-}
-
-fn surface_draw_circle_filled_bridge(
-    task_id: u32,
-    cx: i32,
-    cy: i32,
-    radius: i32,
-    color: u32,
-) -> c_int {
-    video_result_to_code(surface::surface_draw_circle_filled(task_id, cx, cy, radius, color))
-}
-
-fn surface_font_draw_string_bridge(
-    task_id: u32,
-    x: i32,
-    y: i32,
-    str_ptr: *const c_char,
-    fg_color: u32,
-    bg_color: u32,
-) -> c_int {
-    surface::surface_font_draw_string(task_id, x, y, str_ptr, fg_color, bg_color)
-}
-
-fn surface_blit_bridge(
-    task_id: u32,
-    src_x: i32,
-    src_y: i32,
-    dst_x: i32,
-    dst_y: i32,
-    width: i32,
-    height: i32,
-) -> c_int {
-    video_result_to_code(surface::surface_blit(
-        task_id, src_x, src_y, dst_x, dst_y, width, height,
-    ))
-}
-
-fn compositor_present_bridge() -> c_int {
-    surface::compositor_present()
 }
 
 fn surface_enumerate_windows_bridge(out_buffer: *mut video_bridge::WindowInfo, max_count: u32) -> u32 {
@@ -157,8 +47,13 @@ fn surface_commit_bridge(task_id: u32) -> c_int {
     }
 }
 
-fn compositor_present_with_damage_bridge(damage_regions: *const DamageRegion, damage_count: u32) -> c_int {
-    surface::compositor_present_with_damage(damage_regions, damage_count)
+fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8) -> c_int {
+    surface::register_surface_for_task(task_id, width, height, bpp)
+}
+
+/// Copy from shared memory buffer to MMIO framebuffer (page flip for Wayland-like compositor)
+fn fb_flip_bridge(shm_phys: u64, size: usize) -> c_int {
+    framebuffer::fb_flip_from_shm(shm_phys, size)
 }
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {
@@ -177,27 +72,15 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
         }
 
         video_bridge::register_video_callbacks(VideoCallbacks {
-            draw_rect_filled_fast: Some(draw_rect_filled_fast_bridge),
-            draw_line: Some(draw_line_bridge),
-            draw_circle: Some(draw_circle_bridge),
-            draw_circle_filled: Some(draw_circle_filled_bridge),
-            font_draw_string: Some(font_draw_string_bridge),
-            framebuffer_blit: Some(framebuffer_blit_bridge),
             framebuffer_get_info: Some(framebuffer_get_info_bridge),
             roulette_draw: Some(roulette_draw_bridge),
-            surface_draw_rect_filled_fast: Some(surface_draw_rect_filled_fast_bridge),
-            surface_draw_line: Some(surface_draw_line_bridge),
-            surface_draw_circle: Some(surface_draw_circle_bridge),
-            surface_draw_circle_filled: Some(surface_draw_circle_filled_bridge),
-            surface_font_draw_string: Some(surface_font_draw_string_bridge),
-            surface_blit: Some(surface_blit_bridge),
-            compositor_present: Some(compositor_present_bridge),
-            compositor_present_with_damage: Some(compositor_present_with_damage_bridge),
             surface_enumerate_windows: Some(surface_enumerate_windows_bridge),
             surface_set_window_position: Some(surface_set_window_position_bridge),
             surface_set_window_state: Some(surface_set_window_state_bridge),
             surface_raise_window: Some(surface_raise_window_bridge),
             surface_commit: Some(surface_commit_bridge),
+            fb_flip: Some(fb_flip_bridge),
+            register_surface: Some(register_surface_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

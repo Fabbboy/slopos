@@ -4,13 +4,14 @@ use core::cmp;
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
+use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserBlit, UserFbInfo, UserFsEntry,
-    UserFsList, UserRect, UserSysInfo, UserText, sys_fb_info, sys_font_draw, sys_fs_close,
+    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
+    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close,
     sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_gfx_blit, sys_gfx_fill_rect, sys_halt, sys_read_char, sys_surface_commit, sys_sys_info,
-    sys_write,
+    sys_halt, sys_read_char, sys_surface_commit, sys_sys_info,
+    sys_write, sys_shm_create, sys_shm_map, sys_surface_attach, SHM_ACCESS_RW,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -45,8 +46,12 @@ static HALTED: &[u8] = b"Shell requested shutdown...\n";
 
 const FONT_CHAR_WIDTH: i32 = 8;
 const FONT_CHAR_HEIGHT: i32 = 16;
-const SHELL_BG_COLOR: u32 = 0x0000_0000;
+const SHELL_BG_COLOR: u32 = 0x1E1E_1EFF; // Dark background matching compositor theme
 const SHELL_FG_COLOR: u32 = 0xE6E6_E6FF;
+
+// Shell window dimensions (not fullscreen)
+const SHELL_WINDOW_WIDTH: i32 = 640;
+const SHELL_WINDOW_HEIGHT: i32 = 480;
 const SHELL_TAB_WIDTH: i32 = 4;
 const SHELL_SCROLLBACK_LINES: usize = 256;
 const SHELL_SCROLLBACK_COLS: usize = 160;
@@ -72,6 +77,8 @@ struct ShellConsole {
     enabled: bool,
     width: i32,
     height: i32,
+    pitch: usize,
+    bytes_pp: u8,
     cols: i32,
     rows: i32,
     cursor_col: i32,
@@ -82,6 +89,10 @@ struct ShellConsole {
     follow: bool,
     fg: u32,
     bg: u32,
+    // Shared memory buffer
+    shm_token: u32,
+    shm_ptr: *mut u8,
+    shm_size: usize,
 }
 
 impl ShellConsole {
@@ -90,6 +101,8 @@ impl ShellConsole {
             enabled: false,
             width: 0,
             height: 0,
+            pitch: 0,
+            bytes_pp: 4,
             cols: 0,
             rows: 0,
             cursor_col: 0,
@@ -100,12 +113,18 @@ impl ShellConsole {
             follow: true,
             fg: SHELL_FG_COLOR,
             bg: SHELL_BG_COLOR,
+            shm_token: 0,
+            shm_ptr: ptr::null_mut(),
+            shm_size: 0,
         }
     }
 
-    fn init(&mut self, width: i32, height: i32) {
+    fn init(&mut self, width: i32, height: i32, bpp: u8) {
         self.width = width;
         self.height = height;
+        self.bytes_pp = ((bpp as usize + 7) / 8) as u8;
+        self.pitch = (width as usize) * (self.bytes_pp as usize);
+
         let cols = width / FONT_CHAR_WIDTH;
         let rows = height / FONT_CHAR_HEIGHT;
         self.cols = cols.clamp(1, SHELL_SCROLLBACK_COLS as i32);
@@ -114,6 +133,34 @@ impl ShellConsole {
             self.enabled = false;
             return;
         }
+
+        // Allocate shared memory buffer for the surface
+        let buffer_size = self.pitch * (height as usize);
+        let token = sys_shm_create(buffer_size as u64, 0);
+        if token == 0 {
+            let _ = sys_write(b"shell: failed to create shm buffer\n");
+            self.enabled = false;
+            return;
+        }
+
+        let ptr = sys_shm_map(token, SHM_ACCESS_RW);
+        if ptr == 0 {
+            let _ = sys_write(b"shell: failed to map shm buffer\n");
+            self.enabled = false;
+            return;
+        }
+
+        // Attach buffer as a window surface
+        if sys_surface_attach(token, width as u32, height as u32) != 0 {
+            let _ = sys_write(b"shell: failed to attach surface\n");
+            self.enabled = false;
+            return;
+        }
+
+        self.shm_token = token;
+        self.shm_ptr = ptr as *mut u8;
+        self.shm_size = buffer_size;
+
         self.enabled = true;
         self.cursor_col = 0;
         self.cursor_line = 0;
@@ -126,19 +173,30 @@ impl ShellConsole {
         self.clear();
     }
 
+    /// Get a mutable DrawBuffer for the surface
+    fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
+        if !self.enabled || self.shm_ptr.is_null() {
+            return None;
+        }
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(self.shm_ptr, self.shm_size)
+        };
+        DrawBuffer::new(
+            slice,
+            self.width as u32,
+            self.height as u32,
+            self.pitch,
+            self.bytes_pp,
+        )
+    }
+
     fn clear(&mut self) {
         if !self.enabled {
             return;
         }
-        let rect = UserRect {
-            x: 0,
-            y: 0,
-            width: self.width,
-            height: self.height,
-            color: self.bg,
-        };
-        if sys_gfx_fill_rect(&rect) != 0 {
-            let _ = sys_write(b"shell: clear failed\n");
+        let (w, h, bg) = (self.width, self.height, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            gfx::fill_rect(&mut buf, 0, 0, w, h, bg);
         }
         self.cursor_col = 0;
         self.cursor_line = 0;
@@ -161,14 +219,10 @@ impl ShellConsole {
             return;
         }
         let y = row * FONT_CHAR_HEIGHT;
-        let rect = UserRect {
-            x: 0,
-            y,
-            width: self.width,
-            height: FONT_CHAR_HEIGHT,
-            color: self.bg,
-        };
-        let _ = sys_gfx_fill_rect(&rect);
+        let (w, bg) = (self.width, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            gfx::fill_rect(&mut buf, 0, y, w, FONT_CHAR_HEIGHT, bg);
+        }
     }
 
     fn cursor(&self) -> (i32, i32) {
@@ -197,28 +251,21 @@ impl ShellConsole {
         if !self.enabled {
             return;
         }
-        let rect = UserRect {
-            x: 0,
-            y: 0,
-            width: self.width,
-            height: self.height,
-            color: self.bg,
-        };
-        let _ = sys_gfx_fill_rect(&rect);
-        for row in 0..self.rows {
-            self.draw_row_from_scrollback(self.view_top + row, row);
+        let (w, h, bg) = (self.width, self.height, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            gfx::fill_rect(&mut buf, 0, 0, w, h, bg);
+        }
+        let (rows, view_top) = (self.rows, self.view_top);
+        for row in 0..rows {
+            self.draw_row_from_scrollback(view_top + row, row);
         }
     }
 
     fn clear_row(&mut self, row: i32) {
-        let rect = UserRect {
-            x: 0,
-            y: row * FONT_CHAR_HEIGHT,
-            width: self.width,
-            height: FONT_CHAR_HEIGHT,
-            color: self.bg,
-        };
-        let _ = sys_gfx_fill_rect(&rect);
+        let (w, bg) = (self.width, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            gfx::fill_rect(&mut buf, 0, row * FONT_CHAR_HEIGHT, w, FONT_CHAR_HEIGHT, bg);
+        }
     }
 
     fn draw_row_from_scrollback(&mut self, logical: i32, row: i32) {
@@ -246,42 +293,41 @@ impl ShellConsole {
     fn draw_char_at(&mut self, col: i32, row: i32, c: u8) {
         let x = col * FONT_CHAR_WIDTH;
         let y = row * FONT_CHAR_HEIGHT;
-        let buf = [c];
-        let text = UserText {
-            x,
-            y,
-            fg_color: self.fg,
-            bg_color: self.bg,
-            str_ptr: buf.as_ptr() as *const c_char,
-            len: 1,
-        };
-        let _ = sys_font_draw(&text);
+        let (fg, bg) = (self.fg, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            gfx::font::draw_char(&mut buf, x, y, c, fg, bg);
+        }
     }
 
     fn scroll_up_fast(&mut self) -> bool {
         if !self.enabled || self.height <= FONT_CHAR_HEIGHT {
             return false;
         }
-        let blit = UserBlit {
-            src_x: 0,
-            src_y: FONT_CHAR_HEIGHT,
-            dst_x: 0,
-            dst_y: 0,
-            width: self.width,
-            height: self.height - FONT_CHAR_HEIGHT,
-        };
-        if sys_gfx_blit(&blit) != 0 {
-            return false;
+        let (w, h, bg) = (self.width, self.height, self.bg);
+        if let Some(mut buf) = self.draw_buffer() {
+            // Blit content up by one line
+            gfx::blit(
+                &mut buf,
+                0,
+                FONT_CHAR_HEIGHT,
+                0,
+                0,
+                w,
+                h - FONT_CHAR_HEIGHT,
+            );
+            // Clear the bottom line
+            gfx::fill_rect(
+                &mut buf,
+                0,
+                h - FONT_CHAR_HEIGHT,
+                w,
+                FONT_CHAR_HEIGHT,
+                bg,
+            );
+            true
+        } else {
+            false
         }
-        let rect = UserRect {
-            x: 0,
-            y: self.height - FONT_CHAR_HEIGHT,
-            width: self.width,
-            height: FONT_CHAR_HEIGHT,
-            color: self.bg,
-        };
-        let _ = sys_gfx_fill_rect(&rect);
-        true
     }
 
     fn ensure_follow_visible(&mut self) {
@@ -305,17 +351,17 @@ impl ShellConsole {
         self.follow = false;
         if delta < self.rows {
             let shift = delta * FONT_CHAR_HEIGHT;
-            let blit = UserBlit {
-                src_x: 0,
-                src_y: 0,
-                dst_x: 0,
-                dst_y: shift,
-                width: self.width,
-                height: self.height - shift,
+            let (w, h) = (self.width, self.height);
+            let blit_ok = if let Some(mut buf) = self.draw_buffer() {
+                gfx::blit(&mut buf, 0, 0, 0, shift, w, h - shift);
+                true
+            } else {
+                false
             };
-            if sys_gfx_blit(&blit) == 0 {
+            if blit_ok {
+                let view_top = self.view_top;
                 for row in 0..delta {
-                    self.draw_row_from_scrollback(self.view_top + row, row);
+                    self.draw_row_from_scrollback(view_top + row, row);
                 }
                 return;
             }
@@ -342,18 +388,18 @@ impl ShellConsole {
         }
         if delta < self.rows {
             let shift = delta * FONT_CHAR_HEIGHT;
-            let blit = UserBlit {
-                src_x: 0,
-                src_y: shift,
-                dst_x: 0,
-                dst_y: 0,
-                width: self.width,
-                height: self.height - shift,
+            let (w, h) = (self.width, self.height);
+            let blit_ok = if let Some(mut buf) = self.draw_buffer() {
+                gfx::blit(&mut buf, 0, shift, 0, 0, w, h - shift);
+                true
+            } else {
+                false
             };
-            if sys_gfx_blit(&blit) == 0 {
+            if blit_ok {
                 let start = self.rows - delta;
-                for row in start..self.rows {
-                    let logical = self.view_top + row;
+                let (rows, view_top) = (self.rows, self.view_top);
+                for row in start..rows {
+                    let logical = view_top + row;
                     self.draw_row_from_scrollback(logical, row);
                 }
                 return;
@@ -432,14 +478,10 @@ impl ShellConsole {
             let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
             let x = self.cursor_col * FONT_CHAR_WIDTH;
             let y = row * FONT_CHAR_HEIGHT;
-            let rect = UserRect {
-                x,
-                y,
-                width: FONT_CHAR_WIDTH,
-                height: FONT_CHAR_HEIGHT,
-                color: self.bg,
-            };
-            let _ = sys_gfx_fill_rect(&rect);
+            let bg = self.bg;
+            if let Some(mut buf) = self.draw_buffer() {
+                gfx::fill_rect(&mut buf, x, y, FONT_CHAR_WIDTH, FONT_CHAR_HEIGHT, bg);
+            }
         }
     }
 
@@ -532,8 +574,14 @@ fn shell_console_init() {
     if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return;
     }
+
+    // Use fixed window dimensions instead of fullscreen
+    let width = SHELL_WINDOW_WIDTH;
+    let height = SHELL_WINDOW_HEIGHT;
+
     unsafe {
-        SHELL_CONSOLE.init(info.width as i32, info.height as i32);
+        SHELL_CONSOLE.init(width, height, info.bpp);
+        // Window position is set automatically by the kernel in register_surface_for_task
     }
 }
 

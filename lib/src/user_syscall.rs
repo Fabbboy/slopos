@@ -48,21 +48,6 @@ pub extern "C" fn sys_sleep_ms(ms: u64) -> i64 {
 pub extern "C" fn sys_fb_info(out_info: *mut user_fb_info) -> i64 {
     invoke(SYSCALL_FB_INFO, out_info as u64, 0, 0)
 }
-pub extern "C" fn sys_gfx_fill_rect(rect: *const user_rect) -> i64 {
-    invoke(SYSCALL_GFX_FILL_RECT, rect as u64, 0, 0)
-}
-pub extern "C" fn sys_gfx_draw_line(line: *const user_line) -> i64 {
-    invoke(SYSCALL_GFX_DRAW_LINE, line as u64, 0, 0)
-}
-pub extern "C" fn sys_gfx_draw_circle(circle: *const user_circle) -> i64 {
-    invoke(SYSCALL_GFX_DRAW_CIRCLE, circle as u64, 0, 0)
-}
-pub extern "C" fn sys_gfx_draw_circle_filled(circle: *const user_circle) -> i64 {
-    invoke(SYSCALL_GFX_DRAW_CIRCLE_FILLED, circle as u64, 0, 0)
-}
-pub extern "C" fn sys_font_draw(text: *const user_text) -> i64 {
-    invoke(SYSCALL_FONT_DRAW, text as u64, 0, 0)
-}
 pub extern "C" fn sys_random_next() -> u32 {
     invoke(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32
 }

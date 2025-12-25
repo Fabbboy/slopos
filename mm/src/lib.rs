@@ -11,6 +11,7 @@ pub mod page_alloc;
 pub mod paging;
 pub mod phys_virt;
 pub mod process_vm;
+pub mod shared_memory;
 mod tests;
 pub mod user_copy;
 pub mod user_copy_helpers;

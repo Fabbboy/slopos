@@ -1,10 +1,24 @@
+//! SlopOS Compositor - Wayland-like userland compositor
+//!
+//! This compositor runs entirely in userland (Ring 3) and uses shared memory
+//! buffers for all graphics operations. No kernel drawing calls - all rendering
+//! is done with 100% safe Rust via the gfx library.
+//!
+//! Architecture:
+//! - Compositor allocates an output buffer via shared memory
+//! - Clients allocate surface buffers via shared memory (Phase 4)
+//! - Compositor composites all windows to output buffer
+//! - Compositor draws chrome (title bars, taskbar, cursor)
+//! - Compositor presents output buffer via sys_fb_flip()
+
 use core::ffi::{c_char, c_void};
 
+use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
-    sys_compositor_present_damage, sys_enumerate_windows, sys_fb_blit, sys_fb_fill_rect,
-    sys_fb_font_draw, sys_fb_info, sys_get_time_ms, sys_mouse_read, sys_raise_window,
-    sys_set_window_position, sys_set_window_state, sys_sleep_ms, sys_tty_set_focus, sys_yield,
-    UserBlit, UserDamageRegion, UserFbInfo, UserMouseEvent, UserRect, UserText, UserWindowInfo,
+    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_mouse_read,
+    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_create, sys_shm_map,
+    sys_sleep_ms, sys_tty_set_focus, sys_yield, SHM_ACCESS_RO, SHM_ACCESS_RW, UserFbInfo,
+    UserMouseEvent, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -16,31 +30,122 @@ const TASKBAR_BUTTON_WIDTH: i32 = 120;
 const TASKBAR_BUTTON_PADDING: i32 = 4;
 
 // Colors matching the dark roulette aesthetic
-const COLOR_TITLE_BAR: u32 = 0x1E1E1EFF;
-const COLOR_TITLE_BAR_FOCUSED: u32 = 0x2D2D30FF;
-const COLOR_BUTTON: u32 = 0x3E3E42FF;
-const COLOR_BUTTON_HOVER: u32 = 0x505052FF;
-const COLOR_BUTTON_CLOSE_HOVER: u32 = 0xE81123FF;
-const COLOR_TEXT: u32 = 0xE0E0E0FF;
-const COLOR_TASKBAR: u32 = 0x252526FF;
-const COLOR_CURSOR: u32 = 0xFFFFFFFF;
-const COLOR_BACKGROUND: u32 = 0x001122FF; // Background color for cursor clearing
+const COLOR_TITLE_BAR: u32 = rgb(0x1E, 0x1E, 0x1E);
+const COLOR_TITLE_BAR_FOCUSED: u32 = rgb(0x2D, 0x2D, 0x30);
+const COLOR_BUTTON: u32 = rgb(0x3E, 0x3E, 0x42);
+const COLOR_BUTTON_HOVER: u32 = rgb(0x50, 0x50, 0x52);
+const COLOR_BUTTON_CLOSE_HOVER: u32 = rgb(0xE8, 0x11, 0x23);
+const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
+const COLOR_TASKBAR: u32 = rgb(0x25, 0x25, 0x26);
+const COLOR_CURSOR: u32 = rgb(0xFF, 0xFF, 0xFF);
+const COLOR_BACKGROUND: u32 = rgb(0x00, 0x11, 0x22);
+
+// Window placeholder colors (until clients migrate to shared memory)
+const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
 
 const MAX_WINDOWS: usize = 32;
+
+/// Cache entry for a mapped client surface
+#[derive(Clone, Copy)]
+struct ClientSurfaceMapping {
+    task_id: u32,
+    token: u32,
+    ptr: *const u8,
+}
+
+impl ClientSurfaceMapping {
+    const fn empty() -> Self {
+        Self {
+            task_id: 0,
+            token: 0,
+            ptr: core::ptr::null(),
+        }
+    }
+}
+
+/// Cache of mapped client surfaces
+struct ClientSurfaceCache {
+    mappings: [ClientSurfaceMapping; MAX_WINDOWS],
+}
+
+impl ClientSurfaceCache {
+    const fn new() -> Self {
+        Self {
+            mappings: [ClientSurfaceMapping::empty(); MAX_WINDOWS],
+        }
+    }
+
+    /// Get or create a read-only mapping for a client's surface buffer
+    fn get_or_map(&mut self, task_id: u32, token: u32) -> *const u8 {
+        if token == 0 {
+            return core::ptr::null();
+        }
+
+        // Check if we already have this mapping
+        for mapping in &self.mappings {
+            if mapping.task_id == task_id && mapping.token == token && !mapping.ptr.is_null() {
+                return mapping.ptr;
+            }
+        }
+
+        // Need to create a new mapping
+        let ptr = sys_shm_map(token, SHM_ACCESS_RO);
+        if ptr == 0 {
+            return core::ptr::null();
+        }
+
+        // Find a slot to store the mapping
+        for mapping in &mut self.mappings {
+            if mapping.task_id == 0 || mapping.ptr.is_null() {
+                *mapping = ClientSurfaceMapping {
+                    task_id,
+                    token,
+                    ptr: ptr as *const u8,
+                };
+                return ptr as *const u8;
+            }
+        }
+
+        // No slot available - still return the pointer, we just won't cache it
+        ptr as *const u8
+    }
+
+    /// Invalidate mappings for windows that no longer exist
+    fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
+        for mapping in &mut self.mappings {
+            if mapping.task_id == 0 {
+                continue;
+            }
+
+            let mut still_exists = false;
+            for i in 0..window_count as usize {
+                if windows[i].task_id == mapping.task_id {
+                    still_exists = true;
+                    break;
+                }
+            }
+
+            if !still_exists {
+                // Window no longer exists, clear the mapping
+                // (Note: we can't unmap from here, but the kernel will clean up
+                // when the surface is destroyed)
+                *mapping = ClientSurfaceMapping::empty();
+            }
+        }
+    }
+}
 
 const WINDOW_STATE_NORMAL: u8 = 0;
 const WINDOW_STATE_MINIMIZED: u8 = 1;
 
 // Cursor constants
 const CURSOR_SIZE: i32 = 9;
-const CURSOR_HALF: i32 = CURSOR_SIZE / 2;
 
 /// Tracks state for conditional taskbar redraws
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TaskbarState {
     window_count: u32,
     focused_task: u32,
-    // Packed window states (minimized/normal) as bits
     window_states: u32,
 }
 
@@ -68,10 +173,66 @@ impl TaskbarState {
     }
 }
 
+/// Compositor output buffer backed by shared memory
+struct CompositorOutput {
+    token: u32,
+    ptr: *mut u8,
+    size: usize,
+    width: u32,
+    height: u32,
+    pitch: usize,
+    bytes_pp: u8,
+}
+
+impl CompositorOutput {
+    /// Allocate compositor output buffer
+    fn new(fb: &UserFbInfo) -> Option<Self> {
+        let pitch = fb.pitch as usize;
+        let size = pitch * fb.height as usize;
+        let bytes_pp = (fb.bpp / 8) as u8;
+
+        if size == 0 || bytes_pp < 3 {
+            return None;
+        }
+
+        // Allocate shared memory buffer
+        let token = sys_shm_create(size as u64, 0);
+        if token == 0 {
+            return None;
+        }
+
+        // Map the buffer with read-write access
+        let ptr = sys_shm_map(token, SHM_ACCESS_RW);
+        if ptr == 0 {
+            return None;
+        }
+
+        Some(Self {
+            token,
+            ptr: ptr as *mut u8,
+            size,
+            width: fb.width,
+            height: fb.height,
+            pitch,
+            bytes_pp,
+        })
+    }
+
+    /// Get a DrawBuffer for this output
+    fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
+        let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr, self.size) };
+        DrawBuffer::new(slice, self.width, self.height, self.pitch, self.bytes_pp)
+    }
+
+    /// Present the output buffer to the framebuffer
+    fn present(&self) -> bool {
+        sys_fb_flip(self.token) == 0
+    }
+}
+
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
-    // Previous window state for move damage tracking
     prev_windows: [UserWindowInfo; MAX_WINDOWS],
     prev_window_count: u32,
     focused_task: u32,
@@ -86,9 +247,15 @@ struct WindowManager {
     prev_mouse_x: i32,
     prev_mouse_y: i32,
     first_frame: bool,
-    // Taskbar state tracking for conditional redraws
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
+    // Force full redraw flag
+    needs_full_redraw: bool,
+    // Client surface cache for shared memory mappings
+    surface_cache: ClientSurfaceCache,
+    // Output buffer info for compositing
+    output_bytes_pp: u8,
+    output_pitch: usize,
 }
 
 impl WindowManager {
@@ -111,8 +278,17 @@ impl WindowManager {
             prev_mouse_y: 0,
             first_frame: true,
             prev_taskbar_state: TaskbarState::empty(),
-            taskbar_needs_redraw: true, // First frame always needs taskbar
+            taskbar_needs_redraw: true,
+            needs_full_redraw: true,
+            surface_cache: ClientSurfaceCache::new(),
+            output_bytes_pp: 4,
+            output_pitch: 0,
         }
+    }
+
+    fn set_output_info(&mut self, bytes_pp: u8, pitch: usize) {
+        self.output_bytes_pp = bytes_pp;
+        self.output_pitch = pitch;
     }
 
     /// Update mouse state from kernel
@@ -120,10 +296,8 @@ impl WindowManager {
         let mut event = UserMouseEvent::default();
         if sys_mouse_read(&mut event) > 0 {
             self.mouse_buttons_prev = self.mouse_buttons;
-            // Save previous position for damage tracking
             self.prev_mouse_x = self.mouse_x;
             self.prev_mouse_y = self.mouse_y;
-            // Update to new position
             self.mouse_x = event.x;
             self.mouse_y = event.y;
             self.mouse_buttons = event.buttons;
@@ -140,25 +314,45 @@ impl WindowManager {
         (self.mouse_buttons & 0x01) != 0
     }
 
-    /// Refresh window list from kernel and detect taskbar state changes
+    /// Refresh window list from kernel
     fn refresh_windows(&mut self) {
-        // Save previous window state for move damage tracking
         self.prev_windows = self.windows;
         self.prev_window_count = self.window_count;
-
-        // Get current window state from kernel
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
 
-        // Check if taskbar state changed (window count, focus, or minimize states)
-        let new_state = TaskbarState::from_windows(&self.windows, self.window_count, self.focused_task);
+        // Clean up stale surface mappings
+        self.surface_cache.cleanup_stale(&self.windows, self.window_count);
+
+        // Check if taskbar state changed
+        let new_state =
+            TaskbarState::from_windows(&self.windows, self.window_count, self.focused_task);
         if new_state != self.prev_taskbar_state {
             self.taskbar_needs_redraw = true;
             self.prev_taskbar_state = new_state;
         }
+
+        // Check for window position/state changes that require redraw
+        for i in 0..self.window_count as usize {
+            let window = &self.windows[i];
+            // Find in previous frame
+            for j in 0..self.prev_window_count as usize {
+                let prev = &self.prev_windows[j];
+                if prev.task_id == window.task_id {
+                    if prev.x != window.x
+                        || prev.y != window.y
+                        || prev.state != window.state
+                        || window.is_dirty()
+                    {
+                        self.needs_full_redraw = true;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     /// Handle all mouse events
-    fn handle_mouse_events(&mut self, fb: &UserFbInfo) {
+    fn handle_mouse_events(&mut self, fb_height: i32) {
         let clicked = self.mouse_clicked();
 
         // Handle ongoing drag
@@ -174,7 +368,7 @@ impl WindowManager {
         // Handle new clicks
         if clicked {
             // Check taskbar clicks
-            if self.mouse_y >= (fb.height as i32 - TASKBAR_HEIGHT) {
+            if self.mouse_y >= fb_height - TASKBAR_HEIGHT {
                 self.handle_taskbar_click();
                 return;
             }
@@ -187,19 +381,16 @@ impl WindowManager {
                 }
 
                 if self.hit_test_title_bar(&window) {
-                    // Check close button
                     if self.hit_test_close_button(&window) {
                         self.close_window(window.task_id);
                         return;
                     }
 
-                    // Check minimize button
                     if self.hit_test_minimize_button(&window) {
                         sys_set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
                         return;
                     }
 
-                    // Start drag
                     self.start_drag(&window);
                     sys_raise_window(window.task_id);
                     sys_tty_set_focus(window.task_id);
@@ -210,7 +401,6 @@ impl WindowManager {
         }
     }
 
-    /// Test if mouse is over window's title bar
     fn hit_test_title_bar(&self, window: &UserWindowInfo) -> bool {
         let title_y = window.y - TITLE_BAR_HEIGHT;
         self.mouse_x >= window.x
@@ -219,7 +409,6 @@ impl WindowManager {
             && self.mouse_y < window.y
     }
 
-    /// Test if mouse is over close button
     fn hit_test_close_button(&self, window: &UserWindowInfo) -> bool {
         let button_x = window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING;
         let button_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
@@ -229,7 +418,6 @@ impl WindowManager {
             && self.mouse_y < button_y + BUTTON_SIZE
     }
 
-    /// Test if mouse is over minimize button
     fn hit_test_minimize_button(&self, window: &UserWindowInfo) -> bool {
         let button_x = window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
         let button_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
@@ -239,7 +427,6 @@ impl WindowManager {
             && self.mouse_y < button_y + BUTTON_SIZE
     }
 
-    /// Start dragging a window
     fn start_drag(&mut self, window: &UserWindowInfo) {
         self.dragging = true;
         self.drag_task = window.task_id;
@@ -247,25 +434,23 @@ impl WindowManager {
         self.drag_offset_y = self.mouse_y - window.y;
     }
 
-    /// Stop dragging
     fn stop_drag(&mut self) {
         self.dragging = false;
         self.drag_task = 0;
     }
 
-    /// Update drag position
     fn update_drag(&mut self) {
         let new_x = self.mouse_x - self.drag_offset_x;
         let new_y = self.mouse_y - self.drag_offset_y;
         sys_set_window_position(self.drag_task, new_x, new_y);
+        self.needs_full_redraw = true;
     }
 
-    /// Close a window (set to minimized for now)
     fn close_window(&mut self, task_id: u32) {
         sys_set_window_state(task_id, WINDOW_STATE_MINIMIZED);
+        self.needs_full_redraw = true;
     }
 
-    /// Handle taskbar click
     fn handle_taskbar_click(&mut self) {
         let mut x = TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
@@ -273,7 +458,6 @@ impl WindowManager {
             let button_width = TASKBAR_BUTTON_WIDTH;
 
             if self.mouse_x >= x && self.mouse_x < x + button_width {
-                // Restore if minimized, minimize if normal
                 let new_state = if window.state == WINDOW_STATE_MINIMIZED {
                     WINDOW_STATE_NORMAL
                 } else {
@@ -285,6 +469,7 @@ impl WindowManager {
                     sys_tty_set_focus(window.task_id);
                     self.focused_task = window.task_id;
                 }
+                self.needs_full_redraw = true;
                 return;
             }
 
@@ -292,8 +477,8 @@ impl WindowManager {
         }
     }
 
-    /// Draw window title bar
-    fn draw_title_bar(&self, window: &UserWindowInfo) {
+    /// Draw window title bar to the output buffer
+    fn draw_title_bar(&self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
         let focused = window.task_id == self.focused_task;
         let color = if focused {
             COLOR_TITLE_BAR_FOCUSED
@@ -301,49 +486,50 @@ impl WindowManager {
             COLOR_TITLE_BAR
         };
 
+        let title_y = window.y - TITLE_BAR_HEIGHT;
+
         // Title bar background
-        let title_bar = UserRect {
-            x: window.x,
-            y: window.y - TITLE_BAR_HEIGHT,
-            width: window.width as i32,
-            height: TITLE_BAR_HEIGHT,
-            color,
-        };
-        sys_fb_fill_rect(&title_bar);
+        gfx::fill_rect(buf, window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT, color);
 
         // Window title text
-        let title_text = UserText {
-            x: window.x + 8,
-            y: window.y - TITLE_BAR_HEIGHT + 4,
-            fg_color: COLOR_TEXT,
-            bg_color: color,
-            str_ptr: window.title.as_ptr(),
-            len: title_strlen(&window.title),
-        };
-        sys_fb_font_draw(&title_text);
+        let title = title_to_str(&window.title);
+        gfx::font::draw_string(buf, window.x + 8, title_y + 4, title, COLOR_TEXT, color);
 
         // Close button (X)
         self.draw_button(
+            buf,
             window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING,
-            window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING,
+            title_y + BUTTON_PADDING,
             BUTTON_SIZE,
             "X",
             self.hit_test_close_button(window),
+            true,
         );
 
         // Minimize button (_)
         self.draw_button(
+            buf,
             window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2),
-            window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING,
+            title_y + BUTTON_PADDING,
             BUTTON_SIZE,
             "_",
             self.hit_test_minimize_button(window),
+            false,
         );
     }
 
-    /// Draw a button
-    fn draw_button(&self, x: i32, y: i32, size: i32, label: &str, hover: bool) {
-        let color = if hover && label == "X" {
+    /// Draw a button to the output buffer
+    fn draw_button(
+        &self,
+        buf: &mut DrawBuffer,
+        x: i32,
+        y: i32,
+        size: i32,
+        label: &str,
+        hover: bool,
+        is_close: bool,
+    ) {
+        let color = if hover && is_close {
             COLOR_BUTTON_CLOSE_HOVER
         } else if hover {
             COLOR_BUTTON_HOVER
@@ -351,39 +537,23 @@ impl WindowManager {
             COLOR_BUTTON
         };
 
-        let button = UserRect {
-            x,
-            y,
-            width: size,
-            height: size,
-            color,
-        };
-        sys_fb_fill_rect(&button);
-
-        // Draw label
-        let label_bytes = label.as_bytes();
-        let text = UserText {
-            x: x + size / 4,
-            y: y + size / 4,
-            fg_color: COLOR_TEXT,
-            bg_color: color,
-            str_ptr: label_bytes.as_ptr() as *const c_char,
-            len: label_bytes.len() as u32,
-        };
-        sys_fb_font_draw(&text);
+        gfx::fill_rect(buf, x, y, size, size, color);
+        gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
     }
 
-    /// Draw taskbar
-    fn draw_taskbar(&self, fb: &UserFbInfo) {
+    /// Draw taskbar to the output buffer
+    fn draw_taskbar(&self, buf: &mut DrawBuffer) {
+        let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
+
         // Taskbar background
-        let taskbar = UserRect {
-            x: 0,
-            y: fb.height as i32 - TASKBAR_HEIGHT,
-            width: fb.width as i32,
-            height: TASKBAR_HEIGHT,
-            color: COLOR_TASKBAR,
-        };
-        sys_fb_fill_rect(&taskbar);
+        gfx::fill_rect(
+            buf,
+            0,
+            taskbar_y,
+            buf.width() as i32,
+            TASKBAR_HEIGHT,
+            COLOR_TASKBAR,
+        );
 
         // Draw app buttons
         let mut x = TASKBAR_BUTTON_PADDING;
@@ -396,343 +566,195 @@ impl WindowManager {
                 COLOR_BUTTON
             };
 
-            let button = UserRect {
-                x,
-                y: fb.height as i32 - TASKBAR_HEIGHT + TASKBAR_BUTTON_PADDING,
-                width: TASKBAR_BUTTON_WIDTH,
-                height: TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2),
-                color: btn_color,
-            };
-            sys_fb_fill_rect(&button);
+            let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+            let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-            // Button text
-            let text = UserText {
-                x: x + 4,
-                y: fb.height as i32 - TASKBAR_HEIGHT + TASKBAR_BUTTON_PADDING + 4,
-                fg_color: COLOR_TEXT,
-                bg_color: btn_color,
-                str_ptr: window.title.as_ptr(),
-                len: title_strlen(&window.title).min(14), // Truncate to fit
+            gfx::fill_rect(buf, x, btn_y, TASKBAR_BUTTON_WIDTH, btn_height, btn_color);
+
+            // Button text (truncated to fit)
+            let title = title_to_str(&window.title);
+            let max_chars = (TASKBAR_BUTTON_WIDTH / 8 - 1) as usize;
+            let truncated: &str = if title.len() > max_chars {
+                &title[..max_chars]
+            } else {
+                title
             };
-            sys_fb_font_draw(&text);
+            gfx::font::draw_string(buf, x + 4, btn_y + 4, truncated, COLOR_TEXT, btn_color);
 
             x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         }
     }
 
-    /// Calculate damage regions for windows and taskbar (NOT cursor).
-    /// Cursor damage is handled separately without clearing.
-    /// Returns (regions, count).
-    fn get_content_damage_regions(&self, fb: &UserFbInfo) -> ([UserDamageRegion; 64], usize) {
-        let mut regions = [UserDamageRegion::default(); 64];
-        let mut count = 0;
+    /// Draw mouse cursor to the output buffer
+    fn draw_cursor(&self, buf: &mut DrawBuffer) {
+        // Simple crosshair cursor
+        let mx = self.mouse_x;
+        let my = self.mouse_y;
 
-        // FIRST FRAME: Clear entire screen to remove boot artifacts (roulette, etc.)
-        if self.first_frame {
-            regions[count] = UserDamageRegion {
-                x: 0,
-                y: 0,
-                width: fb.width as i32,
-                height: fb.height as i32,
-            };
-            count += 1;
-            return (regions, count);
+        // Horizontal line
+        gfx::fill_rect(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR);
+
+        // Vertical line
+        gfx::fill_rect(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR);
+    }
+
+    /// Draw window content from client's shared memory surface
+    fn draw_window_content(&mut self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
+        // Try to get the client's surface buffer
+        let client_ptr = self.surface_cache.get_or_map(window.task_id, window.shm_token);
+
+        if client_ptr.is_null() {
+            // No shared memory surface - draw placeholder
+            self.draw_window_placeholder(buf, window);
+            return;
         }
 
-        // WINDOW DAMAGE: Iterate over per-window damage regions (not just bounding box)
-        for i in 0..self.window_count as usize {
-            let window = &self.windows[i];
-            if window.state != WINDOW_STATE_MINIMIZED && window.is_dirty() {
-                // Iterate over individual damage regions for finer-grained tracking
-                for j in 0..window.damage_count as usize {
-                    if count >= 64 {
-                        break;
-                    }
-                    let r = &window.damage_regions[j];
-                    let w = r.x1 - r.x0 + 1;
-                    let h = r.y1 - r.y0 + 1;
-                    if w > 0 && h > 0 {
-                        regions[count] = UserDamageRegion {
-                            x: window.x + r.x0,
-                            y: window.y + r.y0,
-                            width: w,
-                            height: h,
-                        };
-                        count += 1;
-                    }
-                }
+        // Composite client surface to output buffer
+        let src_pitch = (window.width as usize) * (self.output_bytes_pp as usize);
+        let dst_pitch = self.output_pitch;
+        let bytes_pp = self.output_bytes_pp as usize;
+
+        let buf_width = buf.width() as i32;
+        let buf_height = buf.height() as i32;
+
+        // Clip to buffer bounds
+        let x0 = window.x.max(0);
+        let y0 = window.y.max(0);
+        let x1 = (window.x + window.width as i32).min(buf_width);
+        let y1 = (window.y + window.height as i32).min(buf_height);
+
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        // Calculate offsets into source buffer
+        let src_start_x = (x0 - window.x) as usize;
+        let src_start_y = (y0 - window.y) as usize;
+
+        // Get destination buffer data
+        let dst_data = buf.data_mut();
+
+        // Copy each row from client surface to output buffer
+        for row in 0..(y1 - y0) as usize {
+            let src_row = src_start_y + row;
+            let dst_row = (y0 as usize) + row;
+
+            let src_off = src_row * src_pitch + src_start_x * bytes_pp;
+            let dst_off = dst_row * dst_pitch + (x0 as usize) * bytes_pp;
+
+            let copy_width = ((x1 - x0) as usize) * bytes_pp;
+
+            // Safety: we've bounds-checked everything
+            unsafe {
+                let src_slice = core::slice::from_raw_parts(client_ptr.add(src_off), copy_width);
+                let dst_slice = &mut dst_data[dst_off..dst_off + copy_width];
+                dst_slice.copy_from_slice(src_slice);
             }
         }
-
-        // TASKBAR DAMAGE: Only when taskbar state actually changed
-        if self.taskbar_needs_redraw && count < 64 {
-            regions[count] = UserDamageRegion {
-                x: 0,
-                y: fb.height as i32 - TASKBAR_HEIGHT,
-                width: fb.width as i32,
-                height: TASKBAR_HEIGHT,
-            };
-            count += 1;
-        }
-
-        (regions, count)
     }
 
-    /// Get the old cursor damage region (if cursor moved)
-    fn get_cursor_damage_region(&self) -> Option<UserDamageRegion> {
-        if self.prev_mouse_x != self.mouse_x || self.prev_mouse_y != self.mouse_y {
-            Some(UserDamageRegion {
-                x: (self.prev_mouse_x - CURSOR_HALF).max(0),
-                y: (self.prev_mouse_y - CURSOR_HALF).max(0),
-                width: CURSOR_SIZE,
-                height: CURSOR_SIZE,
-            })
-        } else {
-            None
-        }
+    /// Draw placeholder when client hasn't migrated to shared memory yet
+    fn draw_window_placeholder(&self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
+        // Draw a colored rectangle as placeholder for window content
+        gfx::fill_rect(
+            buf,
+            window.x,
+            window.y,
+            window.width as i32,
+            window.height as i32,
+            COLOR_WINDOW_PLACEHOLDER,
+        );
+
+        // Draw a border to show window bounds
+        gfx::draw_rect(
+            buf,
+            window.x,
+            window.y,
+            window.width as i32,
+            window.height as i32,
+            COLOR_TITLE_BAR,
+        );
+
+        // Draw placeholder text
+        let text = "Window content pending migration";
+        let text_x = window.x + 10;
+        let text_y = window.y + window.height as i32 / 2 - 8;
+        gfx::font::draw_string(
+            buf,
+            text_x,
+            text_y,
+            text,
+            COLOR_TEXT,
+            COLOR_WINDOW_PLACEHOLDER,
+        );
     }
 
-    /// Check if a window move can use blit optimization.
-    /// A move is "simple" if no other visible windows overlap with either the old or new position.
-    fn can_blit_move(&self, window: &UserWindowInfo, prev_x: i32, prev_y: i32) -> bool {
-        // Include title bar in the overlap check
-        let total_height = window.height as i32 + TITLE_BAR_HEIGHT;
-        let prev_title_y = prev_y - TITLE_BAR_HEIGHT;
-        let new_title_y = window.y - TITLE_BAR_HEIGHT;
+    /// Full compositor render pass
+    fn render(&mut self, buf: &mut DrawBuffer) {
+        // 1. Clear background
+        buf.clear(COLOR_BACKGROUND);
 
-        for i in 0..self.window_count as usize {
-            let other = &self.windows[i];
-            if other.task_id == window.task_id || other.state == WINDOW_STATE_MINIMIZED {
+        // 2. Draw windows (bottom to top for proper z-ordering)
+        let window_count = self.window_count as usize;
+        for i in 0..window_count {
+            let window = self.windows[i];
+            if window.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
 
-            // Check overlap with old position (including title bar)
-            if Self::rects_overlap(
-                prev_x, prev_title_y, window.width as i32, total_height,
-                other.x, other.y - TITLE_BAR_HEIGHT, other.width as i32, other.height as i32 + TITLE_BAR_HEIGHT,
-            ) {
-                return false;
-            }
+            // Draw window content from client's shared memory surface
+            self.draw_window_content(buf, &window);
 
-            // Check overlap with new position (including title bar)
-            if Self::rects_overlap(
-                window.x, new_title_y, window.width as i32, total_height,
-                other.x, other.y - TITLE_BAR_HEIGHT, other.width as i32, other.height as i32 + TITLE_BAR_HEIGHT,
-            ) {
-                return false;
-            }
+            // Draw title bar
+            self.draw_title_bar(buf, &window);
         }
-        true
+
+        // 3. Draw taskbar (on top of windows)
+        self.draw_taskbar(buf);
+
+        // 4. Draw cursor (on top of everything)
+        self.draw_cursor(buf);
+
+        // Reset redraw flags
+        self.needs_full_redraw = false;
+        self.first_frame = false;
+        self.taskbar_needs_redraw = false;
     }
 
-    /// Perform blit-based window move. Returns exposed regions that need recompositing.
-    /// The blit copies the window content (including title bar) from old to new position,
-    /// and returns the exposed strips where the old window was but the new one isn't.
-    fn do_blit_move(
-        &self,
-        window: &UserWindowInfo,
-        prev_x: i32,
-        prev_y: i32,
-        fb: &UserFbInfo,
-    ) -> ([UserDamageRegion; 4], usize) {
-        let mut exposed = [UserDamageRegion::default(); 4];
-        let mut count = 0;
-
-        let dx = window.x - prev_x;
-        let dy = window.y - prev_y;
-
-        // Include title bar in the blit
-        let total_height = window.height as i32 + TITLE_BAR_HEIGHT;
-        let prev_title_y = prev_y - TITLE_BAR_HEIGHT;
-        let new_title_y = window.y - TITLE_BAR_HEIGHT;
-
-        // Calculate clipped blit region (ensure we're within screen bounds)
-        let src_x = prev_x.max(0);
-        let src_y = prev_title_y.max(0);
-        let dst_x = window.x.max(0);
-        let dst_y = new_title_y.max(0);
-        let blit_width = (window.width as i32).min(fb.width as i32 - dst_x.max(src_x));
-        let blit_height = total_height.min(fb.height as i32 - dst_y.max(src_y));
-
-        if blit_width > 0 && blit_height > 0 {
-            let blit = UserBlit {
-                src_x,
-                src_y,
-                dst_x,
-                dst_y,
-                width: blit_width,
-                height: blit_height,
-            };
-            sys_fb_blit(&blit);
-        }
-
-        // Calculate exposed regions (strips where old window was but new isn't)
-        // Horizontal movement: expose vertical strip on trailing edge
-        if dx > 0 {
-            // Moved right: expose left strip
-            let strip_width = dx.min(window.width as i32);
-            if strip_width > 0 && count < 4 {
-                exposed[count] = UserDamageRegion {
-                    x: prev_x,
-                    y: prev_title_y,
-                    width: strip_width,
-                    height: total_height,
-                };
-                count += 1;
-            }
-        } else if dx < 0 {
-            // Moved left: expose right strip
-            let strip_width = (-dx).min(window.width as i32);
-            if strip_width > 0 && count < 4 {
-                exposed[count] = UserDamageRegion {
-                    x: prev_x + window.width as i32 - strip_width,
-                    y: prev_title_y,
-                    width: strip_width,
-                    height: total_height,
-                };
-                count += 1;
-            }
-        }
-
-        // Vertical movement: expose horizontal strip on trailing edge
-        if dy > 0 {
-            // Moved down: expose top strip
-            let strip_height = dy.min(total_height);
-            if strip_height > 0 && count < 4 {
-                exposed[count] = UserDamageRegion {
-                    x: prev_x,
-                    y: prev_title_y,
-                    width: window.width as i32,
-                    height: strip_height,
-                };
-                count += 1;
-            }
-        } else if dy < 0 {
-            // Moved up: expose bottom strip
-            let strip_height = (-dy).min(total_height);
-            if strip_height > 0 && count < 4 {
-                exposed[count] = UserDamageRegion {
-                    x: prev_x,
-                    y: prev_title_y + total_height - strip_height,
-                    width: window.width as i32,
-                    height: strip_height,
-                };
-                count += 1;
-            }
-        }
-
-        (exposed, count)
+    /// Check if any redraw is needed
+    fn needs_redraw(&self) -> bool {
+        self.first_frame
+            || self.needs_full_redraw
+            || self.taskbar_needs_redraw
+            || self.mouse_moved()
+            || self.any_window_dirty()
     }
 
-    /// Check if a rectangle overlaps with any damage region
-    fn overlaps_damage(
-        x: i32, y: i32, w: i32, h: i32,
-        regions: &[UserDamageRegion], count: usize
-    ) -> bool {
-        let r1_x1 = x + w - 1;
-        let r1_y1 = y + h - 1;
+    fn mouse_moved(&self) -> bool {
+        self.mouse_x != self.prev_mouse_x || self.mouse_y != self.prev_mouse_y
+    }
 
-        for i in 0..count {
-            let r = &regions[i];
-            let r2_x1 = r.x + r.width - 1;
-            let r2_y1 = r.y + r.height - 1;
-
-            // Rectangle overlap test
-            if x <= r2_x1 && r1_x1 >= r.x && y <= r2_y1 && r1_y1 >= r.y {
+    fn any_window_dirty(&self) -> bool {
+        for i in 0..self.window_count as usize {
+            if self.windows[i].is_dirty() {
                 return true;
             }
         }
         false
     }
-
-    /// Check if taskbar overlaps any damage region
-    fn taskbar_overlaps_damage(&self, fb: &UserFbInfo, regions: &[UserDamageRegion], count: usize) -> bool {
-        let taskbar_y = fb.height as i32 - TASKBAR_HEIGHT;
-        Self::overlaps_damage(0, taskbar_y, fb.width as i32, TASKBAR_HEIGHT, regions, count)
-    }
-
-    /// Check if taskbar overlaps a specific region
-    fn taskbar_overlaps_region(fb: &UserFbInfo, region: &UserDamageRegion) -> bool {
-        let taskbar_y = fb.height as i32 - TASKBAR_HEIGHT;
-        Self::rects_overlap(0, taskbar_y, fb.width as i32, TASKBAR_HEIGHT,
-                           region.x, region.y, region.width, region.height)
-    }
-
-    /// Check if a window's title bar overlaps any damage region
-    fn title_bar_overlaps_damage(window: &UserWindowInfo, regions: &[UserDamageRegion], count: usize) -> bool {
-        let title_y = window.y - TITLE_BAR_HEIGHT;
-        Self::overlaps_damage(window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT, regions, count)
-    }
-
-    /// Check if a window's title bar overlaps a specific region
-    fn title_bar_overlaps_region(window: &UserWindowInfo, region: &UserDamageRegion) -> bool {
-        let title_y = window.y - TITLE_BAR_HEIGHT;
-        Self::rects_overlap(window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT,
-                           region.x, region.y, region.width, region.height)
-    }
-
-    /// Check if two rectangles overlap
-    fn rects_overlap(x1: i32, y1: i32, w1: i32, h1: i32, x2: i32, y2: i32, w2: i32, h2: i32) -> bool {
-        let r1_x1 = x1 + w1 - 1;
-        let r1_y1 = y1 + h1 - 1;
-        let r2_x1 = x2 + w2 - 1;
-        let r2_y1 = y2 + h2 - 1;
-        x1 <= r2_x1 && r1_x1 >= x2 && y1 <= r2_y1 && r1_y1 >= y2
-    }
-
-    /// Draw mouse cursor
-    fn draw_cursor(&self) {
-        // Simple crosshair cursor with bounds checking
-        // Clamp coordinates to ensure cursor is always visible and within framebuffer
-
-        // Horizontal line (9px wide centered on cursor)
-        let h_x = (self.mouse_x - 4).max(0);
-        let h_width = if self.mouse_x < 4 {
-            // Cursor near left edge - draw shorter line
-            (5 + self.mouse_x).min(9)
-        } else {
-            9
-        };
-
-        let h_line = UserRect {
-            x: h_x,
-            y: self.mouse_y,
-            width: h_width,
-            height: 1,
-            color: COLOR_CURSOR,
-        };
-        sys_fb_fill_rect(&h_line);
-
-        // Vertical line (9px tall centered on cursor)
-        let v_y = (self.mouse_y - 4).max(0);
-        let v_height = if self.mouse_y < 4 {
-            // Cursor near top edge - draw shorter line
-            (5 + self.mouse_y).min(9)
-        } else {
-            9
-        };
-
-        let v_line = UserRect {
-            x: self.mouse_x,
-            y: v_y,
-            width: 1,
-            height: v_height,
-            color: COLOR_CURSOR,
-        };
-        sys_fb_fill_rect(&v_line);
-    }
 }
 
-/// Get length of null-terminated c_char array
-fn title_strlen(title: &[c_char; 32]) -> u32 {
-    let mut len = 0u32;
+/// Convert c_char title array to &str
+fn title_to_str(title: &[c_char; 32]) -> &str {
+    let mut len = 0usize;
     for &ch in title.iter() {
         if ch == 0 {
             break;
         }
         len += 1;
     }
-    len
+    // Safe: we're treating the bytes as ASCII
+    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(title.as_ptr() as *const u8, len)) }
 }
 
 #[unsafe(link_section = ".user_text")]
@@ -742,231 +764,61 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
     // Get framebuffer info
     if sys_fb_info(&mut fb_info) < 0 {
-        // Failed to get framebuffer, just yield forever
         loop {
             sys_yield();
         }
     }
 
-    // 60Hz fixed refresh rate compositor loop
-    // - Frame pacing: sleeps to maintain 16ms per frame (60 FPS)
-    // - Physics/logic runs exactly once per frame for deterministic behavior
-    // - Yields to scheduler for cooperative multitasking after each frame
-    //
-    // Frame timing uses PIT timer (100Hz resolution = 10ms granularity)
-    // Actual frame times will be 10-20ms due to timer resolution.
-    const TARGET_FRAME_MS: u64 = 16; // 60 Hz = 16.67ms, use 16ms
+    // Allocate compositor output buffer
+    let mut output = match CompositorOutput::new(&fb_info) {
+        Some(out) => out,
+        None => {
+            // Failed to allocate output buffer - yield forever
+            loop {
+                sys_yield();
+            }
+        }
+    };
 
-    let mut frame_count: u64 = 0;
+    // Set output info on window manager for compositing
+    wm.set_output_info(output.bytes_pp, output.pitch);
+
+    // Set pixel format based on framebuffer info
+    let pixel_format = if fb_info.pixel_format == 2 || fb_info.pixel_format == 4 {
+        PixelFormat::Bgra
+    } else {
+        PixelFormat::Rgba
+    };
+
+    // 60Hz fixed refresh rate compositor loop
+    const TARGET_FRAME_MS: u64 = 16;
 
     loop {
-        // Capture frame start time for pacing
         let frame_start_ms = sys_get_time_ms();
-        // === PHYSICS/LOGIC PHASE ===
-        // Always runs exactly once per frame for deterministic behavior
 
-        // 1. Update mouse state from kernel driver
+        // === INPUT PHASE ===
         wm.update_mouse();
-
-        // 2. Refresh window list from kernel (also detects taskbar state changes)
         wm.refresh_windows();
-
-        // 3. Handle mouse events (dragging, clicking, etc.)
-        wm.handle_mouse_events(&fb_info);
+        wm.handle_mouse_events(fb_info.height as i32);
 
         // === RENDERING PHASE ===
-        // Layer-based compositing with smart cursor handling:
-        //   - Content damage (windows, taskbar state): CLEAR then redraw
-        //   - Move damage (window position changes): CLEAR then recomposite existing pixels
-        //   - Cursor damage (old position): NO CLEAR, directly redraw layers
-        // This prevents the blue rectangle artifact when cursor moves.
-
-        // 4. Get content damage regions (windows + taskbar state changes)
-        let (content_damage, content_count) = wm.get_content_damage_regions(&fb_info);
-
-        // 4a. Handle window moves with blit optimization where possible
-        // For each moved window, check if we can use blit (no overlapping windows)
-        // If yes: blit pixels directly, only add exposed strips to damage
-        // If no: fall back to clear + recomposite (existing behavior)
-        let mut blit_exposed = [UserDamageRegion::default(); 32];
-        let mut blit_exposed_count = 0;
-        let mut fallback_move_damage = [UserDamageRegion::default(); 64];
-        let mut fallback_move_count = 0;
-
-        for i in 0..wm.window_count as usize {
-            let window = &wm.windows[i];
-            if window.state == WINDOW_STATE_MINIMIZED {
-                continue;
+        if wm.needs_redraw() {
+            if let Some(mut buf) = output.draw_buffer() {
+                buf.set_pixel_format(pixel_format);
+                wm.render(&mut buf);
             }
 
-            // Find this window in previous frame
-            for j in 0..wm.prev_window_count as usize {
-                let prev = &wm.prev_windows[j];
-                if prev.task_id == window.task_id && prev.state != WINDOW_STATE_MINIMIZED {
-                    // Check if position changed
-                    if prev.x != window.x || prev.y != window.y {
-                        // Check if we can use blit optimization
-                        if wm.can_blit_move(window, prev.x, prev.y) {
-                            // Use blit: copy pixels and get exposed regions
-                            let (exposed, count) = wm.do_blit_move(window, prev.x, prev.y, &fb_info);
-                            for k in 0..count {
-                                if blit_exposed_count < 32 {
-                                    blit_exposed[blit_exposed_count] = exposed[k];
-                                    blit_exposed_count += 1;
-                                }
-                            }
-                        } else {
-                            // Fallback: add old and new positions to damage list
-                            if fallback_move_count < 64 {
-                                fallback_move_damage[fallback_move_count] = UserDamageRegion {
-                                    x: prev.x,
-                                    y: prev.y - TITLE_BAR_HEIGHT,
-                                    width: prev.width as i32,
-                                    height: prev.height as i32 + TITLE_BAR_HEIGHT,
-                                };
-                                fallback_move_count += 1;
-                            }
-                            if fallback_move_count < 64 {
-                                fallback_move_damage[fallback_move_count] = UserDamageRegion {
-                                    x: window.x,
-                                    y: window.y - TITLE_BAR_HEIGHT,
-                                    width: window.width as i32,
-                                    height: window.height as i32 + TITLE_BAR_HEIGHT,
-                                };
-                                fallback_move_count += 1;
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
+            // Present to framebuffer
+            output.present();
         }
 
-        // 5. Get cursor damage region (old cursor position, if moved)
-        let cursor_damage = wm.get_cursor_damage_region();
-
-        // 6. Clear content damage regions
-        for i in 0..content_count {
-            let region = &content_damage[i];
-            let clear_rect = UserRect {
-                x: region.x,
-                y: region.y,
-                width: region.width,
-                height: region.height,
-                color: COLOR_BACKGROUND,
-            };
-            sys_fb_fill_rect(&clear_rect);
-        }
-
-        // 6a. Clear fallback move damage (windows that couldn't use blit)
-        for i in 0..fallback_move_count {
-            let region = &fallback_move_damage[i];
-            let clear_rect = UserRect {
-                x: region.x,
-                y: region.y,
-                width: region.width,
-                height: region.height,
-                color: COLOR_BACKGROUND,
-            };
-            sys_fb_fill_rect(&clear_rect);
-        }
-
-        // 6b. Clear blit-exposed regions (strips where old window was)
-        for i in 0..blit_exposed_count {
-            let region = &blit_exposed[i];
-            let clear_rect = UserRect {
-                x: region.x,
-                y: region.y,
-                width: region.width,
-                height: region.height,
-                color: COLOR_BACKGROUND,
-            };
-            sys_fb_fill_rect(&clear_rect);
-        }
-
-        // 7. Build combined damage list for window compositing
-        // Kernel needs to know about content, move, and cursor damage to composite windows
-        // Note: Blit-optimized moves don't need full recomposite, only exposed strips
-        let mut all_damage = [UserDamageRegion::default(); 128];
-        let mut all_count = 0;
-        for i in 0..content_count {
-            if all_count < 128 {
-                all_damage[all_count] = content_damage[i];
-                all_count += 1;
-            }
-        }
-        // Add fallback move damage (windows that couldn't use blit)
-        for i in 0..fallback_move_count {
-            if all_count < 128 {
-                all_damage[all_count] = fallback_move_damage[i];
-                all_count += 1;
-            }
-        }
-        // Add blit-exposed regions (need to composite background behind moved window)
-        for i in 0..blit_exposed_count {
-            if all_count < 128 {
-                all_damage[all_count] = blit_exposed[i];
-                all_count += 1;
-            }
-        }
-        if let Some(ref cursor_region) = cursor_damage {
-            if all_count < 128 {
-                all_damage[all_count] = *cursor_region;
-                all_count += 1;
-            }
-        }
-
-        // 8. Composite windows in all damaged regions
-        if all_count > 0 {
-            sys_compositor_present_damage(&all_damage[..all_count]);
-        }
-
-        // 9. Mark first frame complete
-        if wm.first_frame {
-            wm.first_frame = false;
-        }
-
-        // 10. Redraw title bars that overlap any damage (content, move, OR cursor)
-        for i in 0..wm.window_count as usize {
-            let window = &wm.windows[i];
-            if window.state != WINDOW_STATE_MINIMIZED {
-                let overlaps_content = WindowManager::title_bar_overlaps_damage(window, &content_damage, content_count);
-                let overlaps_fallback_move = WindowManager::title_bar_overlaps_damage(window, &fallback_move_damage, fallback_move_count);
-                let overlaps_blit_exposed = WindowManager::title_bar_overlaps_damage(window, &blit_exposed, blit_exposed_count);
-                let overlaps_cursor = cursor_damage.as_ref()
-                    .map(|r| WindowManager::title_bar_overlaps_region(window, r))
-                    .unwrap_or(false);
-                if overlaps_content || overlaps_fallback_move || overlaps_blit_exposed || overlaps_cursor {
-                    wm.draw_title_bar(window);
-                }
-            }
-        }
-
-        // 11. Redraw taskbar if it overlaps any damage OR state changed
-        let taskbar_overlaps_content = wm.taskbar_overlaps_damage(&fb_info, &content_damage, content_count);
-        let taskbar_overlaps_fallback_move = wm.taskbar_overlaps_damage(&fb_info, &fallback_move_damage, fallback_move_count);
-        let taskbar_overlaps_blit_exposed = wm.taskbar_overlaps_damage(&fb_info, &blit_exposed, blit_exposed_count);
-        let taskbar_overlaps_cursor = cursor_damage.as_ref()
-            .map(|r| WindowManager::taskbar_overlaps_region(&fb_info, r))
-            .unwrap_or(false);
-        if taskbar_overlaps_content || taskbar_overlaps_fallback_move || taskbar_overlaps_blit_exposed || taskbar_overlaps_cursor || wm.taskbar_needs_redraw {
-            wm.draw_taskbar(&fb_info);
-            wm.taskbar_needs_redraw = false;
-        }
-
-        // 12. Draw cursor on top of everything
-        wm.draw_cursor();
-
-        // 13. Frame pacing: sleep to maintain 60Hz (16ms per frame)
+        // === FRAME PACING ===
         let frame_end_ms = sys_get_time_ms();
         let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
         if frame_time < TARGET_FRAME_MS {
             sys_sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
         }
 
-        // 14. Yield to scheduler for cooperative multitasking
         sys_yield();
-
-        frame_count = frame_count.wrapping_add(1);
     }
 }

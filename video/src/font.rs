@@ -594,13 +594,6 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
     &buf[..len]
 }
 
-pub(crate) fn font_glyph(c: u8) -> Option<&'static [u8; FONT_CHAR_HEIGHT as usize]> {
-    if !(FONT_FIRST_CHAR..=FONT_LAST_CHAR).contains(&c) {
-        return None;
-    }
-    let idx = (c - FONT_FIRST_CHAR) as usize;
-    Some(&FONT_DATA[idx])
-}
 pub fn font_draw_string(
     x: i32,
     y: i32,

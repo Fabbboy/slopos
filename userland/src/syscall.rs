@@ -11,14 +11,6 @@ pub const SYSCALL_ROULETTE: u64 = 4;
 pub const SYSCALL_SLEEP_MS: u64 = 5;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_FB_INFO: u64 = 6;
-pub const SYSCALL_GFX_FILL_RECT: u64 = 7;
-pub const SYSCALL_GFX_DRAW_LINE: u64 = 8;
-pub const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
-pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
-pub const SYSCALL_FONT_DRAW: u64 = 11;
-pub const SYSCALL_GFX_BLIT: u64 = 26;
-pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
-pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
 pub const SYSCALL_RANDOM_NEXT: u64 = 12;
 pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
 pub const SYSCALL_ROULETTE_DRAW: u64 = 24;
@@ -37,10 +29,19 @@ pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
 pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
 pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
 pub const SYSCALL_RAISE_WINDOW: u64 = 33;
-pub const SYSCALL_FB_FILL_RECT: u64 = 34;
-pub const SYSCALL_FB_FONT_DRAW: u64 = 35;
-pub const SYSCALL_FB_BLIT: u64 = 37;
 pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
+
+// Shared memory syscalls for Wayland-like compositor
+pub const SYSCALL_SHM_CREATE: u64 = 40;
+pub const SYSCALL_SHM_MAP: u64 = 41;
+pub const SYSCALL_SHM_UNMAP: u64 = 42;
+pub const SYSCALL_SHM_DESTROY: u64 = 43;
+pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
+pub const SYSCALL_FB_FLIP: u64 = 45;
+
+/// Shared memory access flags
+pub const SHM_ACCESS_RO: u32 = 0;
+pub const SHM_ACCESS_RW: u32 = 1;
 
 pub const USER_FS_OPEN_READ: u32 = 0x1;
 pub const USER_FS_OPEN_WRITE: u32 = 0x2;
@@ -55,57 +56,6 @@ pub struct UserFbInfo {
     pub pitch: u32,
     pub bpp: u8,
     pub pixel_format: u8,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserLine {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserCircle {
-    pub cx: i32,
-    pub cy: i32,
-    pub radius: i32,
-    pub color: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserText {
-    pub x: i32,
-    pub y: i32,
-    pub fg_color: u32,
-    pub bg_color: u32,
-    pub str_ptr: *const c_char,
-    pub len: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserBlit {
-    pub src_x: i32,
-    pub src_y: i32,
-    pub dst_x: i32,
-    pub dst_y: i32,
-    pub width: i32,
-    pub height: i32,
 }
 
 #[repr(C)]
@@ -194,6 +144,8 @@ pub struct UserWindowInfo {
     pub state: u8,
     pub damage_count: u8,
     pub _padding: [u8; 2],
+    /// Shared memory token for this surface (0 if not using shared memory)
+    pub shm_token: u32,
     // Individual damage regions
     pub damage_regions: [UserWindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [c_char; 32],
@@ -217,6 +169,7 @@ impl Default for UserWindowInfo {
             state: 0,
             damage_count: 0,
             _padding: [0; 2],
+            shm_token: 0,
             damage_regions: [UserWindowDamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],
         }
@@ -331,70 +284,6 @@ pub fn sys_fb_info(out: &mut UserFbInfo) -> i64 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_gfx_fill_rect(rect: &UserRect) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_FILL_RECT, rect as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_gfx_draw_line(line: &UserLine) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_DRAW_LINE, line as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_gfx_draw_circle(circle: &UserCircle) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_DRAW_CIRCLE, circle as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_gfx_draw_circle_filled(circle: &UserCircle) -> i64 {
-    unsafe {
-        syscall(
-            SYSCALL_GFX_DRAW_CIRCLE_FILLED,
-            circle as *const _ as u64,
-            0,
-            0,
-        ) as i64
-    }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_font_draw(text: &UserText) -> i64 {
-    unsafe { syscall(SYSCALL_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_gfx_blit(blit: &UserBlit) -> i64 {
-    unsafe { syscall(SYSCALL_GFX_BLIT, blit as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_compositor_present() -> i64 {
-    unsafe { syscall(SYSCALL_COMPOSITOR_PRESENT, 0, 0, 0) as i64 }
-}
-
-/// Compositor present with damage tracking (Wayland-style)
-/// Only recomposites regions that have damage
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_compositor_present_damage(damage_regions: &[UserDamageRegion]) -> i64 {
-    unsafe {
-        syscall(
-            SYSCALL_COMPOSITOR_PRESENT_DAMAGE,
-            damage_regions.as_ptr() as u64,
-            damage_regions.len() as u64,
-            0,
-        ) as i64
-    }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn sys_tty_set_focus(task_id: u32) -> i64 {
     unsafe { syscall(SYSCALL_TTY_SET_FOCUS, task_id as u64, 0, 0) as i64 }
 }
@@ -498,24 +387,6 @@ pub fn sys_raise_window(task_id: u32) -> i64 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fb_fill_rect(rect: &UserRect) -> i64 {
-    unsafe { syscall(SYSCALL_FB_FILL_RECT, rect as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_fb_font_draw(text: &UserText) -> i64 {
-    unsafe { syscall(SYSCALL_FB_FONT_DRAW, text as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_fb_blit(blit: &UserBlit) -> i64 {
-    unsafe { syscall(SYSCALL_FB_BLIT, blit as *const _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn sys_halt() -> ! {
     unsafe {
         syscall(SYSCALL_HALT, 0, 0, 0);
@@ -529,4 +400,79 @@ pub fn sys_halt() -> ! {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_commit() -> i64 {
     unsafe { syscall(SYSCALL_SURFACE_COMMIT, 0, 0, 0) as i64 }
+}
+
+// =============================================================================
+// Shared Memory Syscalls (Wayland-like compositor)
+// =============================================================================
+
+/// Create a shared memory buffer.
+/// Returns a token (> 0) on success, or 0 on failure.
+///
+/// # Arguments
+/// * `size` - Size of the buffer in bytes
+/// * `flags` - Reserved for future use (pass 0)
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_shm_create(size: u64, flags: u32) -> u32 {
+    unsafe { syscall(SYSCALL_SHM_CREATE, size, flags as u64, 0) as u32 }
+}
+
+/// Map a shared memory buffer into the caller's address space.
+/// Returns virtual address on success, or 0 on failure.
+///
+/// # Arguments
+/// * `token` - Token from sys_shm_create
+/// * `access` - SHM_ACCESS_RO (0) or SHM_ACCESS_RW (1)
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_shm_map(token: u32, access: u32) -> u64 {
+    unsafe { syscall(SYSCALL_SHM_MAP, token as u64, access as u64, 0) }
+}
+
+/// Unmap a shared memory buffer from the caller's address space.
+/// Returns 0 on success, -1 on failure.
+///
+/// # Arguments
+/// * `virt_addr` - Virtual address from sys_shm_map
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_shm_unmap(virt_addr: u64) -> i64 {
+    unsafe { syscall(SYSCALL_SHM_UNMAP, virt_addr, 0, 0) as i64 }
+}
+
+/// Destroy a shared memory buffer (owner only).
+/// Returns 0 on success, -1 on failure.
+///
+/// # Arguments
+/// * `token` - Token from sys_shm_create
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_shm_destroy(token: u32) -> i64 {
+    unsafe { syscall(SYSCALL_SHM_DESTROY, token as u64, 0, 0) as i64 }
+}
+
+/// Attach a shared memory buffer as a window surface.
+/// Returns 0 on success, -1 on failure.
+///
+/// # Arguments
+/// * `token` - Token from sys_shm_create
+/// * `width` - Surface width in pixels
+/// * `height` - Surface height in pixels
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
+    unsafe { syscall(SYSCALL_SURFACE_ATTACH, token as u64, width as u64, height as u64) as i64 }
+}
+
+/// Copy a shared memory buffer to the framebuffer MMIO (compositor only).
+/// This is the "page flip" operation - presents the compositor's output buffer.
+/// Returns 0 on success, -1 on failure.
+///
+/// # Arguments
+/// * `token` - Token of the output buffer to present
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_fb_flip(token: u32) -> i64 {
+    unsafe { syscall(SYSCALL_FB_FLIP, token as u64, 0, 0) as i64 }
 }

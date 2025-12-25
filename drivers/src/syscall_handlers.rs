@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 use core::ptr;
 
 use crate::random;
@@ -16,8 +16,7 @@ use crate::syscall_types::{
     InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE,
 };
 use crate::video_bridge;
-use slopos_lib::{klog_debug, SYSCALL_FB_BLIT, SYSCALL_FB_FILL_RECT, SYSCALL_FB_FONT_DRAW};
-use slopos_mm::user_copy_helpers::{UserCircle, UserLine, UserRect, UserText};
+use slopos_lib::klog_debug;
 
 #[repr(C)]
 pub struct UserFbInfo {
@@ -45,19 +44,7 @@ pub struct UserSysInfo {
 use crate::fate::{self, FateResult};
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
-use slopos_mm::user_copy::user_copy_from_user;
 use slopos_mm::paging;
-use slopos_mm::user_copy_helpers::{
-    UserBlit, user_copy_blit_checked, user_copy_circle_checked, user_copy_line_checked,
-    user_copy_rect_checked, user_copy_text_header,
-};
-use crate::video_bridge::{VideoError, VideoResult};
-use core::sync::atomic::{AtomicU8, Ordering};
-const GFX_LOG_MAX_TASKS: usize = 32;
-static GFX_FAIL_LOGGED: [AtomicU8; GFX_LOG_MAX_TASKS] = {
-    const ZERO: AtomicU8 = AtomicU8::new(0);
-    [ZERO; GFX_LOG_MAX_TASKS]
-};
 
 use crate::scheduler_callbacks::{
     call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
@@ -70,34 +57,11 @@ use crate::pit::{pit_get_frequency, pit_poll_delay_ms, pit_sleep_ms};
 use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
 
-fn syscall_finish_gfx(frame: *mut InterruptFrame, rc: VideoResult) -> SyscallDisposition {
-    if rc.is_ok() {
-        syscall_return_ok(frame, 0)
-    } else {
-        syscall_return_err(frame, u64::MAX)
-    }
-}
-
-fn video_result_from_font(rc: c_int) -> VideoResult {
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(VideoError::Invalid)
-    }
-}
-
 fn task_has_flag(task: *mut Task, flag: u16) -> bool {
     if task.is_null() {
         return false;
     }
     unsafe { (*task).flags & flag != 0 }
-}
-
-fn log_gfx_failure(task_id: u32, label: &str) {
-    let idx = task_id as usize;
-    if idx < GFX_LOG_MAX_TASKS && GFX_FAIL_LOGGED[idx].swap(1, Ordering::Relaxed) == 0 {
-        klog_debug!("gfx: {} failed for task {}", label, task_id);
-    }
 }
 
 pub fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
@@ -296,259 +260,6 @@ pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
     syscall_return_ok(frame, 0)
 }
 
-pub fn syscall_gfx_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut rect = UserRect {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        color: 0,
-    };
-    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::surface_draw_rect_filled_fast(
-        task_id,
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-        rect.color,
-    );
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "fill_rect");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_gfx_draw_line(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut line = UserLine {
-        x0: 0,
-        y0: 0,
-        x1: 0,
-        y1: 0,
-        color: 0,
-    };
-    if unsafe { user_copy_line_checked(&mut line, (*frame).rdi as *const UserLine) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc =
-        video_bridge::surface_draw_line(task_id, line.x0, line.y0, line.x1, line.y1, line.color);
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "draw_line");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_gfx_draw_circle(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut circle = UserCircle {
-        cx: 0,
-        cy: 0,
-        radius: 0,
-        color: 0,
-    };
-    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc =
-        video_bridge::surface_draw_circle(task_id, circle.cx, circle.cy, circle.radius, circle.color);
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "draw_circle");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_gfx_draw_circle_filled(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
-    let mut circle = UserCircle {
-        cx: 0,
-        cy: 0,
-        radius: 0,
-        color: 0,
-    };
-    if unsafe { user_copy_circle_checked(&mut circle, (*frame).rdi as *const UserCircle) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::surface_draw_circle_filled(
-        task_id,
-        circle.cx,
-        circle.cy,
-        circle.radius,
-        circle.color,
-    );
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "draw_circle_filled");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut text = UserText {
-        x: 0,
-        y: 0,
-        fg_color: 0,
-        bg_color: 0,
-        str_ptr: ptr::null(),
-        len: 0,
-    };
-    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const UserText) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if text.len == 0 || text.len as usize >= USER_IO_MAX_BYTES {
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    let mut buf = [0u8; USER_IO_MAX_BYTES];
-    if user_copy_from_user(
-        buf.as_mut_ptr() as *mut c_void,
-        text.str_ptr as *const c_void,
-        text.len as usize,
-    ) != 0
-    {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    buf[text.len as usize] = 0;
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_result_from_font(video_bridge::surface_font_draw_string(
-        task_id,
-        text.x,
-        text.y,
-        buf.as_ptr() as *const c_char,
-        text.fg_color,
-        text.bg_color,
-    ));
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "font_draw");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_gfx_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut blit = UserBlit {
-        src_x: 0,
-        src_y: 0,
-        dst_x: 0,
-        dst_y: 0,
-        width: 0,
-        height: 0,
-    };
-    if unsafe { user_copy_blit_checked(&mut blit, (*frame).rdi as *const UserBlit) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::surface_blit(
-        task_id,
-        blit.src_x,
-        blit.src_y,
-        blit.dst_x,
-        blit.dst_y,
-        blit.width,
-        blit.height,
-    );
-    if rc.is_ok() {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-        log_gfx_failure(task_id, "blit");
-    }
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_compositor_present(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::compositor_present();
-    let disp = match rc {
-        Ok(_) => syscall_return_ok(frame, 0),
-        Err(_) => {
-            wl_currency::award_loss();
-            syscall_return_err(frame, u64::MAX)
-        }
-    };
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
 pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
         wl_currency::award_loss();
@@ -630,156 +341,6 @@ pub fn syscall_surface_commit(task: *mut Task, frame: *mut InterruptFrame) -> Sy
     }
 }
 
-pub fn syscall_compositor_present_with_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let damage_ptr = unsafe { (*frame).rdi as *const video_bridge::DamageRegion };
-    let damage_count = unsafe { (*frame).rsi as u32 };
-
-    if damage_ptr.is_null() || damage_count == 0 || damage_count > 64 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Copy damage regions from userspace to kernel buffer BEFORE switching page directories
-    let mut kernel_buffer = [video_bridge::DamageRegion {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-    }; 64];
-
-    if user_copy_from_user(
-        kernel_buffer.as_mut_ptr() as *mut c_void,
-        damage_ptr as *const c_void,
-        (damage_count as usize) * core::mem::size_of::<video_bridge::DamageRegion>(),
-    ) != 0
-    {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Now safe to switch to kernel page directory
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-
-    let rc = video_bridge::compositor_present_with_damage(&kernel_buffer[..damage_count as usize]);
-
-    let disp = match rc {
-        Ok(_) => syscall_return_ok(frame, 0),
-        Err(_) => {
-            wl_currency::award_loss();
-            syscall_return_err(frame, u64::MAX)
-        }
-    };
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_fb_fill_rect(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let mut rect = UserRect {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        color: 0,
-    };
-    if unsafe { user_copy_rect_checked(&mut rect, (*frame).rdi as *const UserRect) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::draw_rect_filled_fast(rect.x, rect.y, rect.width, rect.height, rect.color);
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
-pub fn syscall_fb_font_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let mut text = UserText {
-        x: 0,
-        y: 0,
-        fg_color: 0,
-        bg_color: 0,
-        str_ptr: ptr::null(),
-        len: 0,
-    };
-    if unsafe { user_copy_text_header(&mut text, (*frame).rdi as *const UserText) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    if text.len == 0 || text.len as usize >= USER_IO_MAX_BYTES {
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Copy string data from userspace into kernel buffer
-    let mut buf = [0u8; USER_IO_MAX_BYTES];
-    if user_copy_from_user(
-        buf.as_mut_ptr() as *mut c_void,
-        text.str_ptr as *const c_void,
-        text.len as usize,
-    ) != 0
-    {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    buf[text.len as usize] = 0;
-
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::font_draw_string(text.x, text.y, buf.as_ptr() as *const c_char, text.fg_color, text.bg_color);
-    let _ = paging::switch_page_directory(original_dir);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
-pub fn syscall_fb_blit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let mut blit = UserBlit {
-        src_x: 0,
-        src_y: 0,
-        dst_x: 0,
-        dst_y: 0,
-        width: 0,
-        height: 0,
-    };
-    if unsafe { user_copy_blit_checked(&mut blit, (*frame).rdi as *const UserBlit) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::framebuffer_blit(
-        blit.src_x,
-        blit.src_y,
-        blit.dst_x,
-        blit.dst_y,
-        blit.width,
-        blit.height,
-    );
-    let disp = syscall_finish_gfx(frame, rc);
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
-
 pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let value = random::random_next();
     syscall_return_ok(frame, value as u64)
@@ -795,12 +356,13 @@ pub fn syscall_roulette_draw(task: *mut Task, frame: *mut InterruptFrame) -> Sys
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
     let rc = video_bridge::roulette_draw(fate);
-    if rc.is_ok() {
+    let disp = if rc.is_ok() {
         wl_currency::award_win();
+        syscall_return_ok(frame, 0)
     } else {
         wl_currency::award_loss();
-    }
-    let disp = syscall_finish_gfx(frame, rc);
+        syscall_return_err(frame, u64::MAX)
+    };
     let _ = paging::switch_page_directory(original_dir);
     disp
 }
@@ -893,6 +455,163 @@ pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDis
     SyscallDisposition::Ok
 }
 
+// ============================================================================
+// Shared Memory Syscalls for Wayland-like Compositor
+// ============================================================================
+
+/// SHM_CREATE: Allocate a shared memory buffer
+/// rdi = size in bytes, rsi = flags
+/// Returns: token on success, u64::MAX on failure
+pub fn syscall_shm_create(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let size = unsafe { (*frame).rdi };
+    let flags = unsafe { (*frame).rsi as u32 };
+    let task_id = unsafe { (*task).task_id };
+
+    let token = slopos_mm::shared_memory::shm_create(task_id, size, flags);
+    if token == 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, token as u64)
+}
+
+/// SHM_MAP: Map a shared buffer into caller's address space
+/// rdi = token, rsi = access (0=RO, 1=RW)
+/// Returns: virtual address on success, 0 on failure
+pub fn syscall_shm_map(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let token = unsafe { (*frame).rdi as u32 };
+    let access_val = unsafe { (*frame).rsi as u32 };
+    let task_id = unsafe { (*task).task_id };
+
+    let access = match slopos_mm::shared_memory::ShmAccess::from_u32(access_val) {
+        Some(a) => a,
+        None => {
+            wl_currency::award_loss();
+            return syscall_return_err(frame, 0);
+        }
+    };
+
+    let vaddr = slopos_mm::shared_memory::shm_map(task_id, token, access);
+    if vaddr == 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, 0);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, vaddr)
+}
+
+/// SHM_UNMAP: Unmap a shared buffer from caller's address space
+/// rdi = virtual address
+/// Returns: 0 on success, u64::MAX on failure
+pub fn syscall_shm_unmap(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let vaddr = unsafe { (*frame).rdi };
+    let task_id = unsafe { (*task).task_id };
+
+    let result = slopos_mm::shared_memory::shm_unmap(task_id, vaddr);
+    if result != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, 0)
+}
+
+/// SHM_DESTROY: Free a shared buffer (owner only)
+/// rdi = token
+/// Returns: 0 on success, u64::MAX on failure
+pub fn syscall_shm_destroy(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let token = unsafe { (*frame).rdi as u32 };
+    let task_id = unsafe { (*task).task_id };
+
+    let result = slopos_mm::shared_memory::shm_destroy(task_id, token);
+    if result != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, 0)
+}
+
+/// SURFACE_ATTACH: Register a shared buffer as a window surface
+/// rdi = token, rsi = width, rdx = height
+/// Returns: 0 on success, u64::MAX on failure
+pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let token = unsafe { (*frame).rdi as u32 };
+    let width = unsafe { (*frame).rsi as u32 };
+    let height = unsafe { (*frame).rdx as u32 };
+    let task_id = unsafe { (*task).task_id };
+
+    // Register the buffer dimensions with the shared memory subsystem
+    let result = slopos_mm::shared_memory::surface_attach(task_id, token, width, height);
+    if result != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Also register the surface with the video subsystem so it appears in enumerate_windows
+    // Get bpp from framebuffer info
+    let fb_ptr = video_bridge::framebuffer_get_info();
+    let bpp = if !fb_ptr.is_null() {
+        unsafe { (*fb_ptr).bpp as u8 }
+    } else {
+        32 // Default to 32bpp
+    };
+
+    let video_result = video_bridge::register_surface(task_id, width, height, bpp);
+    if video_result != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, 0)
+}
+
+/// FB_FLIP: Copy compositor output buffer to MMIO framebuffer
+/// rdi = token (compositor's output buffer)
+/// Returns: 0 on success, u64::MAX on failure
+/// Only compositor task can call this.
+pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    // Only compositor can flip
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let token = unsafe { (*frame).rdi as u32 };
+
+    // Get buffer physical address and size
+    let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
+    let size = slopos_mm::shared_memory::shm_get_size(token);
+
+    if phys_addr == 0 || size == 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Get framebuffer info
+    let fb_info = video_bridge::framebuffer_get_info();
+    if fb_info.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    // Copy from shared buffer to framebuffer
+    let result = video_bridge::fb_flip_from_shm(phys_addr, size);
+    if result != 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, 0)
+}
+
 use crate::syscall_common::SyscallHandler;
 
 #[repr(C)]
@@ -945,34 +664,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
     table[SYSCALL_FB_INFO as usize] = SyscallEntry {
         handler: Some(syscall_fb_info),
         name: b"fb_info\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GFX_FILL_RECT as usize] = SyscallEntry {
-        handler: Some(syscall_gfx_fill_rect),
-        name: b"gfx_fill_rect\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GFX_DRAW_LINE as usize] = SyscallEntry {
-        handler: Some(syscall_gfx_draw_line),
-        name: b"gfx_draw_line\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GFX_DRAW_CIRCLE as usize] = SyscallEntry {
-        handler: Some(syscall_gfx_draw_circle),
-        name: b"gfx_draw_circle\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GFX_DRAW_CIRCLE_FILLED as usize] = SyscallEntry {
-        handler: Some(syscall_gfx_draw_circle_filled),
-        name: b"gfx_draw_circle_filled\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FONT_DRAW as usize] = SyscallEntry {
-        handler: Some(syscall_font_draw),
-        name: b"font_draw\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_GFX_BLIT as usize] = SyscallEntry {
-        handler: Some(syscall_gfx_blit),
-        name: b"gfx_blit\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_COMPOSITOR_PRESENT as usize] = SyscallEntry {
-        handler: Some(syscall_compositor_present),
-        name: b"compositor_present\0".as_ptr() as *const c_char,
     };
     table[SYSCALL_RANDOM_NEXT as usize] = SyscallEntry {
         handler: Some(syscall_random_next),
@@ -1046,22 +737,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_raise_window),
         name: b"raise_window\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_FB_FILL_RECT as usize] = SyscallEntry {
-        handler: Some(syscall_fb_fill_rect),
-        name: b"fb_fill_rect\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FB_FONT_DRAW as usize] = SyscallEntry {
-        handler: Some(syscall_fb_font_draw),
-        name: b"fb_font_draw\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_COMPOSITOR_PRESENT_DAMAGE as usize] = SyscallEntry {
-        handler: Some(syscall_compositor_present_with_damage),
-        name: b"compositor_present_damage\0".as_ptr() as *const c_char,
-    };
-    table[SYSCALL_FB_BLIT as usize] = SyscallEntry {
-        handler: Some(syscall_fb_blit),
-        name: b"fb_blit\0".as_ptr() as *const c_char,
-    };
     table[SYSCALL_SURFACE_COMMIT as usize] = SyscallEntry {
         handler: Some(syscall_surface_commit),
         name: b"surface_commit\0".as_ptr() as *const c_char,
@@ -1069,6 +744,31 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
     table[SYSCALL_GET_TIME_MS as usize] = SyscallEntry {
         handler: Some(syscall_get_time_ms),
         name: b"get_time_ms\0".as_ptr() as *const c_char,
+    };
+    // Shared memory syscalls for Wayland-like compositor
+    table[SYSCALL_SHM_CREATE as usize] = SyscallEntry {
+        handler: Some(syscall_shm_create),
+        name: b"shm_create\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_MAP as usize] = SyscallEntry {
+        handler: Some(syscall_shm_map),
+        name: b"shm_map\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_UNMAP as usize] = SyscallEntry {
+        handler: Some(syscall_shm_unmap),
+        name: b"shm_unmap\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_DESTROY as usize] = SyscallEntry {
+        handler: Some(syscall_shm_destroy),
+        name: b"shm_destroy\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SURFACE_ATTACH as usize] = SyscallEntry {
+        handler: Some(syscall_surface_attach),
+        name: b"surface_attach\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FB_FLIP as usize] = SyscallEntry {
+        handler: Some(syscall_fb_flip),
+        name: b"fb_flip\0".as_ptr() as *const c_char,
     };
     table
 };
@@ -1083,13 +783,6 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_ROULETTE: u64 = 4;
     pub const SYSCALL_SLEEP_MS: u64 = 5;
     pub const SYSCALL_FB_INFO: u64 = 6;
-    pub const SYSCALL_GFX_FILL_RECT: u64 = 7;
-    pub const SYSCALL_GFX_DRAW_LINE: u64 = 8;
-    pub const SYSCALL_GFX_DRAW_CIRCLE: u64 = 9;
-    pub const SYSCALL_GFX_DRAW_CIRCLE_FILLED: u64 = 10;
-    pub const SYSCALL_FONT_DRAW: u64 = 11;
-    pub const SYSCALL_GFX_BLIT: u64 = 26;
-    pub const SYSCALL_COMPOSITOR_PRESENT: u64 = 27;
     pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
     pub const SYSCALL_RANDOM_NEXT: u64 = 12;
     pub const SYSCALL_ROULETTE_RESULT: u64 = 13;
@@ -1109,9 +802,15 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
     pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
     pub const SYSCALL_RAISE_WINDOW: u64 = 33;
-    pub const SYSCALL_COMPOSITOR_PRESENT_DAMAGE: u64 = 36;
     pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
     pub const SYSCALL_GET_TIME_MS: u64 = 39;
+    // Shared memory syscalls
+    pub const SYSCALL_SHM_CREATE: u64 = 40;
+    pub const SYSCALL_SHM_MAP: u64 = 41;
+    pub const SYSCALL_SHM_UNMAP: u64 = 42;
+    pub const SYSCALL_SHM_DESTROY: u64 = 43;
+    pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
+    pub const SYSCALL_FB_FLIP: u64 = 45;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

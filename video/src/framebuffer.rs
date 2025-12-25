@@ -93,18 +93,6 @@ fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
     }
 }
 
-pub(crate) fn framebuffer_convert_color_for(pixel_format: u8, color: u32) -> u32 {
-    match pixel_format {
-        PIXEL_FORMAT_BGR | PIXEL_FORMAT_BGRA => {
-            ((color & 0xFF0000) >> 16)
-                | (color & 0x00FF00)
-                | ((color & 0x0000FF) << 16)
-                | (color & 0xFF000000)
-        }
-        _ => color,
-    }
-}
-
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > MAX_FRAMEBUFFER_WIDTH {
         return -1;
@@ -377,4 +365,47 @@ pub fn framebuffer_convert_color(color: u32) -> u32 {
 
 pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
+}
+
+/// Copy from a shared memory buffer (by physical address) to the MMIO framebuffer.
+/// This is the "page flip" operation for the userland compositor.
+///
+/// # Arguments
+/// * `shm_phys` - Physical address of the source shared memory buffer
+/// * `size` - Size of the buffer in bytes
+///
+/// # Returns
+/// 0 on success, -1 on failure
+pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
+    let fb = match FRAMEBUFFER.lock().fb {
+        Some(fb) => fb,
+        None => return -1,
+    };
+
+    // Calculate framebuffer size
+    let fb_size = (fb.pitch * fb.height) as usize;
+
+    // Ensure we don't copy more than framebuffer size
+    let copy_size = size.min(fb_size);
+    if copy_size == 0 {
+        return -1;
+    }
+
+    // Convert physical address to virtual using HHDM
+    let shm_virt = mm_phys_to_virt(shm_phys);
+    if shm_virt == 0 {
+        return -1;
+    }
+
+    // Copy from shared memory to framebuffer MMIO
+    // This is a simple memcpy for now - no page flipping hardware support
+    unsafe {
+        ptr::copy_nonoverlapping(
+            shm_virt as *const u8,
+            fb.base,
+            copy_size,
+        );
+    }
+
+    0
 }
