@@ -1,5 +1,5 @@
 #![no_std]
-#![allow(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
@@ -140,11 +140,24 @@ fn paint_banner() {
     let stride = fb.pitch as usize;
     let height = fb.height.min(32) as usize;
     let width = fb.width as usize;
+    let bytes_per_pixel = (fb.bpp as usize) / 8;
     let base = fb.base;
+
+    // Calculate total framebuffer size for bounds checking
+    let fb_size = stride.saturating_mul(fb.height as usize);
+    if fb_size == 0 {
+        return;
+    }
 
     for y in 0..height {
         for x in 0..width {
-            let offset = y * stride + x * (fb.bpp as usize / 8);
+            let offset = y * stride + x * bytes_per_pixel;
+            // Bounds check: ensure we can write 4 bytes at this offset
+            if offset.saturating_add(4) > fb_size {
+                continue;
+            }
+            // SAFETY: We verified offset + 4 <= fb_size, and base points to
+            // valid MMIO framebuffer memory of at least fb_size bytes.
             unsafe {
                 let ptr = base.add(offset);
                 // Simple purple slop hue: ARGB 0x00AA33AA
