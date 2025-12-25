@@ -5,6 +5,7 @@ extern crate alloc;
 
 use core::ffi::c_int;
 use slopos_drivers::serial_println;
+use slopos_drivers::scheduler_callbacks::register_video_task_cleanup_callback;
 use slopos_drivers::video_bridge::{self, VideoCallbacks, VideoResult};
 use slopos_lib::FramebufferInfo;
 
@@ -51,12 +52,20 @@ fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8) -> c_
     surface::register_surface_for_task(task_id, width, height, bpp)
 }
 
+/// Called when a task terminates to clean up its surface resources
+fn task_cleanup_bridge(task_id: u32) {
+    surface::unregister_surface_for_task(task_id);
+}
+
 /// Copy from shared memory buffer to MMIO framebuffer (page flip for Wayland-like compositor)
 fn fb_flip_bridge(shm_phys: u64, size: usize) -> c_int {
     framebuffer::fb_flip_from_shm(shm_phys, size)
 }
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {
+    // Register task cleanup callback early so it's available even if framebuffer init fails
+    register_video_task_cleanup_callback(task_cleanup_bridge);
+
     if let Some(fb) = framebuffer {
         serial_println!(
             "Framebuffer online: {}x{} pitch {} bpp {}",

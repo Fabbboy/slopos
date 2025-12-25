@@ -385,3 +385,31 @@ pub unsafe fn call_get_rsdp_address() -> *const c_void {
         core::ptr::null()
     }
 }
+
+// =============================================================================
+// Video/Surface Cleanup Callbacks
+// =============================================================================
+// These callbacks allow the video crate to hook into task cleanup without
+// creating a circular dependency (sched -> video is not allowed since
+// video -> sched already exists)
+
+/// Callback for cleaning up video/surface resources when a task terminates
+static mut VIDEO_TASK_CLEANUP_CALLBACK: Option<fn(u32)> = None;
+
+/// Register a callback to be called when a task terminates.
+/// Used by the video crate to clean up surface resources.
+pub fn register_video_task_cleanup_callback(callback: fn(u32)) {
+    unsafe {
+        VIDEO_TASK_CLEANUP_CALLBACK = Some(callback);
+    }
+}
+
+/// Call the registered video task cleanup callback.
+/// Called by the scheduler when terminating a task.
+pub fn call_video_task_cleanup(task_id: u32) {
+    unsafe {
+        if let Some(cb) = VIDEO_TASK_CLEANUP_CALLBACK {
+            cb(task_id);
+        }
+    }
+}

@@ -260,7 +260,9 @@ use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir,
 };
+use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
+use slopos_drivers::scheduler_callbacks::call_video_task_cleanup;
 
 fn task_manager_mut() -> *mut TaskManager {
     &raw mut TASK_MANAGER
@@ -672,6 +674,11 @@ pub fn task_terminate(task_id: u32) -> c_int {
         unsafe {
             if (*task_ptr).process_id != INVALID_PROCESS_ID {
                 fileio_destroy_table_for_process((*task_ptr).process_id);
+                // Clean up video/surface resources for this task
+                call_video_task_cleanup(resolved_id);
+                // Clean up shared memory buffers owned by this task
+                // Must happen before destroy_process_vm to properly unmap pages
+                shm_cleanup_task(resolved_id);
                 destroy_process_vm((*task_ptr).process_id);
                 if (*task_ptr).kernel_stack_base != 0 {
                     kfree((*task_ptr).kernel_stack_base as *mut c_void);
