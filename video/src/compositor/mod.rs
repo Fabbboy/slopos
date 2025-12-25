@@ -241,7 +241,11 @@ impl Compositor {
             CompositorEvent::RaiseWindow { task_id } => {
                 if let Some(surface) = self.surfaces.get_mut(&task_id) {
                     surface.z_order = self.next_z_order;
-                    self.next_z_order += 1;
+                    self.next_z_order = self.next_z_order.wrapping_add(1);
+                    // If wrapped, re-normalize all z_orders to prevent stacking issues
+                    if self.next_z_order == 0 {
+                        self.renormalize_z_orders();
+                    }
                     self.needs_compose = true;
                     Ok(())
                 } else {
@@ -323,22 +327,17 @@ impl Compositor {
 
     /// Enumerate visible windows sorted by z-order
     pub fn enumerate_windows(&self) -> Vec<WindowInfo> {
-        let mut windows: Vec<_> = self
+        // Collect z_order alongside WindowInfo to avoid double lookup
+        let mut windows: Vec<(u32, WindowInfo)> = self
             .surfaces
             .values()
             .filter(|s| s.visible)
-            .map(WindowInfo::from_surface)
+            .map(|s| (s.z_order, WindowInfo::from_surface(s)))
             .collect();
 
-        windows.sort_by_key(|w| {
-            // Find the z_order for this window
-            self.surfaces
-                .get(&w.task_id)
-                .map(|s| s.z_order)
-                .unwrap_or(0)
-        });
+        windows.sort_by_key(|(z, _)| *z);
 
-        windows
+        windows.into_iter().map(|(_, w)| w).collect()
     }
 
     /// Get surface info for a specific task
@@ -364,6 +363,22 @@ impl Compositor {
     /// Get the number of surfaces
     pub fn surface_count(&self) -> usize {
         self.surfaces.len()
+    }
+
+    /// Re-normalize z_orders after wraparound to maintain correct stacking.
+    /// Called when next_z_order wraps to 0.
+    fn renormalize_z_orders(&mut self) {
+        // Collect surfaces sorted by current z_order
+        let mut sorted: Vec<_> = self.surfaces.iter_mut().collect();
+        sorted.sort_by_key(|(_, s)| s.z_order);
+
+        // Reassign sequential z_orders starting from 1
+        for (i, (_, surface)) in sorted.into_iter().enumerate() {
+            surface.z_order = (i + 1) as u32;
+        }
+
+        // Set next_z_order to continue after the highest
+        self.next_z_order = (self.surfaces.len() + 1) as u32;
     }
 }
 
