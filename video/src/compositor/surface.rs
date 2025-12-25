@@ -111,25 +111,6 @@ impl PageBuffer {
         unsafe { core::slice::from_raw_parts_mut(self.virt_ptr, self.size) }
     }
 
-    #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        self.virt_ptr
-    }
-
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.virt_ptr
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.size
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.size == 0
-    }
 }
 
 impl Drop for PageBuffer {
@@ -155,10 +136,6 @@ pub struct OwnedBuffer {
     width: u32,
     /// Buffer height in pixels
     height: u32,
-    /// Row stride in bytes
-    pitch: usize,
-    /// Bytes per pixel
-    bytes_pp: u8,
     /// Damage tracking for this buffer
     damage_regions: [DamageRect; MAX_DAMAGE_REGIONS],
     damage_count: u8,
@@ -176,8 +153,6 @@ impl OwnedBuffer {
             data,
             width,
             height,
-            pitch,
-            bytes_pp: bytes_pp as u8,
             damage_regions: [DamageRect::invalid(); MAX_DAMAGE_REGIONS],
             damage_count: 0,
         })
@@ -194,16 +169,6 @@ impl OwnedBuffer {
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        self.data.as_ptr()
-    }
-
-    #[inline]
-    pub fn pixel_offset(&self, x: u32, y: u32) -> usize {
-        (y as usize) * self.pitch + (x as usize) * (self.bytes_pp as usize)
-    }
-
-    #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -211,16 +176,6 @@ impl OwnedBuffer {
     #[inline]
     pub fn height(&self) -> u32 {
         self.height
-    }
-
-    #[inline]
-    pub fn pitch(&self) -> usize {
-        self.pitch
-    }
-
-    #[inline]
-    pub fn bytes_pp(&self) -> u8 {
-        self.bytes_pp
     }
 
     /// Add a damage region to this buffer
@@ -309,12 +264,6 @@ impl DoubleBuffer {
             front: OwnedBuffer::new(width, height, bpp)?,
             back: OwnedBuffer::new(width, height, bpp)?,
         })
-    }
-
-    /// Get mutable access to back buffer for drawing
-    #[inline]
-    pub fn back_mut(&mut self) -> &mut OwnedBuffer {
-        &mut self.back
     }
 
     /// Get immutable access to front buffer for compositing
@@ -428,11 +377,6 @@ impl Surface {
     pub fn add_front_damage(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
         self.buffers.front_mut().add_damage(x0, y0, x1, y1);
         self.dirty = true;
-    }
-
-    /// Clear front buffer damage
-    pub fn clear_front_damage(&mut self) {
-        self.buffers.front_mut().clear_damage();
     }
 
     /// Get surface dimensions
