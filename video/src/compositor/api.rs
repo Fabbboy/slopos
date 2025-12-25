@@ -14,7 +14,6 @@ use slopos_drivers::video_bridge::VideoResult;
 use slopos_lib::FramebufferInfo;
 
 use super::events::CompositorEvent;
-use super::queue::EventQueue;
 use super::{Compositor, WindowInfo};
 
 /// Global compositor instance
@@ -22,9 +21,6 @@ use super::{Compositor, WindowInfo};
 /// Protected by a single mutex. In the event-driven model, this lock is held
 /// only during event processing - much briefer than the old per-surface locks.
 static COMPOSITOR: Mutex<Compositor> = Mutex::new(Compositor::new());
-
-/// Global event queue for deferred processing (if needed)
-static EVENT_QUEUE: EventQueue = EventQueue::new();
 
 // =============================================================================
 // Initialization
@@ -34,17 +30,6 @@ static EVENT_QUEUE: EventQueue = EventQueue::new();
 pub fn init(info: FramebufferInfo) -> c_int {
     let mut compositor = COMPOSITOR.lock();
     compositor.init_framebuffer(info)
-}
-
-/// Process any pending events in the queue
-///
-/// This is called periodically (e.g., from timer interrupt or main loop)
-/// to process deferred events.
-pub fn tick() {
-    if EVENT_QUEUE.has_pending() {
-        let mut compositor = COMPOSITOR.lock();
-        compositor.process_events(&EVENT_QUEUE);
-    }
 }
 
 // =============================================================================
@@ -163,44 +148,4 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
 pub fn framebuffer_snapshot() -> Option<super::FramebufferState> {
     let compositor = COMPOSITOR.lock();
     compositor.framebuffer().copied()
-}
-
-// =============================================================================
-// Legacy Compatibility - Access to compositor state
-// =============================================================================
-
-/// Execute a function with the compositor locked
-///
-/// This is for legacy code that needs direct access to compositor state.
-/// Prefer using the event-based API for new code.
-pub fn with_compositor<F, R>(f: F) -> R
-where
-    F: FnOnce(&Compositor) -> R,
-{
-    let compositor = COMPOSITOR.lock();
-    f(&compositor)
-}
-
-/// Execute a function with the compositor locked mutably
-///
-/// This is for legacy code that needs direct mutable access.
-/// Prefer using the event-based API for new code.
-pub fn with_compositor_mut<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut Compositor) -> R,
-{
-    let mut compositor = COMPOSITOR.lock();
-    f(&mut compositor)
-}
-
-/// Send an event to the queue for deferred processing
-///
-/// Returns true if the event was queued, false if the queue is full.
-pub fn send_event(event: CompositorEvent) -> bool {
-    EVENT_QUEUE.enqueue(event)
-}
-
-/// Check if there are pending events
-pub fn has_pending_events() -> bool {
-    EVENT_QUEUE.has_pending()
 }

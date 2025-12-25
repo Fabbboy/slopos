@@ -17,11 +17,9 @@ use slopos_mm::phys_virt::mm_phys_to_virt;
 
 pub mod api;
 pub mod events;
-pub mod queue;
 pub mod surface;
 
 use events::{CompositorError, CompositorEvent, CompositorResult};
-use queue::EventQueue;
 use surface::{DamageRect, Surface, MAX_DAMAGE_REGIONS};
 
 /// Maximum damage regions exposed per window
@@ -289,14 +287,6 @@ impl Compositor {
                     Err(CompositorError::NoFramebuffer)
                 }
             }
-        }
-    }
-
-    /// Process all pending events from the queue
-    pub fn process_events(&mut self, queue: &EventQueue) {
-        let events = queue.drain();
-        for event in events {
-            let _ = self.handle_event(event);
         }
     }
 
