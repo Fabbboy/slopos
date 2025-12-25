@@ -9,12 +9,16 @@ use slopos_drivers::scheduler_callbacks::register_video_task_cleanup_callback;
 use slopos_drivers::video_bridge::{self, VideoCallbacks, VideoResult};
 use slopos_lib::FramebufferInfo;
 
+pub mod compositor;
 pub mod font;
 pub mod framebuffer;
 pub mod graphics;
 pub mod roulette_core;
-pub mod surface;
 pub mod splash;
+
+// Re-export compositor types for backward compatibility
+pub use compositor::events::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED, WINDOW_STATE_NORMAL};
+pub use compositor::{WindowDamageRect, WindowInfo, MAX_WINDOW_DAMAGE_REGIONS};
 
 fn framebuffer_get_info_bridge() -> *mut slopos_drivers::video_bridge::FramebufferInfoC {
     framebuffer::framebuffer_get_info()
@@ -26,40 +30,40 @@ fn roulette_draw_bridge(fate: u32) -> c_int {
 }
 
 fn surface_enumerate_windows_bridge(out_buffer: *mut video_bridge::WindowInfo, max_count: u32) -> u32 {
-    surface::surface_enumerate_windows(out_buffer as *mut surface::WindowInfo, max_count)
+    compositor::api::surface_enumerate_windows(out_buffer as *mut compositor::WindowInfo, max_count)
 }
 
 fn surface_set_window_position_bridge(task_id: u32, x: i32, y: i32) -> c_int {
-    surface::surface_set_window_position(task_id, x, y)
+    compositor::api::surface_set_window_position(task_id, x, y)
 }
 
 fn surface_set_window_state_bridge(task_id: u32, state: u8) -> c_int {
-    surface::surface_set_window_state(task_id, state)
+    compositor::api::surface_set_window_state(task_id, state)
 }
 
 fn surface_raise_window_bridge(task_id: u32) -> c_int {
-    surface::surface_raise_window(task_id)
+    compositor::api::surface_raise_window(task_id)
 }
 
 fn surface_commit_bridge(task_id: u32) -> c_int {
-    match surface::surface_commit(task_id) {
+    match compositor::api::surface_commit(task_id) {
         Ok(()) => 0,
         Err(_) => -1,
     }
 }
 
 fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8) -> c_int {
-    surface::register_surface_for_task(task_id, width, height, bpp)
+    compositor::api::register_surface_for_task(task_id, width, height, bpp)
 }
 
 /// Called when a task terminates to clean up its surface resources
 fn task_cleanup_bridge(task_id: u32) {
-    surface::unregister_surface_for_task(task_id);
+    compositor::api::unregister_surface_for_task(task_id);
 }
 
 /// Copy from shared memory buffer to MMIO framebuffer (page flip for Wayland-like compositor)
 fn fb_flip_bridge(shm_phys: u64, size: usize) -> c_int {
-    framebuffer::fb_flip_from_shm(shm_phys, size)
+    compositor::api::fb_flip_from_shm(shm_phys, size)
 }
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {
@@ -75,8 +79,15 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             fb.bpp
         );
 
+        // Initialize the legacy framebuffer module (for splash/roulette)
         if framebuffer::init_with_info(fb) != 0 {
             serial_println!("Framebuffer init failed; skipping banner paint.");
+            return;
+        }
+
+        // Initialize the new event-driven compositor
+        if compositor::api::init(fb) != 0 {
+            serial_println!("Compositor init failed");
             return;
         }
 
