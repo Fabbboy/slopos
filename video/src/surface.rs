@@ -62,10 +62,10 @@ impl DamageRect {
 }
 
 // =============================================================================
-// Safe Surface Types (Arc-based Compositor)
+// Surface Types (Arc-based Compositor)
 // =============================================================================
 
-/// Safe owned buffer backed by page frame allocation.
+/// Owned buffer backed by page frame allocation.
 /// Memory is automatically freed when dropped.
 pub struct PageBuffer {
     /// Virtual address of buffer
@@ -356,7 +356,7 @@ impl DoubleBuffer {
 }
 
 /// Thread-safe surface with interior mutability for hot state.
-pub struct SafeSurface {
+pub struct Surface {
     // === Immutable after creation ===
     pub task_id: u32,
     pub pixel_format: u8,
@@ -373,7 +373,7 @@ pub struct SafeSurface {
     window_state: AtomicU8,
 }
 
-impl SafeSurface {
+impl Surface {
     pub fn new(
         task_id: u32,
         width: u32,
@@ -495,36 +495,65 @@ impl SafeSurface {
 }
 
 // =============================================================================
-// Phase 2: Safe Surface Registry
+// Surface Registry
 // =============================================================================
 
 /// Reference-counted surface handle
-pub type SurfaceRef = Arc<SafeSurface>;
+pub type SurfaceRef = Arc<Surface>;
 
-/// New safe surface registry
-/// Lock held briefly only to insert/remove/lookup Arc
-static SAFE_SURFACES: Mutex<BTreeMap<u32, SurfaceRef>> = Mutex::new(BTreeMap::new());
+/// Surface registry - lock held briefly only to insert/remove/lookup Arc
+static SURFACES: Mutex<BTreeMap<u32, SurfaceRef>> = Mutex::new(BTreeMap::new());
 
 /// Get a surface reference (brief lock)
-fn get_safe_surface(task_id: u32) -> Result<SurfaceRef, VideoError> {
-    let registry = SAFE_SURFACES.lock();
+fn get_surface(task_id: u32) -> Result<SurfaceRef, VideoError> {
+    let registry = SURFACES.lock();
     registry.get(&task_id).cloned().ok_or(VideoError::Invalid)
 }
 
 // =============================================================================
-// Safe Surface Operations
+// Public API
 // =============================================================================
 
-/// Safe surface commit
-fn surface_commit_safe(task_id: u32) -> VideoResult {
-    let surface = get_safe_surface(task_id)?;
+/// Exposed damage region for userland (matches DamageRect layout)
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct WindowDamageRect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+/// Maximum damage regions exposed per window (must match MAX_DAMAGE_REGIONS)
+pub const MAX_WINDOW_DAMAGE_REGIONS: usize = MAX_DAMAGE_REGIONS;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WindowInfo {
+    pub task_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub state: u8,
+    pub damage_count: u8,
+    pub _padding: [u8; 2],
+    /// Shared memory token for this surface (0 if not using shared memory)
+    pub shm_token: u32,
+    // Individual damage regions
+    pub damage_regions: [WindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
+    pub title: [c_char; 32],
+}
+
+/// Commits the back buffer to the front buffer (Wayland-style double buffering).
+pub fn surface_commit(task_id: u32) -> VideoResult {
+    let surface = get_surface(task_id)?;
     surface.commit();
     Ok(())
 }
 
-/// Safe window position update
-fn surface_set_window_position_safe(task_id: u32, x: i32, y: i32) -> c_int {
-    match get_safe_surface(task_id) {
+pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
+    match get_surface(task_id) {
         Ok(surface) => {
             surface.set_position(x, y);
             0
@@ -533,9 +562,8 @@ fn surface_set_window_position_safe(task_id: u32, x: i32, y: i32) -> c_int {
     }
 }
 
-/// Safe window state update
-fn surface_set_window_state_safe(task_id: u32, state: u8) -> c_int {
-    match get_safe_surface(task_id) {
+pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
+    match get_surface(task_id) {
         Ok(surface) => {
             surface.set_window_state(state);
             0
@@ -544,9 +572,9 @@ fn surface_set_window_state_safe(task_id: u32, state: u8) -> c_int {
     }
 }
 
-/// Safe window raise (increase z-order)
-fn surface_raise_window_safe(task_id: u32) -> c_int {
-    match get_safe_surface(task_id) {
+/// Raise window (increase z-order)
+pub fn surface_raise_window(task_id: u32) -> c_int {
+    match get_surface(task_id) {
         Ok(surface) => {
             let new_z = NEXT_Z_ORDER.fetch_add(1, Ordering::Relaxed);
             surface.set_z_order(new_z);
@@ -556,13 +584,13 @@ fn surface_raise_window_safe(task_id: u32) -> c_int {
     }
 }
 
-/// Safe implementation of surface_enumerate_windows using SAFE_SURFACES registry
-fn surface_enumerate_windows_safe(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
+/// Enumerate all visible windows for compositor
+pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
     if out_buffer.is_null() || max_count == 0 {
         return 0;
     }
 
-    let registry = SAFE_SURFACES.lock();
+    let registry = SURFACES.lock();
     let mut count = 0u32;
 
     for (&task_id, surface) in registry.iter() {
@@ -613,84 +641,28 @@ fn surface_enumerate_windows_safe(out_buffer: *mut WindowInfo, max_count: u32) -
             info._padding = [0; 2];
             info.shm_token = shm_token;
             info.damage_regions = damage_regions;
-            info.title = [0; 32]; // No title in SafeSurface - return empty
+            info.title = [0; 32]; // No title in Surface - return empty
         }
         count += 1;
     }
     count
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Commits the back buffer to the front buffer (Wayland-style double buffering).
-pub fn surface_commit(task_id: u32) -> VideoResult {
-    surface_commit_safe(task_id)
-}
-
-pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
-    surface_set_window_position_safe(task_id, x, y)
-}
-
-pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
-    surface_set_window_state_safe(task_id, state)
-}
-
-pub fn surface_raise_window(task_id: u32) -> c_int {
-    surface_raise_window_safe(task_id)
-}
-
-/// Exposed damage region for userland (matches DamageRect layout)
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-pub struct WindowDamageRect {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-}
-
-/// Maximum damage regions exposed per window (must match MAX_DAMAGE_REGIONS)
-pub const MAX_WINDOW_DAMAGE_REGIONS: usize = MAX_DAMAGE_REGIONS;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct WindowInfo {
-    pub task_id: u32,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub state: u8,
-    pub damage_count: u8,
-    pub _padding: [u8; 2],
-    /// Shared memory token for this surface (0 if not using shared memory)
-    pub shm_token: u32,
-    // Individual damage regions
-    pub damage_regions: [WindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
-    pub title: [c_char; 32],
-}
-
-pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
-    surface_enumerate_windows_safe(out_buffer, max_count)
-}
-
 /// Register a surface for a task when it calls surface_attach.
-/// This creates a SafeSurface entry so the compositor can see it.
+/// This creates a Surface entry so the compositor can see it.
 /// The actual pixel data comes from the shared memory buffer.
 pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8) -> c_int {
     // Check if already registered
     {
-        let registry = SAFE_SURFACES.lock();
+        let registry = SURFACES.lock();
         if registry.contains_key(&task_id) {
             // Already registered, update is fine
             return 0;
         }
     }
 
-    // Create a new SafeSurface for this task
-    let surface = match SafeSurface::new(task_id, width, height, bpp, 0) {
+    // Create a new Surface for this task
+    let surface = match Surface::new(task_id, width, height, bpp, 0) {
         Ok(s) => Arc::new(s),
         Err(_) => return -1,
     };
@@ -705,7 +677,7 @@ pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8)
     surface.set_position(50 + offset, 50 + offset);
 
     // Register in the global registry
-    let mut registry = SAFE_SURFACES.lock();
+    let mut registry = SURFACES.lock();
     registry.insert(task_id, surface);
 
     0
@@ -713,6 +685,6 @@ pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8)
 
 /// Unregister a surface for a task (called on task exit or surface destruction)
 pub fn unregister_surface_for_task(task_id: u32) {
-    let mut registry = SAFE_SURFACES.lock();
+    let mut registry = SURFACES.lock();
     registry.remove(&task_id);
 }
