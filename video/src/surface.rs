@@ -360,6 +360,8 @@ pub struct Surface {
     // === Immutable after creation ===
     pub task_id: u32,
     pub pixel_format: u8,
+    /// Shared memory token for this surface (stored at registration to avoid lock nesting)
+    pub shm_token: u32,
 
     // === Per-surface lock for buffer access ===
     buffers: Mutex<DoubleBuffer>,
@@ -380,10 +382,12 @@ impl Surface {
         height: u32,
         bpp: u8,
         pixel_format: u8,
+        shm_token: u32,
     ) -> Result<Self, VideoError> {
         Ok(Self {
             task_id,
             pixel_format,
+            shm_token,
             buffers: Mutex::new(DoubleBuffer::new(width, height, bpp)?),
             dirty: AtomicBool::new(true),
             window_x: AtomicI32::new(0),
@@ -626,8 +630,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             (front.width(), front.height(), dmg_count, regions)
         };
 
-        // Look up shared memory token for this surface
-        let shm_token = slopos_mm::shared_memory::get_surface_for_task(task_id).0;
+        // Use the shm_token stored in the surface (avoids nested lock acquisition)
+        let shm_token = surface.shm_token;
 
         unsafe {
             let info = &mut *out_buffer.add(count as usize);
@@ -651,7 +655,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
 /// Register a surface for a task when it calls surface_attach.
 /// This creates a Surface entry so the compositor can see it.
 /// The actual pixel data comes from the shared memory buffer.
-pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8) -> c_int {
+/// The shm_token is stored in the surface to avoid nested lock acquisition during enumeration.
+pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> c_int {
     // Check if already registered
     {
         let registry = SURFACES.lock();
@@ -661,8 +666,8 @@ pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8)
         }
     }
 
-    // Create a new Surface for this task
-    let surface = match Surface::new(task_id, width, height, bpp, 0) {
+    // Create a new Surface for this task with the shm_token stored
+    let surface = match Surface::new(task_id, width, height, bpp, 0, shm_token) {
         Ok(s) => Arc::new(s),
         Err(_) => return -1,
     };

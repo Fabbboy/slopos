@@ -77,8 +77,8 @@ pub struct VideoCallbacks {
     /// Args: (shm_phys_addr, size) -> c_int
     pub fb_flip: Option<fn(u64, usize) -> c_int>,
     /// Register a surface for a task (called on surface_attach)
-    /// Args: (task_id, width, height, bpp) -> c_int
-    pub register_surface: Option<fn(u32, u32, u32, u8) -> c_int>,
+    /// Args: (task_id, width, height, bpp, shm_token) -> c_int
+    pub register_surface: Option<fn(u32, u32, u32, u8, u32) -> c_int>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -157,10 +157,10 @@ pub fn surface_commit(task_id: u32) -> c_int {
 
 /// Register a surface for a task (called when surface_attach is invoked)
 /// This creates the surface entry so it appears in enumerate_windows
-pub fn register_surface(task_id: u32, width: u32, height: u32, bpp: u8) -> c_int {
+pub fn register_surface(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> c_int {
     if let Some(cbs) = VIDEO_CALLBACKS.get() {
         if let Some(cb) = cbs.register_surface {
-            return cb(task_id, width, height, bpp);
+            return cb(task_id, width, height, bpp, shm_token);
         }
     }
     -1

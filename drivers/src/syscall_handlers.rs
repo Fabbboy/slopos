@@ -562,7 +562,8 @@ pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> Sy
         32 // Default to 32bpp
     };
 
-    let video_result = video_bridge::register_surface(task_id, width, height, bpp);
+    // Pass the shm token so it's stored in the surface (avoids lock nesting in enumerate_windows)
+    let video_result = video_bridge::register_surface(task_id, width, height, bpp, token);
     if video_result != 0 {
         wl_currency::award_loss();
         return syscall_return_err(frame, u64::MAX);
