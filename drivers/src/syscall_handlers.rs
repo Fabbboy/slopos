@@ -613,6 +613,20 @@ pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     syscall_return_ok(frame, 0)
 }
 
+/// DRAIN_QUEUE: Process pending client operations (compositor only)
+/// Called by compositor at start of each frame to process queued client operations.
+/// Returns: 0 on success
+pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    // Only compositor can drain the queue
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    video_bridge::drain_queue();
+    syscall_return_ok(frame, 0)
+}
+
 use crate::syscall_common::SyscallHandler;
 
 #[repr(C)]
@@ -771,6 +785,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_fb_flip),
         name: b"fb_flip\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_DRAIN_QUEUE as usize] = SyscallEntry {
+        handler: Some(syscall_drain_queue),
+        name: b"drain_queue\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -812,6 +830,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SHM_DESTROY: u64 = 43;
     pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
     pub const SYSCALL_FB_FLIP: u64 = 45;
+    pub const SYSCALL_DRAIN_QUEUE: u64 = 46;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

@@ -36,3 +36,4 @@ pub const SYSCALL_SHM_UNMAP: u64 = 42;
 pub const SYSCALL_SHM_DESTROY: u64 = 43;
 pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
 pub const SYSCALL_FB_FLIP: u64 = 45;
+pub const SYSCALL_DRAIN_QUEUE: u64 = 46;

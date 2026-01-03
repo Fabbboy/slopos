@@ -79,6 +79,8 @@ pub struct VideoCallbacks {
     /// Register a surface for a task (called on surface_attach)
     /// Args: (task_id, width, height, bpp, shm_token) -> c_int
     pub register_surface: Option<fn(u32, u32, u32, u8, u32) -> c_int>,
+    /// Drain the compositor queue (called by compositor at start of each frame)
+    pub drain_queue: Option<fn()>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -164,6 +166,16 @@ pub fn register_surface(task_id: u32, width: u32, height: u32, bpp: u8, shm_toke
         }
     }
     -1
+}
+
+/// Drain the compositor queue (called by compositor at start of each frame)
+/// Processes all pending client operations (commits, registers, unregisters)
+pub fn drain_queue() {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.drain_queue {
+            cb();
+        }
+    }
 }
 
 fn video_result_from_code(rc: c_int) -> VideoResult {

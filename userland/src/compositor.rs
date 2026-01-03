@@ -15,10 +15,10 @@ use core::ffi::{c_char, c_void};
 
 use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
-    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_mouse_read,
-    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_create, sys_shm_map,
-    sys_sleep_ms, sys_tty_set_focus, sys_yield, SHM_ACCESS_RO, SHM_ACCESS_RW, UserFbInfo,
-    UserMouseEvent, UserWindowInfo,
+    sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
+    sys_mouse_read, sys_raise_window, sys_set_window_position, sys_set_window_state,
+    sys_shm_create, sys_shm_map, sys_sleep_ms, sys_tty_set_focus, sys_yield, SHM_ACCESS_RO,
+    SHM_ACCESS_RW, UserFbInfo, UserMouseEvent, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -795,6 +795,11 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
     loop {
         let frame_start_ms = sys_get_time_ms();
+
+        // === QUEUE DRAIN PHASE ===
+        // Process all pending client operations (commits, registers, unregisters)
+        // Must be called before enumerate_windows to ensure consistent state
+        sys_drain_queue();
 
         // === INPUT PHASE ===
         wm.update_mouse();

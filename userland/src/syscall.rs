@@ -38,6 +38,7 @@ pub const SYSCALL_SHM_UNMAP: u64 = 42;
 pub const SYSCALL_SHM_DESTROY: u64 = 43;
 pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
 pub const SYSCALL_FB_FLIP: u64 = 45;
+pub const SYSCALL_DRAIN_QUEUE: u64 = 46;
 
 /// Shared memory access flags
 pub const SHM_ACCESS_RO: u32 = 0;
@@ -475,4 +476,13 @@ pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_flip(token: u32) -> i64 {
     unsafe { syscall(SYSCALL_FB_FLIP, token as u64, 0, 0) as i64 }
+}
+
+/// Drain the compositor queue (compositor only).
+/// Processes all pending client operations (commits, registers, unregisters).
+/// Must be called at the start of each compositor frame, before enumerate_windows.
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_drain_queue() {
+    unsafe { syscall(SYSCALL_DRAIN_QUEUE, 0, 0, 0); }
 }

@@ -13,7 +13,7 @@ pub mod font;
 pub mod framebuffer;
 pub mod graphics;
 pub mod roulette_core;
-pub mod surface;
+pub mod compositor_context;
 pub mod splash;
 
 fn framebuffer_get_info_bridge() -> *mut slopos_drivers::video_bridge::FramebufferInfoC {
@@ -26,35 +26,40 @@ fn roulette_draw_bridge(fate: u32) -> c_int {
 }
 
 fn surface_enumerate_windows_bridge(out_buffer: *mut video_bridge::WindowInfo, max_count: u32) -> u32 {
-    surface::surface_enumerate_windows(out_buffer as *mut surface::WindowInfo, max_count)
+    compositor_context::surface_enumerate_windows(out_buffer as *mut compositor_context::WindowInfo, max_count)
 }
 
 fn surface_set_window_position_bridge(task_id: u32, x: i32, y: i32) -> c_int {
-    surface::surface_set_window_position(task_id, x, y)
+    compositor_context::surface_set_window_position(task_id, x, y)
 }
 
 fn surface_set_window_state_bridge(task_id: u32, state: u8) -> c_int {
-    surface::surface_set_window_state(task_id, state)
+    compositor_context::surface_set_window_state(task_id, state)
 }
 
 fn surface_raise_window_bridge(task_id: u32) -> c_int {
-    surface::surface_raise_window(task_id)
+    compositor_context::surface_raise_window(task_id)
 }
 
 fn surface_commit_bridge(task_id: u32) -> c_int {
-    match surface::surface_commit(task_id) {
+    match compositor_context::surface_commit(task_id) {
         Ok(()) => 0,
         Err(_) => -1,
     }
 }
 
 fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> c_int {
-    surface::register_surface_for_task(task_id, width, height, bpp, shm_token)
+    compositor_context::register_surface_for_task(task_id, width, height, bpp, shm_token)
 }
 
 /// Called when a task terminates to clean up its surface resources
 fn task_cleanup_bridge(task_id: u32) {
-    surface::unregister_surface_for_task(task_id);
+    compositor_context::unregister_surface_for_task(task_id);
+}
+
+/// Drain the compositor queue - called by compositor at start of each frame
+fn drain_queue_bridge() {
+    compositor_context::drain_queue();
 }
 
 /// Copy from shared memory buffer to MMIO framebuffer (page flip for Wayland-like compositor)
@@ -90,6 +95,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             surface_commit: Some(surface_commit_bridge),
             fb_flip: Some(fb_flip_bridge),
             register_surface: Some(register_surface_bridge),
+            drain_queue: Some(drain_queue_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {
