@@ -4,7 +4,6 @@ use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;
 
-const MOUSE_BUFFER_SIZE: usize = 256;
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
 const PS2_COMMAND_PORT: u16 = 0x64;
@@ -13,36 +12,6 @@ const PS2_COMMAND_PORT: u16 = 0x64;
 pub const MOUSE_BUTTON_LEFT: u8 = 0x01;
 pub const MOUSE_BUTTON_RIGHT: u8 = 0x02;
 pub const MOUSE_BUTTON_MIDDLE: u8 = 0x04;
-
-#[derive(Clone, Copy)]
-struct MouseEvent {
-    x: i32,
-    y: i32,
-    buttons: u8,
-}
-
-#[derive(Clone, Copy)]
-struct MouseBuffer {
-    data: [MouseEvent; MOUSE_BUFFER_SIZE],
-    head: u32,
-    tail: u32,
-    count: u32,
-}
-
-impl MouseBuffer {
-    const fn new() -> Self {
-        Self {
-            data: [MouseEvent {
-                x: 0,
-                y: 0,
-                buttons: 0,
-            }; MOUSE_BUFFER_SIZE],
-            head: 0,
-            tail: 0,
-            count: 0,
-        }
-    }
-}
 
 struct MouseState {
     x: i32,
@@ -63,8 +32,6 @@ static mut MOUSE_STATE: MouseState = MouseState {
     max_x: 1024,
     max_y: 768,
 };
-
-static mut EVENT_BUFFER: MouseBuffer = MouseBuffer::new();
 
 #[inline(always)]
 fn ps2_wait_input() {
@@ -188,14 +155,6 @@ pub fn mouse_init() {
         MOUSE_STATE.x = MOUSE_STATE.max_x / 2;
         MOUSE_STATE.y = MOUSE_STATE.max_y / 2;
         MOUSE_STATE.packet_byte = 0;
-
-        // Generate initial mouse event so compositor knows starting position
-        let initial_event = MouseEvent {
-            x: MOUSE_STATE.x,
-            y: MOUSE_STATE.y,
-            buttons: 0,
-        };
-        buffer_push(initial_event);
     }
 
     klog_info!("PS/2 mouse initialized at ({}, {})",
@@ -212,18 +171,6 @@ pub fn mouse_set_bounds(width: i32, height: i32) {
     }
 }
 
-#[inline(always)]
-unsafe fn buffer_push(event: MouseEvent) {
-    let buf = &raw mut EVENT_BUFFER;
-    if (*buf).count >= MOUSE_BUFFER_SIZE as u32 {
-        (*buf).tail = ((*buf).tail + 1) % MOUSE_BUFFER_SIZE as u32;
-        (*buf).count = (*buf).count.saturating_sub(1);
-    }
-    (*buf).data[(*buf).head as usize] = event;
-    (*buf).head = ((*buf).head + 1) % MOUSE_BUFFER_SIZE as u32;
-    (*buf).count = (*buf).count.saturating_add(1);
-}
-
 /// Get current timestamp in milliseconds for input events.
 fn get_timestamp_ms() -> u64 {
     let ticks = irq::get_timer_ticks();
@@ -232,21 +179,6 @@ fn get_timestamp_ms() -> u64 {
         return 0;
     }
     (ticks * 1000) / freq as u64
-}
-
-#[inline(always)]
-unsafe fn buffer_pop() -> Option<MouseEvent> {
-    let buf = &raw mut EVENT_BUFFER;
-    let mut out = None;
-    cpu::disable_interrupts();
-    if (*buf).count > 0 {
-        let event = (*buf).data[(*buf).tail as usize];
-        (*buf).tail = ((*buf).tail + 1) % MOUSE_BUFFER_SIZE as u32;
-        (*buf).count = (*buf).count.saturating_sub(1);
-        out = Some(event);
-    }
-    cpu::enable_interrupts();
-    out
 }
 
 pub fn mouse_handle_irq(scancode: u8) {
@@ -300,13 +232,6 @@ pub fn mouse_handle_irq(scancode: u8) {
         (*state).x = (*state).x.clamp(0, (*state).max_x - 1);
         (*state).y = (*state).y.clamp(0, (*state).max_y - 1);
 
-        // Push event to buffer (for legacy mouse_read_event API)
-        buffer_push(MouseEvent {
-            x: (*state).x,
-            y: (*state).y,
-            buttons: (*state).buttons,
-        });
-
         // Route events to input_event system for Wayland-like per-task queues
         let timestamp_ms = get_timestamp_ms();
 
@@ -332,25 +257,4 @@ pub fn mouse_get_position() -> (i32, i32) {
 
 pub fn mouse_get_buttons() -> u8 {
     unsafe { MOUSE_STATE.buttons }
-}
-
-pub fn mouse_read_event(x: *mut i32, y: *mut i32, buttons: *mut u8) -> bool {
-    if x.is_null() || y.is_null() || buttons.is_null() {
-        return false;
-    }
-
-    if let Some(event) = unsafe { buffer_pop() } {
-        unsafe {
-            *x = event.x;
-            *y = event.y;
-            *buttons = event.buttons;
-        }
-        true
-    } else {
-        false
-    }
-}
-
-pub fn mouse_has_events() -> bool {
-    unsafe { EVENT_BUFFER.count > 0 }
 }

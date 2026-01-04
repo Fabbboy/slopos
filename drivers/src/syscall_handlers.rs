@@ -156,31 +156,6 @@ pub fn syscall_user_read_char(_task: *mut Task, frame: *mut InterruptFrame) -> S
     syscall_return_ok(frame, c as u64)
 }
 
-pub fn syscall_mouse_read(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut x: i32 = 0;
-    let mut y: i32 = 0;
-    let mut buttons: u8 = 0;
-
-    if crate::mouse::mouse_read_event(&mut x, &mut y, &mut buttons) {
-        // Pack result: buttons in low byte, x and y in return value
-        // Return x in lower 32 bits of rax, caller reads y and buttons via rdi
-        unsafe {
-            if (*frame).rdi != 0 {
-                let event_ptr = (*frame).rdi as *mut u8;
-                // Write x (4 bytes)
-                core::ptr::write_unaligned(event_ptr as *mut i32, x);
-                // Write y (4 bytes)
-                core::ptr::write_unaligned(event_ptr.add(4) as *mut i32, y);
-                // Write buttons (1 byte)
-                core::ptr::write(event_ptr.add(8), buttons);
-            }
-        }
-        syscall_return_ok(frame, 1)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
 pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
         wl_currency::award_loss();
@@ -1065,10 +1040,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_halt),
         name: b"halt\0".as_ptr() as *const c_char,
     };
-    table[SYSCALL_MOUSE_READ as usize] = SyscallEntry {
-        handler: Some(syscall_mouse_read),
-        name: b"mouse_read\0".as_ptr() as *const c_char,
-    };
     table[SYSCALL_ENUMERATE_WINDOWS as usize] = SyscallEntry {
         handler: Some(syscall_enumerate_windows),
         name: b"enumerate_windows\0".as_ptr() as *const c_char,
@@ -1218,7 +1189,6 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_FS_LIST: u64 = 21;
     pub const SYSCALL_SYS_INFO: u64 = 22;
     pub const SYSCALL_HALT: u64 = 23;
-    pub const SYSCALL_MOUSE_READ: u64 = 29;
     pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
     pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
     pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;

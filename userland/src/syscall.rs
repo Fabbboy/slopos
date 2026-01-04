@@ -26,7 +26,6 @@ pub const SYSCALL_FS_UNLINK: u64 = 20;
 pub const SYSCALL_FS_LIST: u64 = 21;
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
-pub const SYSCALL_MOUSE_READ: u64 = 29;
 pub const SYSCALL_ENUMERATE_WINDOWS: u64 = 30;
 pub const SYSCALL_SET_WINDOW_POSITION: u64 = 31;
 pub const SYSCALL_SET_WINDOW_STATE: u64 = 32;
@@ -334,14 +333,6 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
 }
 
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserMouseEvent {
-    pub x: i32,
-    pub y: i32,
-    pub buttons: u8,
-}
-
 /// Per-window damage region (surface-local coordinates)
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
@@ -587,12 +578,6 @@ pub fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-pub fn sys_mouse_read(event: &mut UserMouseEvent) -> i64 {
-    unsafe { syscall(SYSCALL_MOUSE_READ, event as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]

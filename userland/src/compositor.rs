@@ -16,9 +16,9 @@ use core::ffi::{c_char, c_void};
 use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_mouse_read, sys_raise_window, sys_set_window_position, sys_set_window_state,
-    sys_sleep_ms, sys_tty_set_focus, sys_yield, CachedShmMapping, ShmBuffer,
-    UserFbInfo, UserMouseEvent, UserWindowInfo,
+    sys_input_poll, sys_raise_window, sys_set_window_position, sys_set_window_state,
+    sys_sleep_ms, sys_tty_set_focus, sys_yield, CachedShmMapping, InputEvent, InputEventType,
+    ShmBuffer, UserFbInfo, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -289,16 +289,28 @@ impl WindowManager {
         self.output_pitch = pitch;
     }
 
-    /// Update mouse state from kernel
+    /// Update mouse state from kernel input event queue
     fn update_mouse(&mut self) {
-        let mut event = UserMouseEvent::default();
-        if sys_mouse_read(&mut event) > 0 {
-            self.mouse_buttons_prev = self.mouse_buttons;
-            self.prev_mouse_x = self.mouse_x;
-            self.prev_mouse_y = self.mouse_y;
-            self.mouse_x = event.x;
-            self.mouse_y = event.y;
-            self.mouse_buttons = event.buttons;
+        let mut event = InputEvent::default();
+        // Drain all pending pointer events
+        while let Some(ev) = sys_input_poll(&mut event) {
+            match ev.event_type {
+                InputEventType::PointerMotion => {
+                    self.prev_mouse_x = self.mouse_x;
+                    self.prev_mouse_y = self.mouse_y;
+                    self.mouse_x = ev.pointer_x();
+                    self.mouse_y = ev.pointer_y();
+                }
+                InputEventType::PointerButtonPress => {
+                    self.mouse_buttons_prev = self.mouse_buttons;
+                    self.mouse_buttons |= ev.pointer_button_code();
+                }
+                InputEventType::PointerButtonRelease => {
+                    self.mouse_buttons_prev = self.mouse_buttons;
+                    self.mouse_buttons &= !ev.pointer_button_code();
+                }
+                _ => {} // Ignore keyboard events for now
+            }
         }
     }
 
