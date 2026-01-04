@@ -8,6 +8,7 @@
 //! Events are routed to the focused task for each input type.
 
 use spin::Mutex;
+use slopos_lib::cpu;
 
 // Re-export ABI types and constants for consumers
 pub use slopos_abi::{InputEvent, InputEventData, InputEventType, MAX_EVENTS_PER_TASK, MAX_INPUT_TASKS};
@@ -251,19 +252,27 @@ static INPUT_MANAGER: Mutex<InputManager> = Mutex::new(InputManager::new());
 
 /// Set keyboard focus to a task (called by compositor)
 pub fn input_set_keyboard_focus(task_id: u32) {
+    // Use irqsave/irqrestore to prevent deadlock if keyboard IRQ fires while holding lock
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
     mgr.keyboard_focus = task_id;
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
 
 /// Set pointer focus to a task (called by compositor)
 /// Also sends enter/leave events
 pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
+    // Use irqsave/irqrestore to prevent deadlock if mouse IRQ fires while holding lock
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
     let old_focus = mgr.pointer_focus;
     let x = mgr.pointer_x;
     let y = mgr.pointer_y;
 
     if old_focus == task_id {
+        drop(mgr);
+        cpu::restore_flags(flags);
         return;
     }
 
@@ -282,16 +291,24 @@ pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
             mgr.queues[idx].push(InputEvent::pointer_enter_leave(true, x, y, timestamp_ms));
         }
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
 
 /// Get current keyboard focus task ID
 pub fn input_get_keyboard_focus() -> u32 {
-    INPUT_MANAGER.lock().keyboard_focus
+    let flags = cpu::save_flags_cli();
+    let result = INPUT_MANAGER.lock().keyboard_focus;
+    cpu::restore_flags(flags);
+    result
 }
 
 /// Get current pointer focus task ID
 pub fn input_get_pointer_focus() -> u32 {
-    INPUT_MANAGER.lock().pointer_focus
+    let flags = cpu::save_flags_cli();
+    let result = INPUT_MANAGER.lock().pointer_focus;
+    cpu::restore_flags(flags);
+    result
 }
 
 // =============================================================================
@@ -361,11 +378,17 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
 /// Poll for an input event (non-blocking)
 /// Returns the event if available, None if queue is empty
 pub fn input_poll(task_id: u32) -> Option<InputEvent> {
+    // Use irqsave/irqrestore to prevent deadlock if keyboard/mouse IRQ fires while holding lock
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
-    if let Some(idx) = mgr.find_queue(task_id) {
-        return mgr.queues[idx].pop();
-    }
-    None
+    let result = if let Some(idx) = mgr.find_queue(task_id) {
+        mgr.queues[idx].pop()
+    } else {
+        None
+    };
+    drop(mgr);
+    cpu::restore_flags(flags);
+    result
 }
 
 /// Drain up to max_count events from a task's queue in a single lock acquisition.
@@ -387,10 +410,16 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
         return 0;
     }
 
+    // Use irqsave/irqrestore to prevent deadlock if keyboard/mouse IRQ fires while holding lock
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
     let idx = match mgr.find_queue(task_id) {
         Some(i) => i,
-        None => return 0,
+        None => {
+            drop(mgr);
+            cpu::restore_flags(flags);
+            return 0;
+        }
     };
 
     let mut count = 0;
@@ -402,34 +431,51 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
             break;
         }
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
     count
 }
 
 /// Peek at the next input event without removing it
 pub fn input_peek(task_id: u32) -> Option<InputEvent> {
+    let flags = cpu::save_flags_cli();
     let mgr = INPUT_MANAGER.lock();
-    if let Some(idx) = mgr.find_queue(task_id) {
-        return mgr.queues[idx].peek().copied();
-    }
-    None
+    let result = if let Some(idx) = mgr.find_queue(task_id) {
+        mgr.queues[idx].peek().copied()
+    } else {
+        None
+    };
+    drop(mgr);
+    cpu::restore_flags(flags);
+    result
 }
 
 /// Check if a task has pending input events
 pub fn input_has_events(task_id: u32) -> bool {
+    let flags = cpu::save_flags_cli();
     let mgr = INPUT_MANAGER.lock();
-    if let Some(idx) = mgr.find_queue(task_id) {
-        return mgr.queues[idx].count > 0;
-    }
-    false
+    let result = if let Some(idx) = mgr.find_queue(task_id) {
+        mgr.queues[idx].count > 0
+    } else {
+        false
+    };
+    drop(mgr);
+    cpu::restore_flags(flags);
+    result
 }
 
 /// Get the number of pending events for a task
 pub fn input_event_count(task_id: u32) -> u32 {
+    let flags = cpu::save_flags_cli();
     let mgr = INPUT_MANAGER.lock();
-    if let Some(idx) = mgr.find_queue(task_id) {
-        return mgr.queues[idx].count as u32;
-    }
-    0
+    let result = if let Some(idx) = mgr.find_queue(task_id) {
+        mgr.queues[idx].count as u32
+    } else {
+        0
+    };
+    drop(mgr);
+    cpu::restore_flags(flags);
+    result
 }
 
 // =============================================================================
@@ -438,6 +484,7 @@ pub fn input_event_count(task_id: u32) -> u32 {
 
 /// Clean up input queue for a terminated task
 pub fn input_cleanup_task(task_id: u32) {
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
 
     // Clear focus if this task had it
@@ -454,4 +501,6 @@ pub fn input_cleanup_task(task_id: u32) {
         mgr.queues[idx].task_id = 0;
         mgr.queues[idx].clear();
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
