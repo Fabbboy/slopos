@@ -1,8 +1,38 @@
-#![allow(static_mut_refs)]
+//! Shell implementation with Cell-based state management
+//!
+//! Uses Cell<T> for Copy types to avoid RefCell borrow conflicts.
+//! Drawing functions take explicit &mut DrawBuffer parameters.
+//!
+//! # Safety
+//! This module uses static variables with interior mutability. This is safe
+//! because userland is single-threaded with no preemption during shell code.
 
+use core::cell::{Cell, UnsafeCell}; // UnsafeCell used by SyncUnsafeCell wrapper
 use core::cmp;
 use core::ffi::{c_char, c_void};
 use core::ptr;
+
+// =============================================================================
+// Sync wrappers for single-threaded userland
+// =============================================================================
+
+/// UnsafeCell wrapper that implements Sync for single-threaded userland
+#[repr(transparent)]
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+
+impl<T> SyncUnsafeCell<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    #[inline]
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+// Safety: Userland is single-threaded with no preemption during shell code
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
@@ -46,10 +76,9 @@ static HALTED: &[u8] = b"Shell requested shutdown...\n";
 
 const FONT_CHAR_WIDTH: i32 = 8;
 const FONT_CHAR_HEIGHT: i32 = 16;
-const SHELL_BG_COLOR: u32 = 0x1E1E_1EFF; // Dark background matching compositor theme
+const SHELL_BG_COLOR: u32 = 0x1E1E_1EFF;
 const SHELL_FG_COLOR: u32 = 0xE6E6_E6FF;
 
-// Shell window dimensions (not fullscreen)
 const SHELL_WINDOW_WIDTH: i32 = 640;
 const SHELL_WINDOW_HEIGHT: i32 = 480;
 const SHELL_TAB_WIDTH: i32 = 4;
@@ -58,502 +87,666 @@ const SHELL_SCROLLBACK_COLS: usize = 160;
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
 
-#[unsafe(link_section = ".user_bss")]
-static mut LINE_BUF: [u8; 256] = [0; 256];
-#[unsafe(link_section = ".user_bss")]
-static mut TOKEN_STORAGE: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS] =
-    [[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
-#[unsafe(link_section = ".user_bss")]
-static mut PATH_BUF: [u8; SHELL_PATH_BUF] = [0; SHELL_PATH_BUF];
-#[unsafe(link_section = ".user_bss")]
-static mut LIST_ENTRIES: [UserFsEntry; 32] = [UserFsEntry::new(); 32];
-#[unsafe(link_section = ".user_bss")]
-static mut SHELL_SCROLLBACK: [u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS] =
-    [0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS];
-#[unsafe(link_section = ".user_bss")]
-static mut SHELL_SCROLLBACK_LEN: [u16; SHELL_SCROLLBACK_LINES] = [0; SHELL_SCROLLBACK_LINES];
+// =============================================================================
+// DisplayState: Cell-based state (no borrow conflicts)
+// =============================================================================
 
-struct ShellConsole {
-    enabled: bool,
-    width: i32,
-    height: i32,
-    pitch: usize,
-    bytes_pp: u8,
-    cols: i32,
-    rows: i32,
-    cursor_col: i32,
-    cursor_line: i32,
-    origin: i32,
-    total_lines: i32,
-    view_top: i32,
-    follow: bool,
-    fg: u32,
-    bg: u32,
-    // Shared memory buffer (safe wrapper)
-    shm_buffer: Option<ShmBuffer>,
+struct DisplayState {
+    enabled: Cell<bool>,
+    width: Cell<i32>,
+    height: Cell<i32>,
+    pitch: Cell<usize>,
+    bytes_pp: Cell<u8>,
+    cols: Cell<i32>,
+    rows: Cell<i32>,
+    cursor_col: Cell<i32>,
+    cursor_line: Cell<i32>,
+    origin: Cell<i32>,
+    total_lines: Cell<i32>,
+    view_top: Cell<i32>,
+    follow: Cell<bool>,
+    fg: Cell<u32>,
+    bg: Cell<u32>,
 }
 
-impl ShellConsole {
-    const fn disabled() -> Self {
+impl DisplayState {
+    const fn new() -> Self {
         Self {
-            enabled: false,
-            width: 0,
-            height: 0,
-            pitch: 0,
-            bytes_pp: 4,
-            cols: 0,
-            rows: 0,
-            cursor_col: 0,
-            cursor_line: 0,
-            origin: 0,
-            total_lines: 1,
-            view_top: 0,
-            follow: true,
-            fg: SHELL_FG_COLOR,
-            bg: SHELL_BG_COLOR,
-            shm_buffer: None,
+            enabled: Cell::new(false),
+            width: Cell::new(0),
+            height: Cell::new(0),
+            pitch: Cell::new(0),
+            bytes_pp: Cell::new(4),
+            cols: Cell::new(0),
+            rows: Cell::new(0),
+            cursor_col: Cell::new(0),
+            cursor_line: Cell::new(0),
+            origin: Cell::new(0),
+            total_lines: Cell::new(1),
+            view_top: Cell::new(0),
+            follow: Cell::new(true),
+            fg: Cell::new(SHELL_FG_COLOR),
+            bg: Cell::new(SHELL_BG_COLOR),
         }
-    }
-
-    fn init(&mut self, width: i32, height: i32, bpp: u8) {
-        self.width = width;
-        self.height = height;
-        self.bytes_pp = ((bpp as usize + 7) / 8) as u8;
-        self.pitch = (width as usize) * (self.bytes_pp as usize);
-
-        let cols = width / FONT_CHAR_WIDTH;
-        let rows = height / FONT_CHAR_HEIGHT;
-        self.cols = cols.clamp(1, SHELL_SCROLLBACK_COLS as i32);
-        self.rows = rows.clamp(1, SHELL_SCROLLBACK_LINES as i32);
-        if self.cols <= 0 || self.rows <= 0 {
-            self.enabled = false;
-            return;
-        }
-
-        // Allocate shared memory buffer using safe wrapper
-        let buffer_size = self.pitch * (height as usize);
-        let shm_buffer = match ShmBuffer::create(buffer_size) {
-            Ok(buf) => buf,
-            Err(_) => {
-                let _ = sys_write(b"shell: failed to create shm buffer\n");
-                self.enabled = false;
-                return;
-            }
-        };
-
-        // Attach buffer as a window surface
-        if shm_buffer.attach_surface(width as u32, height as u32).is_err() {
-            let _ = sys_write(b"shell: failed to attach surface\n");
-            self.enabled = false;
-            return;
-        }
-
-        self.shm_buffer = Some(shm_buffer);
-        self.enabled = true;
-        self.cursor_col = 0;
-        self.cursor_line = 0;
-        self.origin = 0;
-        self.total_lines = 1;
-        self.view_top = 0;
-        self.follow = true;
-        self.fg = SHELL_FG_COLOR;
-        self.bg = SHELL_BG_COLOR;
-        self.clear();
-    }
-
-    /// Get a mutable DrawBuffer for the surface
-    fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-        if !self.enabled {
-            return None;
-        }
-        let shm_buffer = self.shm_buffer.as_mut()?;
-        let slice = shm_buffer.as_mut_slice();
-        DrawBuffer::new(
-            slice,
-            self.width as u32,
-            self.height as u32,
-            self.pitch,
-            self.bytes_pp,
-        )
-    }
-
-    fn clear(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        let (w, h, bg) = (self.width, self.height, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            gfx::fill_rect(&mut buf, 0, 0, w, h, bg);
-        }
-        self.cursor_col = 0;
-        self.cursor_line = 0;
-        self.origin = 0;
-        self.total_lines = 1;
-        self.view_top = 0;
-        self.follow = true;
-        unsafe {
-            for len in SHELL_SCROLLBACK_LEN.iter_mut() {
-                *len = 0;
-            }
-            for byte in SHELL_SCROLLBACK.iter_mut() {
-                *byte = 0;
-            }
-        }
-    }
-
-    fn clear_line(&mut self, row: i32) {
-        if !self.enabled {
-            return;
-        }
-        let y = row * FONT_CHAR_HEIGHT;
-        let (w, bg) = (self.width, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            gfx::fill_rect(&mut buf, 0, y, w, FONT_CHAR_HEIGHT, bg);
-        }
-    }
-
-    fn cursor(&self) -> (i32, i32) {
-        let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
-        (self.cursor_col, row)
     }
 
     fn line_slot(&self, logical: i32) -> usize {
         let max_lines = SHELL_SCROLLBACK_LINES as i32;
-        ((self.origin + logical).rem_euclid(max_lines)) as usize
+        ((self.origin.get() + logical).rem_euclid(max_lines)) as usize
     }
 
-    fn line_ptr(&self, slot: usize) -> *mut u8 {
-        unsafe { SHELL_SCROLLBACK.as_mut_ptr().add(slot * SHELL_SCROLLBACK_COLS) }
+    fn cursor(&self) -> (i32, i32) {
+        let row = (self.cursor_line.get() - self.view_top.get())
+            .clamp(0, self.rows.get().saturating_sub(1));
+        (self.cursor_col.get(), row)
     }
 
-    fn clear_line_buffer(&mut self, slot: usize) {
+    fn reset(&self) {
+        self.cursor_col.set(0);
+        self.cursor_line.set(0);
+        self.origin.set(0);
+        self.total_lines.set(1);
+        self.view_top.set(0);
+        self.follow.set(true);
+    }
+}
+
+// Safety: Userland is single-threaded with no preemption during shell code
+unsafe impl Sync for DisplayState {}
+
+#[unsafe(link_section = ".user_bss")]
+static DISPLAY: DisplayState = DisplayState::new();
+
+// =============================================================================
+// Scrollback module: safe accessors for large arrays
+// =============================================================================
+
+mod scrollback {
+    use super::*;
+
+    #[unsafe(link_section = ".user_bss")]
+    static DATA: SyncUnsafeCell<[u8; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]> =
+        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES * SHELL_SCROLLBACK_COLS]);
+
+    #[unsafe(link_section = ".user_bss")]
+    static LENS: SyncUnsafeCell<[u16; SHELL_SCROLLBACK_LINES]> =
+        SyncUnsafeCell::new([0; SHELL_SCROLLBACK_LINES]);
+
+    /// Safety: Single-threaded userland, no preemption during shell code
+    #[inline]
+    pub fn get_line(slot: usize) -> &'static [u8] {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
         unsafe {
-            SHELL_SCROLLBACK_LEN[slot] = 0;
-            let line = self.line_ptr(slot);
-            core::ptr::write_bytes(line, 0, SHELL_SCROLLBACK_COLS);
+            let data = &*DATA.get();
+            let start = slot * SHELL_SCROLLBACK_COLS;
+            &data[start..start + SHELL_SCROLLBACK_COLS]
         }
     }
 
-    fn redraw_view(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        let (w, h, bg) = (self.width, self.height, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            gfx::fill_rect(&mut buf, 0, 0, w, h, bg);
-        }
-        let (rows, view_top) = (self.rows, self.view_top);
-        for row in 0..rows {
-            self.draw_row_from_scrollback(view_top + row, row);
-        }
+    #[inline]
+    pub fn get_line_len(slot: usize) -> u16 {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        unsafe { (*LENS.get())[slot] }
     }
 
-    fn clear_row(&mut self, row: i32) {
-        let (w, bg) = (self.width, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            gfx::fill_rect(&mut buf, 0, row * FONT_CHAR_HEIGHT, w, FONT_CHAR_HEIGHT, bg);
-        }
+    #[inline]
+    pub fn set_line_len(slot: usize, len: u16) {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        unsafe { (*LENS.get())[slot] = len }
     }
 
-    fn draw_row_from_scrollback(&mut self, logical: i32, row: i32) {
-        self.clear_row(row);
-        if logical < 0 || logical >= self.total_lines {
-            return;
-        }
-        let slot = self.line_slot(logical);
-        let len = unsafe { SHELL_SCROLLBACK_LEN[slot] as usize };
-        let draw_len = len.min(self.cols as usize);
-        if draw_len == 0 {
-            return;
-        }
-        let line = unsafe {
-            core::slice::from_raw_parts(self.line_ptr(slot) as *const u8, draw_len)
-        };
-        for (col, &ch) in line.iter().enumerate() {
-            if ch == 0 {
-                continue;
-            }
-            self.draw_char_at(col as i32, row, ch);
-        }
-    }
-
-    fn draw_char_at(&mut self, col: i32, row: i32, c: u8) {
-        let x = col * FONT_CHAR_WIDTH;
-        let y = row * FONT_CHAR_HEIGHT;
-        let (fg, bg) = (self.fg, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            gfx::font::draw_char(&mut buf, x, y, c, fg, bg);
-        }
-    }
-
-    fn scroll_up_fast(&mut self) -> bool {
-        if !self.enabled || self.height <= FONT_CHAR_HEIGHT {
-            return false;
-        }
-        let (w, h, bg) = (self.width, self.height, self.bg);
-        if let Some(mut buf) = self.draw_buffer() {
-            // Blit content up by one line
-            gfx::blit(
-                &mut buf,
-                0,
-                FONT_CHAR_HEIGHT,
-                0,
-                0,
-                w,
-                h - FONT_CHAR_HEIGHT,
-            );
-            // Clear the bottom line
-            gfx::fill_rect(
-                &mut buf,
-                0,
-                h - FONT_CHAR_HEIGHT,
-                w,
-                FONT_CHAR_HEIGHT,
-                bg,
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    fn ensure_follow_visible(&mut self) {
-        let max_top = (self.total_lines - self.rows).max(0);
-        self.view_top = max_top;
-        self.follow = true;
-        self.redraw_view();
-    }
-
-    fn page_up(&mut self) {
-        if self.total_lines <= self.rows {
-            return;
-        }
-        let step = self.rows.max(1);
-        let new_top = (self.view_top - step).max(0);
-        let delta = (self.view_top - new_top).max(0);
-        if delta == 0 {
-            return;
-        }
-        self.view_top = new_top;
-        self.follow = false;
-        if delta < self.rows {
-            let shift = delta * FONT_CHAR_HEIGHT;
-            let (w, h) = (self.width, self.height);
-            let blit_ok = if let Some(mut buf) = self.draw_buffer() {
-                gfx::blit(&mut buf, 0, 0, 0, shift, w, h - shift);
-                true
-            } else {
-                false
-            };
-            if blit_ok {
-                let view_top = self.view_top;
-                for row in 0..delta {
-                    self.draw_row_from_scrollback(view_top + row, row);
-                }
-                return;
-            }
-        }
-        self.redraw_view();
-    }
-
-    fn page_down(&mut self) {
-        if self.total_lines <= self.rows {
-            return;
-        }
-        let max_top = (self.total_lines - self.rows).max(0);
-        let step = self.rows.max(1);
-        let new_top = (self.view_top + step).min(max_top);
-        let delta = (new_top - self.view_top).max(0);
-        if delta == 0 {
-            return;
-        }
-        self.view_top = new_top;
-        if self.view_top == max_top {
-            self.follow = true;
-        } else {
-            self.follow = false;
-        }
-        if delta < self.rows {
-            let shift = delta * FONT_CHAR_HEIGHT;
-            let (w, h) = (self.width, self.height);
-            let blit_ok = if let Some(mut buf) = self.draw_buffer() {
-                gfx::blit(&mut buf, 0, shift, 0, 0, w, h - shift);
-                true
-            } else {
-                false
-            };
-            if blit_ok {
-                let start = self.rows - delta;
-                let (rows, view_top) = (self.rows, self.view_top);
-                for row in start..rows {
-                    let logical = view_top + row;
-                    self.draw_row_from_scrollback(logical, row);
-                }
-                return;
-            }
-        }
-        self.redraw_view();
-    }
-
-    fn new_line(&mut self) {
-        self.cursor_col = 0;
-        self.cursor_line += 1;
-        if self.cursor_line >= self.total_lines {
-            if self.total_lines < SHELL_SCROLLBACK_LINES as i32 {
-                self.total_lines += 1;
-            } else {
-                self.origin = (self.origin + 1) % SHELL_SCROLLBACK_LINES as i32;
-                self.cursor_line = self.total_lines - 1;
-                if self.view_top > 0 {
-                    self.view_top -= 1;
-                }
-            }
-            let slot = self.line_slot(self.cursor_line);
-            self.clear_line_buffer(slot);
-        }
-        if self.follow {
-            let max_top = (self.total_lines - self.rows).max(0);
-            if self.view_top != max_top {
-                let step = max_top - self.view_top;
-                self.view_top = max_top;
-                if step == 1 {
-                    if !self.scroll_up_fast() {
-                        self.redraw_view();
-                    }
-                } else {
-                    self.redraw_view();
-                }
-            }
-        }
-    }
-
-    fn backspace(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        } else if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            let slot = self.line_slot(self.cursor_line);
-            let len = unsafe { SHELL_SCROLLBACK_LEN[slot] as i32 };
-            if len > 0 {
-                self.cursor_col = (len - 1).clamp(0, self.cols.saturating_sub(1));
-            } else {
-                self.cursor_col = 0;
-            }
-        } else {
-            return;
-        }
-        let slot = self.line_slot(self.cursor_line);
+    #[inline]
+    pub fn set_char(slot: usize, col: usize, ch: u8) {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        debug_assert!(col < SHELL_SCROLLBACK_COLS);
         unsafe {
-            let line = self.line_ptr(slot);
-            if (self.cursor_col as usize) < SHELL_SCROLLBACK_COLS {
-                *line.add(self.cursor_col as usize) = 0;
-                let mut len = SHELL_SCROLLBACK_LEN[slot] as i32;
-                while len > 0 {
-                    let idx = len as usize - 1;
-                    if *line.add(idx) != 0 {
-                        break;
-                    }
-                    len -= 1;
-                }
-                SHELL_SCROLLBACK_LEN[slot] = len as u16;
-            }
-        }
-        if self.follow {
-            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
-            let x = self.cursor_col * FONT_CHAR_WIDTH;
-            let y = row * FONT_CHAR_HEIGHT;
-            let bg = self.bg;
-            if let Some(mut buf) = self.draw_buffer() {
-                gfx::fill_rect(&mut buf, x, y, FONT_CHAR_WIDTH, FONT_CHAR_HEIGHT, bg);
-            }
+            let data = &mut *DATA.get();
+            data[slot * SHELL_SCROLLBACK_COLS + col] = ch;
         }
     }
 
-    fn draw_char(&mut self, c: u8) {
-        if !self.enabled {
-            return;
-        }
-        let slot = self.line_slot(self.cursor_line);
+    #[inline]
+    pub fn get_char(slot: usize, col: usize) -> u8 {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        debug_assert!(col < SHELL_SCROLLBACK_COLS);
         unsafe {
-            let line = self.line_ptr(slot);
-            if (self.cursor_col as usize) < SHELL_SCROLLBACK_COLS {
-                *line.add(self.cursor_col as usize) = c;
-                let need_len = self.cursor_col + 1;
-                let len = &mut SHELL_SCROLLBACK_LEN[slot];
-                if need_len as u16 > *len {
-                    *len = need_len as u16;
-                }
-            }
-        }
-        if self.follow {
-            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
-            self.draw_char_at(self.cursor_col, row, c);
-        }
-        self.cursor_col += 1;
-        if self.cursor_col >= self.cols {
-            self.new_line();
+            let data = &*DATA.get();
+            data[slot * SHELL_SCROLLBACK_COLS + col]
         }
     }
 
-    fn rewrite_input_line(&mut self, prompt: &[u8], buf: &[u8]) {
-        if !self.enabled {
-            return;
-        }
-        let slot = self.line_slot(self.cursor_line);
-        let max_cols = self.cols as usize;
+    pub fn clear_line(slot: usize) {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
         unsafe {
-            let line = self.line_ptr(slot);
-            core::ptr::write_bytes(line, 0, SHELL_SCROLLBACK_COLS);
-            let mut col = 0usize;
-            for &b in prompt.iter().chain(buf.iter()) {
-                if col >= max_cols {
-                    break;
-                }
-                *line.add(col) = b;
-                col += 1;
+            let data = &mut *DATA.get();
+            let start = slot * SHELL_SCROLLBACK_COLS;
+            for i in start..start + SHELL_SCROLLBACK_COLS {
+                data[i] = 0;
             }
-            SHELL_SCROLLBACK_LEN[slot] = col as u16;
-            self.cursor_col = col as i32;
+            (*LENS.get())[slot] = 0;
         }
-        if self.follow {
-            let row = (self.cursor_line - self.view_top).clamp(0, self.rows.saturating_sub(1));
-            self.clear_line(row);
-            let draw_len = prompt.len().saturating_add(buf.len()).min(max_cols);
-            for (col, &ch) in prompt.iter().chain(buf.iter()).take(draw_len).enumerate() {
-                if ch == 0 {
-                    continue;
-                }
-                self.draw_char_at(col as i32, row, ch);
+    }
+
+    pub fn clear_all() {
+        unsafe {
+            let data = &mut *DATA.get();
+            for byte in data.iter_mut() {
+                *byte = 0;
+            }
+            let lens = &mut *LENS.get();
+            for len in lens.iter_mut() {
+                *len = 0;
             }
         }
     }
 
-    fn write(&mut self, buf: &[u8]) {
-        if !self.enabled {
-            return;
-        }
-        for &b in buf {
-            match b {
-                b'\n' => self.new_line(),
-                b'\r' => self.cursor_col = 0,
-                b'\t' => {
-                    for _ in 0..SHELL_TAB_WIDTH {
-                        self.draw_char(b' ');
-                    }
-                }
-                b'\x08' => self.backspace(),
-                0x20..=0x7E => self.draw_char(b),
-                _ => {}
+    /// Write a line to scrollback (for prompt rewriting)
+    pub fn write_line(slot: usize, content: &[u8]) {
+        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let len = content.len().min(SHELL_SCROLLBACK_COLS);
+        unsafe {
+            let data = &mut *DATA.get();
+            let start = slot * SHELL_SCROLLBACK_COLS;
+            // Clear first
+            for i in start..start + SHELL_SCROLLBACK_COLS {
+                data[i] = 0;
             }
+            // Write content
+            for (i, &b) in content.iter().take(len).enumerate() {
+                data[start + i] = b;
+            }
+            (*LENS.get())[slot] = len as u16;
         }
     }
 }
 
-#[unsafe(link_section = ".user_bss")]
-static mut SHELL_CONSOLE: ShellConsole = ShellConsole::disabled();
+// =============================================================================
+// Surface module: drawing buffer management
+// =============================================================================
+
+mod surface {
+    use super::*;
+
+    struct ShellSurface {
+        shm_buffer: Option<ShmBuffer>,
+        width: i32,
+        height: i32,
+        pitch: usize,
+        bytes_pp: u8,
+    }
+
+    impl ShellSurface {
+        const fn empty() -> Self {
+            Self {
+                shm_buffer: None,
+                width: 0,
+                height: 0,
+                pitch: 0,
+                bytes_pp: 4,
+            }
+        }
+
+        fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
+            let buf = self.shm_buffer.as_mut()?;
+            DrawBuffer::new(
+                buf.as_mut_slice(),
+                self.width as u32,
+                self.height as u32,
+                self.pitch,
+                self.bytes_pp,
+            )
+        }
+    }
+
+    #[unsafe(link_section = ".user_bss")]
+    static SURFACE: SyncUnsafeCell<ShellSurface> = SyncUnsafeCell::new(ShellSurface::empty());
+
+    /// Access surface for drawing. Safety: single-threaded userland
+    fn with_surface<R, F: FnOnce(&mut ShellSurface) -> R>(f: F) -> R {
+        f(unsafe { &mut *SURFACE.get() })
+    }
+
+    pub fn init(width: i32, height: i32, bpp: u8) -> bool {
+        with_surface(|s| {
+            s.width = width;
+            s.height = height;
+            s.bytes_pp = ((bpp as usize + 7) / 8) as u8;
+            s.pitch = (width as usize) * (s.bytes_pp as usize);
+
+            let buffer_size = s.pitch * (height as usize);
+            let shm_buffer = match ShmBuffer::create(buffer_size) {
+                Ok(buf) => buf,
+                Err(_) => {
+                    let _ = sys_write(b"shell: failed to create shm buffer\n");
+                    return false;
+                }
+            };
+
+            if shm_buffer.attach_surface(width as u32, height as u32).is_err() {
+                let _ = sys_write(b"shell: failed to attach surface\n");
+                return false;
+            }
+
+            s.shm_buffer = Some(shm_buffer);
+            true
+        })
+    }
+
+    pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
+        with_surface(|s| s.draw_buffer().map(|mut buf| f(&mut buf)))
+    }
+}
+
+// =============================================================================
+// Command buffers module: safe accessors
+// =============================================================================
+
+mod buffers {
+    use super::*;
+
+    #[unsafe(link_section = ".user_bss")]
+    static LINE_BUF: SyncUnsafeCell<[u8; 256]> = SyncUnsafeCell::new([0; 256]);
+
+    #[unsafe(link_section = ".user_bss")]
+    static TOKEN_STORAGE: SyncUnsafeCell<[[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]> =
+        SyncUnsafeCell::new([[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]);
+
+    #[unsafe(link_section = ".user_bss")]
+    static PATH_BUF: SyncUnsafeCell<[u8; SHELL_PATH_BUF]> = SyncUnsafeCell::new([0; SHELL_PATH_BUF]);
+
+    #[unsafe(link_section = ".user_bss")]
+    static LIST_ENTRIES: SyncUnsafeCell<[UserFsEntry; 32]> = SyncUnsafeCell::new([UserFsEntry::new(); 32]);
+
+    pub fn with_line_buf<R, F: FnOnce(&mut [u8; 256]) -> R>(f: F) -> R {
+        f(unsafe { &mut *LINE_BUF.get() })
+    }
+
+    pub fn with_token_storage<R, F: FnOnce(&mut [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]) -> R>(f: F) -> R {
+        f(unsafe { &mut *TOKEN_STORAGE.get() })
+    }
+
+    pub fn with_path_buf<R, F: FnOnce(&mut [u8; SHELL_PATH_BUF]) -> R>(f: F) -> R {
+        f(unsafe { &mut *PATH_BUF.get() })
+    }
+
+    pub fn with_list_entries<R, F: FnOnce(&mut [UserFsEntry; 32]) -> R>(f: F) -> R {
+        f(unsafe { &mut *LIST_ENTRIES.get() })
+    }
+
+    pub fn token_ptr(idx: usize) -> *const u8 {
+        unsafe { (*TOKEN_STORAGE.get())[idx].as_ptr() }
+    }
+}
+
+// =============================================================================
+// Free drawing functions (no &mut self, explicit parameters)
+// =============================================================================
+
+fn draw_char_at(buf: &mut DrawBuffer, col: i32, row: i32, c: u8, fg: u32, bg: u32) {
+    let x = col * FONT_CHAR_WIDTH;
+    let y = row * FONT_CHAR_HEIGHT;
+    gfx::font::draw_char(buf, x, y, c, fg, bg);
+}
+
+fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: u32) {
+    gfx::fill_rect(buf, 0, row * FONT_CHAR_HEIGHT, width, FONT_CHAR_HEIGHT, bg);
+}
+
+fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logical: i32, row: i32) {
+    let bg = display.bg.get();
+    let fg = display.fg.get();
+    let width = display.width.get();
+    let cols = display.cols.get();
+    let total_lines = display.total_lines.get();
+
+    // Clear the row first
+    clear_row(buf, row, width, bg);
+
+    if logical < 0 || logical >= total_lines {
+        return;
+    }
+
+    let slot = display.line_slot(logical);
+    let len = scrollback::get_line_len(slot) as usize;
+    let draw_len = len.min(cols as usize);
+
+    if draw_len == 0 {
+        return;
+    }
+
+    let line = scrollback::get_line(slot);
+    for (col, &ch) in line.iter().take(draw_len).enumerate() {
+        if ch != 0 {
+            draw_char_at(buf, col as i32, row, ch, fg, bg);
+        }
+    }
+}
+
+fn redraw_view(buf: &mut DrawBuffer, display: &DisplayState) {
+    let bg = display.bg.get();
+    let width = display.width.get();
+    let height = display.height.get();
+    let rows = display.rows.get();
+    let view_top = display.view_top.get();
+
+    // Clear entire view
+    gfx::fill_rect(buf, 0, 0, width, height, bg);
+
+    // Draw each row
+    for row in 0..rows {
+        draw_row_from_scrollback(buf, display, view_top + row, row);
+    }
+}
+
+fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
+    let width = display.width.get();
+    let height = display.height.get();
+    let bg = display.bg.get();
+
+    if height <= FONT_CHAR_HEIGHT {
+        return false;
+    }
+
+    // Blit content up by one line
+    gfx::blit(buf, 0, FONT_CHAR_HEIGHT, 0, 0, width, height - FONT_CHAR_HEIGHT);
+
+    // Clear the bottom line
+    gfx::fill_rect(buf, 0, height - FONT_CHAR_HEIGHT, width, FONT_CHAR_HEIGHT, bg);
+
+    true
+}
+
+// =============================================================================
+// State update functions (no drawing)
+// =============================================================================
+
+fn update_new_line(display: &DisplayState) {
+    display.cursor_col.set(0);
+    let cursor_line = display.cursor_line.get() + 1;
+    display.cursor_line.set(cursor_line);
+
+    let total_lines = display.total_lines.get();
+    if cursor_line >= total_lines {
+        if total_lines < SHELL_SCROLLBACK_LINES as i32 {
+            display.total_lines.set(total_lines + 1);
+        } else {
+            let origin = (display.origin.get() + 1) % SHELL_SCROLLBACK_LINES as i32;
+            display.origin.set(origin);
+            display.cursor_line.set(total_lines - 1);
+            let view_top = display.view_top.get();
+            if view_top > 0 {
+                display.view_top.set(view_top - 1);
+            }
+        }
+        let slot = display.line_slot(display.cursor_line.get());
+        scrollback::clear_line(slot);
+    }
+}
+
+fn update_char_state(display: &DisplayState, c: u8) {
+    let cursor_col = display.cursor_col.get();
+    let cursor_line = display.cursor_line.get();
+    let cols = display.cols.get();
+    let slot = display.line_slot(cursor_line);
+
+    if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
+        scrollback::set_char(slot, cursor_col as usize, c);
+        let len = scrollback::get_line_len(slot) as i32;
+        if cursor_col + 1 > len {
+            scrollback::set_line_len(slot, (cursor_col + 1) as u16);
+        }
+    }
+
+    display.cursor_col.set(cursor_col + 1);
+    if display.cursor_col.get() >= cols {
+        update_new_line(display);
+    }
+}
+
+fn update_backspace_state(display: &DisplayState) {
+    let mut cursor_col = display.cursor_col.get();
+    let mut cursor_line = display.cursor_line.get();
+
+    if cursor_col > 0 {
+        cursor_col -= 1;
+    } else if cursor_line > 0 {
+        cursor_line -= 1;
+        let slot = display.line_slot(cursor_line);
+        let len = scrollback::get_line_len(slot) as i32;
+        cursor_col = if len > 0 {
+            (len - 1).clamp(0, display.cols.get().saturating_sub(1))
+        } else {
+            0
+        };
+    } else {
+        return;
+    }
+
+    display.cursor_col.set(cursor_col);
+    display.cursor_line.set(cursor_line);
+
+    // Clear character in scrollback
+    let slot = display.line_slot(cursor_line);
+    if (cursor_col as usize) < SHELL_SCROLLBACK_COLS {
+        scrollback::set_char(slot, cursor_col as usize, 0);
+        // Trim trailing zeros from line length
+        let mut len = scrollback::get_line_len(slot) as i32;
+        while len > 0 {
+            if scrollback::get_char(slot, (len - 1) as usize) != 0 {
+                break;
+            }
+            len -= 1;
+        }
+        scrollback::set_line_len(slot, len as u16);
+    }
+}
+
+// =============================================================================
+// Console operations (combined state + render)
+// =============================================================================
+
+#[unsafe(link_section = ".user_text")]
+fn console_write(display: &DisplayState, text: &[u8]) {
+    if !display.enabled.get() {
+        return;
+    }
+
+    let follow = display.follow.get();
+    let mut needs_scroll = false;
+    let old_view_top = display.view_top.get();
+
+    // Phase 1: Update state
+    for &b in text {
+        match b {
+            b'\n' => {
+                let old_total = display.total_lines.get();
+                update_new_line(display);
+
+                // Check if we need to scroll view
+                if follow {
+                    let rows = display.rows.get();
+                    let total = display.total_lines.get();
+                    let max_top = (total - rows).max(0);
+                    if display.view_top.get() != max_top {
+                        display.view_top.set(max_top);
+                        if total > old_total || display.view_top.get() != old_view_top {
+                            needs_scroll = true;
+                        }
+                    }
+                }
+            }
+            b'\r' => display.cursor_col.set(0),
+            b'\t' => {
+                for _ in 0..SHELL_TAB_WIDTH {
+                    update_char_state(display, b' ');
+                }
+            }
+            b'\x08' => update_backspace_state(display),
+            0x20..=0x7E => update_char_state(display, b),
+            _ => {}
+        }
+    }
+
+    // Phase 2: Render if following
+    if follow {
+        surface::draw(|buf| {
+            if needs_scroll {
+                let view_diff = display.view_top.get() - old_view_top;
+                if view_diff == 1 {
+                    if !scroll_up_fast(buf, display) {
+                        redraw_view(buf, display);
+                    }
+                } else {
+                    redraw_view(buf, display);
+                }
+            }
+            // Draw current line
+            let cursor_line = display.cursor_line.get();
+            let view_top = display.view_top.get();
+            let row = cursor_line - view_top;
+            if row >= 0 && row < display.rows.get() {
+                draw_row_from_scrollback(buf, display, cursor_line, row);
+            }
+        });
+    }
+}
+
+fn console_clear(display: &DisplayState) {
+    if !display.enabled.get() {
+        return;
+    }
+
+    display.reset();
+    scrollback::clear_all();
+
+    surface::draw(|buf| {
+        let bg = display.bg.get();
+        let width = display.width.get();
+        let height = display.height.get();
+        gfx::fill_rect(buf, 0, 0, width, height, bg);
+    });
+}
+
+fn console_page_up(display: &DisplayState) {
+    if display.total_lines.get() <= display.rows.get() {
+        return;
+    }
+
+    let step = display.rows.get().max(1);
+    let new_top = (display.view_top.get() - step).max(0);
+    let delta = (display.view_top.get() - new_top).max(0);
+
+    if delta == 0 {
+        return;
+    }
+
+    display.view_top.set(new_top);
+    display.follow.set(false);
+
+    surface::draw(|buf| {
+        let rows = display.rows.get();
+        if delta < rows {
+            let shift = delta * FONT_CHAR_HEIGHT;
+            let width = display.width.get();
+            let height = display.height.get();
+            gfx::blit(buf, 0, 0, 0, shift, width, height - shift);
+
+            let view_top = display.view_top.get();
+            for row in 0..delta {
+                draw_row_from_scrollback(buf, display, view_top + row, row);
+            }
+        } else {
+            redraw_view(buf, display);
+        }
+    });
+}
+
+fn console_page_down(display: &DisplayState) {
+    let rows = display.rows.get();
+    let total_lines = display.total_lines.get();
+
+    if total_lines <= rows {
+        return;
+    }
+
+    let max_top = (total_lines - rows).max(0);
+    let step = rows.max(1);
+    let new_top = (display.view_top.get() + step).min(max_top);
+    let delta = (new_top - display.view_top.get()).max(0);
+
+    if delta == 0 {
+        return;
+    }
+
+    display.view_top.set(new_top);
+    display.follow.set(new_top == max_top);
+
+    surface::draw(|buf| {
+        if delta < rows {
+            let shift = delta * FONT_CHAR_HEIGHT;
+            let width = display.width.get();
+            let height = display.height.get();
+            gfx::blit(buf, 0, shift, 0, 0, width, height - shift);
+
+            let start = rows - delta;
+            let view_top = display.view_top.get();
+            for row in start..rows {
+                draw_row_from_scrollback(buf, display, view_top + row, row);
+            }
+        } else {
+            redraw_view(buf, display);
+        }
+    });
+}
+
+fn console_ensure_follow(display: &DisplayState) {
+    let max_top = (display.total_lines.get() - display.rows.get()).max(0);
+    display.view_top.set(max_top);
+    display.follow.set(true);
+
+    surface::draw(|buf| {
+        redraw_view(buf, display);
+    });
+}
+
+fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
+    if !display.enabled.get() {
+        return;
+    }
+
+    let cursor_line = display.cursor_line.get();
+    let slot = display.line_slot(cursor_line);
+    let cols = display.cols.get() as usize;
+
+    // Build combined line
+    let total_len = prompt.len() + input.len();
+    let write_len = total_len.min(cols);
+
+    // Write to scrollback
+    let mut combined = [0u8; SHELL_SCROLLBACK_COLS];
+    let mut idx = 0;
+    for &b in prompt.iter().chain(input.iter()).take(write_len) {
+        combined[idx] = b;
+        idx += 1;
+    }
+    scrollback::write_line(slot, &combined[..idx]);
+    display.cursor_col.set(idx as i32);
+
+    // Render if following
+    if display.follow.get() {
+        let view_top = display.view_top.get();
+        let row = cursor_line - view_top;
+        if row >= 0 && row < display.rows.get() {
+            surface::draw(|buf| {
+                draw_row_from_scrollback(buf, display, cursor_line, row);
+            });
+        }
+    }
+}
+
+// =============================================================================
+// Public API functions
+// =============================================================================
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_init() {
@@ -562,32 +755,50 @@ fn shell_console_init() {
         return;
     }
 
-    // Use fixed window dimensions instead of fullscreen
     let width = SHELL_WINDOW_WIDTH;
     let height = SHELL_WINDOW_HEIGHT;
 
-    unsafe {
-        SHELL_CONSOLE.init(width, height, info.bpp);
-        // Window position is set automatically by the kernel in register_surface_for_task
+    // Initialize display state
+    DISPLAY.width.set(width);
+    DISPLAY.height.set(height);
+    let bytes_pp = ((info.bpp as usize + 7) / 8) as u8;
+    DISPLAY.bytes_pp.set(bytes_pp);
+    DISPLAY.pitch.set((width as usize) * (bytes_pp as usize));
+
+    let cols = width / FONT_CHAR_WIDTH;
+    let rows = height / FONT_CHAR_HEIGHT;
+    DISPLAY.cols.set(cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
+    DISPLAY.rows.set(rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
+
+    if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
+        DISPLAY.enabled.set(false);
+        return;
     }
+
+    // Initialize surface
+    if !surface::init(width, height, info.bpp) {
+        DISPLAY.enabled.set(false);
+        return;
+    }
+
+    DISPLAY.enabled.set(true);
+    DISPLAY.reset();
+    DISPLAY.fg.set(SHELL_FG_COLOR);
+    DISPLAY.bg.set(SHELL_BG_COLOR);
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_clear() {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.clear();
-            let _ = sys_surface_commit();
-        }
+    if DISPLAY.enabled.get() {
+        console_clear(&DISPLAY);
+        let _ = sys_surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_write(buf: &[u8]) {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.write(buf);
-        }
+    if DISPLAY.enabled.get() {
+        console_write(&DISPLAY, buf);
     }
 }
 
@@ -608,63 +819,55 @@ fn shell_echo_char(c: u8) {
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_get_cursor() -> (i32, i32) {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.cursor()
-        } else {
-            (0, 0)
-        }
+    if DISPLAY.enabled.get() {
+        DISPLAY.cursor()
+    } else {
+        (0, 0)
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_page_up() {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.page_up();
-            let _ = sys_surface_commit();
-        }
+    if DISPLAY.enabled.get() {
+        console_page_up(&DISPLAY);
+        let _ = sys_surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_page_down() {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.page_down();
-            let _ = sys_surface_commit();
-        }
+    if DISPLAY.enabled.get() {
+        console_page_down(&DISPLAY);
+        let _ = sys_surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_commit() {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            let _ = sys_surface_commit();
-        }
+    if DISPLAY.enabled.get() {
+        let _ = sys_surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_follow_bottom() {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.ensure_follow_visible();
-            let _ = sys_surface_commit();
-        }
+    if DISPLAY.enabled.get() {
+        console_ensure_follow(&DISPLAY);
+        let _ = sys_surface_commit();
     }
 }
 
 #[unsafe(link_section = ".user_text")]
-fn shell_redraw_input(_line_row: i32, buf: &[u8]) {
-    unsafe {
-        if SHELL_CONSOLE.enabled {
-            SHELL_CONSOLE.rewrite_input_line(PROMPT, buf);
-            let _ = sys_surface_commit();
-        }
+fn shell_redraw_input(_line_row: i32, input: &[u8]) {
+    if DISPLAY.enabled.get() {
+        console_rewrite_input(&DISPLAY, PROMPT, input);
+        let _ = sys_surface_commit();
     }
 }
+
+// =============================================================================
+// Command parsing and builtins
+// =============================================================================
 
 type BuiltinFn = fn(argc: i32, argv: &[*const u8]) -> i32;
 
@@ -676,56 +879,16 @@ struct BuiltinEntry {
 
 #[unsafe(link_section = ".user_rodata")]
 static BUILTINS: &[BuiltinEntry] = &[
-    BuiltinEntry {
-        name: b"help",
-        func: cmd_help,
-        desc: b"List available commands",
-    },
-    BuiltinEntry {
-        name: b"echo",
-        func: cmd_echo,
-        desc: b"Print arguments back to the terminal",
-    },
-    BuiltinEntry {
-        name: b"clear",
-        func: cmd_clear,
-        desc: b"Clear the terminal display",
-    },
-    BuiltinEntry {
-        name: b"shutdown",
-        func: cmd_shutdown,
-        desc: b"Power off the system",
-    },
-    BuiltinEntry {
-        name: b"info",
-        func: cmd_info,
-        desc: b"Show kernel memory and scheduler stats",
-    },
-    BuiltinEntry {
-        name: b"ls",
-        func: cmd_ls,
-        desc: b"List directory contents",
-    },
-    BuiltinEntry {
-        name: b"cat",
-        func: cmd_cat,
-        desc: b"Display file contents",
-    },
-    BuiltinEntry {
-        name: b"write",
-        func: cmd_write,
-        desc: b"Write text to a file",
-    },
-    BuiltinEntry {
-        name: b"mkdir",
-        func: cmd_mkdir,
-        desc: b"Create a directory",
-    },
-    BuiltinEntry {
-        name: b"rm",
-        func: cmd_rm,
-        desc: b"Remove a file",
-    },
+    BuiltinEntry { name: b"help", func: cmd_help, desc: b"List available commands" },
+    BuiltinEntry { name: b"echo", func: cmd_echo, desc: b"Print arguments back to the terminal" },
+    BuiltinEntry { name: b"clear", func: cmd_clear, desc: b"Clear the terminal display" },
+    BuiltinEntry { name: b"shutdown", func: cmd_shutdown, desc: b"Power off the system" },
+    BuiltinEntry { name: b"info", func: cmd_info, desc: b"Show kernel memory and scheduler stats" },
+    BuiltinEntry { name: b"ls", func: cmd_ls, desc: b"List directory contents" },
+    BuiltinEntry { name: b"cat", func: cmd_cat, desc: b"Display file contents" },
+    BuiltinEntry { name: b"write", func: cmd_write, desc: b"Write text to a file" },
+    BuiltinEntry { name: b"mkdir", func: cmd_mkdir, desc: b"Create a directory" },
+    BuiltinEntry { name: b"rm", func: cmd_rm, desc: b"Remove a file" },
 ];
 
 #[inline(always)]
@@ -742,14 +905,12 @@ fn u_streq_slice(a: *const u8, b: &[u8]) -> bool {
     if len != b.len() {
         return false;
     }
-    let mut i = 0usize;
-    while i < len {
+    for i in 0..len {
         unsafe {
             if *a.add(i) != b[i] {
                 return false;
             }
         }
-        i += 1;
     }
     true
 }
@@ -800,6 +961,7 @@ fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
     }
     let mut count = 0usize;
     let mut cursor = 0usize;
+
     while cursor < line.len() {
         while cursor < line.len() && is_space(line[cursor]) {
             cursor += 1;
@@ -815,14 +977,15 @@ fn shell_parse_line(line: &[u8], tokens: &mut [*const u8]) -> i32 {
             continue;
         }
         let token_len = cmp::min(cursor - start, SHELL_MAX_TOKEN_LENGTH - 1);
-        unsafe {
-            let dst = &mut TOKEN_STORAGE[count][..token_len];
-            dst.copy_from_slice(&line[start..start + token_len]);
-            TOKEN_STORAGE[count][token_len] = 0;
-            tokens[count] = TOKEN_STORAGE[count].as_ptr();
-        }
+
+        buffers::with_token_storage(|storage| {
+            storage[count][..token_len].copy_from_slice(&line[start..start + token_len]);
+            storage[count][token_len] = 0;
+        });
+        tokens[count] = buffers::token_ptr(count);
         count += 1;
     }
+
     if count < tokens.len() {
         tokens[count] = ptr::null();
     }
@@ -842,7 +1005,7 @@ fn find_builtin(name: *const u8) -> Option<&'static BuiltinEntry> {
 #[unsafe(link_section = ".user_text")]
 fn print_kv(key: &[u8], value: u64) {
     if !key.is_empty() {
-        let _ = shell_write(key);
+        shell_write(key);
     }
     let mut tmp = [0u8; 32];
     let mut idx = 0usize;
@@ -864,21 +1027,25 @@ fn print_kv(key: &[u8], value: u64) {
             r -= 1;
         }
     }
-    let _ = shell_write(&tmp[..idx]);
-    let _ = shell_write(NL);
+    shell_write(&tmp[..idx]);
+    shell_write(NL);
 }
+
+// =============================================================================
+// Built-in commands
+// =============================================================================
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_help(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let _ = shell_write(HELP_HEADER);
+    shell_write(HELP_HEADER);
     for entry in BUILTINS {
-        let _ = shell_write(b"  ");
-        let _ = shell_write(entry.name);
-        let _ = shell_write(b" - ");
+        shell_write(b"  ");
+        shell_write(entry.name);
+        shell_write(b" - ");
         if !entry.desc.is_empty() {
-            let _ = shell_write(entry.desc);
+            shell_write(entry.desc);
         }
-        let _ = shell_write(NL);
+        shell_write(NL);
     }
     0
 }
@@ -896,26 +1063,26 @@ fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
             continue;
         }
         if !first {
-            let _ = shell_write(b" ");
+            shell_write(b" ");
         }
         let len = runtime::u_strlen(arg);
-        let _ = shell_write(unsafe { core::slice::from_raw_parts(arg, len) });
+        shell_write(unsafe { core::slice::from_raw_parts(arg, len) });
         first = false;
     }
-    let _ = shell_write(NL);
+    shell_write(NL);
     0
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let _ = shell_write(b"\x1B[2J\x1B[H");
+    shell_write(b"\x1B[2J\x1B[H");
     shell_console_clear();
     0
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
-    let _ = shell_write(HALTED);
+    shell_write(HALTED);
     sys_halt();
 }
 
@@ -923,29 +1090,29 @@ fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
 fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     let mut info = UserSysInfo::default();
     if sys_sys_info(&mut info) != 0 {
-        let _ = shell_write(b"info: failed\n");
+        shell_write(b"info: failed\n");
         return 1;
     }
-    let _ = shell_write(b"Kernel information:\n");
-    let _ = shell_write(b"  Memory: total pages=");
+    shell_write(b"Kernel information:\n");
+    shell_write(b"  Memory: total pages=");
     print_kv(b"", info.total_pages as u64);
-    let _ = shell_write(b"  Free pages=");
+    shell_write(b"  Free pages=");
     print_kv(b"", info.free_pages as u64);
-    let _ = shell_write(b"  Allocated pages=");
+    shell_write(b"  Allocated pages=");
     print_kv(b"", info.allocated_pages as u64);
-    let _ = shell_write(b"  Tasks: total=");
+    shell_write(b"  Tasks: total=");
     print_kv(b"", info.total_tasks as u64);
-    let _ = shell_write(b"  Active tasks=");
+    shell_write(b"  Active tasks=");
     print_kv(b"", info.active_tasks as u64);
-    let _ = shell_write(b"  Task ctx switches=");
+    shell_write(b"  Task ctx switches=");
     print_kv(b"", info.task_context_switches);
-    let _ = shell_write(b"  Scheduler: switches=");
+    shell_write(b"  Scheduler: switches=");
     print_kv(b"", info.scheduler_context_switches);
-    let _ = shell_write(b"  Yields=");
+    shell_write(b"  Yields=");
     print_kv(b"", info.scheduler_yields);
-    let _ = shell_write(b"  Ready=");
+    shell_write(b"  Ready=");
     print_kv(b"", info.ready_tasks as u64);
-    let _ = shell_write(b"  schedule() calls=");
+    shell_write(b"  schedule() calls=");
     print_kv(b"", info.schedule_calls as u64);
     0
 }
@@ -953,194 +1120,224 @@ fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
 #[unsafe(link_section = ".user_text")]
 fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
-        let _ = shell_write(ERR_TOO_MANY_ARGS);
+        shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
 
     let path_ptr = if argc == 2 { argv[1] } else { ptr::null() };
-    let path_buf_guard = unsafe { &mut PATH_BUF };
 
-    let path = if path_ptr.is_null() {
-        b"/\0".as_ptr()
-    } else {
-        if normalize_path(path_ptr, path_buf_guard) != 0 {
-            let _ = shell_write(PATH_TOO_LONG);
-            return 1;
+    let path = buffers::with_path_buf(|path_buf| {
+        if path_ptr.is_null() {
+            b"/\0".as_ptr()
+        } else {
+            if normalize_path(path_ptr, path_buf) != 0 {
+                shell_write(PATH_TOO_LONG);
+                return ptr::null();
+            }
+            path_buf.as_ptr()
         }
-        path_buf_guard.as_ptr()
-    };
+    });
 
-    let mut list = UserFsList {
-        entries: unsafe { LIST_ENTRIES.as_mut_ptr() },
-        max_entries: (unsafe { LIST_ENTRIES.len() }) as u32,
-        count: 0,
-    };
-
-    if sys_fs_list(path as *const c_char, &mut list) != 0 {
-        let _ = shell_write(ERR_NO_SUCH);
+    if path.is_null() {
         return 1;
     }
 
-    for i in 0..list.count {
-        let entry = unsafe { &LIST_ENTRIES[i as usize] };
-        if entry.r#type == 1 {
-            let _ = shell_write(b"[");
-            let _ =
-                shell_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
-            let _ = shell_write(b"]\n");
-        } else {
-            let name_len = runtime::u_strnlen(entry.name.as_ptr(), entry.name.len());
-            let _ = shell_write(&entry.name[..name_len]);
-            let _ = shell_write(b" (");
-            print_kv(b"", entry.size as u64);
-        }
-    }
+    let result = buffers::with_list_entries(|entries| {
+        let mut list = UserFsList {
+            entries: entries.as_mut_ptr(),
+            max_entries: entries.len() as u32,
+            count: 0,
+        };
 
-    0
+        if sys_fs_list(path as *const c_char, &mut list) != 0 {
+            shell_write(ERR_NO_SUCH);
+            return 1;
+        }
+
+        for i in 0..list.count {
+            let entry = &entries[i as usize];
+            if entry.r#type == 1 {
+                shell_write(b"[");
+                shell_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
+                shell_write(b"]\n");
+            } else {
+                let name_len = runtime::u_strnlen(entry.name.as_ptr(), entry.name.len());
+                shell_write(&entry.name[..name_len]);
+                shell_write(b" (");
+                print_kv(b"", entry.size as u64);
+            }
+        }
+        0
+    });
+
+    result
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        let _ = shell_write(ERR_MISSING_FILE);
+        shell_write(ERR_MISSING_FILE);
         return 1;
     }
     if argc > 2 {
-        let _ = shell_write(ERR_TOO_MANY_ARGS);
+        shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
-    let path_buf_guard = unsafe { &mut PATH_BUF };
-    if normalize_path(argv[1], path_buf_guard) != 0 {
-        let _ = shell_write(PATH_TOO_LONG);
-        return 1;
-    }
-    let mut tmp = [0u8; SHELL_IO_MAX + 1];
-    let fd = sys_fs_open(path_buf_guard.as_ptr() as *const c_char, USER_FS_OPEN_READ);
-    if fd < 0 {
-        let _ = shell_write(ERR_NO_SUCH);
-        return 1;
-    }
-    let r = sys_fs_read(fd as i32, tmp.as_mut_ptr() as *mut c_void, SHELL_IO_MAX);
-    let _ = sys_fs_close(fd as i32);
-    if r < 0 {
-        let _ = shell_write(ERR_NO_SUCH);
-        return 1;
-    }
-    let len = cmp::min(r as usize, tmp.len() - 1);
-    tmp[len] = 0;
-    let _ = shell_write(&tmp[..len]);
-    if r as usize == SHELL_IO_MAX {
-        let _ = shell_write(b"\n[truncated]\n");
-    }
-    0
+
+    buffers::with_path_buf(|path_buf| {
+        if normalize_path(argv[1], path_buf) != 0 {
+            shell_write(PATH_TOO_LONG);
+            return 1;
+        }
+
+        let mut tmp = [0u8; SHELL_IO_MAX + 1];
+        let fd = sys_fs_open(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+        if fd < 0 {
+            shell_write(ERR_NO_SUCH);
+            return 1;
+        }
+        let r = sys_fs_read(fd as i32, tmp.as_mut_ptr() as *mut c_void, SHELL_IO_MAX);
+        let _ = sys_fs_close(fd as i32);
+        if r < 0 {
+            shell_write(ERR_NO_SUCH);
+            return 1;
+        }
+        let len = cmp::min(r as usize, tmp.len() - 1);
+        tmp[len] = 0;
+        shell_write(&tmp[..len]);
+        if r as usize == SHELL_IO_MAX {
+            shell_write(b"\n[truncated]\n");
+        }
+        0
+    })
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        let _ = shell_write(ERR_MISSING_FILE);
+        shell_write(ERR_MISSING_FILE);
         return 1;
     }
     if argc < 3 {
-        let _ = shell_write(ERR_MISSING_TEXT);
+        shell_write(ERR_MISSING_TEXT);
         return 1;
     }
     if argc > 3 {
-        let _ = shell_write(ERR_TOO_MANY_ARGS);
+        shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
-    let path_buf_guard = unsafe { &mut PATH_BUF };
-    if normalize_path(argv[1], path_buf_guard) != 0 {
-        let _ = shell_write(PATH_TOO_LONG);
-        return 1;
-    }
-    let text = argv[2];
-    if text.is_null() {
-        let _ = shell_write(ERR_MISSING_TEXT);
-        return 1;
-    }
-    let mut len = runtime::u_strlen(text);
-    if len > SHELL_IO_MAX {
-        len = SHELL_IO_MAX;
-    }
-    let fd = sys_fs_open(
-        path_buf_guard.as_ptr() as *const c_char,
-        USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-    );
-    if fd < 0 {
-        let _ = shell_write(b"write failed\n");
-        return 1;
-    }
-    let w = sys_fs_write(fd as i32, text as *const c_void, len);
-    let _ = sys_fs_close(fd as i32);
-    if w < 0 || w as usize != len {
-        let _ = shell_write(b"write failed\n");
-        return 1;
-    }
-    0
+
+    buffers::with_path_buf(|path_buf| {
+        if normalize_path(argv[1], path_buf) != 0 {
+            shell_write(PATH_TOO_LONG);
+            return 1;
+        }
+
+        let text = argv[2];
+        if text.is_null() {
+            shell_write(ERR_MISSING_TEXT);
+            return 1;
+        }
+
+        let mut len = runtime::u_strlen(text);
+        if len > SHELL_IO_MAX {
+            len = SHELL_IO_MAX;
+        }
+
+        let fd = sys_fs_open(
+            path_buf.as_ptr() as *const c_char,
+            USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
+        );
+        if fd < 0 {
+            shell_write(b"write failed\n");
+            return 1;
+        }
+        let w = sys_fs_write(fd as i32, text as *const c_void, len);
+        let _ = sys_fs_close(fd as i32);
+        if w < 0 || w as usize != len {
+            shell_write(b"write failed\n");
+            return 1;
+        }
+        0
+    })
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        let _ = shell_write(ERR_MISSING_OPERAND);
+        shell_write(ERR_MISSING_OPERAND);
         return 1;
     }
     if argc > 2 {
-        let _ = shell_write(ERR_TOO_MANY_ARGS);
+        shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
-    let path_buf_guard = unsafe { &mut PATH_BUF };
-    if normalize_path(argv[1], path_buf_guard) != 0 {
-        let _ = shell_write(PATH_TOO_LONG);
-        return 1;
-    }
-    if sys_fs_mkdir(path_buf_guard.as_ptr() as *const c_char) != 0 {
-        let _ = shell_write(b"mkdir failed\n");
-        return 1;
-    }
-    0
+
+    buffers::with_path_buf(|path_buf| {
+        if normalize_path(argv[1], path_buf) != 0 {
+            shell_write(PATH_TOO_LONG);
+            return 1;
+        }
+        if sys_fs_mkdir(path_buf.as_ptr() as *const c_char) != 0 {
+            shell_write(b"mkdir failed\n");
+            return 1;
+        }
+        0
+    })
 }
 
 #[unsafe(link_section = ".user_text")]
 fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        let _ = shell_write(ERR_MISSING_OPERAND);
+        shell_write(ERR_MISSING_OPERAND);
         return 1;
     }
     if argc > 2 {
-        let _ = shell_write(ERR_TOO_MANY_ARGS);
+        shell_write(ERR_TOO_MANY_ARGS);
         return 1;
     }
-    let path_buf_guard = unsafe { &mut PATH_BUF };
-    if normalize_path(argv[1], path_buf_guard) != 0 {
-        let _ = shell_write(PATH_TOO_LONG);
-        return 1;
-    }
-    if sys_fs_unlink(path_buf_guard.as_ptr() as *const c_char) != 0 {
-        let _ = shell_write(b"rm failed\n");
-        return 1;
-    }
-    0
+
+    buffers::with_path_buf(|path_buf| {
+        if normalize_path(argv[1], path_buf) != 0 {
+            shell_write(PATH_TOO_LONG);
+            return 1;
+        }
+        if sys_fs_unlink(path_buf.as_ptr() as *const c_char) != 0 {
+            shell_write(b"rm failed\n");
+            return 1;
+        }
+        0
+    })
 }
+
+// =============================================================================
+// Main entry point
+// =============================================================================
+
 #[unsafe(link_section = ".user_text")]
 pub fn shell_user_main(_arg: *mut c_void) {
     shell_console_init();
     shell_console_clear();
-    let _ = shell_write(WELCOME);
+    shell_write(WELCOME);
+
     loop {
         let (_, line_row) = shell_console_get_cursor();
-        let _ = shell_write(PROMPT);
-        unsafe {
-            runtime::u_memset(LINE_BUF.as_mut_ptr() as *mut c_void, 0, LINE_BUF.len());
-        }
+        shell_write(PROMPT);
+
+        // Clear line buffer
+        buffers::with_line_buf(|buf| {
+            runtime::u_memset(buf.as_mut_ptr() as *mut c_void, 0, buf.len());
+        });
+
         let mut len = 0usize;
+
         loop {
             let rc = sys_read_char();
             if rc < 0 {
                 continue;
             }
             let c = rc as u8;
+
             if c == KEY_PAGE_UP {
                 shell_console_page_up();
                 continue;
@@ -1149,47 +1346,67 @@ pub fn shell_user_main(_arg: *mut c_void) {
                 shell_console_page_down();
                 continue;
             }
-            unsafe {
-                if SHELL_CONSOLE.enabled && !SHELL_CONSOLE.follow {
-                    shell_console_follow_bottom();
-                }
+
+            // Return to follow mode if we were scrolled up
+            if DISPLAY.enabled.get() && !DISPLAY.follow.get() {
+                shell_console_follow_bottom();
             }
+
             if c == b'\n' || c == b'\r' {
                 shell_echo_char(b'\n');
                 break;
             }
+
             if c == b'\x08' || c == 0x7f {
                 if len > 0 {
                     len -= 1;
-                    shell_redraw_input(line_row, unsafe { &LINE_BUF[..len] });
+                    buffers::with_line_buf(|buf| {
+                        shell_redraw_input(line_row, &buf[..len]);
+                    });
                 }
                 continue;
             }
+
             if c < 0x20 {
                 continue;
             }
-            if len + 1 >= unsafe { LINE_BUF.len() } {
+
+            let max_len = buffers::with_line_buf(|buf| buf.len());
+            if len + 1 >= max_len {
                 continue;
             }
-            unsafe {
-                LINE_BUF[len] = c;
-            }
-            len += 1;
-            shell_redraw_input(line_row, unsafe { &LINE_BUF[..len] });
-        }
-        let capped = cmp::min(len, unsafe { LINE_BUF.len() - 1 });
-        unsafe { LINE_BUF[capped] = 0 };
 
+            buffers::with_line_buf(|buf| {
+                buf[len] = c;
+            });
+            len += 1;
+
+            buffers::with_line_buf(|buf| {
+                shell_redraw_input(line_row, &buf[..len]);
+            });
+        }
+
+        // Null-terminate
+        buffers::with_line_buf(|buf| {
+            let capped = cmp::min(len, buf.len() - 1);
+            buf[capped] = 0;
+        });
+
+        // Parse and execute
         let mut tokens: [*const u8; SHELL_MAX_TOKENS] = [ptr::null(); SHELL_MAX_TOKENS];
-        let token_count = shell_parse_line(unsafe { &LINE_BUF }, &mut tokens);
+        let token_count = buffers::with_line_buf(|buf| {
+            shell_parse_line(buf, &mut tokens)
+        });
+
         if token_count <= 0 {
             continue;
         }
+
         let builtin = find_builtin(tokens[0]);
         if let Some(b) = builtin {
             (b.func)(token_count, &tokens);
         } else {
-            let _ = shell_write(UNKNOWN_CMD);
+            shell_write(UNKNOWN_CMD);
         }
     }
 }
