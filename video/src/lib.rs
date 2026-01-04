@@ -67,6 +67,46 @@ fn fb_flip_bridge(shm_phys: u64, size: usize) -> c_int {
     framebuffer::fb_flip_from_shm(shm_phys, size)
 }
 
+/// Request a frame callback (Wayland wl_surface.frame)
+fn surface_request_frame_callback_bridge(task_id: u32) -> c_int {
+    compositor_context::surface_request_frame_callback(task_id)
+}
+
+/// Mark frames as done (called by compositor after present)
+fn surface_mark_frames_done_bridge(present_time_ms: u64) {
+    compositor_context::surface_mark_frames_done(present_time_ms);
+}
+
+/// Poll for frame completion
+fn surface_poll_frame_done_bridge(task_id: u32) -> u64 {
+    compositor_context::surface_poll_frame_done(task_id)
+}
+
+/// Add damage region to surface
+fn surface_add_damage_bridge(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
+    compositor_context::surface_add_damage(task_id, x, y, width, height)
+}
+
+/// Get back buffer age for damage accumulation
+fn surface_get_buffer_age_bridge(task_id: u32) -> u8 {
+    compositor_context::surface_get_buffer_age(task_id)
+}
+
+/// Set surface role (toplevel, popup, subsurface)
+fn surface_set_role_bridge(task_id: u32, role: u8) -> c_int {
+    compositor_context::surface_set_role(task_id, role)
+}
+
+/// Set parent surface for subsurfaces
+fn surface_set_parent_bridge(task_id: u32, parent_task_id: u32) -> c_int {
+    compositor_context::surface_set_parent(task_id, parent_task_id)
+}
+
+/// Set relative position for subsurfaces
+fn surface_set_relative_position_bridge(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
+    compositor_context::surface_set_relative_position(task_id, rel_x, rel_y)
+}
+
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     // Register task cleanup callback early so it's available even if framebuffer init fails
     register_video_task_cleanup_callback(task_cleanup_bridge);
@@ -96,6 +136,14 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             fb_flip: Some(fb_flip_bridge),
             register_surface: Some(register_surface_bridge),
             drain_queue: Some(drain_queue_bridge),
+            surface_request_frame_callback: Some(surface_request_frame_callback_bridge),
+            surface_mark_frames_done: Some(surface_mark_frames_done_bridge),
+            surface_poll_frame_done: Some(surface_poll_frame_done_bridge),
+            surface_add_damage: Some(surface_add_damage_bridge),
+            surface_get_buffer_age: Some(surface_get_buffer_age_bridge),
+            surface_set_role: Some(surface_set_role_bridge),
+            surface_set_parent: Some(surface_set_parent_bridge),
+            surface_set_relative_position: Some(surface_set_relative_position_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

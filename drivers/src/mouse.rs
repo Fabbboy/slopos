@@ -1,5 +1,9 @@
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use crate::input_event;
+use crate::irq;
+use crate::pit::pit_get_frequency;
+
 const MOUSE_BUFFER_SIZE: usize = 256;
 const PS2_DATA_PORT: u16 = 0x60;
 const PS2_STATUS_PORT: u16 = 0x64;
@@ -220,6 +224,16 @@ unsafe fn buffer_push(event: MouseEvent) {
     (*buf).count = (*buf).count.saturating_add(1);
 }
 
+/// Get current timestamp in milliseconds for input events.
+fn get_timestamp_ms() -> u64 {
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    if freq == 0 {
+        return 0;
+    }
+    (ticks * 1000) / freq as u64
+}
+
 #[inline(always)]
 unsafe fn buffer_pop() -> Option<MouseEvent> {
     let buf = &raw mut EVENT_BUFFER;
@@ -258,6 +272,9 @@ pub fn mouse_handle_irq(scancode: u8) {
             return;
         }
 
+        // Save old button state for detecting button events
+        let old_buttons = (*state).buttons;
+
         // Extract button state
         (*state).buttons = flags & 0x07;
 
@@ -283,12 +300,29 @@ pub fn mouse_handle_irq(scancode: u8) {
         (*state).x = (*state).x.clamp(0, (*state).max_x - 1);
         (*state).y = (*state).y.clamp(0, (*state).max_y - 1);
 
-        // Push event to buffer
+        // Push event to buffer (for legacy mouse_read_event API)
         buffer_push(MouseEvent {
             x: (*state).x,
             y: (*state).y,
             buttons: (*state).buttons,
         });
+
+        // Route events to input_event system for Wayland-like per-task queues
+        let timestamp_ms = get_timestamp_ms();
+
+        // Route motion event if mouse moved
+        if dx != 0 || dy != 0 {
+            input_event::input_route_pointer_motion((*state).x, (*state).y, timestamp_ms);
+        }
+
+        // Route button events for any buttons that changed state
+        let button_changes = old_buttons ^ (*state).buttons;
+        for button_bit in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE] {
+            if button_changes & button_bit != 0 {
+                let pressed = (*state).buttons & button_bit != 0;
+                input_event::input_route_pointer_button(button_bit, pressed, timestamp_ms);
+            }
+        }
     }
 }
 

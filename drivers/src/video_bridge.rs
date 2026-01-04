@@ -81,6 +81,30 @@ pub struct VideoCallbacks {
     pub register_surface: Option<fn(u32, u32, u32, u8, u32) -> c_int>,
     /// Drain the compositor queue (called by compositor at start of each frame)
     pub drain_queue: Option<fn()>,
+    /// Request a frame callback (Wayland wl_surface.frame)
+    /// Args: (task_id) -> c_int
+    pub surface_request_frame_callback: Option<fn(u32) -> c_int>,
+    /// Mark frames as done (called by compositor after present)
+    /// Args: (present_time_ms)
+    pub surface_mark_frames_done: Option<fn(u64)>,
+    /// Poll for frame completion
+    /// Args: (task_id) -> timestamp (0 if not done)
+    pub surface_poll_frame_done: Option<fn(u32) -> u64>,
+    /// Add damage region to surface (Wayland wl_surface.damage)
+    /// Args: (task_id, x, y, width, height) -> c_int
+    pub surface_add_damage: Option<fn(u32, i32, i32, i32, i32) -> c_int>,
+    /// Get back buffer age for damage accumulation
+    /// Args: (task_id) -> age (0 = undefined, N = N frames old)
+    pub surface_get_buffer_age: Option<fn(u32) -> u8>,
+    /// Set surface role (toplevel, popup, subsurface)
+    /// Args: (task_id, role) -> c_int
+    pub surface_set_role: Option<fn(u32, u8) -> c_int>,
+    /// Set parent surface for subsurfaces
+    /// Args: (task_id, parent_task_id) -> c_int
+    pub surface_set_parent: Option<fn(u32, u32) -> c_int>,
+    /// Set relative position for subsurfaces
+    /// Args: (task_id, rel_x, rel_y) -> c_int
+    pub surface_set_relative_position: Option<fn(u32, i32, i32) -> c_int>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -244,4 +268,105 @@ impl VideoCallbacks {
     pub fn has_fb_flip(&self) -> bool {
         self.fb_flip.is_some()
     }
+}
+
+// =============================================================================
+// Frame Callback Protocol (Wayland wl_surface.frame)
+// =============================================================================
+
+/// Request a frame callback (client API).
+/// Called by clients via syscall to request notification when frame is presented.
+pub fn surface_request_frame_callback(task_id: u32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_request_frame_callback {
+            return cb(task_id);
+        }
+    }
+    -1
+}
+
+/// Mark frames as done (compositor API).
+/// Called by compositor after presenting a frame to notify clients.
+pub fn surface_mark_frames_done(present_time_ms: u64) {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_mark_frames_done {
+            cb(present_time_ms);
+        }
+    }
+}
+
+/// Poll for frame completion (client API).
+/// Returns presentation timestamp if done, 0 if still pending.
+pub fn surface_poll_frame_done(task_id: u32) -> u64 {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_poll_frame_done {
+            return cb(task_id);
+        }
+    }
+    0
+}
+
+// =============================================================================
+// Damage Tracking Protocol (Wayland wl_surface.damage)
+// =============================================================================
+
+/// Add damage region to surface's back buffer (client API).
+/// Called by clients via syscall to mark regions that need redrawing.
+pub fn surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_add_damage {
+            return cb(task_id, x, y, width, height);
+        }
+    }
+    -1
+}
+
+/// Get back buffer age for damage accumulation (client API).
+/// Returns 0 if buffer content is undefined (must redraw everything).
+/// Returns N if buffer contains content from N frames ago.
+pub fn surface_get_buffer_age(task_id: u32) -> u8 {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_get_buffer_age {
+            return cb(task_id);
+        }
+    }
+    0
+}
+
+// =============================================================================
+// Surface Role Protocol (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
+// =============================================================================
+
+/// Set surface role (client API).
+/// Role can only be set once per surface.
+/// Values: 0 = None, 1 = Toplevel, 2 = Popup, 3 = Subsurface
+pub fn surface_set_role(task_id: u32, role: u8) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_role {
+            return cb(task_id, role);
+        }
+    }
+    -1
+}
+
+/// Set parent surface for subsurfaces (client API).
+/// Only valid for surfaces with role Subsurface.
+pub fn surface_set_parent(task_id: u32, parent_task_id: u32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_parent {
+            return cb(task_id, parent_task_id);
+        }
+    }
+    -1
+}
+
+/// Set relative position for subsurfaces (client API).
+/// Position is relative to parent's top-left corner.
+pub fn surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_relative_position {
+            return cb(task_id, rel_x, rel_y);
+        }
+    }
+    -1
 }

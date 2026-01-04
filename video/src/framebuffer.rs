@@ -65,7 +65,19 @@ static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new()
 static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> =
     Mutex::new(const { FramebufferInfoC::new() });
 
+// SAFETY: FbState contains base pointer to MMIO-mapped framebuffer memory.
+// Thread-safety is guaranteed because:
+// 1. base is initialized once during boot from UEFI/Limine framebuffer info
+// 2. Only accessed through FRAMEBUFFER Mutex (single global lock serializes all access)
+// 3. MMIO address is stable for the lifetime of the kernel
+// 4. The kernel runs on a single CPU (no SMP) so no concurrent access possible
+// 5. All writes use volatile operations ensuring proper ordering
 unsafe impl Send for FbState {}
+
+// SAFETY: FramebufferState is a wrapper containing Option<FbState>.
+// Thread-safety is guaranteed because:
+// 1. Only accessed through FRAMEBUFFER static Mutex
+// 2. All FbState safety guarantees apply (see above)
 unsafe impl Send for FramebufferState {}
 
 fn determine_pixel_format(bpp: u8) -> u8 {

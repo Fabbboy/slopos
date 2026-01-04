@@ -1,5 +1,8 @@
 use slopos_lib::{cpu, klog_debug};
 
+use crate::input_event;
+use crate::irq;
+use crate::pit::pit_get_frequency;
 use crate::scheduler_callbacks;
 use crate::tty::tty_notify_input_ready;
 
@@ -200,6 +203,16 @@ fn handle_modifier_key(make_code: u8, is_press: bool) {
         }
     }
 }
+
+/// Get current timestamp in milliseconds for input events.
+fn get_timestamp_ms() -> u64 {
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    if freq == 0 {
+        return 0;
+    }
+    (ticks * 1000) / freq as u64
+}
 pub fn keyboard_init() {
     unsafe {
         KB_STATE = KeyboardState::new();
@@ -227,6 +240,12 @@ pub fn keyboard_handle_scancode(scancode: u8) {
     );
 
     unsafe { kb_buffer_push_overwrite(&raw mut SCANCODE_BUFFER, scancode) };
+
+    // Route all key events to the input event system for the focused task.
+    // This includes modifier keys, extended keys, and regular keys.
+    let ascii = translate_scancode(scancode);
+    let timestamp_ms = get_timestamp_ms();
+    input_event::input_route_key_event(make_code, ascii, is_press, timestamp_ms);
 
     if matches!(
         make_code,
@@ -264,7 +283,7 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         return;
     }
 
-    let ascii = translate_scancode(scancode);
+    // ascii was already computed above for input_event routing
     klog_debug!("[KBD] ASCII: 0x{:02x}\n", ascii);
 
     if ascii != 0 {

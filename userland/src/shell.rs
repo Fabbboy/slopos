@@ -11,7 +11,7 @@ use crate::syscall::{
     UserFsList, UserSysInfo, sys_fb_info, sys_fs_close,
     sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
     sys_halt, sys_read_char, sys_surface_commit, sys_sys_info,
-    sys_write, sys_shm_create, sys_shm_map, sys_surface_attach, SHM_ACCESS_RW,
+    sys_write, ShmBuffer,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -89,10 +89,8 @@ struct ShellConsole {
     follow: bool,
     fg: u32,
     bg: u32,
-    // Shared memory buffer
-    shm_token: u32,
-    shm_ptr: *mut u8,
-    shm_size: usize,
+    // Shared memory buffer (safe wrapper)
+    shm_buffer: Option<ShmBuffer>,
 }
 
 impl ShellConsole {
@@ -113,9 +111,7 @@ impl ShellConsole {
             follow: true,
             fg: SHELL_FG_COLOR,
             bg: SHELL_BG_COLOR,
-            shm_token: 0,
-            shm_ptr: ptr::null_mut(),
-            shm_size: 0,
+            shm_buffer: None,
         }
     }
 
@@ -134,33 +130,25 @@ impl ShellConsole {
             return;
         }
 
-        // Allocate shared memory buffer for the surface
+        // Allocate shared memory buffer using safe wrapper
         let buffer_size = self.pitch * (height as usize);
-        let token = sys_shm_create(buffer_size as u64, 0);
-        if token == 0 {
-            let _ = sys_write(b"shell: failed to create shm buffer\n");
-            self.enabled = false;
-            return;
-        }
-
-        let ptr = sys_shm_map(token, SHM_ACCESS_RW);
-        if ptr == 0 {
-            let _ = sys_write(b"shell: failed to map shm buffer\n");
-            self.enabled = false;
-            return;
-        }
+        let shm_buffer = match ShmBuffer::create(buffer_size) {
+            Ok(buf) => buf,
+            Err(_) => {
+                let _ = sys_write(b"shell: failed to create shm buffer\n");
+                self.enabled = false;
+                return;
+            }
+        };
 
         // Attach buffer as a window surface
-        if sys_surface_attach(token, width as u32, height as u32) != 0 {
+        if shm_buffer.attach_surface(width as u32, height as u32).is_err() {
             let _ = sys_write(b"shell: failed to attach surface\n");
             self.enabled = false;
             return;
         }
 
-        self.shm_token = token;
-        self.shm_ptr = ptr as *mut u8;
-        self.shm_size = buffer_size;
-
+        self.shm_buffer = Some(shm_buffer);
         self.enabled = true;
         self.cursor_col = 0;
         self.cursor_line = 0;
@@ -175,12 +163,11 @@ impl ShellConsole {
 
     /// Get a mutable DrawBuffer for the surface
     fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-        if !self.enabled || self.shm_ptr.is_null() {
+        if !self.enabled {
             return None;
         }
-        let slice = unsafe {
-            core::slice::from_raw_parts_mut(self.shm_ptr, self.shm_size)
-        };
+        let shm_buffer = self.shm_buffer.as_mut()?;
+        let slice = shm_buffer.as_mut_slice();
         DrawBuffer::new(
             slice,
             self.width as u32,

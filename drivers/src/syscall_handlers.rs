@@ -1,6 +1,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
+use crate::input_event;
 use crate::random;
 use crate::serial;
 use crate::wl_currency;
@@ -627,6 +628,338 @@ pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> Sysca
     syscall_return_ok(frame, 0)
 }
 
+/// SHM_ACQUIRE: Compositor acquires a buffer reference
+/// Increments refcount and clears released flag.
+/// arg0: token
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_shm_acquire(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    // Only compositor can acquire buffers
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let token = unsafe { (*frame).rdi as u32 };
+    let result = slopos_mm::shared_memory::shm_acquire(token);
+    if result < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, result as u64)
+    } else {
+        wl_currency::award_win();
+        syscall_return_ok(frame, 0)
+    }
+}
+
+/// SHM_RELEASE: Compositor releases a buffer reference
+/// Decrements refcount and sets released flag.
+/// arg0: token
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_shm_release(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    // Only compositor can release buffers
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let token = unsafe { (*frame).rdi as u32 };
+    let result = slopos_mm::shared_memory::shm_release(token);
+    if result < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, result as u64)
+    } else {
+        wl_currency::award_win();
+        syscall_return_ok(frame, 0)
+    }
+}
+
+/// SHM_POLL_RELEASED: Client polls to check if buffer was released by compositor
+/// arg0: token
+/// Returns: 1 if released, 0 if not released, -1 on error
+pub fn syscall_shm_poll_released(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let token = unsafe { (*frame).rdi as u32 };
+    let result = slopos_mm::shared_memory::shm_poll_released(token);
+
+    // Don't award W/L for polling - it's informational
+    syscall_return_ok(frame, result as u64)
+}
+
+// =============================================================================
+// Frame Callback Syscalls (Wayland wl_surface.frame)
+// =============================================================================
+
+/// SURFACE_FRAME: Request a frame callback (client API)
+/// Called by clients to request notification when frame is presented.
+/// arg0: (none - uses caller's task_id)
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_frame(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let rc = video_bridge::surface_request_frame_callback(task_id);
+
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        wl_currency::award_win();
+        syscall_return_ok(frame, 0)
+    }
+}
+
+/// POLL_FRAME_DONE: Poll for frame completion (client API)
+/// Returns presentation timestamp if frame was presented, 0 if still pending.
+/// arg0: (none - uses caller's task_id)
+/// Returns: timestamp (ms since boot) if done, 0 if pending
+pub fn syscall_poll_frame_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, 0);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let timestamp = video_bridge::surface_poll_frame_done(task_id);
+
+    // Don't award W/L for polling - it's informational
+    syscall_return_ok(frame, timestamp)
+}
+
+/// MARK_FRAMES_DONE: Compositor signals frame completion (compositor only)
+/// Called by compositor after presenting a frame to notify all clients.
+/// arg0: present_time_ms
+/// Returns: 0
+pub fn syscall_mark_frames_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let present_time_ms = unsafe { (*frame).rdi };
+    video_bridge::surface_mark_frames_done(present_time_ms);
+
+    syscall_return_ok(frame, 0)
+}
+
+// =============================================================================
+// Pixel Format Negotiation Syscalls (Wayland wl_shm)
+// =============================================================================
+
+/// SHM_GET_FORMATS: Get bitmap of supported pixel formats
+/// Returns: bitmap where bit N is set if PixelFormat N is supported
+pub fn syscall_shm_get_formats(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let formats = slopos_mm::shared_memory::shm_get_formats();
+    syscall_return_ok(frame, formats as u64)
+}
+
+/// SHM_CREATE_WITH_FORMAT: Create a shared buffer with specific pixel format
+/// arg0: size in bytes
+/// arg1: format (PixelFormat enum value)
+/// Returns: token on success, 0 on failure
+pub fn syscall_shm_create_with_format(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let size = unsafe { (*frame).rdi };
+    let format_val = unsafe { (*frame).rsi as u32 };
+    let task_id = unsafe { (*task).task_id };
+
+    let format = match slopos_mm::shared_memory::PixelFormat::from_u32(format_val) {
+        Some(f) => f,
+        None => {
+            wl_currency::award_loss();
+            return syscall_return_err(frame, 0);
+        }
+    };
+
+    let token = slopos_mm::shared_memory::shm_create_with_format(task_id, size, format);
+    if token == 0 {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, 0);
+    }
+
+    wl_currency::award_win();
+    syscall_return_ok(frame, token as u64)
+}
+
+// =============================================================================
+// Damage Tracking Syscalls (Wayland wl_surface.damage)
+// =============================================================================
+
+/// SURFACE_DAMAGE: Add damage region to surface's back buffer
+/// arg0: x
+/// arg1: y
+/// arg2: width
+/// arg3: height
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        wl_currency::award_loss();
+        return syscall_return_err(frame, u64::MAX);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let x = unsafe { (*frame).rdi as i32 };
+    let y = unsafe { (*frame).rsi as i32 };
+    let width = unsafe { (*frame).rdx as i32 };
+    let height = unsafe { (*frame).rcx as i32 };
+
+    let rc = video_bridge::surface_add_damage(task_id, x, y, width, height);
+    if rc < 0 {
+        wl_currency::award_loss();
+        syscall_return_err(frame, u64::MAX)
+    } else {
+        wl_currency::award_win();
+        syscall_return_ok(frame, 0)
+    }
+}
+
+/// BUFFER_AGE: Get back buffer age for damage accumulation
+/// Returns: buffer age (0 = undefined, N = N frames old)
+pub fn syscall_buffer_age(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, 0);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let age = video_bridge::surface_get_buffer_age(task_id);
+
+    // Don't award W/L for querying buffer age - it's informational
+    syscall_return_ok(frame, age as u64)
+}
+
+// =============================================================================
+// Surface Role Syscalls (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
+// =============================================================================
+
+pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
+pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
+pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
+
+/// SURFACE_SET_ROLE: Set the role of a surface (toplevel, popup, subsurface)
+/// Args: rdi = role (0=None, 1=Toplevel, 2=Popup, 3=Subsurface)
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_set_role(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let role = unsafe { (*frame).rdi } as u8;
+
+    let result = video_bridge::surface_set_role(task_id, role);
+    syscall_return_ok(frame, result as u64)
+}
+
+/// SURFACE_SET_PARENT: Set the parent surface for a subsurface
+/// Args: rdi = parent_task_id
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_set_parent(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let parent_task_id = unsafe { (*frame).rdi } as u32;
+
+    let result = video_bridge::surface_set_parent(task_id, parent_task_id);
+    syscall_return_ok(frame, result as u64)
+}
+
+/// SURFACE_SET_REL_POS: Set the relative position of a subsurface
+/// Args: rdi = rel_x, rsi = rel_y
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let rel_x = unsafe { (*frame).rdi } as i32;
+    let rel_y = unsafe { (*frame).rsi } as i32;
+
+    let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
+    syscall_return_ok(frame, result as u64)
+}
+
+// =============================================================================
+// Input Event Syscalls (Wayland-like input protocol)
+// =============================================================================
+
+pub const SYSCALL_INPUT_POLL: u64 = 60;
+pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
+pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
+
+/// INPUT_POLL: Poll for an input event (non-blocking)
+/// Args: rdi = pointer to InputEvent structure to fill
+/// Returns: 1 if event was returned, 0 if no events, -1 on error
+pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let event_ptr = unsafe { (*frame).rdi } as *mut input_event::InputEvent;
+
+    if event_ptr.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    // Poll for an event
+    if let Some(event) = input_event::input_poll(task_id) {
+        // Copy event to userspace
+        unsafe {
+            *event_ptr = event;
+        }
+        syscall_return_ok(frame, 1)
+    } else {
+        syscall_return_ok(frame, 0)
+    }
+}
+
+/// INPUT_HAS_EVENTS: Check if task has pending input events
+/// Returns: number of pending events (0 if none)
+pub fn syscall_input_has_events(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, 0);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let count = input_event::input_event_count(task_id);
+
+    syscall_return_ok(frame, count as u64)
+}
+
+/// INPUT_SET_FOCUS: Set keyboard or pointer focus (compositor only)
+/// Args: rdi = target task ID, rsi = focus type (0=keyboard, 1=pointer)
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let target_task_id = unsafe { (*frame).rdi } as u32;
+    let focus_type = unsafe { (*frame).rsi } as u32;
+
+    // Get current time for enter/leave events
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    let timestamp_ms = (ticks * 1000) / freq as u64;
+
+    match focus_type {
+        0 => {
+            // Keyboard focus
+            input_event::input_set_keyboard_focus(target_task_id);
+        }
+        1 => {
+            // Pointer focus
+            input_event::input_set_pointer_focus(target_task_id, timestamp_ms);
+        }
+        _ => {
+            return syscall_return_ok(frame, (-1i64) as u64);
+        }
+    }
+
+    syscall_return_ok(frame, 0)
+}
+
 use crate::syscall_common::SyscallHandler;
 
 #[repr(C)]
@@ -789,6 +1122,75 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_drain_queue),
         name: b"drain_queue\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_SHM_ACQUIRE as usize] = SyscallEntry {
+        handler: Some(syscall_shm_acquire),
+        name: b"shm_acquire\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_RELEASE as usize] = SyscallEntry {
+        handler: Some(syscall_shm_release),
+        name: b"shm_release\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_POLL_RELEASED as usize] = SyscallEntry {
+        handler: Some(syscall_shm_poll_released),
+        name: b"shm_poll_released\0".as_ptr() as *const c_char,
+    };
+    // Frame callback protocol
+    table[SYSCALL_SURFACE_FRAME as usize] = SyscallEntry {
+        handler: Some(syscall_surface_frame),
+        name: b"surface_frame\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_POLL_FRAME_DONE as usize] = SyscallEntry {
+        handler: Some(syscall_poll_frame_done),
+        name: b"poll_frame_done\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_MARK_FRAMES_DONE as usize] = SyscallEntry {
+        handler: Some(syscall_mark_frames_done),
+        name: b"mark_frames_done\0".as_ptr() as *const c_char,
+    };
+    // Pixel format negotiation
+    table[SYSCALL_SHM_GET_FORMATS as usize] = SyscallEntry {
+        handler: Some(syscall_shm_get_formats),
+        name: b"shm_get_formats\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SHM_CREATE_WITH_FORMAT as usize] = SyscallEntry {
+        handler: Some(syscall_shm_create_with_format),
+        name: b"shm_create_with_format\0".as_ptr() as *const c_char,
+    };
+    // Damage tracking
+    table[SYSCALL_SURFACE_DAMAGE as usize] = SyscallEntry {
+        handler: Some(syscall_surface_damage),
+        name: b"surface_damage\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_BUFFER_AGE as usize] = SyscallEntry {
+        handler: Some(syscall_buffer_age),
+        name: b"buffer_age\0".as_ptr() as *const c_char,
+    };
+    // Surface roles (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
+    table[SYSCALL_SURFACE_SET_ROLE as usize] = SyscallEntry {
+        handler: Some(syscall_surface_set_role),
+        name: b"surface_set_role\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SURFACE_SET_PARENT as usize] = SyscallEntry {
+        handler: Some(syscall_surface_set_parent),
+        name: b"surface_set_parent\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SURFACE_SET_REL_POS as usize] = SyscallEntry {
+        handler: Some(syscall_surface_set_rel_pos),
+        name: b"surface_set_rel_pos\0".as_ptr() as *const c_char,
+    };
+    // Input event protocol (Wayland-like per-task queues)
+    table[SYSCALL_INPUT_POLL as usize] = SyscallEntry {
+        handler: Some(syscall_input_poll),
+        name: b"input_poll\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_INPUT_HAS_EVENTS as usize] = SyscallEntry {
+        handler: Some(syscall_input_has_events),
+        name: b"input_has_events\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_INPUT_SET_FOCUS as usize] = SyscallEntry {
+        handler: Some(syscall_input_set_focus),
+        name: b"input_set_focus\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -831,6 +1233,28 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
     pub const SYSCALL_FB_FLIP: u64 = 45;
     pub const SYSCALL_DRAIN_QUEUE: u64 = 46;
+    // Buffer reference counting (Wayland-style)
+    pub const SYSCALL_SHM_ACQUIRE: u64 = 47;
+    pub const SYSCALL_SHM_RELEASE: u64 = 48;
+    pub const SYSCALL_SHM_POLL_RELEASED: u64 = 49;
+    // Frame callback protocol (Wayland wl_surface.frame)
+    pub const SYSCALL_SURFACE_FRAME: u64 = 50;
+    pub const SYSCALL_POLL_FRAME_DONE: u64 = 51;
+    pub const SYSCALL_MARK_FRAMES_DONE: u64 = 52;
+    // Pixel format negotiation (Wayland wl_shm)
+    pub const SYSCALL_SHM_GET_FORMATS: u64 = 53;
+    pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
+    // Damage tracking (Wayland wl_surface.damage)
+    pub const SYSCALL_SURFACE_DAMAGE: u64 = 55;
+    pub const SYSCALL_BUFFER_AGE: u64 = 56;
+    // Surface roles (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
+    pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
+    pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
+    pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
+    // Input event protocol (Wayland-like per-task queues)
+    pub const SYSCALL_INPUT_POLL: u64 = 60;
+    pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
+    pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

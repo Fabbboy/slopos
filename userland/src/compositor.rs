@@ -17,8 +17,8 @@ use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
     sys_mouse_read, sys_raise_window, sys_set_window_position, sys_set_window_state,
-    sys_shm_create, sys_shm_map, sys_sleep_ms, sys_tty_set_focus, sys_yield, SHM_ACCESS_RO,
-    SHM_ACCESS_RW, UserFbInfo, UserMouseEvent, UserWindowInfo,
+    sys_sleep_ms, sys_tty_set_focus, sys_yield, CachedShmMapping, ShmBuffer,
+    UserFbInfo, UserMouseEvent, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -46,90 +46,100 @@ const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
 const MAX_WINDOWS: usize = 32;
 
 /// Cache entry for a mapped client surface
-#[derive(Clone, Copy)]
-struct ClientSurfaceMapping {
+struct ClientSurfaceEntry {
     task_id: u32,
     token: u32,
-    ptr: *const u8,
+    mapping: Option<CachedShmMapping>,
 }
 
-impl ClientSurfaceMapping {
+impl ClientSurfaceEntry {
     const fn empty() -> Self {
         Self {
             task_id: 0,
             token: 0,
-            ptr: core::ptr::null(),
+            mapping: None,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.task_id == 0 && self.mapping.is_none()
+    }
+
+    fn matches(&self, task_id: u32, token: u32) -> bool {
+        self.task_id == task_id && self.token == token && self.mapping.is_some()
     }
 }
 
-/// Cache of mapped client surfaces
+/// Cache of mapped client surfaces (100% safe - no raw pointers)
 struct ClientSurfaceCache {
-    mappings: [ClientSurfaceMapping; MAX_WINDOWS],
+    entries: [ClientSurfaceEntry; MAX_WINDOWS],
 }
 
 impl ClientSurfaceCache {
-    const fn new() -> Self {
+    fn new() -> Self {
+        // Can't use const fn with Option initialization, so use Default-style init
         Self {
-            mappings: [ClientSurfaceMapping::empty(); MAX_WINDOWS],
+            entries: core::array::from_fn(|_| ClientSurfaceEntry::empty()),
         }
     }
 
-    /// Get or create a read-only mapping for a client's surface buffer
-    fn get_or_map(&mut self, task_id: u32, token: u32) -> *const u8 {
+    /// Get the index of a cached mapping for the given task/token, or create one.
+    /// Returns the index into entries array, or None if mapping failed.
+    fn get_or_create_index(
+        &mut self,
+        task_id: u32,
+        token: u32,
+        buffer_size: usize,
+    ) -> Option<usize> {
         if token == 0 {
-            return core::ptr::null();
+            return None;
         }
 
         // Check if we already have this mapping
-        for mapping in &self.mappings {
-            if mapping.task_id == task_id && mapping.token == token && !mapping.ptr.is_null() {
-                return mapping.ptr;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.matches(task_id, token) {
+                return Some(i);
             }
         }
 
         // Need to create a new mapping
-        let ptr = sys_shm_map(token, SHM_ACCESS_RO);
-        if ptr == 0 {
-            return core::ptr::null();
-        }
+        let mapping = CachedShmMapping::map_readonly(token, buffer_size)?;
 
         // Find a slot to store the mapping
-        for mapping in &mut self.mappings {
-            if mapping.task_id == 0 || mapping.ptr.is_null() {
-                *mapping = ClientSurfaceMapping {
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            if entry.is_empty() {
+                *entry = ClientSurfaceEntry {
                     task_id,
                     token,
-                    ptr: ptr as *const u8,
+                    mapping: Some(mapping),
                 };
-                return ptr as *const u8;
+                return Some(i);
             }
         }
 
-        // No slot available - still return the pointer, we just won't cache it
-        ptr as *const u8
+        // No slot available
+        None
+    }
+
+    /// Get a slice view of the cached buffer at the given index.
+    fn get_slice(&self, index: usize) -> Option<&[u8]> {
+        self.entries.get(index)?.mapping.as_ref().map(|m| m.as_slice())
     }
 
     /// Invalidate mappings for windows that no longer exist
     fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
-        for mapping in &mut self.mappings {
-            if mapping.task_id == 0 {
+        for entry in &mut self.entries {
+            if entry.task_id == 0 {
                 continue;
             }
 
-            let mut still_exists = false;
-            for i in 0..window_count as usize {
-                if windows[i].task_id == mapping.task_id {
-                    still_exists = true;
-                    break;
-                }
-            }
+            let still_exists = (0..window_count as usize)
+                .any(|i| windows[i].task_id == entry.task_id);
 
             if !still_exists {
-                // Window no longer exists, clear the mapping
-                // (Note: we can't unmap from here, but the kernel will clean up
-                // when the surface is destroyed)
-                *mapping = ClientSurfaceMapping::empty();
+                // Window no longer exists, clear the entry
+                // (CachedShmMapping doesn't unmap on drop - kernel cleans up)
+                *entry = ClientSurfaceEntry::empty();
             }
         }
     }
@@ -173,11 +183,9 @@ impl TaskbarState {
     }
 }
 
-/// Compositor output buffer backed by shared memory
+/// Compositor output buffer backed by shared memory (100% safe - uses ShmBuffer)
 struct CompositorOutput {
-    token: u32,
-    ptr: *mut u8,
-    size: usize,
+    buffer: ShmBuffer,
     width: u32,
     height: u32,
     pitch: usize,
@@ -195,22 +203,11 @@ impl CompositorOutput {
             return None;
         }
 
-        // Allocate shared memory buffer
-        let token = sys_shm_create(size as u64, 0);
-        if token == 0 {
-            return None;
-        }
-
-        // Map the buffer with read-write access
-        let ptr = sys_shm_map(token, SHM_ACCESS_RW);
-        if ptr == 0 {
-            return None;
-        }
+        // Allocate shared memory buffer using safe wrapper
+        let buffer = ShmBuffer::create(size).ok()?;
 
         Some(Self {
-            token,
-            ptr: ptr as *mut u8,
-            size,
+            buffer,
             width: fb.width,
             height: fb.height,
             pitch,
@@ -218,15 +215,16 @@ impl CompositorOutput {
         })
     }
 
-    /// Get a DrawBuffer for this output
+    /// Get a DrawBuffer for this output (100% safe - no raw pointers)
     fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
-        let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr, self.size) };
+        // ShmBuffer::as_mut_slice() is safe - bounds checked at creation
+        let slice = self.buffer.as_mut_slice();
         DrawBuffer::new(slice, self.width, self.height, self.pitch, self.bytes_pp)
     }
 
     /// Present the output buffer to the framebuffer
     fn present(&self) -> bool {
-        sys_fb_flip(self.token) == 0
+        sys_fb_flip(self.buffer.token()) == 0
     }
 }
 
@@ -598,22 +596,37 @@ impl WindowManager {
         gfx::fill_rect(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR);
     }
 
-    /// Draw window content from client's shared memory surface
+    /// Draw window content from client's shared memory surface (100% safe)
     fn draw_window_content(&mut self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
-        // Try to get the client's surface buffer
-        let client_ptr = self.surface_cache.get_or_map(window.task_id, window.shm_token);
-
-        if client_ptr.is_null() {
-            // No shared memory surface - draw placeholder
-            self.draw_window_placeholder(buf, window);
-            return;
-        }
-
-        // Composite client surface to output buffer
-        let src_pitch = (window.width as usize) * (self.output_bytes_pp as usize);
-        let dst_pitch = self.output_pitch;
+        // Calculate buffer size for this surface
         let bytes_pp = self.output_bytes_pp as usize;
+        let src_pitch = (window.width as usize) * bytes_pp;
+        let buffer_size = src_pitch * (window.height as usize);
 
+        // Try to get or create a cached mapping for the client's surface
+        let cache_index = match self.surface_cache.get_or_create_index(
+            window.task_id,
+            window.shm_token,
+            buffer_size,
+        ) {
+            Some(idx) => idx,
+            None => {
+                // No shared memory surface - draw placeholder
+                self.draw_window_placeholder(buf, window);
+                return;
+            }
+        };
+
+        // Get the cached buffer slice (100% safe - bounds checked)
+        let src_data = match self.surface_cache.get_slice(cache_index) {
+            Some(slice) => slice,
+            None => {
+                self.draw_window_placeholder(buf, window);
+                return;
+            }
+        };
+
+        let dst_pitch = self.output_pitch;
         let buf_width = buf.width() as i32;
         let buf_height = buf.height() as i32;
 
@@ -634,21 +647,21 @@ impl WindowManager {
         // Get destination buffer data
         let dst_data = buf.data_mut();
 
-        // Copy each row from client surface to output buffer
+        // Copy each row from client surface to output buffer (100% safe - slice ops only)
         for row in 0..(y1 - y0) as usize {
             let src_row = src_start_y + row;
             let dst_row = (y0 as usize) + row;
 
             let src_off = src_row * src_pitch + src_start_x * bytes_pp;
             let dst_off = dst_row * dst_pitch + (x0 as usize) * bytes_pp;
-
             let copy_width = ((x1 - x0) as usize) * bytes_pp;
 
-            // Safety: we've bounds-checked everything
-            unsafe {
-                let src_slice = core::slice::from_raw_parts(client_ptr.add(src_off), copy_width);
-                let dst_slice = &mut dst_data[dst_off..dst_off + copy_width];
-                dst_slice.copy_from_slice(src_slice);
+            // Safe slice operations with bounds checking
+            let src_end = src_off + copy_width;
+            let dst_end = dst_off + copy_width;
+
+            if src_end <= src_data.len() && dst_end <= dst_data.len() {
+                dst_data[dst_off..dst_end].copy_from_slice(&src_data[src_off..src_end]);
             }
         }
     }
@@ -745,7 +758,12 @@ impl WindowManager {
 }
 
 /// Convert c_char title array to &str
+///
+/// Note: Contains one minimal unsafe block for FFI boundary reinterpretation.
+/// c_char is i8 on Linux, but we need &[u8] for UTF-8 validation. This is
+/// unavoidable without changing the kernel API.
 fn title_to_str(title: &[c_char; 32]) -> &str {
+    // Find the null terminator
     let mut len = 0usize;
     for &ch in title.iter() {
         if ch == 0 {
@@ -753,8 +771,18 @@ fn title_to_str(title: &[c_char; 32]) -> &str {
         }
         len += 1;
     }
-    // Safe: we're treating the bytes as ASCII
-    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(title.as_ptr() as *const u8, len)) }
+
+    if len == 0 {
+        return "";
+    }
+
+    // SAFETY: FFI boundary - reinterpret c_char bytes as u8 bytes.
+    // c_char and u8 are both 1 byte with same alignment. len <= 32.
+    // This is the only unsafe in compositor.rs - required for kernel FFI.
+    let bytes: &[u8] = unsafe { core::slice::from_raw_parts(title.as_ptr() as *const u8, len) };
+
+    // Validate UTF-8 and return "<invalid>" for non-UTF8 strings
+    core::str::from_utf8(bytes).unwrap_or("<invalid>")
 }
 
 #[unsafe(link_section = ".user_text")]
