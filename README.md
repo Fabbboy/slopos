@@ -25,7 +25,4 @@ Artifacts land in `builddir/` (kernel at `builddir/kernel.elf`, cargo intermedia
 
 SlopOS boots only with a Limine-provided framebuffer; video output is mandatory and the kernel will panic if no framebuffer is available. Run under QEMU/OVMF with GOP enabled (e.g., `-machine q35`) so Limine can hand off a valid framebuffer.
 
-## MCP Quick Start
-
-
-That’s all you need to get started; everything else (style, lore, subsystem breakdowns, and MCP details) lives in `AGENTS.md`. Go spin the wheel.
+That's all you need to get started; everything else (style, lore, and subsystem breakdowns) lives in `AGENTS.md`. Go spin the wheel.
