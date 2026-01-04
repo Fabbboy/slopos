@@ -798,6 +798,7 @@ pub fn syscall_buffer_age(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
 pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
 pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
 pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
+pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
 
 /// SURFACE_SET_ROLE: Set the role of a surface (toplevel, popup, subsurface)
 /// Args: rdi = role (0=None, 1=Toplevel, 2=Popup, 3=Subsurface)
@@ -842,6 +843,30 @@ pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) 
     let rel_y = unsafe { (*frame).rsi } as i32;
 
     let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
+    syscall_return_ok(frame, result as u64)
+}
+
+/// SURFACE_SET_TITLE: Set the window title
+/// Args: rdi = pointer to title string (UTF-8), rsi = length
+/// Returns: 0 on success, -1 on failure
+pub fn syscall_surface_set_title(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let title_ptr = unsafe { (*frame).rdi } as *const u8;
+    let title_len = unsafe { (*frame).rsi } as usize;
+
+    if title_ptr.is_null() || title_len == 0 {
+        return syscall_return_ok(frame, (-1i64) as u64);
+    }
+
+    // Read title from user memory (max 31 chars)
+    let copy_len = title_len.min(31);
+    let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, copy_len) };
+
+    let result = video_bridge::surface_set_title(task_id, title_slice);
     syscall_return_ok(frame, result as u64)
 }
 
@@ -1148,6 +1173,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_surface_set_rel_pos),
         name: b"surface_set_rel_pos\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_SURFACE_SET_TITLE as usize] = SyscallEntry {
+        handler: Some(syscall_surface_set_title),
+        name: b"surface_set_title\0".as_ptr() as *const c_char,
+    };
     // Input event protocol (Wayland-like per-task queues)
     table[SYSCALL_INPUT_POLL as usize] = SyscallEntry {
         handler: Some(syscall_input_poll),
@@ -1220,6 +1249,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
     pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
     pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
+    pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
     // Input event protocol (Wayland-like per-task queues)
     pub const SYSCALL_INPUT_POLL: u64 = 60;
     pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;

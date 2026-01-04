@@ -40,7 +40,7 @@ use crate::syscall::{
     USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
     UserFsList, UserSysInfo, sys_fb_info, sys_fs_close,
     sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_halt, sys_read_char, sys_surface_commit, sys_sys_info,
+    sys_halt, sys_read_char, sys_surface_commit, sys_surface_set_title, sys_sys_info,
     sys_write, ShmBuffer,
 };
 
@@ -1318,6 +1318,10 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
 pub fn shell_user_main(_arg: *mut c_void) {
     shell_console_init();
     shell_console_clear();
+
+    // Set window title
+    sys_surface_set_title("SlopOS Shell");
+
     shell_write(WELCOME);
 
     loop {

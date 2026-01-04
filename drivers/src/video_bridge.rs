@@ -67,6 +67,9 @@ pub struct VideoCallbacks {
     /// Set relative position for subsurfaces
     /// Args: (task_id, rel_x, rel_y) -> c_int
     pub surface_set_relative_position: Option<fn(u32, i32, i32) -> c_int>,
+    /// Set window title
+    /// Args: (task_id, title_ptr, title_len) -> c_int
+    pub surface_set_title: Option<fn(u32, *const u8, usize) -> c_int>,
 }
 
 static VIDEO_CALLBACKS: Once<VideoCallbacks> = Once::new();
@@ -328,6 +331,17 @@ pub fn surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_
     if let Some(cbs) = VIDEO_CALLBACKS.get() {
         if let Some(cb) = cbs.surface_set_relative_position {
             return cb(task_id, rel_x, rel_y);
+        }
+    }
+    -1
+}
+
+/// Set window title (client API).
+/// Title is UTF-8, max 31 characters.
+pub fn surface_set_title(task_id: u32, title: &[u8]) -> c_int {
+    if let Some(cbs) = VIDEO_CALLBACKS.get() {
+        if let Some(cb) = cbs.surface_set_title {
+            return cb(task_id, title.as_ptr(), title.len());
         }
     }
     -1

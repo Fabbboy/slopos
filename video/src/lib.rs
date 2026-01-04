@@ -126,6 +126,17 @@ fn surface_set_relative_position_bridge(task_id: u32, rel_x: i32, rel_y: i32) ->
         .unwrap_or_else(|e| e.as_c_int())
 }
 
+/// Set window title
+fn surface_set_title_bridge(task_id: u32, title_ptr: *const u8, title_len: usize) -> c_int {
+    if title_ptr.is_null() {
+        return -1;
+    }
+    let title = unsafe { core::slice::from_raw_parts(title_ptr, title_len.min(31)) };
+    compositor_context::surface_set_title(task_id, title)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
 pub fn init(framebuffer: Option<FramebufferInfo>) {
     // Register task cleanup callback early so it's available even if framebuffer init fails
     register_video_task_cleanup_callback(task_cleanup_bridge);
@@ -163,6 +174,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>) {
             surface_set_role: Some(surface_set_role_bridge),
             surface_set_parent: Some(surface_set_parent_bridge),
             surface_set_relative_position: Some(surface_set_relative_position_bridge),
+            surface_set_title: Some(surface_set_title_bridge),
         });
 
         if let Err(err) = splash::splash_show_boot_screen() {

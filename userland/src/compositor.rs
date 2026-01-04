@@ -16,9 +16,9 @@ use core::ffi::c_void;
 use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_input_poll, sys_raise_window, sys_set_window_position, sys_set_window_state,
-    sys_sleep_ms, sys_tty_set_focus, sys_yield, CachedShmMapping, InputEvent, InputEventType,
-    ShmBuffer, UserFbInfo, UserWindowInfo,
+    sys_input_poll, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
+    sys_set_window_state, sys_shm_unmap, sys_sleep_ms, sys_tty_set_focus, sys_yield,
+    CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -137,8 +137,10 @@ impl ClientSurfaceCache {
                 .any(|i| windows[i].task_id == entry.task_id);
 
             if !still_exists {
-                // Window no longer exists, clear the entry
-                // (CachedShmMapping doesn't unmap on drop - kernel cleans up)
+                // Window no longer exists - unmap the shared memory and clear the entry
+                if let Some(ref mapping) = entry.mapping {
+                    sys_shm_unmap(mapping.vaddr());
+                }
                 *entry = ClientSurfaceEntry::empty();
             }
         }
@@ -982,6 +984,10 @@ pub fn compositor_user_main(_arg: *mut c_void) {
 
             // Present to framebuffer
             output.present();
+
+            // Notify clients that their frames have been presented (Wayland wl_surface.frame)
+            let present_time = sys_get_time_ms();
+            sys_mark_frames_done(present_time);
         }
 
         // === FRAME PACING ===

@@ -65,6 +65,7 @@ pub const SYSCALL_BUFFER_AGE: u64 = 56;
 pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
 pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
 pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
+pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
 // Input event protocol (Wayland-like per-task queues)
 pub const SYSCALL_INPUT_POLL: u64 = 60;
 pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
@@ -659,6 +660,20 @@ pub fn sys_surface_set_parent(parent_task_id: u32) -> i64 {
 /// Only valid for surfaces with role Subsurface.
 pub fn sys_surface_set_relative_position(rel_x: i32, rel_y: i32) -> i64 {
     unsafe { syscall(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64, 0) as i64 }
+}
+
+/// Set the window title.
+/// Title is UTF-8, max 31 characters (null-terminated in 32-byte buffer).
+pub fn sys_surface_set_title(title: &str) -> i64 {
+    let bytes = title.as_bytes();
+    unsafe {
+        syscall(
+            SYSCALL_SURFACE_SET_TITLE,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            0,
+        ) as i64
+    }
 }
 
 // =============================================================================

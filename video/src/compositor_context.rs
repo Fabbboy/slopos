@@ -197,6 +197,8 @@ enum ClientOp {
     SetParent { task_id: u32, parent_task_id: u32 },
     /// Set relative position for subsurfaces
     SetRelativePosition { task_id: u32, rel_x: i32, rel_y: i32 },
+    /// Set window title (UTF-8, max 31 chars + null terminator)
+    SetTitle { task_id: u32, title: [u8; 32] },
 }
 
 // =============================================================================
@@ -244,6 +246,8 @@ struct SurfaceState {
     /// Position relative to parent (for subsurfaces)
     relative_x: i32,
     relative_y: i32,
+    /// Window title (UTF-8, null-terminated)
+    title: [u8; 32],
 }
 
 impl SurfaceState {
@@ -269,6 +273,7 @@ impl SurfaceState {
             child_count: 0,
             relative_x: 0,
             relative_y: 0,
+            title: [0; 32],
         }
     }
 
@@ -304,7 +309,10 @@ impl SurfaceState {
         self.committed_damage.export_to_window_format()
     }
 
-    /// Clear committed damage after compositor acknowledges it
+    /// Clear committed damage after compositor acknowledges it.
+    /// Currently unused - damage persists until next commit to prevent loss on failed renders.
+    /// Will be needed when implementing explicit damage acknowledgement.
+    #[allow(dead_code)]
     fn clear_committed_damage(&mut self) {
         self.committed_damage.clear();
     }
@@ -492,6 +500,12 @@ pub fn drain_queue() {
                     }
                 }
             }
+            ClientOp::SetTitle { task_id, title } => {
+                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                    surface.title = title;
+                    surface.dirty = true;
+                }
+            }
         }
     }
 }
@@ -542,16 +556,22 @@ pub fn surface_raise_window(task_id: u32) -> Result<(), CompositorError> {
 }
 
 /// Enumerate all visible windows. IMMEDIATE - called by COMPOSITOR only.
-/// This function exports damage and then clears it (Wayland-style acknowledge).
+///
+/// Note: Damage is NOT cleared here. It persists until the next commit replaces it.
+/// This ensures damage isn't lost if the compositor fails to render.
+/// Static windows may report stale damage, but that's preferable to losing damage.
+///
+/// For subsurfaces, the absolute position is calculated as parent position + relative offset.
 pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
     if out_buffer.is_null() || max_count == 0 {
         return 0;
     }
 
-    let mut ctx = CONTEXT.lock();
+    let ctx = CONTEXT.lock();
     let mut count = 0u32;
 
-    for (&task_id, surface) in ctx.surfaces.iter_mut() {
+    // First pass: collect task IDs and their info (need to look up parents)
+    for (&task_id, surface) in ctx.surfaces.iter() {
         if count >= max_count {
             break;
         }
@@ -560,6 +580,28 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
         if !surface.visible {
             continue;
         }
+
+        // Calculate absolute position
+        // For subsurfaces: parent position + relative offset
+        // For toplevel/popup: use window_x/window_y directly
+        let (abs_x, abs_y) = if surface.role == SurfaceRole::Subsurface {
+            if let Some(parent_id) = surface.parent_task {
+                if let Some(parent) = ctx.surfaces.get(&parent_id) {
+                    (
+                        parent.window_x + surface.relative_x,
+                        parent.window_y + surface.relative_y,
+                    )
+                } else {
+                    // Parent not found, fall back to relative as absolute
+                    (surface.relative_x, surface.relative_y)
+                }
+            } else {
+                // No parent set, use relative as absolute
+                (surface.relative_x, surface.relative_y)
+            }
+        } else {
+            (surface.window_x, surface.window_y)
+        };
 
         // Export damage from committed state
         let (damage_rects, dmg_count) = surface.export_damage();
@@ -576,8 +618,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
         unsafe {
             let info = &mut *out_buffer.add(count as usize);
             info.task_id = task_id;
-            info.x = surface.window_x;
-            info.y = surface.window_y;
+            info.x = abs_x;
+            info.y = abs_y;
             info.width = surface.width;
             info.height = surface.height;
             info.state = surface.window_state;
@@ -585,11 +627,15 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info._padding = [0; 2];
             info.shm_token = surface.shm_token;
             info.damage_regions = regions;
-            info.title = [0; 32];
+            info.title = surface.title;
         }
 
-        // Clear damage after export (Wayland-style: compositor acknowledges damage)
-        surface.clear_committed_damage();
+        // Note: We no longer clear damage here. The next commit will replace it.
+        // This ensures damage isn't lost if the compositor fails to render.
+        //
+        // Trade-off: Static windows (no new commits) will report stale damage forever.
+        // This is acceptable since the compositor currently does full redraws anyway.
+        // When partial updates are implemented, add an explicit acknowledge mechanism.
 
         count += 1;
     }
@@ -697,5 +743,19 @@ pub fn surface_set_parent(task_id: u32, parent_task_id: u32) -> Result<(), Compo
 pub fn surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
     ctx.queue.push_back(ClientOp::SetRelativePosition { task_id, rel_x, rel_y });
+    Ok(())
+}
+
+/// Set the window title. Called by CLIENT tasks.
+/// Title is UTF-8, max 31 characters (null-terminated in 32-byte buffer).
+pub fn surface_set_title(task_id: u32, title: &[u8]) -> Result<(), CompositorError> {
+    let mut title_buf = [0u8; 32];
+    let copy_len = title.len().min(31); // Leave room for null terminator
+    title_buf[..copy_len].copy_from_slice(&title[..copy_len]);
+    // Ensure null termination
+    title_buf[copy_len] = 0;
+
+    let mut ctx = CONTEXT.lock();
+    ctx.queue.push_back(ClientOp::SetTitle { task_id, title: title_buf });
     Ok(())
 }
