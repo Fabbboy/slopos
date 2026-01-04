@@ -5,22 +5,27 @@
 //! - CLIENT operations (commit, register, unregister) enqueue and return immediately
 //! - COMPOSITOR operations (set_position, set_state, raise, enumerate) execute immediately
 //! - Compositor drains the queue at the start of each frame
+//!
+//! Buffer Ownership Model (Wayland-aligned):
+//! - Client owns the buffer (ShmBuffer in userland)
+//! - Client draws directly to their buffer
+//! - Client calls damage() to mark changed regions
+//! - Client calls commit() to make changes visible
+//! - Compositor reads directly from client buffer via shm_token
+//! - NO kernel-side buffer copies
 
 use alloc::collections::{BTreeMap, VecDeque};
 
 use slopos_abi::{
     CompositorError, SurfaceRole, WindowDamageRect, WindowInfo,
-    MAX_BUFFER_AGE, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
+    MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
     WINDOW_STATE_NORMAL,
 };
-use slopos_drivers::video_bridge::{VideoError, VideoResult};
-use slopos_mm::mm_constants::PAGE_SIZE_4KB;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
-use slopos_mm::phys_virt::mm_phys_to_virt;
+use slopos_drivers::video_bridge::VideoResult;
 use spin::Mutex;
 
 // =============================================================================
-// Buffer Types
+// Damage Tracking Types
 // =============================================================================
 
 #[derive(Copy, Clone, Default)]
@@ -75,6 +80,14 @@ impl DamageTracker {
     fn clear(&mut self) {
         self.count = 0;
         self.full_damage = false;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0 && !self.full_damage
+    }
+
+    fn set_full_damage(&mut self) {
+        self.full_damage = true;
     }
 
     fn add(&mut self, rect: DamageRect) {
@@ -153,151 +166,6 @@ impl DamageTracker {
     }
 }
 
-struct PageBuffer {
-    virt_ptr: *mut u8,
-    phys_addr: u64,
-    size: usize,
-    pages: u32,
-}
-
-impl PageBuffer {
-    fn new(size: usize) -> Result<Self, VideoError> {
-        if size == 0 {
-            return Err(VideoError::Invalid);
-        }
-
-        let pages = ((size as u64 + PAGE_SIZE_4KB - 1) / PAGE_SIZE_4KB) as u32;
-        let phys_addr = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
-        if phys_addr == 0 {
-            return Err(VideoError::Invalid);
-        }
-
-        let virt_addr = mm_phys_to_virt(phys_addr);
-        let virt_ptr = if virt_addr != 0 {
-            virt_addr as *mut u8
-        } else {
-            phys_addr as *mut u8
-        };
-
-        Ok(Self {
-            virt_ptr,
-            phys_addr,
-            size,
-            pages,
-        })
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.virt_ptr, self.size) }
-    }
-
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.virt_ptr, self.size) }
-    }
-}
-
-impl Drop for PageBuffer {
-    fn drop(&mut self) {
-        if self.phys_addr != 0 {
-            for i in 0..self.pages {
-                let page_phys = self.phys_addr + (i as u64) * PAGE_SIZE_4KB;
-                let _ = free_page_frame(page_phys);
-            }
-        }
-    }
-}
-
-// SAFETY: PageBuffer contains virt_ptr pointing to kernel-allocated pages.
-// Thread-safety is guaranteed because:
-// 1. Memory is allocated exclusively via alloc_page_frames() from kernel heap
-// 2. Only accessed through CONTEXT Mutex (single global lock serializes all access)
-// 3. Freed in Drop before any dangling access is possible
-// 4. No external aliasing - pointer is internal to PageBuffer only
-// 5. The kernel runs on a single CPU (no SMP) so no concurrent access possible
-unsafe impl Send for PageBuffer {}
-
-struct OwnedBuffer {
-    data: PageBuffer,
-    width: u32,
-    height: u32,
-    damage: DamageTracker,
-    /// Buffer age: 0 = current, 1 = previous frame, 2 = two frames ago, etc.
-    /// Used for damage accumulation when using buffer swapping.
-    age: u8,
-}
-
-impl OwnedBuffer {
-    fn new(width: u32, height: u32, bpp: u8) -> Result<Self, VideoError> {
-        let bytes_pp = ((bpp as usize) + 7) / 8;
-        let pitch = (width as usize) * bytes_pp;
-        let size = pitch * (height as usize);
-
-        let data = PageBuffer::new(size)?;
-
-        Ok(Self {
-            data,
-            width,
-            height,
-            damage: DamageTracker::new(),
-            age: 0,
-        })
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[u8] {
-        self.data.as_slice()
-    }
-
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.data.as_mut_slice()
-    }
-
-    #[inline]
-    fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[inline]
-    fn height(&self) -> u32 {
-        self.height
-    }
-
-    fn add_damage(&mut self, x: i32, y: i32, width: i32, height: i32) {
-        self.damage.add(DamageRect {
-            x0: x,
-            y0: y,
-            x1: x.saturating_add(width).saturating_sub(1),
-            y1: y.saturating_add(height).saturating_sub(1),
-        });
-    }
-
-    fn clear_damage(&mut self) {
-        self.damage.clear();
-    }
-
-    /// Export damage to WindowInfo format
-    fn export_damage(&self) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
-        self.damage.export_to_window_format()
-    }
-
-    fn increment_age(&mut self) {
-        if self.age < MAX_BUFFER_AGE {
-            self.age += 1;
-        }
-    }
-
-    fn reset_age(&mut self) {
-        self.age = 0;
-    }
-
-    fn buffer_age(&self) -> u8 {
-        self.age
-    }
-}
-
 // =============================================================================
 // Client Operation Queue
 // =============================================================================
@@ -310,13 +178,12 @@ enum ClientOp {
         task_id: u32,
         width: u32,
         height: u32,
-        bpp: u8,
         shm_token: u32,
     },
     Unregister { task_id: u32 },
     /// Request a frame callback (Wayland wl_surface.frame)
     RequestFrameCallback { task_id: u32 },
-    /// Add damage region to back buffer (Wayland wl_surface.damage)
+    /// Add damage region to pending damage (Wayland wl_surface.damage)
     AddDamage {
         task_id: u32,
         x: i32,
@@ -333,18 +200,34 @@ enum ClientOp {
 }
 
 // =============================================================================
-// Surface State (no inner locks - compositor context serializes access)
+// Surface State (Wayland-aligned - no kernel buffers)
 // =============================================================================
 
+/// Surface state without kernel-side buffer copies.
+///
+/// The client owns the actual pixel buffer (via ShmBuffer/shm_token).
+/// The compositor reads directly from the client's buffer.
+/// This struct only tracks metadata and damage regions.
 struct SurfaceState {
+    /// Token referencing client's shared memory buffer
     shm_token: u32,
-    front_buffer: OwnedBuffer,
-    back_buffer: OwnedBuffer,
+    /// Surface dimensions (from client's buffer)
+    width: u32,
+    height: u32,
+    /// Damage accumulated since last commit (pending state)
+    pending_damage: DamageTracker,
+    /// Damage from last commit (committed state, visible to compositor)
+    committed_damage: DamageTracker,
+    /// True if surface has uncommitted changes
     dirty: bool,
+    /// Window position on screen
     window_x: i32,
     window_y: i32,
+    /// Z-order for stacking
     z_order: u32,
+    /// Whether window is visible
     visible: bool,
+    /// Window state (normal, minimized, maximized)
     window_state: u8,
     /// True if client has requested a frame callback (Wayland wl_surface.frame)
     frame_callback_pending: bool,
@@ -364,11 +247,14 @@ struct SurfaceState {
 }
 
 impl SurfaceState {
-    fn new(width: u32, height: u32, bpp: u8, shm_token: u32) -> Result<Self, VideoError> {
-        Ok(Self {
+    /// Create a new surface state. No kernel buffer allocation - just metadata.
+    fn new(width: u32, height: u32, shm_token: u32) -> Self {
+        Self {
             shm_token,
-            front_buffer: OwnedBuffer::new(width, height, bpp)?,
-            back_buffer: OwnedBuffer::new(width, height, bpp)?,
+            width,
+            height,
+            pending_damage: DamageTracker::new(),
+            committed_damage: DamageTracker::new(),
             dirty: true,
             window_x: 0,
             window_y: 0,
@@ -383,35 +269,44 @@ impl SurfaceState {
             child_count: 0,
             relative_x: 0,
             relative_y: 0,
-        })
+        }
     }
 
+    /// Commit pending state to committed state (Wayland-style atomic commit).
+    ///
+    /// This is now a zero-copy operation - we just swap damage trackers.
+    /// The compositor reads directly from the client's buffer via shm_token.
     fn commit(&mut self) {
-        // Swap buffers by copying data
-        let src = self.back_buffer.as_slice();
-        let dst = self.front_buffer.as_mut_slice();
-        dst.copy_from_slice(src);
+        // If client didn't explicitly add damage, assume full surface damage
+        // This maintains backwards compatibility with simple clients that don't call damage()
+        if self.pending_damage.is_empty() {
+            self.pending_damage.set_full_damage();
+        }
 
-        // Transfer damage from back to front buffer
-        // We need to copy the damage tracker state
-        core::mem::swap(&mut self.front_buffer.damage, &mut self.back_buffer.damage);
-        self.back_buffer.clear_damage();
-
-        // Update buffer ages
-        self.front_buffer.reset_age();
-        self.back_buffer.increment_age();
-
+        // Transfer pending damage to committed - NO BUFFER COPY
+        core::mem::swap(&mut self.committed_damage, &mut self.pending_damage);
+        self.pending_damage.clear();
         self.dirty = true;
     }
 
-    /// Add damage to the back buffer (called via syscall)
+    /// Add damage to pending state (called via syscall before commit)
     fn add_damage(&mut self, x: i32, y: i32, width: i32, height: i32) {
-        self.back_buffer.add_damage(x, y, width, height);
+        self.pending_damage.add(DamageRect {
+            x0: x,
+            y0: y,
+            x1: x.saturating_add(width).saturating_sub(1),
+            y1: y.saturating_add(height).saturating_sub(1),
+        });
     }
 
-    /// Get back buffer age (for damage accumulation)
-    fn back_buffer_age(&self) -> u8 {
-        self.back_buffer.buffer_age()
+    /// Export committed damage to WindowInfo format
+    fn export_damage(&self) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
+        self.committed_damage.export_to_window_format()
+    }
+
+    /// Clear committed damage after compositor acknowledges it
+    fn clear_committed_damage(&mut self) {
+        self.committed_damage.clear();
     }
 }
 
@@ -470,8 +365,11 @@ static CONTEXT: Mutex<CompositorContext> = Mutex::new(CompositorContext::new());
 // PUBLIC API - Client Operations (ENQUEUE and return immediately)
 // =============================================================================
 
-/// Commits the back buffer to the front buffer (Wayland-style double buffering).
+/// Commits pending state to committed state (Wayland-style atomic commit).
 /// Called by CLIENT tasks. Enqueues the commit for processing by compositor.
+///
+/// Note: This is now zero-copy. The compositor reads directly from the client's
+/// shared memory buffer. Only damage tracking is transferred on commit.
 pub fn surface_commit(task_id: u32) -> VideoResult {
     let mut ctx = CONTEXT.lock();
     ctx.queue.push_back(ClientOp::Commit { task_id });
@@ -480,13 +378,12 @@ pub fn surface_commit(task_id: u32) -> VideoResult {
 
 /// Register a surface for a task when it calls surface_attach.
 /// Called by CLIENT tasks. Enqueues the registration for processing by compositor.
-pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> Result<(), CompositorError> {
+pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, shm_token: u32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
     ctx.queue.push_back(ClientOp::Register {
         task_id,
         width,
         height,
-        bpp,
         shm_token,
     });
     Ok(())
@@ -515,25 +412,25 @@ pub fn drain_queue() {
                     surface.commit();
                 }
             }
-            ClientOp::Register { task_id, width, height, bpp, shm_token } => {
+            ClientOp::Register { task_id, width, height, shm_token } => {
                 // Skip if already registered
                 if ctx.surfaces.contains_key(&task_id) {
                     continue;
                 }
 
-                // Create new surface
-                if let Ok(mut surface) = SurfaceState::new(width, height, bpp, shm_token) {
-                    // Assign z-order and position
-                    let z = ctx.next_z_order;
-                    ctx.next_z_order += 1;
-                    surface.z_order = z;
+                // Create new surface - now infallible (no buffer allocation)
+                let mut surface = SurfaceState::new(width, height, shm_token);
 
-                    let offset = (z as i32 % 10) * 30;
-                    surface.window_x = 50 + offset;
-                    surface.window_y = 50 + offset;
+                // Assign z-order and position
+                let z = ctx.next_z_order;
+                ctx.next_z_order += 1;
+                surface.z_order = z;
 
-                    ctx.surfaces.insert(task_id, surface);
-                }
+                let offset = (z as i32 % 10) * 30;
+                surface.window_x = 50 + offset;
+                surface.window_y = 50 + offset;
+
+                ctx.surfaces.insert(task_id, surface);
             }
             ClientOp::Unregister { task_id } => {
                 ctx.surfaces.remove(&task_id);
@@ -645,15 +542,16 @@ pub fn surface_raise_window(task_id: u32) -> Result<(), CompositorError> {
 }
 
 /// Enumerate all visible windows. IMMEDIATE - called by COMPOSITOR only.
+/// This function exports damage and then clears it (Wayland-style acknowledge).
 pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
     if out_buffer.is_null() || max_count == 0 {
         return 0;
     }
 
-    let ctx = CONTEXT.lock();
+    let mut ctx = CONTEXT.lock();
     let mut count = 0u32;
 
-    for (&task_id, surface) in ctx.surfaces.iter() {
+    for (&task_id, surface) in ctx.surfaces.iter_mut() {
         if count >= max_count {
             break;
         }
@@ -663,8 +561,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             continue;
         }
 
-        // Export damage from front buffer using the new DamageTracker
-        let (damage_rects, dmg_count) = surface.front_buffer.export_damage();
+        // Export damage from committed state
+        let (damage_rects, dmg_count) = surface.export_damage();
         let mut regions = [WindowDamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS];
         for i in 0..MAX_WINDOW_DAMAGE_REGIONS {
             regions[i] = WindowDamageRect {
@@ -680,8 +578,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.task_id = task_id;
             info.x = surface.window_x;
             info.y = surface.window_y;
-            info.width = surface.front_buffer.width();
-            info.height = surface.front_buffer.height();
+            info.width = surface.width;
+            info.height = surface.height;
             info.state = surface.window_state;
             info.damage_count = dmg_count;
             info._padding = [0; 2];
@@ -689,6 +587,10 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.damage_regions = regions;
             info.title = [0; 32];
         }
+
+        // Clear damage after export (Wayland-style: compositor acknowledges damage)
+        surface.clear_committed_damage();
+
         count += 1;
     }
     count
@@ -741,7 +643,7 @@ pub fn surface_poll_frame_done(task_id: u32) -> u64 {
 // Damage Tracking Protocol (Wayland wl_surface.damage)
 // =============================================================================
 
-/// Add damage region to surface's back buffer. Called by CLIENT tasks.
+/// Add damage region to surface's pending state. Called by CLIENT tasks.
 /// Enqueues the damage for processing by compositor on next drain_queue().
 /// The damage rect specifies what region has changed and needs redrawing.
 pub fn surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> Result<(), CompositorError> {
@@ -750,18 +652,17 @@ pub fn surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32)
     Ok(())
 }
 
-/// Get the back buffer age for a surface. Called by CLIENT tasks.
-/// Returns 0 if the buffer content is undefined (must redraw everything).
-/// Returns 1 if the buffer contains the previous frame's content.
-/// Returns N if the buffer contains content from N frames ago.
-/// Returns u8::MAX if buffer is too old for damage accumulation.
-pub fn surface_get_buffer_age(task_id: u32) -> u8 {
-    let ctx = CONTEXT.lock();
-    if let Some(surface) = ctx.surfaces.get(&task_id) {
-        surface.back_buffer_age()
-    } else {
-        0 // Unknown surface - return 0 (undefined content)
-    }
+/// Get the buffer age for a surface. Called by CLIENT tasks.
+///
+/// NOTE: With the Wayland-aligned buffer ownership model, the kernel does not
+/// track buffer content. This always returns 0 (undefined content).
+///
+/// For client-side double-buffering with proper buffer age, clients would need
+/// to manage multiple buffers themselves. This is a potential future enhancement.
+pub fn surface_get_buffer_age(_task_id: u32) -> u8 {
+    // Buffer age is not tracked by kernel - client manages buffer content
+    // Return 0 = undefined content (client must redraw everything)
+    0
 }
 
 // =============================================================================

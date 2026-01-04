@@ -530,16 +530,7 @@ pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> Sy
     }
 
     // Also register the surface with the video subsystem so it appears in enumerate_windows
-    // Get bpp from framebuffer info
-    let fb_ptr = video_bridge::framebuffer_get_info();
-    let bpp = if !fb_ptr.is_null() {
-        unsafe { (*fb_ptr).bpp as u8 }
-    } else {
-        32 // Default to 32bpp
-    };
-
-    // Pass the shm token so it's stored in the surface (avoids lock nesting in enumerate_windows)
-    let video_result = video_bridge::register_surface(task_id, width, height, bpp, token);
+    let video_result = video_bridge::register_surface(task_id, width, height, token);
     if video_result != 0 {
         wl_currency::award_loss();
         return syscall_return_err(frame, u64::MAX);

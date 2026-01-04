@@ -55,8 +55,8 @@ fn surface_commit_bridge(task_id: u32) -> c_int {
     }
 }
 
-fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> c_int {
-    compositor_context::register_surface_for_task(task_id, width, height, bpp, shm_token)
+fn register_surface_bridge(task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int {
+    compositor_context::register_surface_for_task(task_id, width, height, shm_token)
         .map(|()| 0)
         .unwrap_or_else(|e| e.as_c_int())
 }

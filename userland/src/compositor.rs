@@ -13,7 +13,7 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
+use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
     sys_input_poll, sys_raise_window, sys_set_window_position, sys_set_window_state,
@@ -228,6 +228,44 @@ impl CompositorOutput {
     }
 }
 
+/// Bounds of a window (for damage tracking)
+#[derive(Copy, Clone, Default)]
+struct WindowBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    visible: bool,
+}
+
+impl WindowBounds {
+    fn from_window(w: &UserWindowInfo) -> Self {
+        Self {
+            x: w.x,
+            y: w.y,
+            width: w.width,
+            height: w.height,
+            visible: w.state != WINDOW_STATE_MINIMIZED,
+        }
+    }
+
+    /// Get the full window rect including title bar
+    fn to_damage_rect(&self) -> DamageRect {
+        if !self.visible {
+            return DamageRect::invalid();
+        }
+        DamageRect {
+            x0: self.x,
+            y0: self.y - TITLE_BAR_HEIGHT,
+            x1: self.x + self.width as i32 - 1,
+            y1: self.y + self.height as i32 - 1,
+        }
+    }
+}
+
+/// Maximum cursor positions to track per frame (for damage)
+const MAX_CURSOR_TRAIL: usize = 16;
+
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
@@ -242,8 +280,6 @@ struct WindowManager {
     mouse_y: i32,
     mouse_buttons: u8,
     mouse_buttons_prev: u8,
-    prev_mouse_x: i32,
-    prev_mouse_y: i32,
     first_frame: bool,
     prev_taskbar_state: TaskbarState,
     taskbar_needs_redraw: bool,
@@ -254,6 +290,13 @@ struct WindowManager {
     // Output buffer info for compositing
     output_bytes_pp: u8,
     output_pitch: usize,
+    // Output damage accumulator for partial redraw
+    output_damage: DamageTracker,
+    // Previous frame's window bounds (for expose damage calculation)
+    prev_window_bounds: [WindowBounds; MAX_WINDOWS],
+    // Cursor positions visited this frame (for trail-free damage)
+    cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
+    cursor_trail_count: usize,
 }
 
 impl WindowManager {
@@ -272,8 +315,6 @@ impl WindowManager {
             mouse_y: 0,
             mouse_buttons: 0,
             mouse_buttons_prev: 0,
-            prev_mouse_x: 0,
-            prev_mouse_y: 0,
             first_frame: true,
             prev_taskbar_state: TaskbarState::empty(),
             taskbar_needs_redraw: true,
@@ -281,6 +322,10 @@ impl WindowManager {
             surface_cache: ClientSurfaceCache::new(),
             output_bytes_pp: 4,
             output_pitch: 0,
+            output_damage: DamageTracker::new(),
+            prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
+            cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
+            cursor_trail_count: 0,
         }
     }
 
@@ -291,13 +336,20 @@ impl WindowManager {
 
     /// Update mouse state from kernel input event queue
     fn update_mouse(&mut self) {
+        // Reset cursor trail for this frame
+        self.cursor_trail_count = 0;
+
         let mut event = InputEvent::default();
         // Drain all pending pointer events
         while let Some(ev) = sys_input_poll(&mut event) {
             match ev.event_type {
                 InputEventType::PointerMotion => {
-                    self.prev_mouse_x = self.mouse_x;
-                    self.prev_mouse_y = self.mouse_y;
+                    // Record current position before moving (for damage tracking)
+                    if self.cursor_trail_count < MAX_CURSOR_TRAIL {
+                        self.cursor_trail[self.cursor_trail_count] = (self.mouse_x, self.mouse_y);
+                        self.cursor_trail_count += 1;
+                    }
+                    // Update to new position
                     self.mouse_x = ev.pointer_x();
                     self.mouse_y = ev.pointer_y();
                 }
@@ -324,10 +376,13 @@ impl WindowManager {
         (self.mouse_buttons & 0x01) != 0
     }
 
-    /// Refresh window list from kernel
+    /// Refresh window list from kernel and accumulate damage
     fn refresh_windows(&mut self) {
+        // Save previous state
         self.prev_windows = self.windows;
         self.prev_window_count = self.window_count;
+
+        // Get current windows
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
 
         // Clean up stale surface mappings
@@ -341,22 +396,99 @@ impl WindowManager {
             self.prev_taskbar_state = new_state;
         }
 
-        // Check for window position/state changes that require redraw
+        // Clear output damage for this frame (accumulate fresh)
+        self.output_damage.clear();
+
+        // Accumulate damage from all sources
         for i in 0..self.window_count as usize {
-            let window = &self.windows[i];
-            // Find in previous frame
-            for j in 0..self.prev_window_count as usize {
-                let prev = &self.prev_windows[j];
-                if prev.task_id == window.task_id {
-                    if prev.x != window.x
-                        || prev.y != window.y
-                        || prev.state != window.state
-                        || window.is_dirty()
-                    {
-                        self.needs_full_redraw = true;
-                    }
-                    break;
+            // Copy window data to avoid borrow conflicts
+            let window = self.windows[i];
+            let curr_bounds = WindowBounds::from_window(&window);
+
+            // Find previous bounds for this window
+            let prev_bounds = self.find_prev_bounds(window.task_id);
+
+            // Check for window movement or visibility change - add both old and new positions as damage
+            if let Some(old) = prev_bounds {
+                if old.x != curr_bounds.x || old.y != curr_bounds.y
+                    || old.width != curr_bounds.width || old.height != curr_bounds.height
+                    || old.visible != curr_bounds.visible
+                {
+                    // Old position needs redraw (expose damage)
+                    // Note: add_bounds_damage handles invisible bounds by returning early
+                    self.add_bounds_damage(&old);
+                    // New position needs redraw (if visible)
+                    self.add_bounds_damage(&curr_bounds);
                 }
+            }
+
+            // Store current bounds for next frame (even for minimized windows)
+            self.prev_window_bounds[i] = curr_bounds;
+
+            // Skip content damage for minimized windows (they're not drawn)
+            if window.state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+
+            // Add window's content damage (from client's sys_surface_damage calls)
+            if window.is_dirty() {
+                self.add_window_damage(&window);
+            }
+        }
+
+        // Handle removed windows (expose damage)
+        for i in 0..self.prev_window_count as usize {
+            let prev = &self.prev_windows[i];
+            if !self.window_exists(prev.task_id) {
+                let old_bounds = self.prev_window_bounds[i];
+                self.add_bounds_damage(&old_bounds);
+            }
+        }
+    }
+
+    /// Find previous bounds for a window by task_id
+    fn find_prev_bounds(&self, task_id: u32) -> Option<WindowBounds> {
+        for i in 0..self.prev_window_count as usize {
+            if self.prev_windows[i].task_id == task_id {
+                return Some(self.prev_window_bounds[i]);
+            }
+        }
+        None
+    }
+
+    /// Check if a window with given task_id exists in current frame
+    fn window_exists(&self, task_id: u32) -> bool {
+        (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
+    }
+
+    /// Add window bounds (including title bar) to output damage
+    fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
+        let rect = bounds.to_damage_rect();
+        if rect.is_valid() {
+            self.output_damage.add(rect.x0, rect.y0, rect.x1, rect.y1);
+        }
+    }
+
+    /// Add window's content damage (transformed to screen coords) to output damage
+    fn add_window_damage(&mut self, window: &UserWindowInfo) {
+        // If full damage (damage_count == u8::MAX), add entire window bounds
+        if window.damage_count == u8::MAX {
+            let bounds = WindowBounds::from_window(window);
+            self.add_bounds_damage(&bounds);
+            return;
+        }
+
+        // Transform each damage region from surface-local to screen coordinates
+        for i in 0..window.damage_count as usize {
+            let region = &window.damage_regions[i];
+            if region.is_valid() {
+                // Transform to screen coordinates (add window position)
+                self.output_damage.add(
+                    window.x + region.x0,
+                    window.y + region.y0,
+                    window.x + region.x1,
+                    window.y + region.y1,
+                );
             }
         }
     }
@@ -714,12 +846,16 @@ impl WindowManager {
         );
     }
 
-    /// Full compositor render pass
+    /// Compositor render pass
+    ///
+    /// For now, always do full redraws when any content changed.
+    /// Partial redraw optimization deferred until kernel properly clears
+    /// committed_damage after compositor acknowledges it.
     fn render(&mut self, buf: &mut DrawBuffer) {
-        // 1. Clear background
+        // Always clear the entire buffer
         buf.clear(COLOR_BACKGROUND);
 
-        // 2. Draw windows (bottom to top for proper z-ordering)
+        // Draw all visible windows (bottom to top for proper z-ordering)
         let window_count = self.window_count as usize;
         for i in 0..window_count {
             let window = self.windows[i];
@@ -734,10 +870,10 @@ impl WindowManager {
             self.draw_title_bar(buf, &window);
         }
 
-        // 3. Draw taskbar (on top of windows)
+        // Draw taskbar
         self.draw_taskbar(buf);
 
-        // 4. Draw cursor (on top of everything)
+        // Draw cursor (on top of everything)
         self.draw_cursor(buf);
 
         // Reset redraw flags
@@ -752,13 +888,16 @@ impl WindowManager {
             || self.needs_full_redraw
             || self.taskbar_needs_redraw
             || self.mouse_moved()
+            || self.output_damage.is_dirty()
             || self.any_window_dirty()
     }
 
     fn mouse_moved(&self) -> bool {
-        self.mouse_x != self.prev_mouse_x || self.mouse_y != self.prev_mouse_y
+        // Mouse moved if we recorded any trail positions this frame
+        self.cursor_trail_count > 0
     }
 
+    /// Check if any window has pending damage (fallback for damage tracking)
     fn any_window_dirty(&self) -> bool {
         for i in 0..self.window_count as usize {
             if self.windows[i].is_dirty() {
