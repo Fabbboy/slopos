@@ -877,6 +877,14 @@ pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
         return syscall_return_ok(frame, (-1i64) as u64);
     }
 
+    // Auto-set pointer focus to compositor if not set
+    // This ensures the compositor receives mouse events without needing to know its own task_id
+    if task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        if input_event::input_get_pointer_focus() == 0 {
+            input_event::input_set_pointer_focus(task_id, 0);
+        }
+    }
+
     // Poll for an event
     if let Some(event) = input_event::input_poll(task_id) {
         // Copy event to userspace
