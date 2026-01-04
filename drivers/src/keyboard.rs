@@ -112,23 +112,25 @@ unsafe fn kb_buffer_push_overwrite(buf: *mut KeyboardBuffer, byte: u8) {
 unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
     let buf = unsafe { &mut *buf };
     let mut out = None;
-    cpu::disable_interrupts();
+    // Use irqsave/irqrestore to avoid unexpectedly re-enabling interrupts
+    let flags = cpu::save_flags_cli();
     if buf.count > 0 {
         let byte = buf.data[buf.tail as usize];
         buf.tail = (buf.tail + 1) % KEYBOARD_BUFFER_SIZE as u32;
         buf.count = buf.count.saturating_sub(1);
         out = Some(byte);
     }
-    cpu::enable_interrupts();
+    cpu::restore_flags(flags);
     out
 }
 
 #[inline(always)]
 unsafe fn kb_buffer_has_data(buf: *const KeyboardBuffer) -> bool {
     let buf = unsafe { &*buf };
-    cpu::disable_interrupts();
+    // Use irqsave/irqrestore to avoid unexpectedly re-enabling interrupts
+    let flags = cpu::save_flags_cli();
     let has_data = buf.count > 0;
-    cpu::enable_interrupts();
+    cpu::restore_flags(flags);
     has_data
 }
 
