@@ -33,6 +33,33 @@ pub mod cpu {
         }
     }
 
+    /// Save RFLAGS and disable interrupts (irqsave pattern).
+    /// Returns the saved RFLAGS value.
+    #[inline(always)]
+    pub fn save_flags_cli() -> u64 {
+        let flags: u64;
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {}",
+                "cli",
+                out(reg) flags,
+                options(nomem)
+            );
+        }
+        flags
+    }
+
+    /// Restore interrupt flag from saved RFLAGS (irqrestore pattern).
+    /// Only re-enables interrupts if they were enabled in the saved flags.
+    #[inline(always)]
+    pub fn restore_flags(flags: u64) {
+        // Check if IF (bit 9) was set in the saved flags
+        if flags & (1 << 9) != 0 {
+            enable_interrupts();
+        }
+    }
+
     #[inline(always)]
     pub fn halt_loop() -> ! {
         loop {

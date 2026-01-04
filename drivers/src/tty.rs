@@ -183,9 +183,12 @@ pub fn tty_notify_input_ready() {
         return;
     }
 
-    cpu::disable_interrupts();
+    // Use irqsave/irqrestore to avoid re-enabling interrupts when called from IRQ context.
+    // If called from keyboard IRQ handler, interrupts are disabled and must stay disabled
+    // until the IRQ handler completes to prevent nested interrupts and stack corruption.
+    let flags = cpu::save_flags_cli();
     let task = tty_wait_queue_pop();
-    cpu::enable_interrupts();
+    cpu::restore_flags(flags);
 
     if !task.is_null() {
         let state = unsafe { (*task).state };
@@ -205,7 +208,8 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         return 0;
     }
 
-    cpu::disable_interrupts();
+    // Use irqsave/irqrestore to avoid re-enabling interrupts in IRQ context
+    let flags = cpu::save_flags_cli();
     loop {
         let candidate = tty_focus_queue_pop();
         if candidate.is_null() {
@@ -215,7 +219,7 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
             let _ = call_unblock_task(candidate as *mut core::ffi::c_void);
         }
     }
-    cpu::enable_interrupts();
+    cpu::restore_flags(flags);
     0
 }
 
