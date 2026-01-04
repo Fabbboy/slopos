@@ -26,19 +26,26 @@ fn roulette_draw_bridge(fate: u32) -> c_int {
 }
 
 fn surface_enumerate_windows_bridge(out_buffer: *mut video_bridge::WindowInfo, max_count: u32) -> u32 {
-    compositor_context::surface_enumerate_windows(out_buffer as *mut compositor_context::WindowInfo, max_count)
+    // video_bridge::WindowInfo is a re-export of slopos_abi::WindowInfo, so this is now the same type
+    compositor_context::surface_enumerate_windows(out_buffer, max_count)
 }
 
 fn surface_set_window_position_bridge(task_id: u32, x: i32, y: i32) -> c_int {
     compositor_context::surface_set_window_position(task_id, x, y)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 fn surface_set_window_state_bridge(task_id: u32, state: u8) -> c_int {
     compositor_context::surface_set_window_state(task_id, state)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 fn surface_raise_window_bridge(task_id: u32) -> c_int {
     compositor_context::surface_raise_window(task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 fn surface_commit_bridge(task_id: u32) -> c_int {
@@ -50,6 +57,8 @@ fn surface_commit_bridge(task_id: u32) -> c_int {
 
 fn register_surface_bridge(task_id: u32, width: u32, height: u32, bpp: u8, shm_token: u32) -> c_int {
     compositor_context::register_surface_for_task(task_id, width, height, bpp, shm_token)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 /// Called when a task terminates to clean up its surface resources
@@ -70,6 +79,8 @@ fn fb_flip_bridge(shm_phys: u64, size: usize) -> c_int {
 /// Request a frame callback (Wayland wl_surface.frame)
 fn surface_request_frame_callback_bridge(task_id: u32) -> c_int {
     compositor_context::surface_request_frame_callback(task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 /// Mark frames as done (called by compositor after present)
@@ -85,6 +96,8 @@ fn surface_poll_frame_done_bridge(task_id: u32) -> u64 {
 /// Add damage region to surface
 fn surface_add_damage_bridge(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
     compositor_context::surface_add_damage(task_id, x, y, width, height)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 /// Get back buffer age for damage accumulation
@@ -95,16 +108,22 @@ fn surface_get_buffer_age_bridge(task_id: u32) -> u8 {
 /// Set surface role (toplevel, popup, subsurface)
 fn surface_set_role_bridge(task_id: u32, role: u8) -> c_int {
     compositor_context::surface_set_role(task_id, role)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 /// Set parent surface for subsurfaces
 fn surface_set_parent_bridge(task_id: u32, parent_task_id: u32) -> c_int {
     compositor_context::surface_set_parent(task_id, parent_task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 /// Set relative position for subsurfaces
 fn surface_set_relative_position_bridge(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
     compositor_context::surface_set_relative_position(task_id, rel_x, rel_y)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
 }
 
 pub fn init(framebuffer: Option<FramebufferInfo>) {

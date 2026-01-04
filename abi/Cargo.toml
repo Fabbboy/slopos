@@ -1,8 +1,9 @@
 [package]
-name = "slopos-drivers"
+name = "slopos-abi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Kernel-userland ABI types for SlopOS"
 
 [lints]
 workspace = true
@@ -13,12 +14,5 @@ crate-type = ["rlib"]
 
 test = false
 doctest = false
-[features]
-qemu-exit = []
 
 [dependencies]
-slopos-abi = { workspace = true }
-slopos-lib = { workspace = true }
-slopos-mm = { workspace = true }
-slopos-fs = { workspace = true }
-spin.workspace = true

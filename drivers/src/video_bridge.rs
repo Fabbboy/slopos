@@ -1,6 +1,9 @@
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use spin::Once;
+
+// Re-export ABI types for consumers
+pub use slopos_abi::{WindowDamageRect, WindowInfo, MAX_WINDOW_DAMAGE_REGIONS};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -11,47 +14,6 @@ pub struct FramebufferInfoC {
     pub pitch: u32,
     pub bpp: u32,
     pub pixel_format: u32,
-}
-
-/// Maximum damage regions per window (must match video/src/surface.rs)
-pub const MAX_WINDOW_DAMAGE_REGIONS: usize = 8;
-
-/// Damage rectangle for window damage tracking
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct WindowDamageRect {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct WindowInfo {
-    pub task_id: u32,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub state: u8,
-    pub damage_count: u8,
-    pub _padding: [u8; 2],
-    /// Shared memory token for this surface (0 if not using shared memory)
-    pub shm_token: u32,
-    /// Individual damage regions
-    pub damage_regions: [WindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
-    pub title: [c_char; 32],
-}
-
-/// Damage region for compositor damage tracking (Wayland-style)
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct DamageRegion {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

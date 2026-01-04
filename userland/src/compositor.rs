@@ -11,7 +11,7 @@
 //! - Compositor draws chrome (title bars, taskbar, cursor)
 //! - Compositor presents output buffer via sys_fb_flip()
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 
 use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
@@ -769,32 +769,20 @@ impl WindowManager {
     }
 }
 
-/// Convert c_char title array to &str
+/// Convert UTF-8 title array to &str (now 100% safe - no unsafe needed)
 ///
-/// Note: Contains one minimal unsafe block for FFI boundary reinterpretation.
-/// c_char is i8 on Linux, but we need &[u8] for UTF-8 validation. This is
-/// unavoidable without changing the kernel API.
-fn title_to_str(title: &[c_char; 32]) -> &str {
+/// With the ABI change to use `[u8; 32]` instead of `[c_char; 32]`,
+/// this function is now completely safe Rust.
+fn title_to_str(title: &[u8; 32]) -> &str {
     // Find the null terminator
-    let mut len = 0usize;
-    for &ch in title.iter() {
-        if ch == 0 {
-            break;
-        }
-        len += 1;
-    }
+    let len = title.iter().position(|&b| b == 0).unwrap_or(32);
 
     if len == 0 {
         return "";
     }
 
-    // SAFETY: FFI boundary - reinterpret c_char bytes as u8 bytes.
-    // c_char and u8 are both 1 byte with same alignment. len <= 32.
-    // This is the only unsafe in compositor.rs - required for kernel FFI.
-    let bytes: &[u8] = unsafe { core::slice::from_raw_parts(title.as_ptr() as *const u8, len) };
-
-    // Validate UTF-8 and return "<invalid>" for non-UTF8 strings
-    core::str::from_utf8(bytes).unwrap_or("<invalid>")
+    // Direct UTF-8 validation - no unsafe needed!
+    core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
 }
 
 #[unsafe(link_section = ".user_text")]

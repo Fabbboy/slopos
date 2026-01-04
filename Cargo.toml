@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "abi",
   "boot",
   "drivers",
   "fs",
@@ -31,6 +32,7 @@ non_camel_case_types = "deny"
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }
 limine = { version = "0.5.0", default-features = false }
+slopos-abi = { path = "abi" }
 slopos-boot = { path = "boot" }
 slopos-drivers = { path = "drivers" }
 slopos-fs = { path = "fs" }

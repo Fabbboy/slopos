@@ -3,6 +3,13 @@ use core::ffi::{c_char, c_void};
 use core::num::NonZeroU32;
 use core::ptr::NonNull;
 
+// Re-export all ABI types from slopos_abi for userland consumers
+pub use slopos_abi::{
+    InputEvent, InputEventData, InputEventType, PixelFormat, SurfaceRole,
+    WindowDamageRect, WindowInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER,
+    MAX_WINDOW_DAMAGE_REGIONS,
+};
+
 pub const SYSCALL_YIELD: u64 = 0;
 pub const SYSCALL_EXIT: u64 = 1;
 pub const SYSCALL_WRITE: u64 = 2;
@@ -66,203 +73,6 @@ pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 /// Shared memory access flags
 pub const SHM_ACCESS_RO: u32 = 0;
 pub const SHM_ACCESS_RW: u32 = 1;
-
-// =============================================================================
-// Pixel Formats (Wayland wl_shm compatible)
-// =============================================================================
-
-/// Pixel format for shared memory buffers (matches Wayland wl_shm formats).
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    /// 32-bit ARGB (alpha in high byte, red in bits 16-23)
-    Argb8888 = 0,
-    /// 32-bit XRGB (alpha ignored, red in bits 16-23)
-    Xrgb8888 = 1,
-    /// 24-bit RGB (no alpha)
-    Rgb888 = 2,
-    /// 24-bit BGR (no alpha)
-    Bgr888 = 3,
-    /// 32-bit RGBA (red in high byte, alpha in bits 0-7)
-    Rgba8888 = 4,
-    /// 32-bit BGRA (blue in high byte, alpha in bits 0-7)
-    Bgra8888 = 5,
-}
-
-impl PixelFormat {
-    /// Convert from u32 representation.
-    pub fn from_u32(val: u32) -> Option<Self> {
-        match val {
-            0 => Some(Self::Argb8888),
-            1 => Some(Self::Xrgb8888),
-            2 => Some(Self::Rgb888),
-            3 => Some(Self::Bgr888),
-            4 => Some(Self::Rgba8888),
-            5 => Some(Self::Bgra8888),
-            _ => None,
-        }
-    }
-
-    /// Get bytes per pixel for this format.
-    pub fn bytes_per_pixel(&self) -> u8 {
-        match self {
-            Self::Argb8888 | Self::Xrgb8888 | Self::Rgba8888 | Self::Bgra8888 => 4,
-            Self::Rgb888 | Self::Bgr888 => 3,
-        }
-    }
-
-    /// Check if format has an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        matches!(self, Self::Argb8888 | Self::Rgba8888 | Self::Bgra8888)
-    }
-}
-
-// =============================================================================
-// Surface Roles (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
-// =============================================================================
-
-/// Role of a surface in the compositor hierarchy.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SurfaceRole {
-    /// No role assigned yet
-    #[default]
-    None = 0,
-    /// Top-level window (regular application window)
-    Toplevel = 1,
-    /// Popup surface (menus, tooltips, dropdowns)
-    Popup = 2,
-    /// Subsurface (child surface positioned relative to parent)
-    Subsurface = 3,
-}
-
-impl SurfaceRole {
-    pub fn from_u8(val: u8) -> Option<Self> {
-        match val {
-            0 => Some(Self::None),
-            1 => Some(Self::Toplevel),
-            2 => Some(Self::Popup),
-            3 => Some(Self::Subsurface),
-            _ => None,
-        }
-    }
-}
-
-// =============================================================================
-// Input Event Types (Wayland-like per-task input queues)
-// =============================================================================
-
-/// Type of input event.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputEventType {
-    /// Key pressed
-    KeyPress = 0,
-    /// Key released
-    KeyRelease = 1,
-    /// Pointer (mouse) motion
-    PointerMotion = 2,
-    /// Pointer button pressed
-    PointerButtonPress = 3,
-    /// Pointer button released
-    PointerButtonRelease = 4,
-    /// Pointer entered surface
-    PointerEnter = 5,
-    /// Pointer left surface
-    PointerLeave = 6,
-}
-
-impl InputEventType {
-    pub fn from_u8(val: u8) -> Option<Self> {
-        match val {
-            0 => Some(Self::KeyPress),
-            1 => Some(Self::KeyRelease),
-            2 => Some(Self::PointerMotion),
-            3 => Some(Self::PointerButtonPress),
-            4 => Some(Self::PointerButtonRelease),
-            5 => Some(Self::PointerEnter),
-            6 => Some(Self::PointerLeave),
-            _ => None,
-        }
-    }
-
-    /// Returns true if this is a key event (press or release).
-    pub fn is_key_event(&self) -> bool {
-        matches!(self, Self::KeyPress | Self::KeyRelease)
-    }
-
-    /// Returns true if this is a pointer event.
-    pub fn is_pointer_event(&self) -> bool {
-        !self.is_key_event()
-    }
-}
-
-/// Input event data (union-like structure).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InputEventData {
-    /// For key events: scancode in low 16 bits, ASCII in high 16 bits
-    /// For pointer motion: x in low 32 bits, y in high 32 bits (packed as i16)
-    /// For pointer button: button code
-    pub data0: u32,
-    pub data1: u32,
-}
-
-/// A complete input event.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct InputEvent {
-    /// Type of event
-    pub event_type: InputEventType,
-    /// Padding for alignment
-    pub _padding: [u8; 3],
-    /// Timestamp in milliseconds
-    pub timestamp_ms: u64,
-    /// Event-specific data
-    pub data: InputEventData,
-}
-
-impl Default for InputEvent {
-    fn default() -> Self {
-        Self {
-            event_type: InputEventType::KeyPress,
-            _padding: [0; 3],
-            timestamp_ms: 0,
-            data: InputEventData::default(),
-        }
-    }
-}
-
-impl InputEvent {
-    /// Extract scancode from key event.
-    pub fn key_scancode(&self) -> u8 {
-        (self.data.data0 & 0xFF) as u8
-    }
-
-    /// Extract ASCII from key event.
-    pub fn key_ascii(&self) -> u8 {
-        ((self.data.data0 >> 16) & 0xFF) as u8
-    }
-
-    /// Extract X coordinate from pointer event.
-    pub fn pointer_x(&self) -> i32 {
-        self.data.data0 as i32
-    }
-
-    /// Extract Y coordinate from pointer event.
-    pub fn pointer_y(&self) -> i32 {
-        self.data.data1 as i32
-    }
-
-    /// Extract button from pointer button event.
-    pub fn pointer_button_code(&self) -> u8 {
-        (self.data.data0 & 0xFF) as u8
-    }
-}
-
-/// Focus type for input_set_focus syscall.
-pub const INPUT_FOCUS_KEYBOARD: u32 = 0;
-pub const INPUT_FOCUS_POINTER: u32 = 1;
 
 pub const USER_FS_OPEN_READ: u32 = 0x1;
 pub const USER_FS_OPEN_WRITE: u32 = 0x2;
@@ -333,71 +143,9 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
 }
 
-/// Per-window damage region (surface-local coordinates)
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserWindowDamageRect {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-}
-
-/// Maximum damage regions per window
-pub const MAX_WINDOW_DAMAGE_REGIONS: usize = 8;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct UserWindowInfo {
-    pub task_id: u32,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub state: u8,
-    pub damage_count: u8,
-    pub _padding: [u8; 2],
-    /// Shared memory token for this surface (0 if not using shared memory)
-    pub shm_token: u32,
-    // Individual damage regions
-    pub damage_regions: [UserWindowDamageRect; MAX_WINDOW_DAMAGE_REGIONS],
-    pub title: [c_char; 32],
-}
-
-impl UserWindowInfo {
-    /// Returns true if the window has any pending damage
-    pub fn is_dirty(&self) -> bool {
-        self.damage_count > 0
-    }
-}
-
-impl Default for UserWindowInfo {
-    fn default() -> Self {
-        Self {
-            task_id: 0,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            state: 0,
-            damage_count: 0,
-            _padding: [0; 2],
-            shm_token: 0,
-            damage_regions: [UserWindowDamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
-            title: [0; 32],
-        }
-    }
-}
-
-/// Damage region for efficient damage tracking (Wayland-style)
-#[repr(C)]
-#[derive(Default, Copy, Clone, Debug)]
-pub struct UserDamageRegion {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
+// Type aliases for backwards compatibility (use WindowInfo from slopos_abi)
+pub type UserWindowDamageRect = WindowDamageRect;
+pub type UserWindowInfo = WindowInfo;
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]

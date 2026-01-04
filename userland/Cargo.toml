@@ -32,6 +32,7 @@ standalone-bin = []
 external_payload = []
 
 [dependencies]
+slopos-abi = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-video = { workspace = true }
 slopos-boot = { workspace = true }
