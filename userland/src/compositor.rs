@@ -16,7 +16,7 @@ use core::ffi::c_void;
 use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_input_poll, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
+    sys_input_poll_batch, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
     sys_set_window_state, sys_shm_unmap, sys_sleep_ms, sys_tty_set_focus, sys_yield,
     CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
 };
@@ -268,6 +268,11 @@ impl WindowBounds {
 /// Maximum cursor positions to track per frame (for damage)
 const MAX_CURSOR_TRAIL: usize = 16;
 
+/// Maximum input events to process per frame.
+/// 48 events at 60Hz allows ~2880 events/sec, well above mouse/keyboard rates.
+/// Using batch polling avoids lock ping-pong with IRQ handlers.
+const MAX_EVENTS_PER_FRAME: usize = 48;
+
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
@@ -336,14 +341,19 @@ impl WindowManager {
         self.output_pitch = pitch;
     }
 
-    /// Update mouse state from kernel input event queue
+    /// Update mouse state from kernel input event queue.
+    /// Uses batch polling to avoid lock ping-pong with IRQ handlers.
     fn update_mouse(&mut self) {
         // Reset cursor trail for this frame
         self.cursor_trail_count = 0;
 
-        let mut event = InputEvent::default();
-        // Drain all pending pointer events
-        while let Some(ev) = sys_input_poll(&mut event) {
+        // Batch poll all pending events (single syscall, single lock acquisition)
+        let mut events = [InputEvent::default(); MAX_EVENTS_PER_FRAME];
+        let count = sys_input_poll_batch(&mut events) as usize;
+
+        // Process the batch
+        for i in 0..count {
+            let ev = events[i];
             match ev.event_type {
                 InputEventType::PointerMotion => {
                     // Record current position before moving (for damage tracking)

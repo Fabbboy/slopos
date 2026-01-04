@@ -368,6 +368,43 @@ pub fn input_poll(task_id: u32) -> Option<InputEvent> {
     None
 }
 
+/// Drain up to max_count events from a task's queue in a single lock acquisition.
+/// This is much more efficient than calling input_poll() in a loop, as it avoids
+/// lock ping-pong with IRQ handlers that enqueue events.
+///
+/// # Arguments
+/// * `task_id` - The task whose queue to drain
+/// * `out_buffer` - Pointer to buffer to receive events
+/// * `max_count` - Maximum number of events to drain
+///
+/// # Returns
+/// Number of events written to buffer (0 to max_count)
+///
+/// # Safety
+/// Caller must ensure out_buffer points to valid memory for max_count InputEvents.
+pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: usize) -> usize {
+    if out_buffer.is_null() || max_count == 0 {
+        return 0;
+    }
+
+    let mut mgr = INPUT_MANAGER.lock();
+    let idx = match mgr.find_queue(task_id) {
+        Some(i) => i,
+        None => return 0,
+    };
+
+    let mut count = 0;
+    while count < max_count {
+        if let Some(event) = mgr.queues[idx].pop() {
+            unsafe { out_buffer.add(count).write(event); }
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
 /// Peek at the next input event without removing it
 pub fn input_peek(task_id: u32) -> Option<InputEvent> {
     let mgr = INPUT_MANAGER.lock();

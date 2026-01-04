@@ -875,6 +875,7 @@ pub fn syscall_surface_set_title(task: *mut Task, frame: *mut InterruptFrame) ->
 // =============================================================================
 
 pub const SYSCALL_INPUT_POLL: u64 = 60;
+pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
 pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
 pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 
@@ -911,6 +912,34 @@ pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     } else {
         syscall_return_ok(frame, 0)
     }
+}
+
+/// INPUT_POLL_BATCH: Poll for multiple input events at once (non-blocking)
+/// Much more efficient than calling INPUT_POLL in a loop - single lock acquisition.
+/// Args: rdi = pointer to InputEvent array, rsi = max_count
+/// Returns: number of events written to buffer
+pub fn syscall_input_poll_batch(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    if task.is_null() {
+        return syscall_return_ok(frame, 0);
+    }
+
+    let task_id = unsafe { (*task).task_id };
+    let buffer_ptr = unsafe { (*frame).rdi as *mut input_event::InputEvent };
+    let max_count = unsafe { (*frame).rsi as usize };
+
+    if buffer_ptr.is_null() || max_count == 0 {
+        return syscall_return_ok(frame, 0);
+    }
+
+    // Auto-set pointer focus to compositor if not set
+    if task_has_flag(task, TASK_FLAG_COMPOSITOR) {
+        if input_event::input_get_pointer_focus() == 0 {
+            input_event::input_set_pointer_focus(task_id, 0);
+        }
+    }
+
+    let count = input_event::input_drain_batch(task_id, buffer_ptr, max_count);
+    syscall_return_ok(frame, count as u64)
 }
 
 /// INPUT_HAS_EVENTS: Check if task has pending input events
@@ -1182,6 +1211,10 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_input_poll),
         name: b"input_poll\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_INPUT_POLL_BATCH as usize] = SyscallEntry {
+        handler: Some(syscall_input_poll_batch),
+        name: b"input_poll_batch\0".as_ptr() as *const c_char,
+    };
     table[SYSCALL_INPUT_HAS_EVENTS as usize] = SyscallEntry {
         handler: Some(syscall_input_has_events),
         name: b"input_has_events\0".as_ptr() as *const c_char,
@@ -1252,6 +1285,7 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
     // Input event protocol (Wayland-like per-task queues)
     pub const SYSCALL_INPUT_POLL: u64 = 60;
+    pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
     pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
     pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 }

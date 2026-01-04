@@ -68,6 +68,7 @@ pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
 pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
 // Input event protocol (Wayland-like per-task queues)
 pub const SYSCALL_INPUT_POLL: u64 = 60;
+pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
 pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
 pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
 
@@ -695,6 +696,28 @@ pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
         Some(*event_out)
     } else {
         None
+    }
+}
+
+/// Poll for multiple input events at once (non-blocking batch operation).
+/// Much more efficient than calling sys_input_poll() in a loop - single syscall,
+/// single lock acquisition, avoiding lock ping-pong with IRQ handlers.
+///
+/// # Arguments
+/// * `events` - Mutable slice to receive events
+///
+/// # Returns
+/// Number of events actually written to the buffer (0 if queue was empty)
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_input_poll_batch(events: &mut [InputEvent]) -> u64 {
+    unsafe {
+        syscall(
+            SYSCALL_INPUT_POLL_BATCH,
+            events.as_mut_ptr() as u64,
+            events.len() as u64,
+            0,
+        )
     }
 }
 

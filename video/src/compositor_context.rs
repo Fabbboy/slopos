@@ -408,12 +408,25 @@ pub fn unregister_surface_for_task(task_id: u32) {
 // PUBLIC API - Compositor Operations (IMMEDIATE execution)
 // =============================================================================
 
-/// Drain and process all pending client operations.
+/// Maximum operations to process per drain call.
+/// This prevents holding the lock for too long, allowing IRQ handlers to run.
+/// Any remaining operations are processed on the next frame.
+const MAX_OPS_PER_DRAIN: usize = 64;
+
+/// Drain and process pending client operations with bounded iteration.
 /// Called by COMPOSITOR at the start of each frame.
+/// Processes up to MAX_OPS_PER_DRAIN operations per call to avoid holding
+/// the spinlock for too long. Remaining operations are processed next frame.
 pub fn drain_queue() {
     let mut ctx = CONTEXT.lock();
+    let mut processed = 0;
 
-    while let Some(op) = ctx.queue.pop_front() {
+    while processed < MAX_OPS_PER_DRAIN {
+        let op = match ctx.queue.pop_front() {
+            Some(op) => op,
+            None => break,
+        };
+
         match op {
             ClientOp::Commit { task_id } => {
                 if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
@@ -423,6 +436,7 @@ pub fn drain_queue() {
             ClientOp::Register { task_id, width, height, shm_token } => {
                 // Skip if already registered
                 if ctx.surfaces.contains_key(&task_id) {
+                    processed += 1;
                     continue;
                 }
 
@@ -507,7 +521,9 @@ pub fn drain_queue() {
                 }
             }
         }
+        processed += 1;
     }
+    // Any remaining ops are processed next frame
 }
 
 /// Set window position. IMMEDIATE - called by COMPOSITOR only.
