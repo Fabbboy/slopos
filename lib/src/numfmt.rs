@@ -1,14 +1,8 @@
 use core::ffi::{c_char, c_int};
 
 use crate::memory;
-use crate::string;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-
-#[inline(always)]
-fn to_u8(c: c_char) -> u8 {
-    c as u8
-}
 
 unsafe fn ensure_null(buffer: *mut c_char, buffer_len: usize) {
     unsafe {
@@ -140,104 +134,6 @@ pub unsafe fn u8_to_hex_internal(value: u8, buffer: *mut c_char, buffer_len: usi
     }
 }
 
-pub unsafe fn parse_u32_internal(str_ptr: *const c_char, out: *mut u32, fallback: u32) -> c_int {
-    unsafe {
-        if out.is_null() {
-            return -1;
-        }
-        if str_ptr.is_null() {
-            *out = fallback;
-            return -1;
-        }
-
-        let mut cursor = str_ptr;
-        while *cursor != 0 && string::isspace(to_u8(*cursor)) {
-            cursor = cursor.add(1);
-        }
-
-        let mut value: u64 = 0;
-        let mut seen_digit = false;
-
-        while *cursor != 0 && string::isdigit(to_u8(*cursor)) {
-            seen_digit = true;
-            value = value
-                .saturating_mul(10)
-                .saturating_add((to_u8(*cursor) - b'0') as u64);
-            if value > u32::MAX as u64 {
-                value = u32::MAX as u64;
-            }
-            cursor = cursor.add(1);
-        }
-
-        if *cursor != 0 {
-            if (*cursor == b'm' as c_char || *cursor == b'M' as c_char)
-                && (*cursor.add(1) == b's' as c_char || *cursor.add(1) == b'S' as c_char)
-            {
-                cursor = cursor.add(2);
-            }
-        }
-
-        while *cursor != 0 && string::isspace(to_u8(*cursor)) {
-            cursor = cursor.add(1);
-        }
-
-        if !seen_digit || *cursor != 0 {
-            *out = fallback;
-            return -1;
-        }
-
-        *out = value as u32;
-        0
-    }
-}
-
-pub unsafe fn parse_u64_internal(str_ptr: *const c_char, out: *mut u64, fallback: u64) -> c_int {
-    unsafe {
-        if out.is_null() {
-            return -1;
-        }
-        if str_ptr.is_null() {
-            *out = fallback;
-            return -1;
-        }
-
-        let mut cursor = str_ptr;
-        while *cursor != 0 && string::isspace(to_u8(*cursor)) {
-            cursor = cursor.add(1);
-        }
-
-        let mut value: u64 = 0;
-        let mut seen_digit = false;
-
-        while *cursor != 0 && string::isdigit(to_u8(*cursor)) {
-            seen_digit = true;
-            value = value
-                .saturating_mul(10)
-                .saturating_add((to_u8(*cursor) - b'0') as u64);
-            cursor = cursor.add(1);
-        }
-
-        if *cursor != 0 {
-            if (*cursor == b'm' as c_char || *cursor == b'M' as c_char)
-                && (*cursor.add(1) == b's' as c_char || *cursor.add(1) == b'S' as c_char)
-            {
-                cursor = cursor.add(2);
-            }
-        }
-
-        while *cursor != 0 && string::isspace(to_u8(*cursor)) {
-            cursor = cursor.add(1);
-        }
-
-        if !seen_digit || *cursor != 0 {
-            *out = fallback;
-            return -1;
-        }
-
-        *out = value;
-        0
-    }
-}
 pub fn numfmt_u64_to_decimal(value: u64, buffer: *mut c_char, buffer_len: usize) -> usize {
     unsafe { u64_to_decimal_internal(value, buffer, buffer_len) }
 }
@@ -254,10 +150,4 @@ pub fn numfmt_u64_to_hex(
 }
 pub fn numfmt_u8_to_hex(value: u8, buffer: *mut c_char, buffer_len: usize) -> usize {
     unsafe { u8_to_hex_internal(value, buffer, buffer_len) }
-}
-pub fn numfmt_parse_u32(str_ptr: *const c_char, out: *mut u32, fallback: u32) -> c_int {
-    unsafe { parse_u32_internal(str_ptr, out, fallback) }
-}
-pub fn numfmt_parse_u64(str_ptr: *const c_char, out: *mut u64, fallback: u64) -> c_int {
-    unsafe { parse_u64_internal(str_ptr, out, fallback) }
 }

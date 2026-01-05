@@ -26,13 +26,6 @@ fn disable_impl() {
     }
 }
 
-pub fn mask_all() {
-    mask_all_impl();
-}
-
-pub fn disable() {
-    disable_impl();
-}
 pub fn pic_quiesce_mask_all() {
     mask_all_impl();
 }
