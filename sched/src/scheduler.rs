@@ -1,8 +1,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use slopos_drivers::scheduler_callbacks;
-use slopos_drivers::{pit, wl_currency};
+use slopos_drivers::{pit, sched_bridge, wl_currency};
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
 
@@ -338,10 +337,10 @@ fn switch_to_task(new_task: *mut Task) {
             } else {
                 kernel_stack_top() as u64
             };
-            scheduler_callbacks::call_gdt_set_kernel_rsp0(rsp0);
+            sched_bridge::gdt_set_kernel_rsp0(rsp0);
             context_switch_user(old_ctx_ptr, &(*new_task).context);
         } else {
-            scheduler_callbacks::call_gdt_set_kernel_rsp0(kernel_stack_top() as u64);
+            sched_bridge::gdt_set_kernel_rsp0(kernel_stack_top() as u64);
             if !old_ctx_ptr.is_null() {
                 context_switch(old_ctx_ptr, &(*new_task).context);
             } else {
@@ -695,51 +694,8 @@ pub fn boot_step_task_manager_init() -> c_int {
 pub fn boot_step_scheduler_init() -> c_int {
     let rc = init_scheduler();
     if rc == 0 {
-        use crate::task::task_terminate;
-        use core::ffi::c_void;
-        use slopos_drivers::scheduler_callbacks::{
-            SchedulerCallbacks, SchedulerCallbacksForBoot, Task as DriverBootTask,
-        };
-
-        let get_current_task_fn: fn() -> *mut c_void =
-            unsafe { core::mem::transmute(scheduler_get_current_task as *const ()) };
-        let task_is_blocked_fn: fn(*const c_void) -> bool =
-            unsafe { core::mem::transmute(crate::task::task_is_blocked as *const ()) };
-        let unblock_task_fn: fn(*mut c_void) -> c_int =
-            unsafe { core::mem::transmute(unblock_task as *const ()) };
-        unsafe {
-            scheduler_callbacks::register_callbacks(SchedulerCallbacks {
-                timer_tick: Some(scheduler_timer_tick),
-                handle_post_irq: Some(scheduler_handle_post_irq),
-                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
-                get_current_task: Some(get_current_task_fn),
-                yield_fn: Some(yield_),
-                schedule_fn: Some(schedule),
-                task_terminate_fn: Some(task_terminate),
-                scheduler_is_preemption_enabled_fn: Some(scheduler_is_preemption_enabled),
-                get_task_stats_fn: Some(crate::task::get_task_stats),
-                get_scheduler_stats_fn: Some(get_scheduler_stats),
-                register_idle_wakeup_callback: Some(scheduler_register_idle_wakeup_callback),
-                scheduler_is_enabled: Some(scheduler_is_enabled),
-                task_is_blocked: Some(task_is_blocked_fn),
-                unblock_task: Some(unblock_task_fn),
-                block_current_task: Some(block_current_task),
-                fate_spin: Some(crate::fate_api::fate_spin),
-                fate_set_pending: Some(crate::fate_api::fate_set_pending),
-                fate_take_pending: Some(crate::fate_api::fate_take_pending),
-                fate_apply_outcome: Some(crate::fate_api::fate_apply_outcome),
-            });
-        }
-
-        let get_current_task_boot_fn: fn() -> *mut DriverBootTask =
-            unsafe { core::mem::transmute(scheduler_get_current_task as *const ()) };
-        unsafe {
-            scheduler_callbacks::register_scheduler_callbacks_for_boot(SchedulerCallbacksForBoot {
-                request_reschedule_from_interrupt: Some(scheduler_request_reschedule_from_interrupt),
-                get_current_task: Some(get_current_task_boot_fn),
-                task_terminate: Some(crate::task::task_terminate),
-            });
-        }
+        // Register scheduler traits with the sched_bridge
+        crate::sched_impl::register_with_bridge();
     }
     rc
 }

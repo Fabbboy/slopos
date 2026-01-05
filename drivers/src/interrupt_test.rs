@@ -10,7 +10,7 @@ use crate::interrupt_test_config::{
     INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY,
     INTERRUPT_TEST_SUITE_SCHEDULER, interrupt_test_config,
 };
-use crate::scheduler_callbacks::call_kernel_shutdown;
+use crate::sched_bridge;
 
 #[repr(C)]
 pub struct test_stats {
@@ -287,7 +287,7 @@ pub fn interrupt_test_request_shutdown(failed_tests: c_int) {
     unsafe {
         let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
         io::outb(0xF4, exit_value);
-        call_kernel_shutdown(if failed_tests == 0 {
+        sched_bridge::kernel_shutdown(if failed_tests == 0 {
             b"Interrupt tests completed successfully\0".as_ptr() as *const c_char
         } else {
             b"Interrupt tests failed\0".as_ptr() as *const c_char

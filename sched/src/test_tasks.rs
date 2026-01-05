@@ -2,7 +2,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use core::ffi::CStr;
-use slopos_drivers::scheduler_callbacks;
+use slopos_drivers::sched_bridge;
 use slopos_drivers::serial::serial_putc_com1;
 use slopos_lib::klog_info;
 
@@ -258,7 +258,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
     };
 
     let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
-    if unsafe { scheduler_callbacks::call_idt_get_gate(SYSCALL_VECTOR, gate_ptr) } != 0 {
+    if sched_bridge::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
         klog_info!("PRIVSEP_TEST: cannot read syscall gate");
         failed = 1;
     } else {

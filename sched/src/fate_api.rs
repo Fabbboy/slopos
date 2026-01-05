@@ -1,6 +1,7 @@
 use crate::task::{task_find_by_id, Task};
 use core::ffi::c_int;
-use slopos_drivers::{fate::FateResult, random, wl_currency};
+use slopos_abi::sched_traits::FateResult;
+use slopos_drivers::{random, wl_currency};
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where

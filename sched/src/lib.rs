@@ -7,6 +7,7 @@ global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod kthread;
+pub mod sched_impl;
 pub mod scheduler;
 pub mod task;
 pub mod test_tasks;

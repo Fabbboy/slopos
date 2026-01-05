@@ -47,20 +47,16 @@ pub struct UserSysInfo {
     pub schedule_calls: u32,
 }
 
-use crate::fate::{self, FateResult};
+use crate::fate;
+use slopos_abi::sched_traits::FateResult;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 
-use crate::scheduler_callbacks::{
-    call_fate_apply_outcome, call_fate_set_pending, call_fate_spin, call_fate_take_pending,
-    call_get_scheduler_stats, call_get_task_stats, call_schedule,
-    call_scheduler_is_preemption_enabled, call_task_terminate, call_yield,
-};
+use crate::sched_bridge;
 
 use crate::irq;
 use crate::pit::{pit_get_frequency, pit_poll_delay_ms, pit_sleep_ms};
-use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
 
 // =============================================================================
@@ -72,7 +68,7 @@ pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
         return syscall_return_err(frame, u64::MAX);
     };
     let _ = ctx.ok(0);
-    unsafe { call_yield() };
+    sched_bridge::yield_cpu();
     SyscallDisposition::Ok
 }
 
@@ -103,9 +99,7 @@ pub fn syscall_shm_get_formats(task: *mut Task, frame: *mut InterruptFrame) -> S
 }
 
 pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        call_kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
-    }
+    sched_bridge::kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     #[allow(unreachable_code)]
     SyscallDisposition::Ok
 }
@@ -119,7 +113,7 @@ pub fn syscall_sleep_ms(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
     if ms > 60000 {
         ms = 60000;
     }
-    if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
+    if sched_bridge::scheduler_is_preemption_enabled() != 0 {
         pit_sleep_ms(ms as u32);
     } else {
         pit_poll_delay_ms(ms as u32);
@@ -141,8 +135,8 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         }
     }
     let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
-    unsafe { call_task_terminate(task_id) };
-    unsafe { call_schedule() };
+    sched_bridge::task_terminate(task_id);
+    sched_bridge::schedule();
     SyscallDisposition::NoReturn
 }
 
@@ -711,13 +705,13 @@ pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> Sys
         return syscall_return_err(frame, u64::MAX);
     };
 
-    let res = unsafe { call_fate_spin() };
+    let res = sched_bridge::fate_spin();
     let task_id = match ctx.task_id() {
         Some(id) => id,
         None => return ctx.err(),
     };
 
-    if unsafe { call_fate_set_pending(res, task_id) } != 0 {
+    if sched_bridge::fate_set_pending(res, task_id) != 0 {
         return ctx.err();
     }
     let packed = ((res.token as u64) << 32) | res.value as u64;
@@ -735,7 +729,7 @@ pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> S
     };
 
     let mut stored = FateResult { token: 0, value: 0 };
-    if unsafe { call_fate_take_pending(task_id, &mut stored) } != 0 {
+    if sched_bridge::fate_take_pending(task_id, &mut stored) != 0 {
         return ctx.err();
     }
 
@@ -747,15 +741,13 @@ pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> S
 
     let is_win = (stored.value & 1) == 1;
 
-    unsafe {
-        if is_win {
-            call_fate_apply_outcome(&stored, 0, true);
-            fate::fate_notify_outcome(&stored as *const FateResult);
-            ctx.ok(0)
-        } else {
-            call_fate_apply_outcome(&stored, 0, false);
-            call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
-        }
+    if is_win {
+        sched_bridge::fate_apply_outcome(&stored, 0, true);
+        fate::fate_notify_outcome(&stored as *const FateResult);
+        ctx.ok(0)
+    } else {
+        sched_bridge::fate_apply_outcome(&stored, 0, false);
+        sched_bridge::kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
     }
 }
 
@@ -893,24 +885,22 @@ pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
         schedule_calls: 0,
     };
 
-    unsafe {
-        get_page_allocator_stats(
-            &mut info.total_pages,
-            &mut info.free_pages,
-            &mut info.allocated_pages,
-        );
-        call_get_task_stats(
-            &mut info.total_tasks,
-            &mut info.active_tasks,
-            &mut info.task_context_switches,
-        );
-        call_get_scheduler_stats(
-            &mut info.scheduler_context_switches,
-            &mut info.scheduler_yields,
-            &mut info.ready_tasks,
-            &mut info.schedule_calls,
-        );
-    }
+    get_page_allocator_stats(
+        &mut info.total_pages,
+        &mut info.free_pages,
+        &mut info.allocated_pages,
+    );
+    sched_bridge::get_task_stats(
+        &mut info.total_tasks,
+        &mut info.active_tasks,
+        &mut info.task_context_switches,
+    );
+    sched_bridge::get_scheduler_stats(
+        &mut info.scheduler_context_switches,
+        &mut info.scheduler_yields,
+        &mut info.ready_tasks,
+        &mut info.schedule_calls,
+    );
 
     if syscall_copy_to_user_bounded(
         args.arg0 as *mut c_void,

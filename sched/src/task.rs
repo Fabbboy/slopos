@@ -262,7 +262,7 @@ use slopos_mm::process_vm::{
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
-use slopos_drivers::scheduler_callbacks::call_video_task_cleanup;
+use slopos_drivers::sched_bridge;
 
 fn task_manager_mut() -> *mut TaskManager {
     &raw mut TASK_MANAGER
@@ -675,7 +675,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
             if (*task_ptr).process_id != INVALID_PROCESS_ID {
                 fileio_destroy_table_for_process((*task_ptr).process_id);
                 // Clean up video/surface resources for this task
-                call_video_task_cleanup(resolved_id);
+                sched_bridge::video_task_cleanup(resolved_id);
                 // Clean up shared memory buffers owned by this task
                 // Must happen before destroy_process_vm to properly unmap pages
                 shm_cleanup_task(resolved_id);

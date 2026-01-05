@@ -21,7 +21,7 @@ pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod random;
-pub mod scheduler_callbacks;
+pub mod sched_bridge;
 pub mod serial;
 pub mod syscall;
 pub mod syscall_common;

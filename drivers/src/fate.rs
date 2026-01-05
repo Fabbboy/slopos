@@ -1,12 +1,6 @@
 use crate::{random::Lfsr64, serial_println, wl_currency};
+use slopos_abi::sched_traits::FateResult;
 use slopos_lib::cpu;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct FateResult {
-    pub token: u32,
-    pub value: u32,
-}
 
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 pub fn fate_register_outcome_hook(cb: fn(*const FateResult)) {

@@ -70,7 +70,7 @@ pub fn kernel_drain_serial_output() {
     klog_info!("Kernel shutdown: draining serial output");
     serial_flush();
 }
-pub fn kernel_shutdown(reason: *const c_char) {
+pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
     cpu::disable_interrupts();
 
@@ -120,7 +120,7 @@ fn halt() -> ! {
         unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
-pub fn kernel_reboot(reason: *const c_char) {
+pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
     cpu::disable_interrupts();
 

@@ -2,7 +2,7 @@ use slopos_lib::klog_info;
 
 use crate::syscall_handlers::syscall_lookup;
 use crate::syscall_types::{InterruptFrame, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext};
-use crate::{scheduler_callbacks, wl_currency};
+use crate::{sched_bridge, wl_currency};
 
 const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 
@@ -48,7 +48,7 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task = unsafe { scheduler_callbacks::call_get_current_task() as *mut Task };
+    let task = sched_bridge::get_current_task() as *mut Task;
     unsafe {
         if task.is_null() || ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
             wl_currency::award_loss();

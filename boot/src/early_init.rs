@@ -536,24 +536,8 @@ pub fn kernel_main_impl() {
     serial::write_line("BOOT: after idt_load (early)");
     serial::write_line("BOOT: early GDT/IDT initialized");
 
-    // Register boot callbacks early to break circular dependencies
-    unsafe {
-        use crate::limine_protocol::{get_rsdp_address, is_rsdp_available};
-        use crate::shutdown::{kernel_reboot, kernel_shutdown};
-        use slopos_drivers::scheduler_callbacks::{BootCallbacks, register_boot_callbacks};
-        register_boot_callbacks(BootCallbacks {
-            gdt_set_kernel_rsp0: Some(gdt::gdt_set_kernel_rsp0),
-            is_kernel_initialized: Some(is_kernel_initialized),
-            kernel_panic: Some(kernel_panic),
-            kernel_shutdown: Some(kernel_shutdown),
-            kernel_reboot: Some(kernel_reboot),
-            get_hhdm_offset: Some(limine_protocol::get_hhdm_offset_rust),
-            is_hhdm_available: Some(limine_protocol::is_hhdm_available_rust),
-            is_rsdp_available: Some(is_rsdp_available),
-            get_rsdp_address: Some(get_rsdp_address),
-            idt_get_gate: Some(idt::idt_get_gate_opaque),
-        });
-    }
+    // Register boot services early to break circular dependencies
+    crate::boot_impl::register_with_bridge();
 
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {

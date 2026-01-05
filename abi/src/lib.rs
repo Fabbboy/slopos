@@ -14,6 +14,7 @@
 pub mod error;
 pub mod input;
 pub mod pixel;
+pub mod sched_traits;
 pub mod shm;
 pub mod surface;
 pub mod window;
@@ -21,6 +22,7 @@ pub mod window;
 pub use error::*;
 pub use input::*;
 pub use pixel::*;
+pub use sched_traits::*;
 pub use shm::*;
 pub use surface::*;
 pub use window::*;

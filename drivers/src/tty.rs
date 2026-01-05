@@ -6,10 +6,7 @@ use spin::Mutex;
 use slopos_lib::cpu;
 
 use crate::keyboard;
-use crate::scheduler_callbacks::{
-    call_block_current_task, call_get_current_task, call_register_idle_wakeup_callback,
-    call_scheduler_is_enabled, call_unblock_task,
-};
+use crate::sched_bridge;
 use crate::serial;
 use crate::syscall_types::{Task, TASK_STATE_BLOCKED, TASK_STATE_READY};
 
@@ -75,7 +72,7 @@ fn tty_register_idle_callback() {
         if REGISTERED {
             return;
         }
-        call_register_idle_wakeup_callback(Some(tty_input_available_cb));
+        sched_bridge::register_idle_wakeup_callback(Some(tty_input_available_cb));
         REGISTERED = true;
     }
 }
@@ -145,7 +142,7 @@ fn tty_focus_queue_pop() -> *mut Task {
 }
 
 fn tty_current_task_id() -> Option<u32> {
-    let task = unsafe { call_get_current_task() as *mut Task };
+    let task = sched_bridge::get_current_task() as *mut Task;
     if task.is_null() {
         return None;
     }
@@ -167,10 +164,10 @@ fn tty_wait_for_focus(task_id: u32) {
     if tty_task_has_focus(task_id) {
         return;
     }
-    if unsafe { call_scheduler_is_enabled() } != 0 {
-        let current = unsafe { call_get_current_task() as *mut Task };
+    if sched_bridge::scheduler_is_enabled() != 0 {
+        let current = sched_bridge::get_current_task() as *mut Task;
         if tty_focus_queue_push(current) {
-            unsafe { call_block_current_task() };
+            sched_bridge::block_current_task();
             return;
         }
     }
@@ -179,7 +176,7 @@ fn tty_wait_for_focus(task_id: u32) {
     }
 }
 pub fn tty_notify_input_ready() {
-    if unsafe { call_scheduler_is_enabled() } == 0 {
+    if sched_bridge::scheduler_is_enabled() == 0 {
         return;
     }
 
@@ -195,16 +192,14 @@ pub fn tty_notify_input_ready() {
         // Only wake tasks in valid waiting states (BLOCKED or READY)
         // RUNNING tasks shouldn't be in the wait queue (would be a bug elsewhere)
         if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
-            unsafe {
-                call_unblock_task(task as *mut core::ffi::c_void);
-            }
+            sched_bridge::unblock_task(task as *mut core::ffi::c_void);
         }
     }
 }
 
 pub fn tty_set_focus(task_id: u32) -> c_int {
     TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
-    if unsafe { call_scheduler_is_enabled() } == 0 {
+    if sched_bridge::scheduler_is_enabled() == 0 {
         return 0;
     }
 
@@ -215,9 +210,7 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         if candidate.is_null() {
             break;
         }
-        unsafe {
-            let _ = call_unblock_task(candidate as *mut core::ffi::c_void);
-        }
+        let _ = sched_bridge::unblock_task(candidate as *mut core::ffi::c_void);
     }
     cpu::restore_flags(flags);
     0
@@ -264,10 +257,10 @@ fn tty_block_until_input_ready() {
     if tty_input_available() != 0 {
         return;
     }
-    if unsafe { call_scheduler_is_enabled() } != 0 {
-        let current = unsafe { call_get_current_task() as *mut Task };
+    if sched_bridge::scheduler_is_enabled() != 0 {
+        let current = sched_bridge::get_current_task() as *mut Task;
         if tty_wait_queue_push(current) {
-            unsafe { call_block_current_task() };
+            sched_bridge::block_current_task();
             return;
         }
     }

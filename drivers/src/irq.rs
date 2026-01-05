@@ -11,7 +11,7 @@ use crate::hw::ioapic_defs::{
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
 use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
-use crate::{apic, ioapic, keyboard, mouse, scheduler_callbacks, wl_currency};
+use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
 
 const IRQ_LINES: usize = 16;
 const IRQ_BASE_VECTOR: u8 = 32;
@@ -92,8 +92,6 @@ static IRQ_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
 static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
-
-use crate::scheduler_callbacks::call_kernel_panic;
 
 #[inline]
 fn with_irq_tables<R>(
@@ -192,7 +190,7 @@ extern "C" fn timer_irq_handler(irq: u8, _frame: *mut InterruptFrame, _ctx: *mut
         if tick <= 3 {
             klog_debug!("IRQ: Timer tick #{}", tick);
         }
-        scheduler_callbacks::call_timer_tick();
+        sched_bridge::timer_tick();
     }
 }
 
@@ -228,20 +226,16 @@ fn irq_program_ioapic_route(irq: u8) {
     }
 
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
-        unsafe {
-            call_kernel_panic(
-                b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr()
-                    as *const c_char,
-            )
-        };
+        sched_bridge::kernel_panic(
+            b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr()
+                as *const c_char,
+        );
     }
 
     let mut gsi = 0u32;
     let mut legacy_flags = 0u32;
     if ioapic::legacy_irq_info(irq, &mut gsi, &mut legacy_flags) != 0 {
-        unsafe {
-            call_kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char)
-        };
+        sched_bridge::kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char);
     }
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq) as u8;
@@ -252,9 +246,7 @@ fn irq_program_ioapic_route(irq: u8) {
         | IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
-        unsafe {
-            call_kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char)
-        };
+        sched_bridge::kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char);
     }
 
     let masked = with_irq_tables(|table, routes| {
@@ -292,11 +284,9 @@ fn irq_program_ioapic_route(irq: u8) {
 
 fn irq_setup_ioapic_routes() {
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
-        unsafe {
-            call_kernel_panic(
-                b"IRQ: APIC/IOAPIC not ready during dispatcher init\0".as_ptr() as *const c_char,
-            )
-        };
+        sched_bridge::kernel_panic(
+            b"IRQ: APIC/IOAPIC not ready during dispatcher init\0".as_ptr() as *const c_char,
+        );
     }
 
     irq_program_ioapic_route(LEGACY_IRQ_TIMER);
@@ -468,11 +458,11 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
         klog_info!("IRQ: Frame corruption detected on IRQ {} - aborting", irq);
         kdiag_dump_interrupt_frame(frame);
-        unsafe { call_kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char) };
+        sched_bridge::kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char);
     }
 
     acknowledge_irq();
-    unsafe { scheduler_callbacks::call_handle_post_irq() };
+    sched_bridge::handle_post_irq();
 }
 
 #[repr(C)]

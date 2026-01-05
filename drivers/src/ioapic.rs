@@ -6,9 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::hw::ioapic_defs::*;
-use crate::scheduler_callbacks::{
-    call_get_hhdm_offset, call_get_rsdp_address, call_is_hhdm_available, call_is_rsdp_available,
-};
+use crate::sched_bridge;
 use crate::wl_currency;
 
 #[repr(C, packed)]
@@ -155,8 +153,8 @@ fn phys_to_virt(phys: u64) -> *mut u8 {
     if phys == 0 {
         return core::ptr::null_mut();
     }
-    if unsafe { call_is_hhdm_available() } != 0 {
-        unsafe { (phys + call_get_hhdm_offset()) as *mut u8 }
+    if sched_bridge::is_hhdm_available() != 0 {
+        (phys + sched_bridge::get_hhdm_offset()) as *mut u8
     } else {
         phys as *mut u8
     }
@@ -497,19 +495,19 @@ pub fn init() -> i32 {
         -1
     };
 
-    if unsafe { call_is_hhdm_available() } == 0 {
+    if sched_bridge::is_hhdm_available() == 0 {
         klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         wl_currency::award_loss();
         return init_fail();
     }
 
-    if unsafe { call_is_rsdp_available() } == 0 {
+    if sched_bridge::is_rsdp_available() == 0 {
         klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         wl_currency::award_loss();
         return init_fail();
     }
 
-    let rsdp = unsafe { call_get_rsdp_address() } as *const AcpiRsdp;
+    let rsdp = sched_bridge::get_rsdp_address() as *const AcpiRsdp;
     if !acpi_validate_rsdp(rsdp) {
         klog_info!("IOAPIC: ACPI RSDP checksum failed");
         wl_currency::award_loss();

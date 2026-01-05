@@ -5,7 +5,7 @@ extern crate alloc;
 
 use core::ffi::c_int;
 use slopos_drivers::serial_println;
-use slopos_drivers::scheduler_callbacks::register_video_task_cleanup_callback;
+use slopos_drivers::sched_bridge::register_video_task_cleanup_callback;
 use slopos_drivers::video_bridge::{self, VideoCallbacks, VideoResult};
 use slopos_lib::FramebufferInfo;
 

@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use crate::hw::apic_defs::*;
-use crate::scheduler_callbacks::{call_get_hhdm_offset, call_is_hhdm_available};
+use crate::sched_bridge;
 use crate::wl_currency;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -18,8 +18,8 @@ fn hhdm_virt_for(phys: u64) -> Option<u64> {
     if phys == 0 {
         return None;
     }
-    if unsafe { call_is_hhdm_available() } != 0 {
-        Some(phys + unsafe { call_get_hhdm_offset() })
+    if sched_bridge::is_hhdm_available() != 0 {
+        Some(phys + sched_bridge::get_hhdm_offset())
     } else {
         None
     }

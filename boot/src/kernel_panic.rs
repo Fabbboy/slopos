@@ -58,7 +58,7 @@ fn log_register_snapshot(rip: Option<u64>, rsp: Option<u64>) {
     klog_info!("CR3: 0x{:x}", read_cr(ControlRegister::Cr3));
     klog_info!("CR4: 0x{:x}", read_cr(ControlRegister::Cr4));
 }
-pub fn kernel_panic(message: *const c_char) {
+pub fn kernel_panic(message: *const c_char) -> ! {
     cpu::disable_interrupts();
 
     panic_output_str("\n\n=== KERNEL PANIC ===");

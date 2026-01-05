@@ -105,10 +105,7 @@ use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::{paging, process_vm};
 use slopos_mm::phys_virt::mm_phys_to_virt;
 
-use slopos_drivers::scheduler_callbacks::{
-    call_boot_get_current_task, call_boot_request_reschedule_from_interrupt,
-    call_boot_task_terminate,
-};
+use slopos_drivers::sched_bridge;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -449,7 +446,7 @@ fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
 }
 
 fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: &'static CStr) {
-    let task = unsafe { call_boot_get_current_task() as *mut Task };
+    let task = sched_bridge::boot_get_current_task() as *mut Task;
     let tid = if task.is_null() {
         INVALID_TASK_ID
     } else {
@@ -496,8 +493,8 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: 
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
             wl_award_loss();
-            call_boot_task_terminate(tid);
-            call_boot_request_reschedule_from_interrupt();
+            sched_bridge::boot_task_terminate(tid);
+            sched_bridge::boot_request_reschedule_from_interrupt();
         }
     }
     let _ = frame;
@@ -649,7 +646,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         let mut rip_phys = 0u64;
         let mut ctx_rip = 0u64;
         let mut ctx_rsp = 0u64;
-        let task_ptr = unsafe { call_boot_get_current_task() as *mut Task };
+        let task_ptr = sched_bridge::boot_get_current_task() as *mut Task;
         if !task_ptr.is_null() {
             pid = unsafe { (*task_ptr).process_id };
             unsafe {
