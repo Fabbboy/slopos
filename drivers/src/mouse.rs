@@ -26,8 +26,8 @@ static mut MOUSE_STATE: MouseState = MouseState {
     buttons: 0,
     packet_byte: 0,
     packet: [0; 3],
-    max_x: 1024,
-    max_y: 768,
+    max_x: 1920,
+    max_y: 1080,
 };
 
 #[inline(always)]

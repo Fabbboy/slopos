@@ -224,11 +224,12 @@ boot: iso-notests
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
 	DISPLAY_ARGS="-display none -vga std"; \
+	USB_ARGS="-usb -device usb-tablet"; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk -vga std"; \
+		DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,gl=on -vga none"; \
+		DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
 		VIRGL_ARGS=" -device virtio-gpu-gl-pci,multifunction=on"; \
 	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
@@ -244,6 +245,7 @@ boot: iso-notests
 	  -serial stdio \
 	  -monitor none \
 	  $$DISPLAY_ARGS \
+	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
 	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-}
@@ -266,11 +268,12 @@ boot-log: iso-notests
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
 	DISPLAY_ARGS="-nographic -vga std"; \
+	USB_ARGS="-usb -device usb-tablet"; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk -vga std"; \
+		DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,gl=on -vga none"; \
+		DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
 		VIRGL_ARGS=" -device virtio-gpu-pci,virgl=on"; \
 	fi; \
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
@@ -287,6 +290,7 @@ boot-log: iso-notests
 	  -serial stdio \
 	  -monitor none \
 	  $$DISPLAY_ARGS \
+	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
 	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-} \
@@ -327,6 +331,7 @@ test: iso-tests
 	  -monitor none \
 	  -nographic \
 	  -vga std \
+	  -usb -device usb-tablet \
 	  -device isa-debug-exit,iobase=0xf4,iosize=0x01; \
 	status=$$?; \
 	set -e; \
