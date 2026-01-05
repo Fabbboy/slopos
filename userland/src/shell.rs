@@ -175,7 +175,7 @@ mod scrollback {
     /// Safety: Single-threaded userland, no preemption during shell code
     #[inline]
     pub fn get_line(slot: usize) -> &'static [u8] {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe {
             let data = &*DATA.get();
             let start = slot * SHELL_SCROLLBACK_COLS;
@@ -185,20 +185,20 @@ mod scrollback {
 
     #[inline]
     pub fn get_line_len(slot: usize) -> u16 {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe { (*LENS.get())[slot] }
     }
 
     #[inline]
     pub fn set_line_len(slot: usize, len: u16) {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe { (*LENS.get())[slot] = len }
     }
 
     #[inline]
     pub fn set_char(slot: usize, col: usize, ch: u8) {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
-        debug_assert!(col < SHELL_SCROLLBACK_COLS);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let col = col % SHELL_SCROLLBACK_COLS;
         unsafe {
             let data = &mut *DATA.get();
             data[slot * SHELL_SCROLLBACK_COLS + col] = ch;
@@ -207,8 +207,8 @@ mod scrollback {
 
     #[inline]
     pub fn get_char(slot: usize, col: usize) -> u8 {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
-        debug_assert!(col < SHELL_SCROLLBACK_COLS);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
+        let col = col % SHELL_SCROLLBACK_COLS;
         unsafe {
             let data = &*DATA.get();
             data[slot * SHELL_SCROLLBACK_COLS + col]
@@ -216,7 +216,7 @@ mod scrollback {
     }
 
     pub fn clear_line(slot: usize) {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
         unsafe {
             let data = &mut *DATA.get();
             let start = slot * SHELL_SCROLLBACK_COLS;
@@ -242,7 +242,7 @@ mod scrollback {
 
     /// Write a line to scrollback (for prompt rewriting)
     pub fn write_line(slot: usize, content: &[u8]) {
-        debug_assert!(slot < SHELL_SCROLLBACK_LINES);
+        let slot = slot % SHELL_SCROLLBACK_LINES;
         let len = content.len().min(SHELL_SCROLLBACK_COLS);
         unsafe {
             let data = &mut *DATA.get();

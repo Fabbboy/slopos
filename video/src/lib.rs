@@ -131,7 +131,17 @@ fn surface_set_title_bridge(task_id: u32, title_ptr: *const u8, title_len: usize
     if title_ptr.is_null() {
         return -1;
     }
-    let title = unsafe { core::slice::from_raw_parts(title_ptr, title_len.min(31)) };
+
+    // Validate pointer is in user address space
+    let ptr_addr = title_ptr as u64;
+    let len = title_len.min(31);
+    let end_addr = ptr_addr.saturating_add(len as u64);
+    const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+    if ptr_addr >= USER_SPACE_END || end_addr > USER_SPACE_END {
+        return -1;
+    }
+
+    let title = unsafe { core::slice::from_raw_parts(title_ptr, len) };
     compositor_context::surface_set_title(task_id, title)
         .map(|()| 0)
         .unwrap_or_else(|e| e.as_c_int())
