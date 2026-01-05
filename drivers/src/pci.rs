@@ -6,10 +6,8 @@ use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::hw::pci_defs::*;
 use crate::wl_currency;
-
-pub const PCI_COMMAND_OFFSET: u8 = 0x04;
-pub const PCI_MAX_BARS: usize = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -109,42 +107,6 @@ pub struct PciDriver {
 // either immutable or otherwise synchronized by the driver itself. Under these
 // rules, sharing PciDriver references across threads is safe.
 unsafe impl Sync for PciDriver {}
-
-const PCI_CONFIG_ADDRESS: u16 = 0xCF8;
-const PCI_CONFIG_DATA: u16 = 0xCFC;
-
-const PCI_VENDOR_ID_OFFSET: u8 = 0x00;
-const PCI_DEVICE_ID_OFFSET: u8 = 0x02;
-const PCI_REVISION_ID_OFFSET: u8 = 0x08;
-const PCI_PROG_IF_OFFSET: u8 = 0x09;
-const PCI_SUBCLASS_OFFSET: u8 = 0x0A;
-const PCI_CLASS_CODE_OFFSET: u8 = 0x0B;
-const PCI_HEADER_TYPE_OFFSET: u8 = 0x0E;
-const PCI_INTERRUPT_LINE_OFFSET: u8 = 0x3C;
-const PCI_INTERRUPT_PIN_OFFSET: u8 = 0x3D;
-const PCI_BAR0_OFFSET: u8 = 0x10;
-
-const PCI_HEADER_TYPE_MASK: u8 = 0x7F;
-const PCI_HEADER_TYPE_MULTI_FUNCTION: u8 = 0x80;
-const PCI_HEADER_TYPE_DEVICE: u8 = 0x00;
-const PCI_HEADER_TYPE_BRIDGE: u8 = 0x01;
-
-const PCI_BAR_IO_SPACE: u32 = 0x1;
-const PCI_BAR_IO_ADDRESS_MASK: u32 = 0xFFFFFFFC;
-const PCI_BAR_MEM_TYPE_MASK: u32 = 0x6;
-const PCI_BAR_MEM_TYPE_64: u32 = 0x4;
-const PCI_BAR_MEM_PREFETCHABLE: u32 = 0x8;
-const PCI_BAR_MEM_ADDRESS_MASK: u32 = 0xFFFFFFF0;
-
-const PCI_CLASS_DISPLAY: u8 = 0x03;
-
-const PCI_VENDOR_ID_VIRTIO: u16 = 0x1AF4;
-const PCI_DEVICE_ID_VIRTIO_GPU: u16 = 0x1050;
-const PCI_DEVICE_ID_VIRTIO_GPU_TRANS: u16 = 0x1010;
-
-const PCI_MAX_BUSES: usize = 256;
-const PCI_MAX_DEVICES: usize = 256;
-const PCI_DRIVER_MAX: usize = 16;
 
 static mut BUS_VISITED: [u8; PCI_MAX_BUSES] = [0; PCI_MAX_BUSES];
 static mut DEVICES: [PciDeviceInfo; PCI_MAX_DEVICES] = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];

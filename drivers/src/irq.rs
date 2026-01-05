@@ -6,6 +6,11 @@ use slopos_lib::io;
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
+use crate::hw::ioapic_defs::{
+    IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
+    IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
+};
+use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::{apic, ioapic, keyboard, mouse, scheduler_callbacks, wl_currency};
 
 const IRQ_LINES: usize = 16;
@@ -15,9 +20,6 @@ const LEGACY_IRQ_TIMER: u8 = 0;
 const LEGACY_IRQ_KEYBOARD: u8 = 1;
 const LEGACY_IRQ_COM1: u8 = 4;
 const LEGACY_IRQ_MOUSE: u8 = 12;
-
-const PS2_DATA_PORT: u16 = 0x60;
-const PS2_STATUS_PORT: u16 = 0x64;
 
 type IrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);
 
@@ -244,10 +246,10 @@ fn irq_program_ioapic_route(irq: u8) {
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq) as u8;
     let lapic_id = apic::get_id() as u8;
-    let flags = ioapic::IOAPIC_FLAG_DELIVERY_FIXED
-        | ioapic::IOAPIC_FLAG_DEST_PHYSICAL
+    let flags = IOAPIC_FLAG_DELIVERY_FIXED
+        | IOAPIC_FLAG_DEST_PHYSICAL
         | legacy_flags
-        | ioapic::IOAPIC_FLAG_MASK;
+        | IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
         unsafe {
@@ -261,12 +263,12 @@ fn irq_program_ioapic_route(irq: u8) {
         table[irq as usize].masked
     });
 
-    let polarity = if legacy_flags & ioapic::IOAPIC_FLAG_POLARITY_LOW != 0 {
+    let polarity = if legacy_flags & IOAPIC_FLAG_POLARITY_LOW != 0 {
         "active-low"
     } else {
         "active-high"
     };
-    let trigger = if legacy_flags & ioapic::IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
+    let trigger = if legacy_flags & IOAPIC_FLAG_TRIGGER_LEVEL != 0 {
         "level"
     } else {
         "edge"

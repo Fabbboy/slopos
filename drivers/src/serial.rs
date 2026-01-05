@@ -2,42 +2,7 @@ use core::fmt::{self, Write};
 use slopos_lib::io;
 use spin::Mutex;
 
-// Standard COM port base addresses
-pub const COM1_BASE: u16 = 0x3f8;
-pub const COM2_BASE: u16 = 0x2f8;
-pub const COM3_BASE: u16 = 0x3e8;
-pub const COM4_BASE: u16 = 0x2e8;
-
-// UART register offsets (standard across 8250/16450/16550 family)
-const REG_RBR: u16 = 0; // Receiver Buffer Register (read) / Transmitter Holding Register (write)
-const REG_IER: u16 = 1; // Interrupt Enable Register
-const REG_IIR: u16 = 2; // Interrupt Identification Register (read) / FIFO Control Register (write)
-const REG_LCR: u16 = 3; // Line Control Register
-const REG_MCR: u16 = 4; // Modem Control Register
-const REG_LSR: u16 = 5; // Line Status Register
-const REG_SCR: u16 = 7; // Scratch Register
-
-// LCR bits
-const LCR_DLAB: u8 = 0x80; // Divisor Latch Access Bit
-
-// IIR bits (for UART type detection)
-const IIR_FIFO_MASK: u8 = 0xC0;
-const IIR_FIFO_ENABLED: u8 = 0xC0;
-
-// FCR bits (FIFO Control Register)
-const FCR_ENABLE_FIFO: u8 = 0x01;
-const FCR_CLEAR_RX: u8 = 0x02;
-const FCR_CLEAR_TX: u8 = 0x04;
-const FCR_14_BYTE_THRESHOLD: u8 = 0xC0;
-
-// LSR bits
-const LSR_DATA_READY: u8 = 0x01;
-const LSR_TX_EMPTY: u8 = 0x20;
-
-// MCR bits
-const MCR_DTR: u8 = 0x01;
-const MCR_RTS: u8 = 0x02;
-const MCR_AUX2: u8 = 0x08;
+use crate::hw::serial_defs::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartType {

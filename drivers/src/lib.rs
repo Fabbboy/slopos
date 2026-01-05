@@ -1,6 +1,8 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod hw;
+
 pub mod apic;
 pub mod fate;
 pub mod input_event;

@@ -2,20 +2,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_lib::{cpu, io, klog_debug, klog_info};
 
+use crate::hw::pit_defs::*;
 use crate::irq;
-
-pub const PIT_BASE_FREQUENCY_HZ: u32 = 1_193_182;
-pub const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
-
-const PIT_CHANNEL0_PORT: u16 = 0x40;
-const PIT_COMMAND_PORT: u16 = 0x43;
-
-const PIT_COMMAND_CHANNEL0: u8 = 0x00;
-const PIT_COMMAND_ACCESS_LOHI: u8 = 0x30;
-const PIT_COMMAND_MODE_SQUARE: u8 = 0x06;
-const PIT_COMMAND_BINARY: u8 = 0x00;
-
-const PIT_IRQ_LINE: u8 = 0;
 
 static CURRENT_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(0);
 static CURRENT_RELOAD_DIVISOR: AtomicU32 = AtomicU32::new(0);

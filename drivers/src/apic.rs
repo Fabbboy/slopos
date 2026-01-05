@@ -3,55 +3,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use crate::hw::apic_defs::*;
 use crate::scheduler_callbacks::{call_get_hhdm_offset, call_is_hhdm_available};
 use crate::wl_currency;
-
-// CPUID feature flags (leaf 1)
-const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
-const CPUID_FEAT_ECX_X2APIC: u32 = 1 << 21;
-
-// APIC MSRs
-const MSR_APIC_BASE: u32 = 0x1B;
-
-// APIC base register flags
-const APIC_BASE_BSP: u64 = 1 << 8;
-const APIC_BASE_X2APIC: u64 = 1 << 10;
-const APIC_BASE_GLOBAL_ENABLE: u64 = 1 << 11;
-const APIC_BASE_ADDR_MASK: u64 = 0xFFFF_F000;
-
-// Local APIC register offsets
-const LAPIC_ID: u32 = 0x020;
-const LAPIC_VERSION: u32 = 0x030;
-const LAPIC_SPURIOUS: u32 = 0x0F0;
-const LAPIC_ESR: u32 = 0x280;
-const LAPIC_LVT_TIMER: u32 = 0x320;
-const LAPIC_LVT_PERFCNT: u32 = 0x340;
-const LAPIC_LVT_LINT0: u32 = 0x350;
-const LAPIC_LVT_LINT1: u32 = 0x360;
-const LAPIC_LVT_ERROR: u32 = 0x370;
-const LAPIC_ICR_LOW: u32 = 0x300;
-const LAPIC_ICR_HIGH: u32 = 0x310;
-const LAPIC_TIMER_ICR: u32 = 0x380;
-const LAPIC_TIMER_CCR: u32 = 0x390;
-const LAPIC_TIMER_DCR: u32 = 0x3E0;
-const LAPIC_EOI: u32 = 0x0B0;
-
-// LAPIC flags
-const LAPIC_SPURIOUS_ENABLE: u32 = 1 << 8;
-const LAPIC_LVT_MASKED: u32 = 1 << 16;
-const LAPIC_LVT_DELIVERY_MODE_EXTINT: u32 = 0x7 << 8;
-
-// Timer modes/divisors
-const LAPIC_TIMER_PERIODIC: u32 = 0x0002_0000;
-const LAPIC_TIMER_DIV_16: u32 = 0x3;
-
-// IPI delivery mode flags
-const LAPIC_ICR_DELIVERY_FIXED: u32 = 0 << 8;
-const LAPIC_ICR_DEST_PHYSICAL: u32 = 0 << 11;
-const LAPIC_ICR_LEVEL_ASSERT: u32 = 1 << 14;
-const LAPIC_ICR_TRIGGER_EDGE: u32 = 0 << 15;
-const LAPIC_ICR_DEST_BROADCAST: u32 = 0xFF << 24;
-const LAPIC_ICR_DELIVERY_STATUS: u32 = 1 << 12;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static X2APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);

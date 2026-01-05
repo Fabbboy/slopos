@@ -1,12 +1,9 @@
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use crate::hw::ps2_defs::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;
-
-const PS2_DATA_PORT: u16 = 0x60;
-const PS2_STATUS_PORT: u16 = 0x64;
-const PS2_COMMAND_PORT: u16 = 0x64;
 
 // Mouse buttons
 pub const MOUSE_BUTTON_LEFT: u8 = 0x01;

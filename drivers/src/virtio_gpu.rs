@@ -6,8 +6,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::hw::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use crate::pci::{
-    PCI_COMMAND_OFFSET, PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16,
+    PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16,
     pci_config_write8, pci_config_write16, pci_register_driver,
 };
 use crate::wl_currency;
@@ -23,8 +24,6 @@ const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 0x01;
 const VIRTIO_STATUS_DRIVER: u8 = 0x02;
 
 const VIRTIO_MMIO_DEFAULT_SIZE: usize = 0x1000;
-const PCI_COMMAND_MEMORY_SPACE: u16 = 0x0002;
-const PCI_COMMAND_BUS_MASTER: u16 = 0x0004;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

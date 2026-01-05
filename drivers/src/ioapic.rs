@@ -5,46 +5,11 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::wl_currency;
-
+use crate::hw::ioapic_defs::*;
 use crate::scheduler_callbacks::{
     call_get_hhdm_offset, call_get_rsdp_address, call_is_hhdm_available, call_is_rsdp_available,
 };
-
-const IOAPIC_MAX_CONTROLLERS: usize = 8;
-const IOAPIC_MAX_ISO_ENTRIES: usize = 32;
-
-const IOAPIC_REG_VER: u8 = 0x01;
-const IOAPIC_REG_REDIR_BASE: u8 = 0x10;
-
-const IOAPIC_REDIR_WRITABLE_MASK: u32 = (7 << 8) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16);
-
-const MADT_ENTRY_IOAPIC: u8 = 1;
-const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
-
-const ACPI_MADT_POLARITY_MASK: u16 = 0x3;
-const ACPI_MADT_TRIGGER_MASK: u16 = 0xC;
-const ACPI_MADT_TRIGGER_SHIFT: u16 = 2;
-
-// Redirection entry flag helpers (kept to mirror the C interface)
-pub const IOAPIC_FLAG_DELIVERY_FIXED: u32 = 0u32 << 8;
-pub const IOAPIC_FLAG_DELIVERY_LOWEST_PRI: u32 = 1u32 << 8;
-pub const IOAPIC_FLAG_DELIVERY_SMI: u32 = 2u32 << 8;
-pub const IOAPIC_FLAG_DELIVERY_NMI: u32 = 4u32 << 8;
-pub const IOAPIC_FLAG_DELIVERY_INIT: u32 = 5u32 << 8;
-pub const IOAPIC_FLAG_DELIVERY_EXTINT: u32 = 7u32 << 8;
-
-pub const IOAPIC_FLAG_DEST_PHYSICAL: u32 = 0u32 << 11;
-pub const IOAPIC_FLAG_DEST_LOGICAL: u32 = 1u32 << 11;
-
-pub const IOAPIC_FLAG_POLARITY_HIGH: u32 = 0u32 << 13;
-pub const IOAPIC_FLAG_POLARITY_LOW: u32 = 1u32 << 13;
-
-pub const IOAPIC_FLAG_TRIGGER_EDGE: u32 = 0u32 << 15;
-pub const IOAPIC_FLAG_TRIGGER_LEVEL: u32 = 1u32 << 15;
-
-pub const IOAPIC_FLAG_MASK: u32 = 1u32 << 16;
-pub const IOAPIC_FLAG_UNMASKED: u32 = 0u32;
+use crate::wl_currency;
 
 #[repr(C, packed)]
 struct AcpiRsdp {

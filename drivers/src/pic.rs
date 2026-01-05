@@ -1,11 +1,6 @@
 use slopos_lib::io;
 
-const PIC1_COMMAND: u16 = 0x20;
-const PIC1_DATA: u16 = 0x21;
-const PIC2_COMMAND: u16 = 0xA0;
-const PIC2_DATA: u16 = 0xA1;
-
-const PIC_EOI: u8 = 0x20;
+use crate::hw::pic_defs::*;
 
 #[inline]
 fn mask_all_impl() {
