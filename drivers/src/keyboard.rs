@@ -308,3 +308,30 @@ pub fn keyboard_buffer_pending() -> i32 {
 pub fn keyboard_get_scancode() -> u8 {
     unsafe { kb_buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
 }
+
+/// Poll PS/2 keyboard directly for Enter key press.
+///
+/// This function bypasses the interrupt-driven keyboard system and reads
+/// directly from the PS/2 controller ports. It's designed to work during
+/// kernel panic when interrupts are disabled.
+///
+/// Blocks until Enter key is pressed.
+pub fn keyboard_poll_wait_enter() {
+    use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
+    use slopos_lib::io;
+
+    const ENTER_MAKE_CODE: u8 = 0x1C;
+
+    loop {
+        // Check if data is available (bit 0 of status port)
+        let status = unsafe { io::inb(PS2_STATUS_PORT) };
+        if status & 0x01 != 0 {
+            let scancode = unsafe { io::inb(PS2_DATA_PORT) };
+            // Check for Enter key make code (not break code)
+            if scancode == ENTER_MAKE_CODE {
+                break;
+            }
+        }
+        cpu::pause();
+    }
+}

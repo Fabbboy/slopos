@@ -12,6 +12,7 @@ use slopos_lib::FramebufferInfo;
 pub mod font;
 pub mod framebuffer;
 pub mod graphics;
+pub mod panic_screen;
 pub mod roulette_core;
 pub mod compositor_context;
 pub mod splash;

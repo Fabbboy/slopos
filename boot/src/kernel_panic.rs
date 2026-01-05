@@ -1,8 +1,10 @@
 use core::ffi::{CStr, c_char};
 
+use slopos_drivers::keyboard::keyboard_poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_lib::cpu;
 use slopos_lib::klog_info;
+use slopos_video::panic_screen;
 
 use crate::shutdown::kernel_shutdown;
 
@@ -63,21 +65,33 @@ pub fn kernel_panic(message: *const c_char) -> ! {
 
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
-    if !message.is_null() {
-        let msg_str = unsafe { CStr::from_ptr(message) }
+    let msg_str = if !message.is_null() {
+        let s = unsafe { CStr::from_ptr(message) }
             .to_str()
             .unwrap_or("<invalid utf-8>");
-        klog_info!("PANIC: {}", msg_str);
+        klog_info!("PANIC: {}", s);
+        Some(s)
     } else {
         panic_output_str("PANIC: No message provided");
-    }
+        None
+    };
 
     let rsp = read_rsp();
+    let cr0 = read_cr(ControlRegister::Cr0);
+    let cr3 = read_cr(ControlRegister::Cr3);
+    let cr4 = read_cr(ControlRegister::Cr4);
     log_register_snapshot(None, Some(rsp));
 
     panic_output_str("===================");
     panic_output_str("Kernel panic: unrecoverable error");
-    panic_output_str("System halted.");
+
+    // Display graphical panic screen if framebuffer is available
+    if panic_screen::display_panic_screen(msg_str, None, Some(rsp), cr0, cr3, cr4) {
+        panic_output_str("Press ENTER to shutdown...");
+        keyboard_poll_wait_enter();
+    } else {
+        panic_output_str("System halted.");
+    }
 
     if is_memory_system_initialized() != 0 {
         execute_kernel();
@@ -102,12 +116,15 @@ pub fn kernel_panic_with_context(
 
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
-    if !message.is_null() {
-        let msg_str = unsafe { CStr::from_ptr(message) }
+    let msg_str = if !message.is_null() {
+        let s = unsafe { CStr::from_ptr(message) }
             .to_str()
             .unwrap_or("<invalid utf-8>");
-        klog_info!("PANIC: {}", msg_str);
-    }
+        klog_info!("PANIC: {}", s);
+        Some(s)
+    } else {
+        None
+    };
 
     unsafe {
         if !function.is_null() {
@@ -123,11 +140,21 @@ pub fn kernel_panic_with_context(
     }
 
     let rsp = read_rsp();
+    let cr0 = read_cr(ControlRegister::Cr0);
+    let cr3 = read_cr(ControlRegister::Cr3);
+    let cr4 = read_cr(ControlRegister::Cr4);
     log_register_snapshot(None, Some(rsp));
 
     panic_output_str("===================");
     panic_output_str("Kernel panic: unrecoverable error");
-    panic_output_str("System halted.");
+
+    // Display graphical panic screen if framebuffer is available
+    if panic_screen::display_panic_screen(msg_str, None, Some(rsp), cr0, cr3, cr4) {
+        panic_output_str("Press ENTER to shutdown...");
+        keyboard_poll_wait_enter();
+    } else {
+        panic_output_str("System halted.");
+    }
 
     if is_memory_system_initialized() != 0 {
         execute_kernel();
@@ -148,20 +175,32 @@ pub fn kernel_panic_with_state(message: *const c_char, rip: u64, rsp: u64) {
 
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
-    if !message.is_null() {
-        let msg_str = unsafe { CStr::from_ptr(message) }
+    let msg_str = if !message.is_null() {
+        let s = unsafe { CStr::from_ptr(message) }
             .to_str()
             .unwrap_or("<invalid utf-8>");
-        klog_info!("PANIC: {}", msg_str);
+        klog_info!("PANIC: {}", s);
+        Some(s)
     } else {
         panic_output_str("PANIC: No message provided");
-    }
+        None
+    };
 
+    let cr0 = read_cr(ControlRegister::Cr0);
+    let cr3 = read_cr(ControlRegister::Cr3);
+    let cr4 = read_cr(ControlRegister::Cr4);
     log_register_snapshot(Some(rip), Some(rsp));
 
     panic_output_str("===================");
     panic_output_str("Kernel panic: unrecoverable error");
-    panic_output_str("System halted.");
+
+    // Display graphical panic screen if framebuffer is available
+    if panic_screen::display_panic_screen(msg_str, Some(rip), Some(rsp), cr0, cr3, cr4) {
+        panic_output_str("Press ENTER to shutdown...");
+        keyboard_poll_wait_enter();
+    } else {
+        panic_output_str("System halted.");
+    }
 
     if is_memory_system_initialized() != 0 {
         execute_kernel();
