@@ -189,69 +189,55 @@ unsafe fn inl(port: u16) -> u32 {
     }
     value
 }
-pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    let address: u32 = 0x8000_0000
+
+/// Build PCI configuration space address for port 0xCF8
+#[inline(always)]
+fn pci_config_addr(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    0x8000_0000
         | ((bus as u32) << 16)
         | ((device as u32) << 11)
         | ((function as u32) << 8)
-        | (offset as u32 & 0xFC);
+        | ((offset as u32) & 0xFC)
+}
+
+pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     unsafe {
-        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_ADDRESS, pci_config_addr(bus, device, function, offset));
         inl(PCI_CONFIG_DATA)
     }
 }
+
 pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     let value = pci_config_read32(bus, device, function, offset);
-    let shift = ((offset & 0x2) * 8) as u32;
-    ((value >> shift) & 0xFFFF) as u16
+    ((value >> ((offset & 0x2) * 8)) & 0xFFFF) as u16
 }
+
 pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     let value = pci_config_read32(bus, device, function, offset);
-    let shift = ((offset & 0x3) * 8) as u32;
-    ((value >> shift) & 0xFF) as u8
+    ((value >> ((offset & 0x3) * 8)) & 0xFF) as u8
 }
+
 pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    let address: u32 = 0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | (offset as u32 & 0xFC);
     unsafe {
-        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_ADDRESS, pci_config_addr(bus, device, function, offset));
         outl(PCI_CONFIG_DATA, value);
     }
 }
+
 pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
-    let address: u32 = 0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | (offset as u32 & 0xFC);
-    unsafe {
-        outl(PCI_CONFIG_ADDRESS, address);
-        let current = inl(PCI_CONFIG_DATA);
-        let shift = ((offset & 0x2) * 8) as u32;
-        let mask = !((0xFFFFu32) << shift);
-        let new_value = (current & mask) | ((value as u32) << shift);
-        outl(PCI_CONFIG_ADDRESS, address);
-        outl(PCI_CONFIG_DATA, new_value);
-    }
+    let current = pci_config_read32(bus, device, function, offset);
+    let shift = (offset & 0x2) * 8;
+    let mask = !(0xFFFFu32 << shift);
+    let new_value = (current & mask) | ((value as u32) << shift);
+    pci_config_write32(bus, device, function, offset, new_value);
 }
+
 pub fn pci_config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
-    let address: u32 = 0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | (offset as u32 & 0xFC);
-    unsafe {
-        outl(PCI_CONFIG_ADDRESS, address);
-        let current = inl(PCI_CONFIG_DATA);
-        let shift = ((offset & 0x3) * 8) as u32;
-        let mask = !((0xFFu32) << shift);
-        let new_value = (current & mask) | ((value as u32) << shift);
-        outl(PCI_CONFIG_ADDRESS, address);
-        outl(PCI_CONFIG_DATA, new_value);
-    }
+    let current = pci_config_read32(bus, device, function, offset);
+    let shift = (offset & 0x3) * 8;
+    let mask = !(0xFFu32 << shift);
+    let new_value = (current & mask) | ((value as u32) << shift);
+    pci_config_write32(bus, device, function, offset, new_value);
 }
 
 fn pci_probe_bar_size(bus: u8, device: u8, function: u8, offset: u8, original_value: u32) -> u64 {
