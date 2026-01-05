@@ -76,6 +76,7 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
         }
     }
     let _ = fmt::write(&mut KlogWriter, args);
+    putc(b'\n');
 }
 pub fn klog_init() {
     CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
