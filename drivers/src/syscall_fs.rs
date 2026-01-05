@@ -1,3 +1,7 @@
+//! Filesystem syscall handlers
+//!
+//! All handlers use SyscallContext for safe pointer access.
+
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{CStr, c_char, c_int, c_void};
@@ -5,9 +9,11 @@ use core::{mem, ptr};
 
 use crate::syscall_common::{
     SyscallDisposition, USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user,
-    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err, syscall_return_ok,
+    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
 };
+use crate::syscall_context::SyscallContext;
 use crate::syscall_types::{INVALID_PROCESS_ID, InterruptFrame, Task};
+
 const USER_FS_MAX_ENTRIES: u32 = 64;
 type RamfsNode = ramfs_node_t;
 
@@ -42,88 +48,106 @@ use slopos_fs::ramfs::{
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
 
-fn syscall_fs_error(frame: *mut InterruptFrame) -> SyscallDisposition {
-    syscall_return_err(frame, u64::MAX)
-}
-
 pub fn syscall_fs_open(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
-            return syscall_fs_error(frame);
-        }
-    }
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
 
+    let pid = match ctx.process_id() {
+        Some(p) if p != INVALID_PROCESS_ID => p,
+        _ => return ctx.err(),
+    };
+
+    let args = ctx.args();
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
-        (*frame).rdi as *const c_char
-    }) != 0
-    {
-        return syscall_fs_error(frame);
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+        return ctx.err();
     }
 
-    let flags = unsafe { (*frame).rsi as u32 };
-    let pid = unsafe { (*task).process_id };
+    let flags = args.arg1_u32();
     let fd = file_open_for_process(pid, path.as_ptr(), flags);
     if fd < 0 {
-        return syscall_fs_error(frame);
+        ctx.err()
+    } else {
+        ctx.ok(fd as u64)
     }
-    syscall_return_ok(frame, fd as u64)
 }
 
 pub fn syscall_fs_close(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        if task.is_null() || (*task).process_id == INVALID_PROCESS_ID {
-            return syscall_fs_error(frame);
-        }
-    }
-    let pid = unsafe { (*task).process_id };
-    let fd = unsafe { (*frame).rdi as c_int };
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let pid = match ctx.process_id() {
+        Some(p) if p != INVALID_PROCESS_ID => p,
+        _ => return ctx.err(),
+    };
+
+    let args = ctx.args();
+    let fd = args.arg0 as c_int;
     let rc = file_close_fd(pid, fd);
     if rc != 0 {
-        return syscall_fs_error(frame);
+        ctx.err()
+    } else {
+        ctx.ok(0)
     }
-    syscall_return_ok(frame, 0)
 }
 
 pub fn syscall_fs_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
-            return syscall_fs_error(frame);
-        }
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let pid = match ctx.process_id() {
+        Some(p) if p != INVALID_PROCESS_ID => p,
+        _ => return ctx.err(),
+    };
+
+    let args = ctx.args();
+    if args.arg1 == 0 {
+        return ctx.err();
     }
 
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let request_len = unsafe { (*frame).rdx as usize };
+    let request_len = args.arg2_usize();
     let capped_len = request_len.min(USER_IO_MAX_BYTES);
 
     let bytes = file_read_fd(
-        unsafe { (*task).process_id },
-        unsafe { (*frame).rdi as c_int },
+        pid,
+        args.arg0 as c_int,
         tmp.as_mut_ptr() as *mut c_char,
         capped_len,
     );
     if bytes < 0 {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
     let copy_len = bytes as usize;
     if syscall_copy_to_user_bounded(
-        unsafe { (*frame).rsi as *mut c_void },
+        args.arg1_ptr(),
         tmp.as_ptr() as *const c_void,
         copy_len,
     ) != 0
     {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
-    syscall_return_ok(frame, bytes as u64)
+    ctx.ok(bytes as u64)
 }
 
 pub fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        if task.is_null() || (*task).process_id == INVALID_PROCESS_ID || (*frame).rsi == 0 {
-            return syscall_fs_error(frame);
-        }
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let pid = match ctx.process_id() {
+        Some(p) if p != INVALID_PROCESS_ID => p,
+        _ => return ctx.err(),
+    };
+
+    let args = ctx.args();
+    if args.arg1 == 0 {
+        return ctx.err();
     }
 
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
@@ -131,46 +155,46 @@ pub fn syscall_fs_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
     if syscall_bounded_from_user(
         tmp.as_mut_ptr() as *mut c_void,
         tmp.len(),
-        unsafe { (*frame).rsi as *const c_void },
-        unsafe { (*frame).rdx },
+        args.arg1 as *const c_void,
+        args.arg2,
         USER_IO_MAX_BYTES,
         &mut write_len as *mut usize,
     ) != 0
     {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
     let bytes = file_write_fd(
-        unsafe { (*task).process_id },
-        unsafe { (*frame).rdi as c_int },
+        pid,
+        args.arg0 as c_int,
         tmp.as_ptr() as *const c_char,
         write_len,
     );
     if bytes < 0 {
-        return syscall_fs_error(frame);
+        ctx.err()
+    } else {
+        ctx.ok(bytes as u64)
     }
-
-    syscall_return_ok(frame, bytes as u64)
 }
 
 pub fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        if task.is_null() || (*frame).rdi == 0 || (*frame).rsi == 0 {
-            return syscall_fs_error(frame);
-        }
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return ctx.err();
     }
 
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
-        (*frame).rdi as *const c_char
-    }) != 0
-    {
-        return syscall_fs_error(frame);
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+        return ctx.err();
     }
 
     let node = ramfs_acquire_node(path.as_ptr());
     if node.is_null() {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
     let mut stat = UserFsStat { type_: 0, size: 0 };
@@ -188,59 +212,66 @@ pub fn syscall_fs_stat(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     }
 
     if syscall_copy_to_user_bounded(
-        unsafe { (*frame).rsi as *mut c_void },
+        args.arg1_ptr(),
         &stat as *const _ as *const c_void,
         mem::size_of::<UserFsStat>(),
     ) != 0
     {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
-    syscall_return_ok(frame, 0)
+    ctx.ok(0)
 }
 
 pub fn syscall_fs_mkdir(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let _ = task;
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
-        (*frame).rdi as *const c_char
-    }) != 0
-    {
-        return syscall_fs_error(frame);
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+        return ctx.err();
     }
 
     let created = ramfs_create_directory(path.as_ptr());
     if !created.is_null() {
-        return syscall_return_ok(frame, 0);
+        ctx.ok(0)
+    } else {
+        ctx.err()
     }
-    syscall_fs_error(frame)
 }
 
 pub fn syscall_fs_unlink(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let _ = task;
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), unsafe {
-        (*frame).rdi as *const c_char
-    }) != 0
-    {
-        return syscall_fs_error(frame);
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+        return ctx.err();
     }
 
     if file_unlink_path(path.as_ptr()) != 0 {
-        return syscall_fs_error(frame);
+        ctx.err()
+    } else {
+        ctx.ok(0)
     }
-    syscall_return_ok(frame, 0)
 }
 
 pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let _ = task;
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
     let mut path = [0i8; USER_PATH_MAX];
-    unsafe {
-        if syscall_copy_user_str(path.as_mut_ptr(), path.len(), (*frame).rdi as *const c_char) != 0
-            || (*frame).rsi == 0
-        {
-            return syscall_fs_error(frame);
-        }
+
+    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0
+        || args.arg1 == 0
+    {
+        return ctx.err();
     }
 
     let mut list_hdr = UserFsList {
@@ -249,27 +280,25 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         count: 0,
     };
 
-    unsafe {
-        if user_copy_from_user(
-            &mut list_hdr as *mut _ as *mut c_void,
-            (*frame).rsi as *const c_void,
-            mem::size_of::<UserFsList>(),
-        ) != 0
-        {
-            return syscall_fs_error(frame);
-        }
+    if user_copy_from_user(
+        &mut list_hdr as *mut _ as *mut c_void,
+        args.arg1 as *const c_void,
+        mem::size_of::<UserFsList>(),
+    ) != 0
+    {
+        return ctx.err();
     }
 
     let cap = list_hdr.max_entries;
     if cap == 0 || cap > USER_FS_MAX_ENTRIES || list_hdr.entries.is_null() {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
     let mut entries: *mut *mut RamfsNode = ptr::null_mut();
     let mut count: c_int = 0;
     let rc = ramfs_list_directory(path.as_ptr(), &mut entries, &mut count);
     if rc != 0 {
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
 
     if count < 0 {
@@ -286,7 +315,7 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
             ramfs_release_list(entries, count);
             kfree(entries as *mut c_void);
         }
-        return syscall_fs_error(frame);
+        return ctx.err();
     }
     unsafe {
         core::ptr::write_bytes(tmp_ptr as *mut u8, 0, tmp_size);
@@ -328,13 +357,11 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         mem::size_of::<UserFsEntry>() * count as usize,
     );
     if rc_user == 0 {
-        rc_user = unsafe {
-            user_copy_to_user(
-                (*frame).rsi as *mut c_void,
-                &list_hdr as *const _ as *const c_void,
-                mem::size_of::<UserFsList>(),
-            )
-        };
+        rc_user = user_copy_to_user(
+            args.arg1 as *mut c_void,
+            &list_hdr as *const _ as *const c_void,
+            mem::size_of::<UserFsList>(),
+        );
     }
 
     if !entries.is_null() {
@@ -344,7 +371,8 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     kfree(tmp_ptr as *mut c_void);
 
     if rc_user != 0 {
-        return syscall_fs_error(frame);
+        ctx.err()
+    } else {
+        ctx.ok(0)
     }
-    syscall_return_ok(frame, 0)
 }

@@ -1,6 +1,10 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+#[macro_use]
+pub mod syscall_macros;
+pub mod syscall_context;
+
 pub mod hw;
 
 pub mod apic;

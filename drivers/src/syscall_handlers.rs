@@ -1,3 +1,7 @@
+//! Syscall handler implementations
+//!
+//! All handlers use SyscallContext for safe pointer access.
+
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
@@ -6,15 +10,16 @@ use crate::random;
 use crate::serial;
 use crate::wl_currency;
 use crate::syscall_common::{
-    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_return_err, syscall_return_ok,
+    SyscallDisposition, SyscallHandler, USER_IO_MAX_BYTES, syscall_bounded_from_user,
+    syscall_copy_to_user_bounded, syscall_return_err,
 };
+use crate::syscall_context::SyscallContext;
 use crate::syscall_fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
 use crate::syscall_types::{
-    InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    InterruptFrame, Task, TaskExitReason, TaskFaultReason,
 };
 use crate::video_bridge;
 use slopos_lib::klog_debug;
@@ -58,95 +63,744 @@ use crate::pit::{pit_get_frequency, pit_poll_delay_ms, pit_sleep_ms};
 use crate::scheduler_callbacks::{call_kernel_reboot, call_kernel_shutdown};
 use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
 
-fn task_has_flag(task: *mut Task, flag: u16) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    unsafe { (*task).flags & flag != 0 }
-}
+// =============================================================================
+// Simple handlers (no special requirements)
+// =============================================================================
 
-// Macro: require compositor flag or return error with loss
-macro_rules! require_compositor {
-    ($task:expr, $frame:expr) => {
-        if !task_has_flag($task, TASK_FLAG_COMPOSITOR) {
-            wl_currency::award_loss();
-            return syscall_return_err($frame, u64::MAX);
-        }
+pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
     };
-}
-
-// Macro: check result != 0, return error with loss
-macro_rules! check_result {
-    ($result:expr, $frame:expr) => {
-        if $result != 0 {
-            wl_currency::award_loss();
-            return syscall_return_err($frame, u64::MAX);
-        }
-    };
-}
-
-pub fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let _ = syscall_return_ok(frame, 0);
+    let _ = ctx.ok(0);
     unsafe { call_yield() };
     SyscallDisposition::Ok
 }
 
-pub fn syscall_exit(task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_random_next(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let value = random::random_next();
+    ctx.ok(value as u64)
+}
+
+pub fn syscall_get_time_ms(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    let ms = (ticks * 1000) / freq as u64;
+    ctx.ok(ms)
+}
+
+pub fn syscall_shm_get_formats(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let formats = slopos_mm::shared_memory::shm_get_formats();
+    ctx.ok(formats as u64)
+}
+
+pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
     unsafe {
-        if !task.is_null() {
-            (*task).exit_reason = crate::syscall_types::TaskExitReason::Normal;
-            (*task).fault_reason = crate::syscall_types::TaskFaultReason::None;
-            (*task).exit_code = 0;
-        }
-        call_task_terminate(if task.is_null() {
-            u32::MAX
-        } else {
-            (*task).task_id
-        });
+        call_kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
     }
+    #[allow(unreachable_code)]
+    SyscallDisposition::Ok
+}
+
+pub fn syscall_sleep_ms(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let args = ctx.args();
+    let mut ms = args.arg0;
+    if ms > 60000 {
+        ms = 60000;
+    }
+    if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
+        pit_sleep_ms(ms as u32);
+    } else {
+        pit_poll_delay_ms(ms as u32);
+    }
+    ctx.ok(0)
+}
+
+// =============================================================================
+// Handlers requiring valid task
+// =============================================================================
+
+pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let ctx = SyscallContext::new(task, frame);
+    if let Some(ref c) = ctx {
+        if let Some(t) = c.task_mut() {
+            t.exit_reason = TaskExitReason::Normal;
+            t.fault_reason = TaskFaultReason::None;
+            t.exit_code = 0;
+        }
+    }
+    let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
+    unsafe { call_task_terminate(task_id) };
     unsafe { call_schedule() };
     SyscallDisposition::NoReturn
 }
 
-pub fn syscall_user_write(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_surface_commit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let rc = video_bridge::surface_commit(task_id);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+}
+
+pub fn syscall_surface_frame(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let rc = video_bridge::surface_request_frame_callback(task_id);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+}
+
+pub fn syscall_poll_frame_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok(0);
+    }
+    let timestamp = video_bridge::surface_poll_frame_done(task_id);
+    ctx.ok(timestamp)
+}
+
+pub fn syscall_buffer_age(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok(0);
+    }
+    let age = video_bridge::surface_get_buffer_age(task_id);
+    ctx.ok(age as u64)
+}
+
+pub fn syscall_shm_poll_released(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let args = ctx.args();
+    let token = args.arg0_u32();
+    let result = slopos_mm::shared_memory::shm_poll_released(token);
+    ctx.ok(result as u64)
+}
+
+pub fn syscall_surface_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let x = args.arg0_i32();
+    let y = args.arg1_i32();
+    let width = args.arg2_i32();
+    let height = args.arg3_i32();
+
+    let rc = video_bridge::surface_add_damage(task_id, x, y, width, height);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+}
+
+pub fn syscall_shm_create(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let size = args.arg0;
+    let flags = args.arg1_u32();
+
+    let token = slopos_mm::shared_memory::shm_create(task_id, size, flags);
+    if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
+}
+
+pub fn syscall_shm_map(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let token = args.arg0_u32();
+    let access_val = args.arg1_u32();
+
+    let access = match slopos_mm::shared_memory::ShmAccess::from_u32(access_val) {
+        Some(a) => a,
+        None => return ctx.err_loss(),
+    };
+
+    let vaddr = slopos_mm::shared_memory::shm_map(task_id, token, access);
+    if vaddr == 0 { ctx.err_loss() } else { ctx.ok_win(vaddr) }
+}
+
+pub fn syscall_shm_unmap(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let vaddr = args.arg0;
+
+    let result = slopos_mm::shared_memory::shm_unmap(task_id, vaddr);
+    if let Err(d) = ctx.check_result(result) {
+        return d;
+    }
+    ctx.ok_win(0)
+}
+
+pub fn syscall_shm_destroy(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let token = args.arg0_u32();
+
+    let result = slopos_mm::shared_memory::shm_destroy(task_id, token);
+    if let Err(d) = ctx.check_result(result) {
+        return d;
+    }
+    ctx.ok_win(0)
+}
+
+pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let token = args.arg0_u32();
+    let width = args.arg1_u32();
+    let height = args.arg2_u32();
+
+    let result = slopos_mm::shared_memory::surface_attach(task_id, token, width, height);
+    if let Err(d) = ctx.check_result(result) {
+        return d;
+    }
+
+    let video_result = video_bridge::register_surface(task_id, width, height, token);
+    if let Err(d) = ctx.check_result(video_result) {
+        return d;
+    }
+    ctx.ok_win(0)
+}
+
+pub fn syscall_shm_create_with_format(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = match ctx.require_task_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+    let args = ctx.args();
+    let size = args.arg0;
+    let format_val = args.arg1_u32();
+
+    let format = match slopos_mm::shared_memory::PixelFormat::from_u32(format_val) {
+        Some(f) => f,
+        None => return ctx.err_loss(),
+    };
+
+    let token = slopos_mm::shared_memory::shm_create_with_format(task_id, size, format);
+    if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
+}
+
+pub fn syscall_surface_set_role(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+    let args = ctx.args();
+    let role = args.arg0 as u8;
+    let result = video_bridge::surface_set_role(task_id, role);
+    ctx.ok(result as u64)
+}
+
+pub fn syscall_surface_set_parent(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+    let args = ctx.args();
+    let parent_task_id = args.arg0_u32();
+    let result = video_bridge::surface_set_parent(task_id, parent_task_id);
+    ctx.ok(result as u64)
+}
+
+pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+    let args = ctx.args();
+    let rel_x = args.arg0_i32();
+    let rel_y = args.arg1_i32();
+    let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
+    ctx.ok(result as u64)
+}
+
+pub fn syscall_surface_set_title(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+    let args = ctx.args();
+    let title_ptr = args.arg0_const_ptr::<u8>();
+    let title_len = args.arg1_usize();
+
+    if title_ptr.is_null() || title_len == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+
+    let copy_len = title_len.min(31);
+    let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, copy_len) };
+    let result = video_bridge::surface_set_title(task_id, title_slice);
+    ctx.ok(result as u64)
+}
+
+pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+
+    let args = ctx.args();
+    let event_ptr = args.arg0_ptr::<input_event::InputEvent>();
+
+    if event_ptr.is_null() {
+        return ctx.ok((-1i64) as u64);
+    }
+
+    // Auto-set pointer focus to compositor if not set
+    if ctx.is_compositor() && input_event::input_get_pointer_focus() == 0 {
+        input_event::input_set_pointer_focus(task_id, 0);
+    }
+
+    if let Some(event) = input_event::input_poll(task_id) {
+        unsafe { *event_ptr = event; }
+        ctx.ok(1)
+    } else {
+        ctx.ok(0)
+    }
+}
+
+pub fn syscall_input_poll_batch(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok(0);
+    }
+
+    let args = ctx.args();
+    let buffer_ptr = args.arg0_ptr::<input_event::InputEvent>();
+    let max_count = args.arg1_usize();
+
+    if buffer_ptr.is_null() || max_count == 0 {
+        return ctx.ok(0);
+    }
+
+    // Auto-set pointer focus to compositor if not set
+    if ctx.is_compositor() && input_event::input_get_pointer_focus() == 0 {
+        input_event::input_set_pointer_focus(task_id, 0);
+    }
+
+    let count = input_event::input_drain_batch(task_id, buffer_ptr, max_count);
+    ctx.ok(count as u64)
+}
+
+pub fn syscall_input_has_events(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok(0);
+    }
+    let count = input_event::input_event_count(task_id);
+    ctx.ok(count as u64)
+}
+
+pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let task_id = ctx.task_id().unwrap_or(0);
+    if task_id == 0 {
+        return ctx.ok((-1i64) as u64);
+    }
+
+    let args = ctx.args();
+    let target_task_id = args.arg0_u32();
+    let focus_type = args.arg1_u32();
+
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    let timestamp_ms = (ticks * 1000) / freq as u64;
+
+    match focus_type {
+        0 => input_event::input_set_keyboard_focus(target_task_id),
+        1 => input_event::input_set_pointer_focus(target_task_id, timestamp_ms),
+        _ => return ctx.ok((-1i64) as u64),
+    }
+    ctx.ok(0)
+}
+
+// =============================================================================
+// Compositor-only handlers
+// =============================================================================
+
+pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let target = args.arg0_u32();
+    if tty_set_focus(target) != 0 {
+        ctx.err_loss()
+    } else {
+        wl_currency::award_win();
+        ctx.ok(tty_get_focus() as u64)
+    }
+}
+
+pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let out_buffer = args.arg0_ptr::<video_bridge::WindowInfo>();
+    let max_count = args.arg1_u32();
+
+    if out_buffer.is_null() || max_count == 0 {
+        return ctx.err_loss();
+    }
+    let count = video_bridge::surface_enumerate_windows(out_buffer, max_count);
+    ctx.ok(count as u64)
+}
+
+pub fn syscall_set_window_position(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let target_task_id = args.arg0_u32();
+    let x = args.arg1_i32();
+    let y = args.arg2_i32();
+
+    let rc = video_bridge::surface_set_window_position(target_task_id, x, y);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+}
+
+pub fn syscall_set_window_state(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let target_task_id = args.arg0_u32();
+    let state = args.arg1 as u8;
+
+    let rc = video_bridge::surface_set_window_state(target_task_id, state);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+}
+
+pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let target_task_id = args.arg0_u32();
+
+    let rc = video_bridge::surface_raise_window(target_task_id);
+    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+}
+
+pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let token = args.arg0_u32();
+
+    let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
+    let size = slopos_mm::shared_memory::shm_get_size(token);
+
+    if phys_addr == 0 || size == 0 {
+        return ctx.err_loss();
+    }
+
+    let fb_info = video_bridge::framebuffer_get_info();
+    if fb_info.is_null() {
+        return ctx.err_loss();
+    }
+
+    let result = video_bridge::fb_flip_from_shm(phys_addr, size);
+    if let Err(d) = ctx.check_result(result) {
+        return d;
+    }
+    ctx.ok_win(0)
+}
+
+pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    video_bridge::drain_queue();
+    ctx.ok(0)
+}
+
+pub fn syscall_shm_acquire(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let token = args.arg0_u32();
+
+    let result = slopos_mm::shared_memory::shm_acquire(token);
+    if result < 0 {
+        wl_currency::award_loss();
+        ctx.ok(result as u64)
+    } else {
+        ctx.ok_win(0)
+    }
+}
+
+pub fn syscall_shm_release(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let token = args.arg0_u32();
+
+    let result = slopos_mm::shared_memory::shm_release(token);
+    if result < 0 {
+        wl_currency::award_loss();
+        ctx.ok(result as u64)
+    } else {
+        ctx.ok_win(0)
+    }
+}
+
+pub fn syscall_mark_frames_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+    let args = ctx.args();
+    let present_time_ms = args.arg0;
+    video_bridge::surface_mark_frames_done(present_time_ms);
+    ctx.ok(0)
+}
+
+// =============================================================================
+// Display exclusive handlers
+// =============================================================================
+
+pub fn syscall_roulette_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_display_exclusive() {
+        return d;
+    }
+    let args = ctx.args();
+    let fate = args.arg0_u32();
+
+    let original_dir = paging::get_current_page_directory();
+    let kernel_dir = paging::paging_get_kernel_directory();
+    let _ = paging::switch_page_directory(kernel_dir);
+
+    let rc = video_bridge::roulette_draw(fate);
+    let disp = if rc.is_ok() {
+        ctx.ok_win(0)
+    } else {
+        ctx.err_loss()
+    };
+
+    let _ = paging::switch_page_directory(original_dir);
+    disp
+}
+
+// =============================================================================
+// Complex handlers
+// =============================================================================
+
+pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let res = unsafe { call_fate_spin() };
+    let task_id = match ctx.task_id() {
+        Some(id) => id,
+        None => return ctx.err(),
+    };
+
+    if unsafe { call_fate_set_pending(res, task_id) } != 0 {
+        return ctx.err();
+    }
+    let packed = ((res.token as u64) << 32) | res.value as u64;
+    ctx.ok(packed)
+}
+
+pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let task_id = match ctx.task_id() {
+        Some(id) => id,
+        None => return ctx.err(),
+    };
+
+    let mut stored = FateResult { token: 0, value: 0 };
+    if unsafe { call_fate_take_pending(task_id, &mut stored) } != 0 {
+        return ctx.err();
+    }
+
+    let args = ctx.args();
+    let token = (args.arg0 >> 32) as u32;
+    if token != stored.token {
+        return ctx.err();
+    }
+
+    let is_win = (stored.value & 1) == 1;
+
+    unsafe {
+        if is_win {
+            call_fate_apply_outcome(&stored, 0, true);
+            fate::fate_notify_outcome(&stored as *const FateResult);
+            ctx.ok(0)
+        } else {
+            call_fate_apply_outcome(&stored, 0, false);
+            call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
+        }
+    }
+}
+
+pub fn syscall_user_write(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let mut write_len: usize = 0;
 
-    unsafe {
-        if (*frame).rdi == 0
-            || syscall_bounded_from_user(
-                tmp.as_mut_ptr() as *mut c_void,
-                tmp.len(),
-                (*frame).rdi as *const c_void,
-                (*frame).rsi,
-                USER_IO_MAX_BYTES,
-                &mut write_len as *mut usize,
-            ) != 0
-        {
-            return syscall_return_err(frame, u64::MAX);
-        }
+    if args.arg0 == 0
+        || syscall_bounded_from_user(
+            tmp.as_mut_ptr() as *mut c_void,
+            tmp.len(),
+            args.arg0 as *const c_void,
+            args.arg1,
+            USER_IO_MAX_BYTES,
+            &mut write_len as *mut usize,
+        ) != 0
+    {
+        return ctx.err();
     }
 
-    // Best-effort raw serial write; ignore port for the Rust serial wrapper.
     let text = core::str::from_utf8(&tmp[..write_len]).unwrap_or("");
     serial::write_str(text);
-    syscall_return_ok(frame, write_len as u64)
+    ctx.ok(write_len as u64)
 }
 
-pub fn syscall_user_read(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    unsafe {
-        if (*frame).rdi == 0 || (*frame).rsi == 0 {
-            return syscall_return_err(frame, u64::MAX);
-        }
+pub fn syscall_user_read(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let args = ctx.args();
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return ctx.err();
     }
 
-    let max_len = unsafe {
-        if (*frame).rsi as usize > USER_IO_MAX_BYTES {
-            USER_IO_MAX_BYTES
-        } else {
-            (*frame).rsi as usize
-        }
+    let mut tmp = [0u8; USER_IO_MAX_BYTES];
+    let max_len = if args.arg1_usize() > USER_IO_MAX_BYTES {
+        USER_IO_MAX_BYTES
+    } else {
+        args.arg1_usize()
     };
 
     let mut read_len = tty_read_line(tmp.as_mut_ptr(), max_len);
@@ -157,80 +811,42 @@ pub fn syscall_user_read(_task: *mut Task, frame: *mut InterruptFrame) -> Syscal
 
     let copy_len = read_len.saturating_add(1).min(max_len);
     if syscall_copy_to_user_bounded(
-        unsafe { (*frame).rdi as *mut c_void },
+        args.arg0 as *mut c_void,
         tmp.as_ptr() as *const c_void,
         copy_len,
     ) != 0
     {
-        return syscall_return_err(frame, u64::MAX);
+        return ctx.err();
     }
 
-    syscall_return_ok(frame, read_len as u64)
+    ctx.ok(read_len as u64)
 }
 
-pub fn syscall_user_read_char(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_user_read_char(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
     let mut c = 0u8;
     if tty_read_char_blocking(&mut c as *mut u8) != 0 {
+        return ctx.err();
+    }
+    ctx.ok(c as u64)
+}
+
+pub fn syscall_fb_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
-    }
-    syscall_return_ok(frame, c as u64)
-}
+    };
 
-pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-    let target = unsafe { (*frame).rdi as u32 };
-    if tty_set_focus(target) != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    wl_currency::award_win();
-    syscall_return_ok(frame, tty_get_focus() as u64)
-}
-
-pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let res = unsafe { call_fate_spin() };
-    if task.is_null() {
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    if unsafe { call_fate_set_pending(res, (*task).task_id) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let packed = ((res.token as u64) << 32) | res.value as u64;
-    syscall_return_ok(frame, packed)
-}
-
-pub fn syscall_sleep_ms(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let mut ms = unsafe { (*frame).rdi };
-    if ms > 60000 {
-        ms = 60000;
-    }
-    if unsafe { call_scheduler_is_preemption_enabled() } != 0 {
-        pit_sleep_ms(ms as u32);
-    } else {
-        pit_poll_delay_ms(ms as u32);
-    }
-    syscall_return_ok(frame, 0)
-}
-
-/// Returns the current time in milliseconds since boot.
-/// Used for frame pacing in the compositor (60Hz target).
-pub fn syscall_get_time_ms(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let ticks = irq::get_timer_ticks();
-    let freq = pit_get_frequency();
-    let ms = (ticks * 1000) / freq as u64;
-    syscall_return_ok(frame, ms)
-}
-
-pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let info = video_bridge::framebuffer_get_info();
     if info.is_null() {
-        return syscall_return_err(frame, u64::MAX);
+        return ctx.err();
     }
     let info_local = unsafe { core::ptr::read(info) };
     if info_local.initialized == 0 {
         klog_debug!("syscall_fb_info: framebuffer not initialized");
-        return syscall_return_err(frame, u64::MAX);
+        return ctx.err();
     }
 
     let user_info = UserFbInfo {
@@ -241,146 +857,27 @@ pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
         pixel_format: info_local.pixel_format as u8,
     };
 
+    let args = ctx.args();
     if syscall_copy_to_user_bounded(
-        unsafe { (*frame).rdi as *mut c_void },
+        args.arg0 as *mut c_void,
         &user_info as *const _ as *const c_void,
         core::mem::size_of::<UserFbInfo>(),
     ) != 0
     {
+        return ctx.err();
+    }
+
+    ctx.ok(0)
+}
+
+pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
-    }
-
-    syscall_return_ok(frame, 0)
-}
-
-pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-    let out_buffer = unsafe { (*frame).rdi as *mut video_bridge::WindowInfo };
-    let max_count = unsafe { (*frame).rsi as u32 };
-    if out_buffer.is_null() || max_count == 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let count = video_bridge::surface_enumerate_windows(out_buffer, max_count);
-    syscall_return_ok(frame, count as u64)
-}
-
-pub fn syscall_set_window_position(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-    let target_task_id = unsafe { (*frame).rdi as u32 };
-    let x = unsafe { (*frame).rsi as i32 };
-    let y = unsafe { (*frame).rdx as i32 };
-    let rc = video_bridge::surface_set_window_position(target_task_id, x, y);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
-pub fn syscall_set_window_state(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-    let target_task_id = unsafe { (*frame).rdi as u32 };
-    let state = unsafe { (*frame).rsi as u8 };
-    let rc = video_bridge::surface_set_window_state(target_task_id, state);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
-pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-    let target_task_id = unsafe { (*frame).rdi as u32 };
-    let rc = video_bridge::surface_raise_window(target_task_id);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// Commit surface back buffer to front buffer (Wayland-style double buffering)
-/// This is called by regular tasks to make their drawings visible to the compositor
-pub fn syscall_surface_commit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let task_id = unsafe { (*task).task_id };
-    let rc = video_bridge::surface_commit(task_id);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    }
-}
-
-pub fn syscall_random_next(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let value = random::random_next();
-    syscall_return_ok(frame, value as u64)
-}
-
-pub fn syscall_roulette_draw(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_DISPLAY_EXCLUSIVE) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let fate = unsafe { (*frame).rdi as u32 };
-    let original_dir = paging::get_current_page_directory();
-    let kernel_dir = paging::paging_get_kernel_directory();
-    let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::roulette_draw(fate);
-    let disp = if rc.is_ok() {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    } else {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
     };
-    let _ = paging::switch_page_directory(original_dir);
-    disp
-}
 
-pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let mut stored = FateResult { token: 0, value: 0 };
-    if unsafe { call_fate_take_pending((*task).task_id, &mut stored) } != 0 {
-        return syscall_return_err(frame, u64::MAX);
-    }
-    let token = unsafe { ((*frame).rdi >> 32) as u32 };
-    if token != stored.token {
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Check if the fate value is even (loss) or odd (win)
-    let is_win = (stored.value & 1) == 1;
-
-    unsafe {
-        if is_win {
-        // Win: award the win and continue
-            call_fate_apply_outcome(&stored, 0, true);
-            fate::fate_notify_outcome(&stored as *const FateResult);
-            syscall_return_ok(frame, 0)
-        } else {
-            // Loss: award the loss and reboot to spin again
-            call_fate_apply_outcome(&stored, 0, false);
-            call_kernel_reboot(b"Roulette loss - spinning again\0".as_ptr() as *const c_char);
-        }
-    }
-}
-
-pub fn syscall_sys_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if unsafe { (*frame).rdi } == 0 {
-        return syscall_return_err(frame, u64::MAX);
+    let args = ctx.args();
+    if args.arg0 == 0 {
+        return ctx.err();
     }
 
     let mut info = UserSysInfo {
@@ -416,551 +913,20 @@ pub fn syscall_sys_info(_task: *mut Task, frame: *mut InterruptFrame) -> Syscall
     }
 
     if syscall_copy_to_user_bounded(
-        unsafe { (*frame).rdi as *mut c_void },
+        args.arg0 as *mut c_void,
         &info as *const _ as *const c_void,
         core::mem::size_of::<UserSysInfo>(),
     ) != 0
     {
-        return syscall_return_err(frame, u64::MAX);
+        return ctx.err();
     }
 
-    syscall_return_ok(frame, 0)
-}
-
-pub fn syscall_halt(_task: *mut Task, _frame: *mut InterruptFrame) -> SyscallDisposition {
-    unsafe {
-        call_kernel_shutdown(b"user halt\0".as_ptr() as *const c_char);
-    }
-    #[allow(unreachable_code)]
-    // This should never be reached, but Rust needs a return value
-    SyscallDisposition::Ok
-}
-
-// ============================================================================
-// Shared Memory Syscalls for Wayland-like Compositor
-// ============================================================================
-
-/// SHM_CREATE: Allocate a shared memory buffer
-/// rdi = size in bytes, rsi = flags
-/// Returns: token on success, u64::MAX on failure
-pub fn syscall_shm_create(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let size = unsafe { (*frame).rdi };
-    let flags = unsafe { (*frame).rsi as u32 };
-    let task_id = unsafe { (*task).task_id };
-
-    let token = slopos_mm::shared_memory::shm_create(task_id, size, flags);
-    if token == 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    wl_currency::award_win();
-    syscall_return_ok(frame, token as u64)
-}
-
-/// SHM_MAP: Map a shared buffer into caller's address space
-/// rdi = token, rsi = access (0=RO, 1=RW)
-/// Returns: virtual address on success, 0 on failure
-pub fn syscall_shm_map(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let token = unsafe { (*frame).rdi as u32 };
-    let access_val = unsafe { (*frame).rsi as u32 };
-    let task_id = unsafe { (*task).task_id };
-
-    let access = match slopos_mm::shared_memory::ShmAccess::from_u32(access_val) {
-        Some(a) => a,
-        None => {
-            wl_currency::award_loss();
-            return syscall_return_err(frame, 0);
-        }
-    };
-
-    let vaddr = slopos_mm::shared_memory::shm_map(task_id, token, access);
-    if vaddr == 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, 0);
-    }
-
-    wl_currency::award_win();
-    syscall_return_ok(frame, vaddr)
-}
-
-/// SHM_UNMAP: Unmap a shared buffer from caller's address space
-/// rdi = virtual address
-/// Returns: 0 on success, u64::MAX on failure
-pub fn syscall_shm_unmap(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let vaddr = unsafe { (*frame).rdi };
-    let task_id = unsafe { (*task).task_id };
-
-    let result = slopos_mm::shared_memory::shm_unmap(task_id, vaddr);
-    check_result!(result, frame);
-    wl_currency::award_win();
-    syscall_return_ok(frame, 0)
-}
-
-/// SHM_DESTROY: Free a shared buffer (owner only)
-/// rdi = token
-/// Returns: 0 on success, u64::MAX on failure
-pub fn syscall_shm_destroy(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let token = unsafe { (*frame).rdi as u32 };
-    let task_id = unsafe { (*task).task_id };
-
-    let result = slopos_mm::shared_memory::shm_destroy(task_id, token);
-    check_result!(result, frame);
-    wl_currency::award_win();
-    syscall_return_ok(frame, 0)
-}
-
-/// SURFACE_ATTACH: Register a shared buffer as a window surface
-/// rdi = token, rsi = width, rdx = height
-/// Returns: 0 on success, u64::MAX on failure
-pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let token = unsafe { (*frame).rdi as u32 };
-    let width = unsafe { (*frame).rsi as u32 };
-    let height = unsafe { (*frame).rdx as u32 };
-    let task_id = unsafe { (*task).task_id };
-
-    // Register the buffer dimensions with the shared memory subsystem
-    let result = slopos_mm::shared_memory::surface_attach(task_id, token, width, height);
-    check_result!(result, frame);
-
-    // Also register the surface with the video subsystem so it appears in enumerate_windows
-    let video_result = video_bridge::register_surface(task_id, width, height, token);
-    check_result!(video_result, frame);
-
-    wl_currency::award_win();
-    syscall_return_ok(frame, 0)
-}
-
-/// FB_FLIP: Copy compositor output buffer to MMIO framebuffer
-/// rdi = token (compositor's output buffer)
-/// Returns: 0 on success, u64::MAX on failure
-/// Only compositor task can call this.
-pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    // Only compositor can flip
-    require_compositor!(task, frame);
-
-    let token = unsafe { (*frame).rdi as u32 };
-
-    // Get buffer physical address and size
-    let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
-    let size = slopos_mm::shared_memory::shm_get_size(token);
-
-    if phys_addr == 0 || size == 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Get framebuffer info
-    let fb_info = video_bridge::framebuffer_get_info();
-    if fb_info.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    // Copy from shared buffer to framebuffer
-    let result = video_bridge::fb_flip_from_shm(phys_addr, size);
-    check_result!(result, frame);
-    wl_currency::award_win();
-    syscall_return_ok(frame, 0)
-}
-
-/// DRAIN_QUEUE: Process pending client operations (compositor only)
-/// Called by compositor at start of each frame to process queued client operations.
-/// Returns: 0 on success
-pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    // Only compositor can drain the queue
-    require_compositor!(task, frame);
-
-    video_bridge::drain_queue();
-    syscall_return_ok(frame, 0)
-}
-
-/// SHM_ACQUIRE: Compositor acquires a buffer reference
-/// Increments refcount and clears released flag.
-/// arg0: token
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_shm_acquire(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    // Only compositor can acquire buffers
-    require_compositor!(task, frame);
-
-    let token = unsafe { (*frame).rdi as u32 };
-    let result = slopos_mm::shared_memory::shm_acquire(token);
-    if result < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, result as u64)
-    } else {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// SHM_RELEASE: Compositor releases a buffer reference
-/// Decrements refcount and sets released flag.
-/// arg0: token
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_shm_release(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    // Only compositor can release buffers
-    require_compositor!(task, frame);
-
-    let token = unsafe { (*frame).rdi as u32 };
-    let result = slopos_mm::shared_memory::shm_release(token);
-    if result < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, result as u64)
-    } else {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// SHM_POLL_RELEASED: Client polls to check if buffer was released by compositor
-/// arg0: token
-/// Returns: 1 if released, 0 if not released, -1 on error
-pub fn syscall_shm_poll_released(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let token = unsafe { (*frame).rdi as u32 };
-    let result = slopos_mm::shared_memory::shm_poll_released(token);
-
-    // Don't award W/L for polling - it's informational
-    syscall_return_ok(frame, result as u64)
+    ctx.ok(0)
 }
 
 // =============================================================================
-// Frame Callback Syscalls (Wayland wl_surface.frame)
+// Syscall table and dispatch
 // =============================================================================
-
-/// SURFACE_FRAME: Request a frame callback (client API)
-/// Called by clients to request notification when frame is presented.
-/// arg0: (none - uses caller's task_id)
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_frame(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let rc = video_bridge::surface_request_frame_callback(task_id);
-
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// POLL_FRAME_DONE: Poll for frame completion (client API)
-/// Returns presentation timestamp if frame was presented, 0 if still pending.
-/// arg0: (none - uses caller's task_id)
-/// Returns: timestamp (ms since boot) if done, 0 if pending
-pub fn syscall_poll_frame_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, 0);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let timestamp = video_bridge::surface_poll_frame_done(task_id);
-
-    // Don't award W/L for polling - it's informational
-    syscall_return_ok(frame, timestamp)
-}
-
-/// MARK_FRAMES_DONE: Compositor signals frame completion (compositor only)
-/// Called by compositor after presenting a frame to notify all clients.
-/// arg0: present_time_ms
-/// Returns: 0
-pub fn syscall_mark_frames_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    require_compositor!(task, frame);
-
-    let present_time_ms = unsafe { (*frame).rdi };
-    video_bridge::surface_mark_frames_done(present_time_ms);
-
-    syscall_return_ok(frame, 0)
-}
-
-// =============================================================================
-// Pixel Format Negotiation Syscalls (Wayland wl_shm)
-// =============================================================================
-
-/// SHM_GET_FORMATS: Get bitmap of supported pixel formats
-/// Returns: bitmap where bit N is set if PixelFormat N is supported
-pub fn syscall_shm_get_formats(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let formats = slopos_mm::shared_memory::shm_get_formats();
-    syscall_return_ok(frame, formats as u64)
-}
-
-/// SHM_CREATE_WITH_FORMAT: Create a shared buffer with specific pixel format
-/// arg0: size in bytes
-/// arg1: format (PixelFormat enum value)
-/// Returns: token on success, 0 on failure
-pub fn syscall_shm_create_with_format(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let size = unsafe { (*frame).rdi };
-    let format_val = unsafe { (*frame).rsi as u32 };
-    let task_id = unsafe { (*task).task_id };
-
-    let format = match slopos_mm::shared_memory::PixelFormat::from_u32(format_val) {
-        Some(f) => f,
-        None => {
-            wl_currency::award_loss();
-            return syscall_return_err(frame, 0);
-        }
-    };
-
-    let token = slopos_mm::shared_memory::shm_create_with_format(task_id, size, format);
-    if token == 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, 0);
-    }
-
-    wl_currency::award_win();
-    syscall_return_ok(frame, token as u64)
-}
-
-// =============================================================================
-// Damage Tracking Syscalls (Wayland wl_surface.damage)
-// =============================================================================
-
-/// SURFACE_DAMAGE: Add damage region to surface's back buffer
-/// arg0: x
-/// arg1: y
-/// arg2: width
-/// arg3: height
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_damage(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let x = unsafe { (*frame).rdi as i32 };
-    let y = unsafe { (*frame).rsi as i32 };
-    let width = unsafe { (*frame).rdx as i32 };
-    let height = unsafe { (*frame).rcx as i32 };
-
-    let rc = video_bridge::surface_add_damage(task_id, x, y, width, height);
-    if rc < 0 {
-        wl_currency::award_loss();
-        syscall_return_err(frame, u64::MAX)
-    } else {
-        wl_currency::award_win();
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// BUFFER_AGE: Get back buffer age for damage accumulation
-/// Returns: buffer age (0 = undefined, N = N frames old)
-pub fn syscall_buffer_age(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, 0);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let age = video_bridge::surface_get_buffer_age(task_id);
-
-    // Don't award W/L for querying buffer age - it's informational
-    syscall_return_ok(frame, age as u64)
-}
-
-// =============================================================================
-// Surface Role Syscalls (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
-// =============================================================================
-
-pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
-pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
-pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
-pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
-
-/// SURFACE_SET_ROLE: Set the role of a surface (toplevel, popup, subsurface)
-/// Args: rdi = role (0=None, 1=Toplevel, 2=Popup, 3=Subsurface)
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_set_role(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let role = unsafe { (*frame).rdi } as u8;
-
-    let result = video_bridge::surface_set_role(task_id, role);
-    syscall_return_ok(frame, result as u64)
-}
-
-/// SURFACE_SET_PARENT: Set the parent surface for a subsurface
-/// Args: rdi = parent_task_id
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_set_parent(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let parent_task_id = unsafe { (*frame).rdi } as u32;
-
-    let result = video_bridge::surface_set_parent(task_id, parent_task_id);
-    syscall_return_ok(frame, result as u64)
-}
-
-/// SURFACE_SET_REL_POS: Set the relative position of a subsurface
-/// Args: rdi = rel_x, rsi = rel_y
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let rel_x = unsafe { (*frame).rdi } as i32;
-    let rel_y = unsafe { (*frame).rsi } as i32;
-
-    let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
-    syscall_return_ok(frame, result as u64)
-}
-
-/// SURFACE_SET_TITLE: Set the window title
-/// Args: rdi = pointer to title string (UTF-8), rsi = length
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_surface_set_title(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let title_ptr = unsafe { (*frame).rdi } as *const u8;
-    let title_len = unsafe { (*frame).rsi } as usize;
-
-    if title_ptr.is_null() || title_len == 0 {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    // Read title from user memory (max 31 chars)
-    let copy_len = title_len.min(31);
-    let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, copy_len) };
-
-    let result = video_bridge::surface_set_title(task_id, title_slice);
-    syscall_return_ok(frame, result as u64)
-}
-
-// =============================================================================
-// Input Event Syscalls (Wayland-like input protocol)
-// =============================================================================
-
-pub const SYSCALL_INPUT_POLL: u64 = 60;
-pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
-pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
-pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
-
-/// INPUT_POLL: Poll for an input event (non-blocking)
-/// Args: rdi = pointer to InputEvent structure to fill
-/// Returns: 1 if event was returned, 0 if no events, -1 on error
-pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let event_ptr = unsafe { (*frame).rdi } as *mut input_event::InputEvent;
-
-    if event_ptr.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    // Auto-set pointer focus to compositor if not set
-    // This ensures the compositor receives mouse events without needing to know its own task_id
-    if task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        if input_event::input_get_pointer_focus() == 0 {
-            input_event::input_set_pointer_focus(task_id, 0);
-        }
-    }
-
-    // Poll for an event
-    if let Some(event) = input_event::input_poll(task_id) {
-        // Copy event to userspace
-        unsafe {
-            *event_ptr = event;
-        }
-        syscall_return_ok(frame, 1)
-    } else {
-        syscall_return_ok(frame, 0)
-    }
-}
-
-/// INPUT_POLL_BATCH: Poll for multiple input events at once (non-blocking)
-/// Much more efficient than calling INPUT_POLL in a loop - single lock acquisition.
-/// Args: rdi = pointer to InputEvent array, rsi = max_count
-/// Returns: number of events written to buffer
-pub fn syscall_input_poll_batch(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, 0);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let buffer_ptr = unsafe { (*frame).rdi as *mut input_event::InputEvent };
-    let max_count = unsafe { (*frame).rsi as usize };
-
-    if buffer_ptr.is_null() || max_count == 0 {
-        return syscall_return_ok(frame, 0);
-    }
-
-    // Auto-set pointer focus to compositor if not set
-    if task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        if input_event::input_get_pointer_focus() == 0 {
-            input_event::input_set_pointer_focus(task_id, 0);
-        }
-    }
-
-    let count = input_event::input_drain_batch(task_id, buffer_ptr, max_count);
-    syscall_return_ok(frame, count as u64)
-}
-
-/// INPUT_HAS_EVENTS: Check if task has pending input events
-/// Returns: number of pending events (0 if none)
-pub fn syscall_input_has_events(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, 0);
-    }
-
-    let task_id = unsafe { (*task).task_id };
-    let count = input_event::input_event_count(task_id);
-
-    syscall_return_ok(frame, count as u64)
-}
-
-/// INPUT_SET_FOCUS: Set keyboard or pointer focus (compositor only)
-/// Args: rdi = target task ID, rsi = focus type (0=keyboard, 1=pointer)
-/// Returns: 0 on success, -1 on failure
-pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if task.is_null() {
-        return syscall_return_ok(frame, (-1i64) as u64);
-    }
-
-    let target_task_id = unsafe { (*frame).rdi } as u32;
-    let focus_type = unsafe { (*frame).rsi } as u32;
-
-    // Get current time for enter/leave events
-    let ticks = irq::get_timer_ticks();
-    let freq = pit_get_frequency();
-    let timestamp_ms = (ticks * 1000) / freq as u64;
-
-    match focus_type {
-        0 => {
-            // Keyboard focus
-            input_event::input_set_keyboard_focus(target_task_id);
-        }
-        1 => {
-            // Pointer focus
-            input_event::input_set_pointer_focus(target_task_id, timestamp_ms);
-        }
-        _ => {
-            return syscall_return_ok(frame, (-1i64) as u64);
-        }
-    }
-
-    syscall_return_ok(frame, 0)
-}
-
-use crate::syscall_common::SyscallHandler;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -1089,7 +1055,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_get_time_ms),
         name: b"get_time_ms\0".as_ptr() as *const c_char,
     };
-    // Shared memory syscalls for Wayland-like compositor
     table[SYSCALL_SHM_CREATE as usize] = SyscallEntry {
         handler: Some(syscall_shm_create),
         name: b"shm_create\0".as_ptr() as *const c_char,
@@ -1130,7 +1095,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_shm_poll_released),
         name: b"shm_poll_released\0".as_ptr() as *const c_char,
     };
-    // Frame callback protocol
     table[SYSCALL_SURFACE_FRAME as usize] = SyscallEntry {
         handler: Some(syscall_surface_frame),
         name: b"surface_frame\0".as_ptr() as *const c_char,
@@ -1143,7 +1107,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_mark_frames_done),
         name: b"mark_frames_done\0".as_ptr() as *const c_char,
     };
-    // Pixel format negotiation
     table[SYSCALL_SHM_GET_FORMATS as usize] = SyscallEntry {
         handler: Some(syscall_shm_get_formats),
         name: b"shm_get_formats\0".as_ptr() as *const c_char,
@@ -1152,7 +1115,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_shm_create_with_format),
         name: b"shm_create_with_format\0".as_ptr() as *const c_char,
     };
-    // Damage tracking
     table[SYSCALL_SURFACE_DAMAGE as usize] = SyscallEntry {
         handler: Some(syscall_surface_damage),
         name: b"surface_damage\0".as_ptr() as *const c_char,
@@ -1161,7 +1123,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_buffer_age),
         name: b"buffer_age\0".as_ptr() as *const c_char,
     };
-    // Surface roles (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
     table[SYSCALL_SURFACE_SET_ROLE as usize] = SyscallEntry {
         handler: Some(syscall_surface_set_role),
         name: b"surface_set_role\0".as_ptr() as *const c_char,
@@ -1178,7 +1139,6 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_surface_set_title),
         name: b"surface_set_title\0".as_ptr() as *const c_char,
     };
-    // Input event protocol (Wayland-like per-task queues)
     table[SYSCALL_INPUT_POLL as usize] = SyscallEntry {
         handler: Some(syscall_input_poll),
         name: b"input_poll\0".as_ptr() as *const c_char,
@@ -1228,7 +1188,6 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_RAISE_WINDOW: u64 = 33;
     pub const SYSCALL_SURFACE_COMMIT: u64 = 38;
     pub const SYSCALL_GET_TIME_MS: u64 = 39;
-    // Shared memory syscalls
     pub const SYSCALL_SHM_CREATE: u64 = 40;
     pub const SYSCALL_SHM_MAP: u64 = 41;
     pub const SYSCALL_SHM_UNMAP: u64 = 42;
@@ -1236,26 +1195,20 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_SURFACE_ATTACH: u64 = 44;
     pub const SYSCALL_FB_FLIP: u64 = 45;
     pub const SYSCALL_DRAIN_QUEUE: u64 = 46;
-    // Buffer reference counting (Wayland-style)
     pub const SYSCALL_SHM_ACQUIRE: u64 = 47;
     pub const SYSCALL_SHM_RELEASE: u64 = 48;
     pub const SYSCALL_SHM_POLL_RELEASED: u64 = 49;
-    // Frame callback protocol (Wayland wl_surface.frame)
     pub const SYSCALL_SURFACE_FRAME: u64 = 50;
     pub const SYSCALL_POLL_FRAME_DONE: u64 = 51;
     pub const SYSCALL_MARK_FRAMES_DONE: u64 = 52;
-    // Pixel format negotiation (Wayland wl_shm)
     pub const SYSCALL_SHM_GET_FORMATS: u64 = 53;
     pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
-    // Damage tracking (Wayland wl_surface.damage)
     pub const SYSCALL_SURFACE_DAMAGE: u64 = 55;
     pub const SYSCALL_BUFFER_AGE: u64 = 56;
-    // Surface roles (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
     pub const SYSCALL_SURFACE_SET_ROLE: u64 = 57;
     pub const SYSCALL_SURFACE_SET_PARENT: u64 = 58;
     pub const SYSCALL_SURFACE_SET_REL_POS: u64 = 59;
     pub const SYSCALL_SURFACE_SET_TITLE: u64 = 63;
-    // Input event protocol (Wayland-like per-task queues)
     pub const SYSCALL_INPUT_POLL: u64 = 60;
     pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
     pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
