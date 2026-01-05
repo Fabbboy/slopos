@@ -533,6 +533,75 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
     unsafe { &mut KERNEL_PAGE_DIR }
 }
 
+/// Free all 4KB page frames in a page table, then free the PT itself
+unsafe fn free_pt_level(pt: *mut PageTable, pt_phys: u64) {
+    if pt.is_null() {
+        return;
+    }
+    for i in 0..ENTRIES_PER_PAGE_TABLE {
+        let pte = (*pt).entries[i];
+        if pte_present(pte) {
+            let phys = pte_address(pte);
+            if page_frame_can_free(phys) != 0 {
+                free_page_frame(phys);
+            }
+        }
+    }
+    if page_frame_can_free(pt_phys) != 0 {
+        free_page_frame(pt_phys);
+    }
+}
+
+/// Free all entries in a page directory (2MB huge or PT subtrees), then free PD itself
+unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: u64) {
+    if pd.is_null() {
+        return;
+    }
+    for i in 0..ENTRIES_PER_PAGE_TABLE {
+        let pde = (*pd).entries[i];
+        if !pte_present(pde) {
+            continue;
+        }
+        let phys = pte_address(pde);
+        if pte_huge(pde) {
+            if page_frame_is_tracked(phys) != 0 {
+                free_page_frame(phys);
+            }
+        } else {
+            let pt = mm_phys_to_virt(phys) as *mut PageTable;
+            free_pt_level(pt, phys);
+        }
+    }
+    if page_frame_can_free(pd_phys) != 0 {
+        free_page_frame(pd_phys);
+    }
+}
+
+/// Free all entries in a PDPT (1GB huge or PD subtrees), then free PDPT itself
+unsafe fn free_pdpt_level(pdpt: *mut PageTable, pdpt_phys: u64) {
+    if pdpt.is_null() {
+        return;
+    }
+    for i in 0..ENTRIES_PER_PAGE_TABLE {
+        let pdpte = (*pdpt).entries[i];
+        if !pte_present(pdpte) {
+            continue;
+        }
+        let phys = pte_address(pdpte);
+        if pte_huge(pdpte) {
+            if page_frame_is_tracked(phys) != 0 {
+                free_page_frame(phys);
+            }
+        } else {
+            let pd = mm_phys_to_virt(phys) as *mut PageTable;
+            free_pd_level(pd, phys);
+        }
+    }
+    if page_frame_can_free(pdpt_phys) != 0 {
+        free_page_frame(pdpt_phys);
+    }
+}
+
 fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
     if page_dir.is_null() {
         return;
@@ -547,56 +616,9 @@ fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
             if !pte_present(pml4e) {
                 continue;
             }
-            let pdpt = mm_phys_to_virt(pte_address(pml4e)) as *mut PageTable;
-            for pdpt_idx in 0..ENTRIES_PER_PAGE_TABLE {
-                let pdpte = (*pdpt).entries[pdpt_idx];
-                if !pte_present(pdpte) {
-                    continue;
-                }
-                if pte_huge(pdpte) {
-                    let phys = pte_address(pdpte);
-                    if page_frame_is_tracked(phys) != 0 {
-                        free_page_frame(phys);
-                    }
-                    continue;
-                }
-                let pd = mm_phys_to_virt(pte_address(pdpte)) as *mut PageTable;
-                for pd_idx in 0..ENTRIES_PER_PAGE_TABLE {
-                    let pde = (*pd).entries[pd_idx];
-                    if !pte_present(pde) {
-                        continue;
-                    }
-                    if pte_huge(pde) {
-                        let phys = pte_address(pde);
-                        if page_frame_is_tracked(phys) != 0 {
-                            free_page_frame(phys);
-                        }
-                        continue;
-                    }
-                    let pt = mm_phys_to_virt(pte_address(pde)) as *mut PageTable;
-                    for pt_idx in 0..ENTRIES_PER_PAGE_TABLE {
-                        let pte = (*pt).entries[pt_idx];
-                        if pte_present(pte) {
-                            let phys = pte_address(pte);
-                            if page_frame_can_free(phys) != 0 {
-                                free_page_frame(phys);
-                            }
-                        }
-                    }
-                    let phys_pd = pte_address(pde);
-                    if page_frame_can_free(phys_pd) != 0 {
-                        free_page_frame(phys_pd);
-                    }
-                }
-                let phys_pdpt = pte_address(pdpte);
-                if page_frame_can_free(phys_pdpt) != 0 {
-                    free_page_frame(phys_pdpt);
-                }
-            }
-            let phys_pml4e = pte_address(pml4e);
-            if page_frame_can_free(phys_pml4e) != 0 {
-                free_page_frame(phys_pml4e);
-            }
+            let pdpt_phys = pte_address(pml4e);
+            let pdpt = mm_phys_to_virt(pdpt_phys) as *mut PageTable;
+            free_pdpt_level(pdpt, pdpt_phys);
             (*pml4).entries[pml4_idx] = 0;
         }
     }
