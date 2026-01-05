@@ -65,6 +65,26 @@ fn task_has_flag(task: *mut Task, flag: u16) -> bool {
     unsafe { (*task).flags & flag != 0 }
 }
 
+// Macro: require compositor flag or return error with loss
+macro_rules! require_compositor {
+    ($task:expr, $frame:expr) => {
+        if !task_has_flag($task, TASK_FLAG_COMPOSITOR) {
+            wl_currency::award_loss();
+            return syscall_return_err($frame, u64::MAX);
+        }
+    };
+}
+
+// Macro: check result != 0, return error with loss
+macro_rules! check_result {
+    ($result:expr, $frame:expr) => {
+        if $result != 0 {
+            wl_currency::award_loss();
+            return syscall_return_err($frame, u64::MAX);
+        }
+    };
+}
+
 pub fn syscall_yield(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let _ = syscall_return_ok(frame, 0);
     unsafe { call_yield() };
@@ -157,10 +177,7 @@ pub fn syscall_user_read_char(_task: *mut Task, frame: *mut InterruptFrame) -> S
 }
 
 pub fn syscall_tty_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
     let target = unsafe { (*frame).rdi as u32 };
     if tty_set_focus(target) != 0 {
         wl_currency::award_loss();
@@ -237,10 +254,7 @@ pub fn syscall_fb_info(_task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
 }
 
 pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
     let out_buffer = unsafe { (*frame).rdi as *mut video_bridge::WindowInfo };
     let max_count = unsafe { (*frame).rsi as u32 };
     if out_buffer.is_null() || max_count == 0 {
@@ -252,10 +266,7 @@ pub fn syscall_enumerate_windows(task: *mut Task, frame: *mut InterruptFrame) ->
 }
 
 pub fn syscall_set_window_position(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
     let target_task_id = unsafe { (*frame).rdi as u32 };
     let x = unsafe { (*frame).rsi as i32 };
     let y = unsafe { (*frame).rdx as i32 };
@@ -269,10 +280,7 @@ pub fn syscall_set_window_position(task: *mut Task, frame: *mut InterruptFrame) 
 }
 
 pub fn syscall_set_window_state(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
     let target_task_id = unsafe { (*frame).rdi as u32 };
     let state = unsafe { (*frame).rsi as u8 };
     let rc = video_bridge::surface_set_window_state(target_task_id, state);
@@ -285,10 +293,7 @@ pub fn syscall_set_window_state(task: *mut Task, frame: *mut InterruptFrame) -> 
 }
 
 pub fn syscall_raise_window(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
     let target_task_id = unsafe { (*frame).rdi as u32 };
     let rc = video_bridge::surface_raise_window(target_task_id);
     if rc < 0 {
@@ -487,11 +492,7 @@ pub fn syscall_shm_unmap(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
     let task_id = unsafe { (*task).task_id };
 
     let result = slopos_mm::shared_memory::shm_unmap(task_id, vaddr);
-    if result != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
+    check_result!(result, frame);
     wl_currency::award_win();
     syscall_return_ok(frame, 0)
 }
@@ -504,11 +505,7 @@ pub fn syscall_shm_destroy(task: *mut Task, frame: *mut InterruptFrame) -> Sysca
     let task_id = unsafe { (*task).task_id };
 
     let result = slopos_mm::shared_memory::shm_destroy(task_id, token);
-    if result != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
+    check_result!(result, frame);
     wl_currency::award_win();
     syscall_return_ok(frame, 0)
 }
@@ -524,17 +521,11 @@ pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> Sy
 
     // Register the buffer dimensions with the shared memory subsystem
     let result = slopos_mm::shared_memory::surface_attach(task_id, token, width, height);
-    if result != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    check_result!(result, frame);
 
     // Also register the surface with the video subsystem so it appears in enumerate_windows
     let video_result = video_bridge::register_surface(task_id, width, height, token);
-    if video_result != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    check_result!(video_result, frame);
 
     wl_currency::award_win();
     syscall_return_ok(frame, 0)
@@ -546,10 +537,7 @@ pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> Sy
 /// Only compositor task can call this.
 pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     // Only compositor can flip
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
 
     let token = unsafe { (*frame).rdi as u32 };
 
@@ -571,11 +559,7 @@ pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
 
     // Copy from shared buffer to framebuffer
     let result = video_bridge::fb_flip_from_shm(phys_addr, size);
-    if result != 0 {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
-
+    check_result!(result, frame);
     wl_currency::award_win();
     syscall_return_ok(frame, 0)
 }
@@ -585,10 +569,7 @@ pub fn syscall_fb_flip(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
 /// Returns: 0 on success
 pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     // Only compositor can drain the queue
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
 
     video_bridge::drain_queue();
     syscall_return_ok(frame, 0)
@@ -600,10 +581,7 @@ pub fn syscall_drain_queue(task: *mut Task, frame: *mut InterruptFrame) -> Sysca
 /// Returns: 0 on success, -1 on failure
 pub fn syscall_shm_acquire(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     // Only compositor can acquire buffers
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
 
     let token = unsafe { (*frame).rdi as u32 };
     let result = slopos_mm::shared_memory::shm_acquire(token);
@@ -622,10 +600,7 @@ pub fn syscall_shm_acquire(task: *mut Task, frame: *mut InterruptFrame) -> Sysca
 /// Returns: 0 on success, -1 on failure
 pub fn syscall_shm_release(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     // Only compositor can release buffers
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
 
     let token = unsafe { (*frame).rdi as u32 };
     let result = slopos_mm::shared_memory::shm_release(token);
@@ -696,10 +671,7 @@ pub fn syscall_poll_frame_done(task: *mut Task, frame: *mut InterruptFrame) -> S
 /// arg0: present_time_ms
 /// Returns: 0
 pub fn syscall_mark_frames_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    if !task_has_flag(task, TASK_FLAG_COMPOSITOR) {
-        wl_currency::award_loss();
-        return syscall_return_err(frame, u64::MAX);
-    }
+    require_compositor!(task, frame);
 
     let present_time_ms = unsafe { (*frame).rdi };
     video_bridge::surface_mark_frames_done(present_time_ms);
