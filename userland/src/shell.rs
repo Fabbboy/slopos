@@ -554,6 +554,7 @@ fn console_write(display: &DisplayState, text: &[u8]) {
     let follow = display.follow.get();
     let mut needs_scroll = false;
     let old_view_top = display.view_top.get();
+    let start_line = display.cursor_line.get(); // Track first line modified
 
     // Phase 1: Update state
     for &b in text {
@@ -599,13 +600,18 @@ fn console_write(display: &DisplayState, text: &[u8]) {
                 } else {
                     redraw_view(buf, display);
                 }
-            }
-            // Draw current line
-            let cursor_line = display.cursor_line.get();
-            let view_top = display.view_top.get();
-            let row = cursor_line - view_top;
-            if row >= 0 && row < display.rows.get() {
-                draw_row_from_scrollback(buf, display, cursor_line, row);
+            } else {
+                // Draw all lines from start_line to cursor_line (inclusive)
+                // This ensures lines completed by newlines are rendered
+                let view_top = display.view_top.get();
+                let rows = display.rows.get();
+                let cursor_line = display.cursor_line.get();
+                for line in start_line..=cursor_line {
+                    let row = line - view_top;
+                    if row >= 0 && row < rows {
+                        draw_row_from_scrollback(buf, display, line, row);
+                    }
+                }
             }
         });
     }
