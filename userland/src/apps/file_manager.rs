@@ -13,7 +13,6 @@ pub struct FileManager {
     entries: [UserFsEntry; 32],
     entry_count: u32,
     scroll_top: i32,
-    selected_index: i32,
     pub dragging: bool,
     pub drag_offset_x: i32,
     pub drag_offset_y: i32,
@@ -44,7 +43,6 @@ impl FileManager {
             entries: [UserFsEntry::new(); 32],
             entry_count: 0,
             scroll_top: 0,
-            selected_index: -1,
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
@@ -72,14 +70,16 @@ impl FileManager {
         self.entries = [UserFsEntry::new(); 32];
         
         let mut list = UserFsList {
-            // SAFE: entries points to the valid array within self
+            // SAFE: entries points to the valid array within self which lives for the duration of the call
             entries: self.entries.as_mut_ptr(),
             max_entries: 32,
             count: 0,
         };
         
-        // SAFE: current_path is a valid buffer and list.entries is initialized as valid raw pointer
-        sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
+        // SAFE: current_path is a valid null-terminated buffer and list.entries is a valid pointer to self.entries
+        unsafe {
+            sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
+        }
         
         self.entry_count = list.count;
     }
@@ -139,7 +139,6 @@ impl FileManager {
         }
         self.refresh();
         self.scroll_top = 0;
-        self.selected_index = -1;
     }
     
     /// Determines whether a coordinate lies within the visible file manager window.
@@ -208,7 +207,7 @@ impl FileManager {
         
         // List items
         let list_y = self.y + FM_TITLE_HEIGHT;
-        if my >= list_y {
+        if mx >= self.x && mx < self.x + FM_WIDTH && my >= list_y && my < self.y + FM_HEIGHT {
             let idx = (my - list_y) / FM_ITEM_HEIGHT;
             let entry_idx = self.scroll_top + idx;
             
@@ -229,40 +228,6 @@ impl FileManager {
         false
     }
 
-    /// Draws a square button with a centered label, using hover and close styles when applicable.
-    ///
-    /// The button is filled and the label is drawn with the window text color on the button background.
-    /// The `hover` and `is_close` flags select the button fill color.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Create a buffer and draw a hovered close button at (8,8) with size 16.
-    /// let mut buf = DrawBuffer::new();
-    /// let fm = FileManager::new();
-    /// fm.draw_button(&mut buf, 8, 8, 16, "X", true, true);
-    /// ```
-    fn draw_button(
-        &self,
-        buf: &mut DrawBuffer,
-        x: i32,
-        y: i32,
-        size: i32,
-        label: &str,
-        hover: bool,
-        is_close: bool,
-    ) {
-        let color = if hover && is_close {
-            COLOR_BUTTON_CLOSE_HOVER
-        } else if hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
-
-        gfx::fill_rect(buf, x, y, size, size, color);
-        gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
-    }
     pub fn draw(&self, buf: &mut DrawBuffer) {
         if !self.visible { return; }
         

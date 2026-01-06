@@ -278,7 +278,7 @@ pub fn sys_random_next() -> u32 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
+pub unsafe fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
     unsafe { syscall(SYSCALL_FS_OPEN, path as u64, flags as u64, 0) as i64 }
 }
 
@@ -290,37 +290,37 @@ pub fn sys_fs_close(fd: i32) -> i64 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_read(fd: i32, buf: *mut c_void, len: usize) -> i64 {
+pub unsafe fn sys_fs_read(fd: i32, buf: *mut c_void, len: usize) -> i64 {
     unsafe { syscall(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_write(fd: i32, buf: *const c_void, len: usize) -> i64 {
+pub unsafe fn sys_fs_write(fd: i32, buf: *const c_void, len: usize) -> i64 {
     unsafe { syscall(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_stat(path: *const c_char, out_stat: &mut UserFsStat) -> i64 {
+pub unsafe fn sys_fs_stat(path: *const c_char, out_stat: &mut UserFsStat) -> i64 {
     unsafe { syscall(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_mkdir(path: *const c_char) -> i64 {
+pub unsafe fn sys_fs_mkdir(path: *const c_char) -> i64 {
     unsafe { syscall(SYSCALL_FS_MKDIR, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_unlink(path: *const c_char) -> i64 {
+pub unsafe fn sys_fs_unlink(path: *const c_char) -> i64 {
     unsafe { syscall(SYSCALL_FS_UNLINK, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
+pub unsafe fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
     unsafe { syscall(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64, 0) as i64 }
 }
 
@@ -413,7 +413,7 @@ pub fn sys_shm_map(token: u32, access: u32) -> u64 {
 /// * `virt_addr` - Virtual address from sys_shm_map
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_shm_unmap(virt_addr: u64) -> i64 {
+pub unsafe fn sys_shm_unmap(virt_addr: u64) -> i64 {
     unsafe { syscall(SYSCALL_SHM_UNMAP, virt_addr, 0, 0) as i64 }
 }
 
@@ -882,7 +882,7 @@ impl Drop for ShmBuffer {
     #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         // Unmap from our address space
-        sys_shm_unmap(self.ptr.as_ptr() as u64);
+        unsafe { sys_shm_unmap(self.ptr.as_ptr() as u64); }
         // Destroy the buffer (we are the owner)
         sys_shm_destroy(self.token.get());
     }
@@ -972,7 +972,7 @@ impl Drop for ShmBufferRef {
     #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         // Unmap from our address space (we don't destroy - we're not the owner)
-        sys_shm_unmap(self.ptr.as_ptr() as u64);
+        unsafe { sys_shm_unmap(self.ptr.as_ptr() as u64); }
     }
 }
 

@@ -146,7 +146,7 @@ impl ClientSurfaceCache {
             if !still_exists {
                 // Window no longer exists - unmap the shared memory and clear the entry
                 if let Some(ref mapping) = entry.mapping {
-                    sys_shm_unmap(mapping.vaddr());
+                    unsafe { sys_shm_unmap(mapping.vaddr()); }
                 }
                 *entry = ClientSurfaceEntry::empty();
             }
