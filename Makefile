@@ -226,10 +226,18 @@ boot: iso-notests
 	DISPLAY_ARGS="-display none -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+		else \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		else \
+			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		fi; \
 		VIRGL_ARGS=" -device virtio-gpu-gl-pci,multifunction=on"; \
 	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
@@ -270,10 +278,18 @@ boot-log: iso-notests
 	DISPLAY_ARGS="-nographic -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+		else \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		else \
+			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		fi; \
 		VIRGL_ARGS=" -device virtio-gpu-pci,virgl=on"; \
 	fi; \
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
