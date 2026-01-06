@@ -13,6 +13,7 @@ pub mod roulette;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
+pub mod apps;
 
 pub fn init() {
     // Userland init remains lightweight; boot steps registered via bootstrap.
