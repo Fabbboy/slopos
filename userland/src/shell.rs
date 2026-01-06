@@ -1155,7 +1155,7 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             count: 0,
         };
 
-        if sys_fs_list(path as *const c_char, &mut list) != 0 {
+        if unsafe { sys_fs_list(path as *const c_char, &mut list) } != 0 {
             shell_write(ERR_NO_SUCH);
             return 1;
         }
@@ -1197,12 +1197,12 @@ fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
         }
 
         let mut tmp = [0u8; SHELL_IO_MAX + 1];
-        let fd = sys_fs_open(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+        let fd = unsafe { sys_fs_open(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) };
         if fd < 0 {
             shell_write(ERR_NO_SUCH);
             return 1;
         }
-        let r = sys_fs_read(fd as i32, tmp.as_mut_ptr() as *mut c_void, SHELL_IO_MAX);
+        let r = unsafe { sys_fs_read(fd as i32, tmp.as_mut_ptr() as *mut c_void, SHELL_IO_MAX) };
         let _ = sys_fs_close(fd as i32);
         if r < 0 {
             shell_write(ERR_NO_SUCH);
@@ -1250,15 +1250,17 @@ fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
             len = SHELL_IO_MAX;
         }
 
-        let fd = sys_fs_open(
-            path_buf.as_ptr() as *const c_char,
-            USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-        );
+        let fd = unsafe {
+            sys_fs_open(
+                path_buf.as_ptr() as *const c_char,
+                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
+            )
+        };
         if fd < 0 {
             shell_write(b"write failed\n");
             return 1;
         }
-        let w = sys_fs_write(fd as i32, text as *const c_void, len);
+        let w = unsafe { sys_fs_write(fd as i32, text as *const c_void, len) };
         let _ = sys_fs_close(fd as i32);
         if w < 0 || w as usize != len {
             shell_write(b"write failed\n");
@@ -1284,7 +1286,7 @@ fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
-        if sys_fs_mkdir(path_buf.as_ptr() as *const c_char) != 0 {
+        if unsafe { sys_fs_mkdir(path_buf.as_ptr() as *const c_char) } != 0 {
             shell_write(b"mkdir failed\n");
             return 1;
         }
@@ -1308,7 +1310,7 @@ fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
             shell_write(PATH_TOO_LONG);
             return 1;
         }
-        if sys_fs_unlink(path_buf.as_ptr() as *const c_char) != 0 {
+        if unsafe { sys_fs_unlink(path_buf.as_ptr() as *const c_char) } != 0 {
             shell_write(b"rm failed\n");
             return 1;
         }

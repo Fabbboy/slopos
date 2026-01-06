@@ -19,26 +19,13 @@ use crate::syscall::{
     sys_input_poll_batch, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
     sys_set_window_state, sys_shm_unmap, sys_sleep_ms, sys_tty_set_focus, sys_yield,
     CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
+
 };
+use crate::apps::file_manager::FileManager;
+use crate::ui_utils;
 
-// UI Constants - Dark Roulette Theme
-const TITLE_BAR_HEIGHT: i32 = 24;
-const BUTTON_SIZE: i32 = 20;
-const BUTTON_PADDING: i32 = 2;
-const TASKBAR_HEIGHT: i32 = 32;
-const TASKBAR_BUTTON_WIDTH: i32 = 120;
-const TASKBAR_BUTTON_PADDING: i32 = 4;
+use crate::theme::*;
 
-// Colors matching the dark roulette aesthetic
-const COLOR_TITLE_BAR: u32 = rgb(0x1E, 0x1E, 0x1E);
-const COLOR_TITLE_BAR_FOCUSED: u32 = rgb(0x2D, 0x2D, 0x30);
-const COLOR_BUTTON: u32 = rgb(0x3E, 0x3E, 0x42);
-const COLOR_BUTTON_HOVER: u32 = rgb(0x50, 0x50, 0x52);
-const COLOR_BUTTON_CLOSE_HOVER: u32 = rgb(0xE8, 0x11, 0x23);
-const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
-const COLOR_TASKBAR: u32 = rgb(0x25, 0x25, 0x26);
-const COLOR_CURSOR: u32 = rgb(0xFF, 0xFF, 0xFF);
-const COLOR_BACKGROUND: u32 = rgb(0x00, 0x11, 0x22);
 
 // Window placeholder colors (until clients migrate to shared memory)
 const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
@@ -126,7 +113,27 @@ impl ClientSurfaceCache {
         self.entries.get(index)?.mapping.as_ref().map(|m| m.as_slice())
     }
 
-    /// Invalidate mappings for windows that no longer exist
+    /// Unmaps and clears cached client surface mappings for entries whose windows no longer exist.
+    ///
+    /// Iterates the cache and for each entry with a nonzero task id checks whether that task id
+    /// is present in the provided window list (first `window_count` entries of `windows`).
+    /// If the task id is not found, the entry's shared-memory mapping (if any) is unmapped and
+    /// the entry is reset to an empty state.
+    ///
+    /// # Parameters
+    ///
+    /// - `windows`: slice containing the current set of windows (length `MAX_WINDOWS`).
+    /// - `window_count`: number of active windows to consider from `windows`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Call cleanup_stale to ensure mappings for removed windows are released.
+    /// let mut cache = ClientSurfaceCache::new();
+    /// // Create an all-zero windows array (no active windows).
+    /// let windows: [UserWindowInfo; MAX_WINDOWS] = unsafe { std::mem::zeroed() };
+    /// cache.cleanup_stale(&windows, 0);
+    /// ```
     fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
         for entry in &mut self.entries {
             if entry.task_id == 0 {
@@ -139,13 +146,15 @@ impl ClientSurfaceCache {
             if !still_exists {
                 // Window no longer exists - unmap the shared memory and clear the entry
                 if let Some(ref mapping) = entry.mapping {
-                    sys_shm_unmap(mapping.vaddr());
+                    unsafe { sys_shm_unmap(mapping.vaddr()); }
                 }
                 *entry = ClientSurfaceEntry::empty();
             }
         }
     }
 }
+
+
 
 const WINDOW_STATE_NORMAL: u8 = 0;
 const WINDOW_STATE_MINIMIZED: u8 = 1;
@@ -304,9 +313,24 @@ struct WindowManager {
     // Cursor positions visited this frame (for trail-free damage)
     cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     cursor_trail_count: usize,
+    file_manager: FileManager,
 }
 
 impl WindowManager {
+    /// Constructs a new WindowManager initialized to its default, empty runtime state.
+    ///
+    /// The returned manager has empty window lists and previous-window buffers, default input
+    /// and dragging state, an initialized ClientSurfaceCache and FileManager, default output
+    /// damage tracker, and flags set to require an initial full redraw.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let wm = WindowManager::new();
+    /// assert_eq!(wm.window_count, 0);
+    /// assert!(wm.first_frame);
+    /// assert_eq!(wm.surface_cache.get_slice(0), None);
+    /// ```
     fn new() -> Self {
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
@@ -333,6 +357,7 @@ impl WindowManager {
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
+            file_manager: FileManager::new(),
         }
     }
 
@@ -505,10 +530,54 @@ impl WindowManager {
         }
     }
 
-    /// Handle all mouse events
+    /// Process queued mouse input and perform high-level interactions (file manager overlay,
+    /// window dragging, title-bar actions, and taskbar clicks).
+    ///
+    /// This consumes click/drag events in priority order:
+    /// - If the File Manager overlay is visible, its drag and click handling take precedence and
+    ///   input is consumed while dragging or when the overlay handles a click.
+    /// - Ongoing window drags are continued or stopped based on current button state.
+    /// - New clicks are tested against the taskbar, then window title bars (front-to-back),
+    ///   handling close, minimize, raise/focus, and initiating drags.
+    ///
+    /// # Parameters
+    ///
+    /// - `fb_height`: Height of the framebuffer in pixels; used to detect clicks on the taskbar
+    ///   area at the bottom of the screen.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Basic example: update internal mouse state first, then dispatch events.
+    /// let mut wm = WindowManager::new();
+    /// // ... populate wm.mouse_x/mouse_y/mouse_buttons as needed ...
+    /// wm.handle_mouse_events(480);
+    /// ```
     fn handle_mouse_events(&mut self, fb_height: i32) {
         let clicked = self.mouse_clicked();
 
+        // Handle File Manager interactions first (overlay)
+        if self.file_manager.visible {
+             // Handle drag update first
+             if self.file_manager.dragging {
+                 if !self.mouse_pressed() {
+                     self.file_manager.dragging = false;
+                 } else {
+                     self.file_manager.x = self.mouse_x - self.file_manager.drag_offset_x;
+                     self.file_manager.y = self.mouse_y - self.file_manager.drag_offset_y;
+                     self.needs_full_redraw = true; // Force redraw on drag
+                 }
+                 return; // Consume input while dragging
+             }
+             
+             if clicked && self.file_manager.handle_click(self.mouse_x, self.mouse_y) {
+                 self.needs_full_redraw = true;
+                 // If dragging started in handle_click, we might want to continue processing move?
+                 // But handle_click returns true, so we redraw and next frame will handle drag update.
+                 return;
+             }
+        }
+        
         // Handle ongoing drag
         if self.dragging {
             if !self.mouse_pressed() {
@@ -600,13 +669,54 @@ impl WindowManager {
         self.needs_full_redraw = true;
     }
 
+    /// Minimizes the window identified by `task_id` and marks the compositor for a full redraw.
+    ///
+    /// This sets the window state to `WINDOW_STATE_MINIMIZED` and ensures the next frame repaints the
+    /// output to reflect the change.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a mutable WindowManager instance `wm`
+    /// wm.close_window(42);
+    /// ```
     fn close_window(&mut self, task_id: u32) {
         sys_set_window_state(task_id, WINDOW_STATE_MINIMIZED);
         self.needs_full_redraw = true;
     }
 
+    /// Handle a mouse click on the taskbar, toggling the Files overlay or minimizing/restoring a window.
+    ///
+    /// If the click is inside the Files button, this toggles `file_manager.visible`, calls
+    /// `file_manager.refresh()` when shown, sets `needs_full_redraw = true`, and returns.
+    /// If the click hits a per-window taskbar button, this toggles that window between
+    /// minimized and normal state via `sys_set_window_state`; when restoring, it raises the
+    /// window, sets TTY focus, updates `focused_task`, and marks a full redraw. Returns after
+    /// handling the first matching button.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `wm` is a prepared WindowManager with valid taskbar layout and mouse_x/mouse_y set.
+    /// let mut wm = WindowManager::new();
+    /// // position mouse over the Files button and simulate click handling
+    /// wm.mouse_x = 4; // within TASKBAR_BUTTON_PADDING
+    /// wm.handle_taskbar_click();
+    /// assert!(wm.needs_full_redraw);
+    /// ```
     fn handle_taskbar_click(&mut self) {
-        let mut x = TASKBAR_BUTTON_PADDING;
+        let files_btn_x = TASKBAR_BUTTON_PADDING;
+        // Check Files button click
+        if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
+            self.file_manager.visible = !self.file_manager.visible;
+            if self.file_manager.visible {
+                self.file_manager.refresh();
+            }
+            self.needs_full_redraw = true;
+            return;
+        }
+
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let button_width = TASKBAR_BUTTON_WIDTH;
@@ -650,7 +760,7 @@ impl WindowManager {
         gfx::font::draw_string(buf, window.x + 8, title_y + 4, title, COLOR_TEXT, color);
 
         // Close button (X)
-        self.draw_button(
+        ui_utils::draw_button(
             buf,
             window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING,
             title_y + BUTTON_PADDING,
@@ -661,7 +771,7 @@ impl WindowManager {
         );
 
         // Minimize button (_)
-        self.draw_button(
+        ui_utils::draw_button(
             buf,
             window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2),
             title_y + BUTTON_PADDING,
@@ -672,30 +782,22 @@ impl WindowManager {
         );
     }
 
-    /// Draw a button to the output buffer
-    fn draw_button(
-        &self,
-        buf: &mut DrawBuffer,
-        x: i32,
-        y: i32,
-        size: i32,
-        label: &str,
-        hover: bool,
-        is_close: bool,
-    ) {
-        let color = if hover && is_close {
-            COLOR_BUTTON_CLOSE_HOVER
-        } else if hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
 
-        gfx::fill_rect(buf, x, y, size, size, color);
-        gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
-    }
-
-    /// Draw taskbar to the output buffer
+    /// Renders the taskbar into the provided draw buffer, including the Files button and one button per tracked window.
+    ///
+    /// The taskbar is drawn at the bottom of the buffer; the Files button reflects the File Manager's visible/hover state,
+    /// and each window gets a fixed-width button that indicates focus and shows a truncated title.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let wm = WindowManager::new();
+    /// // Obtain a DrawBuffer from a CompositorOutput in real usage:
+    /// // let mut buf = output.draw_buffer();
+    /// // For this example we assume `buf` is a valid DrawBuffer:
+    /// let mut buf: DrawBuffer = unimplemented!();
+    /// wm.draw_taskbar(&mut buf);
+    /// ```
     fn draw_taskbar(&self, buf: &mut DrawBuffer) {
         let taskbar_y = buf.height() as i32 - TASKBAR_HEIGHT;
 
@@ -708,9 +810,28 @@ impl WindowManager {
             TASKBAR_HEIGHT,
             COLOR_TASKBAR,
         );
+        
+        // Draw Files button
+        let files_btn_x = TASKBAR_BUTTON_PADDING;
+        let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+        let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
+        
+        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH 
+                       && self.mouse_y >= btn_y && self.mouse_y < btn_y + btn_height;
+        
+        let files_color = if self.file_manager.visible { 
+             COLOR_BUTTON_HOVER 
+        } else if files_hover {
+             COLOR_BUTTON_HOVER
+        } else {
+             COLOR_BUTTON
+        };
+        
+        gfx::fill_rect(buf, files_btn_x, btn_y, FM_BUTTON_WIDTH, btn_height, files_color);
+        gfx::font::draw_string(buf, files_btn_x + 4, btn_y + 4, "Files", COLOR_TEXT, files_color);
 
         // Draw app buttons
-        let mut x = TASKBAR_BUTTON_PADDING;
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;
@@ -822,7 +943,26 @@ impl WindowManager {
         }
     }
 
-    /// Draw placeholder when client hasn't migrated to shared memory yet
+    /// Render a simple placeholder for a window's content area when the client's surface is not available.
+    ///
+    /// This draws a filled rectangle using COLOR_WINDOW_PLACEHOLDER, an outline using COLOR_TITLE_BAR,
+    /// and a short informational text centered vertically inside the window bounds.
+    ///
+    /// # Parameters
+    ///
+    /// - `buf`: the draw target where the placeholder will be rendered.
+    /// - `window`: the window geometry and position; `x`, `y`, `width`, and `height` determine the placeholder area.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Construct minimal buffer and window info (types shown here are from the compositor crate).
+    /// let mut buf = DrawBuffer::default();
+    /// let window = UserWindowInfo { x: 20, y: 16, width: 200, height: 120, ..Default::default() };
+    /// let wm = WindowManager::new();
+    /// // Render a placeholder for the window into the buffer.
+    /// wm.draw_window_placeholder(&mut buf, &window);
+    /// ```
     fn draw_window_placeholder(&self, buf: &mut DrawBuffer, window: &UserWindowInfo) {
         // Draw a colored rectangle as placeholder for window content
         gfx::fill_rect(
@@ -858,11 +998,44 @@ impl WindowManager {
         );
     }
 
-    /// Compositor render pass
+    /// Renders the File Manager overlay into the given draw buffer.
     ///
-    /// For now, always do full redraws when any content changed.
-    /// Partial redraw optimization deferred until kernel properly clears
-    /// committed_damage after compositor acknowledges it.
+    /// This draws the File Manager's current visual state (contents, chrome, and any
+    /// drag handles) directly into `buf`. Calling this does not present the buffer;
+    /// the caller must present after completing the full render pass if desired.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Obtain a DrawBuffer from your compositor output, then:
+    /// let wm = WindowManager::new();
+    /// let mut buf = /* get a DrawBuffer, e.g. output.draw_buffer() */;
+    /// wm.draw_file_manager(&mut buf);
+    /// ```
+    fn draw_file_manager(&self, buf: &mut DrawBuffer) {
+        self.file_manager.draw(buf);
+    }
+
+    /// Perform a full compositor render pass into the given draw buffer.
+    ///
+    /// Clears the output, draws all visible windows (content then title bar) in back-to-front
+    /// order, renders the taskbar and File Manager overlay, draws the cursor on top, and
+    /// resets internal redraw flags. This implementation always performs a full redraw
+    /// when invoked; partial-redraw optimizations are deferred.
+    ///
+    /// # Parameters
+    ///
+    /// - `buf`: The output draw buffer to render into.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Prepare compositor state and an output buffer (types and construction depend on context).
+    /// let mut wm = WindowManager::new();
+    /// let mut draw_buf = /* obtain a DrawBuffer for the output framebuffer */ unimplemented!();
+    /// // Render the current scene into the output buffer.
+    /// wm.render(&mut draw_buf);
+    /// ```
     fn render(&mut self, buf: &mut DrawBuffer) {
         // Always clear the entire buffer
         buf.clear(COLOR_BACKGROUND);
@@ -884,6 +1057,9 @@ impl WindowManager {
 
         // Draw taskbar
         self.draw_taskbar(buf);
+
+        // Draw File Manager Overlay
+        self.draw_file_manager(buf);
 
         // Draw cursor (on top of everything)
         self.draw_cursor(buf);
