@@ -19,6 +19,7 @@ use crate::syscall::{
     sys_input_poll_batch, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
     sys_set_window_state, sys_shm_unmap, sys_sleep_ms, sys_tty_set_focus, sys_yield,
     CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
+    UserFsEntry, UserFsList, sys_fs_list,
 };
 
 // UI Constants - Dark Roulette Theme
@@ -39,6 +40,18 @@ const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
 const COLOR_TASKBAR: u32 = rgb(0x25, 0x25, 0x26);
 const COLOR_CURSOR: u32 = rgb(0xFF, 0xFF, 0xFF);
 const COLOR_BACKGROUND: u32 = rgb(0x00, 0x11, 0x22);
+
+// File Manager Constants
+const FM_WIDTH: i32 = 400;
+const FM_HEIGHT: i32 = 300;
+const FM_TITLE_HEIGHT: i32 = 24;
+const FM_ITEM_HEIGHT: i32 = 20;
+const FM_COLOR_BG: u32 = rgb(0x25, 0x25, 0x26);
+#[allow(dead_code)]
+const FM_COLOR_FG: u32 = rgb(0xE0, 0xE0, 0xE0);
+#[allow(dead_code)]
+const FM_COLOR_HL: u32 = rgb(0x3E, 0x3E, 0x42);
+const FM_BUTTON_WIDTH: i32 = 40; // Width of "Files" button on taskbar
 
 // Window placeholder colors (until clients migrate to shared memory)
 const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
@@ -144,6 +157,131 @@ impl ClientSurfaceCache {
                 *entry = ClientSurfaceEntry::empty();
             }
         }
+    }
+}
+
+/// Simple File Manager implementation
+struct FileManager {
+    visible: bool,
+    x: i32,
+    y: i32,
+    current_path: [u8; 128],
+    entries: [UserFsEntry; 32],
+    entry_count: u32,
+    scroll_top: i32,
+    selected_index: i32,
+}
+
+impl FileManager {
+    fn new() -> Self {
+        let mut fm = Self {
+            visible: false,
+            x: 100,
+            y: 100,
+            current_path: [0; 128],
+            entries: [UserFsEntry::new(); 32],
+            entry_count: 0,
+            scroll_top: 0,
+            selected_index: -1,
+        };
+        fm.current_path[0] = b'/';
+        fm.refresh();
+        fm
+    }
+
+    fn refresh(&mut self) {
+        // Clear entries first to avoid stale data issues
+        self.entries = [UserFsEntry::new(); 32];
+        
+        let mut list = UserFsList {
+            entries: self.entries.as_mut_ptr(),
+            max_entries: 32,
+            count: 0,
+        };
+        
+        // Safe because we pass valid pointers
+        sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
+        self.entry_count = list.count;
+    }
+
+    fn navigate(&mut self, name: &[u8]) {
+        if name == b".." {
+             // Handle parent directory
+            let mut len = 0;
+            while len < 128 && self.current_path[len] != 0 { len += 1; }
+            
+            if len > 1 {
+                // Find last separator
+                let mut i = len - 1;
+                while i > 0 && self.current_path[i] != b'/' {
+                    self.current_path[i] = 0;
+                    i -= 1;
+                }
+                if i > 0 { self.current_path[i] = 0; } // Remove trailing slash if not root
+            }
+        } else {
+             // Append directory
+            let mut len = 0;
+            while len < 128 && self.current_path[len] != 0 { len += 1; }
+            
+            if len + 1 + name.len() < 128 {
+                if len > 1 || (len == 1 && self.current_path[0] != b'/') {
+                    self.current_path[len] = b'/';
+                    len += 1;
+                } else if len == 0 {
+                    self.current_path[0] = b'/';
+                    len = 1;
+                }
+                
+                for (i, &b) in name.iter().enumerate() {
+                    self.current_path[len + i] = b;
+                }
+            }
+        }
+        self.refresh();
+        self.scroll_top = 0;
+        self.selected_index = -1;
+    }
+    
+    #[allow(dead_code)]
+    fn hit_test(&self, mx: i32, my: i32) -> bool {
+        self.visible && mx >= self.x && mx < self.x + FM_WIDTH && my >= self.y && my < self.y + FM_HEIGHT
+    }
+    
+    fn handle_click(&mut self, mx: i32, my: i32) -> bool {
+        if !self.visible { return false; }
+        
+        // Check title bar (close button)
+        if my >= self.y && my < self.y + FM_TITLE_HEIGHT {
+            // Close logic if we add a close button
+             if mx >= self.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING && mx < self.x + FM_WIDTH - BUTTON_PADDING {
+                 self.visible = false;
+                 return true;
+             }
+             return true; // Title bar drag (future)
+        }
+        
+        // List items
+        let list_y = self.y + FM_TITLE_HEIGHT;
+        if my >= list_y {
+            let idx = (my - list_y) / FM_ITEM_HEIGHT;
+            let entry_idx = self.scroll_top + idx;
+            
+            if entry_idx >= 0 && entry_idx < self.entry_count as i32 {
+                // Determine if it was a double click or just selection (simplified: click navigates dirs)
+                let entry = self.entries[entry_idx as usize];
+                 if entry.r#type == 1 { // Directory
+                    // Extract name
+                    let mut name_len = 0;
+                    while name_len < 64 && entry.name[name_len] != 0 { name_len += 1; }
+                    let name = &entry.name[..name_len];
+                    self.navigate(name);
+                 }
+                return true;
+            }
+        }
+        
+        false
     }
 }
 
@@ -304,6 +442,7 @@ struct WindowManager {
     // Cursor positions visited this frame (for trail-free damage)
     cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     cursor_trail_count: usize,
+    file_manager: FileManager,
 }
 
 impl WindowManager {
@@ -333,6 +472,7 @@ impl WindowManager {
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
+            file_manager: FileManager::new(),
         }
     }
 
@@ -509,6 +649,14 @@ impl WindowManager {
     fn handle_mouse_events(&mut self, fb_height: i32) {
         let clicked = self.mouse_clicked();
 
+        // Handle File Manager interactions first (overlay)
+        if self.file_manager.visible {
+             if clicked && self.file_manager.handle_click(self.mouse_x, self.mouse_y) {
+                 self.needs_full_redraw = true;
+                 return;
+             }
+        }
+        
         // Handle ongoing drag
         if self.dragging {
             if !self.mouse_pressed() {
@@ -606,7 +754,18 @@ impl WindowManager {
     }
 
     fn handle_taskbar_click(&mut self) {
-        let mut x = TASKBAR_BUTTON_PADDING;
+        let files_btn_x = TASKBAR_BUTTON_PADDING;
+        // Check Files button click
+        if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
+            self.file_manager.visible = !self.file_manager.visible;
+            if self.file_manager.visible {
+                self.file_manager.refresh();
+            }
+            self.needs_full_redraw = true;
+            return;
+        }
+
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let button_width = TASKBAR_BUTTON_WIDTH;
@@ -708,9 +867,28 @@ impl WindowManager {
             TASKBAR_HEIGHT,
             COLOR_TASKBAR,
         );
+        
+        // Draw Files button
+        let files_btn_x = TASKBAR_BUTTON_PADDING;
+        let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
+        let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
+        
+        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH 
+                       && self.mouse_y >= btn_y && self.mouse_y < btn_y + btn_height;
+        
+        let files_color = if self.file_manager.visible { 
+             COLOR_BUTTON_HOVER 
+        } else if files_hover {
+             COLOR_BUTTON_HOVER
+        } else {
+             COLOR_BUTTON
+        };
+        
+        gfx::fill_rect(buf, files_btn_x, btn_y, FM_BUTTON_WIDTH, btn_height, files_color);
+        gfx::font::draw_string(buf, files_btn_x + 4, btn_y + 4, "Files", COLOR_TEXT, files_color);
 
         // Draw app buttons
-        let mut x = TASKBAR_BUTTON_PADDING;
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;
@@ -858,6 +1036,52 @@ impl WindowManager {
         );
     }
 
+    fn draw_file_manager(&self, buf: &mut DrawBuffer) {
+        if !self.file_manager.visible { return; }
+        
+        let fm = &self.file_manager;
+        
+        // Window Background
+        gfx::fill_rect(buf, fm.x, fm.y, FM_WIDTH, FM_HEIGHT, FM_COLOR_BG);
+        
+        // Title Bar
+        gfx::fill_rect(buf, fm.x, fm.y, FM_WIDTH, FM_TITLE_HEIGHT, COLOR_TITLE_BAR);
+        
+        // Manual conversion of path to string (safe subset)
+        let mut len = 0;
+        while len < fm.current_path.len() && fm.current_path[len] != 0 { len += 1; }
+        let path_str = core::str::from_utf8(&fm.current_path[..len]).unwrap_or("/");
+        
+        gfx::font::draw_string(buf, fm.x + 8, fm.y + 4, path_str, COLOR_TEXT, COLOR_TITLE_BAR);
+        
+        // Close Button
+        self.draw_button(buf, fm.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING, fm.y + BUTTON_PADDING, BUTTON_SIZE, "X", false, true);
+
+        // Content Area
+        let list_y = fm.y + FM_TITLE_HEIGHT;
+        let _content_height = FM_HEIGHT - FM_TITLE_HEIGHT;
+        
+        // Draw entries
+        for i in 0..fm.entry_count as usize {
+            if i < fm.scroll_top as usize { continue; }
+            let row = (i as i32) - fm.scroll_top;
+            let item_y = list_y + (row * FM_ITEM_HEIGHT);
+            
+            if item_y + FM_ITEM_HEIGHT > fm.y + FM_HEIGHT { break; }
+            
+            let entry = &fm.entries[i];
+             // Extract name
+            let mut name_len = 0;
+            while name_len < 64 && entry.name[name_len] != 0 { name_len += 1; }
+            let name = core::str::from_utf8(&entry.name[..name_len]).unwrap_or("?");
+            
+            // Color based on type: 1=DIR, 0=FILE
+            let color = if entry.r#type == 1 { rgb(0x40, 0x80, 0xFF) } else { COLOR_TEXT };
+            
+            gfx::font::draw_string(buf, fm.x + 8, item_y + 2, name, color, FM_COLOR_BG);
+        }
+    }
+
     /// Compositor render pass
     ///
     /// For now, always do full redraws when any content changed.
@@ -884,6 +1108,9 @@ impl WindowManager {
 
         // Draw taskbar
         self.draw_taskbar(buf);
+
+        // Draw File Manager Overlay
+        self.draw_file_manager(buf);
 
         // Draw cursor (on top of everything)
         self.draw_cursor(buf);
