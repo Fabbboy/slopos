@@ -251,13 +251,22 @@ impl FileManager {
     fn handle_click(&mut self, mx: i32, my: i32) -> bool {
         if !self.visible { return false; }
         
-        // Check title bar (close button)
+        // Check title bar buttons
         if my >= self.y && my < self.y + FM_TITLE_HEIGHT {
-            // Close logic if we add a close button
+             // Close button
              if mx >= self.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING && mx < self.x + FM_WIDTH - BUTTON_PADDING {
                  self.visible = false;
                  return true;
              }
+             
+             // Up button (next to close, or left side?)
+             // Let's put it on the right, to the left of Close
+             let up_x = self.x + FM_WIDTH - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
+             if mx >= up_x && mx < up_x + BUTTON_SIZE {
+                 self.navigate(b"..");
+                 return true;
+             }
+             
              return true; // Title bar drag (future)
         }
         
@@ -1056,6 +1065,10 @@ impl WindowManager {
         
         // Close Button
         self.draw_button(buf, fm.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING, fm.y + BUTTON_PADDING, BUTTON_SIZE, "X", false, true);
+
+        // Up Button
+        let up_x = fm.x + FM_WIDTH - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
+        self.draw_button(buf, up_x, fm.y + BUTTON_PADDING, BUTTON_SIZE, "^", false, false);
 
         // Content Area
         let list_y = fm.y + FM_TITLE_HEIGHT;
