@@ -25,6 +25,10 @@ path = "src/bin/compositor.rs"
 name = "shell"
 path = "src/bin/shell.rs"
 
+[[bin]]
+name = "file_manager"
+path = "src/bin/file_manager.rs"
+
 [features]
 default = []
 standalone-bin = []

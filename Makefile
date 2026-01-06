@@ -179,6 +179,7 @@ build-userland:
 	  --bin roulette \
 	  --bin compositor \
 	  --bin shell \
+	  --bin file_manager \
 	  --features standalone-bin \
 	  --no-default-features \
 	  --release; \
@@ -191,7 +192,10 @@ build-userland:
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/shell" "$(BUILD_DIR)/shell.elf"; \
 	fi; \
-	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf"
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/file_manager ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/file_manager" "$(BUILD_DIR)/file_manager.elf"; \
+	fi; \
+	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf"
 
 build: build-userland
 	@$(call build_kernel)

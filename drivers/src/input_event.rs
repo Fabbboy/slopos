@@ -196,11 +196,15 @@ struct InputManager {
     keyboard_focus: u32,
     /// Task ID with pointer focus (0 = no focus)
     pointer_focus: u32,
-    /// Current pointer position
+    /// Current pointer position (screen coordinates)
     pointer_x: i32,
     pointer_y: i32,
     /// Current pointer button state
     pointer_buttons: u8,
+    /// Window offset for coordinate translation (set by compositor)
+    /// Pointer events will be translated from screen coords to window-local coords
+    window_offset_x: i32,
+    window_offset_y: i32,
 }
 
 impl InputManager {
@@ -212,6 +216,8 @@ impl InputManager {
             pointer_x: 0,
             pointer_y: 0,
             pointer_buttons: 0,
+            window_offset_x: 0,
+            window_offset_y: 0,
         }
     }
 
@@ -261,8 +267,15 @@ pub fn input_set_keyboard_focus(task_id: u32) {
 }
 
 /// Set pointer focus to a task (called by compositor)
-/// Also sends enter/leave events
+/// Also sends enter/leave events. Uses offset (0, 0) for backwards compatibility.
 pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
+    input_set_pointer_focus_with_offset(task_id, 0, 0, timestamp_ms);
+}
+
+/// Set pointer focus to a task with window offset for coordinate translation
+/// The offset is subtracted from screen coordinates to get window-local coordinates.
+/// For a window at screen position (100, 50), pass offset_x=100, offset_y=50.
+pub fn input_set_pointer_focus_with_offset(task_id: u32, offset_x: i32, offset_y: i32, timestamp_ms: u64) {
     // Use irqsave/irqrestore to prevent deadlock if mouse IRQ fires while holding lock
     let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
@@ -270,13 +283,17 @@ pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
     let x = mgr.pointer_x;
     let y = mgr.pointer_y;
 
+    // Update window offset for coordinate translation
+    mgr.window_offset_x = offset_x;
+    mgr.window_offset_y = offset_y;
+
     if old_focus == task_id {
         drop(mgr);
         cpu::restore_flags(flags);
         return;
     }
 
-    // Send leave event to old focus
+    // Send leave event to old focus (with old offset)
     if old_focus != 0 {
         if let Some(idx) = mgr.find_queue(old_focus) {
             mgr.queues[idx].push(InputEvent::pointer_enter_leave(false, x, y, timestamp_ms));
@@ -285,10 +302,12 @@ pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
 
     mgr.pointer_focus = task_id;
 
-    // Send enter event to new focus
+    // Send enter event to new focus (with new offset - translated coords)
     if task_id != 0 {
         if let Some(idx) = mgr.find_or_create_queue(task_id) {
-            mgr.queues[idx].push(InputEvent::pointer_enter_leave(true, x, y, timestamp_ms));
+            let local_x = x - offset_x;
+            let local_y = y - offset_y;
+            mgr.queues[idx].push(InputEvent::pointer_enter_leave(true, local_x, local_y, timestamp_ms));
         }
     }
     drop(mgr);
@@ -307,6 +326,26 @@ pub fn input_get_keyboard_focus() -> u32 {
 pub fn input_get_pointer_focus() -> u32 {
     let flags = cpu::save_flags_cli();
     let result = INPUT_MANAGER.lock().pointer_focus;
+    cpu::restore_flags(flags);
+    result
+}
+
+/// Get current global pointer position (screen coordinates)
+/// Used by compositor to track cursor even when pointer focus is on another task
+pub fn input_get_pointer_position() -> (i32, i32) {
+    let flags = cpu::save_flags_cli();
+    let mgr = INPUT_MANAGER.lock();
+    let result = (mgr.pointer_x, mgr.pointer_y);
+    drop(mgr);
+    cpu::restore_flags(flags);
+    result
+}
+
+/// Get current global pointer button state
+/// Used by compositor to track buttons even when pointer focus is on another task
+pub fn input_get_button_state() -> u8 {
+    let flags = cpu::save_flags_cli();
+    let result = INPUT_MANAGER.lock().pointer_buttons;
     cpu::restore_flags(flags);
     result
 }
@@ -335,6 +374,7 @@ pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_m
 }
 
 /// Route a pointer motion event to the focused task
+/// Coordinates are translated from screen coords to window-local coords
 pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let mut mgr = INPUT_MANAGER.lock();
     mgr.pointer_x = x;
@@ -345,8 +385,12 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
         return;
     }
 
+    // Translate to window-local coordinates
+    let local_x = x - mgr.window_offset_x;
+    let local_y = y - mgr.window_offset_y;
+
     if let Some(idx) = mgr.find_or_create_queue(focus) {
-        mgr.queues[idx].push(InputEvent::pointer_motion(x, y, timestamp_ms));
+        mgr.queues[idx].push(InputEvent::pointer_motion(local_x, local_y, timestamp_ms));
     }
 }
 

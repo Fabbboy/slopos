@@ -16,12 +16,11 @@ use core::ffi::c_void;
 use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, PixelFormat};
 use crate::syscall::{
     sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_input_poll_batch, sys_mark_frames_done, sys_raise_window, sys_set_window_position,
-    sys_set_window_state, sys_shm_unmap, sys_sleep_ms, sys_tty_set_focus, sys_yield,
-    CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
-
+    sys_input_get_button_state, sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset,
+    sys_mark_frames_done, sys_raise_window, sys_set_window_position, sys_set_window_state,
+    sys_shm_unmap, sys_sleep_ms, sys_spawn_task, sys_tty_set_focus, sys_yield,
+    CachedShmMapping, ShmBuffer, UserFbInfo, UserWindowInfo,
 };
-use crate::apps::file_manager::FileManager;
 use crate::ui_utils;
 
 use crate::theme::*;
@@ -277,11 +276,6 @@ impl WindowBounds {
 /// Maximum cursor positions to track per frame (for damage)
 const MAX_CURSOR_TRAIL: usize = 16;
 
-/// Maximum input events to process per frame.
-/// 48 events at 60Hz allows ~2880 events/sec, well above mouse/keyboard rates.
-/// Using batch polling avoids lock ping-pong with IRQ handlers.
-const MAX_EVENTS_PER_FRAME: usize = 48;
-
 struct WindowManager {
     windows: [UserWindowInfo; MAX_WINDOWS],
     window_count: u32,
@@ -313,15 +307,14 @@ struct WindowManager {
     // Cursor positions visited this frame (for trail-free damage)
     cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     cursor_trail_count: usize,
-    file_manager: FileManager,
 }
 
 impl WindowManager {
     /// Constructs a new WindowManager initialized to its default, empty runtime state.
     ///
     /// The returned manager has empty window lists and previous-window buffers, default input
-    /// and dragging state, an initialized ClientSurfaceCache and FileManager, default output
-    /// damage tracker, and flags set to require an initial full redraw.
+    /// and dragging state, an initialized ClientSurfaceCache, default output damage tracker,
+    /// and flags set to require an initial full redraw.
     ///
     /// # Examples
     ///
@@ -357,7 +350,6 @@ impl WindowManager {
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
-            file_manager: FileManager::new(),
         }
     }
 
@@ -366,41 +358,31 @@ impl WindowManager {
         self.output_pitch = pitch;
     }
 
-    /// Update mouse state from kernel input event queue.
-    /// Uses batch polling to avoid lock ping-pong with IRQ handlers.
+    /// Update mouse state from kernel.
+    /// Queries global position and button state directly (works even when focus is on another task).
     fn update_mouse(&mut self) {
         // Reset cursor trail for this frame
         self.cursor_trail_count = 0;
 
-        // Batch poll all pending events (single syscall, single lock acquisition)
-        let mut events = [InputEvent::default(); MAX_EVENTS_PER_FRAME];
-        let count = sys_input_poll_batch(&mut events) as usize;
+        // Record previous position for damage tracking
+        let old_x = self.mouse_x;
+        let old_y = self.mouse_y;
 
-        // Process the batch
-        for i in 0..count {
-            let ev = events[i];
-            match ev.event_type {
-                InputEventType::PointerMotion => {
-                    // Record current position before moving (for damage tracking)
-                    if self.cursor_trail_count < MAX_CURSOR_TRAIL {
-                        self.cursor_trail[self.cursor_trail_count] = (self.mouse_x, self.mouse_y);
-                        self.cursor_trail_count += 1;
-                    }
-                    // Update to new position
-                    self.mouse_x = ev.pointer_x();
-                    self.mouse_y = ev.pointer_y();
-                }
-                InputEventType::PointerButtonPress => {
-                    self.mouse_buttons_prev = self.mouse_buttons;
-                    self.mouse_buttons |= ev.pointer_button_code();
-                }
-                InputEventType::PointerButtonRelease => {
-                    self.mouse_buttons_prev = self.mouse_buttons;
-                    self.mouse_buttons &= !ev.pointer_button_code();
-                }
-                _ => {} // Ignore keyboard events for now
+        // Always query global pointer position (works even when focus is on another task)
+        let (new_x, new_y) = sys_input_get_pointer_pos();
+        if new_x != self.mouse_x || new_y != self.mouse_y {
+            // Record trail for damage tracking
+            if self.cursor_trail_count < MAX_CURSOR_TRAIL {
+                self.cursor_trail[self.cursor_trail_count] = (old_x, old_y);
+                self.cursor_trail_count += 1;
             }
+            self.mouse_x = new_x;
+            self.mouse_y = new_y;
         }
+
+        // Always query global button state (works even when focus is on another task)
+        self.mouse_buttons_prev = self.mouse_buttons;
+        self.mouse_buttons = sys_input_get_button_state();
     }
 
     /// Check if mouse was just clicked (press event)
@@ -498,6 +480,20 @@ impl WindowManager {
         (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
     }
 
+    /// Find a window by its title and return its task_id
+    fn find_window_by_title(&self, title: &[u8]) -> Option<u32> {
+        for i in 0..self.window_count as usize {
+            let window = &self.windows[i];
+            // Compare title bytes (null-terminated)
+            let title_len = title.iter().position(|&b| b == 0).unwrap_or(title.len());
+            let win_title_len = window.title.iter().position(|&b| b == 0).unwrap_or(32);
+            if title_len == win_title_len && &window.title[..win_title_len] == &title[..title_len] {
+                return Some(window.task_id);
+            }
+        }
+        None
+    }
+
     /// Add window bounds (including title bar) to output damage
     fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
         let rect = bounds.to_damage_rect();
@@ -530,12 +526,10 @@ impl WindowManager {
         }
     }
 
-    /// Process queued mouse input and perform high-level interactions (file manager overlay,
-    /// window dragging, title-bar actions, and taskbar clicks).
+    /// Process queued mouse input and perform high-level interactions (window dragging,
+    /// title-bar actions, and taskbar clicks).
     ///
     /// This consumes click/drag events in priority order:
-    /// - If the File Manager overlay is visible, its drag and click handling take precedence and
-    ///   input is consumed while dragging or when the overlay handles a click.
     /// - Ongoing window drags are continued or stopped based on current button state.
     /// - New clicks are tested against the taskbar, then window title bars (front-to-back),
     ///   handling close, minimize, raise/focus, and initiating drags.
@@ -556,28 +550,6 @@ impl WindowManager {
     fn handle_mouse_events(&mut self, fb_height: i32) {
         let clicked = self.mouse_clicked();
 
-        // Handle File Manager interactions first (overlay)
-        if self.file_manager.visible {
-             // Handle drag update first
-             if self.file_manager.dragging {
-                 if !self.mouse_pressed() {
-                     self.file_manager.dragging = false;
-                 } else {
-                     self.file_manager.x = self.mouse_x - self.file_manager.drag_offset_x;
-                     self.file_manager.y = self.mouse_y - self.file_manager.drag_offset_y;
-                     self.needs_full_redraw = true; // Force redraw on drag
-                 }
-                 return; // Consume input while dragging
-             }
-             
-             if clicked && self.file_manager.handle_click(self.mouse_x, self.mouse_y) {
-                 self.needs_full_redraw = true;
-                 // If dragging started in handle_click, we might want to continue processing move?
-                 // But handle_click returns true, so we redraw and next frame will handle drag update.
-                 return;
-             }
-        }
-        
         // Handle ongoing drag
         if self.dragging {
             if !self.mouse_pressed() {
@@ -596,7 +568,7 @@ impl WindowManager {
                 return;
             }
 
-            // Check window title bar clicks (front to back)
+            // Check window title bar and content area clicks (front to back)
             for i in (0..self.window_count as usize).rev() {
                 let window = self.windows[i];
                 if window.state == WINDOW_STATE_MINIMIZED {
@@ -620,8 +592,25 @@ impl WindowManager {
                     self.focused_task = window.task_id;
                     return;
                 }
+
+                // Check content area click - set pointer focus so client receives events
+                if self.hit_test_content_area(&window) {
+                    sys_raise_window(window.task_id);
+                    sys_tty_set_focus(window.task_id);
+                    // Set pointer focus with window offset for coordinate translation
+                    sys_input_set_pointer_focus_with_offset(window.task_id, window.x, window.y);
+                    self.focused_task = window.task_id;
+                    return;
+                }
             }
         }
+    }
+
+    fn hit_test_content_area(&self, window: &UserWindowInfo) -> bool {
+        self.mouse_x >= window.x
+            && self.mouse_x < window.x + window.width as i32
+            && self.mouse_y >= window.y
+            && self.mouse_y < window.y + window.height as i32
     }
 
     fn hit_test_title_bar(&self, window: &UserWindowInfo) -> bool {
@@ -685,14 +674,13 @@ impl WindowManager {
         self.needs_full_redraw = true;
     }
 
-    /// Handle a mouse click on the taskbar, toggling the Files overlay or minimizing/restoring a window.
+    /// Handle a mouse click on the taskbar, spawning the file manager or minimizing/restoring a window.
     ///
-    /// If the click is inside the Files button, this toggles `file_manager.visible`, calls
-    /// `file_manager.refresh()` when shown, sets `needs_full_redraw = true`, and returns.
-    /// If the click hits a per-window taskbar button, this toggles that window between
-    /// minimized and normal state via `sys_set_window_state`; when restoring, it raises the
-    /// window, sets TTY focus, updates `focused_task`, and marks a full redraw. Returns after
-    /// handling the first matching button.
+    /// If the click is inside the Files button, this spawns the file manager task if not already
+    /// running, or raises the existing file manager window. If the click hits a per-window taskbar
+    /// button, this toggles that window between minimized and normal state via `sys_set_window_state`;
+    /// when restoring, it raises the window, sets TTY focus, updates `focused_task`, and marks a
+    /// full redraw. Returns after handling the first matching button.
     ///
     /// # Examples
     ///
@@ -706,11 +694,16 @@ impl WindowManager {
     /// ```
     fn handle_taskbar_click(&mut self) {
         let files_btn_x = TASKBAR_BUTTON_PADDING;
-        // Check Files button click
+        // Check Files button click - spawn file manager or raise existing window
         if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
-            self.file_manager.visible = !self.file_manager.visible;
-            if self.file_manager.visible {
-                self.file_manager.refresh();
+            if let Some(task_id) = self.find_window_by_title(b"Files") {
+                // File manager already running - raise it
+                sys_raise_window(task_id);
+                sys_tty_set_focus(task_id);
+                self.focused_task = task_id;
+            } else {
+                // Spawn new file manager task
+                sys_spawn_task(b"file_manager\0");
             }
             self.needs_full_redraw = true;
             return;
@@ -816,12 +809,12 @@ impl WindowManager {
         let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
         let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
         
-        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH 
+        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH
                        && self.mouse_y >= btn_y && self.mouse_y < btn_y + btn_height;
-        
-        let files_color = if self.file_manager.visible { 
-             COLOR_BUTTON_HOVER 
-        } else if files_hover {
+
+        // Highlight if file manager window exists or button is hovered
+        let file_manager_running = self.find_window_by_title(b"Files").is_some();
+        let files_color = if file_manager_running || files_hover {
              COLOR_BUTTON_HOVER
         } else {
              COLOR_BUTTON
@@ -998,30 +991,12 @@ impl WindowManager {
         );
     }
 
-    /// Renders the File Manager overlay into the given draw buffer.
-    ///
-    /// This draws the File Manager's current visual state (contents, chrome, and any
-    /// drag handles) directly into `buf`. Calling this does not present the buffer;
-    /// the caller must present after completing the full render pass if desired.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// // Obtain a DrawBuffer from your compositor output, then:
-    /// let wm = WindowManager::new();
-    /// let mut buf = /* get a DrawBuffer, e.g. output.draw_buffer() */;
-    /// wm.draw_file_manager(&mut buf);
-    /// ```
-    fn draw_file_manager(&self, buf: &mut DrawBuffer) {
-        self.file_manager.draw(buf);
-    }
-
     /// Perform a full compositor render pass into the given draw buffer.
     ///
     /// Clears the output, draws all visible windows (content then title bar) in back-to-front
-    /// order, renders the taskbar and File Manager overlay, draws the cursor on top, and
-    /// resets internal redraw flags. This implementation always performs a full redraw
-    /// when invoked; partial-redraw optimizations are deferred.
+    /// order, renders the taskbar, draws the cursor on top, and resets internal redraw flags.
+    /// This implementation always performs a full redraw when invoked; partial-redraw
+    /// optimizations are deferred.
     ///
     /// # Parameters
     ///
@@ -1057,9 +1032,6 @@ impl WindowManager {
 
         // Draw taskbar
         self.draw_taskbar(buf);
-
-        // Draw File Manager Overlay
-        self.draw_file_manager(buf);
 
         // Draw cursor (on top of everything)
         self.draw_cursor(buf);

@@ -220,7 +220,8 @@ pub fn syscall_shm_create(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
-    let task_id = match ctx.require_task_id() {
+    // Use process_id for ownership tracking to match shm_map's ownership check
+    let process_id = match ctx.require_process_id() {
         Ok(id) => id,
         Err(d) => return d,
     };
@@ -228,7 +229,7 @@ pub fn syscall_shm_create(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     let size = args.arg0;
     let flags = args.arg1_u32();
 
-    let token = slopos_mm::shared_memory::shm_create(task_id, size, flags);
+    let token = slopos_mm::shared_memory::shm_create(process_id, size, flags);
     if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
 }
 
@@ -236,7 +237,7 @@ pub fn syscall_shm_map(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
-    let task_id = match ctx.require_task_id() {
+    let process_id = match ctx.require_process_id() {
         Ok(id) => id,
         Err(d) => return d,
     };
@@ -249,7 +250,7 @@ pub fn syscall_shm_map(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         None => return ctx.err_loss(),
     };
 
-    let vaddr = slopos_mm::shared_memory::shm_map(task_id, token, access);
+    let vaddr = slopos_mm::shared_memory::shm_map(process_id, token, access);
     if vaddr == 0 { ctx.err_loss() } else { ctx.ok_win(vaddr) }
 }
 
@@ -257,14 +258,14 @@ pub fn syscall_shm_unmap(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
-    let task_id = match ctx.require_task_id() {
+    let process_id = match ctx.require_process_id() {
         Ok(id) => id,
         Err(d) => return d,
     };
     let args = ctx.args();
     let vaddr = args.arg0;
 
-    let result = slopos_mm::shared_memory::shm_unmap(task_id, vaddr);
+    let result = slopos_mm::shared_memory::shm_unmap(process_id, vaddr);
     if let Err(d) = ctx.check_result(result) {
         return d;
     }
@@ -275,14 +276,15 @@ pub fn syscall_shm_destroy(task: *mut Task, frame: *mut InterruptFrame) -> Sysca
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
-    let task_id = match ctx.require_task_id() {
+    // Use process_id to match ownership set by shm_create
+    let process_id = match ctx.require_process_id() {
         Ok(id) => id,
         Err(d) => return d,
     };
     let args = ctx.args();
     let token = args.arg0_u32();
 
-    let result = slopos_mm::shared_memory::shm_destroy(task_id, token);
+    let result = slopos_mm::shared_memory::shm_destroy(process_id, token);
     if let Err(d) = ctx.check_result(result) {
         return d;
     }
@@ -297,16 +299,23 @@ pub fn syscall_surface_attach(task: *mut Task, frame: *mut InterruptFrame) -> Sy
         Ok(id) => id,
         Err(d) => return d,
     };
+    // Use process_id for ownership check (matches shm_create)
+    let process_id = match ctx.require_process_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
     let args = ctx.args();
     let token = args.arg0_u32();
     let width = args.arg1_u32();
     let height = args.arg2_u32();
 
-    let result = slopos_mm::shared_memory::surface_attach(task_id, token, width, height);
+    // surface_attach checks ownership using process_id
+    let result = slopos_mm::shared_memory::surface_attach(process_id, token, width, height);
     if let Err(d) = ctx.check_result(result) {
         return d;
     }
 
+    // video_bridge still uses task_id for surface registration
     let video_result = video_bridge::register_surface(task_id, width, height, token);
     if let Err(d) = ctx.check_result(video_result) {
         return d;
@@ -490,6 +499,64 @@ pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> S
         _ => return ctx.ok((-1i64) as u64),
     }
     ctx.ok(0)
+}
+
+/// Set pointer focus with window offset for coordinate translation.
+/// SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET (65)
+/// - arg0: target_task_id (u32)
+/// - arg1: offset_x (i32)
+/// - arg2: offset_y (i32)
+pub fn syscall_input_set_focus_with_offset(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+
+    let args = ctx.args();
+    let target_task_id = args.arg0_u32();
+    let offset_x = args.arg1 as i32;
+    let offset_y = args.arg2 as i32;
+
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    let timestamp_ms = (ticks * 1000) / freq as u64;
+
+    input_event::input_set_pointer_focus_with_offset(target_task_id, offset_x, offset_y, timestamp_ms);
+    ctx.ok(0)
+}
+
+/// SYSCALL_INPUT_GET_POINTER_POS (66)
+/// Get current global pointer position (compositor use)
+/// Returns: high 32 bits = x, low 32 bits = y (both as i32)
+pub fn syscall_input_get_pointer_pos(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+
+    let (x, y) = input_event::input_get_pointer_position();
+    // Pack x and y into a single u64: upper 32 = x, lower 32 = y
+    let result = ((x as u32 as u64) << 32) | (y as u32 as u64);
+    ctx.ok(result)
+}
+
+/// SYSCALL_INPUT_GET_BUTTON_STATE (67)
+/// Get current global pointer button state (compositor use)
+/// Returns: button state as u8 (bit 0 = left, bit 1 = right, bit 2 = middle)
+pub fn syscall_input_get_button_state(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    if let Err(d) = ctx.require_compositor() {
+        return d;
+    }
+
+    let buttons = input_event::input_get_button_state();
+    ctx.ok(buttons as u64)
 }
 
 // =============================================================================
@@ -915,6 +982,65 @@ pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
 }
 
 // =============================================================================
+// Task spawning syscall
+// =============================================================================
+
+/// Type for the task spawn callback function.
+/// Takes a task name slice and returns task_id (> 0) on success, -1 on failure.
+pub type SpawnTaskFn = fn(&[u8]) -> i32;
+
+/// Global callback for spawning tasks, registered by userland at boot.
+static SPAWN_TASK_CALLBACK: spin::Mutex<Option<SpawnTaskFn>> = spin::Mutex::new(None);
+
+/// Register the task spawn callback (called by userland bootstrap at init).
+pub fn register_spawn_task_callback(callback: SpawnTaskFn) {
+    *SPAWN_TASK_CALLBACK.lock() = Some(callback);
+}
+
+pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+    let args = ctx.args();
+
+    // Get task name from user space
+    let name_ptr = args.arg0 as *const u8;
+    let name_len = args.arg1 as usize;
+
+    // Validate and copy name from user space
+    if name_ptr.is_null() || name_len == 0 || name_len > 64 {
+        return ctx.err();
+    }
+
+    let mut name_buf = [0u8; 64];
+    let mut copied_len: usize = 0;
+    if syscall_bounded_from_user(
+        name_buf.as_mut_ptr() as *mut c_void,
+        name_buf.len(),
+        name_ptr as *const c_void,
+        name_len as u64,
+        64,
+        &mut copied_len,
+    ) != 0
+    {
+        return ctx.err();
+    }
+
+    // Call the registered spawn callback
+    let callback = *SPAWN_TASK_CALLBACK.lock();
+    let result = match callback {
+        Some(spawn_fn) => spawn_fn(&name_buf[..copied_len]),
+        None => -1, // No callback registered
+    };
+
+    if result > 0 {
+        ctx.ok(result as u64)
+    } else {
+        ctx.err()
+    }
+}
+
+// =============================================================================
 // Syscall table and dispatch
 // =============================================================================
 
@@ -927,12 +1053,12 @@ pub struct SyscallEntry {
 
 unsafe impl Sync for SyscallEntry {}
 
-static SYSCALL_TABLE: [SyscallEntry; 64] = {
+static SYSCALL_TABLE: [SyscallEntry; 128] = {
     use self::lib_syscall_numbers::*;
-    let mut table: [SyscallEntry; 64] = [SyscallEntry {
+    let mut table: [SyscallEntry; 128] = [SyscallEntry {
         handler: None,
         name: core::ptr::null(),
-    }; 64];
+    }; 128];
     table[SYSCALL_YIELD as usize] = SyscallEntry {
         handler: Some(syscall_yield),
         name: b"yield\0".as_ptr() as *const c_char,
@@ -1145,6 +1271,22 @@ static SYSCALL_TABLE: [SyscallEntry; 64] = {
         handler: Some(syscall_input_set_focus),
         name: b"input_set_focus\0".as_ptr() as *const c_char,
     };
+    table[SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET as usize] = SyscallEntry {
+        handler: Some(syscall_input_set_focus_with_offset),
+        name: b"input_set_focus_with_offset\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_INPUT_GET_POINTER_POS as usize] = SyscallEntry {
+        handler: Some(syscall_input_get_pointer_pos),
+        name: b"input_get_pointer_pos\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_INPUT_GET_BUTTON_STATE as usize] = SyscallEntry {
+        handler: Some(syscall_input_get_button_state),
+        name: b"input_get_button_state\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SPAWN_TASK as usize] = SyscallEntry {
+        handler: Some(syscall_spawn_task),
+        name: b"spawn_task\0".as_ptr() as *const c_char,
+    };
     table
 };
 
@@ -1203,6 +1345,10 @@ pub mod lib_syscall_numbers {
     pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
     pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
     pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
+    pub const SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET: u64 = 65;
+    pub const SYSCALL_INPUT_GET_POINTER_POS: u64 = 66;
+    pub const SYSCALL_INPUT_GET_BUTTON_STATE: u64 = 67;
+    pub const SYSCALL_SPAWN_TASK: u64 = 64;
 }
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {
