@@ -71,6 +71,11 @@ pub const SYSCALL_INPUT_POLL: u64 = 60;
 pub const SYSCALL_INPUT_POLL_BATCH: u64 = 34;
 pub const SYSCALL_INPUT_HAS_EVENTS: u64 = 61;
 pub const SYSCALL_INPUT_SET_FOCUS: u64 = 62;
+pub const SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET: u64 = 65;
+pub const SYSCALL_INPUT_GET_POINTER_POS: u64 = 66;
+pub const SYSCALL_INPUT_GET_BUTTON_STATE: u64 = 67;
+// Task spawning
+pub const SYSCALL_SPAWN_TASK: u64 = 64;
 
 /// Shared memory access flags
 pub const SHM_ACCESS_RO: u32 = 0;
@@ -368,6 +373,16 @@ pub fn sys_halt() -> ! {
         syscall(SYSCALL_HALT, 0, 0, 0);
     }
     loop {}
+}
+
+/// Spawn a new userland task by name.
+/// The name must be a null-terminated byte string matching a known task name
+/// (e.g., b"file_manager\0").
+/// Returns task_id (> 0) on success, 0 on failure.
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_spawn_task(name: &[u8]) -> i32 {
+    unsafe { syscall(SYSCALL_SPAWN_TASK, name.as_ptr() as u64, name.len() as u64, 0) as i32 }
 }
 
 /// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
@@ -749,6 +764,35 @@ pub fn sys_input_set_keyboard_focus(target_task_id: u32) -> i64 {
 /// Set pointer focus to a task (compositor convenience function).
 pub fn sys_input_set_pointer_focus(target_task_id: u32) -> i64 {
     sys_input_set_focus(target_task_id, INPUT_FOCUS_POINTER)
+}
+
+/// Set pointer focus to a task with window offset for coordinate translation.
+/// The offset is subtracted from screen coordinates to get window-local coordinates.
+/// For a window at screen position (100, 50), pass offset_x=100, offset_y=50.
+pub fn sys_input_set_pointer_focus_with_offset(target_task_id: u32, offset_x: i32, offset_y: i32) -> i64 {
+    unsafe {
+        syscall(
+            SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET,
+            target_task_id as u64,
+            offset_x as u64,
+            offset_y as u64,
+        ) as i64
+    }
+}
+
+/// Get the current global pointer position (compositor only).
+/// Returns (x, y) in screen coordinates.
+pub fn sys_input_get_pointer_pos() -> (i32, i32) {
+    let result = unsafe { syscall(SYSCALL_INPUT_GET_POINTER_POS, 0, 0, 0) };
+    let x = (result >> 32) as i32;
+    let y = result as i32;
+    (x, y)
+}
+
+/// Get the current global pointer button state (compositor only).
+/// Returns button state as u8 (bit 0 = left, bit 1 = right, bit 2 = middle).
+pub fn sys_input_get_button_state() -> u8 {
+    unsafe { syscall(SYSCALL_INPUT_GET_BUTTON_STATE, 0, 0, 0) as u8 }
 }
 
 // =============================================================================

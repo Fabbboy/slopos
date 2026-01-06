@@ -307,13 +307,13 @@ static REGISTRY: Mutex<SharedBufferRegistry> = Mutex::new(SharedBufferRegistry::
 /// Create a new shared memory buffer.
 ///
 /// # Arguments
-/// * `owner_task` - Task ID of the creator (owner)
+/// * `owner_process` - Process ID of the creator (owner, from task.process_id)
 /// * `size` - Size in bytes (will be rounded up to page boundary)
 /// * `flags` - Allocation flags (currently only ALLOC_FLAG_ZERO supported)
 ///
 /// # Returns
 /// Buffer token on success, 0 on failure
-pub fn shm_create(owner_task: u32, size: u64, flags: u32) -> u32 {
+pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
     if size == 0 || size > 64 * 1024 * 1024 {
         // Limit to 64MB per buffer
         klog_info!("shm_create: invalid size {}", size);
@@ -349,7 +349,7 @@ pub fn shm_create(owner_task: u32, size: u64, flags: u32) -> u32 {
         phys_addr,
         size: aligned_size,
         pages,
-        owner_task,
+        owner_task: owner_process,
         token,
         active: true,
         mappings: [ShmMapping::empty(); MAX_MAPPINGS_PER_BUFFER],
@@ -362,11 +362,11 @@ pub fn shm_create(owner_task: u32, size: u64, flags: u32) -> u32 {
     };
 
     klog_debug!(
-        "shm_create: created buffer token={} size={} pages={} for task={}",
+        "shm_create: created buffer token={} size={} pages={} for process={}",
         token,
         aligned_size,
         pages,
-        owner_task
+        owner_process
     );
 
     token
@@ -375,16 +375,16 @@ pub fn shm_create(owner_task: u32, size: u64, flags: u32) -> u32 {
 /// Map a shared buffer into a task's address space.
 ///
 /// # Arguments
-/// * `task_id` - Task to map into
+/// * `process_id` - Process to map into (from task.process_id)
 /// * `token` - Buffer token from shm_create
 /// * `access` - Access permissions (ReadOnly or ReadWrite)
 ///
 /// # Returns
 /// Virtual address on success, 0 on failure
-pub fn shm_map(task_id: u32, token: u32, access: ShmAccess) -> u64 {
-    let page_dir = process_vm_get_page_dir(task_id);
+pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
+    let page_dir = process_vm_get_page_dir(process_id);
     if page_dir.is_null() {
-        klog_info!("shm_map: invalid task_id {}", task_id);
+        klog_info!("shm_map: invalid process_id {}", process_id);
         return 0;
     }
 
@@ -401,10 +401,10 @@ pub fn shm_map(task_id: u32, token: u32, access: ShmAccess) -> u64 {
     {
         let buffer = &registry.buffers[slot];
 
-        // Check if already mapped for this task
+        // Check if already mapped for this process
         for mapping in buffer.mappings.iter() {
-            if mapping.active && mapping.task_id == task_id {
-                klog_debug!("shm_map: already mapped for task {}", task_id);
+            if mapping.active && mapping.task_id == process_id {
+                klog_debug!("shm_map: already mapped for process {}", process_id);
                 return mapping.virt_addr;
             }
         }
@@ -423,7 +423,7 @@ pub fn shm_map(task_id: u32, token: u32, access: ShmAccess) -> u64 {
     let pages = registry.buffers[slot].pages;
 
     // Only owner can have RW access
-    let actual_access = if task_id == owner_task {
+    let actual_access = if process_id == owner_task {
         access
     } else {
         ShmAccess::ReadOnly
@@ -458,33 +458,33 @@ pub fn shm_map(task_id: u32, token: u32, access: ShmAccess) -> u64 {
     let buffer = &mut registry.buffers[slot];
     let mapping_slot = buffer.mappings.iter().position(|m| !m.active).unwrap();
     buffer.mappings[mapping_slot] = ShmMapping {
-        task_id,
+        task_id: process_id,
         virt_addr: vaddr,
         active: true,
     };
     buffer.mapping_count += 1;
 
     klog_debug!(
-        "shm_map: mapped token={} at vaddr={:#x} for task={} access={:?}",
+        "shm_map: mapped token={} at vaddr={:#x} for process={} access={:?}",
         token,
         vaddr,
-        task_id,
+        process_id,
         actual_access
     );
 
     vaddr
 }
 
-/// Unmap a shared buffer from a task's address space.
+/// Unmap a shared buffer from a process's address space.
 ///
 /// # Arguments
-/// * `task_id` - Task to unmap from
+/// * `process_id` - Process to unmap from (from task.process_id)
 /// * `virt_addr` - Virtual address returned by shm_map
 ///
 /// # Returns
 /// 0 on success, -1 on failure
-pub fn shm_unmap(task_id: u32, virt_addr: u64) -> c_int {
-    let page_dir = process_vm_get_page_dir(task_id);
+pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
+    let page_dir = process_vm_get_page_dir(process_id);
     if page_dir.is_null() {
         return -1;
     }
@@ -500,7 +500,7 @@ pub fn shm_unmap(task_id: u32, virt_addr: u64) -> c_int {
         }
 
         for (map_idx, mapping) in buffer.mappings.iter().enumerate() {
-            if mapping.active && mapping.task_id == task_id && mapping.virt_addr == virt_addr {
+            if mapping.active && mapping.task_id == process_id && mapping.virt_addr == virt_addr {
                 found_info = Some((buf_idx, map_idx, buffer.size));
                 break;
             }
@@ -531,9 +531,9 @@ pub fn shm_unmap(task_id: u32, virt_addr: u64) -> c_int {
     registry.free_vaddr(virt_addr, buffer_size);
 
     klog_debug!(
-        "shm_unmap: unmapped vaddr={:#x} for task={}, returned to free list",
+        "shm_unmap: unmapped vaddr={:#x} for process={}, returned to free list",
         virt_addr,
-        task_id
+        process_id
     );
 
     0
@@ -541,16 +541,16 @@ pub fn shm_unmap(task_id: u32, virt_addr: u64) -> c_int {
 
 /// Destroy a shared buffer and free its memory.
 ///
-/// Only the owner task can destroy a buffer.
+/// Only the owner process can destroy a buffer.
 /// All mappings will be forcibly unmapped.
 ///
 /// # Arguments
-/// * `task_id` - Task requesting destruction (must be owner)
+/// * `process_id` - Process requesting destruction (must be owner, from task.process_id)
 /// * `token` - Buffer token
 ///
 /// # Returns
 /// 0 on success, -1 on failure
-pub fn shm_destroy(task_id: u32, token: u32) -> c_int {
+pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
     let mut registry = REGISTRY.lock();
 
     let slot = match registry.find_by_token(token) {
@@ -559,10 +559,10 @@ pub fn shm_destroy(task_id: u32, token: u32) -> c_int {
     };
 
     // Only owner can destroy
-    if registry.buffers[slot].owner_task != task_id {
+    if registry.buffers[slot].owner_task != process_id {
         klog_info!(
-            "shm_destroy: task {} is not owner of token {}",
-            task_id,
+            "shm_destroy: process {} is not owner of token {}",
+            process_id,
             token
         );
         return -1;
@@ -615,7 +615,7 @@ pub fn shm_destroy(task_id: u32, token: u32) -> c_int {
         registry.free_vaddr(vaddr, buffer_size);
     }
 
-    klog_debug!("shm_destroy: destroyed token={} for task={}", token, task_id);
+    klog_debug!("shm_destroy: destroyed token={} for process={}", token, process_id);
 
     0
 }
@@ -645,7 +645,7 @@ pub fn shm_get_buffer_info(token: u32) -> (u64, usize, u32) {
 ///
 /// # Returns
 /// 0 on success, -1 on failure
-pub fn surface_attach(task_id: u32, token: u32, width: u32, height: u32) -> c_int {
+pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c_int {
     let mut registry = REGISTRY.lock();
 
     let slot = match registry.find_by_token(token) {
@@ -655,8 +655,8 @@ pub fn surface_attach(task_id: u32, token: u32, width: u32, height: u32) -> c_in
 
     let buffer = &mut registry.buffers[slot];
 
-    // Only owner can attach
-    if buffer.owner_task != task_id {
+    // Only owner can attach (owner_task stores process_id)
+    if buffer.owner_task != process_id {
         return -1;
     }
 
@@ -675,11 +675,11 @@ pub fn surface_attach(task_id: u32, token: u32, width: u32, height: u32) -> c_in
     buffer.surface_height = height;
 
     klog_debug!(
-        "surface_attach: token={} registered as {}x{} surface for task={}",
+        "surface_attach: token={} registered as {}x{} surface for process={}",
         token,
         width,
         height,
-        task_id
+        process_id
     );
 
     0
