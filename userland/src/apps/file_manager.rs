@@ -65,13 +65,17 @@ impl FileManager {
         self.entries = [UserFsEntry::new(); 32];
         
         let mut list = UserFsList {
-            entries: self.entries.as_mut_ptr(),
+            // SAFE: entries points to the valid array within self
+            entries: unsafe { self.entries.as_mut_ptr() },
             max_entries: 32,
             count: 0,
         };
         
-        // Safe because we pass valid pointers
-        sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
+        // SAFE: current_path is a valid buffer and list.entries is initialized as valid raw pointer
+        unsafe {
+            sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
+        }
+        
         self.entry_count = list.count;
     }
 
