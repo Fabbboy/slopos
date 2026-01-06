@@ -170,6 +170,9 @@ struct FileManager {
     entry_count: u32,
     scroll_top: i32,
     selected_index: i32,
+    dragging: bool,
+    drag_offset_x: i32,
+    drag_offset_y: i32,
 }
 
 impl FileManager {
@@ -183,6 +186,9 @@ impl FileManager {
             entry_count: 0,
             scroll_top: 0,
             selected_index: -1,
+            dragging: false,
+            drag_offset_x: 0,
+            drag_offset_y: 0,
         };
         fm.current_path[0] = b'/';
         fm.refresh();
@@ -267,7 +273,13 @@ impl FileManager {
                  return true;
              }
              
-             return true; // Title bar drag (future)
+             // Start Dragging if not on a button
+             if mx >= self.x && mx < self.x + FM_WIDTH {
+                 self.dragging = true;
+                 self.drag_offset_x = mx - self.x;
+                 self.drag_offset_y = my - self.y;
+                 return true;
+             }
         }
         
         // List items
@@ -660,8 +672,22 @@ impl WindowManager {
 
         // Handle File Manager interactions first (overlay)
         if self.file_manager.visible {
+             // Handle drag update first
+             if self.file_manager.dragging {
+                 if !self.mouse_pressed() {
+                     self.file_manager.dragging = false;
+                 } else {
+                     self.file_manager.x = self.mouse_x - self.file_manager.drag_offset_x;
+                     self.file_manager.y = self.mouse_y - self.file_manager.drag_offset_y;
+                     self.needs_full_redraw = true; // Force redraw on drag
+                 }
+                 return; // Consume input while dragging
+             }
+             
              if clicked && self.file_manager.handle_click(self.mouse_x, self.mouse_y) {
                  self.needs_full_redraw = true;
+                 // If dragging started in handle_click, we might want to continue processing move?
+                 // But handle_click returns true, so we redraw and next frame will handle drag update.
                  return;
              }
         }
