@@ -225,15 +225,19 @@ boot: iso-notests
 	fi; \
 	DISPLAY_ARGS="-display none -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
+	HAS_SDL=0; \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$$'; then \
+		HAS_SDL=1; \
+	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
@@ -277,15 +281,19 @@ boot-log: iso-notests
 	fi; \
 	DISPLAY_ARGS="-nographic -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
+	HAS_SDL=0; \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$$'; then \
+		HAS_SDL=1; \
+	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ]; then \
+		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
