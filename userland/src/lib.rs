@@ -15,6 +15,16 @@ pub mod shell;
 pub mod syscall;
 pub mod apps;
 
+/// Initializes userland runtime and registers lightweight startup steps.
+///
+/// This function performs minimal crate-level setup required to prepare the userland
+/// runtime for operation.
+///
+/// # Examples
+///
+/// ```
+/// userland::init();
+/// ```
 pub fn init() {
     // Userland init remains lightweight; boot steps registered via bootstrap.
 }

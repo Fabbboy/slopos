@@ -41,6 +41,21 @@ pub struct FileManager {
 }
 
 impl FileManager {
+    /// Creates a new FileManager positioned at (100, 100) with the path initialized to "/" and its entry list populated.
+    ///
+    /// The window is initially hidden and the in-memory entry buffer is refreshed from the filesystem so the manager starts with a current directory listing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let fm = FileManager::new();
+    /// assert_eq!(fm.x, 100);
+    /// assert_eq!(fm.y, 100);
+    /// assert_eq!(fm.visible, false);
+    /// assert_eq!(fm.current_path[0], b'/');
+    /// // entry_count reflects the number of entries populated by refresh()
+    /// assert!(fm.entry_count as usize <= fm.entries.len());
+    /// ```
     pub fn new() -> Self {
         let mut fm = Self {
             visible: false,
@@ -60,6 +75,19 @@ impl FileManager {
         fm
     }
 
+    /// Reloads the directory listing for the current path and updates the in-memory entries.
+    ///
+    /// This clears any previously stored entries, requests the filesystem to populate the
+    /// internal entries buffer for `current_path`, and updates `entry_count` to reflect
+    /// the number of entries returned by the filesystem.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut fm = FileManager::new();
+    /// // Should complete without panic and refresh internal entries for the current path.
+    /// fm.refresh();
+    /// ```
     pub fn refresh(&mut self) {
         // Clear entries first to avoid stale data issues
         self.entries = [UserFsEntry::new(); 32];
@@ -75,6 +103,24 @@ impl FileManager {
         self.entry_count = list.count;
     }
 
+    /// Change the FileManager's current path by entering a child directory or moving to the parent.
+    ///
+    /// If `name` is `b".."` the path is shortened to its parent component (stopping at the root).
+    /// Otherwise `name` is appended as a new path component if the resulting path fits within the
+    /// internal 128-byte buffer; if it does not fit, the path is left unchanged.
+    /// After changing the path this method refreshes the directory listing and resets scrolling and selection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut fm = FileManager::new();
+    /// fm.navigate(b"subdir");
+    /// // path contains "/subdir"
+    /// assert!(fm.current_path.windows(7).any(|w| w == b"/subdir"));
+    /// fm.navigate(b"..");
+    /// // returned to root "/"
+    /// assert_eq!(fm.current_path[1], 0);
+    /// ```
     fn navigate(&mut self, name: &[u8]) {
         if name == b".." {
              // Handle parent directory
@@ -114,11 +160,43 @@ impl FileManager {
         self.selected_index = -1;
     }
     
+    /// Determines whether a coordinate lies within the visible file manager window.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the manager is visible and the point (mx, my) is inside the window bounds, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let fm = FileManager { visible: true, x: 10, y: 20, ..FileManager::new() };
+    /// assert!(fm.hit_test(10, 20));
+    /// assert!(!fm.hit_test(0, 0));
+    /// ```
     #[allow(dead_code)]
     pub fn hit_test(&self, mx: i32, my: i32) -> bool {
         self.visible && mx >= self.x && mx < self.x + FM_WIDTH && my >= self.y && my < self.y + FM_HEIGHT
     }
     
+    /// Handle a mouse click inside the file manager window.
+    ///
+    /// Processes clicks on the title bar (close button, up navigation, or begin dragging)
+    /// and on list items (enter directory on click). If the window is not visible, the
+    /// click is ignored.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the click was handled (visibility changed, navigation performed, dragging started,
+    /// or a list item was activated), `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut fm = FileManager::new();
+    /// fm.visible = false;
+    /// // When not visible, clicks are ignored.
+    /// assert!(!fm.handle_click(0, 0));
+    /// ```
     pub fn handle_click(&mut self, mx: i32, my: i32) -> bool {
         if !self.visible { return false; }
         
@@ -169,6 +247,19 @@ impl FileManager {
         false
     }
 
+    /// Draws a square button with a centered label, using hover and close styles when applicable.
+    ///
+    /// The button is filled and the label is drawn with the window text color on the button background.
+    /// The `hover` and `is_close` flags select the button fill color.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Create a buffer and draw a hovered close button at (8,8) with size 16.
+    /// let mut buf = DrawBuffer::new();
+    /// let fm = FileManager::new();
+    /// fm.draw_button(&mut buf, 8, 8, 16, "X", true, true);
+    /// ```
     fn draw_button(
         &self,
         buf: &mut DrawBuffer,
@@ -191,6 +282,19 @@ impl FileManager {
         gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
     }
     
+    /// Renders the file manager window, title bar, buttons, and visible directory entries into `buf`.
+    ///
+    /// The method is a no-op when the file manager is not visible. It draws the window background,
+    /// title bar with the current path, close and up buttons, and each visible entry (directories
+    /// are colored differently from files).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut buf = DrawBuffer::new();
+    /// let fm = FileManager::new();
+    /// fm.draw(&mut buf);
+    /// ```
     pub fn draw(&self, buf: &mut DrawBuffer) {
         if !self.visible { return; }
         
