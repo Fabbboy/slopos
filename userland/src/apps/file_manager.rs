@@ -63,17 +63,11 @@ impl FileManager {
 
     /// Initialize the surface buffer for rendering
     fn init_surface(&mut self) -> bool {
-        use crate::syscall::sys_write;
-
-        let _ = sys_write(b"FM: init_surface start\n");
-
         // Get framebuffer info for bpp
         let mut fb_info = UserFbInfo::default();
         if sys_fb_info(&mut fb_info) != 0 {
-            let _ = sys_write(b"FM: fb_info failed\n");
             return false;
         }
-        let _ = sys_write(b"FM: fb_info ok\n");
 
         self.bytes_pp = ((fb_info.bpp as usize + 7) / 8) as u8;
         self.pitch = (self.width as usize) * (self.bytes_pp as usize);
@@ -81,21 +75,15 @@ impl FileManager {
         let buffer_size = self.pitch * (self.height as usize);
         let shm = match ShmBuffer::create(buffer_size) {
             Ok(buf) => buf,
-            Err(_) => {
-                let _ = sys_write(b"FM: ShmBuffer::create failed\n");
-                return false;
-            }
+            Err(_) => return false,
         };
-        let _ = sys_write(b"FM: shm created\n");
 
         if shm
             .attach_surface(self.width as u32, self.height as u32)
             .is_err()
         {
-            let _ = sys_write(b"FM: attach_surface failed\n");
             return false;
         }
-        let _ = sys_write(b"FM: surface attached\n");
 
         self.shm_buffer = Some(shm);
         true
@@ -314,30 +302,22 @@ impl FileManager {
 /// Main entry point for standalone file manager binary
 #[unsafe(link_section = ".user_text")]
 pub fn file_manager_main(_arg: *mut c_void) {
-    use crate::syscall::sys_write;
-
-    let _ = sys_write(b"FM: main start\n");
     let mut fm = FileManager::new();
-    let _ = sys_write(b"FM: FileManager created\n");
 
     // Initialize surface
     if !fm.init_surface() {
         // Surface init failed - just yield forever
-        let _ = sys_write(b"FM: init_surface FAILED, yielding forever\n");
         loop {
             sys_yield();
         }
     }
-    let _ = sys_write(b"FM: init_surface succeeded\n");
 
     // Set window title
     sys_surface_set_title("Files");
-    let _ = sys_write(b"FM: title set\n");
 
     // Initial draw
     fm.draw();
     let _ = sys_surface_commit();
-    let _ = sys_write(b"FM: initial draw done\n");
 
     // Main event loop
     loop {

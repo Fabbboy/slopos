@@ -361,14 +361,6 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
         format: DEFAULT_PIXEL_FORMAT,
     };
 
-    klog_debug!(
-        "shm_create: created buffer token={} size={} pages={} for process={}",
-        token,
-        aligned_size,
-        pages,
-        owner_process
-    );
-
     token
 }
 
@@ -463,14 +455,6 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
         active: true,
     };
     buffer.mapping_count += 1;
-
-    klog_debug!(
-        "shm_map: mapped token={} at vaddr={:#x} for process={} access={:?}",
-        token,
-        vaddr,
-        process_id,
-        actual_access
-    );
 
     vaddr
 }
@@ -673,14 +657,6 @@ pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c
 
     buffer.surface_width = width;
     buffer.surface_height = height;
-
-    klog_debug!(
-        "surface_attach: token={} registered as {}x{} surface for process={}",
-        token,
-        width,
-        height,
-        process_id
-    );
 
     0
 }

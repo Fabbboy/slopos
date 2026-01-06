@@ -1,7 +1,6 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::{mem, ptr, slice};
 
-use slopos_lib::klog_info;
 use spin::Mutex;
 
 pub const RAMFS_TYPE_FILE: c_int = 1;
@@ -327,7 +326,6 @@ fn ensure_initialized_locked(state: &mut RamfsState) -> c_int {
     );
     let _ = ramfs_create_directory_locked(state, TMP.as_ptr() as *const c_char);
 
-    klog_info!("ramfs: initialized");
     0
 }
 pub fn ramfs_get_root() -> *mut ramfs_node_t {
