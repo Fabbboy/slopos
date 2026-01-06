@@ -21,26 +21,10 @@ use crate::syscall::{
     CachedShmMapping, InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserWindowInfo,
 
 };
-use crate::apps::file_manager::{self, FileManager};
+use crate::apps::file_manager::FileManager;
+use crate::ui_utils;
 
-// UI Constants - Dark Roulette Theme
-const TITLE_BAR_HEIGHT: i32 = 24;
-const BUTTON_SIZE: i32 = 20;
-const BUTTON_PADDING: i32 = 2;
-const TASKBAR_HEIGHT: i32 = 32;
-const TASKBAR_BUTTON_WIDTH: i32 = 120;
-const TASKBAR_BUTTON_PADDING: i32 = 4;
-
-// Colors matching the dark roulette aesthetic
-const COLOR_TITLE_BAR: u32 = rgb(0x1E, 0x1E, 0x1E);
-const COLOR_TITLE_BAR_FOCUSED: u32 = rgb(0x2D, 0x2D, 0x30);
-const COLOR_BUTTON: u32 = rgb(0x3E, 0x3E, 0x42);
-const COLOR_BUTTON_HOVER: u32 = rgb(0x50, 0x50, 0x52);
-const COLOR_BUTTON_CLOSE_HOVER: u32 = rgb(0xE8, 0x11, 0x23);
-const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
-const COLOR_TASKBAR: u32 = rgb(0x25, 0x25, 0x26);
-const COLOR_CURSOR: u32 = rgb(0xFF, 0xFF, 0xFF);
-const COLOR_BACKGROUND: u32 = rgb(0x00, 0x11, 0x22);
+use crate::theme::*;
 
 
 // Window placeholder colors (until clients migrate to shared memory)
@@ -637,7 +621,7 @@ impl WindowManager {
     fn handle_taskbar_click(&mut self) {
         let files_btn_x = TASKBAR_BUTTON_PADDING;
         // Check Files button click
-        if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + file_manager::FM_BUTTON_WIDTH {
+        if self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH {
             self.file_manager.visible = !self.file_manager.visible;
             if self.file_manager.visible {
                 self.file_manager.refresh();
@@ -646,7 +630,7 @@ impl WindowManager {
             return;
         }
 
-        let mut x = TASKBAR_BUTTON_PADDING + file_manager::FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let button_width = TASKBAR_BUTTON_WIDTH;
@@ -690,7 +674,7 @@ impl WindowManager {
         gfx::font::draw_string(buf, window.x + 8, title_y + 4, title, COLOR_TEXT, color);
 
         // Close button (X)
-        self.draw_button(
+        ui_utils::draw_button(
             buf,
             window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING,
             title_y + BUTTON_PADDING,
@@ -701,7 +685,7 @@ impl WindowManager {
         );
 
         // Minimize button (_)
-        self.draw_button(
+        ui_utils::draw_button(
             buf,
             window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2),
             title_y + BUTTON_PADDING,
@@ -712,28 +696,6 @@ impl WindowManager {
         );
     }
 
-    /// Draw a button to the output buffer
-    fn draw_button(
-        &self,
-        buf: &mut DrawBuffer,
-        x: i32,
-        y: i32,
-        size: i32,
-        label: &str,
-        hover: bool,
-        is_close: bool,
-    ) {
-        let color = if hover && is_close {
-            COLOR_BUTTON_CLOSE_HOVER
-        } else if hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
-
-        gfx::fill_rect(buf, x, y, size, size, color);
-        gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
-    }
 
     /// Draw taskbar to the output buffer
     fn draw_taskbar(&self, buf: &mut DrawBuffer) {
@@ -754,7 +716,7 @@ impl WindowManager {
         let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
         let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
         
-        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + file_manager::FM_BUTTON_WIDTH 
+        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH 
                        && self.mouse_y >= btn_y && self.mouse_y < btn_y + btn_height;
         
         let files_color = if self.file_manager.visible { 
@@ -765,11 +727,11 @@ impl WindowManager {
              COLOR_BUTTON
         };
         
-        gfx::fill_rect(buf, files_btn_x, btn_y, file_manager::FM_BUTTON_WIDTH, btn_height, files_color);
+        gfx::fill_rect(buf, files_btn_x, btn_y, FM_BUTTON_WIDTH, btn_height, files_color);
         gfx::font::draw_string(buf, files_btn_x + 4, btn_y + 4, "Files", COLOR_TEXT, files_color);
 
         // Draw app buttons
-        let mut x = TASKBAR_BUTTON_PADDING + file_manager::FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;

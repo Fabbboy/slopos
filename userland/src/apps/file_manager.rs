@@ -1,30 +1,9 @@
 use crate::gfx::{self, rgb, DrawBuffer};
+use crate::ui_utils;
 use crate::syscall::{sys_fs_list, UserFsEntry, UserFsList};
 use core::str;
 
-// UI Constants - Duplicated/Shared from compositor style
-// In a larger system these would be in a theme module
-
-const BUTTON_SIZE: i32 = 20;
-const BUTTON_PADDING: i32 = 2;
-
-const COLOR_TITLE_BAR: u32 = rgb(0x1E, 0x1E, 0x1E);
-const COLOR_BUTTON: u32 = rgb(0x3E, 0x3E, 0x42);
-const COLOR_BUTTON_HOVER: u32 = rgb(0x50, 0x50, 0x52);
-const COLOR_BUTTON_CLOSE_HOVER: u32 = rgb(0xE8, 0x11, 0x23);
-const COLOR_TEXT: u32 = rgb(0xE0, 0xE0, 0xE0);
-
-// File Manager Constants
-pub const FM_WIDTH: i32 = 400;
-pub const FM_HEIGHT: i32 = 300;
-const FM_TITLE_HEIGHT: i32 = 24;
-const FM_ITEM_HEIGHT: i32 = 20;
-const FM_COLOR_BG: u32 = rgb(0x25, 0x25, 0x26);
-#[allow(dead_code)]
-const FM_COLOR_FG: u32 = rgb(0xE0, 0xE0, 0xE0);
-#[allow(dead_code)]
-const FM_COLOR_HL: u32 = rgb(0x3E, 0x3E, 0x42);
-pub const FM_BUTTON_WIDTH: i32 = 40; // Width of "Files" button on taskbar
+use crate::theme::*;
 
 pub struct FileManager {
     pub visible: bool,
@@ -66,15 +45,13 @@ impl FileManager {
         
         let mut list = UserFsList {
             // SAFE: entries points to the valid array within self
-            entries: unsafe { self.entries.as_mut_ptr() },
+            entries: self.entries.as_mut_ptr(),
             max_entries: 32,
             count: 0,
         };
         
         // SAFE: current_path is a valid buffer and list.entries is initialized as valid raw pointer
-        unsafe {
-            sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
-        }
+        sys_fs_list(self.current_path.as_ptr() as *const i8, &mut list);
         
         self.entry_count = list.count;
     }
@@ -99,7 +76,7 @@ impl FileManager {
             let mut len = 0;
             while len < 128 && self.current_path[len] != 0 { len += 1; }
             
-            if len + 1 + name.len() < 128 {
+            if len + 1 + name.len() + 1 <= 128 {
                 if len > 1 || (len == 1 && self.current_path[0] != b'/') {
                     self.current_path[len] = b'/';
                     len += 1;
@@ -111,6 +88,7 @@ impl FileManager {
                 for (i, &b) in name.iter().enumerate() {
                     self.current_path[len + i] = b;
                 }
+                self.current_path[len + name.len()] = 0;
             }
         }
         self.refresh();
@@ -173,28 +151,7 @@ impl FileManager {
         false
     }
 
-    fn draw_button(
-        &self,
-        buf: &mut DrawBuffer,
-        x: i32,
-        y: i32,
-        size: i32,
-        label: &str,
-        hover: bool,
-        is_close: bool,
-    ) {
-        let color = if hover && is_close {
-            COLOR_BUTTON_CLOSE_HOVER
-        } else if hover {
-            COLOR_BUTTON_HOVER
-        } else {
-            COLOR_BUTTON
-        };
 
-        gfx::fill_rect(buf, x, y, size, size, color);
-        gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
-    }
-    
     pub fn draw(&self, buf: &mut DrawBuffer) {
         if !self.visible { return; }
         
@@ -212,11 +169,11 @@ impl FileManager {
         gfx::font::draw_string(buf, self.x + 8, self.y + 4, path_str, COLOR_TEXT, COLOR_TITLE_BAR);
         
         // Close Button
-        self.draw_button(buf, self.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING, self.y + BUTTON_PADDING, BUTTON_SIZE, "X", false, true);
+        ui_utils::draw_button(buf, self.x + FM_WIDTH - BUTTON_SIZE - BUTTON_PADDING, self.y + BUTTON_PADDING, BUTTON_SIZE, "X", false, true);
 
         // Up Button
         let up_x = self.x + FM_WIDTH - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
-        self.draw_button(buf, up_x, self.y + BUTTON_PADDING, BUTTON_SIZE, "^", false, false);
+        ui_utils::draw_button(buf, up_x, self.y + BUTTON_PADDING, BUTTON_SIZE, "^", false, false);
 
         // Content Area
         let list_y = self.y + FM_TITLE_HEIGHT;

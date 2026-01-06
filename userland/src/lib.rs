@@ -14,6 +14,8 @@ pub mod runtime;
 pub mod shell;
 pub mod syscall;
 pub mod apps;
+pub mod theme;
+pub mod ui_utils;
 
 pub fn init() {
     // Userland init remains lightweight; boot steps registered via bootstrap.
