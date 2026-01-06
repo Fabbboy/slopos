@@ -1046,6 +1046,8 @@ fn kernel_draw_text(
 }
 
 fn kernel_sleep_ms(_ctx: *mut c_void, ms: u32) {
+    // Flush after each frame so virtio-gpu scanout updates during animation.
+    crate::framebuffer::framebuffer_flush();
     pit_poll_delay_ms(ms);
 }
 

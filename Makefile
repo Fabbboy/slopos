@@ -19,6 +19,8 @@ BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
 TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on
 VIDEO ?= 0
+VIRGL ?= 0
+QEMU_DISPLAY ?= auto
 
 DEBUG ?= 0
 DEBUG_CMDLINE :=
@@ -220,6 +222,8 @@ boot: iso-notests
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
 	VIRGL_ARGS=""; \
+	QEMU_VIRGL=$${QEMU_VIRGL:-$(VIRGL)}; \
+	QEMU_DISPLAY=$${QEMU_DISPLAY:-$(QEMU_DISPLAY)}; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
@@ -230,14 +234,22 @@ boot: iso-notests
 		HAS_SDL=1; \
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
@@ -276,6 +288,8 @@ boot-log: iso-notests
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
 	VIRGL_ARGS=""; \
+	QEMU_VIRGL=$${QEMU_VIRGL:-$(VIRGL)}; \
+	QEMU_DISPLAY=$${QEMU_DISPLAY:-$(QEMU_DISPLAY)}; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
@@ -286,14 +300,22 @@ boot-log: iso-notests
 		HAS_SDL=1; \
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \

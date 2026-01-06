@@ -80,6 +80,31 @@ fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }
 
+fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
+    if cmdline.is_null() {
+        return false;
+    }
+
+    let haystack = unsafe { CStr::from_ptr(cmdline) }.to_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn boot_video_backend() -> video::VideoBackend {
+    let cmdline = boot_get_cmdline();
+    if cmdline_contains(cmdline, "video=virgl") {
+        video::VideoBackend::Virgl
+    } else {
+        video::VideoBackend::Framebuffer
+    }
+}
+
 fn boot_step_debug_subsystem_fn() {
     klog_debug!("Debug/logging subsystem initialized.");
 }
@@ -135,7 +160,12 @@ fn boot_step_timer_setup_fn() {
             "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
     }
-    video::init(fb);
+    let backend = boot_video_backend();
+    if backend == video::VideoBackend::Virgl {
+        klog_info!("BOOT: deferring video init until PCI for virgl");
+        return;
+    }
+    video::init(fb, backend);
 }
 
 fn boot_step_apic_setup_fn() {
@@ -197,6 +227,12 @@ fn boot_step_pci_init_fn() {
         }
     } else {
         klog_info!("WARNING: PCI initialization failed");
+    }
+
+    let backend = boot_video_backend();
+    if backend == video::VideoBackend::Virgl {
+        let fb = limine_protocol::boot_info().framebuffer;
+        video::init(fb, backend);
     }
 }
 

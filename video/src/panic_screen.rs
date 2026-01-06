@@ -213,5 +213,7 @@ pub fn display_panic_screen(
         PANIC_BG_COLOR,
     );
 
+    framebuffer::framebuffer_flush();
+
     true
 }

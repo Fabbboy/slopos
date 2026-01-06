@@ -64,6 +64,7 @@ impl FramebufferState {
 static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
 static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> =
     Mutex::new(const { FramebufferInfoC::new() });
+static FRAMEBUFFER_FLUSH: Mutex<Option<fn() -> c_int>> = Mutex::new(None);
 
 // SAFETY: FbState contains base pointer to MMIO-mapped framebuffer memory.
 // Thread-safety is guaranteed because:
@@ -379,6 +380,20 @@ pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
 }
 
+pub fn register_flush_callback(callback: fn() -> c_int) {
+    let mut guard = FRAMEBUFFER_FLUSH.lock();
+    *guard = Some(callback);
+}
+
+pub fn framebuffer_flush() -> c_int {
+    let guard = FRAMEBUFFER_FLUSH.lock();
+    if let Some(cb) = *guard {
+        cb()
+    } else {
+        0
+    }
+}
+
 /// Copy from a shared memory buffer (by physical address) to the MMIO framebuffer.
 /// This is the "page flip" operation for the userland compositor.
 ///
@@ -419,5 +434,5 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
         );
     }
 
-    0
+    framebuffer_flush()
 }
