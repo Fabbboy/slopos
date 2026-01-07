@@ -11,7 +11,6 @@ pub mod apic;
 pub mod fate;
 pub mod input_event;
 pub mod interrupt_test;
-pub mod interrupt_test_config;
 pub mod interrupts;
 pub mod ioapic;
 pub mod irq;

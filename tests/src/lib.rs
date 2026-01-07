@@ -4,12 +4,14 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_drivers::interrupt_test as intr;
-use slopos_drivers::interrupt_test_config as intr_cfg;
+pub use slopos_drivers::interrupts::{
+    InterruptTestConfig, Verbosity as InterruptTestVerbosity,
+};
+use slopos_drivers::interrupts::{
+    SUITE_BASIC, SUITE_MEMORY, SUITE_CONTROL, SUITE_SCHEDULER,
+};
 use slopos_drivers::wl_currency;
 use slopos_lib::klog_info;
-
-pub type InterruptTestConfig = intr_cfg::interrupt_test_config;
-pub type InterruptTestVerbosity = intr_cfg::interrupt_test_verbosity;
 
 pub const TESTS_MAX_SUITES: usize = 8;
 const TESTS_MAX_CYCLES_PER_MS: u64 = 3_000_000;
@@ -200,7 +202,7 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
     };
 
     let cfg = unsafe { &*config };
-    if cfg.enabled == 0 {
+    if !cfg.enabled {
         klog_info!("TESTS: Harness disabled\n");
         return 0;
     }
@@ -276,10 +278,6 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
 
 mod suites {
     use super::*;
-    use slopos_drivers::interrupt_test_config::{
-        INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY,
-        INTERRUPT_TEST_SUITE_SCHEDULER,
-    };
 
     const INTERRUPT_NAME: &[u8] = b"interrupt\0";
     const VM_NAME: &[u8] = b"vm\0";
@@ -292,9 +290,9 @@ mod suites {
     const VIRTIO_GPU_NAME: &[u8] = b"virtio_gpu\0";
     pub static INTERRUPT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
         name: INTERRUPT_NAME.as_ptr() as *const c_char,
-        mask_bit: INTERRUPT_TEST_SUITE_BASIC
-            | INTERRUPT_TEST_SUITE_MEMORY
-            | INTERRUPT_TEST_SUITE_CONTROL,
+        mask_bit: SUITE_BASIC
+            | SUITE_MEMORY
+            | SUITE_CONTROL,
         run: Some(run_interrupt_suite),
     };
 
@@ -305,7 +303,7 @@ mod suites {
 
         let mut scoped = unsafe { *config };
         scoped.suite_mask &=
-            INTERRUPT_TEST_SUITE_BASIC | INTERRUPT_TEST_SUITE_MEMORY | INTERRUPT_TEST_SUITE_CONTROL;
+            SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL;
 
         if scoped.suite_mask == 0 {
             if let Some(out_ref) = unsafe { out.as_mut() } {
@@ -702,42 +700,42 @@ mod suites {
     pub fn register_system_suites() {
         static VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VM_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_vm_suite),
         };
         static HEAP_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: HEAP_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_heap_suite),
         };
         static RAMFS_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: RAMFS_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_ramfs_suite),
         };
         static PRIVSEP_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: PRIVSEP_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_privsep_suite),
         };
         static CTX_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: CTXSWITCH_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_context_switch_regression),
         };
         static ROULETTE_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: ROULETTE_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_roulette_mapping_suite),
         };
         static ROULETTE_EXEC_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: ROULETTE_EXEC_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_roulette_exec_suite),
         };
         static VIRTIO_GPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VIRTIO_GPU_NAME.as_ptr() as *const c_char,
-            mask_bit: INTERRUPT_TEST_SUITE_SCHEDULER,
+            mask_bit: SUITE_SCHEDULER,
             run: Some(run_virtio_gpu_driver_suite),
         };
 

@@ -3,7 +3,7 @@ use core::ffi::{CStr, c_char};
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    InterruptTestConfig, InterruptTestVerbosity, TestRunSummary, TestSuiteResult,
+    TestRunSummary, TestSuiteResult,
     tests_register_suite, tests_register_system_suites, tests_reset_registry, tests_run_all,
     INTERRUPT_SUITE_DESC,
 };
@@ -18,10 +18,7 @@ use crate::safe_stack::safe_stack_init;
 use slopos_drivers::{
     apic::{apic_detect, apic_init},
     interrupt_test::interrupt_test_request_shutdown,
-    interrupt_test_config::{
-        interrupt_test_config_init_defaults, interrupt_test_config_parse_cmdline,
-        interrupt_test_suite_string, interrupt_test_verbosity_string,
-    },
+    interrupts::config_from_cmdline,
     ioapic::init,
     mouse::mouse_init,
     pci::{pci_get_primary_gpu, pci_init},
@@ -237,33 +234,22 @@ fn boot_step_pci_init_fn() {
 }
 
 fn boot_step_interrupt_tests_fn() -> i32 {
-    let mut test_config = InterruptTestConfig {
-        enabled: 0,
-        verbosity: InterruptTestVerbosity::INTERRUPT_TEST_VERBOSITY_SUMMARY,
-        suite_mask: 0,
-        timeout_ms: 0,
-        shutdown_on_complete: 0,
-        stacktrace_demo: 0,
-    };
-
-    unsafe {
-        interrupt_test_config_init_defaults(&mut test_config);
-    }
-
+    // Parse command line to get test config
     let cmdline = boot_get_cmdline();
-    if !cmdline.is_null() {
-        unsafe {
-            interrupt_test_config_parse_cmdline(&mut test_config, cmdline);
-        }
-    }
+    let cmdline_str = if cmdline.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(cmdline) }.to_str().ok()
+    };
+    let mut test_config = config_from_cmdline(cmdline_str);
 
-    if test_config.enabled != 0 && test_config.suite_mask == 0 {
+    if test_config.enabled && test_config.suite_mask == 0 {
         klog_info!("INTERRUPT_TEST: No suites selected, skipping execution");
-        test_config.enabled = 0;
-        test_config.shutdown_on_complete = 0;
+        test_config.enabled = false;
+        test_config.shutdown = false;
     }
 
-    if test_config.enabled == 0 {
+    if !test_config.enabled {
         klog_debug!("INTERRUPT_TEST: Harness disabled");
         return 0;
     }
@@ -271,12 +257,8 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     klog_info!("INTERRUPT_TEST: Running orchestrated harness");
 
     if klog::is_enabled_level(KlogLevel::Debug) {
-        let suites = interrupt_test_suite_string(test_config.suite_mask);
-        let suites_str = unsafe { CStr::from_ptr(suites) }.to_str().unwrap_or("?");
-        let verbosity = interrupt_test_verbosity_string(test_config.verbosity);
-        let verbosity_str = unsafe { CStr::from_ptr(verbosity) }.to_str().unwrap_or("?");
-        klog_info!("INTERRUPT_TEST: Suites -> {}", suites_str);
-        klog_info!("INTERRUPT_TEST: Verbosity -> {}", verbosity_str);
+        klog_info!("INTERRUPT_TEST: Suites -> {}", test_config.suite());
+        klog_info!("INTERRUPT_TEST: Verbosity -> {}", test_config.verbosity);
         klog_info!("INTERRUPT_TEST: Timeout (ms) -> {}", test_config.timeout_ms);
     }
 
@@ -307,7 +289,7 @@ fn boot_step_interrupt_tests_fn() -> i32 {
 
     let rc = tests_run_all(&test_config, &mut summary);
 
-    if test_config.shutdown_on_complete != 0 {
+    if test_config.shutdown {
         klog_debug!("INTERRUPT_TEST: Auto shutdown enabled after harness");
         interrupt_test_request_shutdown(summary.failed as i32);
     }

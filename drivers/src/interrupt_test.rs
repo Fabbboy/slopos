@@ -6,9 +6,8 @@ use core::ptr;
 
 use slopos_lib::{io, klog_info};
 
-use crate::interrupt_test_config::{
-    INTERRUPT_TEST_SUITE_BASIC, INTERRUPT_TEST_SUITE_CONTROL, INTERRUPT_TEST_SUITE_MEMORY,
-    INTERRUPT_TEST_SUITE_SCHEDULER, interrupt_test_config,
+use crate::interrupts::{
+    InterruptTestConfig, SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER,
 };
 use crate::sched_bridge;
 
@@ -74,7 +73,7 @@ fn cstr_to_str(ptr: *const c_char) -> &'static str {
         .to_str()
         .unwrap_or("<invalid utf-8>")
 }
-pub fn interrupt_test_init(config: *const interrupt_test_config) {
+pub fn interrupt_test_init(config: *const InterruptTestConfig) {
     let _ = config;
     unsafe {
         TEST_CTX = test_context {
@@ -247,27 +246,27 @@ pub fn run_control_flow_tests() -> c_int {
 pub fn run_scheduler_tests() -> c_int {
     1
 }
-pub fn run_all_interrupt_tests(config: *const interrupt_test_config) -> c_int {
+pub fn run_all_interrupt_tests(config: *const InterruptTestConfig) -> c_int {
     if config.is_null() {
         return 0;
     }
     let cfg = unsafe { *config };
-    if cfg.enabled == 0 {
+    if !cfg.enabled {
         klog_info!("INTERRUPT_TEST: Skipping interrupt tests (disabled)");
         return 0;
     }
 
     let mut total_passed = 0;
-    if (cfg.suite_mask & INTERRUPT_TEST_SUITE_BASIC) != 0 {
+    if (cfg.suite_mask & SUITE_BASIC) != 0 {
         total_passed += run_basic_exception_tests();
     }
-    if (cfg.suite_mask & INTERRUPT_TEST_SUITE_MEMORY) != 0 {
+    if (cfg.suite_mask & SUITE_MEMORY) != 0 {
         total_passed += run_memory_access_tests();
     }
-    if (cfg.suite_mask & INTERRUPT_TEST_SUITE_CONTROL) != 0 {
+    if (cfg.suite_mask & SUITE_CONTROL) != 0 {
         total_passed += run_control_flow_tests();
     }
-    if (cfg.suite_mask & INTERRUPT_TEST_SUITE_SCHEDULER) != 0 {
+    if (cfg.suite_mask & SUITE_SCHEDULER) != 0 {
         total_passed += run_scheduler_tests();
     }
 
@@ -276,7 +275,7 @@ pub fn run_all_interrupt_tests(config: *const interrupt_test_config) -> c_int {
         TEST_STATS.passed_cases = TEST_STATS.passed_cases.saturating_add(total_passed as u32);
     }
 
-    if cfg.shutdown_on_complete != 0 {
+    if cfg.shutdown {
         interrupt_test_request_shutdown(if total_passed >= 0 { 0 } else { 1 });
     }
 
