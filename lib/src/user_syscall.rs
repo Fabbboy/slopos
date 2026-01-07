@@ -2,7 +2,7 @@ use core::arch::asm;
 use core::ffi::{c_char, c_int, c_void};
 use core::hint::unreachable_unchecked;
 
-use crate::syscall_numbers::*;
+use slopos_abi::syscall::*;
 use crate::user_syscall_defs::*;
 
 #[inline(always)]

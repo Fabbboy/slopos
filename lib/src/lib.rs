@@ -243,7 +243,6 @@ pub mod ring_buffer;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
-pub mod syscall_numbers;
 pub mod user_syscall;
 pub mod user_syscall_defs;
 
@@ -258,7 +257,6 @@ pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ring_buffer::RingBuffer;
 pub use spinlock::Spinlock;
 pub use stacktrace::StacktraceEntry;
-pub use syscall_numbers::*;
 pub use user_syscall::*;
 pub use user_syscall_defs::*;
 
