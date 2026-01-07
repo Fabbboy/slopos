@@ -4,7 +4,7 @@ use core::ptr;
 use crate::syscall_types::{InterruptFrame, Task};
 
 pub const USER_IO_MAX_BYTES: usize = 512;
-pub const USER_PATH_MAX: usize = 128;
+pub use slopos_abi::fs::USER_PATH_MAX;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
