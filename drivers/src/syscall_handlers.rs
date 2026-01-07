@@ -12,7 +12,7 @@ use crate::random;
 use crate::serial;
 use crate::wl_currency;
 use crate::syscall_common::{
-    SyscallDisposition, SyscallHandler, USER_IO_MAX_BYTES, syscall_bounded_from_user,
+    SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_return_err,
 };
 use crate::syscall_context::SyscallContext;
@@ -1022,15 +1022,6 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
 // =============================================================================
 // Syscall table and dispatch
 // =============================================================================
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct SyscallEntry {
-    pub handler: Option<SyscallHandler>,
-    pub name: *const c_char,
-}
-
-unsafe impl Sync for SyscallEntry {}
 
 static SYSCALL_TABLE: [SyscallEntry; 128] = {
     let mut table: [SyscallEntry; 128] = [SyscallEntry {

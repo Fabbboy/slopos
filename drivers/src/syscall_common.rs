@@ -16,10 +16,15 @@ pub enum SyscallDisposition {
 pub type SyscallHandler = fn(*mut Task, *mut InterruptFrame) -> SyscallDisposition;
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct SyscallEntry {
     pub handler: Option<SyscallHandler>,
     pub name: *const c_char,
 }
+
+// SAFETY: SyscallEntry contains only function pointers and raw pointers to static strings,
+// which are inherently thread-safe for read-only access in the static syscall table.
+unsafe impl Sync for SyscallEntry {}
 
 use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
 
