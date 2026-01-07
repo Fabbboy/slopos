@@ -8,40 +8,12 @@ pub use slopos_abi::{
     InputEvent, InputEventData, InputEventType, PixelFormat, SurfaceRole,
     UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
     INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, MAX_WINDOW_DAMAGE_REGIONS,
+    SHM_ACCESS_RO, SHM_ACCESS_RW,
     USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
 };
 
-// Re-export syscall numbers from canonical ABI source
+// Re-export syscall numbers and data structures from canonical ABI source
 pub use slopos_abi::syscall::*;
-
-/// Shared memory access flags
-pub const SHM_ACCESS_RO: u32 = 0;
-pub const SHM_ACCESS_RW: u32 = 1;
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserFbInfo {
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u8,
-    pub pixel_format: u8,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserSysInfo {
-    pub total_pages: u32,
-    pub free_pages: u32,
-    pub allocated_pages: u32,
-    pub total_tasks: u32,
-    pub active_tasks: u32,
-    pub task_context_switches: u64,
-    pub scheduler_context_switches: u64,
-    pub scheduler_yields: u64,
-    pub ready_tasks: u32,
-    pub schedule_calls: u32,
-}
 
 // Type aliases for backwards compatibility (use WindowInfo from slopos_abi)
 pub type UserWindowDamageRect = WindowDamageRect;

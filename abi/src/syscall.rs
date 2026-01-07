@@ -104,3 +104,34 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 // =============================================================================
 
 pub const SYSCALL_SPAWN_TASK: u64 = 64;
+
+// =============================================================================
+// Syscall data structures
+// =============================================================================
+
+/// Framebuffer information returned by SYSCALL_FB_INFO
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserFbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u8,
+    pub pixel_format: u8,
+}
+
+/// System information returned by SYSCALL_SYS_INFO
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct UserSysInfo {
+    pub total_pages: u32,
+    pub free_pages: u32,
+    pub allocated_pages: u32,
+    pub total_tasks: u32,
+    pub active_tasks: u32,
+    pub task_context_switches: u64,
+    pub scheduler_context_switches: u64,
+    pub scheduler_yields: u64,
+    pub ready_tasks: u32,
+    pub schedule_calls: u32,
+}
