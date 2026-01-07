@@ -13,8 +13,9 @@ use crate::hw::ioapic_defs::{
 use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
 
+use slopos_abi::arch::IRQ_BASE_VECTOR;
+
 const IRQ_LINES: usize = 16;
-const IRQ_BASE_VECTOR: u8 = 32;
 
 const LEGACY_IRQ_TIMER: u8 = 0;
 const LEGACY_IRQ_KEYBOARD: u8 = 1;

@@ -19,9 +19,9 @@ const FILE_OPEN_WRITE: u32 = 1 << 1;
 const FILE_OPEN_CREAT: u32 = 1 << 2;
 const FILE_OPEN_APPEND: u32 = 1 << 3;
 
+use slopos_mm::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES};
+
 const FILEIO_MAX_OPEN_FILES: usize = 32;
-const MAX_PROCESSES: usize = 256;
-const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
 #[derive(Copy, Clone)]
 struct FileDescriptor {

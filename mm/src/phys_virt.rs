@@ -9,7 +9,7 @@ use crate::memory_reservations::{
     mm_reservations_find_option,
 };
 
-const PAGE_SIZE_4KB: usize = 0x1000;
+use crate::mm_constants::PAGE_SIZE_4KB;
 
 use crate::memory_reservations::mm_reservation_type_name;
 use crate::paging::virt_to_phys;
@@ -91,7 +91,7 @@ pub fn mm_zero_physical_page(phys_addr: u64) -> c_int {
     }
 
     unsafe {
-        ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE_4KB);
+        ptr::write_bytes(virt as *mut u8, 0, PAGE_SIZE_4KB as usize);
     }
     0
 }

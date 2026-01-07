@@ -3,10 +3,9 @@ use core::ptr;
 
 use slopos_lib::klog_info;
 
+use crate::mm_constants::{HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB};
+
 const MM_REGION_STATIC_CAP: usize = 4096;
-const PAGE_SIZE_4KB: u64 = 0x1000;
-const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-const HHDM_VIRT_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 pub const MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS: u32 = 1 << 0;
 pub const MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT: u32 = 1 << 1;

@@ -146,8 +146,8 @@ fn surface_set_title_bridge(task_id: u32, title_ptr: *const u8, title_len: usize
     let ptr_addr = title_ptr as u64;
     let len = title_len.min(31);
     let end_addr = ptr_addr.saturating_add(len as u64);
-    const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
-    if ptr_addr >= USER_SPACE_END || end_addr > USER_SPACE_END {
+    use slopos_mm::mm_constants::USER_SPACE_END_VA;
+    if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
         return -1;
     }
 

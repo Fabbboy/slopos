@@ -19,7 +19,7 @@ pub use slopos_abi::task::{
     TASK_STATE_TERMINATED,
 };
 
-const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000;
+use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = fn(*mut c_void);
@@ -113,9 +113,8 @@ fn user_entry_is_allowed(addr: u64) -> bool {
     }
     // Allow entry points in PROCESS_CODE_START_VA range (for ELF binaries)
     // ELF binaries are loaded at 0x400000, allow a reasonable range
-    const PROCESS_CODE_START: u64 = 0x0000_0000_0040_0000;
     const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000; // 1MB range
-    addr >= PROCESS_CODE_START && addr < PROCESS_CODE_END
+    addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
 }
 
 fn task_slot_index(task: *const Task) -> Option<usize> {
@@ -365,7 +364,7 @@ pub fn task_create(
             let text_start_aligned = align_down(text_start as usize, PAGE_SIZE_4KB as usize) as u64;
             // Calculate offset from aligned start to match map_user_sections mapping
             let offset = entry_addr - text_start_aligned;
-            task_ref.entry_point = USER_CODE_BASE + offset;
+            task_ref.entry_point = PROCESS_CODE_START_VA + offset;
         } else {
             task_ref.entry_point = entry_addr;
         }

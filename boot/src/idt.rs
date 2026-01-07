@@ -34,8 +34,7 @@ pub const EXCEPTION_ALIGNMENT_CHECK: u8 = 17;
 pub const EXCEPTION_MACHINE_CHECK: u8 = 18;
 pub const EXCEPTION_SIMD_FP_EXCEPTION: u8 = 19;
 
-pub const IRQ_BASE_VECTOR: u8 = 32;
-pub const SYSCALL_VECTOR: u8 = 0x80;
+pub use slopos_abi::arch::{IRQ_BASE_VECTOR, SYSCALL_VECTOR};
 
 pub const IDT_ENTRIES: usize = 256;
 

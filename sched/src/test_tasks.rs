@@ -17,12 +17,9 @@ use crate::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
 
+use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
+
 // IdtEntry is now imported from abi via crate::task
-
-const SYSCALL_VECTOR: u8 = 0x80;
-
-const GDT_USER_CODE_SELECTOR: u64 = 0x23;
-const GDT_USER_DATA_SELECTOR: u64 = 0x1B;
 
 /* ========================================================================
  * TEST TASK IMPLEMENTATIONS
@@ -228,7 +225,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
         }
         let cs = (*task_info).context.cs;
         let ss = (*task_info).context.ss;
-        if cs != GDT_USER_CODE_SELECTOR || ss != GDT_USER_DATA_SELECTOR {
+        if cs != GDT_USER_CODE_SELECTOR as u64 || ss != GDT_USER_DATA_SELECTOR as u64 {
             klog_info!(
                 "PRIVSEP_TEST: user task selectors incorrect (cs=0x{:x} ss=0x{:x})",
                 cs,

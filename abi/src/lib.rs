@@ -11,6 +11,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod arch;
 pub mod error;
 pub mod fs;
 pub mod input;

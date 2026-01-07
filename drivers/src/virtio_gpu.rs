@@ -44,7 +44,7 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 const VIRTIO_GPU_QUEUE_CONTROL: u16 = 0;
 const VIRTIO_GPU_QUEUE_SIZE: u16 = 64;
-const PAGE_SIZE_4KB: usize = 0x1000;
+use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
@@ -1515,8 +1515,8 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
             return None;
         }
 
-        let size_aligned = align_up(size as usize, PAGE_SIZE_4KB) as u64;
-        let pages = (size_aligned / PAGE_SIZE_4KB as u64) as u32;
+        let size_aligned = align_up(size as usize, PAGE_SIZE_4KB as usize) as u64;
+        let pages = (size_aligned / PAGE_SIZE_4KB) as u32;
         let phys = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
         if phys == 0 {
             // Recoverable failure: backing store allocation failed.
