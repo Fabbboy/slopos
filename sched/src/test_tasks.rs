@@ -8,7 +8,7 @@ use slopos_lib::klog_info;
 
 use crate::scheduler;
 use crate::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    IdtEntry, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_NORMAL, Task, TaskContext, TaskIterateCb, task_create, task_get_info,
     task_get_total_yields, task_iterate_active, task_shutdown_all, task_state_to_string,
 };
@@ -17,16 +17,7 @@ use crate::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
 
-#[repr(C, packed)]
-pub struct IdtEntry {
-    offset_low: u16,
-    selector: u16,
-    ist: u8,
-    type_attr: u8,
-    offset_mid: u16,
-    offset_high: u32,
-    zero: u32,
-}
+// IdtEntry is now imported from abi via crate::task
 
 const SYSCALL_VECTOR: u8 = 0x80;
 

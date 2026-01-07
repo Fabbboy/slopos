@@ -102,20 +102,6 @@ use slopos_mm::user_copy;
 // Use assembly functions from FFI boundary
 use crate::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
 
-#[repr(C)]
-pub struct ProcessPageDir {
-    pub pml4: *mut PageTable,
-    pub pml4_phys: u64,
-    pub ref_count: u32,
-    pub process_id: u32,
-    pub next: *mut ProcessPageDir,
-}
-
-#[repr(C, align(4096))]
-pub struct PageTable {
-    pub entries: [u64; 512],
-}
-
 fn scheduler_mut() -> *mut Scheduler {
     &raw mut SCHEDULER
 }

@@ -7,10 +7,7 @@ use crate::memory_layout::mm_get_kernel_heap_start;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
 
-#[repr(C)]
-pub struct Task {
-    pub process_id: u32,
-}
+// Task type is now imported from slopos_abi when needed
 
 static KERNEL_GUARD_CHECKED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TASK_PROVIDER: Mutex<Option<fn() -> u32>> = Mutex::new(None);

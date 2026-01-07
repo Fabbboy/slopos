@@ -14,5 +14,6 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 [dependencies]
+slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }
 spin.workspace = true

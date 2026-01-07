@@ -4,21 +4,17 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::gdt::gdt_set_ist;
-use crate::idt::idt_set_ist;
+use crate::idt::{
+    idt_set_ist, EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
+    EXCEPTION_STACK_FAULT,
+};
 use crate::kernel_panic::kernel_panic;
 
-const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFFFFFFB0000000;
-const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x00010000;
-const EXCEPTION_STACK_GUARD_SIZE: u64 = 0x1000;
-const EXCEPTION_STACK_PAGES: u32 = 8;
-const PAGE_SIZE_4KB: u64 = 0x1000;
-const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES as u64 * PAGE_SIZE_4KB;
-const PAGE_KERNEL_RW: u64 = 0x003;
-
-const EXCEPTION_DOUBLE_FAULT: u8 = 8;
-const EXCEPTION_STACK_FAULT: u8 = 12;
-const EXCEPTION_GENERAL_PROTECTION: u8 = 13;
-const EXCEPTION_PAGE_FAULT: u8 = 14;
+// Import exception stack constants from mm
+use slopos_mm::mm_constants::{
+    EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
+    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_KERNEL_RW, PAGE_SIZE_4KB,
+};
 
 #[repr(C)]
 pub struct ExceptionStackInfoConfig {
@@ -133,7 +129,7 @@ fn find_stack_index_by_address(addr: u64) -> Option<usize> {
 
 fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
     for page in 0..EXCEPTION_STACK_PAGES {
-        let virt_addr = stack.stack_base + page as u64 * PAGE_SIZE_4KB;
+        let virt_addr = stack.stack_base + page * PAGE_SIZE_4KB;
         let phys_addr = alloc_page_frame(0);
         if phys_addr == 0 {
             kernel_panic(

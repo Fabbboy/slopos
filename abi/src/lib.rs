@@ -18,6 +18,7 @@ pub mod pixel;
 pub mod sched_traits;
 pub mod shm;
 pub mod surface;
+pub mod task;
 pub mod window;
 
 pub use error::*;
@@ -27,4 +28,5 @@ pub use pixel::*;
 pub use sched_traits::*;
 pub use shm::*;
 pub use surface::*;
+pub use task::*;
 pub use window::*;

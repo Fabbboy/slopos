@@ -39,17 +39,8 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 
 pub const IDT_ENTRIES: usize = 256;
 
-#[repr(C, packed)]
-#[derive(Copy, Clone)]
-pub struct IdtEntry {
-    offset_low: u16,
-    selector: u16,
-    ist: u8,
-    type_attr: u8,
-    offset_mid: u16,
-    offset_high: u32,
-    zero: u32,
-}
+// IdtEntry is now imported from abi
+pub use slopos_abi::task::IdtEntry;
 
 #[repr(C, packed)]
 struct IdtPtr {
@@ -107,47 +98,10 @@ use slopos_mm::phys_virt::mm_phys_to_virt;
 
 use slopos_drivers::sched_bridge;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Task {
-    pub task_id: u32,
-    pub name: [u8; 32],
-    pub state: u8,
-    pub priority: u8,
-    pub flags: u16,
-    pub process_id: u32,
-    pub stack_base: u64,
-    pub stack_size: u64,
-    pub stack_pointer: u64,
-    pub kernel_stack_base: u64,
-    pub kernel_stack_top: u64,
-    pub kernel_stack_size: u64,
-    pub entry_point: u64,
-    pub entry_arg: u64,
-    pub context: [u8; 0xC8], // padding for context structure
-    pub time_slice: u64,
-    pub time_slice_remaining: u64,
-    pub total_runtime: u64,
-    pub creation_time: u64,
-    pub yield_count: u32,
-    pub last_run_timestamp: u64,
-    pub waiting_on_task_id: u32,
-    pub user_started: u8,
-    pub context_from_user: u8,
-    pub exit_reason: u16,
-    pub fault_reason: u16,
-    pub exit_code: u32,
-    pub fate_token: u32,
-    pub fate_value: u32,
-    pub fate_pending: u8,
-}
-
-const TASK_EXIT_REASON_USER_FAULT: u16 = 2;
-const TASK_FAULT_USER_PAGE: u16 = 1;
-const TASK_FAULT_USER_GP: u16 = 2;
-const TASK_FAULT_USER_UD: u16 = 3;
-const TASK_FAULT_USER_DEVICE_NA: u16 = 4;
-const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
+// Task and related types are now imported from abi
+use slopos_abi::task::{
+    Task, TaskExitReason, TaskFaultReason, INVALID_TASK_ID,
+};
 
 unsafe extern "C" {
     fn isr0();
@@ -445,7 +399,7 @@ fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
     unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
 }
 
-fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: &'static CStr) {
+fn terminate_user_task(reason: TaskFaultReason, frame: &slopos_lib::InterruptFrame, detail: &'static CStr) {
     let task = sched_bridge::boot_get_current_task() as *mut Task;
     let tid = if task.is_null() {
         INVALID_TASK_ID
@@ -489,7 +443,7 @@ fn terminate_user_task(reason: u16, frame: &slopos_lib::InterruptFrame, detail: 
     kdiag_dump_interrupt_frame(frame as *const _);
     if !task.is_null() {
         unsafe {
-            (*task).exit_reason = TASK_EXIT_REASON_USER_FAULT;
+            (*task).exit_reason = TaskExitReason::UserFault;
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
             wl_award_loss();
@@ -534,7 +488,7 @@ pub fn exception_bound_range(frame: *mut slopos_lib::InterruptFrame) {
 pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
-            TASK_FAULT_USER_UD,
+            TaskFaultReason::UserUd,
             unsafe { &*frame },
             cstr_from_bytes(b"invalid opcode in user mode\0"),
         );
@@ -547,7 +501,7 @@ pub fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
 pub fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
-            TASK_FAULT_USER_DEVICE_NA,
+            TaskFaultReason::UserDeviceNa,
             unsafe { &*frame },
             cstr_from_bytes(b"device not available in user mode\0"),
         );
@@ -579,7 +533,7 @@ pub fn exception_stack_fault(frame: *mut slopos_lib::InterruptFrame) {
 pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     if in_user(unsafe { &*frame }) {
         terminate_user_task(
-            TASK_FAULT_USER_GP,
+            TaskFaultReason::UserGp,
             unsafe { &*frame },
             cstr_from_bytes(b"general protection from user mode\0"),
         );
@@ -650,9 +604,9 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         if !task_ptr.is_null() {
             pid = unsafe { (*task_ptr).process_id };
             unsafe {
-                let ctx_bytes = (*task_ptr).context.as_ptr();
-                ctx_rip = core::ptr::read_unaligned(ctx_bytes.add(0x80) as *const u64);
-                ctx_rsp = core::ptr::read_unaligned(ctx_bytes.add(0x38) as *const u64);
+                // TaskContext is packed, use addr_of! to get raw pointers
+                ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rip));
+                ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rsp));
             }
             let dir = process_vm::process_vm_get_page_dir(pid);
             if !dir.is_null() {
@@ -698,7 +652,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
             ctx_rsp
         );
         terminate_user_task(
-            TASK_FAULT_USER_PAGE,
+            TaskFaultReason::UserPage,
             unsafe { &*frame },
             cstr_from_bytes(b"user page fault\0"),
         );
