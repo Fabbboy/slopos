@@ -1162,7 +1162,7 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
 
         for i in 0..list.count {
             let entry = &entries[i as usize];
-            if entry.r#type == 1 {
+            if entry.is_directory() {
                 shell_write(b"[");
                 shell_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
                 shell_write(b"]\n");

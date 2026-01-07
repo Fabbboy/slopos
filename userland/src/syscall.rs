@@ -6,8 +6,9 @@ use core::ptr::NonNull;
 // Re-export all ABI types from slopos_abi for userland consumers
 pub use slopos_abi::{
     InputEvent, InputEventData, InputEventType, PixelFormat, SurfaceRole,
-    WindowDamageRect, WindowInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER,
-    MAX_WINDOW_DAMAGE_REGIONS,
+    UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
+    INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, MAX_WINDOW_DAMAGE_REGIONS,
+    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
 };
 
 pub const SYSCALL_YIELD: u64 = 0;
@@ -81,11 +82,6 @@ pub const SYSCALL_SPAWN_TASK: u64 = 64;
 pub const SHM_ACCESS_RO: u32 = 0;
 pub const SHM_ACCESS_RW: u32 = 1;
 
-pub const USER_FS_OPEN_READ: u32 = 0x1;
-pub const USER_FS_OPEN_WRITE: u32 = 0x2;
-pub const USER_FS_OPEN_CREAT: u32 = 0x4;
-pub const USER_FS_OPEN_APPEND: u32 = 0x8;
-
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
 pub struct UserFbInfo {
@@ -94,45 +90,6 @@ pub struct UserFbInfo {
     pub pitch: u32,
     pub bpp: u8,
     pub pixel_format: u8,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct UserFsEntry {
-    pub name: [u8; 64],
-    pub r#type: u8,
-    pub size: u32,
-}
-
-impl UserFsEntry {
-    pub const fn new() -> Self {
-        Self {
-            name: [0; 64],
-            r#type: 0,
-            size: 0,
-        }
-    }
-}
-
-impl Default for UserFsEntry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserFsStat {
-    pub r#type: u8,
-    pub size: u32,
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserFsList {
-    pub entries: *mut UserFsEntry,
-    pub max_entries: u32,
-    pub count: u32,
 }
 
 #[repr(C)]

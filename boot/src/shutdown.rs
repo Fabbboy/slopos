@@ -2,7 +2,7 @@ use core::arch::asm;
 use core::ffi::{CStr, c_char};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{cpu, io, klog_info};
+use slopos_lib::{COM1_BASE, cpu, io, klog_info};
 
 static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
@@ -18,7 +18,6 @@ use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 fn serial_flush() {
     // Best-effort drain by waiting for line status transmit empty bit.
     const LINE_STATUS_PORT_OFFSET: u16 = 5;
-    const COM1_BASE: u16 = 0x3F8;
     for _ in 0..1024 {
         let lsr = unsafe { io::inb(COM1_BASE + LINE_STATUS_PORT_OFFSET) };
         if (lsr & 0x40) != 0 {

@@ -182,7 +182,7 @@ impl FileManager {
 
             if entry_idx >= 0 && entry_idx < self.entry_count as i32 {
                 let entry = self.entries[entry_idx as usize];
-                if entry.r#type == 1 {
+                if entry.is_directory() {
                     // Directory - navigate into it
                     let mut name_len = 0;
                     while name_len < 64 && entry.name[name_len] != 0 {
@@ -288,7 +288,7 @@ impl FileManager {
             let name = str::from_utf8(&entry.name[..name_len]).unwrap_or("?");
 
             // Color: blue for directories, white for files
-            let color = if entry.r#type == 1 {
+            let color = if entry.is_directory() {
                 rgb(0x40, 0x80, 0xFF)
             } else {
                 COLOR_TEXT

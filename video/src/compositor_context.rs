@@ -308,14 +308,6 @@ impl SurfaceState {
     fn export_damage(&self) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
         self.committed_damage.export_to_window_format()
     }
-
-    /// Clear committed damage after compositor acknowledges it.
-    /// Currently unused - damage persists until next commit to prevent loss on failed renders.
-    /// Will be needed when implementing explicit damage acknowledgement.
-    #[allow(dead_code)]
-    fn clear_committed_damage(&mut self) {
-        self.committed_damage.clear();
-    }
 }
 
 // =============================================================================

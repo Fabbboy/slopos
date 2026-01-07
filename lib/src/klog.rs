@@ -4,7 +4,8 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::io;
 
-const COM1_BASE: u16 = 0x3f8;
+/// COM1 serial port base address - canonical definition for the codebase
+pub const COM1_BASE: u16 = 0x3F8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

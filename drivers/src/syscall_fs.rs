@@ -7,6 +7,8 @@
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 
+use slopos_abi::{UserFsEntry, UserFsList, UserFsStat, USER_FS_MAX_ENTRIES};
+
 use crate::syscall_common::{
     SyscallDisposition, USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
@@ -14,28 +16,7 @@ use crate::syscall_common::{
 use crate::syscall_context::SyscallContext;
 use crate::syscall_types::{INVALID_PROCESS_ID, InterruptFrame, Task};
 
-const USER_FS_MAX_ENTRIES: u32 = 64;
 type RamfsNode = ramfs_node_t;
-
-#[repr(C)]
-pub struct UserFsEntry {
-    pub name: [c_char; 64],
-    pub type_: u8,
-    pub size: u32,
-}
-
-#[repr(C)]
-pub struct UserFsStat {
-    pub type_: u8,
-    pub size: u32,
-}
-
-#[repr(C)]
-pub struct UserFsList {
-    pub entries: *mut UserFsEntry,
-    pub max_entries: u32,
-    pub count: u32,
-}
 
 use slopos_fs::fileio::{
     file_close_fd, file_open_for_process, file_read_fd, file_unlink_path, file_write_fd,
@@ -331,11 +312,14 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
                 continue;
             }
 
+            // Copy filename to userland buffer.
+            // IMPORTANT: This exact pattern (iter_mut + zip) is required.
+            // Other approaches (copy_from_slice, index loops) cause rendering slowdown.
             let cstr = CStr::from_ptr((*entry_ptr).name);
             let name_bytes = cstr.to_bytes();
             let nlen = name_bytes.len().min(dst.name.len());
             for (dst_byte, src_byte) in dst.name[..nlen].iter_mut().zip(name_bytes[..nlen].iter()) {
-                *dst_byte = *src_byte as i8;
+                *dst_byte = *src_byte;
             }
             if nlen < dst.name.len() {
                 dst.name[nlen] = 0;

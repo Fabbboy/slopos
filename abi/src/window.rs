@@ -24,84 +24,10 @@ pub struct WindowDamageRect {
 }
 
 impl WindowDamageRect {
-    /// Create an invalid (empty) damage rect
-    #[inline]
-    pub const fn invalid() -> Self {
-        Self {
-            x0: 0,
-            y0: 0,
-            x1: -1,
-            y1: -1,
-        }
-    }
-
-    /// Create a damage rect from position and size
-    #[inline]
-    pub const fn from_xywh(x: i32, y: i32, w: i32, h: i32) -> Self {
-        Self {
-            x0: x,
-            y0: y,
-            x1: x + w - 1,
-            y1: y + h - 1,
-        }
-    }
-
     /// Check if this rect is valid (non-empty)
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.x1 >= self.x0 && self.y1 >= self.y0
-    }
-
-    /// Calculate the width of this rect
-    #[inline]
-    pub fn width(&self) -> i32 {
-        if self.is_valid() {
-            self.x1 - self.x0 + 1
-        } else {
-            0
-        }
-    }
-
-    /// Calculate the height of this rect
-    #[inline]
-    pub fn height(&self) -> i32 {
-        if self.is_valid() {
-            self.y1 - self.y0 + 1
-        } else {
-            0
-        }
-    }
-
-    /// Calculate the area of this rect
-    #[inline]
-    pub fn area(&self) -> i32 {
-        self.width() * self.height()
-    }
-
-    /// Check if this rect intersects another
-    #[inline]
-    pub fn intersects(&self, other: &Self) -> bool {
-        self.x0 <= other.x1
-            && self.x1 >= other.x0
-            && self.y0 <= other.y1
-            && self.y1 >= other.y0
-    }
-
-    /// Compute the union (bounding box) of two rects
-    #[inline]
-    pub fn union(&self, other: &Self) -> Self {
-        Self {
-            x0: self.x0.min(other.x0),
-            y0: self.y0.min(other.y0),
-            x1: self.x1.max(other.x1),
-            y1: self.y1.max(other.y1),
-        }
-    }
-
-    /// Merge this rect with another, returning the union
-    #[inline]
-    pub fn merge(&self, other: &Self) -> Self {
-        self.union(other)
     }
 }
 

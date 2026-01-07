@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod fs;
 pub mod input;
 pub mod pixel;
 pub mod sched_traits;
@@ -20,6 +21,7 @@ pub mod surface;
 pub mod window;
 
 pub use error::*;
+pub use fs::*;
 pub use input::*;
 pub use pixel::*;
 pub use sched_traits::*;

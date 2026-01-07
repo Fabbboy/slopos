@@ -4,14 +4,15 @@
 // Standard COM Port Base Addresses
 // ============================================================================
 
-/// COM1 base address
-pub const COM1_BASE: u16 = 0x3f8;
+// Re-export COM1_BASE from lib (single source of truth)
+pub use slopos_lib::COM1_BASE;
+
 /// COM2 base address
-pub const COM2_BASE: u16 = 0x2f8;
+pub const COM2_BASE: u16 = 0x2F8;
 /// COM3 base address
-pub const COM3_BASE: u16 = 0x3e8;
+pub const COM3_BASE: u16 = 0x3E8;
 /// COM4 base address
-pub const COM4_BASE: u16 = 0x2e8;
+pub const COM4_BASE: u16 = 0x2E8;
 
 // ============================================================================
 // UART Register Offsets (8250/16450/16550 family)

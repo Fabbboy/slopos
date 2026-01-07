@@ -3,7 +3,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Mutex;
-use slopos_lib::cpu;
+use slopos_lib::{COM1_BASE, cpu};
 
 use crate::keyboard;
 use crate::sched_bridge;
@@ -11,7 +11,6 @@ use crate::serial;
 use crate::syscall_types::{Task, TASK_STATE_BLOCKED, TASK_STATE_READY};
 
 const TTY_MAX_WAITERS: usize = 32;
-const COM1_BASE: u16 = 0x3F8;
 
 #[repr(C)]
 struct TtyWaitQueue {
