@@ -5,8 +5,6 @@
 pub mod syscall_macros;
 pub mod syscall_context;
 
-pub mod hw;
-
 pub mod apic;
 pub mod fate;
 pub mod input_event;

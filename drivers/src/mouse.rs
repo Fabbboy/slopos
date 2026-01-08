@@ -1,6 +1,6 @@
 use slopos_lib::{cpu, klog_debug, klog_info};
 
-use crate::hw::ps2_defs::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
+use slopos_abi::arch::x86_64::ports::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;

@@ -6,11 +6,11 @@ use slopos_lib::io;
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
-use crate::hw::ioapic_defs::{
+use slopos_abi::arch::x86_64::ioapic::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
-use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
+use slopos_abi::arch::x86_64::ports::{PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;

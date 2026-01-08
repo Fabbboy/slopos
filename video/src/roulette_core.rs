@@ -3,6 +3,7 @@ use slopos_drivers::video_bridge::{VideoError, VideoResult};
 use slopos_drivers::pit::pit_poll_delay_ms;
 
 use crate::{framebuffer, font, graphics};
+use crate::graphics::GraphicsContext;
 
 const ROULETTE_BLANK_COLOR: u32 = 0x1E1E_1EFF;
 const ROULETTE_BLANK_HIGHLIGHT: u32 = 0x3333_33FF;
@@ -975,8 +976,23 @@ pub fn roulette_run(backend: *const RouletteBackend, fate_number: u32) -> i32 {
     0
 }
 
-fn kernel_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
-    let fb = framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)?;
+fn kernel_get_size(ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
+    if let Some(ctx) = unsafe { (ctx as *const GraphicsContext).as_ref() } {
+        unsafe {
+            if !w.is_null() {
+                *w = ctx.width() as i32;
+            }
+            if !h.is_null() {
+                *h = ctx.height() as i32;
+            }
+        }
+        return Ok(());
+    }
+
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return Err(VideoError::NoFramebuffer),
+    };
     unsafe {
         if !w.is_null() {
             *w = fb.width as i32;
@@ -989,59 +1005,69 @@ fn kernel_get_size(_ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
 }
 
 fn kernel_fill_rect(
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
     x: i32,
     y: i32,
     w: i32,
     h: i32,
     color: u32,
 ) -> VideoResult {
-    graphics::graphics_draw_rect_filled_fast_status(x, y, w, h, color)
+    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }
+        .ok_or(VideoError::Invalid)?;
+    graphics::graphics_draw_rect_filled_fast_ctx(ctx, x, y, w, h, color)
 }
 
 fn kernel_draw_line(
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
     x0: i32,
     y0: i32,
     x1: i32,
     y1: i32,
     color: u32,
 ) -> VideoResult {
-    graphics::graphics_draw_line_status(x0, y0, x1, y1, color)
+    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }
+        .ok_or(VideoError::Invalid)?;
+    graphics::graphics_draw_line_ctx(ctx, x0, y0, x1, y1, color)
 }
 
 fn kernel_draw_circle(
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
     cx: i32,
     cy: i32,
     radius: i32,
     color: u32,
 ) -> VideoResult {
-    graphics::graphics_draw_circle_status(cx, cy, radius, color)
+    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }
+        .ok_or(VideoError::Invalid)?;
+    graphics::graphics_draw_circle_ctx(ctx, cx, cy, radius, color)
 }
 
 fn kernel_draw_circle_filled(
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
     cx: i32,
     cy: i32,
     radius: i32,
     color: u32,
 ) -> VideoResult {
-    graphics::graphics_draw_circle_filled_status(cx, cy, radius, color)
+    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }
+        .ok_or(VideoError::Invalid)?;
+    graphics::graphics_draw_circle_filled_ctx(ctx, cx, cy, radius, color)
 }
 
 fn kernel_draw_text(
-    _ctx: *mut c_void,
+    ctx: *mut c_void,
     x: i32,
     y: i32,
     text: *const u8,
     fg: u32,
     bg: u32,
 ) -> VideoResult {
+    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }
+        .ok_or(VideoError::Invalid)?;
     if text.is_null() {
         return Err(VideoError::Invalid);
     }
-    let rc = font::font_draw_string(x, y, text as *const c_char, fg, bg);
+    let rc = font::font_draw_string_ctx(ctx, x, y, text as *const c_char, fg, bg);
     if rc == 0 { Ok(()) } else { Err(VideoError::Invalid) }
 }
 
@@ -1052,8 +1078,9 @@ fn kernel_sleep_ms(_ctx: *mut c_void, ms: u32) {
 }
 
 pub fn roulette_draw_kernel(fate_number: u32) -> VideoResult {
+    let mut gfx_ctx = GraphicsContext::new()?;
     let backend = RouletteBackend {
-        ctx: core::ptr::null_mut(),
+        ctx: &mut gfx_ctx as *mut GraphicsContext as *mut c_void,
         get_size: Some(kernel_get_size),
         fill_rect: Some(kernel_fill_rect),
         draw_line: Some(kernel_draw_line),
@@ -1063,7 +1090,9 @@ pub fn roulette_draw_kernel(fate_number: u32) -> VideoResult {
         sleep_ms: Some(kernel_sleep_ms),
     };
 
-    if roulette_run(&backend as *const RouletteBackend, fate_number) == 0 {
+    let result = roulette_run(&backend as *const RouletteBackend, fate_number);
+
+    if result == 0 {
         Ok(())
     } else {
         Err(VideoError::Invalid)

@@ -3,7 +3,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
-use crate::hw::apic_defs::*;
+use slopos_abi::arch::x86_64::apic::*;
+use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_FEAT_ECX_X2APIC};
 use crate::sched_bridge;
 use crate::wl_currency;
 

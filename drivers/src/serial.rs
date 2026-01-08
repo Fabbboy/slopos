@@ -2,7 +2,17 @@ use core::fmt::{self, Write};
 use slopos_lib::io;
 use spin::Mutex;
 
-use crate::hw::serial_defs::*;
+use slopos_abi::arch::x86_64::ports::{
+    COM1_BASE,
+    UART_REG_RBR as REG_RBR, UART_REG_IER as REG_IER, UART_REG_IIR as REG_IIR,
+    UART_REG_LCR as REG_LCR, UART_REG_MCR as REG_MCR, UART_REG_LSR as REG_LSR,
+    UART_REG_SCR as REG_SCR, UART_LCR_DLAB as LCR_DLAB,
+    UART_IIR_FIFO_MASK as IIR_FIFO_MASK, UART_IIR_FIFO_ENABLED as IIR_FIFO_ENABLED,
+    UART_FCR_ENABLE_FIFO as FCR_ENABLE_FIFO, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
+    UART_FCR_CLEAR_TX as FCR_CLEAR_TX, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD,
+    UART_LSR_DATA_READY as LSR_DATA_READY, UART_LSR_TX_EMPTY as LSR_TX_EMPTY,
+    UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS, UART_MCR_AUX2 as MCR_AUX2,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartType {

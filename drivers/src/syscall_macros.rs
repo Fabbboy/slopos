@@ -5,113 +5,155 @@
 //! - Argument extraction from registers
 //! - Common error handling patterns
 //! - W/L currency tracking
+//!
+//! # Usage
+//!
+//! Due to Rust's macro hygiene, you must pass identifier names for `ctx` and `args`:
+//!
+//! ```ignore
+//! define_syscall!(syscall_random_next(ctx, args) {
+//!     let value = random::random_next();
+//!     ctx.ok(value as u64)
+//! });
+//! ```
+//!
+//! For handlers requiring task_id or process_id, also pass those identifiers:
+//!
+//! ```ignore
+//! define_syscall!(syscall_surface_commit(ctx, args, task_id) requires task_id {
+//!     let rc = video_bridge::surface_commit(task_id);
+//!     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+//! });
+//! ```
 
 /// Main syscall definition macro.
-///
-/// # Variants
-///
-/// ## Simple handler (no requirements)
-/// ```ignore
-/// define_syscall!(syscall_random_next() {
-///     let value = random::random_next();
-///     ctx.ok(value as u64)
-/// });
-/// ```
-///
-/// ## Task-requiring handler
-/// ```ignore
-/// define_syscall!(syscall_surface_commit() requires task {
-///     let task_id = ctx.require_task_id()?;
-///     let rc = video_bridge::surface_commit(task_id);
-///     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
-/// });
-/// ```
-///
-/// ## Compositor-only handler
-/// ```ignore
-/// define_syscall!(syscall_drain_queue() requires compositor {
-///     video_bridge::drain_queue();
-///     ctx.ok(0)
-/// });
-/// ```
 #[macro_export]
 macro_rules! define_syscall {
     // Pattern 1: Simple handler, no requirements
-    ($name:ident() $body:block) => {
+    // Usage: define_syscall!(name(ctx, args) { body })
+    ($name:ident($ctx:ident, $args:ident) $body:block) => {
         pub fn $name(
             task: *mut $crate::syscall_types::Task,
             frame: *mut $crate::syscall_types::InterruptFrame,
         ) -> $crate::syscall_common::SyscallDisposition {
-            let _ = task; // suppress unused warning
-            let Some(ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+            let _ = task;
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
                 return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
             };
-            let _args = ctx.args();
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
             $body
         }
     };
 
-    // Pattern 2: Requires valid task (null check with loss)
-    ($name:ident() requires task $body:block) => {
+    // Pattern 2: Requires valid task_id (extracts and validates)
+    // Usage: define_syscall!(name(ctx, args, task_id) requires task_id { body })
+    ($name:ident($ctx:ident, $args:ident, $task_id:ident) requires task_id $body:block) => {
         pub fn $name(
             task: *mut $crate::syscall_types::Task,
             frame: *mut $crate::syscall_types::InterruptFrame,
         ) -> $crate::syscall_common::SyscallDisposition {
-            let Some(ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
                 return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
             };
-            if let Err(disp) = ctx.require_task() {
+            #[allow(unused_variables)]
+            let $task_id = match $ctx.require_task_id() {
+                Ok(id) => id,
+                Err(d) => return d,
+            };
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
+            $body
+        }
+    };
+
+    // Pattern 3: Requires valid process_id (extracts and validates != INVALID)
+    // Usage: define_syscall!(name(ctx, args, process_id) requires process_id { body })
+    ($name:ident($ctx:ident, $args:ident, $process_id:ident) requires process_id $body:block) => {
+        pub fn $name(
+            task: *mut $crate::syscall_types::Task,
+            frame: *mut $crate::syscall_types::InterruptFrame,
+        ) -> $crate::syscall_common::SyscallDisposition {
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+                return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
+            };
+            #[allow(unused_variables)]
+            let $process_id = match $ctx.require_process_id() {
+                Ok(id) => id,
+                Err(d) => return d,
+            };
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
+            $body
+        }
+    };
+
+    // Pattern 4: Requires both task_id and process_id
+    // Usage: define_syscall!(name(ctx, args, task_id, process_id) requires task_and_process { body })
+    ($name:ident($ctx:ident, $args:ident, $task_id:ident, $process_id:ident) requires task_and_process $body:block) => {
+        pub fn $name(
+            task: *mut $crate::syscall_types::Task,
+            frame: *mut $crate::syscall_types::InterruptFrame,
+        ) -> $crate::syscall_common::SyscallDisposition {
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+                return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
+            };
+            #[allow(unused_variables)]
+            let $task_id = match $ctx.require_task_id() {
+                Ok(id) => id,
+                Err(d) => return d,
+            };
+            #[allow(unused_variables)]
+            let $process_id = match $ctx.require_process_id() {
+                Ok(id) => id,
+                Err(d) => return d,
+            };
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
+            $body
+        }
+    };
+
+    // Pattern 5: Requires compositor flag
+    // Usage: define_syscall!(name(ctx, args) requires compositor { body })
+    ($name:ident($ctx:ident, $args:ident) requires compositor $body:block) => {
+        pub fn $name(
+            task: *mut $crate::syscall_types::Task,
+            frame: *mut $crate::syscall_types::InterruptFrame,
+        ) -> $crate::syscall_common::SyscallDisposition {
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+                return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
+            };
+            if let Err(disp) = $ctx.require_compositor() {
                 return disp;
             }
-            let _args = ctx.args();
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
             $body
         }
     };
 
-    // Pattern 3: Requires compositor flag
-    ($name:ident() requires compositor $body:block) => {
+    // Pattern 6: Requires display exclusive flag
+    // Usage: define_syscall!(name(ctx, args) requires display_exclusive { body })
+    ($name:ident($ctx:ident, $args:ident) requires display_exclusive $body:block) => {
         pub fn $name(
             task: *mut $crate::syscall_types::Task,
             frame: *mut $crate::syscall_types::InterruptFrame,
         ) -> $crate::syscall_common::SyscallDisposition {
-            let Some(ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
+            #[allow(unused_variables)]
+            let Some($ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
                 return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
             };
-            if let Err(disp) = ctx.require_compositor() {
+            if let Err(disp) = $ctx.require_display_exclusive() {
                 return disp;
             }
-            let _args = ctx.args();
-            $body
-        }
-    };
-
-    // Pattern 4: Requires display exclusive flag
-    ($name:ident() requires display_exclusive $body:block) => {
-        pub fn $name(
-            task: *mut $crate::syscall_types::Task,
-            frame: *mut $crate::syscall_types::InterruptFrame,
-        ) -> $crate::syscall_common::SyscallDisposition {
-            let Some(ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
-                return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
-            };
-            if let Err(disp) = ctx.require_display_exclusive() {
-                return disp;
-            }
-            let _args = ctx.args();
-            $body
-        }
-    };
-
-    // Pattern 5: Requires valid process (task + process_id check)
-    ($name:ident() requires process $body:block) => {
-        pub fn $name(
-            task: *mut $crate::syscall_types::Task,
-            frame: *mut $crate::syscall_types::InterruptFrame,
-        ) -> $crate::syscall_common::SyscallDisposition {
-            let Some(ctx) = $crate::syscall_context::SyscallContext::new(task, frame) else {
-                return $crate::syscall_common::syscall_return_err(frame, u64::MAX);
-            };
-            let _args = ctx.args();
+            #[allow(unused_variables)]
+            let $args = $ctx.args();
             $body
         }
     };

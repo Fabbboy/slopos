@@ -2,7 +2,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_lib::{cpu, io, klog_debug, klog_info};
 
-use crate::hw::pit_defs::*;
+use slopos_abi::arch::x86_64::ports::{
+    PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0_PORT, PIT_COMMAND_ACCESS_LOHI,
+    PIT_COMMAND_BINARY, PIT_COMMAND_CHANNEL0, PIT_COMMAND_MODE_SQUARE,
+    PIT_COMMAND_PORT, PIT_DEFAULT_FREQUENCY_HZ, PIT_IRQ_LINE,
+};
 use crate::irq;
 
 static CURRENT_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(0);
@@ -92,20 +96,22 @@ pub fn pit_poll_delay_ms(ms: u32) {
         return;
     }
 
-    let freq = {
-        let f = CURRENT_FREQUENCY_HZ.load(Ordering::SeqCst);
-        if f == 0 { PIT_DEFAULT_FREQUENCY_HZ } else { f }
-    };
     let reload = {
         let d = CURRENT_RELOAD_DIVISOR.load(Ordering::SeqCst);
         if d == 0 { 0x10000 } else { d }
     };
 
-    let ticks_needed = ((ms as u64) * freq as u64 / 1000) as u32;
+    // Calculate ticks needed in raw PIT frequency (1.193182 MHz).
+    // The pit_read_count() returns raw PIT counter values, so we must use
+    // PIT_BASE_FREQUENCY_HZ, not the configured timer frequency.
+    let ticks_needed = ((ms as u64) * (PIT_BASE_FREQUENCY_HZ as u64) / 1000) as u32;
     let mut last = pit_read_count();
     let mut elapsed: u32 = 0;
 
     while elapsed < ticks_needed {
+        // Prevent the compiler from optimizing this loop
+        core::hint::spin_loop();
+
         let current = pit_read_count();
         if current <= last {
             elapsed = elapsed.saturating_add((last - current) as u32);

@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{FramebufferInfo, align_up, klog_debug, klog_info};
 
-use crate::hw::pci_defs::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
+use slopos_abi::arch::x86_64::pci::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use crate::pci::{
     PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16,
     pci_config_read32, pci_config_write8, pci_config_write16, pci_register_driver,

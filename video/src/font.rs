@@ -3,6 +3,7 @@ use core::ptr;
 
 use crate::framebuffer;
 use crate::graphics;
+use crate::graphics::GraphicsContext;
 
 pub(crate) const FONT_CHAR_WIDTH: i32 = 8;
 pub(crate) const FONT_CHAR_HEIGHT: i32 = 16;
@@ -566,6 +567,39 @@ pub fn font_draw_char(x: i32, y: i32, c: c_char, fg_color: u32, bg_color: u32) -
     FONT_SUCCESS
 }
 
+pub fn font_draw_char_ctx(
+    ctx: &GraphicsContext,
+    x: i32,
+    y: i32,
+    c: c_char,
+    fg_color: u32,
+    bg_color: u32,
+) -> c_int {
+    let fb_w = ctx.width() as i32;
+    let fb_h = ctx.height() as i32;
+    let glyph = glyph_for_char(c);
+
+    for (row_idx, byte) in glyph.iter().copied().enumerate() {
+        let py = y + row_idx as i32;
+        if py < 0 || py >= fb_h {
+            continue;
+        }
+        for col in 0..FONT_CHAR_WIDTH {
+            let px = x + col;
+            if px < 0 || px >= fb_w {
+                continue;
+            }
+            if byte & (0x80 >> col) != 0 {
+                let _ = graphics::graphics_draw_pixel_ctx(ctx, px, py, fg_color);
+            } else if bg_color != 0 {
+                let _ = graphics::graphics_draw_pixel_ctx(ctx, px, py, bg_color);
+            }
+        }
+    }
+
+    FONT_SUCCESS
+}
+
 unsafe fn c_str_len(ptr: *const c_char) -> usize {
     if ptr.is_null() {
         return 0;
@@ -630,6 +664,57 @@ pub fn font_draw_string(
             }
             _ => {
                 font_draw_char(cx, cy, c, fg_color, bg_color);
+                cx += FONT_CHAR_WIDTH;
+                if cx + FONT_CHAR_WIDTH > fb_w {
+                    cx = x;
+                    cy += FONT_CHAR_HEIGHT;
+                }
+            }
+        }
+
+        if cy >= fb_h {
+            break;
+        }
+    }
+
+    FONT_SUCCESS
+}
+
+pub fn font_draw_string_ctx(
+    ctx: &GraphicsContext,
+    x: i32,
+    y: i32,
+    str_ptr: *const c_char,
+    fg_color: u32,
+    bg_color: u32,
+) -> c_int {
+    if str_ptr.is_null() {
+        return FONT_ERROR_INVALID;
+    }
+
+    let fb_w = ctx.width() as i32;
+    let fb_h = ctx.height() as i32;
+    let mut cx = x;
+    let mut cy = y;
+    let mut tmp = [0u8; 1024];
+    let text = unsafe { c_str_to_bytes(str_ptr, &mut tmp) };
+
+    for &ch in text {
+        let c = ch as c_char;
+        match ch {
+            b'\n' => {
+                cx = x;
+                cy += FONT_CHAR_HEIGHT;
+            }
+            b'\r' => {
+                cx = x;
+            }
+            b'\t' => {
+                let tab_width = 4 * FONT_CHAR_WIDTH;
+                cx = ((cx - x + tab_width) / tab_width) * tab_width + x;
+            }
+            _ => {
+                font_draw_char_ctx(ctx, cx, cy, c, fg_color, bg_color);
                 cx += FONT_CHAR_WIDTH;
                 if cx + FONT_CHAR_WIDTH > fb_w {
                     cx = x;

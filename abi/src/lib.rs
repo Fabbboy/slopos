@@ -21,6 +21,7 @@ pub mod shm;
 pub mod surface;
 pub mod syscall;
 pub mod task;
+pub mod video_traits;
 pub mod window;
 
 pub use error::*;
@@ -32,4 +33,5 @@ pub use shm::*;
 pub use surface::*;
 pub use syscall::*;
 pub use task::*;
+pub use video_traits::*;
 pub use window::*;

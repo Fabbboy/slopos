@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::hw::ioapic_defs::*;
+use slopos_abi::arch::x86_64::ioapic::*;
 use crate::sched_bridge;
 use crate::wl_currency;
 

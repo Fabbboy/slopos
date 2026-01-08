@@ -317,7 +317,7 @@ pub fn keyboard_get_scancode() -> u8 {
 ///
 /// Blocks until Enter key is pressed.
 pub fn keyboard_poll_wait_enter() {
-    use crate::hw::ps2_defs::{PS2_DATA_PORT, PS2_STATUS_PORT};
+    use slopos_abi::arch::x86_64::ports::{PS2_DATA_PORT, PS2_STATUS_PORT};
     use slopos_lib::io;
 
     const ENTER_MAKE_CODE: u8 = 0x1C;

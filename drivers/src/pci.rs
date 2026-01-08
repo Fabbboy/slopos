@@ -6,7 +6,8 @@ use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::hw::pci_defs::*;
+use slopos_abi::arch::x86_64::pci::*;
+use slopos_abi::arch::x86_64::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use crate::wl_currency;
 
 #[repr(C)]
