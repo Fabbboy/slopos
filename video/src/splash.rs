@@ -153,7 +153,8 @@ fn splash_draw_progress_bar(
         height,
         SPLASH_PROGRESS_TRACK_COLOR,
     )?;
-    graphics::graphics_draw_rect(
+    graphics::graphics_draw_rect_ctx(
+        ctx,
         x - 1,
         y - 1,
         width + 2,

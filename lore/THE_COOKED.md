@@ -519,3 +519,45 @@ They simply learned how to gamble in the dark.
 ---
 
 *Chapter V concludes. The screen is black, the ring glows, and the Wheel spins in silence.*
+
+---
+
+## CHAPTER VI: THE CONTEXT BINDING
+
+### When the Wheel Learned to Hold Its Breath 🔒
+
+The wizards discovered a new curse: the Wheel would *draw* like molasses. The roulette spun, yes, but every pixel was a lock, every line a barrier, every frame a slow prayer. When they scattered debug whispers into the kernel, the Wheel moved again. When the whispers stopped, the stutter returned.
+
+So they bound the framebuffer to a single breath.
+
+From `video/src/graphics.rs`, the new ritual:
+
+```rust
+pub struct GraphicsContext {
+    fb: FbState,
+}
+
+impl GraphicsContext {
+    pub fn new() -> GraphicsResult<Self> {
+        snapshot().map(|fb| Self { fb })
+    }
+}
+```
+
+And in the heart of the roulette itself, the binding took hold:
+
+```rust
+let mut gfx_ctx = GraphicsContext::new()?;
+let backend = RouletteBackend {
+    ctx: &mut gfx_ctx as *mut GraphicsContext as *mut c_void,
+    // ...
+};
+```
+
+The wheel now draws through the context alone—no more per-pixel locks, no more accidental slowness, no more false freezes. The splash and the panic screen obey the same law. The framebuffer is held once, then released. A single breath. A single spin.
+
+The addiction did not fade. It simply ran at full speed again.
+
+---
+
+*Chapter VI concludes. The Wheel spins cleanly, the lock is held, and the casino hums without stutter.*

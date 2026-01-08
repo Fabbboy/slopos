@@ -522,13 +522,6 @@ fn framebuffer_ready() -> bool {
     framebuffer::framebuffer_is_initialized() != 0
 }
 
-fn framebuffer_dims() -> (i32, i32) {
-    (
-        framebuffer::framebuffer_get_width() as i32,
-        framebuffer::framebuffer_get_height() as i32,
-    )
-}
-
 fn glyph_for_char(c: c_char) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
     let ch = (c as i8) as u8;
     let glyph = if ch < FONT_FIRST_CHAR || ch > FONT_LAST_CHAR {
@@ -538,35 +531,6 @@ fn glyph_for_char(c: c_char) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
     };
     &FONT_DATA[(glyph - FONT_FIRST_CHAR) as usize]
 }
-pub fn font_draw_char(x: i32, y: i32, c: c_char, fg_color: u32, bg_color: u32) -> c_int {
-    if !framebuffer_ready() {
-        return FONT_ERROR_NO_FB;
-    }
-
-    let (fb_w, fb_h) = framebuffer_dims();
-    let glyph = glyph_for_char(c);
-
-    for (row_idx, byte) in glyph.iter().copied().enumerate() {
-        let py = y + row_idx as i32;
-        if py < 0 || py >= fb_h {
-            continue;
-        }
-        for col in 0..FONT_CHAR_WIDTH {
-            let px = x + col;
-            if px < 0 || px >= fb_w {
-                continue;
-            }
-            if byte & (0x80 >> col) != 0 {
-                let _ = graphics::graphics_draw_pixel(px, py, fg_color);
-            } else if bg_color != 0 {
-                let _ = graphics::graphics_draw_pixel(px, py, bg_color);
-            }
-        }
-    }
-
-    FONT_SUCCESS
-}
-
 pub fn font_draw_char_ctx(
     ctx: &GraphicsContext,
     x: i32,
@@ -628,58 +592,6 @@ unsafe fn c_str_to_bytes<'a>(ptr: *const c_char, buf: &'a mut [u8]) -> &'a [u8] 
     &buf[..len]
 }
 
-pub fn font_draw_string(
-    x: i32,
-    y: i32,
-    str_ptr: *const c_char,
-    fg_color: u32,
-    bg_color: u32,
-) -> c_int {
-    if !framebuffer_ready() {
-        return FONT_ERROR_NO_FB;
-    }
-    if str_ptr.is_null() {
-        return FONT_ERROR_INVALID;
-    }
-
-    let (fb_w, fb_h) = framebuffer_dims();
-    let mut cx = x;
-    let mut cy = y;
-    let mut tmp = [0u8; 1024];
-    let text = unsafe { c_str_to_bytes(str_ptr, &mut tmp) };
-
-    for &ch in text {
-        let c = ch as c_char;
-        match ch {
-            b'\n' => {
-                cx = x;
-                cy += FONT_CHAR_HEIGHT;
-            }
-            b'\r' => {
-                cx = x;
-            }
-            b'\t' => {
-                let tab_width = 4 * FONT_CHAR_WIDTH;
-                cx = ((cx - x + tab_width) / tab_width) * tab_width + x;
-            }
-            _ => {
-                font_draw_char(cx, cy, c, fg_color, bg_color);
-                cx += FONT_CHAR_WIDTH;
-                if cx + FONT_CHAR_WIDTH > fb_w {
-                    cx = x;
-                    cy += FONT_CHAR_HEIGHT;
-                }
-            }
-        }
-
-        if cy >= fb_h {
-            break;
-        }
-    }
-
-    FONT_SUCCESS
-}
-
 pub fn font_draw_string_ctx(
     ctx: &GraphicsContext,
     x: i32,
@@ -730,7 +642,8 @@ pub fn font_draw_string_ctx(
 
     FONT_SUCCESS
 }
-pub fn font_draw_string_clear(
+pub fn font_draw_string_clear_ctx(
+    ctx: &GraphicsContext,
     x: i32,
     y: i32,
     str_ptr: *const c_char,
@@ -743,8 +656,8 @@ pub fn font_draw_string_clear(
 
     let width = font_get_string_width(str_ptr);
     let height = FONT_CHAR_HEIGHT;
-    let _ = graphics::graphics_draw_rect_filled(x, y, width, height, bg_color);
-    font_draw_string(x, y, str_ptr, fg_color, bg_color)
+    let _ = graphics::graphics_draw_rect_filled_fast_ctx(ctx, x, y, width, height, bg_color);
+    font_draw_string_ctx(ctx, x, y, str_ptr, fg_color, bg_color)
 }
 pub fn font_get_string_width(str_ptr: *const c_char) -> i32 {
     if str_ptr.is_null() {
@@ -790,7 +703,7 @@ pub fn font_get_string_lines(str_ptr: *const c_char) -> c_int {
     lines
 }
 
-fn console_scroll_up(state: &mut ConsoleState) {
+fn console_scroll_up(ctx: &GraphicsContext, state: &mut ConsoleState) {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
         None => return,
@@ -802,11 +715,12 @@ fn console_scroll_up(state: &mut ConsoleState) {
     }
 
     if fb.height <= FONT_CHAR_HEIGHT as u32 {
-        let _ = graphics::graphics_draw_rect_filled(
+        let _ = graphics::graphics_draw_rect_filled_fast_ctx(
+            ctx,
             0,
             0,
-            fb.width as i32,
-            fb.height as i32,
+            ctx.width() as i32,
+            ctx.height() as i32,
             state.bg_color,
         );
         state.cursor_y = 0;
@@ -820,7 +734,8 @@ fn console_scroll_up(state: &mut ConsoleState) {
         ptr::copy(fb.base.add(src_offset), fb.base, copy_bytes);
     }
 
-    let _ = graphics::graphics_draw_rect_filled(
+    let _ = graphics::graphics_draw_rect_filled_fast_ctx(
+        ctx,
         0,
         fb.height as i32 - FONT_CHAR_HEIGHT,
         fb.width as i32,
@@ -837,16 +752,7 @@ pub fn font_console_init(fg_color: u32, bg_color: u32) {
     console.bg_color = bg_color;
     console.initialized = true;
 }
-pub fn font_console_putc(c: c_char) -> c_int {
-    if !framebuffer_ready() {
-        return FONT_ERROR_NO_FB;
-    }
-
-    let mut console = FONT_CONSOLE.lock();
-    if !console.initialized {
-        return FONT_ERROR_NO_FB;
-    }
-
+fn console_putc_with_ctx(ctx: &GraphicsContext, console: &mut ConsoleState, c: c_char) {
     match c as u8 {
         b'\n' => {
             console.cursor_x = 0;
@@ -856,7 +762,8 @@ pub fn font_console_putc(c: c_char) -> c_int {
             console.cursor_x = 0;
         }
         _ => {
-            font_draw_char(
+            font_draw_char_ctx(
+                ctx,
                 console.cursor_x,
                 console.cursor_y,
                 c,
@@ -864,22 +771,50 @@ pub fn font_console_putc(c: c_char) -> c_int {
                 console.bg_color,
             );
             console.cursor_x += FONT_CHAR_WIDTH;
-            if console.cursor_x + FONT_CHAR_WIDTH > framebuffer::framebuffer_get_width() as i32 {
+            if console.cursor_x + FONT_CHAR_WIDTH > ctx.width() as i32 {
                 console.cursor_x = 0;
                 console.cursor_y += FONT_CHAR_HEIGHT;
             }
         }
     }
 
-    if console.cursor_y + FONT_CHAR_HEIGHT > framebuffer::framebuffer_get_height() as i32 {
-        console_scroll_up(&mut console);
+    if console.cursor_y + FONT_CHAR_HEIGHT > ctx.height() as i32 {
+        console_scroll_up(ctx, console);
+    }
+}
+
+pub fn font_console_putc(c: c_char) -> c_int {
+    if !framebuffer_ready() {
+        return FONT_ERROR_NO_FB;
     }
 
+    let ctx = match GraphicsContext::new() {
+        Ok(ctx) => ctx,
+        Err(_) => return FONT_ERROR_NO_FB,
+    };
+
+    let mut console = FONT_CONSOLE.lock();
+    if !console.initialized {
+        return FONT_ERROR_NO_FB;
+    }
+
+    console_putc_with_ctx(&ctx, &mut console, c);
     FONT_SUCCESS
 }
 pub fn font_console_puts(str_ptr: *const c_char) -> c_int {
     if str_ptr.is_null() {
         return FONT_ERROR_INVALID;
+    }
+    if !framebuffer_ready() {
+        return FONT_ERROR_NO_FB;
+    }
+    let ctx = match GraphicsContext::new() {
+        Ok(ctx) => ctx,
+        Err(_) => return FONT_ERROR_NO_FB,
+    };
+    let mut console = FONT_CONSOLE.lock();
+    if !console.initialized {
+        return FONT_ERROR_NO_FB;
     }
     let mut p = str_ptr;
     loop {
@@ -887,7 +822,7 @@ pub fn font_console_puts(str_ptr: *const c_char) -> c_int {
         if ch == 0 {
             break;
         }
-        font_console_putc(ch);
+        console_putc_with_ctx(&ctx, &mut console, ch);
         unsafe {
             p = p.add(1);
         }
@@ -898,9 +833,14 @@ pub fn font_console_clear() -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
+    let ctx = match GraphicsContext::new() {
+        Ok(ctx) => ctx,
+        Err(_) => return FONT_ERROR_NO_FB,
+    };
     {
         let mut console = FONT_CONSOLE.lock();
-        let _ = graphics::graphics_draw_rect_filled(
+        let _ = graphics::graphics_draw_rect_filled_fast_ctx(
+            &ctx,
             0,
             0,
             framebuffer::framebuffer_get_width() as i32,
