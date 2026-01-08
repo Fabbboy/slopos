@@ -26,8 +26,16 @@ static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
+/// Aligned heap storage wrapper.
+/// The HEAP must be properly aligned (at least 16 bytes) so that allocations
+/// requesting alignment up to 16 bytes will get properly aligned pointers.
+/// Without this, the base address of a [u8; N] array has alignment 1, causing
+/// unaligned pointer panics in collections like VecDeque.
+#[repr(C, align(16))]
+struct AlignedHeap([u8; HEAP_SIZE]);
+
 #[unsafe(link_section = ".bss.heap")]
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
 
 pub fn init(hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Release);
@@ -67,7 +75,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
             return ptr::null_mut();
         }
         self.next.store(offset + size, Ordering::Relaxed);
-        unsafe { HEAP.as_mut_ptr().add(offset) }
+        unsafe { HEAP.0.as_mut_ptr().add(offset) }
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {

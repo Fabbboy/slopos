@@ -1,43 +1,34 @@
-// SlopOS Memory and Paging Constants (ported from mm_constants.h)
+//! SlopOS Memory and Paging Constants.
+//!
+//! This module re-exports memory and paging constants from `slopos_abi::arch::x86_64`
+//! for backward compatibility. New code should import directly from abi.
 
-pub const BOOT_STACK_SIZE: u64 = 0x4000;
-pub const BOOT_STACK_PHYS_ADDR: u64 = 0x20000;
-pub const EARLY_PML4_PHYS_ADDR: u64 = 0x30000;
-pub const EARLY_PDPT_PHYS_ADDR: u64 = 0x31000;
-pub const EARLY_PD_PHYS_ADDR: u64 = 0x32000;
+// Re-export memory layout constants from abi
+pub use slopos_abi::arch::x86_64::memory::{
+    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
+    EARLY_PML4_PHYS_ADDR, EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES,
+    EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE,
+    EXCEPTION_STACK_TOTAL_SIZE, HHDM_VIRT_BASE, KERNEL_HEAP_SIZE,
+    KERNEL_HEAP_VBASE, KERNEL_PDPT_INDEX, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE,
+    MAX_MEMORY_REGIONS, MAX_PROCESSES, PROCESS_CODE_START_VA, PROCESS_DATA_START_VA,
+    PROCESS_HEAP_MAX_VA, PROCESS_HEAP_START_VA, PROCESS_STACK_SIZE_BYTES,
+    PROCESS_STACK_TOP_VA, USER_SPACE_END_VA, USER_SPACE_START_VA,
+};
 
-pub const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-pub const KERNEL_PML4_INDEX: usize = 511;
-pub const KERNEL_PDPT_INDEX: usize = 510;
+// INVALID_PROCESS_ID is canonical in task module
+pub use slopos_abi::task::INVALID_PROCESS_ID;
 
-pub const HHDM_VIRT_BASE: u64 = 0xFFFF_8000_0000_0000;
+// Re-export paging constants from abi
+pub use slopos_abi::arch::x86_64::paging::{
+    EFI_CONVENTIONAL_MEMORY, EFI_PAGE_SIZE, ENTRIES_PER_PAGE_TABLE, PAGE_ALIGN,
+    PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, STACK_ALIGN,
+};
 
-pub const KERNEL_HEAP_VBASE: u64 = 0xFFFF_FFFF_9000_0000;
-pub const KERNEL_HEAP_SIZE: u64 = 256 * 1024 * 1024;
+// Re-export PageFlags for type-safe flag manipulation
+pub use slopos_abi::arch::x86_64::paging::PageFlags;
 
-pub const USER_SPACE_START_VA: u64 = 0x0000_0000_0000_0000;
-pub const USER_SPACE_END_VA: u64 = 0x0000_8000_0000_0000;
-
-pub const PROCESS_CODE_START_VA: u64 = 0x0000_0000_0040_0000;
-pub const PROCESS_DATA_START_VA: u64 = 0x0000_0000_0080_0000;
-pub const PROCESS_HEAP_START_VA: u64 = 0x0000_0000_0100_0000;
-pub const PROCESS_HEAP_MAX_VA: u64 = 0x0000_0000_4000_0000;
-pub const PROCESS_STACK_TOP_VA: u64 = 0x0000_7FFF_FF00_0000;
-pub const PROCESS_STACK_SIZE_BYTES: u64 = 0x0000_0000_0010_0000;
-
-pub const PAGE_SIZE_4KB: u64 = 0x1000;
-pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
-pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
-pub const PAGE_ALIGN: u64 = 0x1000;
-pub const STACK_ALIGN: u64 = 16;
-
-pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_B000_0000;
-pub const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x0001_0000;
-pub const EXCEPTION_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
-pub const EXCEPTION_STACK_PAGES: u64 = 8;
-pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
-pub const EXCEPTION_STACK_TOTAL_SIZE: u64 = EXCEPTION_STACK_GUARD_SIZE + EXCEPTION_STACK_SIZE;
-
+// Backward compatibility: raw page flag constants
+// These match the bitflags values but as raw u64 for existing code
 pub const PAGE_PRESENT: u64 = 0x001;
 pub const PAGE_WRITABLE: u64 = 0x002;
 pub const PAGE_USER: u64 = 0x004;
@@ -46,21 +37,13 @@ pub const PAGE_CACHE_DISABLE: u64 = 0x010;
 pub const PAGE_ACCESSED: u64 = 0x020;
 pub const PAGE_DIRTY: u64 = 0x040;
 pub const PAGE_SIZE_FLAG: u64 = 0x080;
-// Preserve legacy name from C header; used as the large-page flag.
+/// Preserve legacy name from C header; used as the large-page flag.
 pub const PAGE_SIZE_FLAG_COMPAT: u64 = PAGE_SIZE_FLAG;
 pub const PAGE_GLOBAL: u64 = 0x100;
 
+// Composite flags (backward compatibility)
 pub const PAGE_KERNEL_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE;
 pub const PAGE_KERNEL_RO: u64 = PAGE_PRESENT;
 pub const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 pub const PAGE_USER_RO: u64 = PAGE_PRESENT | PAGE_USER;
 pub const PAGE_LARGE_KERNEL_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_SIZE_FLAG;
-
-pub const ENTRIES_PER_PAGE_TABLE: usize = 512;
-
-pub const MAX_MEMORY_REGIONS: usize = 64;
-pub const MAX_PROCESSES: usize = 256;
-pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
-
-pub const EFI_PAGE_SIZE: u64 = 0x1000;
-pub const EFI_CONVENTIONAL_MEMORY: u64 = 7;

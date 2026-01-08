@@ -16,3 +16,4 @@ test = false
 doctest = false
 
 [dependencies]
+bitflags.workspace = true
