@@ -23,6 +23,20 @@ pub struct FramebufferInfoC {
     pub pixel_format: u32,
 }
 
+impl FramebufferInfoC {
+    /// Create a zeroed FramebufferInfoC for static initialization.
+    pub const fn new() -> Self {
+        Self {
+            initialized: 0,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            bpp: 0,
+            pixel_format: 0,
+        }
+    }
+}
+
 /// Video subsystem error types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoError {

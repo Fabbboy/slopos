@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use core::ptr;
 
+use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use slopos_mm::phys_virt::mm_phys_to_virt;
@@ -16,30 +17,6 @@ const MAX_FRAMEBUFFER_HEIGHT: u32 = 4096;
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
 const MIN_FRAMEBUFFER_HEIGHT: u32 = 240;
 const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
-
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-pub struct FramebufferInfoC {
-    pub initialized: u8,
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u32,
-    pub pixel_format: u32,
-}
-
-impl FramebufferInfoC {
-    pub const fn new() -> Self {
-        Self {
-            initialized: 0,
-            width: 0,
-            height: 0,
-            pitch: 0,
-            bpp: 0,
-            pixel_format: 0,
-        }
-    }
-}
 
 #[derive(Copy, Clone)]
 pub(crate) struct FbState {

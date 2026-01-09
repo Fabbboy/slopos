@@ -2,6 +2,43 @@
 
 use core::ffi::c_int;
 
+/// Implement common methods for kernel error enums.
+///
+/// Generates `as_c_int()`, `from_c_int()`, `is_success()`, and `is_error()` methods
+/// for `#[repr(i32)]` error enums that follow the kernel's error convention.
+macro_rules! impl_kernel_error {
+    ($ty:ty, fallback: $fallback:ident, variants: { $($val:literal => $variant:ident),* $(,)? }) => {
+        impl $ty {
+            /// Convert to C-style integer for syscall returns.
+            #[inline]
+            pub fn as_c_int(self) -> c_int {
+                self as c_int
+            }
+
+            /// Convert from C-style integer.
+            #[inline]
+            pub fn from_c_int(val: c_int) -> Self {
+                match val {
+                    $($val => Self::$variant,)*
+                    _ => Self::$fallback,
+                }
+            }
+
+            /// Check if this is a success result.
+            #[inline]
+            pub fn is_success(self) -> bool {
+                matches!(self, Self::Success)
+            }
+
+            /// Check if this is an error result.
+            #[inline]
+            pub fn is_error(self) -> bool {
+                !self.is_success()
+            }
+        }
+    };
+}
+
 /// Compositor operation result type
 pub type CompositorResult<T> = Result<T, CompositorError>;
 
@@ -34,44 +71,19 @@ pub enum CompositorError {
     InvalidToken = -10,
 }
 
-impl CompositorError {
-    /// Convert to C-style integer for syscall returns
-    #[inline]
-    pub fn as_c_int(self) -> c_int {
-        self as c_int
-    }
-
-    /// Convert from C-style integer
-    #[inline]
-    pub fn from_c_int(val: c_int) -> Self {
-        match val {
-            0 => Self::Success,
-            -1 => Self::SurfaceNotFound,
-            -2 => Self::InvalidRole,
-            -3 => Self::RoleAlreadySet,
-            -4 => Self::ParentNotFound,
-            -5 => Self::ChildLimitReached,
-            -6 => Self::InvalidArgument,
-            -7 => Self::OutOfMemory,
-            -8 => Self::PermissionDenied,
-            -9 => Self::BufferNotFound,
-            -10 => Self::InvalidToken,
-            _ => Self::InvalidArgument,
-        }
-    }
-
-    /// Check if this is a success result
-    #[inline]
-    pub fn is_success(self) -> bool {
-        matches!(self, Self::Success)
-    }
-
-    /// Check if this is an error result
-    #[inline]
-    pub fn is_error(self) -> bool {
-        !self.is_success()
-    }
-}
+impl_kernel_error!(CompositorError, fallback: InvalidArgument, variants: {
+    0 => Success,
+    -1 => SurfaceNotFound,
+    -2 => InvalidRole,
+    -3 => RoleAlreadySet,
+    -4 => ParentNotFound,
+    -5 => ChildLimitReached,
+    -6 => InvalidArgument,
+    -7 => OutOfMemory,
+    -8 => PermissionDenied,
+    -9 => BufferNotFound,
+    -10 => InvalidToken,
+});
 
 /// Shared memory operation errors
 #[repr(i32)]
@@ -96,32 +108,13 @@ pub enum ShmError {
     InvalidSize = -7,
 }
 
-impl ShmError {
-    /// Convert to C-style integer for syscall returns
-    #[inline]
-    pub fn as_c_int(self) -> c_int {
-        self as c_int
-    }
-
-    /// Convert from C-style integer
-    #[inline]
-    pub fn from_c_int(val: c_int) -> Self {
-        match val {
-            0 => Self::Success,
-            -1 => Self::AllocationFailed,
-            -2 => Self::MappingFailed,
-            -3 => Self::InvalidToken,
-            -4 => Self::PermissionDenied,
-            -5 => Self::BufferLimitReached,
-            -6 => Self::MappingLimitReached,
-            -7 => Self::InvalidSize,
-            _ => Self::InvalidToken,
-        }
-    }
-
-    /// Check if this is a success result
-    #[inline]
-    pub fn is_success(self) -> bool {
-        matches!(self, Self::Success)
-    }
-}
+impl_kernel_error!(ShmError, fallback: InvalidToken, variants: {
+    0 => Success,
+    -1 => AllocationFailed,
+    -2 => MappingFailed,
+    -3 => InvalidToken,
+    -4 => PermissionDenied,
+    -5 => BufferLimitReached,
+    -6 => MappingLimitReached,
+    -7 => InvalidSize,
+});
