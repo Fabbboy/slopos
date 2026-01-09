@@ -246,7 +246,8 @@ pub mod string;
 pub mod user_syscall;
 pub mod user_syscall_defs;
 
-pub use alignment::{align_down_u64, align_up_u64};
+pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
+pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use kdiag::{InterruptFrame, KDIAG_STACK_TRACE_DEPTH, kdiag_timestamp};
 pub use klog::{
@@ -259,16 +260,6 @@ pub use spinlock::Spinlock;
 pub use stacktrace::StacktraceEntry;
 pub use user_syscall::*;
 pub use user_syscall_defs::*;
-
-#[inline(always)]
-pub const fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
-}
-
-#[inline(always)]
-pub const fn align_down(value: usize, align: usize) -> usize {
-    value & !(align - 1)
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

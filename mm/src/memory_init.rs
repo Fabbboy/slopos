@@ -20,7 +20,7 @@ use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::process_vm::init_process_vm;
 use core::ffi::{CStr, c_char, c_int};
 
-use slopos_lib::{FramebufferInfo, cpu, klog_debug, klog_info};
+use slopos_lib::{FramebufferInfo, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
 const MSR_APIC_BASE: u32 = 0x1B;
@@ -104,22 +104,6 @@ pub fn hhdm_is_available() -> bool {
 
 fn framebuffer_boot_info() -> Option<FramebufferInfo> {
     unsafe { FRAMEBUFFER_BOOT_INFO }
-}
-
-fn align_down_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        value & !(alignment - 1)
-    }
-}
-
-fn align_up_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        (value + alignment - 1) & !(alignment - 1)
-    }
 }
 
 fn configure_region_store(memmap: *const LimineMemmapResponse) {

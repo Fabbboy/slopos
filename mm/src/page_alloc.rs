@@ -1,7 +1,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info};
 use spin::Mutex;
 
 use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
@@ -340,21 +340,6 @@ static PAGE_ALLOCATOR: Mutex<PageAllocator> = Mutex::new(PageAllocator::new());
 
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
-fn align_down_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        value & !(alignment - 1)
-    }
-}
-
-fn align_up_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        (value + alignment - 1) & !(alignment - 1)
-    }
-}
 pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
     if frame_array.is_null() || max_frames == 0 {
         panic!("init_page_allocator: Invalid parameters");

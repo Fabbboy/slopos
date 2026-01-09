@@ -148,8 +148,11 @@ static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
 static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+/// Convert physical address to virtual pointer.
+/// Falls back to identity mapping if HHDM is not yet available (early boot).
+/// Uses sched_bridge to access HHDM offset to avoid driver->mm circular dependency.
 #[inline]
-fn phys_to_virt(phys: u64) -> *mut u8 {
+fn phys_to_virt_ptr(phys: u64) -> *mut u8 {
     if phys == 0 {
         return core::ptr::null_mut();
     }
@@ -201,7 +204,7 @@ fn acpi_map_table(phys_addr: u64) -> *const AcpiSdtHeader {
     if phys_addr == 0 {
         return core::ptr::null();
     }
-    phys_to_virt(phys_addr) as *const AcpiSdtHeader
+    phys_to_virt_ptr(phys_addr) as *const AcpiSdtHeader
 }
 
 fn acpi_scan_table(
@@ -439,8 +442,8 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                             ctrl.id = entry.ioapic_id;
                             ctrl.gsi_base = entry.gsi_base;
                             ctrl.phys_addr = entry.ioapic_address as u64;
-                            ctrl.reg_select = phys_to_virt(ctrl.phys_addr) as *mut u32;
-                            ctrl.reg_window = phys_to_virt(ctrl.phys_addr + 0x10) as *mut u32;
+                            ctrl.reg_select = phys_to_virt_ptr(ctrl.phys_addr) as *mut u32;
+                            ctrl.reg_window = phys_to_virt_ptr(ctrl.phys_addr + 0x10) as *mut u32;
                             ctrl.version = ioapic_read(ctrl, IOAPIC_REG_VER);
                             ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
                             ioapic_log_controller(ctrl);

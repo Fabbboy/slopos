@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_lib::klog_info;
+use slopos_lib::{align_down_u64, align_up_u64, klog_info};
 
 use crate::mm_constants::{HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB};
 
@@ -72,24 +72,6 @@ static mut REGION_STORE: RegionStore = RegionStore {
     overflows: 0,
     configured: false,
 };
-
-#[inline(always)]
-const fn align_down_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        value & !(alignment - 1)
-    }
-}
-
-#[inline(always)]
-const fn align_up_u64(value: u64, alignment: u64) -> u64 {
-    if alignment == 0 {
-        value
-    } else {
-        (value + alignment - 1) & !(alignment - 1)
-    }
-}
 
 fn ensure_storage() -> &'static mut RegionStore {
     unsafe {

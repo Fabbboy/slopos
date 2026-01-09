@@ -45,11 +45,17 @@ pub fn hhdm_offset() -> u64 {
     HHDM_OFFSET.load(Ordering::Acquire)
 }
 
-pub fn phys_to_virt(phys: u64) -> u64 {
+/// Raw HHDM translation: physical to virtual.
+/// No safety checks - use mm_phys_to_virt() for checked translation.
+#[inline(always)]
+pub fn hhdm_phys_to_virt(phys: u64) -> u64 {
     phys + hhdm_offset()
 }
 
-pub fn virt_to_phys(virt: u64) -> u64 {
+/// Raw HHDM translation: virtual to physical.
+/// No safety checks - use mm_virt_to_phys() for checked translation.
+#[inline(always)]
+pub fn hhdm_virt_to_phys(virt: u64) -> u64 {
     virt.wrapping_sub(hhdm_offset())
 }
 

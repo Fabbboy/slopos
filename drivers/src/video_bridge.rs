@@ -101,7 +101,7 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
     }
 
     // Verify source address is valid via HHDM
-    let shm_virt = slopos_mm::phys_to_virt(shm_phys);
+    let shm_virt = slopos_mm::hhdm_phys_to_virt(shm_phys);
     if shm_virt == 0 {
         return -1;
     }

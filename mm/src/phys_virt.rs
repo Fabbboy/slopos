@@ -1,3 +1,39 @@
+//! Physical/Virtual Address Translation
+//!
+//! This module provides safe, validated address translation functions.
+//! Use these instead of raw HHDM arithmetic for most kernel code.
+//!
+//! # API Layers
+//!
+//! SlopOS provides three levels of address translation:
+//!
+//! 1. **Raw HHDM** (`hhdm_phys_to_virt`, `hhdm_virt_to_phys` in mm/lib.rs)
+//!    - Bare arithmetic with HHDM offset
+//!    - No safety checks
+//!    - Use only when you're certain the address is valid
+//!
+//! 2. **Safe Wrappers** (`mm_phys_to_virt`, `mm_virt_to_phys` in this module)
+//!    - Zero-address handling
+//!    - Overflow detection
+//!    - Reserved region permission checks
+//!    - Already-translated detection
+//!    - **Preferred for most kernel code**
+//!
+//! 3. **Page Table Walk** (`paging::virt_to_phys*`)
+//!    - Actual page table translation
+//!    - Use when you need to verify mappings exist
+//!
+//! # Usage
+//!
+//! ```ignore
+//! // Safe translation (preferred)
+//! let virt = mm_phys_to_virt(phys_addr);
+//! if virt == 0 { /* handle error */ }
+//!
+//! // Raw translation (only when performance-critical and address is known-safe)
+//! let virt = hhdm_phys_to_virt(phys_addr);
+//! ```
+
 use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 
