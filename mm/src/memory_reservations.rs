@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_lib::{align_down_u64, align_up_u64, klog_info};
 
-use crate::mm_constants::{HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB};
+use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB};
 
 const MM_REGION_STATIC_CAP: usize = 4096;
 
@@ -237,7 +237,11 @@ fn overlay_region(
         return -1;
     }
 
-    if phys_base >= KERNEL_VIRTUAL_BASE || phys_base >= HHDM_VIRT_BASE {
+    if phys_base >= KERNEL_VIRTUAL_BASE {
+        klog_info!("MM: rejecting virtual overlay base 0x{:x}", phys_base);
+        return -1;
+    }
+    if crate::hhdm::is_available() && phys_base >= crate::hhdm::offset() {
         klog_info!("MM: rejecting virtual overlay base 0x{:x}", phys_base);
         return -1;
     }

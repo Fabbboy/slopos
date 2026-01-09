@@ -151,8 +151,11 @@ fn virt_to_phys_kernel(virt: u64) -> u64 {
     if virt >= KERNEL_VIRTUAL_BASE {
         return virt - KERNEL_VIRTUAL_BASE;
     }
-    if virt >= HHDM_VIRT_BASE {
-        return virt - HHDM_VIRT_BASE;
+    if crate::hhdm::is_available() {
+        let hhdm_base = crate::hhdm::offset();
+        if virt >= hhdm_base {
+            return virt - hhdm_base;
+        }
     }
     virt
 }
@@ -533,6 +536,13 @@ pub fn init_memory_system(
         // Initialize the unified HHDM module (single source of truth)
         if hhdm_available {
             crate::hhdm::init(hhdm_offset);
+            if hhdm_offset != HHDM_VIRT_BASE {
+                klog_info!(
+                    "MM: WARNING - HHDM base 0x{:x} differs from expected 0x{:x}",
+                    hhdm_offset,
+                    HHDM_VIRT_BASE
+                );
+            }
         }
 
         if memmap.is_null() {
