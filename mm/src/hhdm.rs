@@ -210,11 +210,11 @@ impl VirtAddrHhdm for VirtAddr {
         if self.is_null() {
             return None;
         }
-        let phys = crate::paging::virt_to_phys(self.as_u64());
-        if phys == 0 {
+        let phys = crate::paging::virt_to_phys(self);
+        if phys.is_null() {
             None
         } else {
-            Some(PhysAddr::new(phys))
+            Some(phys)
         }
     }
 }

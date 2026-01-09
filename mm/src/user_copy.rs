@@ -3,6 +3,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
+use slopos_abi::addr::VirtAddr;
+
 use crate::memory_layout::mm_get_kernel_heap_start;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
@@ -78,7 +80,7 @@ fn validate_user_buffer(
 
     if !KERNEL_GUARD_CHECKED.load(Ordering::Acquire) {
         let kernel_probe = mm_get_kernel_heap_start();
-        if paging_is_user_accessible(dir, kernel_probe) != 0 {
+        if paging_is_user_accessible(dir, VirtAddr::new(kernel_probe)) != 0 {
             return -1;
         }
         KERNEL_GUARD_CHECKED.store(true, Ordering::Release);
@@ -86,7 +88,7 @@ fn validate_user_buffer(
 
     let mut page = start & !(crate::mm_constants::PAGE_SIZE_4KB - 1);
     while page < end {
-        if paging_is_user_accessible(dir, page) == 0 {
+        if paging_is_user_accessible(dir, VirtAddr::new(page)) == 0 {
             return -1;
         }
         page = page.wrapping_add(crate::mm_constants::PAGE_SIZE_4KB);

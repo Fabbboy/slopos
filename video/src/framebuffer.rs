@@ -1,10 +1,11 @@
 use core::ffi::c_int;
 use core::ptr;
 
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
-use slopos_mm::phys_virt::mm_phys_to_virt;
+use slopos_mm::hhdm::PhysAddrHhdm;
 use spin::Mutex;
 
 const PIXEL_FORMAT_RGB: u8 = 0x01;
@@ -99,8 +100,8 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
     };
 
     // Translate the physical address into the higher-half mapping if available.
-    let virt_addr = mm_phys_to_virt(addr);
-    let mapped_base = if virt_addr != 0 { virt_addr } else { addr };
+    let virt_addr = PhysAddr::new(addr).to_virt_checked();
+    let mapped_base = virt_addr.map(|v| v.as_u64()).unwrap_or(addr);
 
     let fb_state = FbState {
         base: mapped_base as *mut u8,
@@ -396,10 +397,10 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
     }
 
     // Convert physical address to virtual using HHDM
-    let shm_virt = mm_phys_to_virt(shm_phys);
-    if shm_virt == 0 {
-        return -1;
-    }
+    let shm_virt = match PhysAddr::new(shm_phys).to_virt_checked() {
+        Some(v) => v.as_u64(),
+        None => return -1,
+    };
 
     // Copy from shared memory to framebuffer MMIO
     // This is a simple memcpy for now - no page flipping hardware support

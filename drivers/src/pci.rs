@@ -297,6 +297,7 @@ fn pci_log_bar(bar: &PciBarInfo, index: u8) {
     }
 }
 
+use slopos_abi::addr::PhysAddr;
 use slopos_mm::phys_virt::mm_map_mmio_region;
 
 fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
@@ -323,9 +324,10 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
             PRIMARY_GPU.device = *info;
             PRIMARY_GPU.mmio_phys_base = bar.base;
             PRIMARY_GPU.mmio_size = if bar.size != 0 { bar.size } else { 0x1000 };
-            PRIMARY_GPU.mmio_virt_base =
-                mm_map_mmio_region(PRIMARY_GPU.mmio_phys_base, PRIMARY_GPU.mmio_size as usize)
-                    as *mut u8;
+            PRIMARY_GPU.mmio_virt_base = mm_map_mmio_region(
+                PhysAddr::new(PRIMARY_GPU.mmio_phys_base),
+                PRIMARY_GPU.mmio_size as usize,
+            ) as *mut u8;
         }
 
         let gpu_kind = if virtio_candidate {

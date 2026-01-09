@@ -305,8 +305,8 @@ fn switch_to_task(new_task: *mut Task) {
     unsafe {
         if (*new_task).process_id != INVALID_TASK_ID {
             let page_dir = process_vm_get_page_dir((*new_task).process_id);
-            if !page_dir.is_null() && (*page_dir).pml4_phys != 0 {
-                (*new_task).context.cr3 = (*page_dir).pml4_phys;
+            if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
+                (*new_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
                 paging_set_current_directory(page_dir);
             }
         } else {

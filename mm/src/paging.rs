@@ -1,9 +1,10 @@
 use core::ffi::c_int;
 use core::ptr;
 
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::hhdm;
+use crate::hhdm::{self, PhysAddrHhdm};
 use crate::mm_constants::{
     ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
     PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
@@ -11,7 +12,6 @@ use crate::mm_constants::{
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
-use crate::phys_virt::mm_phys_to_virt;
 
 #[repr(C, align(4096))]
 pub struct PageTable {
@@ -29,7 +29,7 @@ impl PageTable {
 #[repr(C)]
 pub struct ProcessPageDir {
     pub pml4: *mut PageTable,
-    pub pml4_phys: u64,
+    pub pml4_phys: PhysAddr,
     pub ref_count: u32,
     pub process_id: u32,
     pub next: *mut ProcessPageDir,
@@ -40,7 +40,7 @@ pub static mut EARLY_PD: PageTable = PageTable::zeroed();
 
 static mut KERNEL_PAGE_DIR: ProcessPageDir = ProcessPageDir {
     pml4: unsafe { &mut EARLY_PML4 },
-    pml4_phys: 0,
+    pml4_phys: PhysAddr::NULL,
     ref_count: 1,
     process_id: 0,
     next: ptr::null_mut(),
@@ -64,12 +64,12 @@ fn table_empty(table: *const PageTable) -> bool {
     true
 }
 
-fn alloc_page_table(phys_out: &mut u64) -> *mut PageTable {
+fn alloc_page_table(phys_out: &mut PhysAddr) -> *mut PageTable {
     let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if phys == 0 {
+    if phys.is_null() {
         return ptr::null_mut();
     }
-    let virt = mm_phys_to_virt(phys) as *mut PageTable;
+    let virt = phys.to_virt().as_mut_ptr::<PageTable>();
     if virt.is_null() {
         free_page_frame(phys);
         return ptr::null_mut();
@@ -85,21 +85,27 @@ fn intermediate_flags(user_mapping: bool) -> u64 {
     PAGE_PRESENT | PAGE_WRITABLE | if user_mapping { PAGE_USER } else { 0 }
 }
 
-fn pml4_index(vaddr: u64) -> usize {
-    ((vaddr >> 39) & 0x1FF) as usize
-}
-fn pdpt_index(vaddr: u64) -> usize {
-    ((vaddr >> 30) & 0x1FF) as usize
-}
-fn pd_index(vaddr: u64) -> usize {
-    ((vaddr >> 21) & 0x1FF) as usize
-}
-fn pt_index(vaddr: u64) -> usize {
-    ((vaddr >> 12) & 0x1FF) as usize
+/// Convert a physical page table address to a virtual pointer.
+#[inline]
+fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
+    phys.to_virt().as_mut_ptr()
 }
 
-fn pte_address(pte: u64) -> u64 {
-    pte & PTE_ADDRESS_MASK
+fn pml4_index(vaddr: VirtAddr) -> usize {
+    ((vaddr.as_u64() >> 39) & 0x1FF) as usize
+}
+fn pdpt_index(vaddr: VirtAddr) -> usize {
+    ((vaddr.as_u64() >> 30) & 0x1FF) as usize
+}
+fn pd_index(vaddr: VirtAddr) -> usize {
+    ((vaddr.as_u64() >> 21) & 0x1FF) as usize
+}
+fn pt_index(vaddr: VirtAddr) -> usize {
+    ((vaddr.as_u64() >> 12) & 0x1FF) as usize
+}
+
+fn pte_address(pte: u64) -> PhysAddr {
+    PhysAddr::new(pte & PTE_ADDRESS_MASK)
 }
 
 fn pte_present(pte: u64) -> bool {
@@ -114,30 +120,39 @@ fn pte_user(pte: u64) -> bool {
     pte & PAGE_USER != 0
 }
 
-fn is_user_address(vaddr: u64) -> bool {
-    vaddr < KERNEL_VIRTUAL_BASE && vaddr >= crate::mm_constants::USER_SPACE_START_VA
+fn is_user_address(vaddr: VirtAddr) -> bool {
+    let raw = vaddr.as_u64();
+    raw < KERNEL_VIRTUAL_BASE && raw >= crate::mm_constants::USER_SPACE_START_VA
 }
 
 #[inline(always)]
-fn invlpg(vaddr: u64) {
+fn invlpg(vaddr: VirtAddr) {
     unsafe {
-        core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+        core::arch::asm!(
+            "invlpg [{}]",
+            in(reg) vaddr.as_u64(),
+            options(nostack, preserves_flags)
+        );
     }
 }
 
 #[inline(always)]
-fn get_cr3() -> u64 {
+fn get_cr3() -> PhysAddr {
     let mut cr3: u64;
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
     }
-    cr3
+    PhysAddr::new(cr3 & !0xFFF)
 }
 
 #[inline(always)]
-fn set_cr3(pml4_phys: u64) {
+fn set_cr3(pml4_phys: PhysAddr) {
     unsafe {
-        core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
+        core::arch::asm!(
+            "mov cr3, {}",
+            in(reg) pml4_phys.as_u64(),
+            options(nostack, preserves_flags)
+        );
     }
 }
 pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
@@ -158,70 +173,70 @@ pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
     }
 }
 
-fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
+fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
     if page_dir.is_null() {
         klog_info!("virt_to_phys: No page directory");
-        return 0;
+        return PhysAddr::NULL;
     }
     unsafe {
         let pml4 = (*page_dir).pml4;
         if pml4.is_null() {
-            return 0;
+            return PhysAddr::NULL;
         }
         let pml4_entry = (*pml4).entries[pml4_index(vaddr)];
         if !pte_present(pml4_entry) {
-            return 0;
+            return PhysAddr::NULL;
         }
-        let pdpt = mm_phys_to_virt(pte_address(pml4_entry)) as *mut PageTable;
+        let pdpt = phys_to_table(pte_address(pml4_entry));
         if pdpt.is_null() {
             klog_info!("virt_to_phys: Invalid PDPT address");
-            return 0;
+            return PhysAddr::NULL;
         }
         let pdpt_entry = (*pdpt).entries[pdpt_index(vaddr)];
         if !pte_present(pdpt_entry) {
-            return 0;
+            return PhysAddr::NULL;
         }
         if pte_huge(pdpt_entry) {
-            let page_offset = vaddr & (PAGE_SIZE_1GB - 1);
-            return pte_address(pdpt_entry) + page_offset;
+            let page_offset = vaddr.as_u64() & (PAGE_SIZE_1GB - 1);
+            return pte_address(pdpt_entry).offset(page_offset);
         }
 
-        let pd = mm_phys_to_virt(pte_address(pdpt_entry)) as *mut PageTable;
+        let pd = phys_to_table(pte_address(pdpt_entry));
         if pd.is_null() {
             klog_info!("virt_to_phys: Invalid PD address");
-            return 0;
+            return PhysAddr::NULL;
         }
         let pd_entry = (*pd).entries[pd_index(vaddr)];
         if !pte_present(pd_entry) {
-            return 0;
+            return PhysAddr::NULL;
         }
         if pte_huge(pd_entry) {
-            let page_offset = vaddr & (PAGE_SIZE_2MB - 1);
-            return pte_address(pd_entry) + page_offset;
+            let page_offset = vaddr.as_u64() & (PAGE_SIZE_2MB - 1);
+            return pte_address(pd_entry).offset(page_offset);
         }
 
-        let pt = mm_phys_to_virt(pte_address(pd_entry)) as *mut PageTable;
+        let pt = phys_to_table(pte_address(pd_entry));
         if pt.is_null() {
             klog_info!("virt_to_phys: Invalid PT address");
-            return 0;
+            return PhysAddr::NULL;
         }
         let pt_entry = (*pt).entries[pt_index(vaddr)];
         if !pte_present(pt_entry) {
-            return 0;
+            return PhysAddr::NULL;
         }
-        let page_offset = vaddr & (PAGE_SIZE_4KB - 1);
-        pte_address(pt_entry) + page_offset
+        let page_offset = vaddr.as_u64() & (PAGE_SIZE_4KB - 1);
+        pte_address(pt_entry).offset(page_offset)
     }
 }
-pub fn virt_to_phys_in_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> u64 {
+pub fn virt_to_phys_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
     virt_to_phys_for_dir(page_dir, vaddr)
 }
-pub fn virt_to_phys(vaddr: u64) -> u64 {
+pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
     unsafe { virt_to_phys_for_dir(CURRENT_PAGE_DIR, vaddr) }
 }
-pub fn virt_to_phys_process(vaddr: u64, page_dir: *mut ProcessPageDir) -> u64 {
+pub fn virt_to_phys_process(vaddr: VirtAddr, page_dir: *mut ProcessPageDir) -> PhysAddr {
     if page_dir.is_null() {
-        return 0;
+        return PhysAddr::NULL;
     }
     unsafe {
         let saved = CURRENT_PAGE_DIR;
@@ -234,8 +249,8 @@ pub fn virt_to_phys_process(vaddr: u64, page_dir: *mut ProcessPageDir) -> u64 {
 
 fn map_page_in_directory(
     page_dir: *mut ProcessPageDir,
-    vaddr: u64,
-    paddr: u64,
+    vaddr: VirtAddr,
+    paddr: PhysAddr,
     flags: u64,
     page_size: u64,
 ) -> c_int {
@@ -244,7 +259,9 @@ fn map_page_in_directory(
         return -1;
     }
 
-    if (vaddr & (page_size - 1)) != 0 || (paddr & (page_size - 1)) != 0 {
+    if (vaddr.as_u64() & (page_size - 1)) != 0
+        || (paddr.as_u64() & (page_size - 1)) != 0
+    {
         klog_info!("map_page: Addresses not aligned to requested size");
         return -1;
     }
@@ -263,7 +280,7 @@ fn map_page_in_directory(
         let pt_idx = pt_index(vaddr);
 
         let pdpt: *mut PageTable;
-        let mut pdpt_phys = 0;
+        let mut pdpt_phys = PhysAddr::NULL;
         let pml4_entry = (*pml4).entries[pml4_idx];
         if !pte_present(pml4_entry) {
             pdpt = alloc_page_table(&mut pdpt_phys);
@@ -271,21 +288,21 @@ fn map_page_in_directory(
                 klog_info!("map_page: Failed to allocate PDPT");
                 return -1;
             }
-            (*pml4).entries[pml4_idx] = pdpt_phys | inter_flags;
+            (*pml4).entries[pml4_idx] = pdpt_phys.as_u64() | inter_flags;
         } else {
             if pte_huge(pml4_entry) {
                 klog_info!("map_page: PML4 entry is huge (unexpected)");
                 return -1;
             }
             pdpt_phys = pte_address(pml4_entry);
-            pdpt = mm_phys_to_virt(pdpt_phys) as *mut PageTable;
+            pdpt = phys_to_table(pdpt_phys);
             if user_mapping && (pml4_entry & PAGE_USER) == 0 {
                 (*pml4).entries[pml4_idx] = (pml4_entry & !0xFFF) | inter_flags;
             }
         }
 
         let pd: *mut PageTable;
-        let mut pd_phys = 0;
+        let mut pd_phys = PhysAddr::NULL;
         let pdpt_entry = (*pdpt).entries[pdpt_idx];
 
         if page_size == PAGE_SIZE_1GB {
@@ -293,7 +310,8 @@ fn map_page_in_directory(
                 klog_info!("map_page: PDPT entry already present for 1GB mapping");
                 return -1;
             }
-            (*pdpt).entries[pdpt_idx] = paddr | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
+            (*pdpt).entries[pdpt_idx] =
+                paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
             invlpg(vaddr);
             return 0;
         }
@@ -304,14 +322,14 @@ fn map_page_in_directory(
                 klog_info!("map_page: Failed to allocate PD");
                 return -1;
             }
-            (*pdpt).entries[pdpt_idx] = pd_phys | inter_flags;
+            (*pdpt).entries[pdpt_idx] = pd_phys.as_u64() | inter_flags;
         } else {
             if pte_huge(pdpt_entry) {
                 klog_info!("map_page: PDPT entry is a huge page");
                 return -1;
             }
             pd_phys = pte_address(pdpt_entry);
-            pd = mm_phys_to_virt(pd_phys) as *mut PageTable;
+            pd = phys_to_table(pd_phys);
             if user_mapping && (pdpt_entry & PAGE_USER) == 0 {
                 (*pdpt).entries[pdpt_idx] = (pdpt_entry & !0xFFF) | inter_flags;
             }
@@ -323,20 +341,21 @@ fn map_page_in_directory(
                 klog_info!("map_page: PD entry already present for 2MB mapping");
                 return -1;
             }
-            (*pd).entries[pd_idx] = paddr | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
+            (*pd).entries[pd_idx] =
+                paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
             invlpg(vaddr);
             return 0;
         }
 
         let mut pt_entry = pd_entry;
         if !pte_present(pd_entry) {
-            let mut pt_phys = 0;
+            let mut pt_phys = PhysAddr::NULL;
             let pt = alloc_page_table(&mut pt_phys);
             if pt.is_null() {
                 klog_info!("map_page: Failed to allocate PT");
                 return -1;
             }
-            (*pd).entries[pd_idx] = pt_phys | inter_flags;
+            (*pd).entries[pd_idx] = pt_phys.as_u64() | inter_flags;
             pt_entry = (*pd).entries[pd_idx];
         }
 
@@ -345,17 +364,22 @@ fn map_page_in_directory(
             return -1;
         }
 
-        let pt = mm_phys_to_virt(pte_address(pt_entry)) as *mut PageTable;
+        let pt = phys_to_table(pte_address(pt_entry));
         if pt.is_null() {
             klog_info!("map_page: Invalid PT pointer");
             return -1;
         }
 
         if (*pt).entries[pt_idx] & PAGE_PRESENT != 0 {
-            klog_info!("map_page: Virtual address 0x{:x} already mapped (entry=0x{:x})", vaddr, (*pt).entries[pt_idx]);
+            klog_info!(
+                "map_page: Virtual address 0x{:x} already mapped (entry=0x{:x})",
+                vaddr.as_u64(),
+                (*pt).entries[pt_idx]
+            );
             // For ELF loading, unmap the existing page first
             let old_phys = (*pt).entries[pt_idx] & 0x000f_ffff_ffff_f000;
-            if old_phys != 0 && page_frame_can_free(old_phys) != 0 {
+            let old_phys = PhysAddr::new(old_phys);
+            if !old_phys.is_null() && page_frame_can_free(old_phys) != 0 {
                 free_page_frame(old_phys);
             }
             // Continue to overwrite the mapping
@@ -365,29 +389,29 @@ fn map_page_in_directory(
             (*pd).entries[pd_idx] = (pt_entry & !0xFFF) | inter_flags;
         }
 
-        (*pt).entries[pt_idx] = paddr | (flags | PAGE_PRESENT);
+        (*pt).entries[pt_idx] = paddr.as_u64() | (flags | PAGE_PRESENT);
         invlpg(vaddr);
     }
     0
 }
 pub fn map_page_4kb_in_dir(
     page_dir: *mut ProcessPageDir,
-    vaddr: u64,
-    paddr: u64,
+    vaddr: VirtAddr,
+    paddr: PhysAddr,
     flags: u64,
 ) -> c_int {
     map_page_in_directory(page_dir, vaddr, paddr, flags, PAGE_SIZE_4KB)
 }
-pub fn map_page_4kb(vaddr: u64, paddr: u64, flags: u64) -> c_int {
+pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
     unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_4KB) }
 }
-pub fn map_page_2mb(vaddr: u64, paddr: u64, flags: u64) -> c_int {
+pub fn map_page_2mb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
     unsafe { map_page_in_directory(CURRENT_PAGE_DIR, vaddr, paddr, flags, PAGE_SIZE_2MB) }
 }
 pub fn paging_map_shared_kernel_page(
     page_dir: *mut ProcessPageDir,
-    kernel_vaddr: u64,
-    user_vaddr: u64,
+    kernel_vaddr: VirtAddr,
+    user_vaddr: VirtAddr,
     flags: u64,
 ) -> c_int {
     if page_dir.is_null() {
@@ -396,18 +420,20 @@ pub fn paging_map_shared_kernel_page(
     if !is_user_address(user_vaddr) {
         return -1;
     }
-    if (user_vaddr & (PAGE_SIZE_4KB - 1)) != 0 || (kernel_vaddr & (PAGE_SIZE_4KB - 1)) != 0 {
+    if (user_vaddr.as_u64() & (PAGE_SIZE_4KB - 1)) != 0
+        || (kernel_vaddr.as_u64() & (PAGE_SIZE_4KB - 1)) != 0
+    {
         return -1;
     }
 
     let phys = virt_to_phys_in_dir(unsafe { &mut KERNEL_PAGE_DIR }, kernel_vaddr);
-    if phys == 0 {
+    if phys.is_null() {
         return -1;
     }
     map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PAGE_USER)
 }
 
-fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
+fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
     if page_dir.is_null() {
         klog_info!("unmap_page: No page directory provided");
         return -1;
@@ -427,7 +453,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
             return 0;
         }
 
-        let pdpt = mm_phys_to_virt(pte_address(pml4_entry)) as *mut PageTable;
+        let pdpt = phys_to_table(pte_address(pml4_entry));
         let pdpt_entry = (*pdpt).entries[pdpt_idx];
         if !pte_present(pdpt_entry) {
             return 0;
@@ -442,14 +468,15 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
             invlpg(vaddr);
             if table_empty(pdpt as *const PageTable) {
                 (*pml4).entries[pml4_idx] = 0;
-                if page_frame_can_free(pte_address(pml4_entry)) != 0 {
-                    free_page_frame(pte_address(pml4_entry));
+                let pml4_phys = pte_address(pml4_entry);
+                if page_frame_can_free(pml4_phys) != 0 {
+                    free_page_frame(pml4_phys);
                 }
             }
             return 0;
         }
 
-        let pd = mm_phys_to_virt(pte_address(pdpt_entry)) as *mut PageTable;
+        let pd = phys_to_table(pte_address(pdpt_entry));
         let pd_entry = (*pd).entries[pd_idx];
         if !pte_present(pd_entry) {
             return 0;
@@ -463,7 +490,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
             }
             invlpg(vaddr);
         } else {
-            let pt = mm_phys_to_virt(pte_address(pd_entry)) as *mut PageTable;
+            let pt = phys_to_table(pte_address(pd_entry));
             if pt.is_null() {
                 return -1;
             }
@@ -494,18 +521,19 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
 
         if table_empty(pdpt as *const PageTable) {
             (*pml4).entries[pml4_idx] = 0;
-            if page_frame_can_free(pte_address(pml4_entry)) != 0 {
-                free_page_frame(pte_address(pml4_entry));
+            let pml4_phys = pte_address(pml4_entry);
+            if page_frame_can_free(pml4_phys) != 0 {
+                free_page_frame(pml4_phys);
             }
         }
     }
 
     0
 }
-pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
+pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
     unmap_page_in_directory(page_dir, vaddr)
 }
-pub fn unmap_page(vaddr: u64) -> c_int {
+pub fn unmap_page(vaddr: VirtAddr) -> c_int {
     unsafe { unmap_page_in_directory(CURRENT_PAGE_DIR, vaddr) }
 }
 pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
@@ -534,7 +562,7 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
 }
 
 /// Free all 4KB page frames in a page table, then free the PT itself
-unsafe fn free_pt_level(pt: *mut PageTable, pt_phys: u64) {
+unsafe fn free_pt_level(pt: *mut PageTable, pt_phys: PhysAddr) {
     if pt.is_null() {
         return;
     }
@@ -553,7 +581,7 @@ unsafe fn free_pt_level(pt: *mut PageTable, pt_phys: u64) {
 }
 
 /// Free all entries in a page directory (2MB huge or PT subtrees), then free PD itself
-unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: u64) {
+unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: PhysAddr) {
     if pd.is_null() {
         return;
     }
@@ -568,7 +596,7 @@ unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: u64) {
                 free_page_frame(phys);
             }
         } else {
-            let pt = mm_phys_to_virt(phys) as *mut PageTable;
+            let pt = phys_to_table(phys);
             free_pt_level(pt, phys);
         }
     }
@@ -578,7 +606,7 @@ unsafe fn free_pd_level(pd: *mut PageTable, pd_phys: u64) {
 }
 
 /// Free all entries in a PDPT (1GB huge or PD subtrees), then free PDPT itself
-unsafe fn free_pdpt_level(pdpt: *mut PageTable, pdpt_phys: u64) {
+unsafe fn free_pdpt_level(pdpt: *mut PageTable, pdpt_phys: PhysAddr) {
     if pdpt.is_null() {
         return;
     }
@@ -593,7 +621,7 @@ unsafe fn free_pdpt_level(pdpt: *mut PageTable, pdpt_phys: u64) {
                 free_page_frame(phys);
             }
         } else {
-            let pd = mm_phys_to_virt(phys) as *mut PageTable;
+            let pd = phys_to_table(phys);
             free_pd_level(pd, phys);
         }
     }
@@ -617,7 +645,7 @@ fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
                 continue;
             }
             let pdpt_phys = pte_address(pml4e);
-            let pdpt = mm_phys_to_virt(pdpt_phys) as *mut PageTable;
+            let pdpt = phys_to_table(pdpt_phys);
             free_pdpt_level(pdpt, pdpt_phys);
             (*pml4).entries[pml4_idx] = 0;
         }
@@ -629,23 +657,26 @@ pub fn paging_free_user_space(page_dir: *mut ProcessPageDir) {
 pub fn init_paging() {
     unsafe {
         let cr3 = get_cr3();
-        KERNEL_PAGE_DIR.pml4_phys = cr3 & !0xFFF;
+        KERNEL_PAGE_DIR.pml4_phys = cr3;
 
-        let pml4_ptr = mm_phys_to_virt(KERNEL_PAGE_DIR.pml4_phys) as *mut PageTable;
+        let pml4_ptr = phys_to_table(KERNEL_PAGE_DIR.pml4_phys);
         if pml4_ptr.is_null() {
             panic!("Failed to translate kernel PML4 physical address");
         }
         KERNEL_PAGE_DIR.pml4 = pml4_ptr;
 
-        let kernel_phys = virt_to_phys(KERNEL_VIRTUAL_BASE);
-        if kernel_phys == 0 {
+        let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
+        if kernel_phys.is_null() {
             panic!("Higher-half kernel mapping not found");
         }
 
-        klog_debug!("Higher-half kernel mapping verified at 0x{:x}", kernel_phys);
+        klog_debug!(
+            "Higher-half kernel mapping verified at 0x{:x}",
+            kernel_phys.as_u64()
+        );
 
-        let identity_phys = virt_to_phys(0x100000);
-        if identity_phys == 0x100000 || hhdm::is_available() {
+        let identity_phys = virt_to_phys(VirtAddr::new(0x100000));
+        if identity_phys == PhysAddr::new(0x100000) || hhdm::is_available() {
             klog_debug!("Identity mapping verified");
         } else {
             klog_debug!("Identity mapping not found (may be normal after early boot)");
@@ -660,14 +691,14 @@ pub fn get_memory_layout_info(kernel_virt_base: *mut u64, kernel_phys_base: *mut
             *kernel_virt_base = KERNEL_VIRTUAL_BASE;
         }
         if !kernel_phys_base.is_null() {
-            *kernel_phys_base = virt_to_phys(KERNEL_VIRTUAL_BASE);
+            *kernel_phys_base = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE)).as_u64();
         }
     }
 }
-pub fn is_mapped(vaddr: u64) -> c_int {
-    (virt_to_phys(vaddr) != 0) as c_int
+pub fn is_mapped(vaddr: VirtAddr) -> c_int {
+    (!virt_to_phys(vaddr).is_null()) as c_int
 }
-pub fn get_page_size(vaddr: u64) -> u64 {
+pub fn get_page_size(vaddr: VirtAddr) -> u64 {
     unsafe {
         if CURRENT_PAGE_DIR.is_null() || (*CURRENT_PAGE_DIR).pml4.is_null() {
             return 0;
@@ -676,7 +707,7 @@ pub fn get_page_size(vaddr: u64) -> u64 {
         if !pte_present(pml4_entry) {
             return 0;
         }
-        let pdpt = mm_phys_to_virt(pte_address(pml4_entry)) as *mut PageTable;
+        let pdpt = phys_to_table(pte_address(pml4_entry));
         let pdpt_entry = (*pdpt).entries[pdpt_index(vaddr)];
         if !pte_present(pdpt_entry) {
             return 0;
@@ -684,7 +715,7 @@ pub fn get_page_size(vaddr: u64) -> u64 {
         if pte_huge(pdpt_entry) {
             return PAGE_SIZE_1GB;
         }
-        let pd = mm_phys_to_virt(pte_address(pdpt_entry)) as *mut PageTable;
+        let pd = phys_to_table(pte_address(pdpt_entry));
         let pd_entry = (*pd).entries[pd_index(vaddr)];
         if !pte_present(pd_entry) {
             return 0;
@@ -697,28 +728,32 @@ pub fn get_page_size(vaddr: u64) -> u64 {
 }
 pub fn paging_mark_range_user(
     page_dir: *mut ProcessPageDir,
-    start: u64,
-    end: u64,
+    start: VirtAddr,
+    end: VirtAddr,
     writable: c_int,
 ) -> c_int {
-    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } || start >= end {
+    if page_dir.is_null()
+        || unsafe { (*page_dir).pml4.is_null() }
+        || start.as_u64() >= end.as_u64()
+    {
         return -1;
     }
-    let mut addr = start & !(PAGE_SIZE_4KB - 1);
+    let mut addr = start.as_u64() & !(PAGE_SIZE_4KB - 1);
     unsafe {
-        while addr < end {
-            let pml4e = &mut (*(*page_dir).pml4).entries[pml4_index(addr)];
+        while addr < end.as_u64() {
+            let vaddr = VirtAddr::new(addr);
+            let pml4e = &mut (*(*page_dir).pml4).entries[pml4_index(vaddr)];
             if !pte_present(*pml4e) {
                 return -1;
             }
             if !pte_user(*pml4e) {
                 *pml4e |= PAGE_USER;
             }
-            let pdpt = mm_phys_to_virt(pte_address(*pml4e)) as *mut PageTable;
+            let pdpt = phys_to_table(pte_address(*pml4e));
             if pdpt.is_null() {
                 return -1;
             }
-            let pdpte = &mut (*pdpt).entries[pdpt_index(addr)];
+            let pdpte = &mut (*pdpt).entries[pdpt_index(vaddr)];
             if !pte_present(*pdpte) {
                 return -1;
             }
@@ -733,11 +768,11 @@ pub fn paging_mark_range_user(
                 addr += PAGE_SIZE_1GB;
                 continue;
             }
-            let pd = mm_phys_to_virt(pte_address(*pdpte)) as *mut PageTable;
+            let pd = phys_to_table(pte_address(*pdpte));
             if pd.is_null() {
                 return -1;
             }
-            let pde = &mut (*pd).entries[pd_index(addr)];
+            let pde = &mut (*pd).entries[pd_index(vaddr)];
             if !pte_present(*pde) {
                 return -1;
             }
@@ -752,11 +787,11 @@ pub fn paging_mark_range_user(
                 addr += PAGE_SIZE_2MB;
                 continue;
             }
-            let pt = mm_phys_to_virt(pte_address(*pde)) as *mut PageTable;
+            let pt = phys_to_table(pte_address(*pde));
             if pt.is_null() {
                 return -1;
             }
-            let pte = &mut (*pt).entries[pt_index(addr)];
+            let pte = &mut (*pt).entries[pt_index(vaddr)];
             if !pte_present(*pte) {
                 return -1;
             }
@@ -772,7 +807,7 @@ pub fn paging_mark_range_user(
     }
     0
 }
-pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: u64) -> c_int {
+pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
     if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
         return 0;
     }
@@ -781,7 +816,7 @@ pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: u64) -> c
         if !pte_present(pml4_entry) || !pte_user(pml4_entry) {
             return 0;
         }
-        let pdpt = mm_phys_to_virt(pte_address(pml4_entry)) as *mut PageTable;
+        let pdpt = phys_to_table(pte_address(pml4_entry));
         if pdpt.is_null() {
             return 0;
         }
@@ -792,7 +827,7 @@ pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: u64) -> c
         if pte_huge(pdpt_entry) {
             return 1;
         }
-        let pd = mm_phys_to_virt(pte_address(pdpt_entry)) as *mut PageTable;
+        let pd = phys_to_table(pte_address(pdpt_entry));
         if pd.is_null() {
             return 0;
         }
@@ -803,7 +838,7 @@ pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: u64) -> c
         if pte_huge(pd_entry) {
             return 1;
         }
-        let pt = mm_phys_to_virt(pte_address(pd_entry)) as *mut PageTable;
+        let pt = phys_to_table(pte_address(pd_entry));
         if pt.is_null() {
             return 0;
         }

@@ -1,9 +1,11 @@
 use core::ffi::c_int;
 use core::ptr;
 
-use slopos_lib::{klog_debug, klog_info};
+use slopos_abi::addr::VirtAddr;
+use slopos_lib::{align_down, align_up, klog_debug, klog_info};
 use spin::Mutex;
 
+use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
 use crate::mm_constants::{
@@ -14,8 +16,6 @@ use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
     paging_free_user_space, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir,
 };
-use crate::phys_virt::mm_phys_to_virt;
-use slopos_lib::{align_down, align_up};
 
 #[repr(C)]
 struct VmArea {
@@ -142,7 +142,7 @@ fn map_user_range(
 
     while current < end_addr {
         let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-        if phys == 0 {
+        if phys.is_null() {
             klog_info!("map_user_range: Physical allocation failed");
             rollback_range(page_dir, current, start_addr, &mut mapped);
             if !pages_mapped_out.is_null() {
@@ -150,7 +150,7 @@ fn map_user_range(
             }
             return -1;
         }
-        if map_page_4kb_in_dir(page_dir, current, phys, map_flags) != 0 {
+        if map_page_4kb_in_dir(page_dir, VirtAddr::new(current), phys, map_flags) != 0 {
             klog_info!("map_user_range: Virtual mapping failed");
             free_page_frame(phys);
             rollback_range(page_dir, current, start_addr, &mut mapped);
@@ -177,9 +177,9 @@ fn rollback_range(
 ) {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
-        let phys = virt_to_phys_in_dir(page_dir, current);
-        if phys != 0 {
-            unmap_page_in_dir(page_dir, current);
+        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(current));
+        if !phys.is_null() {
+            unmap_page_in_dir(page_dir, VirtAddr::new(current));
             if page_frame_can_free(phys) != 0 {
                 free_page_frame(phys);
             }
@@ -195,9 +195,9 @@ fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u6
     }
     let mut addr = start_addr;
     while addr < end_addr {
-        let phys = virt_to_phys_in_dir(page_dir, addr);
-        if phys != 0 && page_frame_can_free(phys) != 0 {
-            unmap_page_in_dir(page_dir, addr);
+        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
+        if !phys.is_null() && page_frame_can_free(phys) != 0 {
+            unmap_page_in_dir(page_dir, VirtAddr::new(addr));
             free_page_frame(phys);
         }
         addr += PAGE_SIZE_4KB;
@@ -315,10 +315,10 @@ fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
     let mut addr = start;
     unsafe {
         while addr < end {
-            let phys = virt_to_phys_in_dir((*process).page_dir, addr);
-            if phys != 0 {
+            let phys = virt_to_phys_in_dir((*process).page_dir, VirtAddr::new(addr));
+            if !phys.is_null() {
                 let was_allocated = page_frame_can_free(phys) != 0;
-                unmap_page_in_dir((*process).page_dir, addr);
+                unmap_page_in_dir((*process).page_dir, VirtAddr::new(addr));
                 if was_allocated {
                     freed += 1;
                 }
@@ -574,15 +574,15 @@ fn apply_elf_relocations(
                     // For PC32/PLT32, read current offset from instruction and calculate symbol
                     let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
                     let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-                    let read_phys = virt_to_phys_in_dir(page_dir, read_page_va);
-                    if read_phys == 0 {
+                    let read_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(read_page_va));
+                    if read_phys.is_null() {
                         continue;
                     }
-                    let read_virt = mm_phys_to_virt(read_phys);
-                    if read_virt == 0 {
+                    let read_virt = read_phys.to_virt();
+                    if read_virt.is_null() {
                         continue;
                     }
-                    let read_ptr = unsafe { (read_virt as *mut u8).add(read_page_off) };
+                    let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
                     let current_offset = unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
                     // For R_X86_64_PC32/PLT32: offset = S + A - P, where:
                     //   S = symbol value, A = addend, P = place (RIP after instruction)
@@ -603,15 +603,15 @@ fn apply_elf_relocations(
                         // If addend is 0, try reading current value
                         let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
                         let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
-                        let read_phys = virt_to_phys_in_dir(page_dir, read_page_va);
-                        if read_phys == 0 {
+                        let read_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(read_page_va));
+                        if read_phys.is_null() {
                             continue;
                         }
-                        let read_virt = mm_phys_to_virt(read_phys);
-                        if read_virt == 0 {
+                        let read_virt = read_phys.to_virt();
+                        if read_virt.is_null() {
                             continue;
                         }
-                        let read_ptr = unsafe { (read_virt as *mut u8).add(read_page_off) };
+                        let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
                         match reloc_type {
                             R_X86_64_64 => unsafe { core::ptr::read_unaligned(read_ptr as *const u64) },
                             R_X86_64_32 | R_X86_64_32S => {
@@ -638,16 +638,16 @@ fn apply_elf_relocations(
             let reloc_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
             let reloc_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
 
-            let reloc_phys = virt_to_phys_in_dir(page_dir, reloc_page_va);
-            if reloc_phys == 0 {
+            let reloc_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(reloc_page_va));
+            if reloc_phys.is_null() {
                 continue;
             }
-            let reloc_virt = mm_phys_to_virt(reloc_phys);
-            if reloc_virt == 0 {
+            let reloc_virt = reloc_phys.to_virt();
+            if reloc_virt.is_null() {
                 continue;
             }
 
-            let reloc_ptr = unsafe { (reloc_virt as *mut u8).add(reloc_page_off) };
+            let reloc_ptr = unsafe { reloc_virt.as_mut_ptr::<u8>().add(reloc_page_off) };
 
             // Apply relocation based on type
             match reloc_type {
@@ -836,30 +836,35 @@ pub fn process_vm_load_elf(
         let mut pages_mapped_seg = 0u32;
         while dst < page_end {
             // Check if this page is already mapped (from a previous segment)
-            let existing_phys = virt_to_phys_in_dir(page_dir, dst);
-            let phys = if existing_phys != 0 {
+            let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(dst));
+            let phys = if !existing_phys.is_null() {
                 // Page already mapped, reuse it (for overlapping segments)
                 // But we still need to copy the data for this segment's portion
                 if (map_flags & PAGE_WRITABLE) != 0 {
-                    let _ = paging_mark_range_user(page_dir, dst, dst + PAGE_SIZE_4KB, 1);
+                    let _ = paging_mark_range_user(
+                        page_dir,
+                        VirtAddr::new(dst),
+                        VirtAddr::new(dst + PAGE_SIZE_4KB),
+                        1,
+                    );
                 }
                 existing_phys
             } else {
                 // Allocate new page
                 let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-                if new_phys == 0 {
+                if new_phys.is_null() {
                     return -1;
                 }
-                if map_page_4kb_in_dir(page_dir, dst, new_phys, map_flags) != 0 {
+                if map_page_4kb_in_dir(page_dir, VirtAddr::new(dst), new_phys, map_flags) != 0 {
                     free_page_frame(new_phys);
                     return -1;
                 }
                 pages_mapped_seg += 1;
                 new_phys
             };
-            let dest_virt = mm_phys_to_virt(phys);
-            if dest_virt == 0 {
-                if existing_phys == 0 {
+            let dest_virt = phys.to_virt();
+            if dest_virt.is_null() {
+                if existing_phys.is_null() {
                     free_page_frame(phys);
                 }
                 return -1;
@@ -881,7 +886,7 @@ pub fn process_vm_load_elf(
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             payload.add(src_off),
-                            (dest_virt as *mut u8).add(dest_off),
+                            dest_virt.as_mut_ptr::<u8>().add(dest_off),
                             copy_len,
                         );
                     }
@@ -896,7 +901,7 @@ pub fn process_vm_load_elf(
                     let zero_off = (zero_start - dst) as usize;
                     let zero_len = (zero_end - zero_start) as usize;
                     unsafe {
-                        core::ptr::write_bytes((dest_virt as *mut u8).add(zero_off), 0, zero_len);
+                        core::ptr::write_bytes(dest_virt.as_mut_ptr::<u8>().add(zero_off), 0, zero_len);
                     }
                 }
             }
@@ -978,11 +983,11 @@ pub fn create_process_vm() -> u32 {
     }
 
     let pml4_phys = alloc_page_frame(0);
-    if pml4_phys == 0 {
+    if pml4_phys.is_null() {
         klog_info!("create_process_vm: Failed to allocate PML4");
         return INVALID_PROCESS_ID;
     }
-    let pml4 = mm_phys_to_virt(pml4_phys) as *mut PageTable;
+    let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
     if pml4.is_null() {
         klog_info!("create_process_vm: No HHDM/identity map available for PML4");
         free_page_frame(pml4_phys);
@@ -1126,7 +1131,7 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         teardown_process_mappings(process_ptr);
         paging_free_user_space((*process_ptr).page_dir);
         if !(*process_ptr).page_dir.is_null() {
-            if (*(*process_ptr).page_dir).pml4_phys != 0 {
+            if !(*(*process_ptr).page_dir).pml4_phys.is_null() {
                 free_page_frame((*(*process_ptr).page_dir).pml4_phys);
             }
             kfree((*process_ptr).page_dir as *mut _);

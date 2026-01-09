@@ -13,8 +13,10 @@ use crate::pci::{
 };
 use crate::wl_currency;
 
+use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_abi::addr::PhysAddr;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame};
-use slopos_mm::phys_virt::{mm_map_mmio_region, mm_phys_to_virt, mm_unmap_mmio_region};
+use slopos_mm::phys_virt::{mm_map_mmio_region, mm_unmap_mmio_region};
 
 pub const VIRTIO_GPU_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;
@@ -339,7 +341,7 @@ fn virtio_gpu_map_cap_region(
         return core::ptr::null_mut();
     }
     let phys = bar.base.wrapping_add(offset as u64);
-    mm_map_mmio_region(phys, length as usize) as *mut u8
+    mm_map_mmio_region(PhysAddr::new(phys), length as usize) as *mut u8
 }
 
 fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> virtio_gpu_device_t {
@@ -469,22 +471,22 @@ fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
     let desc_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let avail_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let used_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if desc_phys == 0 || avail_phys == 0 || used_phys == 0 {
-        if desc_phys != 0 {
+    if desc_phys.is_null() || avail_phys.is_null() || used_phys.is_null() {
+        if !desc_phys.is_null() {
             free_page_frame(desc_phys);
         }
-        if avail_phys != 0 {
+        if !avail_phys.is_null() {
             free_page_frame(avail_phys);
         }
-        if used_phys != 0 {
+        if !used_phys.is_null() {
             free_page_frame(used_phys);
         }
         return false;
     }
 
-    let desc_virt = mm_phys_to_virt(desc_phys);
-    let avail_virt = mm_phys_to_virt(avail_phys);
-    let used_virt = mm_phys_to_virt(used_phys);
+    let desc_virt = desc_phys.to_virt().as_u64();
+    let avail_virt = avail_phys.to_virt().as_u64();
+    let used_virt = used_phys.to_virt().as_u64();
     if desc_virt == 0 || avail_virt == 0 || used_virt == 0 {
         free_page_frame(desc_phys);
         free_page_frame(avail_phys);
@@ -493,9 +495,9 @@ fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
     }
 
     unsafe {
-        core::ptr::write_volatile(&mut (*cfg).queue_desc, desc_phys);
-        core::ptr::write_volatile(&mut (*cfg).queue_avail, avail_phys);
-        core::ptr::write_volatile(&mut (*cfg).queue_used, used_phys);
+        core::ptr::write_volatile(&mut (*cfg).queue_desc, desc_phys.as_u64());
+        core::ptr::write_volatile(&mut (*cfg).queue_avail, avail_phys.as_u64());
+        core::ptr::write_volatile(&mut (*cfg).queue_used, used_phys.as_u64());
         core::ptr::write_volatile(&mut (*cfg).queue_enable, 1);
     }
 
@@ -503,9 +505,9 @@ fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
 
     device.ctrl_queue = VirtioGpuQueue {
         size,
-        desc_phys,
-        avail_phys,
-        used_phys,
+        desc_phys: desc_phys.as_u64(),
+        avail_phys: avail_phys.as_u64(),
+        used_phys: used_phys.as_u64(),
         desc: desc_virt as *mut VirtqDesc,
         avail: avail_virt as *mut VirtqAvail,
         used: used_virt as *mut VirtqUsed,
@@ -618,18 +620,18 @@ fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t) -> bool {
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -656,9 +658,9 @@ fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t) -> bool {
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuRespDisplayInfo>(),
     );
     if !submitted {
@@ -699,18 +701,18 @@ fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t) -> bool {
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -742,9 +744,9 @@ fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t) -> bool {
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuGetCapsetInfo>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuRespCapsetInfo>(),
     );
     if !submitted {
@@ -785,18 +787,18 @@ fn virtio_gpu_create_context(device: &mut virtio_gpu_device_t, ctx_id: u32) -> b
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -830,9 +832,9 @@ fn virtio_gpu_create_context(device: &mut virtio_gpu_device_t, ctx_id: u32) -> b
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtxCreate>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -865,18 +867,18 @@ fn virtio_gpu_resource_create_2d(
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -910,9 +912,9 @@ fn virtio_gpu_resource_create_2d(
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuResourceCreate2d>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -945,18 +947,18 @@ fn virtio_gpu_resource_attach_backing(
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -1000,9 +1002,9 @@ fn virtio_gpu_resource_attach_backing(
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         cmd_len,
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -1035,18 +1037,18 @@ fn virtio_gpu_set_scanout(
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -1084,9 +1086,9 @@ fn virtio_gpu_set_scanout(
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuSetScanout>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -1119,18 +1121,18 @@ fn virtio_gpu_transfer_to_host_2d(
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -1169,9 +1171,9 @@ fn virtio_gpu_transfer_to_host_2d(
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuTransferToHost2d>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -1204,18 +1206,18 @@ fn virtio_gpu_resource_flush(
 
     let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys == 0 || resp_phys == 0 {
-        if cmd_phys != 0 {
+    if cmd_phys.is_null() || resp_phys.is_null() {
+        if !cmd_phys.is_null() {
             free_page_frame(cmd_phys);
         }
-        if resp_phys != 0 {
+        if !resp_phys.is_null() {
             free_page_frame(resp_phys);
         }
         return false;
     }
 
-    let cmd_virt = mm_phys_to_virt(cmd_phys);
-    let resp_virt = mm_phys_to_virt(resp_phys);
+    let cmd_virt = cmd_phys.to_virt().as_u64();
+    let resp_virt = resp_phys.to_virt().as_u64();
     if cmd_virt == 0 || resp_virt == 0 {
         free_page_frame(cmd_phys);
         free_page_frame(resp_phys);
@@ -1253,9 +1255,9 @@ fn virtio_gpu_resource_flush(
         &mut device.ctrl_queue,
         notify_cfg,
         notify_mult,
-        cmd_phys,
+        cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuResourceFlush>(),
-        resp_phys,
+        resp_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
     );
     if !submitted {
@@ -1308,7 +1310,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
     } else {
         VIRTIO_MMIO_DEFAULT_SIZE
     };
-    let mmio_base = mm_map_mmio_region(bar.base, mmio_size);
+    let mmio_base = mm_map_mmio_region(PhysAddr::new(bar.base), mmio_size);
     if mmio_base.is_null() {
         klog_info!(
             "PCI: virtio-gpu MMIO mapping failed for phys=0x{:x}",
@@ -1518,7 +1520,7 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         let size_aligned = align_up(size as usize, PAGE_SIZE_4KB as usize) as u64;
         let pages = (size_aligned / PAGE_SIZE_4KB) as u32;
         let phys = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
-        if phys == 0 {
+        if phys.is_null() {
             // Recoverable failure: backing store allocation failed.
             wl_currency::award_loss();
             return None;
@@ -1537,7 +1539,7 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
             return None;
         }
 
-        if !virtio_gpu_resource_attach_backing(&mut VIRTIO_GPU_DEVICE, resource_id, phys, size as u32) {
+        if !virtio_gpu_resource_attach_backing(&mut VIRTIO_GPU_DEVICE, resource_id, phys.as_u64(), size as u32) {
             free_page_frame(phys);
             // Recoverable failure: backing attach failed.
             wl_currency::award_loss();
@@ -1561,7 +1563,7 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         }
 
         VIRTIO_GPU_DEVICE.fb_resource_id = resource_id;
-        VIRTIO_GPU_DEVICE.fb_phys = phys;
+        VIRTIO_GPU_DEVICE.fb_phys = phys.as_u64();
         VIRTIO_GPU_DEVICE.fb_size = size;
         VIRTIO_GPU_DEVICE.fb_width = width;
         VIRTIO_GPU_DEVICE.fb_height = height;
@@ -1573,7 +1575,7 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         wl_currency::award_win();
 
         Some(FramebufferInfo {
-            address: phys as *mut u8,
+            address: phys.to_virt().as_mut_ptr::<u8>(),
             width: width as u64,
             height: height as u64,
             pitch: pitch as u64,

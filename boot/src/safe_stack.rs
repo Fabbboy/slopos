@@ -109,6 +109,7 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
 use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::map_page_4kb;
 use slopos_mm::phys_virt::mm_zero_physical_page;
+use slopos_abi::addr::VirtAddr;
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)
@@ -131,7 +132,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack.stack_base + page * PAGE_SIZE_4KB;
         let phys_addr = alloc_page_frame(0);
-        if phys_addr == 0 {
+        if phys_addr.is_null() {
             kernel_panic(
                 b"safe_stack_init: Failed to allocate exception stack page\0".as_ptr()
                     as *const c_char,
@@ -142,7 +143,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
                 b"safe_stack_init: Failed to zero exception stack page\0".as_ptr() as *const c_char,
             );
         }
-        if map_page_4kb(virt_addr, phys_addr, PAGE_KERNEL_RW) != 0 {
+        if map_page_4kb(VirtAddr::new(virt_addr), phys_addr, PAGE_KERNEL_RW) != 0 {
             kernel_panic(
                 b"safe_stack_init: Failed to map exception stack page\0".as_ptr() as *const c_char,
             );

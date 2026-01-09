@@ -1,12 +1,13 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
+use slopos_abi::addr::PhysAddr;
 use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info};
 use spin::Mutex;
 
+use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
 use crate::mm_constants::PAGE_SIZE_4KB;
-use crate::phys_virt::{mm_phys_to_virt, mm_zero_physical_page};
 
 // Allocation flags (mirrors page_alloc.h)
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;
@@ -63,12 +64,12 @@ impl PageAllocator {
         }
     }
 
-    fn phys_to_frame(&self, phys_addr: u64) -> u32 {
-        (phys_addr >> 12) as u32
+    fn phys_to_frame(&self, phys_addr: PhysAddr) -> u32 {
+        (phys_addr.as_u64() >> 12) as u32
     }
 
-    fn frame_to_phys(&self, frame_num: u32) -> u64 {
-        (frame_num as u64) << 12
+    fn frame_to_phys(&self, frame_num: u32) -> PhysAddr {
+        PhysAddr::new((frame_num as u64) << 12)
     }
 
     fn is_valid_frame(&self, frame_num: u32) -> bool {
@@ -162,7 +163,7 @@ impl PageAllocator {
     }
 
     fn block_meets_flags(&self, frame_num: u32, order: u32, flags: u32) -> bool {
-        let phys = self.frame_to_phys(frame_num);
+        let phys = self.frame_to_phys(frame_num).as_u64();
         let span = (Self::order_block_pages(order) as u64) * PAGE_SIZE_4KB;
         if flags & ALLOC_FLAG_DMA != 0 && phys + span > DMA_MEMORY_LIMIT {
             return false;
@@ -290,8 +291,8 @@ impl PageAllocator {
             return;
         }
 
-        let start_frame = self.phys_to_frame(aligned_start);
-        let mut end_frame = self.phys_to_frame(aligned_end);
+        let start_frame = self.phys_to_frame(PhysAddr::new(aligned_start));
+        let mut end_frame = self.phys_to_frame(PhysAddr::new(aligned_end));
         if start_frame >= self.total_frames {
             return;
         }
@@ -395,9 +396,9 @@ pub fn finalize_page_allocator() -> c_int {
 
     0
 }
-pub fn alloc_page_frames(count: u32, flags: u32) -> u64 {
+pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
     if count == 0 {
-        return 0;
+        return PhysAddr::NULL;
     }
 
     let mut order = 0;
@@ -416,7 +417,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> u64 {
     let frame_num = alloc.allocate_block(order, flags);
     if frame_num == INVALID_PAGE_FRAME {
         klog_info!("alloc_page_frames: No suitable block available");
-        return 0;
+        return PhysAddr::NULL;
     }
 
     let phys_addr = alloc.frame_to_phys(frame_num);
@@ -425,19 +426,20 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> u64 {
     if flags & ALLOC_FLAG_ZERO != 0 {
         let span_pages = PageAllocator::order_block_pages(order);
         for i in 0..span_pages {
-            if mm_zero_physical_page(phys_addr + (i as u64 * PAGE_SIZE_4KB)) != 0 {
+            let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
+            if zero_physical_page(page_phys) != 0 {
                 free_page_frame(phys_addr);
-                return 0;
+                return PhysAddr::NULL;
             }
         }
     }
 
     phys_addr
 }
-pub fn alloc_page_frame(flags: u32) -> u64 {
+pub fn alloc_page_frame(flags: u32) -> PhysAddr {
     alloc_page_frames(1, flags)
 }
-pub fn free_page_frame(phys_addr: u64) -> c_int {
+pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
     let mut alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
 
@@ -487,12 +489,12 @@ pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut
         }
     }
 }
-pub fn page_frame_is_tracked(phys_addr: u64) -> c_int {
+pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     (frame_num < alloc.total_frames) as c_int
 }
-pub fn page_frame_can_free(phys_addr: u64) -> c_int {
+pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     if !alloc.is_valid_frame(frame_num) {
@@ -509,12 +511,29 @@ pub fn page_allocator_paint_all(value: u8) {
 
     for frame_num in 0..alloc.total_frames {
         let phys_addr = alloc.frame_to_phys(frame_num);
-        let virt_addr = mm_phys_to_virt(phys_addr);
-        if virt_addr == 0 {
-            continue;
+        if let Some(virt_addr) = phys_addr.to_virt_checked() {
+            unsafe {
+                ptr::write_bytes(virt_addr.as_mut_ptr::<u8>(), value, PAGE_SIZE_4KB as usize);
+            }
         }
-        unsafe {
-            ptr::write_bytes(virt_addr as *mut u8, value, PAGE_SIZE_4KB as usize);
+    }
+}
+
+/// Zero a physical page.
+///
+/// Returns 0 on success, -1 on failure.
+fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
+    if phys_addr.is_null() {
+        return -1;
+    }
+
+    match phys_addr.to_virt_checked() {
+        Some(virt) => {
+            unsafe {
+                ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
+            }
+            0
         }
+        None => -1,
     }
 }

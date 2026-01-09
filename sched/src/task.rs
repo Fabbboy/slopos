@@ -396,7 +396,7 @@ pub fn task_create(
     } else {
         let page_dir = process_vm_get_page_dir(process_id);
         if !page_dir.is_null() {
-            task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys };
+            task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys.as_u64() };
         }
     }
 

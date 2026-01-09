@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::Mutex;
 
+use slopos_abi::addr::{PhysAddr, VirtAddr};
+
 use crate::mm_constants::{PAGE_PRESENT, PAGE_SIZE_4KB, PAGE_USER, PAGE_WRITABLE};
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
@@ -325,7 +327,7 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
 
     // Allocate physical pages
     let phys_addr = alloc_page_frames(pages, flags | ALLOC_FLAG_ZERO);
-    if phys_addr == 0 {
+    if phys_addr.is_null() {
         klog_info!("shm_create: failed to allocate {} pages", pages);
         return 0;
     }
@@ -336,7 +338,7 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
         None => {
             // Free the allocated pages
             for i in 0..pages {
-                free_page_frame(phys_addr + (i as u64) * PAGE_SIZE_4KB);
+                free_page_frame(PhysAddr::new(phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB));
             }
             klog_info!("shm_create: no free slots");
             return 0;
@@ -346,7 +348,7 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
     let token = registry.next_token.fetch_add(1, Ordering::Relaxed);
 
     registry.buffers[slot] = SharedBuffer {
-        phys_addr,
+        phys_addr: phys_addr.as_u64(),
         size: aligned_size,
         pages,
         owner_task: owner_process,
@@ -435,11 +437,16 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
         let page_vaddr = vaddr + (i as u64) * PAGE_SIZE_4KB;
         let page_phys = phys_base + (i as u64) * PAGE_SIZE_4KB;
 
-        if map_page_4kb_in_dir(page_dir, page_vaddr, page_phys, map_flags) != 0 {
+        if map_page_4kb_in_dir(
+            page_dir,
+            VirtAddr::new(page_vaddr),
+            PhysAddr::new(page_phys),
+            map_flags,
+        ) != 0 {
             // Rollback on failure
             for j in 0..i {
                 let rollback_vaddr = vaddr + (j as u64) * PAGE_SIZE_4KB;
-                unmap_page_in_dir(page_dir, rollback_vaddr);
+                unmap_page_in_dir(page_dir, VirtAddr::new(rollback_vaddr));
             }
             klog_info!("shm_map: failed to map page {} for token {}", i, token);
             return 0;
@@ -503,7 +510,7 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
     let pages = registry.buffers[buf_idx].pages;
     for i in 0..pages {
         let page_vaddr = virt_addr + (i as u64) * PAGE_SIZE_4KB;
-        unmap_page_in_dir(page_dir, page_vaddr);
+        unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
     }
 
     // Clear the mapping
@@ -575,7 +582,7 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         if !page_dir.is_null() {
             for j in 0..pages {
                 let page_vaddr = vaddr + (j as u64) * PAGE_SIZE_4KB;
-                unmap_page_in_dir(page_dir, page_vaddr);
+                unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
             }
         }
     }
@@ -587,7 +594,7 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
 
     // Free physical pages
     for i in 0..pages {
-        free_page_frame(phys_addr + (i as u64) * PAGE_SIZE_4KB);
+        free_page_frame(PhysAddr::new(phys_addr + (i as u64) * PAGE_SIZE_4KB));
     }
 
     // Clear the buffer slot
@@ -760,7 +767,7 @@ pub fn shm_cleanup_task(task_id: u32) {
 
         // Free physical pages
         for j in 0..buffer.pages {
-            free_page_frame(buffer.phys_addr + (j as u64) * PAGE_SIZE_4KB);
+            free_page_frame(PhysAddr::new(buffer.phys_addr + (j as u64) * PAGE_SIZE_4KB));
         }
 
         // Collect vaddrs and unmap from other tasks
@@ -776,7 +783,7 @@ pub fn shm_cleanup_task(task_id: u32) {
                 if !page_dir.is_null() {
                     for j in 0..buffer.pages {
                         let page_vaddr = mapping.virt_addr + (j as u64) * PAGE_SIZE_4KB;
-                        unmap_page_in_dir(page_dir, page_vaddr);
+                        unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
                     }
                 }
             }
@@ -948,7 +955,7 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
 
     // Allocate physical pages
     let phys_addr = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
-    if phys_addr == 0 {
+    if phys_addr.is_null() {
         klog_info!("shm_create_with_format: failed to allocate {} pages", pages);
         return 0;
     }
@@ -959,7 +966,7 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
         None => {
             // Free the allocated pages
             for i in 0..pages {
-                free_page_frame(phys_addr + (i as u64) * PAGE_SIZE_4KB);
+                free_page_frame(PhysAddr::new(phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB));
             }
             klog_info!("shm_create_with_format: no free slots");
             return 0;
@@ -969,7 +976,7 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
     let token = registry.next_token.fetch_add(1, Ordering::Relaxed);
 
     registry.buffers[slot] = SharedBuffer {
-        phys_addr,
+        phys_addr: phys_addr.as_u64(),
         size: aligned_size,
         pages,
         owner_task,

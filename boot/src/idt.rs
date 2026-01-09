@@ -78,7 +78,8 @@ use slopos_drivers::syscall::syscall_handle;
 use slopos_drivers::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::{paging, process_vm};
-use slopos_mm::phys_virt::mm_phys_to_virt;
+use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use slopos_drivers::sched_bridge;
 
@@ -579,9 +580,9 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     if from_user {
         let mut pid = INVALID_TASK_ID;
         let mut cr3 = 0u64;
-        let mut fault_phys = 0u64;
-        let mut rsp_phys = 0u64;
-        let mut rip_phys = 0u64;
+        let mut fault_phys = PhysAddr::NULL;
+        let mut rsp_phys = PhysAddr::NULL;
+        let mut rip_phys = PhysAddr::NULL;
         let mut ctx_rip = 0u64;
         let mut ctx_rsp = 0u64;
         let task_ptr = sched_bridge::boot_get_current_task() as *mut Task;
@@ -594,16 +595,15 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
             }
             let dir = process_vm::process_vm_get_page_dir(pid);
             if !dir.is_null() {
-                cr3 = unsafe { (*dir).pml4_phys };
-                fault_phys = paging::virt_to_phys_process(fault_addr, dir);
-                rsp_phys = paging::virt_to_phys_process(frame_ref.rsp, dir);
-                rip_phys = paging::virt_to_phys_process(frame_ref.rip, dir);
+                cr3 = unsafe { (*dir).pml4_phys.as_u64() };
+                fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
+                rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
+                rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);
             }
         }
-        if rsp_phys != 0 {
-            let base_addr = mm_phys_to_virt(rsp_phys);
-            if base_addr != 0 {
-                let base = base_addr as *const u64;
+        if !rsp_phys.is_null() {
+            if let Some(base_addr) = rsp_phys.to_virt_checked() {
+                let base = base_addr.as_u64() as *const u64;
                 unsafe {
                     let s0 = core::ptr::read_unaligned(base);
                     let s1 = core::ptr::read_unaligned(base.add(1));
@@ -618,7 +618,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
             } else {
                 klog_info!(
                     "User PF stack top unavailable (phys 0x{:x} unmapped)",
-                    rsp_phys
+                    rsp_phys.as_u64()
                 );
             }
         }
@@ -626,9 +626,9 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
             "User PF debug: pid={} cr3=0x{:x} fault_phys=0x{:x} rip_phys=0x{:x} rsp_phys=0x{:x}",
             pid,
             cr3,
-            fault_phys,
-            rip_phys,
-            rsp_phys
+            fault_phys.as_u64(),
+            rip_phys.as_u64(),
+            rsp_phys.as_u64()
         );
         klog_info!(
             "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",

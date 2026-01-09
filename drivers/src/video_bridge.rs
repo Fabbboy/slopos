@@ -100,9 +100,10 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
         return -1;
     }
 
-    // Verify source address is valid via HHDM (use safe wrapper with validation)
-    let shm_virt = slopos_mm::phys_virt::mm_phys_to_virt(shm_phys);
-    if shm_virt == 0 {
+    // Verify source address is valid via HHDM (use typed translation)
+    use slopos_abi::addr::PhysAddr;
+    use slopos_mm::hhdm::PhysAddrHhdm;
+    if PhysAddr::new(shm_phys).to_virt_checked().is_none() {
         return -1;
     }
 

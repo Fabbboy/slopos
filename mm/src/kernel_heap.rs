@@ -1,6 +1,7 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
+use slopos_abi::addr::VirtAddr;
 use slopos_lib::{klog_debug, klog_info};
 use spin::Mutex;
 
@@ -269,13 +270,13 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
 
     for i in 0..pages_needed {
         let phys_page = alloc_page_frame(0);
-        if phys_page == 0 {
+        if phys_page.is_null() {
             klog_info!("expand_heap: Failed to allocate physical page");
             goto_rollback(expansion_start, mapped_pages);
             return -1;
         }
         let virt_page = expansion_start + (i as u64) * PAGE_SIZE_4KB;
-        if map_page_4kb(virt_page, phys_page, PAGE_KERNEL_RW) != 0 {
+        if map_page_4kb(VirtAddr::new(virt_page), phys_page, PAGE_KERNEL_RW) != 0 {
             klog_info!("expand_heap: Failed to map heap page");
             free_page_frame(phys_page);
             goto_rollback(expansion_start, mapped_pages);
@@ -307,9 +308,9 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
 fn goto_rollback(expansion_start: u64, mapped_pages: u32) {
     for j in 0..mapped_pages {
         let virt_page = expansion_start + (j as u64) * PAGE_SIZE_4KB;
-        let mapped_phys = virt_to_phys(virt_page);
-        if mapped_phys != 0 {
-            unmap_page(virt_page);
+        let mapped_phys = virt_to_phys(VirtAddr::new(virt_page));
+        if !mapped_phys.is_null() {
+            unmap_page(VirtAddr::new(virt_page));
             free_page_frame(mapped_phys);
         }
     }

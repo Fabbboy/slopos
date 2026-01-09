@@ -589,19 +589,26 @@ fn write_register(reg: u32, value: u32) {
 
 **Goal:** Convert memory subsystem to use typed addresses.
 
-**Tasks:**
+**Status:** Completed
+
+**Tasks (completed):**
 1. Update `mm/src/paging.rs` to use `PhysAddr`/`VirtAddr`
 2. Update `mm/src/page_alloc.rs`
 3. Update `mm/src/process_vm.rs`
 4. Call `hhdm::init()` from `init_memory_system()`
 5. Remove `memory_init::HHDM_OFFSET` static
+6. Update `mm/src/phys_virt.rs` wrappers to use typed addresses
+7. Update core MM callers (`kernel_heap`, `shared_memory`, `user_copy`)
 
-**Files to modify:**
+**Files modified:**
 - `mm/src/memory_init.rs`
 - `mm/src/paging.rs`
 - `mm/src/page_alloc.rs`
 - `mm/src/process_vm.rs`
-- `mm/src/phys_virt.rs` - reimplement using new types
+- `mm/src/phys_virt.rs`
+- `mm/src/kernel_heap.rs`
+- `mm/src/shared_memory.rs`
+- `mm/src/user_copy.rs`
 
 ### Phase 3: Migrate Drivers
 
