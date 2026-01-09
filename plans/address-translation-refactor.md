@@ -15,7 +15,13 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 - Typed address API, unified HHDM storage, and `MmioRegion` are implemented.
 - Core MM and driver migrations are complete; legacy `phys_virt` wrappers removed.
 - Phase 4 cleanup complete (no legacy wrappers or untyped HHDM helpers remain).
-- Remaining gaps (planned follow-ups): none noted.
+- Remaining gaps (planned follow-ups):
+  - `mm/src/user_copy.rs` uses `VirtAddr::new()` on user-provided pointers; non-canonical input should fail gracefully instead of panicking (`VirtAddr::try_new()` or explicit canonical check).
+  - `mm/src/hhdm.rs` initializes the `HHDM_INITIALIZED` flag before storing the offset; publish offset first, then set the flag to avoid observing `initialized` with offset=0.
+  - `mm/src/mmio.rs` lacks overflow checking for `phys + hhdm::offset()` when building `virt_base`.
+  - Some drivers still use raw `u64` physical addresses (type-safety gap), e.g. `drivers/src/virtio_gpu.rs` queue/command phys fields and `drivers/src/ioapic.rs` `phys_addr`/`map_ioapic_mmio`/`acpi_map_table`.
+  - `MmioAddr` type is defined but not used in any driver or MMIO API surface.
+  - For a long-term Rust-native fix to user pointer validation and kernel/user type boundaries, see `plans/user-pointer-type-safety.md`.
 
 ---
 
