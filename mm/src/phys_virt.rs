@@ -7,10 +7,10 @@
 //!
 //! SlopOS provides three levels of address translation:
 //!
-//! 1. **Raw HHDM** (`hhdm_phys_to_virt`, `hhdm_virt_to_phys` in mm/lib.rs)
-//!    - Bare arithmetic with HHDM offset
-//!    - No safety checks
-//!    - Use only when you're certain the address is valid
+//! 1. **Typed HHDM** (`hhdm` module + `PhysAddrHhdm` trait)
+//!    - Type-safe `PhysAddr::to_virt()` translation
+//!    - Checks HHDM availability
+//!    - Preferred for new code
 //!
 //! 2. **Safe Wrappers** (`mm_phys_to_virt`, `mm_virt_to_phys` in this module)
 //!    - Zero-address handling
@@ -26,12 +26,16 @@
 //! # Usage
 //!
 //! ```ignore
-//! // Safe translation (preferred)
+//! use slopos_abi::addr::PhysAddr;
+//! use slopos_mm::hhdm::PhysAddrHhdm;
+//!
+//! // Typed translation (preferred for new code)
+//! let phys = PhysAddr::new(0x1000);
+//! let virt = phys.to_virt();
+//!
+//! // Safe wrapper (legacy, still supported)
 //! let virt = mm_phys_to_virt(phys_addr);
 //! if virt == 0 { /* handle error */ }
-//!
-//! // Raw translation (only when performance-critical and address is known-safe)
-//! let virt = hhdm_phys_to_virt(phys_addr);
 //! ```
 
 use core::ffi::{CStr, c_int, c_void};

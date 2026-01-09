@@ -1,25 +1,26 @@
-use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use spin::Once;
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::*;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_FEAT_ECX_X2APIC};
-use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_mm::mmio::MmioRegion;
 use crate::wl_currency;
+
+/// APIC register region size (4KB page).
+const APIC_REGION_SIZE: usize = 0x1000;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static X2APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
-static APIC_BASE_ADDRESS: AtomicU64 = AtomicU64::new(0);
 static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
-/// Convert physical address to virtual via HHDM.
-#[inline]
-fn hhdm_virt_for(phys: u64) -> Option<u64> {
-    PhysAddr::new(phys).try_to_virt().map(|v| v.as_u64())
-}
+/// MMIO region for Local APIC registers.
+/// Initialized once during detect() and used for all register access.
+static APIC_REGS: Once<MmioRegion> = Once::new();
 
 pub fn detect() -> bool {
     klog_debug!("APIC: Detecting Local APIC availability...");
@@ -39,34 +40,41 @@ pub fn detect() -> bool {
     let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
     APIC_BASE_PHYSICAL.store(apic_phys, Ordering::Relaxed);
 
-    if let Some(virt) = hhdm_virt_for(apic_phys) {
-        APIC_BASE_ADDRESS.store(virt, Ordering::Relaxed);
-        let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 {
-            " BSP"
-        } else {
-            ""
-        };
-        let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 {
-            " X2APIC"
-        } else {
-            ""
-        };
-        let enable_flag = if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
-            " ENABLED"
-        } else {
-            ""
-        };
-        klog_debug!(
-            "APIC: Physical base: 0x{:x}, Virtual base (HHDM): 0x{:x}",
-            apic_phys,
-            virt
-        );
-        klog_debug!("APIC: MSR flags:{}{}{}", bsp_flag, x2apic_flag, enable_flag);
-        true
-    } else {
-        klog_info!("APIC: ERROR - HHDM not available, cannot map APIC registers");
-        APIC_AVAILABLE.store(false, Ordering::Relaxed);
-        false
+    // Map APIC registers via MmioRegion
+    let phys_addr = PhysAddr::new(apic_phys);
+    match MmioRegion::map(phys_addr, APIC_REGION_SIZE) {
+        Some(region) => {
+            let virt = region.virt_base();
+            APIC_REGS.call_once(|| region);
+
+            let bsp_flag = if apic_base_msr & APIC_BASE_BSP != 0 {
+                " BSP"
+            } else {
+                ""
+            };
+            let x2apic_flag = if apic_base_msr & APIC_BASE_X2APIC != 0 {
+                " X2APIC"
+            } else {
+                ""
+            };
+            let enable_flag = if apic_base_msr & APIC_BASE_GLOBAL_ENABLE != 0 {
+                " ENABLED"
+            } else {
+                ""
+            };
+            klog_debug!(
+                "APIC: Physical base: 0x{:x}, Virtual base (HHDM): 0x{:x}",
+                apic_phys,
+                virt
+            );
+            klog_debug!("APIC: MSR flags:{}{}{}", bsp_flag, x2apic_flag, enable_flag);
+            true
+        }
+        None => {
+            klog_info!("APIC: ERROR - Failed to map APIC registers");
+            APIC_AVAILABLE.store(false, Ordering::Relaxed);
+            false
+        }
     }
 }
 
@@ -268,7 +276,7 @@ pub fn send_ipi_halt_all() {
 }
 
 pub fn get_base_address() -> u64 {
-    APIC_BASE_ADDRESS.load(Ordering::Relaxed)
+    APIC_REGS.get().map(|r| r.virt_base()).unwrap_or(0)
 }
 
 pub fn set_base_address(base: u64) {
@@ -281,29 +289,28 @@ pub fn set_base_address(base: u64) {
     cpu::write_msr(MSR_APIC_BASE, apic_base_msr);
 
     APIC_BASE_PHYSICAL.store(masked_base, Ordering::Relaxed);
-    if let Some(virt) = hhdm_virt_for(masked_base) {
-        APIC_BASE_ADDRESS.store(virt, Ordering::Relaxed);
-    } else {
-        APIC_BASE_ADDRESS.store(0, Ordering::Relaxed);
-    }
+    // Note: APIC_REGS is initialized once during detect() and cannot be updated.
+    // Changing the APIC base address at runtime requires re-initialization.
+    klog_info!("APIC: Base address changed to 0x{:x} - restart required for new mapping", masked_base);
 }
 
 pub fn read_register(reg: u32) -> u32 {
-    let base = APIC_BASE_ADDRESS.load(Ordering::Relaxed);
-    if !is_available() || base == 0 {
+    if !is_available() {
         return 0;
     }
-    let reg_ptr = (base + reg as u64) as *const u32;
-    unsafe { read_volatile(reg_ptr) }
+    APIC_REGS
+        .get()
+        .map(|r| r.read_u32(reg as usize))
+        .unwrap_or(0)
 }
 
 pub fn write_register(reg: u32, value: u32) {
-    let base = APIC_BASE_ADDRESS.load(Ordering::Relaxed);
-    if !is_available() || base == 0 {
+    if !is_available() {
         return;
     }
-    let reg_ptr = (base + reg as u64) as *mut u32;
-    unsafe { write_volatile(reg_ptr, value) };
+    if let Some(r) = APIC_REGS.get() {
+        r.write_u32(reg as usize, value);
+    }
 }
 
 pub fn dump_state() {

@@ -1,15 +1,19 @@
 use core::cell::UnsafeCell;
 use core::mem;
-use core::ptr::{read_unaligned, read_volatile, write_volatile};
+use core::ptr::read_unaligned;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
-use slopos_mm::hhdm::{self, PhysAddrHhdm};
+use slopos_mm::hhdm;
+use slopos_mm::mmio::MmioRegion;
 use crate::sched_bridge;
 use crate::wl_currency;
+
+/// IOAPIC register region size (one 4KB page covers both IOREGSEL and IOWIN).
+const IOAPIC_REGION_SIZE: usize = 0x20;
 
 #[repr(C, packed)]
 struct AcpiRsdp {
@@ -76,8 +80,8 @@ struct IoapicController {
     gsi_count: u32,
     version: u32,
     phys_addr: u64,
-    reg_select: *mut u32,
-    reg_window: *mut u32,
+    /// Virtual base address for MMIO access (computed via MmioRegion during init).
+    mmio_base: u64,
 }
 
 impl IoapicController {
@@ -88,8 +92,37 @@ impl IoapicController {
             gsi_count: 0,
             version: 0,
             phys_addr: 0,
-            reg_select: core::ptr::null_mut(),
-            reg_window: core::ptr::null_mut(),
+            mmio_base: 0,
+        }
+    }
+
+    /// Read from IOAPIC register via MMIO.
+    #[inline]
+    fn read_reg(&self, reg: u8) -> u32 {
+        if self.mmio_base == 0 {
+            return 0;
+        }
+        // IOREGSEL at offset 0x00, IOWIN at offset 0x10
+        let regsel = self.mmio_base as *mut u32;
+        let window = (self.mmio_base + 0x10) as *mut u32;
+        unsafe {
+            core::ptr::write_volatile(regsel, reg as u32);
+            core::ptr::read_volatile(window)
+        }
+    }
+
+    /// Write to IOAPIC register via MMIO.
+    #[inline]
+    fn write_reg(&self, reg: u8, value: u32) {
+        if self.mmio_base == 0 {
+            return;
+        }
+        // IOREGSEL at offset 0x00, IOWIN at offset 0x10
+        let regsel = self.mmio_base as *mut u32;
+        let window = (self.mmio_base + 0x10) as *mut u32;
+        unsafe {
+            core::ptr::write_volatile(regsel, reg as u32);
+            core::ptr::write_volatile(window, value);
         }
     }
 }
@@ -150,19 +183,16 @@ static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
 static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
-/// Convert physical address to virtual pointer.
-/// Falls back to identity mapping if HHDM is not yet available (early boot).
+/// Map IOAPIC MMIO region, returning the virtual base address.
+/// Returns 0 if mapping fails (HHDM unavailable or invalid address).
 #[inline]
-fn phys_to_virt_ptr(phys: u64) -> *mut u8 {
+fn map_ioapic_mmio(phys: u64) -> u64 {
     if phys == 0 {
-        return core::ptr::null_mut();
+        return 0;
     }
-    if let Some(virt) = PhysAddr::new(phys).try_to_virt() {
-        virt.as_mut_ptr()
-    } else {
-        // Fallback to identity mapping during early boot
-        phys as *mut u8
-    }
+    MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
+        .map(|r| r.virt_base())
+        .unwrap_or(0)
 }
 
 fn acpi_checksum(table: *const u8, length: usize) -> u8 {
@@ -206,7 +236,12 @@ fn acpi_map_table(phys_addr: u64) -> *const AcpiSdtHeader {
     if phys_addr == 0 {
         return core::ptr::null();
     }
-    phys_to_virt_ptr(phys_addr) as *const AcpiSdtHeader
+    // Map via HHDM for ACPI table access
+    use slopos_mm::hhdm::PhysAddrHhdm;
+    PhysAddr::new(phys_addr)
+        .try_to_virt()
+        .map(|v| v.as_ptr())
+        .unwrap_or(core::ptr::null())
 }
 
 fn acpi_scan_table(
@@ -297,25 +332,6 @@ fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
     }
 }
 
-fn ioapic_read(ctrl: &IoapicController, reg: u8) -> u32 {
-    if ctrl.reg_select.is_null() || ctrl.reg_window.is_null() {
-        return 0;
-    }
-    unsafe {
-        write_volatile(ctrl.reg_select, reg as u32);
-        read_volatile(ctrl.reg_window)
-    }
-}
-
-fn ioapic_write(ctrl: &IoapicController, reg: u8, value: u32) {
-    if ctrl.reg_select.is_null() || ctrl.reg_window.is_null() {
-        return;
-    }
-    unsafe {
-        write_volatile(ctrl.reg_select, reg as u32);
-        write_volatile(ctrl.reg_window, value);
-    }
-}
 
 #[inline]
 fn ioapic_entry_low_index(pin: u32) -> u8 {
@@ -386,7 +402,7 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
         return -1;
     };
 
-    let ctrl = unsafe { &mut *ctrl_ptr };
+    let ctrl = unsafe { &*ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         klog_info!("IOAPIC: Pin out of range for mask request");
@@ -394,14 +410,14 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
     }
 
     let reg = ioapic_entry_low_index(pin);
-    let mut value = ioapic_read(ctrl, reg);
+    let mut value = ctrl.read_reg(reg);
     if mask {
         value |= IOAPIC_FLAG_MASK;
     } else {
         value &= !IOAPIC_FLAG_MASK;
     }
 
-    ioapic_write(ctrl, reg, value);
+    ctrl.write_reg(reg, value);
     klog_debug!(
         "IOAPIC: {} GSI {} (pin {}) -> low=0x{:x}",
         if mask { "Masked" } else { "Unmasked" },
@@ -444,9 +460,8 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                             ctrl.id = entry.ioapic_id;
                             ctrl.gsi_base = entry.gsi_base;
                             ctrl.phys_addr = entry.ioapic_address as u64;
-                            ctrl.reg_select = phys_to_virt_ptr(ctrl.phys_addr) as *mut u32;
-                            ctrl.reg_window = phys_to_virt_ptr(ctrl.phys_addr + 0x10) as *mut u32;
-                            ctrl.version = ioapic_read(ctrl, IOAPIC_REG_VER);
+                            ctrl.mmio_base = map_ioapic_mmio(ctrl.phys_addr);
+                            ctrl.version = ctrl.read_reg(IOAPIC_REG_VER);
                             ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
                             ioapic_log_controller(ctrl);
                         }
@@ -558,7 +573,7 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         return -1;
     };
 
-    let ctrl = unsafe { &mut *ctrl_ptr };
+    let ctrl = unsafe { &*ctrl_ptr };
     let pin = gsi.saturating_sub(ctrl.gsi_base);
     if pin >= ctrl.gsi_count {
         klog_info!("IOAPIC: Calculated pin outside controller range");
@@ -569,8 +584,8 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     let low = vector as u32 | writable_flags;
     let high = (lapic_id as u32) << 24;
 
-    ioapic_write(ctrl, ioapic_entry_high_index(pin), high);
-    ioapic_write(ctrl, ioapic_entry_low_index(pin), low);
+    ctrl.write_reg(ioapic_entry_high_index(pin), high);
+    ctrl.write_reg(ioapic_entry_low_index(pin), low);
 
     klog_info!(
         "IOAPIC: Configured GSI {} (pin {}) -> vector 0x{:x}, LAPIC 0x{:x}, low=0x{:x}, high=0x{:x}",
