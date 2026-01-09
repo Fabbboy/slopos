@@ -99,9 +99,22 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
         _ => return -1,
     };
 
-    // Translate the physical address into the higher-half mapping if available.
-    let virt_addr = PhysAddr::new(addr).to_virt_checked();
-    let mapped_base = virt_addr.map(|v| v.as_u64()).unwrap_or(addr);
+    // Translate physical addresses via HHDM, but accept already-mapped higher-half addresses.
+    let mapped_base = if let Some(hhdm_base) = slopos_mm::hhdm::try_offset() {
+        if addr >= hhdm_base {
+            addr
+        } else {
+            PhysAddr::try_new(addr)
+                .and_then(|phys| phys.to_virt_checked())
+                .map(|v| v.as_u64())
+                .unwrap_or(addr)
+        }
+    } else {
+        PhysAddr::try_new(addr)
+            .and_then(|phys| phys.to_virt_checked())
+            .map(|v| v.as_u64())
+            .unwrap_or(addr)
+    };
 
     let fb_state = FbState {
         base: mapped_base as *mut u8,

@@ -66,9 +66,28 @@ impl PhysAddr {
     pub const MAX: Self = Self((1 << 52) - 1);
 
     /// Create a new physical address from a raw u64 value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the address exceeds the 52-bit physical address limit.
     #[inline]
-    pub const fn new(addr: u64) -> Self {
+    pub fn new(addr: u64) -> Self {
+        assert!(
+            addr <= Self::MAX.0,
+            "PhysAddr out of range: 0x{:x}",
+            addr
+        );
         Self(addr)
+    }
+
+    /// Create a new physical address if it is in range.
+    #[inline]
+    pub const fn try_new(addr: u64) -> Option<Self> {
+        if addr <= Self::MAX.0 {
+            Some(Self(addr))
+        } else {
+            None
+        }
     }
 
     /// Returns the raw u64 value of this address.
@@ -148,9 +167,28 @@ impl VirtAddr {
     pub const NULL: Self = Self(0);
 
     /// Create a new virtual address from a raw u64 value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the address is not canonical.
     #[inline]
-    pub const fn new(addr: u64) -> Self {
+    pub fn new(addr: u64) -> Self {
+        assert!(
+            Self::is_canonical(addr),
+            "VirtAddr not canonical: 0x{:x}",
+            addr
+        );
         Self(addr)
+    }
+
+    /// Create a new virtual address if it is canonical.
+    #[inline]
+    pub const fn try_new(addr: u64) -> Option<Self> {
+        if Self::is_canonical(addr) {
+            Some(Self(addr))
+        } else {
+            None
+        }
     }
 
     /// Returns the raw u64 value of this address.
@@ -235,6 +273,18 @@ impl VirtAddr {
     pub const fn is_user_space(self) -> bool {
         self.0 < 0x0000_8000_0000_0000
     }
+
+    /// Returns true if the raw address is canonical on x86_64.
+    #[inline]
+    pub const fn is_canonical(addr: u64) -> bool {
+        let sign = (addr >> 47) & 1;
+        let upper = addr >> 48;
+        if sign == 0 {
+            upper == 0
+        } else {
+            upper == 0xFFFF
+        }
+    }
 }
 
 // =============================================================================
@@ -277,7 +327,7 @@ impl MmioAddr {
 impl From<u64> for PhysAddr {
     #[inline]
     fn from(addr: u64) -> Self {
-        Self(addr)
+        Self::new(addr)
     }
 }
 
@@ -291,7 +341,7 @@ impl From<PhysAddr> for u64 {
 impl From<u64> for VirtAddr {
     #[inline]
     fn from(addr: u64) -> Self {
-        Self(addr)
+        Self::new(addr)
     }
 }
 
@@ -305,14 +355,14 @@ impl From<VirtAddr> for u64 {
 impl<T> From<*const T> for VirtAddr {
     #[inline]
     fn from(ptr: *const T) -> Self {
-        Self(ptr as u64)
+        Self::new(ptr as u64)
     }
 }
 
 impl<T> From<*mut T> for VirtAddr {
     #[inline]
     fn from(ptr: *mut T) -> Self {
-        Self(ptr as u64)
+        Self::new(ptr as u64)
     }
 }
 

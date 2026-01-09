@@ -78,7 +78,7 @@ pub struct PciGpuInfo {
     pub present: c_int,
     pub device: PciDeviceInfo,
     pub mmio_phys_base: u64,
-    pub mmio_virt_base: *mut u8,
+    pub mmio_region: MmioRegion,
     pub mmio_size: u64,
 }
 
@@ -88,7 +88,7 @@ impl PciGpuInfo {
             present: 0,
             device: PciDeviceInfo::zeroed(),
             mmio_phys_base: 0,
-            mmio_virt_base: ptr::null_mut(),
+            mmio_region: MmioRegion::empty(),
             mmio_size: 0,
         }
     }
@@ -324,12 +324,11 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
             PRIMARY_GPU.device = *info;
             PRIMARY_GPU.mmio_phys_base = bar.base;
             PRIMARY_GPU.mmio_size = if bar.size != 0 { bar.size } else { 0x1000 };
-            PRIMARY_GPU.mmio_virt_base = MmioRegion::map(
+            PRIMARY_GPU.mmio_region = MmioRegion::map(
                 PhysAddr::new(PRIMARY_GPU.mmio_phys_base),
                 PRIMARY_GPU.mmio_size as usize,
             )
-            .map(|r| r.virt_base() as *mut u8)
-            .unwrap_or(ptr::null_mut());
+            .unwrap_or(MmioRegion::empty());
         }
 
         let gpu_kind = if virtio_candidate {
@@ -337,15 +336,15 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
         } else {
             "display-class"
         };
-        let virt = unsafe { PRIMARY_GPU.mmio_virt_base };
+        let region = unsafe { PRIMARY_GPU.mmio_region };
         let size = unsafe { PRIMARY_GPU.mmio_size };
-        if !virt.is_null() {
+        if region.is_mapped() {
             klog_info!(
                 "PCI: Selected {} GPU candidate at MMIO phys=0x{:x} size=0x{:x} virt=0x{:x}",
                 gpu_kind,
                 bar.base,
                 size,
-                virt as u64
+                region.virt_base()
             );
             wl_currency::award_win();
         } else {
@@ -358,7 +357,7 @@ fn pci_consider_gpu_candidate(info: &PciDeviceInfo) {
             wl_currency::award_loss();
         }
         klog_info!("PCI: GPU acceleration groundwork ready (MMIO mapped)");
-        if unsafe { PRIMARY_GPU.mmio_virt_base.is_null() } {
+        if !unsafe { PRIMARY_GPU.mmio_region }.is_mapped() {
             klog_info!("PCI: WARNING GPU MMIO not accessible; check paging support");
         }
         return;
@@ -585,7 +584,7 @@ pub fn pci_init() -> c_int {
         PRIMARY_GPU.present = 0;
         PRIMARY_GPU.mmio_phys_base = 0;
         PRIMARY_GPU.mmio_size = 0;
-        PRIMARY_GPU.mmio_virt_base = ptr::null_mut();
+        PRIMARY_GPU.mmio_region = MmioRegion::empty();
         for b in BUS_VISITED.iter_mut() {
             *b = 0;
         }

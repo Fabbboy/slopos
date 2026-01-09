@@ -63,7 +63,7 @@ struct PciGpuInfo {
     present: i32,
     device: PciDeviceInfo,
     mmio_phys_base: u64,
-    mmio_virt_base: *mut core::ffi::c_void,
+    mmio_region: slopos_mm::mmio::MmioRegion,
     mmio_size: u64,
 }
 
@@ -209,10 +209,10 @@ fn boot_step_pci_init_fn() {
                     info.device.device,
                     info.device.function
                 );
-                if !info.mmio_virt_base.is_null() {
+                if info.mmio_region.is_mapped() {
                     klog_debug!(
                         "PCI: GPU MMIO virtual base {:#x}, size {:#x}",
-                        info.mmio_virt_base as u64,
+                        info.mmio_region.virt_base(),
                         info.mmio_size
                     );
                 } else {

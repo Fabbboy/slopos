@@ -277,6 +277,15 @@ pub struct virtio_gpu_device_t {
     pub fb_ready: u8,
 }
 
+#[derive(Clone, Copy, Default)]
+struct VirtioGpuMmioCaps {
+    common_cfg: Option<MmioRegion>,
+    notify_cfg: Option<MmioRegion>,
+    isr_cfg: Option<MmioRegion>,
+    device_cfg: Option<MmioRegion>,
+    device_cfg_len: u32,
+}
+
 static mut VIRTIO_GPU_DEVICE: virtio_gpu_device_t = virtio_gpu_device_t {
     present: 0,
     device: PciDeviceInfo::zeroed(),
@@ -303,6 +312,43 @@ static mut VIRTIO_GPU_DEVICE: virtio_gpu_device_t = virtio_gpu_device_t {
     fb_bpp: 0,
     fb_ready: 0,
 };
+
+static mut VIRTIO_GPU_MMIO: VirtioGpuMmioCaps = VirtioGpuMmioCaps {
+    common_cfg: None,
+    notify_cfg: None,
+    isr_cfg: None,
+    device_cfg: None,
+    device_cfg_len: 0,
+};
+
+const COMMON_CFG_DEVICE_FEATURE_SELECT: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, device_feature_select);
+const COMMON_CFG_DEVICE_FEATURE: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, device_feature);
+const COMMON_CFG_DRIVER_FEATURE_SELECT: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, driver_feature_select);
+const COMMON_CFG_DRIVER_FEATURE: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, driver_feature);
+const COMMON_CFG_DEVICE_STATUS: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, device_status);
+const COMMON_CFG_QUEUE_SELECT: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_select);
+const COMMON_CFG_QUEUE_SIZE: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_size);
+const COMMON_CFG_QUEUE_DESC: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_desc);
+const COMMON_CFG_QUEUE_AVAIL: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_avail);
+const COMMON_CFG_QUEUE_USED: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_used);
+const COMMON_CFG_QUEUE_ENABLE: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_enable);
+const COMMON_CFG_QUEUE_NOTIFY_OFF: usize =
+    core::mem::offset_of!(VirtioPciCommonCfg, queue_notify_off);
+
+fn virtio_gpu_mmio_caps() -> Option<VirtioGpuMmioCaps> {
+    unsafe {
+        if VIRTIO_GPU_MMIO.common_cfg.is_some() || VIRTIO_GPU_MMIO.notify_cfg.is_some() {
+            Some(VIRTIO_GPU_MMIO)
+        } else {
+            None
+        }
+    }
+}
 
 fn virtio_gpu_enable_master(info: &PciDeviceInfo) {
     let command = pci_config_read16(info.bus, info.device, info.function, PCI_COMMAND_OFFSET);
@@ -331,27 +377,26 @@ fn virtio_gpu_map_cap_region(
     bar_index: u8,
     offset: u32,
     length: u32,
-) -> *mut u8 {
+) -> Option<MmioRegion> {
     let bar = info.bars.get(bar_index as usize);
     let bar = match bar {
         Some(b) => b,
-        None => return core::ptr::null_mut(),
+        None => return None,
     };
     if bar.is_io != 0 || bar.base == 0 || length == 0 {
-        return core::ptr::null_mut();
+        return None;
     }
     let phys = bar.base.wrapping_add(offset as u64);
     MmioRegion::map(PhysAddr::new(phys), length as usize)
-        .map(|r| r.virt_base() as *mut u8)
-        .unwrap_or(core::ptr::null_mut())
 }
 
-fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> virtio_gpu_device_t {
+fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> (virtio_gpu_device_t, VirtioGpuMmioCaps) {
     let mut caps = virtio_gpu_device_t::default();
+    let mut mmio_caps = VirtioGpuMmioCaps::default();
 
     let status = pci_config_read16(info.bus, info.device, info.function, PCI_STATUS_OFFSET);
     if (status & PCI_STATUS_CAP_LIST) == 0 {
-        return caps;
+        return (caps, mmio_caps);
     }
 
     let mut cap_ptr = pci_config_read8(info.bus, info.device, info.function, PCI_CAP_PTR_OFFSET);
@@ -367,25 +412,31 @@ fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> virtio_gpu_device_t {
             let offset = pci_config_read32(info.bus, info.device, info.function, cap_ptr + 8);
             let length = pci_config_read32(info.bus, info.device, info.function, cap_ptr + 12);
             let mapped = virtio_gpu_map_cap_region(info, bar, offset, length);
-            if !mapped.is_null() {
+            if let Some(region) = mapped {
+                let mapped_ptr = region.virt_base() as *mut u8;
                 match cfg_type {
                     VIRTIO_PCI_CAP_COMMON_CFG => {
-                        caps.common_cfg = mapped as *mut VirtioPciCommonCfg;
+                        caps.common_cfg = mapped_ptr as *mut VirtioPciCommonCfg;
+                        mmio_caps.common_cfg = Some(region);
                         caps.modern_caps = 1;
                     }
                     VIRTIO_PCI_CAP_NOTIFY_CFG => {
-                        caps.notify_cfg = mapped;
+                        caps.notify_cfg = mapped_ptr;
+                        mmio_caps.notify_cfg = Some(region);
                         caps.notify_off_multiplier =
                             pci_config_read32(info.bus, info.device, info.function, cap_ptr + 16);
                         caps.modern_caps = 1;
                     }
                     VIRTIO_PCI_CAP_ISR_CFG => {
-                        caps.isr_cfg = mapped;
+                        caps.isr_cfg = mapped_ptr;
+                        mmio_caps.isr_cfg = Some(region);
                         caps.modern_caps = 1;
                     }
                     VIRTIO_PCI_CAP_DEVICE_CFG => {
-                        caps.device_cfg = mapped;
+                        caps.device_cfg = mapped_ptr;
                         caps.device_cfg_len = length;
+                        mmio_caps.device_cfg = Some(region);
+                        mmio_caps.device_cfg_len = length;
                         caps.modern_caps = 1;
                     }
                     _ => {}
@@ -395,55 +446,48 @@ fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> virtio_gpu_device_t {
         cap_ptr = cap_next;
     }
 
-    caps
+    (caps, mmio_caps)
 }
 
-fn virtio_gpu_set_status(cfg: *mut VirtioPciCommonCfg, status: u8) {
-    unsafe {
-        let mut current = core::ptr::read_volatile(cfg);
-        current.device_status = status;
-        core::ptr::write_volatile(cfg, current);
-    }
+fn virtio_gpu_set_status(cfg: &MmioRegion, status: u8) {
+    cfg.write_u8(COMMON_CFG_DEVICE_STATUS, status);
 }
 
-fn virtio_gpu_get_status(cfg: *mut VirtioPciCommonCfg) -> u8 {
-    unsafe { core::ptr::read_volatile(&(*cfg).device_status) }
+fn virtio_gpu_get_status(cfg: &MmioRegion) -> u8 {
+    cfg.read_u8(COMMON_CFG_DEVICE_STATUS)
 }
 
-fn virtio_gpu_negotiate_features(device: &mut virtio_gpu_device_t) -> bool {
-    let cfg = device.common_cfg;
-    if cfg.is_null() {
-        return false;
-    }
+fn virtio_gpu_negotiate_features(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+) -> bool {
+    let cfg = match mmio.common_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
 
-    virtio_gpu_set_status(cfg, 0);
-    let mut status = virtio_gpu_get_status(cfg);
+    virtio_gpu_set_status(&cfg, 0);
+    let mut status = virtio_gpu_get_status(&cfg);
     status |= VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
-    virtio_gpu_set_status(cfg, status);
+    virtio_gpu_set_status(&cfg, status);
 
-    unsafe {
-        core::ptr::write_volatile(&mut (*cfg).device_feature_select, 0);
-    }
-    let features_low = unsafe { core::ptr::read_volatile(&(*cfg).device_feature) };
+    cfg.write_u32(COMMON_CFG_DEVICE_FEATURE_SELECT, 0);
+    let features_low = cfg.read_u32(COMMON_CFG_DEVICE_FEATURE);
 
-    unsafe {
-        core::ptr::write_volatile(&mut (*cfg).device_feature_select, 1);
-    }
-    let features_high = unsafe { core::ptr::read_volatile(&(*cfg).device_feature) };
+    cfg.write_u32(COMMON_CFG_DEVICE_FEATURE_SELECT, 1);
+    let features_high = cfg.read_u32(COMMON_CFG_DEVICE_FEATURE);
 
     let driver_features_low = features_low & VIRTIO_GPU_F_VIRGL;
     let driver_features_high = features_high & VIRTIO_F_VERSION_1;
 
-    unsafe {
-        core::ptr::write_volatile(&mut (*cfg).driver_feature_select, 0);
-        core::ptr::write_volatile(&mut (*cfg).driver_feature, driver_features_low);
-        core::ptr::write_volatile(&mut (*cfg).driver_feature_select, 1);
-        core::ptr::write_volatile(&mut (*cfg).driver_feature, driver_features_high);
-    }
+    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE_SELECT, 0);
+    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE, driver_features_low);
+    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE_SELECT, 1);
+    cfg.write_u32(COMMON_CFG_DRIVER_FEATURE, driver_features_high);
 
     status |= VIRTIO_STATUS_FEATURES_OK;
-    virtio_gpu_set_status(cfg, status);
-    status = virtio_gpu_get_status(cfg);
+    virtio_gpu_set_status(&cfg, status);
+    status = virtio_gpu_get_status(&cfg);
     if (status & VIRTIO_STATUS_FEATURES_OK) == 0 {
         return false;
     }
@@ -455,16 +499,20 @@ fn virtio_gpu_negotiate_features(device: &mut virtio_gpu_device_t) -> bool {
     true
 }
 
-fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
-    let cfg = device.common_cfg;
-    if cfg.is_null() || device.notify_cfg.is_null() {
+fn virtio_gpu_setup_control_queue(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+) -> bool {
+    let cfg = match mmio.common_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
+    if mmio.notify_cfg.is_none() {
         return false;
     }
 
-    unsafe {
-        core::ptr::write_volatile(&mut (*cfg).queue_select, VIRTIO_GPU_QUEUE_CONTROL);
-    }
-    let queue_size = unsafe { core::ptr::read_volatile(&(*cfg).queue_size) };
+    cfg.write_u32(COMMON_CFG_QUEUE_SELECT, VIRTIO_GPU_QUEUE_CONTROL as u32);
+    let queue_size = cfg.read_u16(COMMON_CFG_QUEUE_SIZE);
     if queue_size == 0 {
         return false;
     }
@@ -496,14 +544,12 @@ fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
         return false;
     }
 
-    unsafe {
-        core::ptr::write_volatile(&mut (*cfg).queue_desc, desc_phys.as_u64());
-        core::ptr::write_volatile(&mut (*cfg).queue_avail, avail_phys.as_u64());
-        core::ptr::write_volatile(&mut (*cfg).queue_used, used_phys.as_u64());
-        core::ptr::write_volatile(&mut (*cfg).queue_enable, 1);
-    }
+    cfg.write_u64(COMMON_CFG_QUEUE_DESC, desc_phys.as_u64());
+    cfg.write_u64(COMMON_CFG_QUEUE_AVAIL, avail_phys.as_u64());
+    cfg.write_u64(COMMON_CFG_QUEUE_USED, used_phys.as_u64());
+    cfg.write_u16(COMMON_CFG_QUEUE_ENABLE, 1);
 
-    let notify_off = unsafe { core::ptr::read_volatile(&(*cfg).queue_notify_off) };
+    let notify_off = cfg.read_u16(COMMON_CFG_QUEUE_NOTIFY_OFF);
 
     device.ctrl_queue = VirtioGpuQueue {
         size,
@@ -518,27 +564,25 @@ fn virtio_gpu_setup_control_queue(device: &mut virtio_gpu_device_t) -> bool {
         ready: 1,
     };
 
-    let mut status = virtio_gpu_get_status(cfg);
+    let mut status = virtio_gpu_get_status(&cfg);
     status |= VIRTIO_STATUS_DRIVER_OK;
-    virtio_gpu_set_status(cfg, status);
+    virtio_gpu_set_status(&cfg, status);
 
     true
 }
 
-fn virtio_gpu_queue_notify(notify_cfg: *mut u8, notify_off_multiplier: u32, queue: &VirtioGpuQueue) {
-    if notify_cfg.is_null() {
-        return;
-    }
+fn virtio_gpu_queue_notify(
+    notify_cfg: &MmioRegion,
+    notify_off_multiplier: u32,
+    queue: &VirtioGpuQueue,
+) {
     let offset = (queue.notify_off as u32 * notify_off_multiplier) as usize;
-    unsafe {
-        let notify = notify_cfg.add(offset) as *mut u16;
-        core::ptr::write_volatile(notify, VIRTIO_GPU_QUEUE_CONTROL);
-    }
+    notify_cfg.write_u16(offset, VIRTIO_GPU_QUEUE_CONTROL);
 }
 
 fn virtio_gpu_send_cmd(
     queue: &mut VirtioGpuQueue,
-    notify_cfg: *mut u8,
+    notify_cfg: &MmioRegion,
     notify_off_multiplier: u32,
     cmd_phys: u64,
     cmd_len: usize,
@@ -576,7 +620,7 @@ fn virtio_gpu_send_cmd(
 
 fn virtio_gpu_queue_submit(
     queue: &mut VirtioGpuQueue,
-    notify_cfg: *mut u8,
+    notify_cfg: &MmioRegion,
     notify_off_multiplier: u32,
     head: u16,
 ) -> bool {
@@ -615,7 +659,10 @@ fn virtio_gpu_queue_submit(
     false
 }
 
-fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t) -> bool {
+fn virtio_gpu_get_display_info(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+) -> bool {
     if device.ctrl_queue.ready == 0 {
         return false;
     }
@@ -654,11 +701,14 @@ fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t) -> bool {
             },
         );
     }
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtrlHeader>(),
@@ -696,7 +746,10 @@ fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t) -> bool {
     true
 }
 
-fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t) -> bool {
+fn virtio_gpu_get_capset_info(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+) -> bool {
     if device.ctrl_queue.ready == 0 {
         return false;
     }
@@ -740,11 +793,14 @@ fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t) -> bool {
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuGetCapsetInfo>(),
@@ -782,7 +838,11 @@ fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t) -> bool {
     true
 }
 
-fn virtio_gpu_create_context(device: &mut virtio_gpu_device_t, ctx_id: u32) -> bool {
+fn virtio_gpu_create_context(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+    ctx_id: u32,
+) -> bool {
     if device.ctrl_queue.ready == 0 {
         return false;
     }
@@ -828,11 +888,14 @@ fn virtio_gpu_create_context(device: &mut virtio_gpu_device_t, ctx_id: u32) -> b
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuCtxCreate>(),
@@ -859,6 +922,7 @@ fn virtio_gpu_create_context(device: &mut virtio_gpu_device_t, ctx_id: u32) -> b
 
 fn virtio_gpu_resource_create_2d(
     device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -908,11 +972,14 @@ fn virtio_gpu_resource_create_2d(
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuResourceCreate2d>(),
@@ -939,6 +1006,7 @@ fn virtio_gpu_resource_create_2d(
 
 fn virtio_gpu_resource_attach_backing(
     device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
     resource_id: u32,
     backing_phys: u64,
     backing_len: u32,
@@ -998,11 +1066,14 @@ fn virtio_gpu_resource_attach_backing(
 
     let cmd_len =
         core::mem::size_of::<VirtioGpuResourceAttachBacking>() + core::mem::size_of::<VirtioGpuMemEntry>();
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         cmd_len,
@@ -1029,6 +1100,7 @@ fn virtio_gpu_resource_attach_backing(
 
 fn virtio_gpu_set_scanout(
     device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -1082,11 +1154,14 @@ fn virtio_gpu_set_scanout(
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuSetScanout>(),
@@ -1113,6 +1188,7 @@ fn virtio_gpu_set_scanout(
 
 fn virtio_gpu_transfer_to_host_2d(
     device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -1167,11 +1243,14 @@ fn virtio_gpu_transfer_to_host_2d(
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuTransferToHost2d>(),
@@ -1198,6 +1277,7 @@ fn virtio_gpu_transfer_to_host_2d(
 
 fn virtio_gpu_resource_flush(
     device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -1251,11 +1331,14 @@ fn virtio_gpu_resource_flush(
         );
     }
 
-    let notify_cfg = device.notify_cfg;
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
     let notify_mult = device.notify_off_multiplier;
     let submitted = virtio_gpu_send_cmd(
         &mut device.ctrl_queue,
-        notify_cfg,
+        &notify_cfg,
         notify_mult,
         cmd_phys.as_u64(),
         core::mem::size_of::<VirtioGpuResourceFlush>(),
@@ -1328,11 +1411,11 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
 
     virtio_gpu_enable_master(info);
 
-    let mut caps = virtio_gpu_parse_caps(info);
+    let (mut caps, mmio_caps) = virtio_gpu_parse_caps(info);
     let mut handshake_ok = false;
 
     if !caps.common_cfg.is_null() {
-        if virtio_gpu_negotiate_features(&mut caps) {
+        if virtio_gpu_negotiate_features(&mut caps, &mmio_caps) {
             handshake_ok = true;
             klog_debug!("PCI: virtio-gpu modern capability handshake ok");
         } else {
@@ -1340,7 +1423,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
             wl_currency::award_loss();
         }
         if handshake_ok {
-            if !virtio_gpu_setup_control_queue(&mut caps) {
+            if !virtio_gpu_setup_control_queue(&mut caps, &mmio_caps) {
                 klog_info!("PCI: virtio-gpu control queue setup failed");
                 // Recoverable failure: queue setup failed.
                 wl_currency::award_loss();
@@ -1409,7 +1492,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         }
         wl_currency::award_win();
         if caps.ctrl_queue.ready != 0 {
-            if virtio_gpu_get_display_info(&mut caps) {
+            if virtio_gpu_get_display_info(&mut caps, &mmio_caps) {
                 // Successful display query earns a W for the driver path.
                 wl_currency::award_win();
             } else {
@@ -1417,12 +1500,12 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
                 wl_currency::award_loss();
             }
             if caps.supports_virgl != 0 {
-                if virtio_gpu_get_capset_info(&mut caps) {
+                if virtio_gpu_get_capset_info(&mut caps, &mmio_caps) {
                     wl_currency::award_win();
                 } else {
                     wl_currency::award_loss();
                 }
-                if virtio_gpu_create_context(&mut caps, 1) {
+                if virtio_gpu_create_context(&mut caps, &mmio_caps, 1) {
                     caps.virgl_ready = 1;
                     klog_info!("PCI: virtio-gpu virgl context ready");
                     wl_currency::award_win();
@@ -1448,6 +1531,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
             VIRTIO_GPU_DEVICE.display_width = caps.display_width;
             VIRTIO_GPU_DEVICE.display_height = caps.display_height;
             VIRTIO_GPU_DEVICE.virgl_ready = caps.virgl_ready;
+            VIRTIO_GPU_MMIO = mmio_caps;
         }
         return 0;
     }
@@ -1539,29 +1623,40 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
             1
         };
 
-        if !virtio_gpu_resource_create_2d(&mut VIRTIO_GPU_DEVICE, resource_id, width, height) {
+        let Some(mmio) = virtio_gpu_mmio_caps() else {
+            wl_currency::award_loss();
+            return None;
+        };
+
+        if !virtio_gpu_resource_create_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
             free_page_frame(phys);
             // Recoverable failure: resource creation failed.
             wl_currency::award_loss();
             return None;
         }
 
-        if !virtio_gpu_resource_attach_backing(&mut VIRTIO_GPU_DEVICE, resource_id, phys.as_u64(), size as u32) {
+        if !virtio_gpu_resource_attach_backing(
+            &mut VIRTIO_GPU_DEVICE,
+            &mmio,
+            resource_id,
+            phys.as_u64(),
+            size as u32,
+        ) {
             free_page_frame(phys);
             // Recoverable failure: backing attach failed.
             wl_currency::award_loss();
             return None;
         }
 
-        if !virtio_gpu_set_scanout(&mut VIRTIO_GPU_DEVICE, resource_id, width, height) {
+        if !virtio_gpu_set_scanout(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
             free_page_frame(phys);
             // Recoverable failure: scanout bind failed.
             wl_currency::award_loss();
             return None;
         }
 
-        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, resource_id, width, height)
-            || !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, resource_id, width, height)
+        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height)
+            || !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height)
         {
             free_page_frame(phys);
             // Recoverable failure: initial transfer/flush failed.
@@ -1604,12 +1699,16 @@ pub fn virtio_gpu_flush_full() -> c_int {
             wl_currency::award_loss();
             return -1;
         }
-        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, resource_id, width, height) {
+        let Some(mmio) = virtio_gpu_mmio_caps() else {
+            wl_currency::award_loss();
+            return -1;
+        };
+        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
             // Recoverable failure: transfer to host failed.
             wl_currency::award_loss();
             return -1;
         }
-        if !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, resource_id, width, height) {
+        if !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
             // Recoverable failure: resource flush failed.
             wl_currency::award_loss();
             return -1;

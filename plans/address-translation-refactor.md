@@ -15,10 +15,7 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 - Typed address API, unified HHDM storage, and `MmioRegion` are implemented.
 - Core MM and driver migrations are complete; legacy `phys_virt` wrappers removed.
 - Phase 4 cleanup complete (no legacy wrappers or untyped HHDM helpers remain).
-- Remaining gaps (planned follow-ups):
-  - IOAPIC still uses raw MMIO base + volatile pointer math instead of `MmioRegion` accessors.
-  - PCI GPU candidate and VirtIO GPU cap mappings store raw pointers, bypassing `MmioRegion`.
-  - `PhysAddr`/`VirtAddr` constructors are unchecked; 52-bit/canonical validation is not implemented.
+- Remaining gaps (planned follow-ups): none noted.
 
 ---
 
@@ -586,9 +583,7 @@ fn write_register(reg: u32, value: u32) {
 5. Add `#[deprecated]` attributes to old functions
 6. Update `mm/src/lib.rs` to export new modules
 
-**Notes (open):**
-- `PhysAddr`/`VirtAddr` do not yet validate 52-bit/canonical constraints; consider adding `try_new`
-  or debug-asserted constructors to match the original design.
+**Notes:** Address constructors now validate 52-bit physical and canonical virtual addresses.
 
 **Files to create:**
 - `abi/src/addr.rs`
@@ -630,11 +625,11 @@ fn write_register(reg: u32, value: u32) {
 
 **Tasks (completed):**
 1. Convert `drivers/src/apic.rs` to use `MmioRegion`
-2. Convert `drivers/src/ioapic.rs` to use `MmioRegion` (partial; still uses raw MMIO base)
-3. Convert `drivers/src/virtio_gpu.rs` to use typed addresses + `MmioRegion` (partial; maps to raw pointers)
+2. Convert `drivers/src/ioapic.rs` to use `MmioRegion`
+3. Convert `drivers/src/virtio_gpu.rs` to use typed addresses + `MmioRegion`
 4. Fix `drivers/src/video_bridge.rs` to use correct API
 5. Remove inline HHDM helpers from drivers
-6. Convert PCI GPU candidate mapping to `MmioRegion` (`drivers/src/pci.rs`) (partial; stores raw pointer)
+6. Convert PCI GPU candidate mapping to `MmioRegion` (`drivers/src/pci.rs`)
 
 **Files to modify:**
 - `drivers/src/apic.rs`

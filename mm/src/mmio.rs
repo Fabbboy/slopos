@@ -58,13 +58,20 @@ use crate::hhdm;
 ///
 /// Like Linux's `__iomem *`, this type cannot be dereferenced directly.
 /// Use `read()` and `write()` methods for proper volatile access.
-#[derive(Debug)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct MmioRegion {
     virt_base: u64,
     size: usize,
 }
 
 impl MmioRegion {
+    /// Create an empty (unmapped) MMIO region.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self { virt_base: 0, size: 0 }
+    }
+
     /// Map a physical MMIO region via HHDM.
     ///
     /// Returns `None` if:
@@ -246,6 +253,12 @@ impl MmioRegion {
         self.size
     }
 
+    /// Returns true if this region is mapped (non-zero size).
+    #[inline]
+    pub fn is_mapped(&self) -> bool {
+        self.size != 0
+    }
+
     /// Check if an offset is within bounds for a given access size.
     #[inline]
     pub fn is_valid_offset(&self, offset: usize, access_size: usize) -> bool {
@@ -264,6 +277,13 @@ impl MmioRegion {
             virt_base: self.virt_base + offset as u64,
             size,
         })
+    }
+}
+
+impl Default for MmioRegion {
+    #[inline]
+    fn default() -> Self {
+        Self::empty()
     }
 }
 

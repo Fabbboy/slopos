@@ -80,8 +80,8 @@ struct IoapicController {
     gsi_count: u32,
     version: u32,
     phys_addr: u64,
-    /// Virtual base address for MMIO access (computed via MmioRegion during init).
-    mmio_base: u64,
+    /// MMIO region for this controller (mapped via HHDM).
+    mmio: Option<MmioRegion>,
 }
 
 impl IoapicController {
@@ -92,38 +92,30 @@ impl IoapicController {
             gsi_count: 0,
             version: 0,
             phys_addr: 0,
-            mmio_base: 0,
+            mmio: None,
         }
     }
 
     /// Read from IOAPIC register via MMIO.
     #[inline]
     fn read_reg(&self, reg: u8) -> u32 {
-        if self.mmio_base == 0 {
-            return 0;
-        }
-        // IOREGSEL at offset 0x00, IOWIN at offset 0x10
-        let regsel = self.mmio_base as *mut u32;
-        let window = (self.mmio_base + 0x10) as *mut u32;
-        unsafe {
-            core::ptr::write_volatile(regsel, reg as u32);
-            core::ptr::read_volatile(window)
-        }
+        let region = match self.mmio {
+            Some(region) => region,
+            None => return 0,
+        };
+        region.write_u32(0x00, reg as u32);
+        region.read_u32(0x10)
     }
 
     /// Write to IOAPIC register via MMIO.
     #[inline]
     fn write_reg(&self, reg: u8, value: u32) {
-        if self.mmio_base == 0 {
-            return;
-        }
-        // IOREGSEL at offset 0x00, IOWIN at offset 0x10
-        let regsel = self.mmio_base as *mut u32;
-        let window = (self.mmio_base + 0x10) as *mut u32;
-        unsafe {
-            core::ptr::write_volatile(regsel, reg as u32);
-            core::ptr::write_volatile(window, value);
-        }
+        let region = match self.mmio {
+            Some(region) => region,
+            None => return,
+        };
+        region.write_u32(0x00, reg as u32);
+        region.write_u32(0x10, value);
     }
 }
 
@@ -186,13 +178,11 @@ static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 /// Map IOAPIC MMIO region, returning the virtual base address.
 /// Returns 0 if mapping fails (HHDM unavailable or invalid address).
 #[inline]
-fn map_ioapic_mmio(phys: u64) -> u64 {
+fn map_ioapic_mmio(phys: u64) -> Option<MmioRegion> {
     if phys == 0 {
-        return 0;
+        return None;
     }
     MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
-        .map(|r| r.virt_base())
-        .unwrap_or(0)
 }
 
 fn acpi_checksum(table: *const u8, length: usize) -> u8 {
@@ -460,7 +450,7 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
                             ctrl.id = entry.ioapic_id;
                             ctrl.gsi_base = entry.gsi_base;
                             ctrl.phys_addr = entry.ioapic_address as u64;
-                            ctrl.mmio_base = map_ioapic_mmio(ctrl.phys_addr);
+                            ctrl.mmio = map_ioapic_mmio(ctrl.phys_addr);
                             ctrl.version = ctrl.read_reg(IOAPIC_REG_VER);
                             ctrl.gsi_count = ((ctrl.version >> 16) & 0xFF) + 1;
                             ioapic_log_controller(ctrl);
