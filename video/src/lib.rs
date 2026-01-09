@@ -12,6 +12,7 @@ use slopos_drivers::wl_currency;
 use slopos_lib::FramebufferInfo;
 use slopos_lib::klog_info;
 
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::video_traits::{FramebufferInfoC, VideoServices};
 use slopos_abi::WindowInfo;
 
@@ -90,7 +91,7 @@ impl VideoServices for VideoServicesImpl {
         compositor_context::drain_queue();
     }
 
-    fn fb_flip(&self, shm_phys: u64, size: usize) -> c_int {
+    fn fb_flip(&self, shm_phys: PhysAddr, size: usize) -> c_int {
         framebuffer::fb_flip_from_shm(shm_phys, size)
     }
 

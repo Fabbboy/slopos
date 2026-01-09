@@ -1,6 +1,6 @@
 # Address Translation API Refactoring Plan
 
-**Status:** In progress (Phases 1-3 complete; Phase 4 pending)
+**Status:** Complete (Phases 1-4 complete)
 **Author:** Claude (with kernel-architect guidance)
 **Date:** 2026-01-09
 
@@ -14,7 +14,7 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 
 - Typed address API, unified HHDM storage, and `MmioRegion` are implemented.
 - Core MM and driver migrations are complete; legacy `phys_virt` wrappers removed.
-- Remaining work is Phase 4 cleanup of any lingering deprecated exports/wrappers.
+- Phase 4 cleanup complete (no legacy wrappers or untyped HHDM helpers remain).
 
 ---
 
@@ -644,8 +644,8 @@ fn write_register(reg: u32, value: u32) {
 2. Done: Remove `BootServices::get_hhdm_offset()` from trait
 3. Done: Replace `mm_init_phys_virt_helpers()` usage in `mm/src/memory_init.rs`
 4. Done: Remove `mm/src/phys_virt.rs` after callers are migrated
-5. Pending: Remove any remaining legacy wrappers in `mm/src/lib.rs` (if any exist)
-6. Pending: Update any remaining callers
+5. Done: Remove any remaining legacy wrappers and untyped HHDM helpers
+6. Done: Update any remaining callers
 
 **Files to modify/delete:**
 - `mm/src/lib.rs` - remove deprecated exports/functions (if any remain)

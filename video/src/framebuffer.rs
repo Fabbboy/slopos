@@ -381,7 +381,7 @@ pub fn framebuffer_flush() -> c_int {
 ///
 /// # Returns
 /// 0 on success, -1 on failure
-pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
+pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return -1,
@@ -397,7 +397,7 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
     }
 
     // Convert physical address to virtual using HHDM
-    let shm_virt = match PhysAddr::new(shm_phys).to_virt_checked() {
+    let shm_virt = match shm_phys.to_virt_checked() {
         Some(v) => v.as_u64(),
         None => return -1,
     };

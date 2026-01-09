@@ -83,7 +83,7 @@ pub fn surface_set_title(task_id: u32, title: &[u8]) -> c_int {
 
 /// Copy from a shared memory buffer to the MMIO framebuffer (page flip).
 /// This is the "page flip" operation for the userland compositor.
-pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
+pub fn fb_flip_from_shm(shm_phys: slopos_abi::addr::PhysAddr, size: usize) -> c_int {
     let fb_ptr = framebuffer_get_info();
     if fb_ptr.is_null() {
         return -1;
@@ -101,9 +101,8 @@ pub fn fb_flip_from_shm(shm_phys: u64, size: usize) -> c_int {
     }
 
     // Verify source address is valid via HHDM (use typed translation)
-    use slopos_abi::addr::PhysAddr;
     use slopos_mm::hhdm::PhysAddrHhdm;
-    if PhysAddr::new(shm_phys).to_virt_checked().is_none() {
+    if shm_phys.to_virt_checked().is_none() {
         return -1;
     }
 

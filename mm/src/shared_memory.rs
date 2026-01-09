@@ -671,8 +671,8 @@ pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c
 /// Get surface info for a task.
 ///
 /// # Returns
-/// (token, width, height, phys_addr) or (0, 0, 0, 0) if no surface
-pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, u64) {
+/// (token, width, height, phys_addr) or (0, 0, 0, NULL) if no surface
+pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, slopos_abi::addr::PhysAddr) {
     let registry = REGISTRY.lock();
 
     for buffer in registry.buffers.iter() {
@@ -685,21 +685,21 @@ pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, u64) {
                 buffer.token,
                 buffer.surface_width,
                 buffer.surface_height,
-                buffer.phys_addr,
+                slopos_abi::addr::PhysAddr::new(buffer.phys_addr),
             );
         }
     }
 
-    (0, 0, 0, 0)
+    (0, 0, 0, slopos_abi::addr::PhysAddr::NULL)
 }
 
 /// Get the physical address of a shared buffer by token.
 /// Used by FB_FLIP syscall.
-pub fn shm_get_phys_addr(token: u32) -> u64 {
+pub fn shm_get_phys_addr(token: u32) -> slopos_abi::addr::PhysAddr {
     let registry = REGISTRY.lock();
     match registry.find_by_token(token) {
-        Some(slot) => registry.buffers[slot].phys_addr,
-        None => 0,
+        Some(slot) => slopos_abi::addr::PhysAddr::new(registry.buffers[slot].phys_addr),
+        None => slopos_abi::addr::PhysAddr::NULL,
     }
 }
 

@@ -9,6 +9,7 @@
 
 use core::ffi::c_int;
 
+use crate::addr::PhysAddr;
 use crate::window::WindowInfo;
 
 /// Framebuffer information structure (C ABI compatible).
@@ -89,7 +90,7 @@ pub trait VideoServices: Send + Sync {
     fn drain_queue(&self);
 
     /// Copy shared memory buffer to framebuffer MMIO (page flip).
-    fn fb_flip(&self, shm_phys: u64, size: usize) -> c_int;
+    fn fb_flip(&self, shm_phys: PhysAddr, size: usize) -> c_int;
 
     /// Request a frame callback (Wayland wl_surface.frame).
     fn surface_request_frame_callback(&self, task_id: u32) -> c_int;

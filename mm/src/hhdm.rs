@@ -218,23 +218,3 @@ impl VirtAddrHhdm for VirtAddr {
         }
     }
 }
-
-// =============================================================================
-// Convenience Functions
-// =============================================================================
-
-/// Quick physical-to-virtual translation using the typed API.
-///
-/// Equivalent to `PhysAddr::new(phys).to_virt().as_u64()`.
-#[inline]
-pub fn phys_to_virt(phys: u64) -> u64 {
-    PhysAddr::new(phys).to_virt().as_u64()
-}
-
-/// Quick virtual-to-physical translation assuming HHDM mapping.
-///
-/// Equivalent to `VirtAddr::new(virt).to_phys_hhdm().as_u64()`.
-#[inline]
-pub fn virt_to_phys(virt: u64) -> u64 {
-    VirtAddr::new(virt).to_phys_hhdm().as_u64()
-}

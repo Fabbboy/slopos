@@ -446,7 +446,7 @@ define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     let token = args.arg0_u32();
     let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
     let size = slopos_mm::shared_memory::shm_get_size(token);
-    if phys_addr == 0 || size == 0 {
+    if phys_addr.is_null() || size == 0 {
         return ctx.err_loss();
     }
     let fb_info = video_bridge::framebuffer_get_info();
