@@ -15,8 +15,8 @@ use crate::wl_currency;
 
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_abi::addr::PhysAddr;
+use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame};
-use slopos_mm::phys_virt::{mm_map_mmio_region, mm_unmap_mmio_region};
 
 pub const VIRTIO_GPU_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;
@@ -341,7 +341,9 @@ fn virtio_gpu_map_cap_region(
         return core::ptr::null_mut();
     }
     let phys = bar.base.wrapping_add(offset as u64);
-    mm_map_mmio_region(PhysAddr::new(phys), length as usize) as *mut u8
+    MmioRegion::map(PhysAddr::new(phys), length as usize)
+        .map(|r| r.virt_base() as *mut u8)
+        .unwrap_or(core::ptr::null_mut())
 }
 
 fn virtio_gpu_parse_caps(info: &PciDeviceInfo) -> virtio_gpu_device_t {
@@ -1310,7 +1312,11 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
     } else {
         VIRTIO_MMIO_DEFAULT_SIZE
     };
-    let mmio_base = mm_map_mmio_region(PhysAddr::new(bar.base), mmio_size);
+    let mmio_region = MmioRegion::map(PhysAddr::new(bar.base), mmio_size);
+    let mmio_base = mmio_region
+        .as_ref()
+        .map(|r| r.virt_base() as *mut core::ffi::c_void)
+        .unwrap_or(core::ptr::null_mut());
     if mmio_base.is_null() {
         klog_info!(
             "PCI: virtio-gpu MMIO mapping failed for phys=0x{:x}",
@@ -1384,14 +1390,16 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
                 "PCI: virtio-gpu handshake incomplete (status=0x{:02x})",
                 status_handshake
             );
-            mm_unmap_mmio_region(mmio_base, mmio_size);
             wl_currency::award_loss();
             return -1;
         }
         handshake_ok = true;
     }
 
-    let sample_value = unsafe { core::ptr::read_volatile(mmio_base as *const u32) };
+    let sample_value = mmio_region
+        .as_ref()
+        .map(|r| r.read_u32(0))
+        .unwrap_or(0);
     klog_debug!("PCI: virtio-gpu MMIO sample value=0x{:08x}", sample_value);
 
     if handshake_ok {
@@ -1444,7 +1452,6 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         return 0;
     }
 
-    mm_unmap_mmio_region(mmio_base, mmio_size);
     -1
 }
 

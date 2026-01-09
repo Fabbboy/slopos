@@ -1,6 +1,6 @@
 # Address Translation API Refactoring Plan
 
-**Status:** Proposed
+**Status:** In progress (Phases 1-3 complete; Phase 4 pending)
 **Author:** Claude (with kernel-architect guidance)
 **Date:** 2026-01-09
 
@@ -9,6 +9,12 @@
 ## Executive Summary
 
 SlopOS currently has fragmented address translation APIs with three separate HHDM offset storages, one of which is never initialized. This plan proposes a clean Rust-native redesign that leverages the type system for compile-time safety, following patterns from Linux and the Rust OS ecosystem.
+
+## Status Update
+
+- Typed address API, unified HHDM storage, and `MmioRegion` are implemented.
+- Core MM and driver migrations are complete; legacy `phys_virt` wrappers removed.
+- Remaining work is Phase 4 cleanup of any lingering deprecated exports/wrappers.
 
 ---
 
@@ -597,7 +603,6 @@ fn write_register(reg: u32, value: u32) {
 3. Update `mm/src/process_vm.rs`
 4. Call `hhdm::init()` from `init_memory_system()`
 5. Remove `memory_init::HHDM_OFFSET` static
-6. Update `mm/src/phys_virt.rs` wrappers to use typed addresses
 7. Update core MM callers (`kernel_heap`, `shared_memory`, `user_copy`)
 
 **Files modified:**
@@ -605,7 +610,6 @@ fn write_register(reg: u32, value: u32) {
 - `mm/src/paging.rs`
 - `mm/src/page_alloc.rs`
 - `mm/src/process_vm.rs`
-- `mm/src/phys_virt.rs`
 - `mm/src/kernel_heap.rs`
 - `mm/src/shared_memory.rs`
 - `mm/src/user_copy.rs`
@@ -614,35 +618,37 @@ fn write_register(reg: u32, value: u32) {
 
 **Goal:** Convert all drivers to use typed addresses and MmioRegion.
 
-**Tasks:**
+**Status:** Completed
+
+**Tasks (completed):**
 1. Convert `drivers/src/apic.rs` to use `MmioRegion`
 2. Convert `drivers/src/ioapic.rs` to use `MmioRegion`
-3. Convert `drivers/src/virtio_gpu.rs` to use typed addresses
+3. Convert `drivers/src/virtio_gpu.rs` to use typed addresses + `MmioRegion`
 4. Fix `drivers/src/video_bridge.rs` to use correct API
 5. Remove inline HHDM helpers from drivers
+6. Convert PCI GPU candidate mapping to `MmioRegion` (`drivers/src/pci.rs`)
 
 **Files to modify:**
 - `drivers/src/apic.rs`
 - `drivers/src/ioapic.rs`
 - `drivers/src/virtio_gpu.rs`
 - `drivers/src/video_bridge.rs`
+- `drivers/src/pci.rs`
 
 ### Phase 4: Remove Legacy
 
 **Goal:** Remove all deprecated code and workarounds.
 
 **Tasks:**
-1. Remove `mm/src/lib.rs` old HHDM functions
-2. Remove `mm/src/phys_virt.rs` if fully replaced
-3. Remove `sched_bridge` HHDM functions
-4. Remove `BootServices::get_hhdm_offset()` from trait
-5. Update all remaining callers
+1. Done: Remove `sched_bridge` HHDM functions
+2. Done: Remove `BootServices::get_hhdm_offset()` from trait
+3. Done: Replace `mm_init_phys_virt_helpers()` usage in `mm/src/memory_init.rs`
+4. Done: Remove `mm/src/phys_virt.rs` after callers are migrated
+5. Pending: Remove any remaining legacy wrappers in `mm/src/lib.rs` (if any exist)
+6. Pending: Update any remaining callers
 
 **Files to modify/delete:**
-- `mm/src/lib.rs` - remove deprecated functions
-- `drivers/src/sched_bridge.rs` - remove HHDM wrappers
-- `abi/src/sched_traits.rs` - remove from BootServices trait
-- `boot/src/boot_impl.rs` - remove implementations
+- `mm/src/lib.rs` - remove deprecated exports/functions (if any remain)
 
 ---
 

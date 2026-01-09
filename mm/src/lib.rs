@@ -11,7 +11,6 @@ pub mod mm_constants;
 pub mod mmio;
 pub mod page_alloc;
 pub mod paging;
-pub mod phys_virt;
 pub mod process_vm;
 pub mod shared_memory;
 mod tests;

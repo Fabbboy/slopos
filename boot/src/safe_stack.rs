@@ -106,10 +106,11 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
     ExceptionStackMetrics::new(),
 ];
 
+use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::map_page_4kb;
-use slopos_mm::phys_virt::mm_zero_physical_page;
 use slopos_abi::addr::VirtAddr;
+use core::ptr;
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)
@@ -138,10 +139,14 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
                     as *const c_char,
             );
         }
-        if mm_zero_physical_page(phys_addr) != 0 {
+        let Some(virt) = phys_addr.to_virt_checked() else {
             kernel_panic(
-                b"safe_stack_init: Failed to zero exception stack page\0".as_ptr() as *const c_char,
+                b"safe_stack_init: HHDM unavailable for exception stack page\0".as_ptr()
+                    as *const c_char,
             );
+        };
+        unsafe {
+            ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
         }
         if map_page_4kb(VirtAddr::new(virt_addr), phys_addr, PAGE_KERNEL_RW) != 0 {
             kernel_panic(

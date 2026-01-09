@@ -16,7 +16,6 @@ use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
 };
 use crate::paging::init_paging;
-use crate::phys_virt::mm_init_phys_virt_helpers;
 use crate::process_vm::init_process_vm;
 use core::ffi::{CStr, c_char, c_int};
 
@@ -541,7 +540,9 @@ pub fn init_memory_system(
         }
 
         init_kernel_memory_layout();
-        mm_init_phys_virt_helpers();
+        if !crate::hhdm::is_available() {
+            mm_panic("MM: HHDM unavailable; cannot translate physical addresses");
+        }
 
         configure_region_store(memmap);
         record_memmap_usable(memmap);
