@@ -2,11 +2,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 
+pub mod hhdm;
 pub mod kernel_heap;
 pub mod memory_init;
 mod memory_layout;
 mod memory_reservations;
 pub mod mm_constants;
+pub mod mmio;
 pub mod page_alloc;
 pub mod paging;
 pub mod phys_virt;
@@ -19,10 +21,8 @@ pub mod symbols;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_lib::align_up;
-
-static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
@@ -36,28 +36,6 @@ struct AlignedHeap([u8; HEAP_SIZE]);
 
 #[unsafe(link_section = ".bss.heap")]
 static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
-
-pub fn init(hhdm_offset: u64) {
-    HHDM_OFFSET.store(hhdm_offset, Ordering::Release);
-}
-
-pub fn hhdm_offset() -> u64 {
-    HHDM_OFFSET.load(Ordering::Acquire)
-}
-
-/// Raw HHDM translation: physical to virtual.
-/// No safety checks - use mm_phys_to_virt() for checked translation.
-#[inline(always)]
-pub fn hhdm_phys_to_virt(phys: u64) -> u64 {
-    phys + hhdm_offset()
-}
-
-/// Raw HHDM translation: virtual to physical.
-/// No safety checks - use mm_virt_to_phys() for checked translation.
-#[inline(always)]
-pub fn hhdm_virt_to_phys(virt: u64) -> u64 {
-    virt.wrapping_sub(hhdm_offset())
-}
 
 pub struct BumpAllocator {
     next: AtomicUsize,

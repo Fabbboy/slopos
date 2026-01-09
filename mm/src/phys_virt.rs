@@ -39,7 +39,7 @@ use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::memory_init::{hhdm_is_available, hhdm_offset_value};
+use crate::hhdm;
 use crate::memory_reservations::{
     MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_MMIO, MmRegion,
     mm_reservations_find_option,
@@ -52,7 +52,7 @@ use crate::paging::virt_to_phys;
 
 #[inline]
 fn hhdm_available() -> bool {
-    hhdm_is_available()
+    hhdm::is_available()
 }
 pub fn mm_init_phys_virt_helpers() {
     if !hhdm_available() {
@@ -91,7 +91,7 @@ pub fn mm_phys_to_virt(phys_addr: u64) -> u64 {
         return 0;
     }
 
-    let hhdm = hhdm_offset_value();
+    let hhdm = hhdm::offset();
 
     // If we were handed something already in the higher-half window, treat it
     // as translated and return it directly rather than overflowing the add.
@@ -147,7 +147,7 @@ pub fn mm_map_mmio_region(phys_addr: u64, size: usize) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    (phys_addr + hhdm_offset_value()) as *mut c_void
+    (phys_addr + hhdm::offset()) as *mut c_void
 }
 pub fn mm_unmap_mmio_region(_virt_addr: *mut c_void, _size: usize) -> c_int {
     /* HHDM mappings are static; nothing to do yet. */

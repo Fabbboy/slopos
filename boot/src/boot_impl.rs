@@ -20,14 +20,6 @@ unsafe impl Send for BootImpl {}
 unsafe impl Sync for BootImpl {}
 
 impl BootServices for BootImpl {
-    fn get_hhdm_offset(&self) -> u64 {
-        limine_protocol::get_hhdm_offset_rust()
-    }
-
-    fn is_hhdm_available(&self) -> bool {
-        limine_protocol::is_hhdm_available_rust() != 0
-    }
-
     fn is_rsdp_available(&self) -> bool {
         limine_protocol::is_rsdp_available() != 0
     }

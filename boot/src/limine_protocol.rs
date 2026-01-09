@@ -665,18 +665,11 @@ pub fn is_memory_map_available() -> i32 {
 pub fn get_hhdm_offset() -> u64 {
     sysinfo().hhdm_offset
 }
+
 pub fn is_hhdm_available() -> i32 {
     sysinfo().flags.hhdm_available as i32
 }
 
-// Rust function wrappers for callback registration
-pub fn get_hhdm_offset_rust() -> u64 {
-    get_hhdm_offset()
-}
-
-pub fn is_hhdm_available_rust() -> i32 {
-    is_hhdm_available()
-}
 pub fn get_kernel_phys_base() -> u64 {
     sysinfo().kernel_phys_base
 }

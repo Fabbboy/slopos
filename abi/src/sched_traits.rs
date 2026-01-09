@@ -97,13 +97,10 @@ pub trait SchedulerFate: Send + Sync {
 
 /// Boot/kernel services - separate from scheduler.
 /// Provides access to boot-time data and critical kernel operations.
+///
+/// Note: HHDM access (get_hhdm_offset, is_hhdm_available) has been moved to
+/// slopos_mm::hhdm module for direct access without trait indirection.
 pub trait BootServices: Send + Sync {
-    /// Get the Higher Half Direct Map offset.
-    fn get_hhdm_offset(&self) -> u64;
-
-    /// Check if HHDM is available.
-    fn is_hhdm_available(&self) -> bool;
-
     /// Check if ACPI RSDP is available.
     fn is_rsdp_available(&self) -> bool;
 

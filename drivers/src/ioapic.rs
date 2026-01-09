@@ -5,7 +5,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
+use slopos_mm::hhdm::{self, PhysAddrHhdm};
 use crate::sched_bridge;
 use crate::wl_currency;
 
@@ -150,15 +152,15 @@ static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Convert physical address to virtual pointer.
 /// Falls back to identity mapping if HHDM is not yet available (early boot).
-/// Uses sched_bridge to access HHDM offset to avoid driver->mm circular dependency.
 #[inline]
 fn phys_to_virt_ptr(phys: u64) -> *mut u8 {
     if phys == 0 {
         return core::ptr::null_mut();
     }
-    if sched_bridge::is_hhdm_available() != 0 {
-        (phys + sched_bridge::get_hhdm_offset()) as *mut u8
+    if let Some(virt) = PhysAddr::new(phys).try_to_virt() {
+        virt.as_mut_ptr()
     } else {
+        // Fallback to identity mapping during early boot
         phys as *mut u8
     }
 }
@@ -498,7 +500,7 @@ pub fn init() -> i32 {
         -1
     };
 
-    if sched_bridge::is_hhdm_available() == 0 {
+    if !hhdm::is_available() {
         klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
         wl_currency::award_loss();
         return init_fail();

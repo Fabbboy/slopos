@@ -3,9 +3,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::*;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_FEAT_ECX_X2APIC};
-use crate::sched_bridge;
+use slopos_mm::hhdm::PhysAddrHhdm;
 use crate::wl_currency;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -14,16 +15,10 @@ static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 static APIC_BASE_ADDRESS: AtomicU64 = AtomicU64::new(0);
 static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
+/// Convert physical address to virtual via HHDM.
 #[inline]
 fn hhdm_virt_for(phys: u64) -> Option<u64> {
-    if phys == 0 {
-        return None;
-    }
-    if sched_bridge::is_hhdm_available() != 0 {
-        Some(phys + sched_bridge::get_hhdm_offset())
-    } else {
-        None
-    }
+    PhysAddr::new(phys).try_to_virt().map(|v| v.as_u64())
 }
 
 pub fn detect() -> bool {

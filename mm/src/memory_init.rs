@@ -86,20 +86,10 @@ static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
 };
 static mut EARLY_PAGING_OK: bool = false;
 static mut MEMORY_SYSTEM_INITIALIZED: bool = false;
-static mut HHDM_OFFSET: u64 = 0;
-static mut HHDM_AVAILABLE: bool = false;
 static mut FRAMEBUFFER_BOOT_INFO: Option<FramebufferInfo> = None;
 
 fn mm_panic(msg: &str) -> ! {
     panic!("{msg}");
-}
-
-pub fn hhdm_offset_value() -> u64 {
-    unsafe { HHDM_OFFSET }
-}
-
-pub fn hhdm_is_available() -> bool {
-    unsafe { HHDM_AVAILABLE }
 }
 
 fn framebuffer_boot_info() -> Option<FramebufferInfo> {
@@ -340,8 +330,8 @@ fn record_framebuffer_reservation() {
     };
 
     let mut phys_base = fb.address as u64;
-    if hhdm_is_available() {
-        let offset = hhdm_offset_value();
+    if crate::hhdm::is_available() {
+        let offset = crate::hhdm::offset();
         if phys_base >= offset {
             phys_base -= offset;
         }
@@ -539,9 +529,12 @@ pub fn init_memory_system(
         klog_debug!("========== SlopOS Memory System Initialization ==========");
         klog_debug!("Initializing complete memory management system...");
 
-        HHDM_OFFSET = hhdm_offset;
-        HHDM_AVAILABLE = hhdm_available;
         FRAMEBUFFER_BOOT_INFO = framebuffer;
+
+        // Initialize the unified HHDM module (single source of truth)
+        if hhdm_available {
+            crate::hhdm::init(hhdm_offset);
+        }
 
         if memmap.is_null() {
             mm_panic("MM: Missing Limine memory map");

@@ -176,8 +176,9 @@ pub fn fate_apply_outcome(res: *const FateResult, resolution: u32, award: bool) 
 // BootServices wrappers
 // =============================================================================
 
-sched_fn!(get_hhdm_offset, BOOT, get_hhdm_offset() -> u64, 0);
-sched_fn!(is_hhdm_available, BOOT, is_hhdm_available() -> bool_as_i32);
+// Note: HHDM functions (get_hhdm_offset, is_hhdm_available) removed.
+// Drivers should use slopos_mm::hhdm module directly instead.
+
 sched_fn!(is_rsdp_available, BOOT, is_rsdp_available() -> bool_as_i32);
 sched_fn!(get_rsdp_address, BOOT, get_rsdp_address() -> *const c_void, core::ptr::null());
 sched_fn!(gdt_set_kernel_rsp0, BOOT, gdt_set_kernel_rsp0(rsp0: u64));

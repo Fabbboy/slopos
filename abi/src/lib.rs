@@ -11,6 +11,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod addr;
 pub mod arch;
 pub mod error;
 pub mod fs;
@@ -24,6 +25,7 @@ pub mod task;
 pub mod video_traits;
 pub mod window;
 
+pub use addr::*;
 pub use error::*;
 pub use fs::*;
 pub use input::*;

@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::memory_init::hhdm_is_available;
+use crate::hhdm;
 use crate::mm_constants::{
     ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
     PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
@@ -645,7 +645,7 @@ pub fn init_paging() {
         klog_debug!("Higher-half kernel mapping verified at 0x{:x}", kernel_phys);
 
         let identity_phys = virt_to_phys(0x100000);
-        if identity_phys == 0x100000 || hhdm_is_available() {
+        if identity_phys == 0x100000 || hhdm::is_available() {
             klog_debug!("Identity mapping verified");
         } else {
             klog_debug!("Identity mapping not found (may be normal after early boot)");
