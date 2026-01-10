@@ -17,8 +17,11 @@ pub fn draw_char<T: DrawTarget>(target: &mut T, x: i32, y: i32, ch: u8, fg: u32,
         for col in 0..FONT_CHAR_WIDTH {
             let px = x + col;
             let is_fg = (row_bits & (0x80 >> col)) != 0;
-            let color = if is_fg { fg_raw } else { bg_raw };
-            target.draw_pixel(px, py, color);
+            if is_fg {
+                target.draw_pixel(px, py, fg_raw);
+            } else if bg != 0 {
+                target.draw_pixel(px, py, bg_raw);
+            }
         }
     }
 }

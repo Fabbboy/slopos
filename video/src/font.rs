@@ -1,6 +1,5 @@
 use core::ffi::{c_char, c_int};
 
-use slopos_abi::DrawTarget;
 use slopos_abi::font_render;
 
 use crate::framebuffer;
@@ -50,7 +49,7 @@ pub fn string_lines(text: &[u8]) -> i32 {
 }
 
 pub fn font_draw_char_ctx(
-    ctx: &GraphicsContext,
+    _ctx: &GraphicsContext,
     x: i32,
     y: i32,
     c: c_char,
@@ -61,36 +60,17 @@ pub fn font_draw_char_ctx(
         return FONT_ERROR_NO_FB;
     }
 
-    let mut ctx_copy = match GraphicsContext::new() {
+    let mut ctx = match GraphicsContext::new() {
         Ok(c) => c,
         Err(_) => return FONT_ERROR_NO_FB,
     };
-    let _ = ctx;
 
-    let fmt = ctx_copy.pixel_format();
-    let fg_raw = fmt.convert_color(fg_color);
-    let bg_raw = fmt.convert_color(bg_color);
-
-    let glyph = slopos_abi::font::get_glyph_or_space(c as u8);
-
-    for (row_idx, &row_bits) in glyph.iter().enumerate() {
-        let py = y + row_idx as i32;
-        for col in 0..FONT_CHAR_WIDTH {
-            let px = x + col;
-            let is_fg = (row_bits & (0x80 >> col)) != 0;
-            if is_fg {
-                ctx_copy.draw_pixel(px, py, fg_raw);
-            } else if bg_color != 0 {
-                ctx_copy.draw_pixel(px, py, bg_raw);
-            }
-        }
-    }
-
+    font_render::draw_char(&mut ctx, x, y, c as u8, fg_color, bg_color);
     FONT_SUCCESS
 }
 
 pub fn font_draw_string_ctx(
-    ctx: &GraphicsContext,
+    _ctx: &GraphicsContext,
     x: i32,
     y: i32,
     str_ptr: *const c_char,
@@ -104,67 +84,12 @@ pub fn font_draw_string_ctx(
         return FONT_ERROR_NO_FB;
     }
 
-    let mut ctx_copy = match GraphicsContext::new() {
+    let mut ctx = match GraphicsContext::new() {
         Ok(c) => c,
         Err(_) => return FONT_ERROR_NO_FB,
     };
-    let _ = ctx;
 
-    let fb_w = ctx_copy.width() as i32;
-    let fb_h = ctx_copy.height() as i32;
     let text = c_str_to_slice(str_ptr);
-
-    let fmt = ctx_copy.pixel_format();
-    let fg_raw = fmt.convert_color(fg_color);
-    let bg_raw = fmt.convert_color(bg_color);
-
-    let mut cx = x;
-    let mut cy = y;
-
-    for &ch in text {
-        match ch {
-            b'\n' => {
-                cx = x;
-                cy += FONT_CHAR_HEIGHT;
-            }
-            b'\r' => {
-                cx = x;
-            }
-            b'\t' => {
-                let tab_width = 4 * FONT_CHAR_WIDTH;
-                cx = ((cx - x + tab_width) / tab_width) * tab_width + x;
-            }
-            _ => {
-                let glyph = slopos_abi::font::get_glyph_or_space(ch);
-                for (row_idx, &row_bits) in glyph.iter().enumerate() {
-                    let py = cy + row_idx as i32;
-                    if py < 0 || py >= fb_h {
-                        continue;
-                    }
-                    for col in 0..FONT_CHAR_WIDTH {
-                        let px = cx + col;
-                        if px < 0 || px >= fb_w {
-                            continue;
-                        }
-                        let is_fg = (row_bits & (0x80 >> col)) != 0;
-                        if is_fg {
-                            ctx_copy.draw_pixel(px, py, fg_raw);
-                        } else if bg_color != 0 {
-                            ctx_copy.draw_pixel(px, py, bg_raw);
-                        }
-                    }
-                }
-                cx += FONT_CHAR_WIDTH;
-                if cx + FONT_CHAR_WIDTH > fb_w {
-                    cx = x;
-                    cy += FONT_CHAR_HEIGHT;
-                }
-            }
-        }
-        if cy >= fb_h {
-            break;
-        }
-    }
-
+    font_render::draw_string(&mut ctx, x, y, text, fg_color, bg_color);
     FONT_SUCCESS
 }
