@@ -3,9 +3,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::io;
-
-/// COM1 serial port base address - canonical definition for the codebase
-pub const COM1_BASE: u16 = 0x3F8;
+use slopos_abi::arch::x86_64::ports::COM1_BASE;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -226,50 +226,18 @@ pub const PIT_IRQ_LINE: u8 = 0;
 pub const PIC_EOI: u8 = 0x20;
 
 // =============================================================================
-// Backward Compatibility Aliases
+// Raw Port Address Constants
 // =============================================================================
 
-/// COM1 base address (backward compatibility).
 pub const COM1_BASE: u16 = Port::COM1.0;
-
-/// COM2 base address (backward compatibility).
-pub const COM2_BASE: u16 = Port::COM2.0;
-
-/// COM3 base address (backward compatibility).
-pub const COM3_BASE: u16 = Port::COM3.0;
-
-/// COM4 base address (backward compatibility).
-pub const COM4_BASE: u16 = Port::COM4.0;
-
-/// PIT Channel 0 port (backward compatibility).
 pub const PIT_CHANNEL0_PORT: u16 = Port::PIT_CHANNEL0.0;
-
-/// PIT Command port (backward compatibility).
 pub const PIT_COMMAND_PORT: u16 = Port::PIT_COMMAND.0;
-
-/// PS/2 data port (backward compatibility).
 pub const PS2_DATA_PORT: u16 = Port::PS2_DATA.0;
-
-/// PS/2 status port (backward compatibility).
 pub const PS2_STATUS_PORT: u16 = Port::PS2_STATUS.0;
-
-/// PS/2 command port (backward compatibility).
 pub const PS2_COMMAND_PORT: u16 = Port::PS2_COMMAND.0;
-
-/// Master PIC command port (backward compatibility).
 pub const PIC1_COMMAND: u16 = Port::PIC1_COMMAND.0;
-
-/// Master PIC data port (backward compatibility).
 pub const PIC1_DATA: u16 = Port::PIC1_DATA.0;
-
-/// Slave PIC command port (backward compatibility).
 pub const PIC2_COMMAND: u16 = Port::PIC2_COMMAND.0;
-
-/// Slave PIC data port (backward compatibility).
 pub const PIC2_DATA: u16 = Port::PIC2_DATA.0;
-
-/// PCI configuration address port (backward compatibility).
 pub const PCI_CONFIG_ADDRESS: u16 = Port::PCI_CONFIG_ADDRESS.0;
-
-/// PCI configuration data port (backward compatibility).
 pub const PCI_CONFIG_DATA: u16 = Port::PCI_CONFIG_DATA.0;
