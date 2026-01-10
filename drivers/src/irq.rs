@@ -2,7 +2,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::io;
+use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
@@ -12,7 +12,6 @@ use slopos_abi::arch::x86_64::ioapic::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
-use slopos_abi::arch::x86_64::ports::{PS2_DATA_PORT, PS2_STATUS_PORT};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
 
@@ -198,12 +197,12 @@ extern "C" fn timer_irq_handler(irq: u8, _frame: *mut InterruptFrame, _ctx: *mut
 
 extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     unsafe {
-        let status = io::inb(PS2_STATUS_PORT);
+        let status = PS2_STATUS.read();
         if status & 0x01 == 0 {
             return;
         }
 
-        let scancode = io::inb(PS2_DATA_PORT);
+        let scancode = PS2_DATA.read();
         KEYBOARD_EVENT_COUNTER = KEYBOARD_EVENT_COUNTER.wrapping_add(1);
         keyboard::keyboard_handle_scancode(scancode);
     }
@@ -211,13 +210,12 @@ extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: 
 
 extern "C" fn mouse_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     unsafe {
-        let status = io::inb(PS2_STATUS_PORT);
+        let status = PS2_STATUS.read();
         if status & 0x20 == 0 {
-            // Bit 5 must be set for mouse data
             return;
         }
 
-        let data = io::inb(PS2_DATA_PORT);
+        let data = PS2_DATA.read();
         mouse::mouse_handle_irq(data);
     }
 }

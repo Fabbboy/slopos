@@ -1,9 +1,9 @@
+use slopos_lib::ports::{PS2_COMMAND, PS2_DATA, PS2_STATUS};
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;
-use slopos_abi::arch::x86_64::ports::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
 
 // Mouse buttons
 pub const MOUSE_BUTTON_LEFT: u8 = 0x01;
@@ -33,17 +33,9 @@ static mut MOUSE_STATE: MouseState = MouseState {
 #[inline(always)]
 fn ps2_wait_input() {
     for _ in 0..100000 {
-        unsafe {
-            let status: u8;
-            core::arch::asm!(
-                "in al, dx",
-                in("dx") PS2_STATUS_PORT,
-                out("al") status,
-                options(nomem, nostack, preserves_flags)
-            );
-            if status & 0x02 == 0 {
-                return;
-            }
+        let status = unsafe { PS2_STATUS.read() };
+        if status & 0x02 == 0 {
+            return;
         }
         cpu::pause();
     }
@@ -52,17 +44,9 @@ fn ps2_wait_input() {
 #[inline(always)]
 fn ps2_wait_output() {
     for _ in 0..100000 {
-        unsafe {
-            let status: u8;
-            core::arch::asm!(
-                "in al, dx",
-                in("dx") PS2_STATUS_PORT,
-                out("al") status,
-                options(nomem, nostack, preserves_flags)
-            );
-            if status & 0x01 != 0 {
-                return;
-            }
+        let status = unsafe { PS2_STATUS.read() };
+        if status & 0x01 != 0 {
+            return;
         }
         cpu::pause();
     }
@@ -71,42 +55,19 @@ fn ps2_wait_output() {
 #[inline(always)]
 fn ps2_write_command(cmd: u8) {
     ps2_wait_input();
-    unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") PS2_COMMAND_PORT,
-            in("al") cmd,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { PS2_COMMAND.write(cmd) }
 }
 
 #[inline(always)]
 fn ps2_write_data(data: u8) {
     ps2_wait_input();
-    unsafe {
-        core::arch::asm!(
-            "out dx, al",
-            in("dx") PS2_DATA_PORT,
-            in("al") data,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+    unsafe { PS2_DATA.write(data) }
 }
 
 #[inline(always)]
 fn ps2_read_data() -> u8 {
     ps2_wait_output();
-    unsafe {
-        let data: u8;
-        core::arch::asm!(
-            "in al, dx",
-            in("dx") PS2_DATA_PORT,
-            out("al") data,
-            options(nomem, nostack, preserves_flags)
-        );
-        data
-    }
+    unsafe { PS2_DATA.read() }
 }
 
 fn mouse_write(cmd: u8) {

@@ -1,7 +1,7 @@
 use crate::{serial_println, wl_currency};
 use slopos_lib::cpu;
 #[cfg(feature = "qemu-exit")]
-use slopos_lib::io;
+use slopos_lib::ports::QEMU_DEBUG_EXIT;
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_SUITE: Suite = Suite::All;
@@ -9,9 +9,6 @@ const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
 const DEFAULT_TIMEOUT_MS: u32 = 0;
 const DEFAULT_SHUTDOWN: bool = false;
 const DEFAULT_STACKTRACE_DEMO: bool = false;
-
-#[cfg(feature = "qemu-exit")]
-const QEMU_DEBUG_EXIT_PORT: u16 = 0xf4;
 
 // Suite bitmask constants for test harness matching
 pub const SUITE_BASIC: u32 = 1 << 0;
@@ -246,8 +243,6 @@ pub fn run(config: &InterruptTestConfig) -> bool {
 #[cfg(feature = "qemu-exit")]
 fn qemu_exit(success: bool) -> ! {
     let code: u8 = if success { 0 } else { 1 };
-    unsafe {
-        io::outb(QEMU_DEBUG_EXIT_PORT, code);
-    }
+    unsafe { QEMU_DEBUG_EXIT.write(code) };
     cpu::halt_loop();
 }

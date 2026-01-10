@@ -152,33 +152,31 @@ fn boot_step_ioapic_setup_fn() {
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_gpu_register_driver();
-    if pci_init() == 0 {
-        klog_debug!("PCI subsystem initialized.");
-        let gpu = pci_get_primary_gpu();
-        if !gpu.is_null() {
-            let info = unsafe { &*gpu };
-            if info.present != 0 {
+    pci_init();
+
+    klog_debug!("PCI subsystem initialized.");
+    let gpu = pci_get_primary_gpu();
+    if !gpu.is_null() {
+        let info = unsafe { &*gpu };
+        if info.present != 0 {
+            klog_debug!(
+                "PCI: Primary GPU detected (bus {}, device {}, function {})",
+                info.device.bus,
+                info.device.device,
+                info.device.function
+            );
+            if info.mmio_region.is_mapped() {
                 klog_debug!(
-                    "PCI: Primary GPU detected (bus {}, device {}, function {})",
-                    info.device.bus,
-                    info.device.device,
-                    info.device.function
+                    "PCI: GPU MMIO virtual base {:#x}, size {:#x}",
+                    info.mmio_region.virt_base(),
+                    info.mmio_size
                 );
-                if info.mmio_region.is_mapped() {
-                    klog_debug!(
-                        "PCI: GPU MMIO virtual base {:#x}, size {:#x}",
-                        info.mmio_region.virt_base(),
-                        info.mmio_size
-                    );
-                } else {
-                    klog_info!("PCI: WARNING GPU MMIO mapping unavailable");
-                }
             } else {
-                klog_debug!("PCI: No GPU-class device discovered during enumeration");
+                klog_info!("PCI: WARNING GPU MMIO mapping unavailable");
             }
+        } else {
+            klog_debug!("PCI: No GPU-class device discovered during enumeration");
         }
-    } else {
-        klog_info!("WARNING: PCI initialization failed");
     }
 
     let backend = boot_video_backend();

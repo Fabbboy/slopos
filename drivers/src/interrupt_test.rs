@@ -4,8 +4,9 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_lib::klog_info;
+use slopos_lib::ports::QEMU_DEBUG_EXIT;
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{io, klog_info};
 
 use crate::interrupts::{
     InterruptTestConfig, SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER,
@@ -276,15 +277,13 @@ pub fn run_all_interrupt_tests(config: *const InterruptTestConfig) -> c_int {
 }
 pub fn interrupt_test_request_shutdown(failed_tests: c_int) {
     klog_info!("INTERRUPT_TEST: Auto shutdown requested");
-    unsafe {
-        let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
-        io::outb(0xF4, exit_value);
-        sched_bridge::kernel_shutdown(if failed_tests == 0 {
-            b"Interrupt tests completed successfully\0".as_ptr() as *const c_char
-        } else {
-            b"Interrupt tests failed\0".as_ptr() as *const c_char
-        });
-    }
+    let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
+    unsafe { QEMU_DEBUG_EXIT.write(exit_value) };
+    sched_bridge::kernel_shutdown(if failed_tests == 0 {
+        b"Interrupt tests completed successfully\0".as_ptr() as *const c_char
+    } else {
+        b"Interrupt tests failed\0".as_ptr() as *const c_char
+    });
 }
 pub fn test_get_stats() -> *const test_stats {
     unsafe { &TEST_STATS as *const test_stats }

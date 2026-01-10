@@ -278,22 +278,15 @@ pub fn keyboard_get_scancode() -> u8 {
 /// Poll PS/2 keyboard directly for Enter key press.
 ///
 /// This function bypasses the interrupt-driven keyboard system and reads
-/// directly from the PS/2 controller ports. It's designed to work during
-/// kernel panic when interrupts are disabled.
-///
-/// Blocks until Enter key is pressed.
 pub fn keyboard_poll_wait_enter() {
-    use slopos_abi::arch::x86_64::ports::{PS2_DATA_PORT, PS2_STATUS_PORT};
-    use slopos_lib::io;
+    use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
 
     const ENTER_MAKE_CODE: u8 = 0x1C;
 
     loop {
-        // Check if data is available (bit 0 of status port)
-        let status = unsafe { io::inb(PS2_STATUS_PORT) };
+        let status = unsafe { PS2_STATUS.read() };
         if status & 0x01 != 0 {
-            let scancode = unsafe { io::inb(PS2_DATA_PORT) };
-            // Check for Enter key make code (not break code)
+            let scancode = unsafe { PS2_DATA.read() };
             if scancode == ENTER_MAKE_CODE {
                 break;
             }

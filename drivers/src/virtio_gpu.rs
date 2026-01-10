@@ -1543,7 +1543,7 @@ pub fn virtio_gpu_register_driver() {
     if REGISTERED.swap(true, Ordering::SeqCst) {
         return;
     }
-    if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER as *const PciDriver) != 0 {
+    if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER) != 0 {
         klog_info!("PCI: virtio-gpu driver registration failed");
     }
 }

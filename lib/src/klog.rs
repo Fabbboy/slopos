@@ -2,8 +2,7 @@ use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use crate::io;
-use slopos_abi::arch::x86_64::ports::COM1_BASE;
+use crate::ports::COM1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,12 +36,8 @@ fn is_enabled(level: KlogLevel) -> bool {
 
 #[inline(always)]
 fn putc(byte: u8) {
-    // We keep the serial-ready flag for parity with the old implementation,
-    // but both paths emit directly to COM1 to avoid dependency cycles.
     let _ready = SERIAL_READY.load(Ordering::Relaxed);
-    unsafe {
-        io::outb(COM1_BASE, byte);
-    }
+    unsafe { COM1.write(byte) }
 }
 
 fn write_bytes(bytes: &[u8]) {

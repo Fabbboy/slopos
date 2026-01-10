@@ -3,7 +3,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::sched_traits::TaskRef;
-use slopos_lib::{COM1_BASE, cpu};
+use slopos_lib::{cpu, ports::COM1};
 use spin::Mutex;
 
 use crate::keyboard;
@@ -48,7 +48,7 @@ fn tty_cpu_relax() {
 
 #[inline]
 fn tty_service_serial_input() {
-    serial_poll_receive(COM1_BASE);
+    serial_poll_receive(COM1.address());
 }
 
 fn tty_input_available() -> c_int {
@@ -56,7 +56,7 @@ fn tty_input_available() -> c_int {
     if keyboard::keyboard_has_input() != 0 {
         return 1;
     }
-    if serial_buffer_pending(COM1_BASE) != 0 {
+    if serial_buffer_pending(COM1.address()) != 0 {
         return 1;
     }
     0
@@ -240,7 +240,7 @@ fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
     tty_service_serial_input();
 
     let mut raw = 0u8;
-    if serial_buffer_read(COM1_BASE, &mut raw as *mut u8) == 0 {
+    if serial_buffer_read(COM1.address(), &mut raw as *mut u8) == 0 {
         if raw == b'\r' {
             raw = b'\n';
         } else if raw == 0x7F {

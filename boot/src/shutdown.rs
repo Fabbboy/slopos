@@ -2,8 +2,11 @@ use core::arch::asm;
 use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_lib::ports::{
+    ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,
+};
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{COM1_BASE, cpu, io, klog_info};
+use slopos_lib::{cpu, klog_info};
 
 static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
@@ -17,10 +20,9 @@ use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 
 fn serial_flush() {
-    // Best-effort drain by waiting for line status transmit empty bit.
-    const LINE_STATUS_PORT_OFFSET: u16 = 5;
+    let lsr_port = COM1.offset(5);
     for _ in 0..1024 {
-        let lsr = unsafe { io::inb(COM1_BASE + LINE_STATUS_PORT_OFFSET) };
+        let lsr = unsafe { lsr_port.read() };
         if (lsr & 0x40) != 0 {
             break;
         }
@@ -35,11 +37,10 @@ fn ensure_kernel_page_dir() {
     }
 }
 fn poweroff_hardware() {
-    // QEMU/Bochs/SeaBIOS ACPI poweroff ports.
     unsafe {
-        io::outw(0x604, 0x2000);
-        io::outw(0xB004, 0x2000);
-        io::outw(0x4004, 0x3400);
+        ACPI_PM1A_CNT.write(0x2000);
+        ACPI_PM1A_CNT_BOCHS.write(0x2000);
+        ACPI_PM1A_CNT_VBOX.write(0x3400);
     }
 }
 pub fn kernel_quiesce_interrupts() {
@@ -131,10 +132,8 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("Rebooting via keyboard controller...");
 
-    unsafe {
-        pit_poll_delay_ms(50);
-        io::outb(0x64, 0xFE);
-    }
+    pit_poll_delay_ms(50);
+    unsafe { PS2_COMMAND.write(0xFE) };
 
     klog_info!("Keyboard reset failed, attempting triple fault...");
 

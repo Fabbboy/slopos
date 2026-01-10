@@ -125,67 +125,10 @@ pub mod cpu {
     }
 }
 
-pub mod io {
-    use core::arch::asm;
+pub mod io;
+pub mod ports;
 
-    #[inline(always)]
-    pub unsafe fn outb(port: u16, value: u8) {
-        unsafe {
-            asm!(
-                "out dx, al",
-                in("dx") port,
-                in("al") value,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn inb(port: u16) -> u8 {
-        unsafe {
-            let value: u8;
-            asm!(
-                "in al, dx",
-                out("al") value,
-                in("dx") port,
-                options(nomem, nostack, preserves_flags)
-            );
-            value
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn outw(port: u16, value: u16) {
-        unsafe {
-            asm!(
-                "out dx, ax",
-                in("dx") port,
-                in("ax") value,
-                options(nomem, nostack, preserves_flags)
-            );
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn inw(port: u16) -> u16 {
-        unsafe {
-            let value: u16;
-            asm!(
-                "in ax, dx",
-                out("ax") value,
-                in("dx") port,
-                options(nomem, nostack, preserves_flags)
-            );
-            value
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn io_wait() {
-        unsafe {
-            outb(0x80, 0);
-        }
-    }
+pub mod ffi {
     pub extern "C" fn cpuid_ffi(
         leaf: u32,
         eax: *mut u32,
@@ -253,8 +196,8 @@ pub use klog::{
     klog_set_level,
 };
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
+pub use ports::COM1;
 pub use ring_buffer::RingBuffer;
-pub use slopos_abi::arch::x86_64::ports::COM1_BASE;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
 
