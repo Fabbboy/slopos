@@ -169,17 +169,12 @@ impl PhysAddrHhdm for PhysAddr {
             }
         }
 
-        // If address is already in higher-half, return as-is (idempotent)
         if self.as_u64() >= hhdm {
             return Some(VirtAddr::new(self.as_u64()));
         }
 
-        // Check for overflow
-        if self.as_u64() > u64::MAX - hhdm {
-            return None;
-        }
-
-        Some(VirtAddr::new(self.as_u64() + hhdm))
+        let virt = self.as_u64().checked_add(hhdm)?;
+        Some(VirtAddr::new(virt))
     }
 }
 
