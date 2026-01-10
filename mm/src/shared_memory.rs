@@ -10,7 +10,7 @@ use spin::Mutex;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use crate::mm_constants::{PAGE_PRESENT, PAGE_SIZE_4KB, PAGE_USER, PAGE_WRITABLE};
+use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
 use crate::process_vm::process_vm_get_page_dir;
@@ -426,11 +426,10 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
     // Allocate virtual address range
     let vaddr = registry.alloc_vaddr(buffer_size);
 
-    // Map each page into the task's address space
     let map_flags = if actual_access == ShmAccess::ReadWrite {
-        PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE
+        PageFlags::USER_RW.bits()
     } else {
-        PAGE_PRESENT | PAGE_USER
+        PageFlags::USER_RO.bits()
     };
 
     for i in 0..pages {

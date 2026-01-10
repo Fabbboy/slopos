@@ -6,8 +6,8 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::mm_constants::{
-    ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_PRESENT, PAGE_SIZE_1GB,
-    PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_FLAG_COMPAT, PAGE_USER, PAGE_WRITABLE,
+    ENTRIES_PER_PAGE_TABLE, KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB,
+    PAGE_SIZE_4KB, PageFlags,
 };
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
@@ -56,7 +56,7 @@ fn table_empty(table: *const PageTable) -> bool {
     }
     unsafe {
         for entry in (*table).entries.iter() {
-            if entry & PAGE_PRESENT != 0 {
+            if entry & PageFlags::PRESENT.bits() != 0 {
                 return false;
             }
         }
@@ -82,7 +82,12 @@ fn alloc_page_table(phys_out: &mut PhysAddr) -> *mut PageTable {
 }
 
 fn intermediate_flags(user_mapping: bool) -> u64 {
-    PAGE_PRESENT | PAGE_WRITABLE | if user_mapping { PAGE_USER } else { 0 }
+    let base = PageFlags::PRESENT | PageFlags::WRITABLE;
+    if user_mapping {
+        (base | PageFlags::USER).bits()
+    } else {
+        base.bits()
+    }
 }
 
 /// Convert a physical page table address to a virtual pointer.
@@ -109,15 +114,15 @@ fn pte_address(pte: u64) -> PhysAddr {
 }
 
 fn pte_present(pte: u64) -> bool {
-    pte & PAGE_PRESENT != 0
+    pte & PageFlags::PRESENT.bits() != 0
 }
 
 fn pte_huge(pte: u64) -> bool {
-    pte & PAGE_SIZE_FLAG_COMPAT != 0
+    pte & PageFlags::HUGE.bits() != 0
 }
 
 fn pte_user(pte: u64) -> bool {
-    pte & PAGE_USER != 0
+    pte & PageFlags::USER.bits() != 0
 }
 
 fn is_user_address(vaddr: VirtAddr) -> bool {
@@ -264,7 +269,7 @@ fn map_page_in_directory(
         return -1;
     }
 
-    let user_mapping = (flags & PAGE_USER != 0) && is_user_address(vaddr);
+    let user_mapping = (flags & PageFlags::USER.bits() != 0) && is_user_address(vaddr);
     let inter_flags = intermediate_flags(user_mapping);
 
     unsafe {
@@ -294,7 +299,7 @@ fn map_page_in_directory(
             }
             pdpt_phys = pte_address(pml4_entry);
             pdpt = phys_to_table(pdpt_phys);
-            if user_mapping && (pml4_entry & PAGE_USER) == 0 {
+            if user_mapping && (pml4_entry & PageFlags::USER.bits()) == 0 {
                 (*pml4).entries[pml4_idx] = (pml4_entry & !0xFFF) | inter_flags;
             }
         }
@@ -309,7 +314,7 @@ fn map_page_in_directory(
                 return -1;
             }
             (*pdpt).entries[pdpt_idx] =
-                paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
+                paddr.as_u64() | flags | PageFlags::HUGE.bits() | PageFlags::PRESENT.bits();
             invlpg(vaddr);
             return 0;
         }
@@ -328,7 +333,7 @@ fn map_page_in_directory(
             }
             pd_phys = pte_address(pdpt_entry);
             pd = phys_to_table(pd_phys);
-            if user_mapping && (pdpt_entry & PAGE_USER) == 0 {
+            if user_mapping && (pdpt_entry & PageFlags::USER.bits()) == 0 {
                 (*pdpt).entries[pdpt_idx] = (pdpt_entry & !0xFFF) | inter_flags;
             }
         }
@@ -339,7 +344,8 @@ fn map_page_in_directory(
                 klog_info!("map_page: PD entry already present for 2MB mapping");
                 return -1;
             }
-            (*pd).entries[pd_idx] = paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
+            (*pd).entries[pd_idx] =
+                paddr.as_u64() | flags | PageFlags::HUGE.bits() | PageFlags::PRESENT.bits();
             invlpg(vaddr);
             return 0;
         }
@@ -367,7 +373,7 @@ fn map_page_in_directory(
             return -1;
         }
 
-        if (*pt).entries[pt_idx] & PAGE_PRESENT != 0 {
+        if (*pt).entries[pt_idx] & PageFlags::PRESENT.bits() != 0 {
             klog_info!(
                 "map_page: Virtual address 0x{:x} already mapped (entry=0x{:x})",
                 vaddr.as_u64(),
@@ -382,11 +388,11 @@ fn map_page_in_directory(
             // Continue to overwrite the mapping
         }
 
-        if user_mapping && (pt_entry & PAGE_USER) == 0 {
+        if user_mapping && (pt_entry & PageFlags::USER.bits()) == 0 {
             (*pd).entries[pd_idx] = (pt_entry & !0xFFF) | inter_flags;
         }
 
-        (*pt).entries[pt_idx] = paddr.as_u64() | (flags | PAGE_PRESENT);
+        (*pt).entries[pt_idx] = paddr.as_u64() | (flags | PageFlags::PRESENT.bits());
         invlpg(vaddr);
     }
     0
@@ -427,7 +433,7 @@ pub fn paging_map_shared_kernel_page(
     if phys.is_null() {
         return -1;
     }
-    map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PAGE_USER)
+    map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PageFlags::USER.bits())
 }
 
 fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
@@ -491,7 +497,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
             if pt.is_null() {
                 return -1;
             }
-            if (*pt).entries[pt_idx] & PAGE_PRESENT != 0 {
+            if (*pt).entries[pt_idx] & PageFlags::PRESENT.bits() != 0 {
                 let phys = pte_address((*pt).entries[pt_idx]);
                 (*pt).entries[pt_idx] = 0;
                 invlpg(vaddr);
@@ -742,7 +748,7 @@ pub fn paging_mark_range_user(
                 return -1;
             }
             if !pte_user(*pml4e) {
-                *pml4e |= PAGE_USER;
+                *pml4e |= PageFlags::USER.bits();
             }
             let pdpt = phys_to_table(pte_address(*pml4e));
             if pdpt.is_null() {
@@ -753,11 +759,11 @@ pub fn paging_mark_range_user(
                 return -1;
             }
             if pte_huge(*pdpte) {
-                let mut flags = *pdpte | PAGE_USER;
+                let mut flags = *pdpte | PageFlags::USER.bits();
                 if writable == 0 {
-                    flags &= !PAGE_WRITABLE;
+                    flags &= !PageFlags::WRITABLE.bits();
                 } else {
-                    flags |= PAGE_WRITABLE;
+                    flags |= PageFlags::WRITABLE.bits();
                 }
                 *pdpte = flags;
                 addr += PAGE_SIZE_1GB;
@@ -772,11 +778,11 @@ pub fn paging_mark_range_user(
                 return -1;
             }
             if pte_huge(*pde) {
-                let mut flags = *pde | PAGE_USER;
+                let mut flags = *pde | PageFlags::USER.bits();
                 if writable == 0 {
-                    flags &= !PAGE_WRITABLE;
+                    flags &= !PageFlags::WRITABLE.bits();
                 } else {
-                    flags |= PAGE_WRITABLE;
+                    flags |= PageFlags::WRITABLE.bits();
                 }
                 *pde = flags;
                 addr += PAGE_SIZE_2MB;
@@ -790,11 +796,11 @@ pub fn paging_mark_range_user(
             if !pte_present(*pte) {
                 return -1;
             }
-            let mut flags = *pte | PAGE_USER;
+            let mut flags = *pte | PageFlags::USER.bits();
             if writable == 0 {
-                flags &= !PAGE_WRITABLE;
+                flags &= !PageFlags::WRITABLE.bits();
             } else {
-                flags |= PAGE_WRITABLE;
+                flags |= PageFlags::WRITABLE.bits();
             }
             *pte = flags;
             addr += PAGE_SIZE_4KB;

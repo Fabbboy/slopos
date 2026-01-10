@@ -1,7 +1,7 @@
 //! SlopOS Memory and Paging Constants.
 //!
-//! This module re-exports memory and paging constants from `slopos_abi::arch::x86_64`
-//! for backward compatibility. New code should import directly from abi.
+//! This module re-exports memory and paging constants from `slopos_abi::arch::x86_64`.
+//! All code should use the type-safe `PageFlags` bitflags for page table operations.
 
 // Re-export memory layout constants from abi
 pub use slopos_abi::arch::x86_64::memory::{
@@ -25,24 +25,3 @@ pub use slopos_abi::arch::x86_64::paging::{
 
 // Re-export PageFlags for type-safe flag manipulation
 pub use slopos_abi::arch::x86_64::paging::PageFlags;
-
-// Backward compatibility: raw page flag constants
-// These match the bitflags values but as raw u64 for existing code
-pub const PAGE_PRESENT: u64 = 0x001;
-pub const PAGE_WRITABLE: u64 = 0x002;
-pub const PAGE_USER: u64 = 0x004;
-pub const PAGE_WRITE_THROUGH: u64 = 0x008;
-pub const PAGE_CACHE_DISABLE: u64 = 0x010;
-pub const PAGE_ACCESSED: u64 = 0x020;
-pub const PAGE_DIRTY: u64 = 0x040;
-pub const PAGE_SIZE_FLAG: u64 = 0x080;
-/// Preserve legacy name from C header; used as the large-page flag.
-pub const PAGE_SIZE_FLAG_COMPAT: u64 = PAGE_SIZE_FLAG;
-pub const PAGE_GLOBAL: u64 = 0x100;
-
-// Composite flags (backward compatibility)
-pub const PAGE_KERNEL_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE;
-pub const PAGE_KERNEL_RO: u64 = PAGE_PRESENT;
-pub const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-pub const PAGE_USER_RO: u64 = PAGE_PRESENT | PAGE_USER;
-pub const PAGE_LARGE_KERNEL_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_SIZE_FLAG;

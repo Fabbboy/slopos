@@ -18,7 +18,7 @@ pub use slopos_abi::task::{
     TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
 };
 
-use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
+use slopos_mm::mm_constants::{PROCESS_CODE_START_VA, PageFlags};
 
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = fn(*mut c_void);
@@ -296,7 +296,7 @@ pub fn task_create(
         stack_base = process_vm_alloc(
             process_id,
             TASK_STACK_SIZE,
-            (0x1 | 0x2 | 0x4) as u32, /* PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER */
+            PageFlags::USER_RW.bits() as u32,
         );
 
         if stack_base == 0 {

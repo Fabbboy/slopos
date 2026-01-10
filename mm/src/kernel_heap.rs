@@ -6,7 +6,7 @@ use slopos_lib::{klog_debug, klog_info};
 use spin::Mutex;
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
-use crate::mm_constants::{PAGE_KERNEL_RW, PAGE_SIZE_4KB};
+use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 
@@ -276,7 +276,12 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
             return -1;
         }
         let virt_page = expansion_start + (i as u64) * PAGE_SIZE_4KB;
-        if map_page_4kb(VirtAddr::new(virt_page), phys_page, PAGE_KERNEL_RW) != 0 {
+        if map_page_4kb(
+            VirtAddr::new(virt_page),
+            phys_page,
+            PageFlags::KERNEL_RW.bits(),
+        ) != 0
+        {
             klog_info!("expand_heap: Failed to map heap page");
             free_page_frame(phys_page);
             goto_rollback(expansion_start, mapped_pages);

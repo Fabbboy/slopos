@@ -10,10 +10,9 @@ use crate::idt::{
 };
 use crate::kernel_panic::kernel_panic;
 
-// Import exception stack constants from mm
 use slopos_mm::mm_constants::{
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
-    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_KERNEL_RW, PAGE_SIZE_4KB,
+    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_SIZE_4KB, PageFlags,
 };
 
 #[repr(C)]
@@ -148,7 +147,12 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
         unsafe {
             ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
         }
-        if map_page_4kb(VirtAddr::new(virt_addr), phys_addr, PAGE_KERNEL_RW) != 0 {
+        if map_page_4kb(
+            VirtAddr::new(virt_addr),
+            phys_addr,
+            PageFlags::KERNEL_RW.bits(),
+        ) != 0
+        {
             kernel_panic(
                 b"safe_stack_init: Failed to map exception stack page\0".as_ptr() as *const c_char,
             );

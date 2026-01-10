@@ -8,7 +8,6 @@
 //!
 //! - [`PhysAddr`]: A physical memory address. Cannot be directly dereferenced.
 //! - [`VirtAddr`]: A virtual memory address in kernel or user space.
-//! - [`MmioAddr`]: An MMIO device address. Must use volatile operations only.
 //!
 //! # Example
 //!
@@ -42,17 +41,6 @@ pub struct PhysAddr(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
-
-/// An MMIO (Memory-Mapped I/O) address.
-///
-/// MMIO addresses are special virtual addresses that map to device registers.
-/// They must be accessed using volatile operations only - regular loads/stores
-/// may be incorrectly optimized by the compiler.
-///
-/// This type is equivalent to Linux's `__iomem *` annotation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct MmioAddr(pub u64);
 
 // =============================================================================
 // PhysAddr implementation
@@ -284,39 +272,6 @@ impl VirtAddr {
 }
 
 // =============================================================================
-// MmioAddr implementation
-// =============================================================================
-
-impl MmioAddr {
-    /// The null MMIO address.
-    pub const NULL: Self = Self(0);
-
-    /// Create a new MMIO address from a raw u64 value.
-    #[inline]
-    pub const fn new(addr: u64) -> Self {
-        Self(addr)
-    }
-
-    /// Returns the raw u64 value of this address.
-    #[inline]
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    /// Returns true if this is the null address.
-    #[inline]
-    pub const fn is_null(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Add an offset to this address.
-    #[inline]
-    pub const fn offset(self, off: u64) -> Self {
-        Self(self.0.wrapping_add(off))
-    }
-}
-
-// =============================================================================
 // Conversions
 // =============================================================================
 
@@ -362,20 +317,6 @@ impl<T> From<*mut T> for VirtAddr {
     }
 }
 
-impl From<u64> for MmioAddr {
-    #[inline]
-    fn from(addr: u64) -> Self {
-        Self(addr)
-    }
-}
-
-impl From<MmioAddr> for u64 {
-    #[inline]
-    fn from(addr: MmioAddr) -> Self {
-        addr.0
-    }
-}
-
 // =============================================================================
 // Display implementations
 // =============================================================================
@@ -399,18 +340,6 @@ impl core::fmt::LowerHex for VirtAddr {
 }
 
 impl core::fmt::UpperHex for VirtAddr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::UpperHex::fmt(&self.0, f)
-    }
-}
-
-impl core::fmt::LowerHex for MmioAddr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::LowerHex::fmt(&self.0, f)
-    }
-}
-
-impl core::fmt::UpperHex for MmioAddr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         core::fmt::UpperHex::fmt(&self.0, f)
     }

@@ -19,11 +19,12 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 - **HHDM race condition fixed** (2026-01-10): `mm/src/hhdm.rs` now stores offset BEFORE setting initialized flag.
 - **MMIO overflow check added** (2026-01-10): `mm/src/mmio.rs` now uses `checked_add` for `phys + hhdm::offset()`.
 - **Shared memory typed addresses** (2026-01-10): `mm/src/shared_memory.rs` internal structures now use `PhysAddr`/`VirtAddr` instead of raw `u64`. Improves type safety for buffer tracking.
+- **PageFlags migration complete** (2026-01-10): All page flag constants migrated from raw `u64` to type-safe `PageFlags` bitflags. Files updated: `mm_constants.rs`, `paging.rs`, `process_vm.rs`, `shared_memory.rs`, `kernel_heap.rs`, `boot/safe_stack.rs`, `sched/task.rs`.
+- **MmioAddr removed** (2026-01-10): Unused `MmioAddr` type removed from `abi/src/addr.rs`. `MmioRegion` provides sufficient MMIO safety.
 - Remaining gaps (deferred - not type-safety issues):
   - Raw `u64` fields in `virtio_gpu.rs` (queue descriptors) and `ioapic.rs` (controller struct) are intentional for hardware/DMA compatibility. API boundaries already use `PhysAddr`.
   - Raw `u64` in `process_vm.rs` internal structures (`VmArea`, `ProcessVm`) - extensive refactor for minimal gain; paging API boundaries already use typed addresses.
   - Raw `u64` in `memory_reservations.rs` (`MmRegion.phys_base`) - `#[repr(C)]` struct for FFI compatibility; internal usage only.
-  - `MmioAddr` type is defined but not used - may be useful for future MMIO-specific safety invariants.
 
 ---
 
@@ -65,13 +66,14 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 
 ### Critical Issues
 
-| Issue | Severity | Impact |
+| Issue | Severity | Status |
 |-------|----------|--------|
-| `mm::lib::HHDM_OFFSET` never initialized | **CRITICAL** | `hhdm_phys_to_virt()` returns wrong values |
-| Three separate HHDM storages | HIGH | Maintenance burden, confusion |
-| Raw `u64` for all addresses | HIGH | Easy to confuse physical/virtual |
-| No MMIO abstraction | MEDIUM | Drivers do unsafe pointer arithmetic |
-| `sched_bridge` workaround | MEDIUM | Adds complexity for circular dep avoidance |
+| `mm::lib::HHDM_OFFSET` never initialized | **CRITICAL** | ✅ FIXED - Single source in `hhdm.rs` |
+| Three separate HHDM storages | HIGH | ✅ FIXED - Consolidated to one |
+| Raw `u64` for all addresses | HIGH | ✅ FIXED - `PhysAddr`/`VirtAddr` types |
+| No MMIO abstraction | MEDIUM | ✅ FIXED - `MmioRegion` added |
+| `sched_bridge` workaround | MEDIUM | ✅ FIXED - Removed |
+| Raw page flag constants | MEDIUM | ✅ FIXED - `PageFlags` bitflags |
 
 ### Affected Files
 

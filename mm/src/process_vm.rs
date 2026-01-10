@@ -8,9 +8,7 @@ use spin::Mutex;
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
-use crate::mm_constants::{
-    INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_PRESENT, PAGE_SIZE_4KB, PAGE_USER, PAGE_WRITABLE,
-};
+use crate::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
 use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
@@ -825,9 +823,9 @@ pub fn process_vm_load_elf(
         };
 
         let map_flags = if (ph.p_flags & PF_W) != 0 {
-            PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE
+            PageFlags::USER_RW.bits()
         } else {
-            PAGE_PRESENT | PAGE_USER
+            PageFlags::USER_RO.bits()
         };
 
         let page_start = align_down(user_seg_start as usize, PAGE_SIZE_4KB as usize) as u64;
@@ -847,7 +845,7 @@ pub fn process_vm_load_elf(
             let phys = if !existing_phys.is_null() {
                 // Page already mapped, reuse it (for overlapping segments)
                 // But we still need to copy the data for this segment's portion
-                if (map_flags & PAGE_WRITABLE) != 0 {
+                if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
                     let _ = paging_mark_range_user(
                         page_dir,
                         VirtAddr::new(dst),
@@ -1053,19 +1051,19 @@ pub fn create_process_vm() -> u32 {
             process_ptr,
             proc.code_start,
             proc.data_start,
-            PAGE_PRESENT as u32 | PAGE_USER as u32 | 0x04,
+            PageFlags::USER_RO.bits() as u32,
         ) != 0
             || add_vma_to_process(
                 process_ptr,
                 proc.data_start,
                 proc.heap_start,
-                PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32,
+                PageFlags::USER_RW.bits() as u32,
             ) != 0
             || add_vma_to_process(
                 process_ptr,
                 proc.stack_start,
                 proc.stack_end,
-                PAGE_PRESENT as u32 | PAGE_USER as u32 | PAGE_WRITABLE as u32,
+                PageFlags::USER_RW.bits() as u32,
             ) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
@@ -1077,7 +1075,7 @@ pub fn create_process_vm() -> u32 {
             return INVALID_PROCESS_ID;
         }
 
-        let stack_map_flags = PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE;
+        let stack_map_flags = PageFlags::USER_RW.bits();
         let mut stack_pages: u32 = 0;
         if map_user_range(
             proc.page_dir,
@@ -1105,7 +1103,7 @@ pub fn create_process_vm() -> u32 {
             proc.page_dir,
             0,
             PAGE_SIZE_4KB,
-            PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE,
+            PageFlags::USER_RW.bits(),
             &mut null_pages,
         ) == 0
         {
@@ -1113,7 +1111,7 @@ pub fn create_process_vm() -> u32 {
                 process_ptr,
                 0,
                 PAGE_SIZE_4KB,
-                (PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE) as u32,
+                PageFlags::USER_RW.bits() as u32,
             );
             proc.total_pages += null_pages;
         } else {
@@ -1194,15 +1192,16 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         return 0;
     }
 
-    let mut protection_flags = flags & (PAGE_PRESENT as u32 | PAGE_WRITABLE as u32 | 0x04);
+    let mut protection_flags =
+        flags & (PageFlags::PRESENT.bits() as u32 | PageFlags::WRITABLE.bits() as u32 | 0x04);
     if protection_flags == 0 {
-        protection_flags = PAGE_PRESENT as u32 | PAGE_WRITABLE as u32;
+        protection_flags = PageFlags::KERNEL_RW.bits() as u32;
     }
 
     let mut pages_mapped: u32 = 0;
-    let mut map_flags = PAGE_PRESENT | PAGE_USER;
-    if protection_flags & PAGE_WRITABLE as u32 != 0 {
-        map_flags |= PAGE_WRITABLE;
+    let mut map_flags = PageFlags::USER_RO.bits();
+    if protection_flags & PageFlags::WRITABLE.bits() as u32 != 0 {
+        map_flags |= PageFlags::WRITABLE.bits();
     }
     if map_user_range(
         process.page_dir,
@@ -1219,7 +1218,7 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         process_ptr,
         start_addr,
         end_addr,
-        protection_flags | PAGE_USER as u32,
+        protection_flags | PageFlags::USER.bits() as u32,
     ) != 0
     {
         klog_info!("process_vm_alloc: Failed to record VMA");
