@@ -243,7 +243,6 @@ pub mod ring_buffer;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
-pub mod user_syscall;
 
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
@@ -257,7 +256,6 @@ pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ring_buffer::RingBuffer;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
-pub use user_syscall::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

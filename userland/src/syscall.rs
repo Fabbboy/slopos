@@ -1,3 +1,16 @@
+//! Userland syscall wrappers — the canonical implementation for user-mode code.
+//!
+//! This module provides the ONLY syscall wrapper implementation in SlopOS.
+//! All user-mode applications (shell, compositor, roulette, file_manager) use
+//! these wrappers to invoke kernel services via `int 0x80`.
+//!
+//! Architecture:
+//! - `abi/src/syscall.rs` — Syscall numbers and shared types (source of truth)
+//! - `userland/src/syscall.rs` — User-mode wrappers (this file)
+//! - `drivers/src/syscall_*.rs` — Kernel-side handlers
+//!
+//! All functions are placed in `.user_text` section for proper Ring 3 execution.
+
 use core::arch::asm;
 use core::ffi::{c_char, c_void};
 use core::num::NonZeroU32;
