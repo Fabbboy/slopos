@@ -386,25 +386,6 @@ mod suites {
     };
 
     #[cfg(feature = "builtin-tests")]
-    #[repr(C)]
-    struct ProcessMemoryLayout {
-        code_start: u64,
-        data_start: u64,
-        heap_start: u64,
-        heap_max: u64,
-        stack_top: u64,
-        stack_size: u64,
-        user_space_start: u64,
-        user_space_end: u64,
-    }
-
-    #[cfg(feature = "builtin-tests")]
-    #[repr(C)]
-    struct ProcessPageDir {
-        _opaque: [u8; 0],
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn c_str_eq(a: *const c_char, b: *const c_char) -> bool {
         if a.is_null() || b.is_null() {
             return false;

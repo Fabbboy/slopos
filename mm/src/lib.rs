@@ -5,7 +5,7 @@
 pub mod hhdm;
 pub mod kernel_heap;
 pub mod memory_init;
-mod memory_layout;
+pub mod memory_layout;
 mod memory_reservations;
 pub mod mm_constants;
 pub mod mmio;
@@ -14,7 +14,7 @@ pub mod paging;
 pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;
-mod tests;
+pub mod tests;
 pub mod user_copy;
 pub mod user_ptr;
 
