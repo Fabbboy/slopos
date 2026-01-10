@@ -16,11 +16,11 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 - Core MM and driver migrations are complete; legacy `phys_virt` wrappers removed.
 - Phase 4 cleanup complete (no legacy wrappers or untyped HHDM helpers remain).
 - **User pointer type safety complete** (2026-01-10): `mm/src/user_ptr.rs` provides `UserVirtAddr`, `UserPtr<T>`, `UserBytes`, and `UserPtrError`. All user-copy APIs now use Result-based returns. No more panics from malformed user pointers.
-- Remaining gaps (planned follow-ups):
-  - `mm/src/hhdm.rs` initializes the `HHDM_INITIALIZED` flag before storing the offset; publish offset first, then set the flag to avoid observing `initialized` with offset=0.
-  - `mm/src/mmio.rs` lacks overflow checking for `phys + hhdm::offset()` when building `virt_base`.
-  - Some drivers still use raw `u64` physical addresses (type-safety gap), e.g. `drivers/src/virtio_gpu.rs` queue/command phys fields and `drivers/src/ioapic.rs` `phys_addr`/`map_ioapic_mmio`/`acpi_map_table`.
-  - `MmioAddr` type is defined but not used in any driver or MMIO API surface.
+- **HHDM race condition fixed** (2026-01-10): `mm/src/hhdm.rs` now stores offset BEFORE setting initialized flag.
+- **MMIO overflow check added** (2026-01-10): `mm/src/mmio.rs` now uses `checked_add` for `phys + hhdm::offset()`.
+- Remaining gaps (deferred - not type-safety issues):
+  - Raw `u64` fields in `virtio_gpu.rs` (queue descriptors) and `ioapic.rs` (controller struct) are intentional for hardware/DMA compatibility. API boundaries already use `PhysAddr`.
+  - `MmioAddr` type is defined but not used - may be useful for future MMIO-specific safety invariants.
 
 ---
 

@@ -93,17 +93,17 @@ impl MmioRegion {
             return None;
         }
 
-        // Check for overflow
+        // Check for overflow: phys + size
         phys.as_u64().checked_add(size as u64)?;
 
         if !hhdm::is_available() {
             return None;
         }
 
-        Some(Self {
-            virt_base: phys.as_u64() + hhdm::offset(),
-            size,
-        })
+        // Check for overflow: phys + hhdm_offset
+        let virt_base = phys.as_u64().checked_add(hhdm::offset())?;
+
+        Some(Self { virt_base, size })
     }
 
     /// Map a single 4KB page at physical address.

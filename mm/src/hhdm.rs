@@ -45,11 +45,20 @@ static HHDM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// # Panics
 ///
 /// Panics if called more than once. This catches double-init bugs at runtime.
+///
+/// # Memory Ordering
+///
+/// The offset is stored with Release ordering BEFORE setting the initialized flag.
+/// This ensures that any thread observing `is_available() == true` will also
+/// see the correct offset value (no race between flag and offset).
 pub fn init(offset: u64) {
+    // Store offset FIRST with Release ordering
+    HHDM_OFFSET.store(offset, Ordering::Release);
+
+    // Then set the initialized flag - if already set, we have a double-init bug
     if HHDM_INITIALIZED.swap(true, Ordering::SeqCst) {
         panic!("HHDM already initialized - init() called twice!");
     }
-    HHDM_OFFSET.store(offset, Ordering::Release);
 }
 
 /// Check if HHDM has been initialized.
