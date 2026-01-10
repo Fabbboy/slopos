@@ -995,8 +995,9 @@ fn kernel_get_size(ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
 }
 
 fn kernel_fill_rect(ctx: *mut c_void, x: i32, y: i32, w: i32, h: i32, color: u32) -> VideoResult {
-    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
-    graphics::graphics_draw_rect_filled_fast_ctx(ctx, x, y, w, h, color)
+    let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
+    graphics::fill_rect(ctx, x, y, w, h, color);
+    Ok(())
 }
 
 fn kernel_draw_line(
@@ -1007,13 +1008,15 @@ fn kernel_draw_line(
     y1: i32,
     color: u32,
 ) -> VideoResult {
-    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
-    graphics::graphics_draw_line_ctx(ctx, x0, y0, x1, y1, color)
+    let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
+    graphics::draw_line(ctx, x0, y0, x1, y1, color);
+    Ok(())
 }
 
 fn kernel_draw_circle(ctx: *mut c_void, cx: i32, cy: i32, radius: i32, color: u32) -> VideoResult {
-    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
-    graphics::graphics_draw_circle_ctx(ctx, cx, cy, radius, color)
+    let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
+    graphics::draw_circle(ctx, cx, cy, radius, color);
+    Ok(())
 }
 
 fn kernel_draw_circle_filled(
@@ -1023,8 +1026,9 @@ fn kernel_draw_circle_filled(
     radius: i32,
     color: u32,
 ) -> VideoResult {
-    let ctx = unsafe { (ctx as *const GraphicsContext).as_ref() }.ok_or(VideoError::Invalid)?;
-    graphics::graphics_draw_circle_filled_ctx(ctx, cx, cy, radius, color)
+    let ctx = unsafe { (ctx as *mut GraphicsContext).as_mut() }.ok_or(VideoError::Invalid)?;
+    graphics::draw_circle_filled(ctx, cx, cy, radius, color);
+    Ok(())
 }
 
 fn kernel_draw_text(

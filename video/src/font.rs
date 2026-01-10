@@ -1,8 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use crate::framebuffer;
-use crate::graphics;
+use crate::framebuffer::{self, FbState};
 use crate::graphics::GraphicsContext;
 
 pub(crate) use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
@@ -40,6 +39,107 @@ fn framebuffer_ready() -> bool {
 fn glyph_for_char(c: c_char) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
     slopos_abi::font::get_glyph_or_space((c as i8) as u8)
 }
+
+fn bytes_per_pixel(bpp: u8) -> u32 {
+    ((bpp as u32) + 7) / 8
+}
+
+fn convert_color(fb: &FbState, color: u32) -> u32 {
+    match fb.pixel_format {
+        0x02 | 0x04 => {
+            ((color & 0xFF0000) >> 16)
+                | (color & 0x00FF00)
+                | ((color & 0x0000FF) << 16)
+                | (color & 0xFF000000)
+        }
+        _ => color,
+    }
+}
+
+#[inline]
+fn write_pixel(fb: &FbState, x: i32, y: i32, pixel_value: u32) {
+    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let offset = y as usize * fb.pitch as usize + x as usize * bytes_pp;
+    let pixel_ptr = unsafe { fb.base.add(offset) };
+
+    unsafe {
+        match bytes_pp {
+            2 => ptr::write_volatile(pixel_ptr as *mut u16, pixel_value as u16),
+            3 => {
+                ptr::write_volatile(pixel_ptr, ((pixel_value >> 16) & 0xFF) as u8);
+                ptr::write_volatile(pixel_ptr.add(1), ((pixel_value >> 8) & 0xFF) as u8);
+                ptr::write_volatile(pixel_ptr.add(2), (pixel_value & 0xFF) as u8);
+            }
+            4 => ptr::write_volatile(pixel_ptr as *mut u32, pixel_value),
+            _ => {}
+        }
+    }
+}
+
+fn fill_rect_fb(fb: &FbState, x: i32, y: i32, w: i32, h: i32, color: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let mut x1 = x;
+    let mut y1 = y;
+    let mut x2 = x + w - 1;
+    let mut y2 = y + h - 1;
+
+    if x1 < 0 {
+        x1 = 0;
+    }
+    if y1 < 0 {
+        y1 = 0;
+    }
+    if x2 >= fb.width as i32 {
+        x2 = fb.width as i32 - 1;
+    }
+    if y2 >= fb.height as i32 {
+        y2 = fb.height as i32 - 1;
+    }
+
+    if x1 > x2 || y1 > y2 {
+        return;
+    }
+
+    let pixel_value = convert_color(fb, color);
+    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let pitch = fb.pitch as usize;
+
+    for row in y1..=y2 {
+        let mut pixel_ptr = unsafe { fb.base.add(row as usize * pitch + x1 as usize * bytes_pp) };
+        if bytes_pp == 4 {
+            let mut count = x2 - x1 + 1;
+            while count > 0 {
+                unsafe {
+                    (pixel_ptr as *mut u32).write_volatile(pixel_value);
+                    pixel_ptr = pixel_ptr.add(bytes_pp);
+                }
+                count -= 1;
+            }
+        } else {
+            for _ in x1..=x2 {
+                unsafe {
+                    match bytes_pp {
+                        2 => (pixel_ptr as *mut u16).write_volatile(pixel_value as u16),
+                        3 => {
+                            ptr::write_volatile(pixel_ptr, ((pixel_value >> 16) & 0xFF) as u8);
+                            ptr::write_volatile(
+                                pixel_ptr.add(1),
+                                ((pixel_value >> 8) & 0xFF) as u8,
+                            );
+                            ptr::write_volatile(pixel_ptr.add(2), (pixel_value & 0xFF) as u8);
+                        }
+                        _ => {}
+                    }
+                    pixel_ptr = pixel_ptr.add(bytes_pp);
+                }
+            }
+        }
+    }
+}
+
 pub fn font_draw_char_ctx(
     ctx: &GraphicsContext,
     x: i32,
@@ -48,9 +148,16 @@ pub fn font_draw_char_ctx(
     fg_color: u32,
     bg_color: u32,
 ) -> c_int {
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return FONT_ERROR_NO_FB,
+    };
+
     let fb_w = ctx.width() as i32;
     let fb_h = ctx.height() as i32;
     let glyph = glyph_for_char(c);
+    let fg_raw = convert_color(&fb, fg_color);
+    let bg_raw = convert_color(&fb, bg_color);
 
     for (row_idx, byte) in glyph.iter().copied().enumerate() {
         let py = y + row_idx as i32;
@@ -63,9 +170,9 @@ pub fn font_draw_char_ctx(
                 continue;
             }
             if byte & (0x80 >> col) != 0 {
-                let _ = graphics::graphics_draw_pixel_ctx(ctx, px, py, fg_color);
+                write_pixel(&fb, px, py, fg_raw);
             } else if bg_color != 0 {
-                let _ = graphics::graphics_draw_pixel_ctx(ctx, px, py, bg_color);
+                write_pixel(&fb, px, py, bg_raw);
             }
         }
     }
@@ -151,6 +258,7 @@ pub fn font_draw_string_ctx(
 
     FONT_SUCCESS
 }
+
 pub fn font_draw_string_clear_ctx(
     ctx: &GraphicsContext,
     x: i32,
@@ -163,11 +271,17 @@ pub fn font_draw_string_clear_ctx(
         return FONT_ERROR_INVALID;
     }
 
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return FONT_ERROR_NO_FB,
+    };
+
     let width = font_get_string_width(str_ptr);
     let height = FONT_CHAR_HEIGHT;
-    let _ = graphics::graphics_draw_rect_filled_fast_ctx(ctx, x, y, width, height, bg_color);
+    fill_rect_fb(&fb, x, y, width, height, bg_color);
     font_draw_string_ctx(ctx, x, y, str_ptr, fg_color, bg_color)
 }
+
 pub fn font_get_string_width(str_ptr: *const c_char) -> i32 {
     if str_ptr.is_null() {
         return 0;
@@ -191,6 +305,7 @@ pub fn font_get_string_width(str_ptr: *const c_char) -> i32 {
     }
     width
 }
+
 pub fn font_get_string_lines(str_ptr: *const c_char) -> c_int {
     if str_ptr.is_null() {
         return 0;
@@ -212,7 +327,7 @@ pub fn font_get_string_lines(str_ptr: *const c_char) -> c_int {
     lines
 }
 
-fn console_scroll_up(ctx: &GraphicsContext, state: &mut ConsoleState) {
+fn console_scroll_up(state: &mut ConsoleState) {
     let fb = match framebuffer::snapshot() {
         Some(fb) => fb,
         None => return,
@@ -224,14 +339,7 @@ fn console_scroll_up(ctx: &GraphicsContext, state: &mut ConsoleState) {
     }
 
     if fb.height <= FONT_CHAR_HEIGHT as u32 {
-        let _ = graphics::graphics_draw_rect_filled_fast_ctx(
-            ctx,
-            0,
-            0,
-            ctx.width() as i32,
-            ctx.height() as i32,
-            state.bg_color,
-        );
+        fill_rect_fb(&fb, 0, 0, fb.width as i32, fb.height as i32, state.bg_color);
         state.cursor_y = 0;
         return;
     }
@@ -243,8 +351,8 @@ fn console_scroll_up(ctx: &GraphicsContext, state: &mut ConsoleState) {
         ptr::copy(fb.base.add(src_offset), fb.base, copy_bytes);
     }
 
-    let _ = graphics::graphics_draw_rect_filled_fast_ctx(
-        ctx,
+    fill_rect_fb(
+        &fb,
         0,
         fb.height as i32 - FONT_CHAR_HEIGHT,
         fb.width as i32,
@@ -253,6 +361,7 @@ fn console_scroll_up(ctx: &GraphicsContext, state: &mut ConsoleState) {
     );
     state.cursor_y = fb.height as i32 - FONT_CHAR_HEIGHT;
 }
+
 pub fn font_console_init(fg_color: u32, bg_color: u32) {
     let mut console = FONT_CONSOLE.lock();
     console.cursor_x = 0;
@@ -261,6 +370,7 @@ pub fn font_console_init(fg_color: u32, bg_color: u32) {
     console.bg_color = bg_color;
     console.initialized = true;
 }
+
 fn console_putc_with_ctx(ctx: &GraphicsContext, console: &mut ConsoleState, c: c_char) {
     match c as u8 {
         b'\n' => {
@@ -288,7 +398,7 @@ fn console_putc_with_ctx(ctx: &GraphicsContext, console: &mut ConsoleState, c: c
     }
 
     if console.cursor_y + FONT_CHAR_HEIGHT > ctx.height() as i32 {
-        console_scroll_up(ctx, console);
+        console_scroll_up(console);
     }
 }
 
@@ -310,6 +420,7 @@ pub fn font_console_putc(c: c_char) -> c_int {
     console_putc_with_ctx(&ctx, &mut console, c);
     FONT_SUCCESS
 }
+
 pub fn font_console_puts(str_ptr: *const c_char) -> c_int {
     if str_ptr.is_null() {
         return FONT_ERROR_INVALID;
@@ -338,29 +449,31 @@ pub fn font_console_puts(str_ptr: *const c_char) -> c_int {
     }
     FONT_SUCCESS
 }
+
 pub fn font_console_clear() -> c_int {
     if !framebuffer_ready() {
         return FONT_ERROR_NO_FB;
     }
-    let ctx = match GraphicsContext::new() {
-        Ok(ctx) => ctx,
-        Err(_) => return FONT_ERROR_NO_FB,
+
+    let fb = match framebuffer::snapshot() {
+        Some(fb) => fb,
+        None => return FONT_ERROR_NO_FB,
     };
-    {
-        let mut console = FONT_CONSOLE.lock();
-        let _ = graphics::graphics_draw_rect_filled_fast_ctx(
-            &ctx,
-            0,
-            0,
-            framebuffer::framebuffer_get_width() as i32,
-            framebuffer::framebuffer_get_height() as i32,
-            console.bg_color,
-        );
-        console.cursor_x = 0;
-        console.cursor_y = 0;
-    }
+
+    let mut console = FONT_CONSOLE.lock();
+    fill_rect_fb(
+        &fb,
+        0,
+        0,
+        fb.width as i32,
+        fb.height as i32,
+        console.bg_color,
+    );
+    console.cursor_x = 0;
+    console.cursor_y = 0;
     FONT_SUCCESS
 }
+
 pub fn font_console_set_colors(fg_color: u32, bg_color: u32) {
     let mut console = FONT_CONSOLE.lock();
     console.fg_color = fg_color;

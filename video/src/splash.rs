@@ -110,80 +110,46 @@ fn ensure_framebuffer_ready() -> GraphicsResult<()> {
     }
 }
 
-fn splash_draw_logo(
-    ctx: &GraphicsContext,
-    center_x: i32,
-    center_y: i32,
-    ring_radius: i32,
-) -> GraphicsResult<()> {
-    graphics::graphics_draw_circle_filled_ctx(
-        ctx,
-        center_x,
-        center_y,
-        ring_radius,
-        SPLASH_ACCENT_COLOR,
-    )?;
-    graphics::graphics_draw_circle_filled_ctx(
-        ctx,
-        center_x,
-        center_y,
-        ring_radius - 4,
-        SPLASH_BG_COLOR,
-    )?;
-    graphics::graphics_draw_rect_filled_fast_ctx(
+fn splash_draw_logo(ctx: &mut GraphicsContext, center_x: i32, center_y: i32, ring_radius: i32) {
+    graphics::draw_circle_filled(ctx, center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR);
+    graphics::draw_circle_filled(ctx, center_x, center_y, ring_radius - 4, SPLASH_BG_COLOR);
+    graphics::fill_rect(
         ctx,
         center_x - 40,
         center_y + ring_radius + 10,
         80,
         2,
         SPLASH_ACCENT_COLOR,
-    )?;
-
-    Ok(())
+    );
 }
 
 fn splash_draw_progress_bar(
-    ctx: &GraphicsContext,
+    ctx: &mut GraphicsContext,
     x: i32,
     y: i32,
     width: i32,
     height: i32,
     progress: i32,
-) -> GraphicsResult<()> {
-    graphics::graphics_draw_rect_filled_fast_ctx(
-        ctx,
-        x,
-        y,
-        width,
-        height,
-        SPLASH_PROGRESS_TRACK_COLOR,
-    )?;
-    graphics::graphics_draw_rect_ctx(
+) {
+    graphics::fill_rect(ctx, x, y, width, height, SPLASH_PROGRESS_TRACK_COLOR);
+    graphics::draw_rect(
         ctx,
         x - 1,
         y - 1,
         width + 2,
         height + 2,
         SPLASH_PROGRESS_FRAME_COLOR,
-    )?;
+    );
 
     if progress > 0 {
         let fill_width = (width * progress) / 100;
-        graphics::graphics_draw_rect_filled_fast_ctx(
-            ctx,
-            x,
-            y,
-            fill_width,
-            height,
-            SPLASH_ACCENT_COLOR,
-        )?;
+        graphics::fill_rect(ctx, x, y, fill_width, height, SPLASH_ACCENT_COLOR);
     }
-
-    Ok(())
 }
+
 pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
-    let ctx = GraphicsContext::new()?;
+    let mut ctx = GraphicsContext::new()?;
 
     let mut state = STATE.lock();
     framebuffer::framebuffer_clear(SPLASH_BG_COLOR);
@@ -193,11 +159,12 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     let layout = splash_layout(width, height);
 
     splash_draw_logo(
-        &ctx,
+        &mut ctx,
         layout.center_x,
         layout.ring_center_y,
         layout.ring_radius,
-    )?;
+    );
+
     if font::font_draw_string_ctx(
         &ctx,
         layout.title_x,
@@ -233,34 +200,36 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     }
 
     splash_draw_progress_bar(
-        &ctx,
+        &mut ctx,
         layout.progress_x,
         layout.progress_y,
         layout.progress_w,
         layout.progress_h,
         0,
-    )?;
+    );
 
     state.active = true;
     state.progress = 0;
     Ok(())
 }
+
 pub fn splash_update_progress(progress: i32, message: *const c_char) -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
 
-    let ctx = GraphicsContext::new()?;
+    let mut ctx = GraphicsContext::new()?;
     let width = ctx.width() as i32;
     let height = ctx.height() as i32;
     let layout = splash_layout(width, height);
 
-    graphics::graphics_draw_rect_filled_fast_ctx(
-        &ctx,
+    graphics::fill_rect(
+        &mut ctx,
         layout.message_x,
         layout.message_y,
         layout.message_w,
         SPLASH_MESSAGE_HEIGHT,
         SPLASH_BG_COLOR,
-    )?;
+    );
+
     if !message.is_null()
         && font::font_draw_string_ctx(
             &ctx,
@@ -275,15 +244,16 @@ pub fn splash_update_progress(progress: i32, message: *const c_char) -> Graphics
     }
 
     splash_draw_progress_bar(
-        &ctx,
+        &mut ctx,
         layout.progress_x,
         layout.progress_y,
         layout.progress_w,
         layout.progress_h,
         progress,
-    )?;
+    );
     Ok(())
 }
+
 pub fn splash_report_progress(progress: i32, message: *const c_char) -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
 
@@ -312,6 +282,7 @@ pub fn splash_report_progress(progress: i32, message: *const c_char) -> Graphics
     pit::pit_poll_delay_ms(delay_ms as u32);
     Ok(())
 }
+
 pub fn splash_finish() -> GraphicsResult<()> {
     let mut state = STATE.lock();
     if state.active {
@@ -321,6 +292,7 @@ pub fn splash_finish() -> GraphicsResult<()> {
     }
     Ok(())
 }
+
 pub fn splash_clear() -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
     framebuffer::framebuffer_clear(SPLASH_BG_COLOR);
