@@ -13,8 +13,12 @@
 
 pub mod addr;
 pub mod arch;
+pub mod damage;
+pub mod draw;
+pub mod draw_primitives;
 pub mod error;
 pub mod font;
+pub mod font_render;
 pub mod fs;
 pub mod input;
 pub mod pixel;
@@ -27,6 +31,8 @@ pub mod video_traits;
 pub mod window;
 
 pub use addr::*;
+pub use damage::{DamageRect, DamageTracker, MAX_DAMAGE_REGIONS};
+pub use draw::{DamageTracking, DrawTarget};
 pub use error::*;
 pub use fs::*;
 pub use input::*;

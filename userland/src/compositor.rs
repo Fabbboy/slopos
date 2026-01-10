@@ -504,7 +504,8 @@ impl WindowManager {
     fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
         let rect = bounds.to_damage_rect();
         if rect.is_valid() {
-            self.output_damage.add(rect.x0, rect.y0, rect.x1, rect.y1);
+            self.output_damage
+                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
         }
     }
 
@@ -522,7 +523,7 @@ impl WindowManager {
             let region = &window.damage_regions[i];
             if region.is_valid() {
                 // Transform to screen coordinates (add window position)
-                self.output_damage.add(
+                self.output_damage.add_rect(
                     window.x + region.x0,
                     window.y + region.y0,
                     window.x + region.x1,

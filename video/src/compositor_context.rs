@@ -16,52 +16,13 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 
+use slopos_abi::damage::DamageRect;
 use slopos_abi::{
     CompositorError, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
     SurfaceRole, WINDOW_STATE_NORMAL, WindowDamageRect, WindowInfo,
 };
 use slopos_drivers::video_bridge::VideoResult;
 use spin::Mutex;
-
-// =============================================================================
-// Damage Tracking Types
-// =============================================================================
-
-#[derive(Copy, Clone, Default)]
-struct DamageRect {
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-}
-
-impl DamageRect {
-    const fn invalid() -> Self {
-        Self {
-            x0: 0,
-            y0: 0,
-            x1: -1,
-            y1: -1,
-        }
-    }
-
-    fn is_valid(&self) -> bool {
-        self.x1 >= self.x0 && self.y1 >= self.y0
-    }
-
-    fn intersects(&self, other: &Self) -> bool {
-        self.x0 <= other.x1 && self.x1 >= other.x0 && self.y0 <= other.y1 && self.y1 >= other.y0
-    }
-
-    fn merge(&self, other: &Self) -> Self {
-        Self {
-            x0: self.x0.min(other.x0),
-            y0: self.y0.min(other.y0),
-            x1: self.x1.max(other.x1),
-            y1: self.y1.max(other.y1),
-        }
-    }
-}
 
 /// Advanced damage tracker with 32 regions and automatic merging.
 struct DamageTracker {
@@ -106,7 +67,7 @@ impl DamageTracker {
         // Try to merge with existing regions
         for i in 0..(self.count as usize) {
             if self.regions[i].intersects(&rect) {
-                self.regions[i] = self.regions[i].merge(&rect);
+                self.regions[i] = self.regions[i].union(&rect);
                 self.merge_overlapping();
                 return;
             }
@@ -133,7 +94,7 @@ impl DamageTracker {
             let mut j = i + 1;
             while j < self.count as usize {
                 if self.regions[i].intersects(&self.regions[j]) {
-                    self.regions[i] = self.regions[i].merge(&self.regions[j]);
+                    self.regions[i] = self.regions[i].union(&self.regions[j]);
                     // Remove region j by swapping with last
                     self.count -= 1;
                     self.regions[j] = self.regions[self.count as usize];

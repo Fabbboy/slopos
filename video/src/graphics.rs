@@ -1,6 +1,8 @@
 use core::ptr;
 
 use crate::framebuffer::{self, FbState};
+use slopos_abi::DrawTarget;
+use slopos_abi::pixel::DrawPixelFormat;
 use slopos_drivers::video_bridge::VideoError;
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
@@ -31,22 +33,121 @@ fn bytes_per_pixel(bpp: u8) -> u32 {
     ((bpp as u32) + 7) / 8
 }
 
-fn bounds_check(fb: &FbState, x: i32, y: i32) -> bool {
-    x >= 0 && y >= 0 && (x as u32) < fb.width && (y as u32) < fb.height
-}
+impl DrawTarget for GraphicsContext {
+    #[inline]
+    fn width(&self) -> u32 {
+        self.fb.width
+    }
 
-fn clip_coords(fb: &FbState, x: &mut i32, y: &mut i32) {
-    if *x < 0 {
-        *x = 0;
+    #[inline]
+    fn height(&self) -> u32 {
+        self.fb.height
     }
-    if *y < 0 {
-        *y = 0;
+
+    #[inline]
+    fn pitch(&self) -> usize {
+        self.fb.pitch as usize
     }
-    if *x >= fb.width as i32 {
-        *x = fb.width.saturating_sub(1) as i32;
+
+    #[inline]
+    fn bytes_pp(&self) -> u8 {
+        self.fb.bpp
     }
-    if *y >= fb.height as i32 {
-        *y = fb.height.saturating_sub(1) as i32;
+
+    fn pixel_format(&self) -> DrawPixelFormat {
+        match self.fb.pixel_format {
+            0x02 | 0x04 => DrawPixelFormat::Bgr,
+            _ => DrawPixelFormat::Rgb,
+        }
+    }
+
+    #[inline]
+    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
+        if x < 0 || y < 0 || x >= self.fb.width as i32 || y >= self.fb.height as i32 {
+            return;
+        }
+        let bytes_pp = bytes_per_pixel(self.fb.bpp) as usize;
+        let offset = y as usize * self.fb.pitch as usize + x as usize * bytes_pp;
+        let pixel_ptr = unsafe { self.fb.base.add(offset) };
+
+        unsafe {
+            match bytes_pp {
+                4 => (pixel_ptr as *mut u32).write_volatile(color),
+                3 => {
+                    pixel_ptr.write_volatile((color & 0xFF) as u8);
+                    pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
+                    pixel_ptr
+                        .add(2)
+                        .write_volatile(((color >> 16) & 0xFF) as u8);
+                }
+                2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
+                _ => {}
+            }
+        }
+    }
+
+    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
+        let mut x1 = x;
+        let mut y1 = y;
+        let mut x2 = x + w - 1;
+        let mut y2 = y + h - 1;
+
+        if x1 < 0 {
+            x1 = 0;
+        }
+        if y1 < 0 {
+            y1 = 0;
+        }
+        if x2 >= self.fb.width as i32 {
+            x2 = self.fb.width as i32 - 1;
+        }
+        if y2 >= self.fb.height as i32 {
+            y2 = self.fb.height as i32 - 1;
+        }
+
+        if x1 > x2 || y1 > y2 {
+            return;
+        }
+
+        let bytes_pp = bytes_per_pixel(self.fb.bpp) as usize;
+        let buffer = self.fb.base;
+        let pitch = self.fb.pitch as usize;
+
+        for row in y1..=y2 {
+            let mut pixel_ptr =
+                unsafe { buffer.add(row as usize * pitch + x1 as usize * bytes_pp) };
+            if bytes_pp == 4 {
+                let mut count = x2 - x1 + 1;
+                while count > 0 {
+                    unsafe {
+                        (pixel_ptr as *mut u32).write_volatile(color);
+                        pixel_ptr = pixel_ptr.add(bytes_pp);
+                    }
+                    count -= 1;
+                }
+            } else {
+                for _ in x1..=x2 {
+                    unsafe {
+                        match bytes_pp {
+                            2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
+                            3 => {
+                                pixel_ptr.write_volatile((color & 0xFF) as u8);
+                                pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
+                                pixel_ptr
+                                    .add(2)
+                                    .write_volatile(((color >> 16) & 0xFF) as u8);
+                            }
+                            _ => {}
+                        }
+                        pixel_ptr = pixel_ptr.add(bytes_pp);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -60,6 +161,10 @@ fn convert_color(fb: &FbState, color: u32) -> u32 {
         }
         _ => color,
     }
+}
+
+fn bounds_check(fb: &FbState, x: i32, y: i32) -> bool {
+    x >= 0 && y >= 0 && (x as u32) < fb.width && (y as u32) < fb.height
 }
 
 #[inline]
@@ -104,18 +209,25 @@ pub fn graphics_draw_hline_ctx(
     y: i32,
     color: u32,
 ) -> GraphicsResult<()> {
-    if !bounds_check(&ctx.fb, x1, y) && !bounds_check(&ctx.fb, x2, y) {
+    let fb = &ctx.fb;
+    if y < 0 || y >= fb.height as i32 {
         return Err(VideoError::OutOfBounds);
     }
 
     let (mut xa, mut xb) = if x1 > x2 { (x2, x1) } else { (x1, x2) };
-    let mut y_clipped = y;
-    clip_coords(&ctx.fb, &mut xa, &mut y_clipped);
-    clip_coords(&ctx.fb, &mut xb, &mut y_clipped);
+    if xa < 0 {
+        xa = 0;
+    }
+    if xb >= fb.width as i32 {
+        xb = fb.width as i32 - 1;
+    }
+    if xa > xb {
+        return Err(VideoError::OutOfBounds);
+    }
 
-    let pixel_value = convert_color(&ctx.fb, color);
+    let pixel_value = convert_color(fb, color);
     for x in xa..=xb {
-        write_pixel(&ctx.fb, x, y_clipped, pixel_value);
+        write_pixel(fb, x, y, pixel_value);
     }
 
     Ok(())
@@ -128,18 +240,25 @@ pub fn graphics_draw_vline_ctx(
     y2: i32,
     color: u32,
 ) -> GraphicsResult<()> {
-    if !bounds_check(&ctx.fb, x, y1) && !bounds_check(&ctx.fb, x, y2) {
+    let fb = &ctx.fb;
+    if x < 0 || x >= fb.width as i32 {
         return Err(VideoError::OutOfBounds);
     }
 
     let (mut ya, mut yb) = if y1 > y2 { (y2, y1) } else { (y1, y2) };
-    let mut x_clipped = x;
-    clip_coords(&ctx.fb, &mut x_clipped, &mut ya);
-    clip_coords(&ctx.fb, &mut x_clipped, &mut yb);
+    if ya < 0 {
+        ya = 0;
+    }
+    if yb >= fb.height as i32 {
+        yb = fb.height as i32 - 1;
+    }
+    if ya > yb {
+        return Err(VideoError::OutOfBounds);
+    }
 
-    let pixel_value = convert_color(&ctx.fb, color);
+    let pixel_value = convert_color(fb, color);
     for y in ya..=yb {
-        write_pixel(&ctx.fb, x_clipped, y, pixel_value);
+        write_pixel(fb, x, y, pixel_value);
     }
 
     Ok(())
@@ -153,8 +272,9 @@ pub fn graphics_draw_line_ctx(
     y1: i32,
     color: u32,
 ) -> GraphicsResult<()> {
-    let width = ctx.fb.width as i32;
-    let height = ctx.fb.height as i32;
+    let fb = &ctx.fb;
+    let width = fb.width as i32;
+    let height = fb.height as i32;
     if (x0 < 0 && x1 < 0)
         || (y0 < 0 && y1 < 0)
         || (x0 >= width && x1 >= width)
@@ -168,13 +288,13 @@ pub fn graphics_draw_line_ctx(
     let sx = if x0 < x1 { 1 } else { -1 };
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut err = dx - dy;
-    let pixel_value = convert_color(&ctx.fb, color);
+    let pixel_value = convert_color(fb, color);
 
     let mut x = x0;
     let mut y = y0;
     loop {
-        if bounds_check(&ctx.fb, x, y) {
-            write_pixel(&ctx.fb, x, y, pixel_value);
+        if bounds_check(fb, x, y) {
+            write_pixel(fb, x, y, pixel_value);
         }
         if x == x1 && y == y1 {
             break;
@@ -205,10 +325,10 @@ pub fn graphics_draw_rect_ctx(
         return Err(VideoError::Invalid);
     }
 
-    graphics_draw_hline_ctx(ctx, x, x + width - 1, y, color)?;
-    graphics_draw_hline_ctx(ctx, x, x + width - 1, y + height - 1, color)?;
-    graphics_draw_vline_ctx(ctx, x, y, y + height - 1, color)?;
-    graphics_draw_vline_ctx(ctx, x + width - 1, y, y + height - 1, color)?;
+    let _ = graphics_draw_hline_ctx(ctx, x, x + width - 1, y, color);
+    let _ = graphics_draw_hline_ctx(ctx, x, x + width - 1, y + height - 1, color);
+    let _ = graphics_draw_vline_ctx(ctx, x, y, y + height - 1, color);
+    let _ = graphics_draw_vline_ctx(ctx, x + width - 1, y, y + height - 1, color);
     Ok(())
 }
 
@@ -224,6 +344,7 @@ pub fn graphics_draw_rect_filled_fast_ctx(
         return Err(VideoError::Invalid);
     }
 
+    let fb = &ctx.fb;
     let mut x1 = x;
     let mut y1 = y;
     let mut x2 = x + width - 1;
@@ -235,21 +356,21 @@ pub fn graphics_draw_rect_filled_fast_ctx(
     if y1 < 0 {
         y1 = 0;
     }
-    if x2 >= ctx.fb.width as i32 {
-        x2 = ctx.fb.width as i32 - 1;
+    if x2 >= fb.width as i32 {
+        x2 = fb.width as i32 - 1;
     }
-    if y2 >= ctx.fb.height as i32 {
-        y2 = ctx.fb.height as i32 - 1;
+    if y2 >= fb.height as i32 {
+        y2 = fb.height as i32 - 1;
     }
 
     if x1 > x2 || y1 > y2 {
         return Err(VideoError::OutOfBounds);
     }
 
-    let pixel_value = convert_color(&ctx.fb, color);
-    let bytes_pp = bytes_per_pixel(ctx.fb.bpp) as usize;
-    let buffer = ctx.fb.base;
-    let pitch = ctx.fb.pitch as usize;
+    let pixel_value = convert_color(fb, color);
+    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let buffer = fb.base;
+    let pitch = fb.pitch as usize;
 
     for row in y1..=y2 {
         let mut pixel_ptr = unsafe { buffer.add(row as usize * pitch + x1 as usize * bytes_pp) };
@@ -268,11 +389,12 @@ pub fn graphics_draw_rect_filled_fast_ctx(
                     match bytes_pp {
                         2 => (pixel_ptr as *mut u16).write_volatile(pixel_value as u16),
                         3 => {
-                            pixel_ptr.write_volatile(((pixel_value >> 16) & 0xFF) as u8);
-                            pixel_ptr
-                                .add(1)
-                                .write_volatile(((pixel_value >> 8) & 0xFF) as u8);
-                            pixel_ptr.add(2).write_volatile((pixel_value & 0xFF) as u8);
+                            ptr::write_volatile(pixel_ptr, ((pixel_value >> 16) & 0xFF) as u8);
+                            ptr::write_volatile(
+                                pixel_ptr.add(1),
+                                ((pixel_value >> 8) & 0xFF) as u8,
+                            );
+                            ptr::write_volatile(pixel_ptr.add(2), (pixel_value & 0xFF) as u8);
                         }
                         _ => {}
                     }
@@ -296,22 +418,23 @@ pub fn graphics_draw_circle_ctx(
         return Err(VideoError::Invalid);
     }
 
-    let pixel_value = convert_color(&ctx.fb, color);
+    let fb = &ctx.fb;
+    let pixel_value = convert_color(fb, color);
     let mut x = 0;
     let mut y = radius;
     let mut d = 1 - radius;
 
-    if bounds_check(&ctx.fb, cx, cy + radius) {
-        write_pixel(&ctx.fb, cx, cy + radius, pixel_value);
+    if bounds_check(fb, cx, cy + radius) {
+        write_pixel(fb, cx, cy + radius, pixel_value);
     }
-    if bounds_check(&ctx.fb, cx, cy - radius) {
-        write_pixel(&ctx.fb, cx, cy - radius, pixel_value);
+    if bounds_check(fb, cx, cy - radius) {
+        write_pixel(fb, cx, cy - radius, pixel_value);
     }
-    if bounds_check(&ctx.fb, cx + radius, cy) {
-        write_pixel(&ctx.fb, cx + radius, cy, pixel_value);
+    if bounds_check(fb, cx + radius, cy) {
+        write_pixel(fb, cx + radius, cy, pixel_value);
     }
-    if bounds_check(&ctx.fb, cx - radius, cy) {
-        write_pixel(&ctx.fb, cx - radius, cy, pixel_value);
+    if bounds_check(fb, cx - radius, cy) {
+        write_pixel(fb, cx - radius, cy, pixel_value);
     }
 
     while x < y {
@@ -335,8 +458,8 @@ pub fn graphics_draw_circle_ctx(
         ];
 
         for (px, py) in points {
-            if bounds_check(&ctx.fb, px, py) {
-                write_pixel(&ctx.fb, px, py, pixel_value);
+            if bounds_check(fb, px, py) {
+                write_pixel(fb, px, py, pixel_value);
             }
         }
     }
@@ -355,15 +478,16 @@ pub fn graphics_draw_circle_filled_ctx(
         return Err(VideoError::Invalid);
     }
 
-    let pixel_value = convert_color(&ctx.fb, color);
+    let fb = &ctx.fb;
+    let pixel_value = convert_color(fb, color);
     let radius_sq = radius * radius;
     for y in -radius..=radius {
         for x in -radius..=radius {
             if x * x + y * y <= radius_sq {
                 let px = cx + x;
                 let py = cy + y;
-                if bounds_check(&ctx.fb, px, py) {
-                    write_pixel(&ctx.fb, px, py, pixel_value);
+                if bounds_check(fb, px, py) {
+                    write_pixel(fb, px, py, pixel_value);
                 }
             }
         }
