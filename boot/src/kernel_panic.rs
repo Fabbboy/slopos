@@ -1,9 +1,10 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::c_char;
 
 use slopos_drivers::keyboard::keyboard_poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_lib::cpu;
 use slopos_lib::klog_info;
+use slopos_lib::string::cstr_to_str;
 use slopos_video::panic_screen;
 
 use crate::shutdown::kernel_shutdown;
@@ -66,9 +67,7 @@ pub fn kernel_panic(message: *const c_char) -> ! {
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
     let msg_str = if !message.is_null() {
-        let s = unsafe { CStr::from_ptr(message) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
+        let s = unsafe { cstr_to_str(message) };
         klog_info!("PANIC: {}", s);
         Some(s)
     } else {
@@ -117,9 +116,7 @@ pub fn kernel_panic_with_context(
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
     let msg_str = if !message.is_null() {
-        let s = unsafe { CStr::from_ptr(message) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
+        let s = unsafe { cstr_to_str(message) };
         klog_info!("PANIC: {}", s);
         Some(s)
     } else {
@@ -128,14 +125,10 @@ pub fn kernel_panic_with_context(
 
     unsafe {
         if !function.is_null() {
-            let function_str = CStr::from_ptr(function)
-                .to_str()
-                .unwrap_or("<invalid utf-8>");
-            klog_info!("Function: {}", function_str);
+            klog_info!("Function: {}", cstr_to_str(function));
         }
         if !file.is_null() {
-            let file_str = CStr::from_ptr(file).to_str().unwrap_or("<invalid utf-8>");
-            klog_info!("File: {}:{}", file_str, line);
+            klog_info!("File: {}:{}", cstr_to_str(file), line);
         }
     }
 
@@ -176,9 +169,7 @@ pub fn kernel_panic_with_state(message: *const c_char, rip: u64, rsp: u64) {
     panic_output_str("\n\n=== KERNEL PANIC ===");
 
     let msg_str = if !message.is_null() {
-        let s = unsafe { CStr::from_ptr(message) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
+        let s = unsafe { cstr_to_str(message) };
         klog_info!("PANIC: {}", s);
         Some(s)
     } else {

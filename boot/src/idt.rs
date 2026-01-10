@@ -5,6 +5,7 @@ use core::arch::{asm, global_asm};
 use core::ffi::{CStr, c_char, c_void};
 
 use slopos_drivers::serial_println;
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::kernel_panic::kernel_panic_with_state;
@@ -299,9 +300,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let critical = is_critical_exception_internal(vector);
     unsafe {
         if critical || !matches!(CURRENT_EXCEPTION_MODE, ExceptionMode::Test) {
-            let name = CStr::from_ptr(get_exception_name(vector))
-                .to_str()
-                .unwrap_or("Unknown");
+            let name = cstr_to_str(get_exception_name(vector));
             klog_info!("EXCEPTION: Vector {} ({})", vector, name);
         }
     }
@@ -549,10 +548,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     if safe_stack::safe_stack_guard_fault(fault_addr, &mut stack_name) != 0 {
         klog_info!("FATAL: Exception stack overflow detected via guard page");
         if !stack_name.is_null() {
-            let owner = unsafe { CStr::from_ptr(stack_name) }
-                .to_str()
-                .unwrap_or("<invalid utf-8>");
-            klog_info!("Guard page owner: {}", owner);
+            klog_info!("Guard page owner: {}", unsafe { cstr_to_str(stack_name) });
         }
         klog_info!("Fault address: 0x{:x}", fault_addr);
         kdiag_dump_interrupt_frame(frame);

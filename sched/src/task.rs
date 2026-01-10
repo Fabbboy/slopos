@@ -6,6 +6,7 @@ use slopos_lib::IrqMutex;
 
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
@@ -435,13 +436,11 @@ pub fn task_create(
         mgr.tasks_created = mgr.tasks_created.saturating_add(1);
     });
 
-    unsafe {
-        use core::ffi::CStr;
-        let name_str = CStr::from_ptr(task_ref.name.as_ptr() as *const c_char)
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog_debug!("Created task '{}' with ID {}", name_str, task_id);
-    }
+    klog_debug!(
+        "Created task '{}' with ID {}",
+        unsafe { cstr_to_str(task_ref.name.as_ptr() as *const c_char) },
+        task_id
+    );
 
     task_id
 }
@@ -465,13 +464,11 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
-    unsafe {
-        use core::ffi::CStr;
-        let name_str = CStr::from_ptr((*task_ptr).name.as_ptr() as *const c_char)
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
-    }
+    klog_info!(
+        "Terminating task '{}' (ID {})",
+        unsafe { cstr_to_str((*task_ptr).name.as_ptr() as *const c_char) },
+        resolved_id
+    );
 
     let is_current = task_ptr == scheduler::scheduler_get_current_task();
 

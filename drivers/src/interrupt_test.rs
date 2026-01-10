@@ -1,9 +1,10 @@
 #![allow(non_camel_case_types)]
 #![allow(static_mut_refs)]
 
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{io, klog_info};
 
 use crate::interrupts::{
@@ -65,14 +66,6 @@ static mut TEST_CTX: test_context = test_context {
     last_recovery_reason: 0,
 };
 
-fn cstr_to_str(ptr: *const c_char) -> &'static str {
-    if ptr.is_null() {
-        return "<null>";
-    }
-    unsafe { CStr::from_ptr(ptr) }
-        .to_str()
-        .unwrap_or("<invalid utf-8>")
-}
 pub fn interrupt_test_init(config: *const InterruptTestConfig) {
     let _ = config;
     unsafe {

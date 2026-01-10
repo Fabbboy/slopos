@@ -1,5 +1,6 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::c_char;
 use core::ptr;
+use slopos_lib::string::cstr_to_str;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_drivers::{syscall_handlers::register_spawn_task_callback, wl_currency};
@@ -19,14 +20,7 @@ fn log_info(msg: &str) {
 
 #[unsafe(link_section = ".user_text")]
 fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
-    let task_name = unsafe {
-        if name.is_null() {
-            "<null>"
-        } else {
-            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
-        }
-    };
-
+    let task_name = unsafe { cstr_to_str(name) };
     f(task_name);
 }
 

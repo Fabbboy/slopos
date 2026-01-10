@@ -1,5 +1,6 @@
+use crate::string::cstr_to_str;
 use core::arch::asm;
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cpu;
@@ -165,9 +166,7 @@ pub fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
     }
     unsafe {
         let f = &*frame;
-        let exc_name = CStr::from_ptr(exception_name(f.vector as u8).as_ptr() as *const c_char)
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
+        let exc_name = cstr_to_str(exception_name(f.vector as u8).as_ptr() as *const c_char);
         crate::klog_info!("=== INTERRUPT FRAME DUMP ===");
         crate::klog_info!(
             "Vector: {} ({}) Error Code: 0x{:x}",

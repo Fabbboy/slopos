@@ -1,6 +1,7 @@
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 
 use slopos_lib::klog_info;
+use slopos_lib::string::cstr_to_str;
 
 use crate::scheduler;
 use crate::scheduler::task_wait_for;
@@ -32,8 +33,9 @@ pub fn kthread_spawn_ex(
     let id = task_create(name, entry_point.unwrap(), arg, priority, combined_flags);
 
     if id == INVALID_TASK_ID {
-        let name_str = unsafe { CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>") };
-        klog_info!("kthread_spawn_ex: failed to create thread '{}'", name_str);
+        klog_info!("kthread_spawn_ex: failed to create thread '{}'", unsafe {
+            cstr_to_str(name)
+        });
     }
 
     id

@@ -1,7 +1,8 @@
 use core::arch::asm;
-use core::ffi::{CStr, c_char};
+use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{COM1_BASE, cpu, io, klog_info};
 
 static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -81,10 +82,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
 
     klog_info!("=== Kernel Shutdown Requested ===");
     if !reason.is_null() {
-        let reason_str = unsafe { CStr::from_ptr(reason) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog_info!("Reason: {}", reason_str);
+        klog_info!("Reason: {}", unsafe { cstr_to_str(reason) });
     }
 
     scheduler_shutdown();
@@ -125,10 +123,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
 
     klog_info!("=== Kernel Reboot Requested ===");
     if !reason.is_null() {
-        let reason_str = unsafe { CStr::from_ptr(reason) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog_info!("Reason: {}", reason_str);
+        klog_info!("Reason: {}", unsafe { cstr_to_str(reason) });
     }
 
     kernel_quiesce_interrupts();

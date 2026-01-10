@@ -1,10 +1,10 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use core::ffi::CStr;
 use slopos_drivers::sched_bridge;
 use slopos_drivers::serial::serial_putc_com1;
 use slopos_lib::klog_info;
+use slopos_lib::string::cstr_to_str;
 
 use crate::scheduler;
 use crate::task::{
@@ -307,14 +307,8 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         ctx_ref.task_name
     };
 
-    unsafe {
-        let name_str = if name.is_null() {
-            "<null>"
-        } else {
-            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
-        };
-        klog_info!("{}: Starting (initial RSP=0x{:x})", name_str, stack_base);
-    }
+    let name_str = unsafe { cstr_to_str(name) };
+    klog_info!("{}: Starting (initial RSP=0x{:x})", name_str, stack_base);
 
     let mut iteration: u32 = 0;
     let target_yields: u32 = 100;
@@ -336,65 +330,44 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
             .initial_stack_top
             .saturating_sub(ctx_ref.min_stack_pointer);
         if stack_growth > 0x1000 {
-            unsafe {
-                let name_str = if name.is_null() {
-                    "<null>"
-                } else {
-                    CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
-                };
-                klog_info!(
-                    "{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes",
-                    name_str,
-                    stack_growth
-                );
-            }
+            klog_info!(
+                "{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes",
+                name_str,
+                stack_growth
+            );
             ctx_ref.test_failed = 1;
             break;
         }
 
         iteration = iteration.wrapping_add(1);
         if iteration % 50 == 0 {
-            unsafe {
-                let name_str = if name.is_null() {
-                    "<null>"
-                } else {
-                    CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
-                };
-                klog_info!(
-                    "{}: Iteration {} (yields: {}, RSP=0x{:x})",
-                    name_str,
-                    iteration,
-                    ctx_ref.yield_count,
-                    current_rsp
-                );
-            }
+            klog_info!(
+                "{}: Iteration {} (yields: {}, RSP=0x{:x})",
+                name_str,
+                iteration,
+                ctx_ref.yield_count,
+                current_rsp
+            );
         }
 
         scheduler::r#yield();
         ctx_ref.yield_count = ctx_ref.yield_count.wrapping_add(1);
     }
 
-    unsafe {
-        let name_str = if name.is_null() {
-            "<null>"
-        } else {
-            CStr::from_ptr(name).to_str().unwrap_or("<invalid utf-8>")
-        };
-        klog_info!("{}: Completed {} yields", name_str, ctx_ref.yield_count);
-        klog_info!(
-            "{}: Stack range: min=0x{:x} max=0x{:x} growth=0x{:x} bytes",
-            name_str,
-            ctx_ref.min_stack_pointer,
-            ctx_ref.max_stack_pointer,
-            ctx_ref
-                .initial_stack_top
-                .saturating_sub(ctx_ref.min_stack_pointer)
-        );
-        if ctx_ref.test_failed != 0 {
-            klog_info!("{}: FAILED - Stack corruption detected", name_str);
-        } else {
-            klog_info!("{}: PASSED - No stack corruption", name_str);
-        }
+    klog_info!("{}: Completed {} yields", name_str, ctx_ref.yield_count);
+    klog_info!(
+        "{}: Stack range: min=0x{:x} max=0x{:x} growth=0x{:x} bytes",
+        name_str,
+        ctx_ref.min_stack_pointer,
+        ctx_ref.max_stack_pointer,
+        ctx_ref
+            .initial_stack_top
+            .saturating_sub(ctx_ref.min_stack_pointer)
+    );
+    if ctx_ref.test_failed != 0 {
+        klog_info!("{}: FAILED - Stack corruption detected", name_str);
+    } else {
+        klog_info!("{}: PASSED - No stack corruption", name_str);
     }
 }
 pub fn smoke_test_task_a(arg: *mut c_void) {
@@ -517,13 +490,9 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     let ctx = unsafe { &mut *(context as *mut TaskStatPrintCtx) };
     ctx.index = ctx.index.wrapping_add(1);
 
+    let name_str = unsafe { cstr_to_str((*task).name.as_ptr() as *const c_char) };
+    let state_str = unsafe { cstr_to_str(task_state_to_string((*task).state)) };
     unsafe {
-        let name_str = CStr::from_ptr((*task).name.as_ptr() as *const c_char)
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        let state_str = CStr::from_ptr(task_state_to_string((*task).state))
-            .to_str()
-            .unwrap_or("<invalid>");
         klog_info!(
             "  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}",
             ctx.index,

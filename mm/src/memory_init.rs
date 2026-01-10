@@ -17,7 +17,8 @@ use crate::page_alloc::{
 };
 use crate::paging::init_paging;
 use crate::process_vm::init_process_vm;
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{c_char, c_int};
+use slopos_lib::string::cstr_to_str;
 
 use slopos_lib::{FramebufferInfo, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
@@ -466,9 +467,7 @@ fn log_reserved_regions() {
                 mm_reservation_type_name(region_ref.type_) as *const u8
             };
             let region_end = region_ref.phys_base + region_ref.length;
-            let label_str = CStr::from_ptr(label_ptr as *const c_char)
-                .to_str()
-                .unwrap_or("<invalid utf-8>");
+            let label_str = cstr_to_str(label_ptr as *const c_char);
             klog_info!(
                 "  {}: 0x{:x} - 0x{:x} ({} KB)",
                 label_str,

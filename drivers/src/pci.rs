@@ -1,9 +1,10 @@
 #![allow(static_mut_refs)]
 
 use core::arch::asm;
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
@@ -57,12 +58,7 @@ static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] =
 static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
-    if ptr.is_null() {
-        return "<null>";
-    }
-    unsafe { CStr::from_ptr(ptr as *const c_char) }
-        .to_str()
-        .unwrap_or("<invalid utf-8>")
+    unsafe { cstr_to_str(ptr as *const c_char) }
 }
 
 #[inline(always)]

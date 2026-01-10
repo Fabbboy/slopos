@@ -1,9 +1,10 @@
 use core::cell::UnsafeCell;
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::io;
 use slopos_lib::spinlock::Spinlock;
+use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
 use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
@@ -363,10 +364,9 @@ pub fn register_handler(
     });
 
     if !name.is_null() {
-        let name_str = unsafe { CStr::from_ptr(name) }
-            .to_str()
-            .unwrap_or("<invalid utf-8>");
-        klog_debug!("IRQ: Registered handler for line {} ({})", irq, name_str);
+        klog_debug!("IRQ: Registered handler for line {} ({})", irq, unsafe {
+            cstr_to_str(name)
+        });
     } else {
         klog_debug!("IRQ: Registered handler for line {}", irq);
     }
