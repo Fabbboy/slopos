@@ -1,8 +1,8 @@
-use core::ffi::c_void;
 use crate::syscall::{
     UserFbInfo, sys_exit, sys_fb_info, sys_roulette, sys_roulette_draw, sys_roulette_result,
     sys_sleep_ms, sys_write,
 };
+use core::ffi::c_void;
 
 #[unsafe(link_section = ".user_text")]
 fn text_fallback(fate: u32) {
@@ -34,7 +34,6 @@ fn text_fallback(fate: u32) {
     sys_write(&digits[..idx]);
     sys_write(b"\n");
 }
-
 
 #[unsafe(link_section = ".user_rodata")]
 static MSG_START: [u8; 16] = *b"ROULETTE: start\n";

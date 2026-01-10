@@ -2,8 +2,8 @@ use core::arch::asm;
 use core::ffi::{c_char, c_int, c_void};
 use core::hint::unreachable_unchecked;
 
-use slopos_abi::syscall::*;
 use crate::user_syscall_defs::*;
+use slopos_abi::syscall::*;
 
 #[inline(always)]
 pub unsafe fn syscall_invoke(num: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {

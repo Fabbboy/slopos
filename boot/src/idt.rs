@@ -14,13 +14,13 @@ global_asm!(include_str!("../idt_handlers.s"));
 
 // Import IDT constants from abi
 pub use slopos_abi::arch::x86_64::idt::{
-    EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT,
-    EXCEPTION_DEBUG, EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR,
-    EXCEPTION_DOUBLE_FAULT, EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION,
-    EXCEPTION_INVALID_OPCODE, EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK,
-    EXCEPTION_NMI, EXCEPTION_OVERFLOW, EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES,
-    EXCEPTION_SIMD_FP_EXCEPTION, EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT,
-    IDT_GATE_TRAP, IRQ_BASE_VECTOR, SYSCALL_VECTOR,
+    EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
+    EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
+    EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
+    EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
+    EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
+    EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
+    SYSCALL_VECTOR,
 };
 
 // IdtEntry is now imported from abi
@@ -73,20 +73,18 @@ pub enum ExceptionMode {
 }
 
 // Import functions from other crates - they're now regular Rust functions
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_drivers::irq::irq_dispatch;
 use slopos_drivers::syscall::syscall_handle;
 use slopos_drivers::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
-use slopos_mm::{paging, process_vm};
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_mm::{paging, process_vm};
 
 use slopos_drivers::sched_bridge;
 
 // Task and related types are now imported from abi
-use slopos_abi::task::{
-    Task, TaskExitReason, TaskFaultReason, INVALID_TASK_ID,
-};
+use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskFaultReason};
 
 unsafe extern "C" {
     fn isr0();
@@ -384,7 +382,11 @@ fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
     unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
 }
 
-fn terminate_user_task(reason: TaskFaultReason, frame: &slopos_lib::InterruptFrame, detail: &'static CStr) {
+fn terminate_user_task(
+    reason: TaskFaultReason,
+    frame: &slopos_lib::InterruptFrame,
+    detail: &'static CStr,
+) {
     let task = sched_bridge::boot_get_current_task() as *mut Task;
     let tid = if task.is_null() {
         INVALID_TASK_ID
@@ -395,7 +397,13 @@ fn terminate_user_task(reason: TaskFaultReason, frame: &slopos_lib::InterruptFra
     let (cr2, rip, rsp, vec, err) = unsafe {
         let cr2_val: u64;
         asm!("mov {}, cr2", out(reg) cr2_val, options(nomem, nostack, preserves_flags));
-        (cr2_val, frame.rip, frame.rsp, frame.vector, frame.error_code)
+        (
+            cr2_val,
+            frame.rip,
+            frame.rsp,
+            frame.vector,
+            frame.error_code,
+        )
     };
     let (entry_point, proc_id, flags, name_str) = if task.is_null() {
         (0, 0, 0, "<no task>")
@@ -526,7 +534,10 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     }
     klog_info!("FATAL: General protection fault");
     kdiag_dump_interrupt_frame(frame);
-    panic_with_frame(b"General protection fault\0".as_ptr() as *const c_char, frame);
+    panic_with_frame(
+        b"General protection fault\0".as_ptr() as *const c_char,
+        frame,
+    );
 }
 pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     let fault_addr: u64;
@@ -545,7 +556,10 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         }
         klog_info!("Fault address: 0x{:x}", fault_addr);
         kdiag_dump_interrupt_frame(frame);
-        panic_with_frame(b"Exception stack overflow\0".as_ptr() as *const c_char, frame);
+        panic_with_frame(
+            b"Exception stack overflow\0".as_ptr() as *const c_char,
+            frame,
+        );
         return;
     }
 

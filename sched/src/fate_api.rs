@@ -1,4 +1,4 @@
-use crate::task::{task_find_by_id, Task};
+use crate::task::{Task, task_find_by_id};
 use core::ffi::c_int;
 use slopos_abi::sched_traits::FateResult;
 use slopos_drivers::{random, wl_currency};

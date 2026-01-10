@@ -2,13 +2,13 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use spin::Mutex;
 use slopos_lib::{COM1_BASE, cpu};
+use spin::Mutex;
 
 use crate::keyboard;
 use crate::sched_bridge;
 use crate::serial;
-use crate::syscall_types::{Task, TASK_STATE_BLOCKED, TASK_STATE_READY};
+use crate::syscall_types::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
 
 const TTY_MAX_WAITERS: usize = 32;
 

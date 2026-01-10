@@ -69,7 +69,10 @@ impl MmioRegion {
     /// Create an empty (unmapped) MMIO region.
     #[inline]
     pub const fn empty() -> Self {
-        Self { virt_base: 0, size: 0 }
+        Self {
+            virt_base: 0,
+            size: 0,
+        }
     }
 
     /// Map a physical MMIO region via HHDM.
@@ -262,7 +265,9 @@ impl MmioRegion {
     /// Check if an offset is within bounds for a given access size.
     #[inline]
     pub fn is_valid_offset(&self, offset: usize, access_size: usize) -> bool {
-        offset.checked_add(access_size).is_some_and(|end| end <= self.size)
+        offset
+            .checked_add(access_size)
+            .is_some_and(|end| end <= self.size)
     }
 
     /// Get a sub-region at the specified offset.

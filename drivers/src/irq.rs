@@ -6,12 +6,12 @@ use slopos_lib::io;
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
+use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
 use slopos_abi::arch::x86_64::ioapic::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
 use slopos_abi::arch::x86_64::ports::{PS2_DATA_PORT, PS2_STATUS_PORT};
-use crate::{apic, ioapic, keyboard, mouse, sched_bridge, wl_currency};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
 
@@ -228,26 +228,27 @@ fn irq_program_ioapic_route(irq: u8) {
 
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
         sched_bridge::kernel_panic(
-            b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr()
-                as *const c_char,
+            b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr() as *const c_char,
         );
     }
 
     let mut gsi = 0u32;
     let mut legacy_flags = 0u32;
     if ioapic::legacy_irq_info(irq, &mut gsi, &mut legacy_flags) != 0 {
-        sched_bridge::kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char);
+        sched_bridge::kernel_panic(
+            b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char
+        );
     }
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq) as u8;
     let lapic_id = apic::get_id() as u8;
-    let flags = IOAPIC_FLAG_DELIVERY_FIXED
-        | IOAPIC_FLAG_DEST_PHYSICAL
-        | legacy_flags
-        | IOAPIC_FLAG_MASK;
+    let flags =
+        IOAPIC_FLAG_DELIVERY_FIXED | IOAPIC_FLAG_DEST_PHYSICAL | legacy_flags | IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
-        sched_bridge::kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char);
+        sched_bridge::kernel_panic(
+            b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char
+        );
     }
 
     let masked = with_irq_tables(|table, routes| {

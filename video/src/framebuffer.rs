@@ -323,20 +323,16 @@ pub fn framebuffer_blit(
 
     if dst_y > src_y {
         for row in (0..height).rev() {
-            let src_offset =
-                (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
-            let dst_offset =
-                (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
+            let src_offset = (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
+            let dst_offset = (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
             unsafe {
                 ptr::copy(base.add(src_offset), base.add(dst_offset), row_bytes);
             }
         }
     } else {
         for row in 0..height {
-            let src_offset =
-                (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
-            let dst_offset =
-                (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
+            let src_offset = (src_y + row) as usize * src_pitch + src_x as usize * bytes_per_pixel;
+            let dst_offset = (dst_y + row) as usize * src_pitch + dst_x as usize * bytes_per_pixel;
             unsafe {
                 ptr::copy(base.add(src_offset), base.add(dst_offset), row_bytes);
             }
@@ -378,11 +374,7 @@ pub fn register_flush_callback(callback: fn() -> c_int) {
 
 pub fn framebuffer_flush() -> c_int {
     let guard = FRAMEBUFFER_FLUSH.lock();
-    if let Some(cb) = *guard {
-        cb()
-    } else {
-        0
-    }
+    if let Some(cb) = *guard { cb() } else { 0 }
 }
 
 /// Copy from a shared memory buffer (by physical address) to the MMIO framebuffer.
@@ -418,11 +410,7 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     // Copy from shared memory to framebuffer MMIO
     // This is a simple memcpy for now - no page flipping hardware support
     unsafe {
-        ptr::copy_nonoverlapping(
-            shm_virt as *const u8,
-            fb.base,
-            copy_size,
-        );
+        ptr::copy_nonoverlapping(shm_virt as *const u8, fb.base, copy_size);
     }
 
     framebuffer_flush()

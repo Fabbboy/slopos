@@ -7,11 +7,13 @@
 //!
 //! Events are routed to the focused task for each input type.
 
-use spin::Mutex;
 use slopos_lib::cpu;
+use spin::Mutex;
 
 // Re-export ABI types and constants for consumers
-pub use slopos_abi::{InputEvent, InputEventData, InputEventType, MAX_EVENTS_PER_TASK, MAX_INPUT_TASKS};
+pub use slopos_abi::{
+    InputEvent, InputEventData, InputEventType, MAX_EVENTS_PER_TASK, MAX_INPUT_TASKS,
+};
 
 /// Extension trait for InputEvent construction methods
 pub trait InputEventExt {
@@ -275,7 +277,12 @@ pub fn input_set_pointer_focus(task_id: u32, timestamp_ms: u64) {
 /// Set pointer focus to a task with window offset for coordinate translation
 /// The offset is subtracted from screen coordinates to get window-local coordinates.
 /// For a window at screen position (100, 50), pass offset_x=100, offset_y=50.
-pub fn input_set_pointer_focus_with_offset(task_id: u32, offset_x: i32, offset_y: i32, timestamp_ms: u64) {
+pub fn input_set_pointer_focus_with_offset(
+    task_id: u32,
+    offset_x: i32,
+    offset_y: i32,
+    timestamp_ms: u64,
+) {
     // Use irqsave/irqrestore to prevent deadlock if mouse IRQ fires while holding lock
     let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
@@ -307,7 +314,12 @@ pub fn input_set_pointer_focus_with_offset(task_id: u32, offset_x: i32, offset_y
         if let Some(idx) = mgr.find_or_create_queue(task_id) {
             let local_x = x - offset_x;
             let local_y = y - offset_y;
-            mgr.queues[idx].push(InputEvent::pointer_enter_leave(true, local_x, local_y, timestamp_ms));
+            mgr.queues[idx].push(InputEvent::pointer_enter_leave(
+                true,
+                local_x,
+                local_y,
+                timestamp_ms,
+            ));
         }
     }
     drop(mgr);
@@ -469,7 +481,9 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
     let mut count = 0;
     while count < max_count {
         if let Some(event) = mgr.queues[idx].pop() {
-            unsafe { out_buffer.add(count).write(event); }
+            unsafe {
+                out_buffer.add(count).write(event);
+            }
             count += 1;
         } else {
             break;

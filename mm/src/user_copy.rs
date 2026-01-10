@@ -1,4 +1,3 @@
-use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -8,13 +7,11 @@ use slopos_abi::addr::VirtAddr;
 use crate::memory_layout::mm_get_kernel_heap_start;
 use crate::paging::paging_is_user_accessible;
 use crate::process_vm::process_vm_get_page_dir;
-
-// Task type is now imported from slopos_abi when needed
+use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 
 static KERNEL_GUARD_CHECKED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TASK_PROVIDER: Mutex<Option<fn() -> u32>> = Mutex::new(None);
 
-// Static to store process_id during syscall handling
 static mut SYSCALL_CURRENT_PID: u32 = crate::mm_constants::INVALID_PROCESS_ID;
 
 fn syscall_process_id_provider() -> u32 {
@@ -25,8 +22,6 @@ pub fn register_current_task_provider(provider: fn() -> u32) {
     *CURRENT_TASK_PROVIDER.lock() = Some(provider);
 }
 
-/// Temporarily set the current task provider to use a specific process_id
-/// Returns the previous provider so it can be restored
 pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
     unsafe {
         SYSCALL_CURRENT_PID = pid;
@@ -37,7 +32,6 @@ pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
     original
 }
 
-/// Restore the previous task provider
 pub fn restore_task_provider(provider: Option<fn() -> u32>) {
     let mut guard = CURRENT_TASK_PROVIDER.lock();
     *guard = provider;
@@ -60,67 +54,83 @@ fn current_process_dir() -> *mut crate::paging::ProcessPageDir {
     process_vm_get_page_dir(pid)
 }
 
-fn validate_user_buffer(
-    user_ptr: u64,
+fn validate_user_pages(
+    user_addr: UserVirtAddr,
     len: usize,
     dir: *mut crate::paging::ProcessPageDir,
-) -> c_int {
+) -> Result<(), UserPtrError> {
     if len == 0 {
-        return 0;
+        return Ok(());
     }
     if dir.is_null() {
-        return -1;
-    }
-
-    let start = user_ptr;
-    let end = start.wrapping_add(len as u64);
-    if end < start {
-        return -1;
+        return Err(UserPtrError::NotMapped);
     }
 
     if !KERNEL_GUARD_CHECKED.load(Ordering::Acquire) {
         let kernel_probe = mm_get_kernel_heap_start();
         if paging_is_user_accessible(dir, VirtAddr::new(kernel_probe)) != 0 {
-            return -1;
+            return Err(UserPtrError::NotMapped);
         }
         KERNEL_GUARD_CHECKED.store(true, Ordering::Release);
     }
 
+    let start = user_addr.as_u64();
+    let end = start + len as u64;
     let mut page = start & !(crate::mm_constants::PAGE_SIZE_4KB - 1);
+
     while page < end {
-        if paging_is_user_accessible(dir, VirtAddr::new(page)) == 0 {
-            return -1;
+        if paging_is_user_accessible(dir, VirtAddr(page)) == 0 {
+            return Err(UserPtrError::NotMapped);
         }
         page = page.wrapping_add(crate::mm_constants::PAGE_SIZE_4KB);
     }
-    0
+
+    Ok(())
 }
-pub fn user_copy_from_user(kernel_dst: *mut c_void, user_src: *const c_void, len: usize) -> c_int {
+
+pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
     let dir = current_process_dir();
-    if kernel_dst.is_null() || user_src.is_null() {
-        return -1;
-    }
-    if dir.is_null() {
-        return -1;
-    }
-    if validate_user_buffer(user_src as u64, len, dir) != 0 {
-        return -1;
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(user_src, kernel_dst, len);
-    }
-    0
+    validate_user_pages(src.addr(), core::mem::size_of::<T>(), dir)?;
+
+    unsafe { Ok(ptr::read(src.as_ptr())) }
 }
-pub fn user_copy_to_user(user_dst: *mut c_void, kernel_src: *const c_void, len: usize) -> c_int {
+
+pub fn copy_to_user<T: Copy>(dst: UserPtr<T>, value: &T) -> Result<(), UserPtrError> {
     let dir = current_process_dir();
-    if user_dst.is_null() || kernel_src.is_null() {
-        return -1;
-    }
-    if validate_user_buffer(user_dst as u64, len, dir) != 0 {
-        return -1;
-    }
+    validate_user_pages(dst.addr(), core::mem::size_of::<T>(), dir)?;
+
     unsafe {
-        ptr::copy_nonoverlapping(kernel_src, user_dst, len);
+        ptr::write(dst.as_mut_ptr(), *value);
     }
-    0
+    Ok(())
+}
+
+pub fn copy_bytes_from_user(src: UserBytes, dst: &mut [u8]) -> Result<usize, UserPtrError> {
+    let copy_len = src.len().min(dst.len());
+    if copy_len == 0 {
+        return Ok(0);
+    }
+
+    let dir = current_process_dir();
+    validate_user_pages(src.base(), copy_len, dir)?;
+
+    unsafe {
+        ptr::copy_nonoverlapping(src.base().as_ptr(), dst.as_mut_ptr(), copy_len);
+    }
+    Ok(copy_len)
+}
+
+pub fn copy_bytes_to_user(dst: UserBytes, src: &[u8]) -> Result<usize, UserPtrError> {
+    let copy_len = src.len().min(dst.len());
+    if copy_len == 0 {
+        return Ok(0);
+    }
+
+    let dir = current_process_dir();
+    validate_user_pages(dst.base(), copy_len, dir)?;
+
+    unsafe {
+        ptr::copy_nonoverlapping(src.as_ptr(), dst.base().as_mut_ptr(), copy_len);
+    }
+    Ok(copy_len)
 }

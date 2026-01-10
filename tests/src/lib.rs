@@ -4,12 +4,8 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_drivers::interrupt_test as intr;
-pub use slopos_drivers::interrupts::{
-    InterruptTestConfig, Verbosity as InterruptTestVerbosity,
-};
-use slopos_drivers::interrupts::{
-    SUITE_BASIC, SUITE_MEMORY, SUITE_CONTROL, SUITE_SCHEDULER,
-};
+pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
+use slopos_drivers::interrupts::{SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER};
 use slopos_drivers::wl_currency;
 use slopos_lib::klog_info;
 
@@ -290,9 +286,7 @@ mod suites {
     const VIRTIO_GPU_NAME: &[u8] = b"virtio_gpu\0";
     pub static INTERRUPT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
         name: INTERRUPT_NAME.as_ptr() as *const c_char,
-        mask_bit: SUITE_BASIC
-            | SUITE_MEMORY
-            | SUITE_CONTROL,
+        mask_bit: SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL,
         run: Some(run_interrupt_suite),
     };
 
@@ -302,8 +296,7 @@ mod suites {
         }
 
         let mut scoped = unsafe { *config };
-        scoped.suite_mask &=
-            SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL;
+        scoped.suite_mask &= SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL;
 
         if scoped.suite_mask == 0 {
             if let Some(out_ref) = unsafe { out.as_mut() } {

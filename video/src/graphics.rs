@@ -82,7 +82,6 @@ fn write_pixel(fb: &FbState, x: i32, y: i32, pixel_value: u32) {
     }
 }
 
-
 pub fn graphics_draw_pixel_ctx(
     ctx: &GraphicsContext,
     x: i32,

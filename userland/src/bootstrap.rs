@@ -62,7 +62,7 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
     // Load user program ELF into the new process address space and repoint entry.
     let mut new_entry: u64 = 0;
     let pid = unsafe { (*task_info).process_id };
-    
+
     // Determine which ELF binary to load based on task name
     let elf_data: &[u8] = if name == b"roulette\0" {
         const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
@@ -90,19 +90,17 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         FILE_MANAGER_ELF
     } else {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Unknown task name '{}', cannot load ELF\n", task_name);
+            klog_info!(
+                "USERLAND: Unknown task name '{}', cannot load ELF\n",
+                task_name
+            );
         });
         wl_currency::award_loss();
         task_terminate(task_id);
         return -1;
     };
 
-    if process_vm_load_elf(
-        pid,
-        elf_data.as_ptr(),
-        elf_data.len(),
-        &mut new_entry,
-    ) != 0
+    if process_vm_load_elf(pid, elf_data.as_ptr(), elf_data.len(), &mut new_entry) != 0
         || new_entry == 0
     {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
@@ -158,7 +156,10 @@ pub fn spawn_task_by_name(name: &[u8]) -> i32 {
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(task_id as u32, &mut task_info) != 0 || task_info.is_null() {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to fetch task info for scheduling '{}'\n", task_name);
+            klog_info!(
+                "USERLAND: Failed to fetch task info for scheduling '{}'\n",
+                task_name
+            );
         });
         task_terminate(task_id as u32);
         return -1;
@@ -207,11 +208,7 @@ fn boot_step_userland_preinit() -> i32 {
         return -1;
     }
 
-    let roulette_id = userland_spawn_with_flags(
-        b"roulette\0",
-        5,
-        TASK_FLAG_DISPLAY_EXCLUSIVE,
-    );
+    let roulette_id = userland_spawn_with_flags(b"roulette\0", 5, TASK_FLAG_DISPLAY_EXCLUSIVE);
     if roulette_id <= 0 {
         log_info("USERLAND: Failed to create roulette task\n");
         task_terminate(shell_id as u32);

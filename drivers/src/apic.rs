@@ -4,11 +4,11 @@ use spin::Once;
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
+use crate::wl_currency;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::*;
-use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_FEAT_ECX_X2APIC};
+use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
 use slopos_mm::mmio::MmioRegion;
-use crate::wl_currency;
 
 /// APIC register region size (4KB page).
 const APIC_REGION_SIZE: usize = 0x1000;
@@ -291,7 +291,10 @@ pub fn set_base_address(base: u64) {
     APIC_BASE_PHYSICAL.store(masked_base, Ordering::Relaxed);
     // Note: APIC_REGS is initialized once during detect() and cannot be updated.
     // Changing the APIC base address at runtime requires re-initialization.
-    klog_info!("APIC: Base address changed to 0x{:x} - restart required for new mapping", masked_base);
+    klog_info!(
+        "APIC: Base address changed to 0x{:x} - restart required for new mapping",
+        masked_base
+    );
 }
 
 pub fn read_register(reg: u32) -> u32 {

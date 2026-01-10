@@ -1,17 +1,15 @@
 //! Filesystem syscall handlers
-//!
-//! All handlers use SyscallContext for safe pointer access.
 
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 
-use slopos_abi::{UserFsEntry, UserFsList, UserFsStat, USER_FS_MAX_ENTRIES};
+use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use crate::syscall_common::{
     SyscallDisposition, USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user,
-    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
+    syscall_copy_to_user_bounded, syscall_copy_user_str_to_cstr, syscall_return_err,
 };
 use crate::syscall_context::SyscallContext;
 use crate::syscall_types::{InterruptFrame, Task};
@@ -27,11 +25,12 @@ use slopos_fs::ramfs::{
 };
 
 use slopos_mm::kernel_heap::{kfree, kmalloc};
-use slopos_mm::user_copy::{user_copy_from_user, user_copy_to_user};
+use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
+use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 define_syscall!(syscall_fs_open(ctx, args, pid) requires process_id {
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+    if syscall_copy_user_str_to_cstr(&mut path, args.arg0) != 0 {
         return ctx.err();
     }
 
@@ -74,12 +73,7 @@ define_syscall!(syscall_fs_read(ctx, args, pid) requires process_id {
     }
 
     let copy_len = bytes as usize;
-    if syscall_copy_to_user_bounded(
-        args.arg1_ptr(),
-        tmp.as_ptr() as *const c_void,
-        copy_len,
-    ) != 0
-    {
+    if syscall_copy_to_user_bounded(args.arg1, &tmp[..copy_len]).is_err() {
         return ctx.err();
     }
 
@@ -92,18 +86,15 @@ define_syscall!(syscall_fs_write(ctx, args, pid) requires process_id {
     }
 
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let mut write_len: usize = 0;
-    if syscall_bounded_from_user(
-        tmp.as_mut_ptr() as *mut c_void,
-        tmp.len(),
-        args.arg1 as *const c_void,
+    let write_len = match syscall_bounded_from_user(
+        &mut tmp,
+        args.arg1,
         args.arg2,
         USER_IO_MAX_BYTES,
-        &mut write_len as *mut usize,
-    ) != 0
-    {
-        return ctx.err();
-    }
+    ) {
+        Ok(len) => len,
+        Err(_) => return ctx.err(),
+    };
 
     let bytes = file_write_fd(
         pid,
@@ -124,7 +115,7 @@ define_syscall!(syscall_fs_stat(ctx, args) {
     }
 
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+    if syscall_copy_user_str_to_cstr(&mut path, args.arg0) != 0 {
         return ctx.err();
     }
 
@@ -147,12 +138,11 @@ define_syscall!(syscall_fs_stat(ctx, args) {
         ramfs_node_release(node);
     }
 
-    if syscall_copy_to_user_bounded(
-        args.arg1_ptr(),
-        &stat as *const _ as *const c_void,
-        mem::size_of::<UserFsStat>(),
-    ) != 0
-    {
+    let stat_ptr = match UserPtr::<UserFsStat>::try_new(args.arg1) {
+        Ok(p) => p,
+        Err(_) => return ctx.err(),
+    };
+    if copy_to_user(stat_ptr, &stat).is_err() {
         return ctx.err();
     }
 
@@ -161,7 +151,7 @@ define_syscall!(syscall_fs_stat(ctx, args) {
 
 define_syscall!(syscall_fs_mkdir(ctx, args) {
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+    if syscall_copy_user_str_to_cstr(&mut path, args.arg0) != 0 {
         return ctx.err();
     }
 
@@ -175,7 +165,7 @@ define_syscall!(syscall_fs_mkdir(ctx, args) {
 
 define_syscall!(syscall_fs_unlink(ctx, args) {
     let mut path = [0i8; USER_PATH_MAX];
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0 {
+    if syscall_copy_user_str_to_cstr(&mut path, args.arg0) != 0 {
         return ctx.err();
     }
 
@@ -194,26 +184,18 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     let args = ctx.args();
     let mut path = [0i8; USER_PATH_MAX];
 
-    if syscall_copy_user_str(path.as_mut_ptr(), path.len(), args.arg0_const_ptr()) != 0
-        || args.arg1 == 0
-    {
+    if syscall_copy_user_str_to_cstr(&mut path, args.arg0) != 0 || args.arg1 == 0 {
         return ctx.err();
     }
 
-    let mut list_hdr = UserFsList {
-        entries: ptr::null_mut(),
-        max_entries: 0,
-        count: 0,
+    let list_hdr_ptr = match UserPtr::<UserFsList>::try_new(args.arg1) {
+        Ok(p) => p,
+        Err(_) => return ctx.err(),
     };
-
-    if user_copy_from_user(
-        &mut list_hdr as *mut _ as *mut c_void,
-        args.arg1 as *const c_void,
-        mem::size_of::<UserFsList>(),
-    ) != 0
-    {
-        return ctx.err();
-    }
+    let mut list_hdr = match copy_from_user(list_hdr_ptr) {
+        Ok(h) => h,
+        Err(_) => return ctx.err(),
+    };
 
     let cap = list_hdr.max_entries;
     if cap == 0 || cap > USER_FS_MAX_ENTRIES || list_hdr.entries.is_null() {
@@ -257,9 +239,6 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
                 continue;
             }
 
-            // Copy filename to userland buffer.
-            // IMPORTANT: This exact pattern (iter_mut + zip) is required.
-            // Other approaches (copy_from_slice, index loops) cause rendering slowdown.
             let cstr = CStr::from_ptr((*entry_ptr).name);
             let name_bytes = cstr.to_bytes();
             let nlen = name_bytes.len().min(dst.name.len());
@@ -280,18 +259,42 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
 
     list_hdr.count = count as u32;
 
-    let mut rc_user = user_copy_to_user(
-        list_hdr.entries as *mut c_void,
-        tmp_ptr as *const c_void,
-        mem::size_of::<UserFsEntry>() * count as usize,
-    );
-    if rc_user == 0 {
-        rc_user = user_copy_to_user(
-            args.arg1 as *mut c_void,
-            &list_hdr as *const _ as *const c_void,
-            mem::size_of::<UserFsList>(),
-        );
-    }
+    let entries_bytes = unsafe {
+        core::slice::from_raw_parts(
+            tmp_ptr as *const u8,
+            mem::size_of::<UserFsEntry>() * count as usize,
+        )
+    };
+    let entries_user = match UserBytes::try_new(list_hdr.entries as u64, entries_bytes.len()) {
+        Ok(b) => b,
+        Err(_) => {
+            if !entries.is_null() {
+                ramfs_release_list(entries, count);
+                kfree(entries as *mut c_void);
+            }
+            kfree(tmp_ptr as *mut c_void);
+            return ctx.err();
+        }
+    };
+
+    let rc_entries = copy_bytes_to_user(entries_user, entries_bytes);
+
+    let rc_hdr = if rc_entries.is_ok() {
+        let hdr_ptr = match UserPtr::<UserFsList>::try_new(args.arg1) {
+            Ok(p) => p,
+            Err(_) => {
+                if !entries.is_null() {
+                    ramfs_release_list(entries, count);
+                    kfree(entries as *mut c_void);
+                }
+                kfree(tmp_ptr as *mut c_void);
+                return ctx.err();
+            }
+        };
+        copy_to_user(hdr_ptr, &list_hdr)
+    } else {
+        rc_entries.map(|_| ())
+    };
 
     if !entries.is_null() {
         ramfs_release_list(entries, count);
@@ -299,7 +302,7 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     }
     kfree(tmp_ptr as *mut c_void);
 
-    if rc_user != 0 {
+    if rc_hdr.is_err() {
         ctx.err()
     } else {
         ctx.ok(0)

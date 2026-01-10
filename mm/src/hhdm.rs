@@ -68,7 +68,10 @@ pub fn is_available() -> bool {
 /// returns 0 (which will cause incorrect translations).
 #[inline]
 pub fn offset() -> u64 {
-    debug_assert!(is_available(), "HHDM not initialized - call hhdm::init() first");
+    debug_assert!(
+        is_available(),
+        "HHDM not initialized - call hhdm::init() first"
+    );
     HHDM_OFFSET.load(Ordering::Acquire)
 }
 
@@ -137,8 +140,8 @@ impl PhysAddrHhdm for PhysAddr {
 
     fn to_virt_checked(self) -> Option<VirtAddr> {
         use crate::memory_reservations::{
-            mm_reservations_find_option, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-            MM_RESERVATION_FLAG_MMIO,
+            MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_MMIO,
+            mm_reservations_find_option,
         };
 
         if self.is_null() {
@@ -211,10 +214,6 @@ impl VirtAddrHhdm for VirtAddr {
             return None;
         }
         let phys = crate::paging::virt_to_phys(self);
-        if phys.is_null() {
-            None
-        } else {
-            Some(phys)
-        }
+        if phys.is_null() { None } else { Some(phys) }
     }
 }

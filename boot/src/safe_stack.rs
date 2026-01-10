@@ -5,8 +5,8 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::gdt::gdt_set_ist;
 use crate::idt::{
-    idt_set_ist, EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
-    EXCEPTION_STACK_FAULT,
+    EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
+    EXCEPTION_STACK_FAULT, idt_set_ist,
 };
 use crate::kernel_panic::kernel_panic;
 
@@ -106,11 +106,11 @@ static STACK_METRICS: [ExceptionStackMetrics; 4] = [
     ExceptionStackMetrics::new(),
 ];
 
+use core::ptr;
+use slopos_abi::addr::VirtAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::map_page_4kb;
-use slopos_abi::addr::VirtAddr;
-use core::ptr;
 
 fn bytes_to_str(bytes: &[u8]) -> &str {
     CStr::from_bytes_with_nul(bytes)

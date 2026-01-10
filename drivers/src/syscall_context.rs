@@ -4,7 +4,9 @@
 //! centralizing all unsafe dereferences into a single module.
 
 use crate::syscall_common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
-use crate::syscall_types::{InterruptFrame, Task, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
+use crate::syscall_types::{
+    InterruptFrame, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, Task,
+};
 use crate::wl_currency;
 
 /// Arguments extracted from InterruptFrame registers (System V AMD64 ABI)
@@ -224,6 +226,20 @@ impl SyscallContext {
         } else {
             Ok(())
         }
+    }
+
+    #[inline]
+    pub fn err_user_ptr(&self, _err: slopos_mm::user_ptr::UserPtrError) -> SyscallDisposition {
+        wl_currency::award_loss();
+        self.err()
+    }
+
+    #[inline]
+    pub fn check_user_ptr<T>(
+        &self,
+        result: Result<T, slopos_mm::user_ptr::UserPtrError>,
+    ) -> Result<T, SyscallDisposition> {
+        result.map_err(|e| self.err_user_ptr(e))
     }
 }
 

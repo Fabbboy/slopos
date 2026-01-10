@@ -4,24 +4,24 @@
 extern crate alloc;
 
 use core::ffi::c_int;
-use slopos_drivers::serial_println;
 use slopos_drivers::sched_bridge::register_video_task_cleanup_callback;
-use slopos_drivers::virtio_gpu;
+use slopos_drivers::serial_println;
 use slopos_drivers::video_bridge;
+use slopos_drivers::virtio_gpu;
 use slopos_drivers::wl_currency;
 use slopos_lib::FramebufferInfo;
 use slopos_lib::klog_info;
 
+use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::video_traits::{FramebufferInfoC, VideoServices};
-use slopos_abi::WindowInfo;
 
+pub mod compositor_context;
 pub mod font;
 pub mod framebuffer;
 pub mod graphics;
 pub mod panic_screen;
 pub mod roulette_core;
-pub mod compositor_context;
 pub mod splash;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,7 +185,11 @@ pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
         }
     }
 
-    let fb_to_use = if virgl_fb.is_some() { virgl_fb } else { framebuffer };
+    let fb_to_use = if virgl_fb.is_some() {
+        virgl_fb
+    } else {
+        framebuffer
+    };
 
     if let Some(fb) = fb_to_use {
         serial_println!(

@@ -194,10 +194,50 @@ pub fn draw_circle_filled(buf: &mut DrawBuffer, cx: i32, cy: i32, radius: i32, c
 
     while x >= y {
         // Draw horizontal lines to fill the circle
-        draw_hline(data, pitch, bytes_pp, width, height, cx - x, cx + x, cy + y, converted);
-        draw_hline(data, pitch, bytes_pp, width, height, cx - x, cx + x, cy - y, converted);
-        draw_hline(data, pitch, bytes_pp, width, height, cx - y, cx + y, cy + x, converted);
-        draw_hline(data, pitch, bytes_pp, width, height, cx - y, cx + y, cy - x, converted);
+        draw_hline(
+            data,
+            pitch,
+            bytes_pp,
+            width,
+            height,
+            cx - x,
+            cx + x,
+            cy + y,
+            converted,
+        );
+        draw_hline(
+            data,
+            pitch,
+            bytes_pp,
+            width,
+            height,
+            cx - x,
+            cx + x,
+            cy - y,
+            converted,
+        );
+        draw_hline(
+            data,
+            pitch,
+            bytes_pp,
+            width,
+            height,
+            cx - y,
+            cx + y,
+            cy + x,
+            converted,
+        );
+        draw_hline(
+            data,
+            pitch,
+            bytes_pp,
+            width,
+            height,
+            cx - y,
+            cx + y,
+            cy - x,
+            converted,
+        );
 
         y += 1;
         err += 1 + 2 * y;

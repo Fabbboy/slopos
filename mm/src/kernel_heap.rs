@@ -28,13 +28,13 @@ fn wl_award_win() {
     }
 }
 
-    fn wl_award_loss() {
-        unsafe {
-            if let Some(cb) = WL_LOSS_HOOK {
-                cb();
-            }
+fn wl_award_loss() {
+    unsafe {
+        if let Some(cb) = WL_LOSS_HOOK {
+            cb();
         }
     }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

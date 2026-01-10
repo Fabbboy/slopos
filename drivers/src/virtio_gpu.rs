@@ -6,17 +6,21 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::{FramebufferInfo, align_up, klog_debug, klog_info};
 
-use slopos_abi::arch::x86_64::pci::{PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET};
 use crate::pci::{
-    PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16,
-    pci_config_read32, pci_config_write8, pci_config_write16, pci_register_driver,
+    PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16, pci_config_read32,
+    pci_config_write8, pci_config_write16, pci_register_driver,
 };
 use crate::wl_currency;
+use slopos_abi::arch::x86_64::pci::{
+    PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET,
+};
 
-use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_abi::addr::PhysAddr;
+use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame};
+use slopos_mm::page_alloc::{
+    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
+};
 
 pub const VIRTIO_GPU_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;
@@ -323,14 +327,11 @@ static mut VIRTIO_GPU_MMIO: VirtioGpuMmioCaps = VirtioGpuMmioCaps {
 
 const COMMON_CFG_DEVICE_FEATURE_SELECT: usize =
     core::mem::offset_of!(VirtioPciCommonCfg, device_feature_select);
-const COMMON_CFG_DEVICE_FEATURE: usize =
-    core::mem::offset_of!(VirtioPciCommonCfg, device_feature);
+const COMMON_CFG_DEVICE_FEATURE: usize = core::mem::offset_of!(VirtioPciCommonCfg, device_feature);
 const COMMON_CFG_DRIVER_FEATURE_SELECT: usize =
     core::mem::offset_of!(VirtioPciCommonCfg, driver_feature_select);
-const COMMON_CFG_DRIVER_FEATURE: usize =
-    core::mem::offset_of!(VirtioPciCommonCfg, driver_feature);
-const COMMON_CFG_DEVICE_STATUS: usize =
-    core::mem::offset_of!(VirtioPciCommonCfg, device_status);
+const COMMON_CFG_DRIVER_FEATURE: usize = core::mem::offset_of!(VirtioPciCommonCfg, driver_feature);
+const COMMON_CFG_DEVICE_STATUS: usize = core::mem::offset_of!(VirtioPciCommonCfg, device_status);
 const COMMON_CFG_QUEUE_SELECT: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_select);
 const COMMON_CFG_QUEUE_SIZE: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_size);
 const COMMON_CFG_QUEUE_DESC: usize = core::mem::offset_of!(VirtioPciCommonCfg, queue_desc);
@@ -659,10 +660,7 @@ fn virtio_gpu_queue_submit(
     false
 }
 
-fn virtio_gpu_get_display_info(
-    device: &mut virtio_gpu_device_t,
-    mmio: &VirtioGpuMmioCaps,
-) -> bool {
+fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t, mmio: &VirtioGpuMmioCaps) -> bool {
     if device.ctrl_queue.ready == 0 {
         return false;
     }
@@ -746,10 +744,7 @@ fn virtio_gpu_get_display_info(
     true
 }
 
-fn virtio_gpu_get_capset_info(
-    device: &mut virtio_gpu_device_t,
-    mmio: &VirtioGpuMmioCaps,
-) -> bool {
+fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t, mmio: &VirtioGpuMmioCaps) -> bool {
     if device.ctrl_queue.ready == 0 {
         return false;
     }
@@ -1036,8 +1031,9 @@ fn virtio_gpu_resource_attach_backing(
     }
 
     let cmd = cmd_virt as *mut VirtioGpuResourceAttachBacking;
-    let entry = unsafe { (cmd as *mut u8).add(core::mem::size_of::<VirtioGpuResourceAttachBacking>()) }
-        as *mut VirtioGpuMemEntry;
+    let entry =
+        unsafe { (cmd as *mut u8).add(core::mem::size_of::<VirtioGpuResourceAttachBacking>()) }
+            as *mut VirtioGpuMemEntry;
     let resp = resp_virt as *mut VirtioGpuCtrlHeader;
     unsafe {
         core::ptr::write_volatile(
@@ -1064,8 +1060,8 @@ fn virtio_gpu_resource_attach_backing(
         );
     }
 
-    let cmd_len =
-        core::mem::size_of::<VirtioGpuResourceAttachBacking>() + core::mem::size_of::<VirtioGpuMemEntry>();
+    let cmd_len = core::mem::size_of::<VirtioGpuResourceAttachBacking>()
+        + core::mem::size_of::<VirtioGpuMemEntry>();
     let notify_cfg = match mmio.notify_cfg {
         Some(cfg) => cfg,
         None => return false,
@@ -1479,10 +1475,7 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         handshake_ok = true;
     }
 
-    let sample_value = mmio_region
-        .as_ref()
-        .map(|r| r.read_u32(0))
-        .unwrap_or(0);
+    let sample_value = mmio_region.as_ref().map(|r| r.read_u32(0)).unwrap_or(0);
     klog_debug!("PCI: virtio-gpu MMIO sample value=0x{:08x}", sample_value);
 
     if handshake_ok {
@@ -1628,7 +1621,8 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
             return None;
         };
 
-        if !virtio_gpu_resource_create_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
+        if !virtio_gpu_resource_create_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height)
+        {
             free_page_frame(phys);
             // Recoverable failure: resource creation failed.
             wl_currency::award_loss();
@@ -1655,9 +1649,19 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
             return None;
         }
 
-        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height)
-            || !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height)
-        {
+        if !virtio_gpu_transfer_to_host_2d(
+            &mut VIRTIO_GPU_DEVICE,
+            &mmio,
+            resource_id,
+            width,
+            height,
+        ) || !virtio_gpu_resource_flush(
+            &mut VIRTIO_GPU_DEVICE,
+            &mmio,
+            resource_id,
+            width,
+            height,
+        ) {
             free_page_frame(phys);
             // Recoverable failure: initial transfer/flush failed.
             wl_currency::award_loss();
@@ -1703,7 +1707,13 @@ pub fn virtio_gpu_flush_full() -> c_int {
             wl_currency::award_loss();
             return -1;
         };
-        if !virtio_gpu_transfer_to_host_2d(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
+        if !virtio_gpu_transfer_to_host_2d(
+            &mut VIRTIO_GPU_DEVICE,
+            &mmio,
+            resource_id,
+            width,
+            height,
+        ) {
             // Recoverable failure: transfer to host failed.
             wl_currency::award_loss();
             return -1;

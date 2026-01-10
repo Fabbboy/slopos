@@ -29,7 +29,8 @@ pub const IOAPIC_REG_REDIR_BASE: u8 = 0x10;
 
 /// Writable bits in redirection entry low dword.
 /// Includes: delivery mode (8-10), dest mode (11), polarity (13), trigger (15), mask (16).
-pub const IOAPIC_REDIR_WRITABLE_MASK: u32 = (7 << 8) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16);
+pub const IOAPIC_REDIR_WRITABLE_MASK: u32 =
+    (7 << 8) | (1 << 11) | (1 << 13) | (1 << 15) | (1 << 16);
 
 // =============================================================================
 // ACPI MADT Entry Types

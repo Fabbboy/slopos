@@ -97,7 +97,11 @@ pub unsafe fn register_cleanup_hook(hook: &'static dyn TaskCleanupHook) {
 
 sched_fn!(timer_tick, TIMING, timer_tick());
 sched_fn!(handle_post_irq, TIMING, handle_post_irq());
-sched_fn!(request_reschedule_from_interrupt, TIMING, request_reschedule_from_interrupt());
+sched_fn!(
+    request_reschedule_from_interrupt,
+    TIMING,
+    request_reschedule_from_interrupt()
+);
 
 // =============================================================================
 // SchedulerExecution wrappers
@@ -123,9 +127,15 @@ sched_fn!(register_idle_wakeup_callback, STATE, register_idle_wakeup_callback(cb
 pub fn get_task_stats(total: *mut u32, active: *mut u32, context_switches: *mut u64) {
     if let Some(s) = unsafe { STATE } {
         let (t, a, cs) = s.get_task_stats();
-        if !total.is_null() { unsafe { *total = t }; }
-        if !active.is_null() { unsafe { *active = a }; }
-        if !context_switches.is_null() { unsafe { *context_switches = cs }; }
+        if !total.is_null() {
+            unsafe { *total = t };
+        }
+        if !active.is_null() {
+            unsafe { *active = a };
+        }
+        if !context_switches.is_null() {
+            unsafe { *context_switches = cs };
+        }
     }
 }
 
@@ -138,10 +148,18 @@ pub fn get_scheduler_stats(
 ) {
     if let Some(s) = unsafe { STATE } {
         let (cs, y, rt, sc) = s.get_scheduler_stats();
-        if !context_switches.is_null() { unsafe { *context_switches = cs }; }
-        if !yields.is_null() { unsafe { *yields = y }; }
-        if !ready_tasks.is_null() { unsafe { *ready_tasks = rt }; }
-        if !schedule_calls.is_null() { unsafe { *schedule_calls = sc }; }
+        if !context_switches.is_null() {
+            unsafe { *context_switches = cs };
+        }
+        if !yields.is_null() {
+            unsafe { *yields = y };
+        }
+        if !ready_tasks.is_null() {
+            unsafe { *ready_tasks = rt };
+        }
+        if !schedule_calls.is_null() {
+            unsafe { *schedule_calls = sc };
+        }
     }
 }
 
@@ -156,7 +174,9 @@ sched_fn!(fate_set_pending, FATE, fate_set_pending(res: FateResult, task_id: u32
 pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
     if let Some(f) = unsafe { FATE } {
         if let Some(result) = f.fate_take_pending(task_id) {
-            if !out.is_null() { unsafe { *out = result }; }
+            if !out.is_null() {
+                unsafe { *out = result };
+            }
             return 0;
         }
     }
@@ -187,27 +207,43 @@ sched_fn!(idt_get_gate, BOOT, idt_get_gate(vector: u8, entry: *mut c_void) -> c_
 
 /// Trigger kernel panic. Never returns.
 pub fn kernel_panic(msg: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } { b.kernel_panic(msg) }
-    loop { core::hint::spin_loop(); }
+    if let Some(b) = unsafe { BOOT } {
+        b.kernel_panic(msg)
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// Graceful shutdown. Never returns.
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } { b.kernel_shutdown(reason) }
-    loop { core::hint::spin_loop(); }
+    if let Some(b) = unsafe { BOOT } {
+        b.kernel_shutdown(reason)
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 /// System reboot. Never returns.
 pub fn kernel_reboot(reason: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } { b.kernel_reboot(reason) }
-    loop { core::hint::spin_loop(); }
+    if let Some(b) = unsafe { BOOT } {
+        b.kernel_reboot(reason)
+    }
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 // =============================================================================
 // SchedulerForBoot wrappers
 // =============================================================================
 
-sched_fn!(boot_request_reschedule_from_interrupt, SCHED_FOR_BOOT, request_reschedule_from_interrupt());
+sched_fn!(
+    boot_request_reschedule_from_interrupt,
+    SCHED_FOR_BOOT,
+    request_reschedule_from_interrupt()
+);
 sched_fn!(boot_get_current_task, SCHED_FOR_BOOT, get_current_task() -> *mut OpaqueTask, core::ptr::null_mut());
 sched_fn!(boot_task_terminate, SCHED_FOR_BOOT, task_terminate(task_id: u32) -> c_int, -1);
 
@@ -221,10 +257,14 @@ pub fn video_task_cleanup(task_id: u32) {
         hook.on_task_terminate(task_id);
         return;
     }
-    if let Some(cb) = unsafe { VIDEO_CLEANUP_FN } { cb(task_id); }
+    if let Some(cb) = unsafe { VIDEO_CLEANUP_FN } {
+        cb(task_id);
+    }
 }
 
 /// Register a cleanup callback using the legacy function pointer API.
 pub fn register_video_task_cleanup_callback(callback: fn(u32)) {
-    unsafe { VIDEO_CLEANUP_FN = Some(callback); }
+    unsafe {
+        VIDEO_CLEANUP_FN = Some(callback);
+    }
 }

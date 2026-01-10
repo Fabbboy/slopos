@@ -10,13 +10,12 @@ use crate::scheduler;
 
 // Re-export all task types and constants from abi
 pub use slopos_abi::task::{
-    IdtEntry, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
-    INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
     TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
-    TASK_STATE_TERMINATED,
+    TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
 };
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
@@ -54,6 +53,7 @@ impl TaskManager {
 
 static mut TASK_MANAGER: TaskManager = TaskManager::new();
 
+use slopos_drivers::sched_bridge;
 use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
@@ -61,7 +61,6 @@ use slopos_mm::process_vm::{
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
-use slopos_drivers::sched_bridge;
 
 fn task_manager_mut() -> *mut TaskManager {
     &raw mut TASK_MANAGER
@@ -187,7 +186,13 @@ fn init_task_context(task: &mut Task) {
             let rsp = task.context.rsp;
             let rdi = task.context.rdi;
             let entry_point = task.entry_point;
-            klog_info!("init_task_context: user task rip=0x{:x} rsp=0x{:x} rdi=0x{:x} entry_point=0x{:x}\n", rip, rsp, rdi, entry_point);
+            klog_info!(
+                "init_task_context: user task rip=0x{:x} rsp=0x{:x} rdi=0x{:x} entry_point=0x{:x}\n",
+                rip,
+                rsp,
+                rdi,
+                entry_point
+            );
         }
         // #endregion
     }
@@ -359,8 +364,8 @@ pub fn task_create(
         let text_end = text_end as u64;
         if entry_addr >= text_start && entry_addr < text_end {
             // Align to page boundaries to match map_user_sections behavior
-            use slopos_mm::mm_constants::PAGE_SIZE_4KB;
             use slopos_lib::align_down;
+            use slopos_mm::mm_constants::PAGE_SIZE_4KB;
             let text_start_aligned = align_down(text_start as usize, PAGE_SIZE_4KB as usize) as u64;
             // Calculate offset from aligned start to match map_user_sections mapping
             let offset = entry_addr - text_start_aligned;

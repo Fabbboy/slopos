@@ -13,18 +13,17 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, PixelFormat};
+use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, PixelFormat, rgb};
 use crate::syscall::{
-    sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_input_get_button_state, sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset,
-    sys_mark_frames_done, sys_raise_window, sys_set_window_position, sys_set_window_state,
-    sys_shm_unmap, sys_sleep_ms, sys_spawn_task, sys_tty_set_focus, sys_yield,
-    CachedShmMapping, ShmBuffer, UserFbInfo, UserWindowInfo,
+    CachedShmMapping, ShmBuffer, UserFbInfo, UserWindowInfo, sys_drain_queue,
+    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
+    sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
+    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
+    sys_spawn_task, sys_tty_set_focus, sys_yield,
 };
 use crate::ui_utils;
 
 use crate::theme::*;
-
 
 // Window placeholder colors (until clients migrate to shared memory)
 const COLOR_WINDOW_PLACEHOLDER: u32 = rgb(0x20, 0x20, 0x30);
@@ -109,7 +108,11 @@ impl ClientSurfaceCache {
 
     /// Get a slice view of the cached buffer at the given index.
     fn get_slice(&self, index: usize) -> Option<&[u8]> {
-        self.entries.get(index)?.mapping.as_ref().map(|m| m.as_slice())
+        self.entries
+            .get(index)?
+            .mapping
+            .as_ref()
+            .map(|m| m.as_slice())
     }
 
     /// Unmaps and clears cached client surface mappings for entries whose windows no longer exist.
@@ -139,21 +142,21 @@ impl ClientSurfaceCache {
                 continue;
             }
 
-            let still_exists = (0..window_count as usize)
-                .any(|i| windows[i].task_id == entry.task_id);
+            let still_exists =
+                (0..window_count as usize).any(|i| windows[i].task_id == entry.task_id);
 
             if !still_exists {
                 // Window no longer exists - unmap the shared memory and clear the entry
                 if let Some(ref mapping) = entry.mapping {
-                    unsafe { sys_shm_unmap(mapping.vaddr()); }
+                    unsafe {
+                        sys_shm_unmap(mapping.vaddr());
+                    }
                 }
                 *entry = ClientSurfaceEntry::empty();
             }
         }
     }
 }
-
-
 
 const WINDOW_STATE_NORMAL: u8 = 0;
 const WINDOW_STATE_MINIMIZED: u8 = 1;
@@ -405,7 +408,8 @@ impl WindowManager {
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
 
         // Clean up stale surface mappings
-        self.surface_cache.cleanup_stale(&self.windows, self.window_count);
+        self.surface_cache
+            .cleanup_stale(&self.windows, self.window_count);
 
         // Check if taskbar state changed
         let new_state =
@@ -429,8 +433,10 @@ impl WindowManager {
 
             // Check for window movement or visibility change - add both old and new positions as damage
             if let Some(old) = prev_bounds {
-                if old.x != curr_bounds.x || old.y != curr_bounds.y
-                    || old.width != curr_bounds.width || old.height != curr_bounds.height
+                if old.x != curr_bounds.x
+                    || old.y != curr_bounds.y
+                    || old.width != curr_bounds.width
+                    || old.height != curr_bounds.height
                     || old.visible != curr_bounds.visible
                 {
                     // Old position needs redraw (expose damage)
@@ -746,7 +752,14 @@ impl WindowManager {
         let title_y = window.y - TITLE_BAR_HEIGHT;
 
         // Title bar background
-        gfx::fill_rect(buf, window.x, title_y, window.width as i32, TITLE_BAR_HEIGHT, color);
+        gfx::fill_rect(
+            buf,
+            window.x,
+            title_y,
+            window.width as i32,
+            TITLE_BAR_HEIGHT,
+            color,
+        );
 
         // Window title text
         let title = title_to_str(&window.title);
@@ -775,7 +788,6 @@ impl WindowManager {
         );
     }
 
-
     /// Renders the taskbar into the provided draw buffer, including the Files button and one button per tracked window.
     ///
     /// The taskbar is drawn at the bottom of the buffer; the Files button reflects the File Manager's visible/hover state,
@@ -803,25 +815,41 @@ impl WindowManager {
             TASKBAR_HEIGHT,
             COLOR_TASKBAR,
         );
-        
+
         // Draw Files button
         let files_btn_x = TASKBAR_BUTTON_PADDING;
         let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
         let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
-        
-        let files_hover = self.mouse_x >= files_btn_x && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH
-                       && self.mouse_y >= btn_y && self.mouse_y < btn_y + btn_height;
+
+        let files_hover = self.mouse_x >= files_btn_x
+            && self.mouse_x < files_btn_x + FM_BUTTON_WIDTH
+            && self.mouse_y >= btn_y
+            && self.mouse_y < btn_y + btn_height;
 
         // Highlight if file manager window exists or button is hovered
         let file_manager_running = self.find_window_by_title(b"Files").is_some();
         let files_color = if file_manager_running || files_hover {
-             COLOR_BUTTON_HOVER
+            COLOR_BUTTON_HOVER
         } else {
-             COLOR_BUTTON
+            COLOR_BUTTON
         };
-        
-        gfx::fill_rect(buf, files_btn_x, btn_y, FM_BUTTON_WIDTH, btn_height, files_color);
-        gfx::font::draw_string(buf, files_btn_x + 4, btn_y + 4, "Files", COLOR_TEXT, files_color);
+
+        gfx::fill_rect(
+            buf,
+            files_btn_x,
+            btn_y,
+            FM_BUTTON_WIDTH,
+            btn_height,
+            files_color,
+        );
+        gfx::font::draw_string(
+            buf,
+            files_btn_x + 4,
+            btn_y + 4,
+            "Files",
+            COLOR_TEXT,
+            files_color,
+        );
 
         // Draw app buttons
         let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;

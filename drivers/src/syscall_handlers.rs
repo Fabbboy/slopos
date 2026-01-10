@@ -2,7 +2,7 @@
 //!
 //! All handlers use SyscallContext for safe pointer access.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::syscall::*;
@@ -10,7 +10,6 @@ use slopos_abi::syscall::*;
 use crate::input_event;
 use crate::random;
 use crate::serial;
-use crate::wl_currency;
 use crate::syscall_common::{
     SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_return_err,
@@ -20,11 +19,12 @@ use crate::syscall_fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_types::{
-    InterruptFrame, Task, TaskExitReason, TaskFaultReason,
-};
+use crate::syscall_types::{InterruptFrame, Task, TaskExitReason, TaskFaultReason};
 use crate::video_bridge;
+use crate::wl_currency;
 use slopos_lib::klog_debug;
+use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_ptr::UserPtr;
 
 use crate::fate;
 use slopos_abi::sched_traits::FateResult;
@@ -225,7 +225,10 @@ pub fn syscall_surface_set_role(task: *mut Task, frame: *mut InterruptFrame) -> 
     ctx.ok(result as u64)
 }
 
-pub fn syscall_surface_set_parent(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_surface_set_parent(
+    task: *mut Task,
+    frame: *mut InterruptFrame,
+) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
@@ -239,7 +242,10 @@ pub fn syscall_surface_set_parent(task: *mut Task, frame: *mut InterruptFrame) -
     ctx.ok(result as u64)
 }
 
-pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_surface_set_rel_pos(
+    task: *mut Task,
+    frame: *mut InterruptFrame,
+) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
@@ -254,7 +260,10 @@ pub fn syscall_surface_set_rel_pos(task: *mut Task, frame: *mut InterruptFrame) 
     ctx.ok(result as u64)
 }
 
-pub fn syscall_surface_set_title(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+pub fn syscall_surface_set_title(
+    task: *mut Task,
+    frame: *mut InterruptFrame,
+) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
     };
@@ -298,7 +307,9 @@ pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     }
 
     if let Some(event) = input_event::input_poll(task_id) {
-        unsafe { *event_ptr = event; }
+        unsafe {
+            *event_ptr = event;
+        }
         ctx.ok(1)
     } else {
         ctx.ok(0)
@@ -572,20 +583,15 @@ pub fn syscall_user_write(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
 
     let args = ctx.args();
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let mut write_len: usize = 0;
 
-    if args.arg0 == 0
-        || syscall_bounded_from_user(
-            tmp.as_mut_ptr() as *mut c_void,
-            tmp.len(),
-            args.arg0 as *const c_void,
-            args.arg1,
-            USER_IO_MAX_BYTES,
-            &mut write_len as *mut usize,
-        ) != 0
-    {
+    if args.arg0 == 0 {
         return ctx.err();
     }
+    let write_len =
+        match syscall_bounded_from_user(&mut tmp, args.arg0, args.arg1, USER_IO_MAX_BYTES) {
+            Ok(len) => len,
+            Err(_) => return ctx.err(),
+        };
 
     let text = core::str::from_utf8(&tmp[..write_len]).unwrap_or("");
     serial::write_str(text);
@@ -616,12 +622,7 @@ pub fn syscall_user_read(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
     }
 
     let copy_len = read_len.saturating_add(1).min(max_len);
-    if syscall_copy_to_user_bounded(
-        args.arg0 as *mut c_void,
-        tmp.as_ptr() as *const c_void,
-        copy_len,
-    ) != 0
-    {
+    if syscall_copy_to_user_bounded(args.arg0, &tmp[..copy_len]).is_err() {
         return ctx.err();
     }
 
@@ -660,12 +661,11 @@ pub fn syscall_fb_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     };
 
     let args = ctx.args();
-    if syscall_copy_to_user_bounded(
-        args.arg0 as *mut c_void,
-        &user_info as *const _ as *const c_void,
-        core::mem::size_of::<UserFbInfo>(),
-    ) != 0
-    {
+    let user_ptr = match UserPtr::<UserFbInfo>::try_new(args.arg0) {
+        Ok(p) => p,
+        Err(_) => return ctx.err(),
+    };
+    if copy_to_user(user_ptr, &user_info).is_err() {
         return ctx.err();
     }
 
@@ -712,12 +712,11 @@ pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
         &mut info.schedule_calls,
     );
 
-    if syscall_copy_to_user_bounded(
-        args.arg0 as *mut c_void,
-        &info as *const _ as *const c_void,
-        core::mem::size_of::<UserSysInfo>(),
-    ) != 0
-    {
+    let user_ptr = match UserPtr::<UserSysInfo>::try_new(args.arg0) {
+        Ok(p) => p,
+        Err(_) => return ctx.err(),
+    };
+    if copy_to_user(user_ptr, &info).is_err() {
         return ctx.err();
     }
 
@@ -756,18 +755,11 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     }
 
     let mut name_buf = [0u8; 64];
-    let mut copied_len: usize = 0;
-    if syscall_bounded_from_user(
-        name_buf.as_mut_ptr() as *mut c_void,
-        name_buf.len(),
-        name_ptr as *const c_void,
-        name_len as u64,
-        64,
-        &mut copied_len,
-    ) != 0
-    {
-        return ctx.err();
-    }
+    let copied_len =
+        match syscall_bounded_from_user(&mut name_buf, name_ptr as u64, name_len as u64, 64) {
+            Ok(len) => len,
+            Err(_) => return ctx.err(),
+        };
 
     // Call the registered spawn callback
     let callback = *SPAWN_TASK_CALLBACK.lock();

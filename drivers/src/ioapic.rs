@@ -5,12 +5,12 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::sched_bridge;
+use crate::wl_currency;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
-use crate::sched_bridge;
-use crate::wl_currency;
 
 /// IOAPIC register region size (one 4KB page covers both IOREGSEL and IOWIN).
 const IOAPIC_REGION_SIZE: usize = 0x20;
@@ -321,7 +321,6 @@ fn ioapic_find_controller(gsi: u32) -> Option<*mut IoapicController> {
         None
     }
 }
-
 
 #[inline]
 fn ioapic_entry_low_index(pin: u32) -> u8 {

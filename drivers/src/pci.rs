@@ -6,9 +6,9 @@ use core::ptr;
 
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::wl_currency;
 use slopos_abi::arch::x86_64::pci::*;
 use slopos_abi::arch::x86_64::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
-use crate::wl_currency;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -165,7 +165,10 @@ fn pci_config_addr(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
 
 pub fn pci_config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     unsafe {
-        outl(PCI_CONFIG_ADDRESS, pci_config_addr(bus, device, function, offset));
+        outl(
+            PCI_CONFIG_ADDRESS,
+            pci_config_addr(bus, device, function, offset),
+        );
         inl(PCI_CONFIG_DATA)
     }
 }
@@ -182,7 +185,10 @@ pub fn pci_config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
 
 pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     unsafe {
-        outl(PCI_CONFIG_ADDRESS, pci_config_addr(bus, device, function, offset));
+        outl(
+            PCI_CONFIG_ADDRESS,
+            pci_config_addr(bus, device, function, offset),
+        );
         outl(PCI_CONFIG_DATA, value);
     }
 }

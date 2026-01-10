@@ -7,13 +7,13 @@ pub mod bootstrap;
 #[cfg(not(feature = "standalone-bin"))]
 pub mod loader;
 
+pub mod apps;
 pub mod compositor;
 pub mod gfx;
 pub mod roulette;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
-pub mod apps;
 pub mod theme;
 pub mod ui_utils;
 

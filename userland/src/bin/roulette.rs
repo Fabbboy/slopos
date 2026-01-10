@@ -13,4 +13,3 @@ pub extern "C" fn _start() -> ! {
     roulette_user_main(core::ptr::null_mut());
     loop {}
 }
-

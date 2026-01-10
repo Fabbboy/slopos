@@ -17,9 +17,8 @@
 use alloc::collections::{BTreeMap, VecDeque};
 
 use slopos_abi::{
-    CompositorError, SurfaceRole, WindowDamageRect, WindowInfo,
-    MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
-    WINDOW_STATE_NORMAL,
+    CompositorError, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
+    SurfaceRole, WINDOW_STATE_NORMAL, WindowDamageRect, WindowInfo,
 };
 use slopos_drivers::video_bridge::VideoResult;
 use spin::Mutex;
@@ -38,7 +37,12 @@ struct DamageRect {
 
 impl DamageRect {
     const fn invalid() -> Self {
-        Self { x0: 0, y0: 0, x1: -1, y1: -1 }
+        Self {
+            x0: 0,
+            y0: 0,
+            x1: -1,
+            y1: -1,
+        }
     }
 
     fn is_valid(&self) -> bool {
@@ -46,8 +50,7 @@ impl DamageRect {
     }
 
     fn intersects(&self, other: &Self) -> bool {
-        self.x0 <= other.x1 && self.x1 >= other.x0 &&
-        self.y0 <= other.y1 && self.y1 >= other.y0
+        self.x0 <= other.x1 && self.x1 >= other.x0 && self.y0 <= other.y1 && self.y1 >= other.y0
     }
 
     fn merge(&self, other: &Self) -> Self {
@@ -173,16 +176,22 @@ impl DamageTracker {
 /// Operations queued by CLIENT tasks (shell, apps).
 /// These are processed when the compositor calls drain_queue().
 enum ClientOp {
-    Commit { task_id: u32 },
+    Commit {
+        task_id: u32,
+    },
     Register {
         task_id: u32,
         width: u32,
         height: u32,
         shm_token: u32,
     },
-    Unregister { task_id: u32 },
+    Unregister {
+        task_id: u32,
+    },
     /// Request a frame callback (Wayland wl_surface.frame)
-    RequestFrameCallback { task_id: u32 },
+    RequestFrameCallback {
+        task_id: u32,
+    },
     /// Add damage region to pending damage (Wayland wl_surface.damage)
     AddDamage {
         task_id: u32,
@@ -192,13 +201,26 @@ enum ClientOp {
         height: i32,
     },
     /// Set surface role (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
-    SetRole { task_id: u32, role: SurfaceRole },
+    SetRole {
+        task_id: u32,
+        role: SurfaceRole,
+    },
     /// Set parent surface for subsurfaces
-    SetParent { task_id: u32, parent_task_id: u32 },
+    SetParent {
+        task_id: u32,
+        parent_task_id: u32,
+    },
     /// Set relative position for subsurfaces
-    SetRelativePosition { task_id: u32, rel_x: i32, rel_y: i32 },
+    SetRelativePosition {
+        task_id: u32,
+        rel_x: i32,
+        rel_y: i32,
+    },
     /// Set window title (UTF-8, max 31 chars + null terminator)
-    SetTitle { task_id: u32, title: [u8; 32] },
+    SetTitle {
+        task_id: u32,
+        title: [u8; 32],
+    },
 }
 
 // =============================================================================
@@ -335,7 +357,9 @@ impl CompositorContext {
         use alloc::vec::Vec;
 
         // Collect (task_id, z_order) pairs
-        let mut ordered: Vec<(u32, u32)> = self.surfaces.iter()
+        let mut ordered: Vec<(u32, u32)> = self
+            .surfaces
+            .iter()
             .map(|(&task_id, s)| (task_id, s.z_order))
             .collect();
 
@@ -378,7 +402,12 @@ pub fn surface_commit(task_id: u32) -> VideoResult {
 
 /// Register a surface for a task when it calls surface_attach.
 /// Called by CLIENT tasks. Enqueues the registration for processing by compositor.
-pub fn register_surface_for_task(task_id: u32, width: u32, height: u32, shm_token: u32) -> Result<(), CompositorError> {
+pub fn register_surface_for_task(
+    task_id: u32,
+    width: u32,
+    height: u32,
+    shm_token: u32,
+) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
     ctx.queue.push_back(ClientOp::Register {
         task_id,
@@ -425,7 +454,12 @@ pub fn drain_queue() {
                     surface.commit();
                 }
             }
-            ClientOp::Register { task_id, width, height, shm_token } => {
+            ClientOp::Register {
+                task_id,
+                width,
+                height,
+                shm_token,
+            } => {
                 // Skip if already registered
                 if ctx.surfaces.contains_key(&task_id) {
                     processed += 1;
@@ -454,7 +488,13 @@ pub fn drain_queue() {
                     surface.frame_callback_pending = true;
                 }
             }
-            ClientOp::AddDamage { task_id, x, y, width, height } => {
+            ClientOp::AddDamage {
+                task_id,
+                x,
+                y,
+                width,
+                height,
+            } => {
                 if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
                     surface.add_damage(x, y, width, height);
                 }
@@ -467,7 +507,10 @@ pub fn drain_queue() {
                     }
                 }
             }
-            ClientOp::SetParent { task_id, parent_task_id } => {
+            ClientOp::SetParent {
+                task_id,
+                parent_task_id,
+            } => {
                 // First verify parent exists and has capacity
                 let can_add = if let Some(parent) = ctx.surfaces.get(&parent_task_id) {
                     (parent.child_count as usize) < MAX_CHILDREN
@@ -496,7 +539,11 @@ pub fn drain_queue() {
                     }
                 }
             }
-            ClientOp::SetRelativePosition { task_id, rel_x, rel_y } => {
+            ClientOp::SetRelativePosition {
+                task_id,
+                rel_x,
+                rel_y,
+            } => {
                 if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
                     // Only subsurfaces use relative positioning
                     if surface.role == SurfaceRole::Subsurface {
@@ -658,7 +705,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
 /// Enqueues the request for processing by compositor.
 pub fn surface_request_frame_callback(task_id: u32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::RequestFrameCallback { task_id });
+    ctx.queue
+        .push_back(ClientOp::RequestFrameCallback { task_id });
     Ok(())
 }
 
@@ -700,9 +748,21 @@ pub fn surface_poll_frame_done(task_id: u32) -> u64 {
 /// Add damage region to surface's pending state. Called by CLIENT tasks.
 /// Enqueues the damage for processing by compositor on next drain_queue().
 /// The damage rect specifies what region has changed and needs redrawing.
-pub fn surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> Result<(), CompositorError> {
+pub fn surface_add_damage(
+    task_id: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::AddDamage { task_id, x, y, width, height });
+    ctx.queue.push_back(ClientOp::AddDamage {
+        task_id,
+        x,
+        y,
+        width,
+        height,
+    });
     Ok(())
 }
 
@@ -741,16 +801,27 @@ pub fn surface_set_role(task_id: u32, role: u8) -> Result<(), CompositorError> {
 /// Only valid for surfaces with role Subsurface.
 pub fn surface_set_parent(task_id: u32, parent_task_id: u32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::SetParent { task_id, parent_task_id });
+    ctx.queue.push_back(ClientOp::SetParent {
+        task_id,
+        parent_task_id,
+    });
     Ok(())
 }
 
 /// Set the relative position of a subsurface. Called by CLIENT tasks.
 /// The position is relative to the parent surface's top-left corner.
 /// Only valid for surfaces with role Subsurface.
-pub fn surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> Result<(), CompositorError> {
+pub fn surface_set_relative_position(
+    task_id: u32,
+    rel_x: i32,
+    rel_y: i32,
+) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::SetRelativePosition { task_id, rel_x, rel_y });
+    ctx.queue.push_back(ClientOp::SetRelativePosition {
+        task_id,
+        rel_x,
+        rel_y,
+    });
     Ok(())
 }
 
@@ -764,6 +835,9 @@ pub fn surface_set_title(task_id: u32, title: &[u8]) -> Result<(), CompositorErr
     title_buf[copy_len] = 0;
 
     let mut ctx = CONTEXT.lock();
-    ctx.queue.push_back(ClientOp::SetTitle { task_id, title: title_buf });
+    ctx.queue.push_back(ClientOp::SetTitle {
+        task_id,
+        title: title_buf,
+    });
     Ok(())
 }

@@ -61,10 +61,7 @@ impl PixelFormat {
     /// Check if format uses BGR byte order (vs RGB)
     #[inline]
     pub fn is_bgr_order(self) -> bool {
-        matches!(
-            self,
-            Self::Argb8888 | Self::Xrgb8888 | Self::Bgra8888
-        )
+        matches!(self, Self::Argb8888 | Self::Xrgb8888 | Self::Bgra8888)
     }
 
     /// Convert a color value from RGBA format to this pixel format

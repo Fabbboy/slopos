@@ -1,9 +1,9 @@
 use slopos_lib::{cpu, klog_debug, klog_info};
 
-use slopos_abi::arch::x86_64::ports::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;
+use slopos_abi::arch::x86_64::ports::{PS2_COMMAND_PORT, PS2_DATA_PORT, PS2_STATUS_PORT};
 
 // Mouse buttons
 pub const MOUSE_BUTTON_LEFT: u8 = 0x01;
@@ -154,9 +154,11 @@ pub fn mouse_init() {
         MOUSE_STATE.packet_byte = 0;
     }
 
-    klog_info!("PS/2 mouse initialized at ({}, {})",
+    klog_info!(
+        "PS/2 mouse initialized at ({}, {})",
         unsafe { MOUSE_STATE.x },
-        unsafe { MOUSE_STATE.y });
+        unsafe { MOUSE_STATE.y }
+    );
 }
 
 pub fn mouse_set_bounds(width: i32, height: i32) {

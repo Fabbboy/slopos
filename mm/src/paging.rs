@@ -259,9 +259,7 @@ fn map_page_in_directory(
         return -1;
     }
 
-    if (vaddr.as_u64() & (page_size - 1)) != 0
-        || (paddr.as_u64() & (page_size - 1)) != 0
-    {
+    if (vaddr.as_u64() & (page_size - 1)) != 0 || (paddr.as_u64() & (page_size - 1)) != 0 {
         klog_info!("map_page: Addresses not aligned to requested size");
         return -1;
     }
@@ -341,8 +339,7 @@ fn map_page_in_directory(
                 klog_info!("map_page: PD entry already present for 2MB mapping");
                 return -1;
             }
-            (*pd).entries[pd_idx] =
-                paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
+            (*pd).entries[pd_idx] = paddr.as_u64() | flags | PAGE_SIZE_FLAG_COMPAT | PAGE_PRESENT;
             invlpg(vaddr);
             return 0;
         }
@@ -732,9 +729,7 @@ pub fn paging_mark_range_user(
     end: VirtAddr,
     writable: c_int,
 ) -> c_int {
-    if page_dir.is_null()
-        || unsafe { (*page_dir).pml4.is_null() }
-        || start.as_u64() >= end.as_u64()
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } || start.as_u64() >= end.as_u64()
     {
         return -1;
     }

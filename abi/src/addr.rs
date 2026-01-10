@@ -72,11 +72,7 @@ impl PhysAddr {
     /// Panics if the address exceeds the 52-bit physical address limit.
     #[inline]
     pub fn new(addr: u64) -> Self {
-        assert!(
-            addr <= Self::MAX.0,
-            "PhysAddr out of range: 0x{:x}",
-            addr
-        );
+        assert!(addr <= Self::MAX.0, "PhysAddr out of range: 0x{:x}", addr);
         Self(addr)
     }
 

@@ -1,8 +1,6 @@
 use slopos_lib::io;
 
-use slopos_abi::arch::x86_64::ports::{
-    PIC1_COMMAND, PIC1_DATA, PIC2_COMMAND, PIC2_DATA, PIC_EOI,
-};
+use slopos_abi::arch::x86_64::ports::{PIC_EOI, PIC1_COMMAND, PIC1_DATA, PIC2_COMMAND, PIC2_DATA};
 
 #[inline]
 fn mask_all_impl() {

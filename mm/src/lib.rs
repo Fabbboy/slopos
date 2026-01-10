@@ -13,10 +13,10 @@ pub mod page_alloc;
 pub mod paging;
 pub mod process_vm;
 pub mod shared_memory;
+pub mod symbols;
 mod tests;
 pub mod user_copy;
-pub mod user_copy_helpers;
-pub mod symbols;
+pub mod user_ptr;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;

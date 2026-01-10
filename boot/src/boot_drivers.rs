@@ -3,9 +3,8 @@ use core::ffi::{CStr, c_char};
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    TestRunSummary, TestSuiteResult,
-    tests_register_suite, tests_register_system_suites, tests_reset_registry, tests_run_all,
-    INTERRUPT_SUITE_DESC,
+    INTERRUPT_SUITE_DESC, TestRunSummary, TestSuiteResult, tests_register_suite,
+    tests_register_system_suites, tests_reset_registry, tests_run_all,
 };
 use slopos_video as video;
 

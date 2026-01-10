@@ -2,9 +2,9 @@ use core::ffi::c_char;
 
 use spin::Mutex;
 
+use crate::font;
 use crate::framebuffer;
 use crate::graphics::{self, GraphicsContext, GraphicsResult};
-use crate::font;
 use slopos_drivers::pit;
 use slopos_drivers::video_bridge::VideoError;
 
@@ -74,8 +74,7 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
     let subtitle_y = title_y + 18;
     let message_y = subtitle_y + 22;
     let progress_w = (min_dim * 5 / 10).clamp(SPLASH_PROGRESS_MIN_WIDTH, SPLASH_PROGRESS_MAX_WIDTH);
-    let progress_h =
-        (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
+    let progress_h = (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
     let progress_x = center_x - (progress_w / 2);
     let progress_y = message_y + 22;
     let message_w = (min_dim * 55 / 100).clamp(SPLASH_MESSAGE_MIN_WIDTH, SPLASH_MESSAGE_MAX_WIDTH);
@@ -117,7 +116,13 @@ fn splash_draw_logo(
     center_y: i32,
     ring_radius: i32,
 ) -> GraphicsResult<()> {
-    graphics::graphics_draw_circle_filled_ctx(ctx, center_x, center_y, ring_radius, SPLASH_ACCENT_COLOR)?;
+    graphics::graphics_draw_circle_filled_ctx(
+        ctx,
+        center_x,
+        center_y,
+        ring_radius,
+        SPLASH_ACCENT_COLOR,
+    )?;
     graphics::graphics_draw_circle_filled_ctx(
         ctx,
         center_x,
@@ -187,7 +192,12 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     let height = ctx.height() as i32;
     let layout = splash_layout(width, height);
 
-    splash_draw_logo(&ctx, layout.center_x, layout.ring_center_y, layout.ring_radius)?;
+    splash_draw_logo(
+        &ctx,
+        layout.center_x,
+        layout.ring_center_y,
+        layout.ring_radius,
+    )?;
     if font::font_draw_string_ctx(
         &ctx,
         layout.title_x,

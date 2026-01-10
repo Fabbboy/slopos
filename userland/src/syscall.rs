@@ -5,11 +5,10 @@ use core::ptr::NonNull;
 
 // Re-export all ABI types from slopos_abi for userland consumers
 pub use slopos_abi::{
-    InputEvent, InputEventData, InputEventType, PixelFormat, SurfaceRole,
-    UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
-    INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, MAX_WINDOW_DAMAGE_REGIONS,
-    SHM_ACCESS_RO, SHM_ACCESS_RW,
-    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData, InputEventType,
+    MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW, SurfaceRole,
+    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
+    UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
 };
 
 // Re-export syscall numbers and data structures from canonical ABI source
@@ -69,7 +68,6 @@ pub fn sys_yield() {
 pub fn sys_write(buf: &[u8]) -> i64 {
     unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
-
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
@@ -216,7 +214,14 @@ pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
-    unsafe { syscall(SYSCALL_SET_WINDOW_POSITION, task_id as u64, x as u64, y as u64) as i64 }
+    unsafe {
+        syscall(
+            SYSCALL_SET_WINDOW_POSITION,
+            task_id as u64,
+            x as u64,
+            y as u64,
+        ) as i64
+    }
 }
 
 #[inline(always)]
@@ -247,7 +252,14 @@ pub fn sys_halt() -> ! {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_spawn_task(name: &[u8]) -> i32 {
-    unsafe { syscall(SYSCALL_SPAWN_TASK, name.as_ptr() as u64, name.len() as u64, 0) as i32 }
+    unsafe {
+        syscall(
+            SYSCALL_SPAWN_TASK,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            0,
+        ) as i32
+    }
 }
 
 /// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
@@ -318,7 +330,14 @@ pub fn sys_shm_destroy(token: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_ATTACH, token as u64, width as u64, height as u64) as i64 }
+    unsafe {
+        syscall(
+            SYSCALL_SURFACE_ATTACH,
+            token as u64,
+            width as u64,
+            height as u64,
+        ) as i64
+    }
 }
 
 /// Copy a shared memory buffer to the framebuffer MMIO (compositor only).
@@ -339,7 +358,9 @@ pub fn sys_fb_flip(token: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_drain_queue() {
-    unsafe { syscall(SYSCALL_DRAIN_QUEUE, 0, 0, 0); }
+    unsafe {
+        syscall(SYSCALL_DRAIN_QUEUE, 0, 0, 0);
+    }
 }
 
 // =============================================================================
@@ -429,7 +450,9 @@ pub fn sys_poll_frame_done() -> u64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_mark_frames_done(present_time_ms: u64) {
-    unsafe { syscall(SYSCALL_MARK_FRAMES_DONE, present_time_ms, 0, 0); }
+    unsafe {
+        syscall(SYSCALL_MARK_FRAMES_DONE, present_time_ms, 0, 0);
+    }
 }
 
 // =============================================================================
@@ -572,11 +595,7 @@ pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
             0,
         )
     };
-    if result == 1 {
-        Some(*event_out)
-    } else {
-        None
-    }
+    if result == 1 { Some(*event_out) } else { None }
 }
 
 /// Poll for multiple input events at once (non-blocking batch operation).
@@ -634,7 +653,11 @@ pub fn sys_input_set_pointer_focus(target_task_id: u32) -> i64 {
 /// Set pointer focus to a task with window offset for coordinate translation.
 /// The offset is subtracted from screen coordinates to get window-local coordinates.
 /// For a window at screen position (100, 50), pass offset_x=100, offset_y=50.
-pub fn sys_input_set_pointer_focus_with_offset(target_task_id: u32, offset_x: i32, offset_y: i32) -> i64 {
+pub fn sys_input_set_pointer_focus_with_offset(
+    target_task_id: u32,
+    offset_x: i32,
+    offset_y: i32,
+) -> i64 {
     unsafe {
         syscall(
             SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET,
@@ -791,7 +814,9 @@ impl Drop for ShmBuffer {
     #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         // Unmap from our address space
-        unsafe { sys_shm_unmap(self.ptr.as_ptr() as u64); }
+        unsafe {
+            sys_shm_unmap(self.ptr.as_ptr() as u64);
+        }
         // Destroy the buffer (we are the owner)
         sys_shm_destroy(self.token.get());
     }
@@ -881,7 +906,9 @@ impl Drop for ShmBufferRef {
     #[unsafe(link_section = ".user_text")]
     fn drop(&mut self) {
         // Unmap from our address space (we don't destroy - we're not the owner)
-        unsafe { sys_shm_unmap(self.ptr.as_ptr() as u64); }
+        unsafe {
+            sys_shm_unmap(self.ptr.as_ptr() as u64);
+        }
     }
 }
 

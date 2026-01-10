@@ -37,11 +37,10 @@ unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
-    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close,
-    sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink, sys_fs_write,
-    sys_halt, sys_read_char, sys_surface_commit, sys_surface_set_title, sys_sys_info,
-    sys_write, ShmBuffer,
+    ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
+    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
+    sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_surface_commit,
+    sys_surface_set_title, sys_sys_info, sys_write,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -322,7 +321,10 @@ mod surface {
                 }
             };
 
-            if shm_buffer.attach_surface(width as u32, height as u32).is_err() {
+            if shm_buffer
+                .attach_surface(width as u32, height as u32)
+                .is_err()
+            {
                 let _ = sys_write(b"shell: failed to attach surface\n");
                 return false;
             }
@@ -352,16 +354,23 @@ mod buffers {
         SyncUnsafeCell::new([[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]);
 
     #[unsafe(link_section = ".user_bss")]
-    static PATH_BUF: SyncUnsafeCell<[u8; SHELL_PATH_BUF]> = SyncUnsafeCell::new([0; SHELL_PATH_BUF]);
+    static PATH_BUF: SyncUnsafeCell<[u8; SHELL_PATH_BUF]> =
+        SyncUnsafeCell::new([0; SHELL_PATH_BUF]);
 
     #[unsafe(link_section = ".user_bss")]
-    static LIST_ENTRIES: SyncUnsafeCell<[UserFsEntry; 32]> = SyncUnsafeCell::new([UserFsEntry::new(); 32]);
+    static LIST_ENTRIES: SyncUnsafeCell<[UserFsEntry; 32]> =
+        SyncUnsafeCell::new([UserFsEntry::new(); 32]);
 
     pub fn with_line_buf<R, F: FnOnce(&mut [u8; 256]) -> R>(f: F) -> R {
         f(unsafe { &mut *LINE_BUF.get() })
     }
 
-    pub fn with_token_storage<R, F: FnOnce(&mut [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]) -> R>(f: F) -> R {
+    pub fn with_token_storage<
+        R,
+        F: FnOnce(&mut [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS]) -> R,
+    >(
+        f: F,
+    ) -> R {
         f(unsafe { &mut *TOKEN_STORAGE.get() })
     }
 
@@ -448,10 +457,25 @@ fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
     }
 
     // Blit content up by one line
-    gfx::blit(buf, 0, FONT_CHAR_HEIGHT, 0, 0, width, height - FONT_CHAR_HEIGHT);
+    gfx::blit(
+        buf,
+        0,
+        FONT_CHAR_HEIGHT,
+        0,
+        0,
+        width,
+        height - FONT_CHAR_HEIGHT,
+    );
 
     // Clear the bottom line
-    gfx::fill_rect(buf, 0, height - FONT_CHAR_HEIGHT, width, FONT_CHAR_HEIGHT, bg);
+    gfx::fill_rect(
+        buf,
+        0,
+        height - FONT_CHAR_HEIGHT,
+        width,
+        FONT_CHAR_HEIGHT,
+        bg,
+    );
 
     true
 }
@@ -773,8 +797,12 @@ fn shell_console_init() {
 
     let cols = width / FONT_CHAR_WIDTH;
     let rows = height / FONT_CHAR_HEIGHT;
-    DISPLAY.cols.set(cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
-    DISPLAY.rows.set(rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
+    DISPLAY
+        .cols
+        .set(cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
+    DISPLAY
+        .rows
+        .set(rows.clamp(1, SHELL_SCROLLBACK_LINES as i32));
 
     if DISPLAY.cols.get() <= 0 || DISPLAY.rows.get() <= 0 {
         DISPLAY.enabled.set(false);
@@ -885,16 +913,56 @@ struct BuiltinEntry {
 
 #[unsafe(link_section = ".user_rodata")]
 static BUILTINS: &[BuiltinEntry] = &[
-    BuiltinEntry { name: b"help", func: cmd_help, desc: b"List available commands" },
-    BuiltinEntry { name: b"echo", func: cmd_echo, desc: b"Print arguments back to the terminal" },
-    BuiltinEntry { name: b"clear", func: cmd_clear, desc: b"Clear the terminal display" },
-    BuiltinEntry { name: b"shutdown", func: cmd_shutdown, desc: b"Power off the system" },
-    BuiltinEntry { name: b"info", func: cmd_info, desc: b"Show kernel memory and scheduler stats" },
-    BuiltinEntry { name: b"ls", func: cmd_ls, desc: b"List directory contents" },
-    BuiltinEntry { name: b"cat", func: cmd_cat, desc: b"Display file contents" },
-    BuiltinEntry { name: b"write", func: cmd_write, desc: b"Write text to a file" },
-    BuiltinEntry { name: b"mkdir", func: cmd_mkdir, desc: b"Create a directory" },
-    BuiltinEntry { name: b"rm", func: cmd_rm, desc: b"Remove a file" },
+    BuiltinEntry {
+        name: b"help",
+        func: cmd_help,
+        desc: b"List available commands",
+    },
+    BuiltinEntry {
+        name: b"echo",
+        func: cmd_echo,
+        desc: b"Print arguments back to the terminal",
+    },
+    BuiltinEntry {
+        name: b"clear",
+        func: cmd_clear,
+        desc: b"Clear the terminal display",
+    },
+    BuiltinEntry {
+        name: b"shutdown",
+        func: cmd_shutdown,
+        desc: b"Power off the system",
+    },
+    BuiltinEntry {
+        name: b"info",
+        func: cmd_info,
+        desc: b"Show kernel memory and scheduler stats",
+    },
+    BuiltinEntry {
+        name: b"ls",
+        func: cmd_ls,
+        desc: b"List directory contents",
+    },
+    BuiltinEntry {
+        name: b"cat",
+        func: cmd_cat,
+        desc: b"Display file contents",
+    },
+    BuiltinEntry {
+        name: b"write",
+        func: cmd_write,
+        desc: b"Write text to a file",
+    },
+    BuiltinEntry {
+        name: b"mkdir",
+        func: cmd_mkdir,
+        desc: b"Create a directory",
+    },
+    BuiltinEntry {
+        name: b"rm",
+        func: cmd_rm,
+        desc: b"Remove a file",
+    },
 ];
 
 #[inline(always)]
@@ -1164,7 +1232,9 @@ fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             let entry = &entries[i as usize];
             if entry.is_directory() {
                 shell_write(b"[");
-                shell_write(&entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())]);
+                shell_write(
+                    &entry.name[..runtime::u_strnlen(entry.name.as_ptr(), entry.name.len())],
+                );
                 shell_write(b"]\n");
             } else {
                 let name_len = runtime::u_strnlen(entry.name.as_ptr(), entry.name.len());
@@ -1406,9 +1476,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
 
         // Parse and execute
         let mut tokens: [*const u8; SHELL_MAX_TOKENS] = [ptr::null(); SHELL_MAX_TOKENS];
-        let token_count = buffers::with_line_buf(|buf| {
-            shell_parse_line(buf, &mut tokens)
-        });
+        let token_count = buffers::with_line_buf(|buf| shell_parse_line(buf, &mut tokens));
 
         if token_count <= 0 {
             continue;

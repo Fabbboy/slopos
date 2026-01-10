@@ -411,10 +411,7 @@ pub fn ramfs_create_directory(path: *const c_char) -> *mut ramfs_node_t {
     ramfs_create_directory_locked(&mut state, path)
 }
 
-fn ramfs_create_directory_locked(
-    state: &mut RamfsState,
-    path: *const c_char,
-) -> *mut ramfs_node_t {
+fn ramfs_create_directory_locked(state: &mut RamfsState, path: *const c_char) -> *mut ramfs_node_t {
     if !validate_path(path) {
         return ptr::null_mut();
     }

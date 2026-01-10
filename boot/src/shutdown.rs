@@ -11,8 +11,8 @@ static SERIAL_DRAINED: AtomicBool = AtomicBool::new(false);
 use slopos_drivers::apic::apic_is_available;
 use slopos_drivers::apic::{apic_disable, apic_send_eoi, apic_send_ipi_halt_all, apic_timer_stop};
 use slopos_drivers::pit::pit_poll_delay_ms;
-use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_mm::page_alloc::page_allocator_paint_all;
+use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_sched::{scheduler_shutdown, task_shutdown_all};
 
 fn serial_flush() {

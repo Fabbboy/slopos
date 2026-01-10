@@ -7,8 +7,10 @@ use core::ffi::c_int;
 use spin::Once;
 
 // Re-export ABI types for consumers
-pub use slopos_abi::video_traits::{FramebufferInfoC, VideoError, VideoResult, video_result_from_code};
-pub use slopos_abi::{WindowDamageRect, WindowInfo, MAX_WINDOW_DAMAGE_REGIONS};
+pub use slopos_abi::video_traits::{
+    FramebufferInfoC, VideoError, VideoResult, video_result_from_code,
+};
+pub use slopos_abi::{MAX_WINDOW_DAMAGE_REGIONS, WindowDamageRect, WindowInfo};
 
 use slopos_abi::video_traits::VideoServices;
 
@@ -69,14 +71,16 @@ video_fn!(surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) ->
 
 /// Draw roulette wheel - returns VideoResult instead of c_int.
 pub fn roulette_draw(fate: u32) -> VideoResult {
-    VIDEO.get()
+    VIDEO
+        .get()
         .map(|v| video_result_from_code(v.roulette_draw(fate)))
         .unwrap_or(Err(VideoError::NoFramebuffer))
 }
 
 /// Set window title - takes slice instead of raw pointer.
 pub fn surface_set_title(task_id: u32, title: &[u8]) -> c_int {
-    VIDEO.get()
+    VIDEO
+        .get()
         .map(|v| v.surface_set_title(task_id, title.as_ptr(), title.len()))
         .unwrap_or(-1)
 }
@@ -106,7 +110,8 @@ pub fn fb_flip_from_shm(shm_phys: slopos_abi::addr::PhysAddr, size: usize) -> c_
         return -1;
     }
 
-    VIDEO.get()
+    VIDEO
+        .get()
         .map(|v| v.fb_flip(shm_phys, copy_size))
         .unwrap_or(-1)
 }

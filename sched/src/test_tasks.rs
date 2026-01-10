@@ -8,7 +8,7 @@ use slopos_lib::klog_info;
 
 use crate::scheduler;
 use crate::task::{
-    IdtEntry, INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_NORMAL, Task, TaskContext, TaskIterateCb, task_create, task_get_info,
     task_get_total_yields, task_iterate_active, task_shutdown_all, task_state_to_string,
 };

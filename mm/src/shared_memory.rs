@@ -68,8 +68,7 @@ impl PixelFormat {
 
 /// Bitmap of supported pixel formats (for format negotiation syscall).
 /// Bit N is set if PixelFormat with value N is supported.
-pub const SUPPORTED_FORMATS_BITMAP: u32 =
-    (1 << PixelFormat::Argb8888 as u32)
+pub const SUPPORTED_FORMATS_BITMAP: u32 = (1 << PixelFormat::Argb8888 as u32)
     | (1 << PixelFormat::Xrgb8888 as u32)
     | (1 << PixelFormat::Rgba8888 as u32)
     | (1 << PixelFormat::Bgra8888 as u32);
@@ -338,7 +337,9 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
         None => {
             // Free the allocated pages
             for i in 0..pages {
-                free_page_frame(PhysAddr::new(phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB));
+                free_page_frame(PhysAddr::new(
+                    phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB,
+                ));
             }
             klog_info!("shm_create: no free slots");
             return 0;
@@ -442,7 +443,8 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
             VirtAddr::new(page_vaddr),
             PhysAddr::new(page_phys),
             map_flags,
-        ) != 0 {
+        ) != 0
+        {
             // Rollback on failure
             for j in 0..i {
                 let rollback_vaddr = vaddr + (j as u64) * PAGE_SIZE_4KB;
@@ -565,7 +567,8 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
     let phys_addr = registry.buffers[slot].phys_addr;
 
     // Collect virtual addresses to free (max 8 mappings per buffer)
-    let mut vaddrs_to_free: [(u64, u32); MAX_MAPPINGS_PER_BUFFER] = [(0, 0); MAX_MAPPINGS_PER_BUFFER];
+    let mut vaddrs_to_free: [(u64, u32); MAX_MAPPINGS_PER_BUFFER] =
+        [(0, 0); MAX_MAPPINGS_PER_BUFFER];
     let mut vaddr_count = 0;
 
     for mapping in registry.buffers[slot].mappings.iter() {
@@ -606,7 +609,11 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         registry.free_vaddr(vaddr, buffer_size);
     }
 
-    klog_debug!("shm_destroy: destroyed token={} for process={}", token, process_id);
+    klog_debug!(
+        "shm_destroy: destroyed token={} for process={}",
+        token,
+        process_id
+    );
 
     0
 }
@@ -966,7 +973,9 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
         None => {
             // Free the allocated pages
             for i in 0..pages {
-                free_page_frame(PhysAddr::new(phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB));
+                free_page_frame(PhysAddr::new(
+                    phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB,
+                ));
             }
             klog_info!("shm_create_with_format: no free slots");
             return 0;

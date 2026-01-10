@@ -6,8 +6,8 @@
 
 use core::ffi::c_char;
 
-use crate::{font, framebuffer};
 use crate::graphics::GraphicsContext;
+use crate::{font, framebuffer};
 
 // Colors (ARGB format)
 const PANIC_BG_COLOR: u32 = 0xFF8B0000; // Dark red

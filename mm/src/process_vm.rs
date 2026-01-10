@@ -421,10 +421,10 @@ struct Elf64Rela {
 const SHT_RELA: u32 = 4;
 
 // x86-64 relocation types
-const R_X86_64_64: u32 = 1;      // Absolute 64-bit
-const R_X86_64_PC32: u32 = 2;    // RIP-relative 32-bit
-const R_X86_64_32: u32 = 10;     // Absolute 32-bit
-const R_X86_64_32S: u32 = 11;    // Absolute 32-bit sign-extended
+const R_X86_64_64: u32 = 1; // Absolute 64-bit
+const R_X86_64_PC32: u32 = 2; // RIP-relative 32-bit
+const R_X86_64_32: u32 = 10; // Absolute 32-bit
+const R_X86_64_32S: u32 = 11; // Absolute 32-bit sign-extended
 
 fn apply_elf_relocations(
     payload: *const u8,
@@ -469,9 +469,7 @@ fn apply_elf_relocations(
     }
 
     // Get string table for section names
-    let shstrtab_shdr = unsafe {
-        &*(payload.add(sh_off + shstrndx * sh_size) as *const Elf64Shdr)
-    };
+    let shstrtab_shdr = unsafe { &*(payload.add(sh_off + shstrndx * sh_size) as *const Elf64Shdr) };
     let shstrtab_base = shstrtab_shdr.sh_offset as usize;
     let shstrtab_size = shstrtab_shdr.sh_size as usize;
     if shstrtab_base + shstrtab_size > payload_len {
@@ -510,8 +508,10 @@ fn apply_elf_relocations(
         }
 
         let name_off = shdr.sh_name;
-        let Some(name) = get_section_name(name_off) else { continue };
-        
+        let Some(name) = get_section_name(name_off) else {
+            continue;
+        };
+
         // Check if this is a .rela section we care about
         if !name.starts_with(b".rela.") {
             continue;
@@ -522,15 +522,14 @@ fn apply_elf_relocations(
         if target_section_idx >= sh_num {
             continue;
         }
-        let target_shdr = unsafe {
-            &*(payload.add(sh_off + target_section_idx * sh_size) as *const Elf64Shdr)
-        };
+        let target_shdr =
+            unsafe { &*(payload.add(sh_off + target_section_idx * sh_size) as *const Elf64Shdr) };
 
         // Get the target section's user VA mapping
         let target_kern_va = target_shdr.sh_addr;
-            let Some(target_user_va_base) = map_kernel_va_to_user(target_kern_va) else {
-                continue;
-            };
+        let Some(target_user_va_base) = map_kernel_va_to_user(target_kern_va) else {
+            continue;
+        };
 
         // Process relocation entries
         let rela_base = shdr.sh_offset as usize;
@@ -547,9 +546,7 @@ fn apply_elf_relocations(
 
         let num_relocs = rela_size / rela_entsize;
         for j in 0..num_relocs {
-            let rela_ptr = unsafe {
-                payload.add(rela_base + j * rela_entsize) as *const Elf64Rela
-            };
+            let rela_ptr = unsafe { payload.add(rela_base + j * rela_entsize) as *const Elf64Rela };
             let rela = unsafe { &*rela_ptr };
 
             let reloc_type = (rela.r_info & 0xffffffff) as u32;
@@ -570,7 +567,8 @@ fn apply_elf_relocations(
             // For R_X86_64_PLT32/PC32: read current offset, calculate symbol = rip_after + offset + addend
             // For others: use addend or read from target
             let symbol_va = match reloc_type {
-                R_X86_64_PC32 | 4 => { // 4 = R_X86_64_PLT32
+                R_X86_64_PC32 | 4 => {
+                    // 4 = R_X86_64_PLT32
                     // For PC32/PLT32, read current offset from instruction and calculate symbol
                     let read_page_va = reloc_user_addr & !(PAGE_SIZE_4KB - 1);
                     let read_page_off = (reloc_user_addr & (PAGE_SIZE_4KB - 1)) as usize;
@@ -583,7 +581,8 @@ fn apply_elf_relocations(
                         continue;
                     }
                     let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
-                    let current_offset = unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
+                    let current_offset =
+                        unsafe { core::ptr::read_unaligned(read_ptr as *const i32) } as i64;
                     // For R_X86_64_PC32/PLT32: offset = S + A - P, where:
                     //   S = symbol value, A = addend, P = place (RIP after instruction)
                     // The current_offset in the instruction was calculated for kernel addresses.
@@ -593,7 +592,10 @@ fn apply_elf_relocations(
                     let original_kernel_rip_after = reloc_kern_addr.wrapping_add(4);
                     // For PC32: offset = S + A - P, so S = offset - A + P = offset + P - A
                     // But we need to be careful: if A is negative, subtracting it means adding
-                    let original_symbol_va = (original_kernel_rip_after as i64).wrapping_add(current_offset).wrapping_sub(rela.r_addend) as u64;
+                    let original_symbol_va = (original_kernel_rip_after as i64)
+                        .wrapping_add(current_offset)
+                        .wrapping_sub(rela.r_addend)
+                        as u64;
                     original_symbol_va
                 }
                 _ => {
@@ -613,9 +615,13 @@ fn apply_elf_relocations(
                         }
                         let read_ptr = unsafe { read_virt.as_mut_ptr::<u8>().add(read_page_off) };
                         match reloc_type {
-                            R_X86_64_64 => unsafe { core::ptr::read_unaligned(read_ptr as *const u64) },
+                            R_X86_64_64 => unsafe {
+                                core::ptr::read_unaligned(read_ptr as *const u64)
+                            },
                             R_X86_64_32 | R_X86_64_32S => {
-                                let val = unsafe { core::ptr::read_unaligned(read_ptr as *const u32) } as u64;
+                                let val =
+                                    unsafe { core::ptr::read_unaligned(read_ptr as *const u32) }
+                                        as u64;
                                 if reloc_type == R_X86_64_32S {
                                     (val as i32 as i64) as u64
                                 } else {
@@ -657,7 +663,8 @@ fn apply_elf_relocations(
                         core::ptr::write_unaligned(reloc_ptr as *mut u64, user_symbol_va);
                     }
                 }
-                R_X86_64_PC32 | 4 => { // 4 = R_X86_64_PLT32, same as PC32 for static binaries
+                R_X86_64_PC32 | 4 => {
+                    // 4 = R_X86_64_PLT32, same as PC32 for static binaries
                     // RIP-relative 32-bit: offset = symbol - (RIP after instruction)
                     let rip_after = reloc_user_addr + 4; // 32-bit = 4 bytes
                     let offset = (user_symbol_va as i64 - rip_after as i64) as i32;
@@ -763,7 +770,7 @@ pub fn process_vm_load_elf(
     // kernel_va is the p_vaddr from the ELF, user_va is where we actually map it
     let mut section_mappings: [(u64, u64, u64); 8] = [(0, 0, 0); 8];
     let mut mapping_count = 0usize;
-    
+
     // Find the lowest p_vaddr to calculate offset for user space mapping
     let mut min_vaddr = u64::MAX;
     for i in 0..ph_num {
@@ -773,7 +780,7 @@ pub fn process_vm_load_elf(
             min_vaddr = ph.p_vaddr;
         }
     }
-    
+
     // If min_vaddr is a kernel VA, we'll map at user space instead
     // Calculate offset from min_vaddr to code_base
     const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
@@ -801,7 +808,7 @@ pub fn process_vm_load_elf(
         if seg_end <= seg_start {
             continue;
         }
-        
+
         // Map at user space address, not the ELF's p_vaddr
         // For kernel VAs, calculate: user_addr = kernel_addr - KERNEL_BASE + code_base
         let user_seg_start = if seg_start >= KERNEL_BASE {
@@ -816,7 +823,7 @@ pub fn process_vm_load_elf(
         } else {
             seg_end.wrapping_add(vaddr_offset)
         };
-        
+
         let map_flags = if (ph.p_flags & PF_W) != 0 {
             PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE
         } else {
@@ -901,7 +908,11 @@ pub fn process_vm_load_elf(
                     let zero_off = (zero_start - dst) as usize;
                     let zero_len = (zero_end - zero_start) as usize;
                     unsafe {
-                        core::ptr::write_bytes(dest_virt.as_mut_ptr::<u8>().add(zero_off), 0, zero_len);
+                        core::ptr::write_bytes(
+                            dest_virt.as_mut_ptr::<u8>().add(zero_off),
+                            0,
+                            zero_len,
+                        );
                     }
                 }
             }
@@ -928,7 +939,7 @@ pub fn process_vm_load_elf(
         // Same address, relocations already correct
         false
     };
-    
+
     if needs_reloc {
         let _reloc_result = apply_elf_relocations(
             payload,
