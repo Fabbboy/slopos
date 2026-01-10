@@ -50,9 +50,14 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task = sched_bridge::get_current_task() as *mut Task;
+    let task_ref = sched_bridge::get_current_task();
+    if task_ref.is_null() {
+        wl_currency::award_loss();
+        return;
+    }
+    let task = task_ref.as_raw() as *mut Task;
     unsafe {
-        if task.is_null() || ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
+        if ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
             wl_currency::award_loss();
             return;
         }

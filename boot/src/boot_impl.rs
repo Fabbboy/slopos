@@ -53,10 +53,6 @@ impl BootServices for BootImpl {
     }
 }
 
-/// Register boot services with the sched_bridge.
-/// Called early during boot initialization.
 pub fn register_with_bridge() {
-    unsafe {
-        slopos_drivers::sched_bridge::register_boot_services(&BOOT_IMPL);
-    }
+    slopos_drivers::sched_bridge::init_boot(&BOOT_IMPL);
 }

@@ -256,7 +256,7 @@ pub use klog::{
 };
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ring_buffer::RingBuffer;
-pub use spinlock::Spinlock;
+pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
 pub use user_syscall::*;
 pub use user_syscall_defs::*;

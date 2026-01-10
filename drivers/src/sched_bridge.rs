@@ -1,131 +1,118 @@
-//! Scheduler bridge - stores trait objects and provides call-through functions.
-//!
-//! This replaces scheduler_callbacks.rs with a type-safe trait-based approach.
-//! Traits are defined in `abi/sched_traits.rs`, implementations live in `sched/` and `boot/`.
+//! Scheduler bridge - consolidated trait object storage with fail-fast initialization.
 
 use core::ffi::{c_char, c_int, c_void};
 use slopos_abi::sched_traits::{
-    BootServices, FateResult, OpaqueTask, SchedulerExecution, SchedulerFate, SchedulerForBoot,
-    SchedulerState, SchedulerTiming, TaskCleanupHook, TaskHandle,
+    BootServices, FateResult, OpaqueTask, SchedulerServices, TaskCleanupHook, TaskRef,
 };
+use spin::Once;
 
-// =============================================================================
-// Static Storage for Trait Objects
-// =============================================================================
+static SCHED: Once<&'static dyn SchedulerServices> = Once::new();
+static BOOT: Once<&'static dyn BootServices> = Once::new();
+static VIDEO_CLEANUP: Once<fn(u32)> = Once::new();
+static CLEANUP_HOOK: Once<&'static dyn TaskCleanupHook> = Once::new();
 
-static mut TIMING: Option<&'static dyn SchedulerTiming> = None;
-static mut EXECUTION: Option<&'static dyn SchedulerExecution> = None;
-static mut STATE: Option<&'static dyn SchedulerState> = None;
-static mut FATE: Option<&'static dyn SchedulerFate> = None;
-static mut BOOT: Option<&'static dyn BootServices> = None;
-static mut SCHED_FOR_BOOT: Option<&'static dyn SchedulerForBoot> = None;
-static mut CLEANUP_HOOK: Option<&'static dyn TaskCleanupHook> = None;
-static mut VIDEO_CLEANUP_FN: Option<fn(u32)> = None;
-
-// =============================================================================
-// Macro for generating wrapper functions
-// =============================================================================
-
-macro_rules! sched_fn {
-    // Void function, no args
-    ($name:ident, $static:ident, $method:ident()) => {
-        pub fn $name() {
-            if let Some(t) = unsafe { $static } { t.$method(); }
-        }
-    };
-    // Void function with args
-    ($name:ident, $static:ident, $method:ident($($arg:ident: $ty:ty),+)) => {
-        pub fn $name($($arg: $ty),+) {
-            if let Some(t) = unsafe { $static } { t.$method($($arg),+); }
-        }
-    };
-    // Function returning value, no args
-    ($name:ident, $static:ident, $method:ident() -> $ret:ty, $default:expr) => {
-        pub fn $name() -> $ret {
-            unsafe { $static }.map(|t| t.$method()).unwrap_or($default)
-        }
-    };
-    // Function returning value with args
-    ($name:ident, $static:ident, $method:ident($($arg:ident: $ty:ty),+) -> $ret:ty, $default:expr) => {
-        pub fn $name($($arg: $ty),+) -> $ret {
-            unsafe { $static }.map(|t| t.$method($($arg),+)).unwrap_or($default)
-        }
-    };
-    // Bool to i32 conversion, no args
-    ($name:ident, $static:ident, $method:ident() -> bool_as_i32) => {
-        pub fn $name() -> i32 {
-            unsafe { $static }.map(|t| if t.$method() { 1 } else { 0 }).unwrap_or(0)
-        }
-    };
+pub fn init_scheduler(sched: &'static dyn SchedulerServices) {
+    SCHED.call_once(|| sched);
 }
 
-// =============================================================================
-// Registration Functions (kept manual - called once during boot)
-// =============================================================================
-
-/// Register all scheduler traits (called once by sched during init).
-pub unsafe fn register_scheduler(
-    timing: &'static dyn SchedulerTiming,
-    execution: &'static dyn SchedulerExecution,
-    state: &'static dyn SchedulerState,
-    fate: &'static dyn SchedulerFate,
-) {
-    TIMING = Some(timing);
-    EXECUTION = Some(execution);
-    STATE = Some(state);
-    FATE = Some(fate);
+pub fn init_boot(boot: &'static dyn BootServices) {
+    BOOT.call_once(|| boot);
 }
 
-/// Register boot services (called once by boot during early init).
-pub unsafe fn register_boot_services(boot: &'static dyn BootServices) {
-    BOOT = Some(boot);
+pub fn register_cleanup_hook(hook: &'static dyn TaskCleanupHook) {
+    CLEANUP_HOOK.call_once(|| hook);
 }
 
-/// Register scheduler callbacks for boot (called by sched during init).
-pub unsafe fn register_scheduler_for_boot(sched: &'static dyn SchedulerForBoot) {
-    SCHED_FOR_BOOT = Some(sched);
+#[inline]
+fn sched() -> Option<&'static dyn SchedulerServices> {
+    SCHED.get().copied()
 }
 
-/// Register cleanup hook (called by video crate).
-pub unsafe fn register_cleanup_hook(hook: &'static dyn TaskCleanupHook) {
-    CLEANUP_HOOK = Some(hook);
+#[inline]
+fn boot() -> Option<&'static dyn BootServices> {
+    BOOT.get().copied()
 }
 
-// =============================================================================
-// SchedulerTiming wrappers
-// =============================================================================
+#[inline]
+pub fn is_scheduler_initialized() -> bool {
+    SCHED.get().is_some()
+}
 
-sched_fn!(timer_tick, TIMING, timer_tick());
-sched_fn!(handle_post_irq, TIMING, handle_post_irq());
-sched_fn!(
-    request_reschedule_from_interrupt,
-    TIMING,
-    request_reschedule_from_interrupt()
-);
+#[inline]
+pub fn is_boot_initialized() -> bool {
+    BOOT.get().is_some()
+}
 
-// =============================================================================
-// SchedulerExecution wrappers
-// =============================================================================
+pub fn timer_tick() {
+    if let Some(s) = sched() {
+        s.timer_tick();
+    }
+}
 
-sched_fn!(get_current_task, EXECUTION, get_current_task() -> TaskHandle, core::ptr::null_mut());
-sched_fn!(yield_cpu, EXECUTION, yield_cpu());
-sched_fn!(schedule, EXECUTION, schedule());
-sched_fn!(task_terminate, EXECUTION, task_terminate(task_id: u32) -> c_int, -1);
-sched_fn!(block_current_task, EXECUTION, block_current_task());
-sched_fn!(task_is_blocked, EXECUTION, task_is_blocked(task: TaskHandle) -> bool, false);
-sched_fn!(unblock_task, EXECUTION, unblock_task(task: TaskHandle) -> c_int, -1);
+pub fn handle_post_irq() {
+    if let Some(s) = sched() {
+        s.handle_post_irq();
+    }
+}
 
-// =============================================================================
-// SchedulerState wrappers
-// =============================================================================
+pub fn request_reschedule_from_interrupt() {
+    if let Some(s) = sched() {
+        s.request_reschedule_from_interrupt();
+    }
+}
 
-sched_fn!(scheduler_is_enabled, STATE, is_enabled() -> c_int, 0);
-sched_fn!(scheduler_is_preemption_enabled, STATE, is_preemption_enabled() -> c_int, 0);
-sched_fn!(register_idle_wakeup_callback, STATE, register_idle_wakeup_callback(cb: Option<fn() -> c_int>));
+pub fn get_current_task() -> TaskRef {
+    sched()
+        .map(|s| s.get_current_task())
+        .unwrap_or(TaskRef::NULL)
+}
 
-/// Get task statistics via out-pointers (legacy API).
+pub fn yield_cpu() {
+    if let Some(s) = sched() {
+        s.yield_cpu();
+    }
+}
+
+pub fn schedule() {
+    if let Some(s) = sched() {
+        s.schedule();
+    }
+}
+
+pub fn task_terminate(task_id: u32) -> c_int {
+    sched().map(|s| s.task_terminate(task_id)).unwrap_or(-1)
+}
+
+pub fn block_current_task() {
+    if let Some(s) = sched() {
+        s.block_current_task();
+    }
+}
+
+pub fn task_is_blocked(task: TaskRef) -> bool {
+    sched().map(|s| s.task_is_blocked(task)).unwrap_or(false)
+}
+
+pub fn unblock_task(task: TaskRef) -> c_int {
+    sched().map(|s| s.unblock_task(task)).unwrap_or(-1)
+}
+
+pub fn scheduler_is_enabled() -> c_int {
+    sched().map(|s| s.is_enabled()).unwrap_or(0)
+}
+
+pub fn scheduler_is_preemption_enabled() -> c_int {
+    sched().map(|s| s.is_preemption_enabled()).unwrap_or(0)
+}
+
+pub fn register_idle_wakeup_callback(cb: Option<fn() -> c_int>) {
+    if let Some(s) = sched() {
+        s.register_idle_wakeup_callback(cb);
+    }
+}
+
 pub fn get_task_stats(total: *mut u32, active: *mut u32, context_switches: *mut u64) {
-    if let Some(s) = unsafe { STATE } {
+    if let Some(s) = sched() {
         let (t, a, cs) = s.get_task_stats();
         if !total.is_null() {
             unsafe { *total = t };
@@ -139,14 +126,13 @@ pub fn get_task_stats(total: *mut u32, active: *mut u32, context_switches: *mut 
     }
 }
 
-/// Get scheduler statistics via out-pointers (legacy API).
 pub fn get_scheduler_stats(
     context_switches: *mut u64,
     yields: *mut u64,
     ready_tasks: *mut u32,
     schedule_calls: *mut u32,
 ) {
-    if let Some(s) = unsafe { STATE } {
+    if let Some(s) = sched() {
         let (cs, y, rt, sc) = s.get_scheduler_stats();
         if !context_switches.is_null() {
             unsafe { *context_switches = cs };
@@ -163,17 +149,21 @@ pub fn get_scheduler_stats(
     }
 }
 
-// =============================================================================
-// SchedulerFate wrappers (Wheel of Fate)
-// =============================================================================
+pub fn fate_spin() -> FateResult {
+    sched()
+        .map(|s| s.fate_spin())
+        .unwrap_or(FateResult { token: 0, value: 0 })
+}
 
-sched_fn!(fate_spin, FATE, fate_spin() -> FateResult, FateResult { token: 0, value: 0 });
-sched_fn!(fate_set_pending, FATE, fate_set_pending(res: FateResult, task_id: u32) -> c_int, -1);
+pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
+    sched()
+        .map(|s| s.fate_set_pending(res, task_id))
+        .unwrap_or(-1)
+}
 
-/// Retrieve and clear pending fate (returns -1 if none pending).
 pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
-    if let Some(f) = unsafe { FATE } {
-        if let Some(result) = f.fate_take_pending(task_id) {
+    if let Some(s) = sched() {
+        if let Some(result) = s.fate_take_pending(task_id) {
             if !out.is_null() {
                 unsafe { *out = result };
             }
@@ -183,31 +173,44 @@ pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
     -1
 }
 
-/// Apply fate outcome (award W or L).
 pub fn fate_apply_outcome(res: *const FateResult, resolution: u32, award: bool) {
-    if let Some(f) = unsafe { FATE } {
+    if let Some(s) = sched() {
         if !res.is_null() {
-            unsafe { f.fate_apply_outcome(&*res, resolution, award) };
+            unsafe { s.fate_apply_outcome(&*res, resolution, award) };
         }
     }
 }
 
-// =============================================================================
-// BootServices wrappers
-// =============================================================================
+pub fn is_rsdp_available() -> i32 {
+    boot()
+        .map(|b| if b.is_rsdp_available() { 1 } else { 0 })
+        .unwrap_or(0)
+}
 
-// Note: HHDM functions (get_hhdm_offset, is_hhdm_available) removed.
-// Drivers should use slopos_mm::hhdm module directly instead.
+pub fn get_rsdp_address() -> *const c_void {
+    boot()
+        .map(|b| b.get_rsdp_address())
+        .unwrap_or(core::ptr::null())
+}
 
-sched_fn!(is_rsdp_available, BOOT, is_rsdp_available() -> bool_as_i32);
-sched_fn!(get_rsdp_address, BOOT, get_rsdp_address() -> *const c_void, core::ptr::null());
-sched_fn!(gdt_set_kernel_rsp0, BOOT, gdt_set_kernel_rsp0(rsp0: u64));
-sched_fn!(is_kernel_initialized, BOOT, is_kernel_initialized() -> bool_as_i32);
-sched_fn!(idt_get_gate, BOOT, idt_get_gate(vector: u8, entry: *mut c_void) -> c_int, -1);
+pub fn gdt_set_kernel_rsp0(rsp0: u64) {
+    if let Some(b) = boot() {
+        b.gdt_set_kernel_rsp0(rsp0);
+    }
+}
 
-/// Trigger kernel panic. Never returns.
+pub fn is_kernel_initialized() -> i32 {
+    boot()
+        .map(|b| if b.is_kernel_initialized() { 1 } else { 0 })
+        .unwrap_or(0)
+}
+
+pub fn idt_get_gate(vector: u8, entry: *mut c_void) -> c_int {
+    boot().map(|b| b.idt_get_gate(vector, entry)).unwrap_or(-1)
+}
+
 pub fn kernel_panic(msg: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } {
+    if let Some(b) = boot() {
         b.kernel_panic(msg)
     }
     loop {
@@ -215,9 +218,8 @@ pub fn kernel_panic(msg: *const c_char) -> ! {
     }
 }
 
-/// Graceful shutdown. Never returns.
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } {
+    if let Some(b) = boot() {
         b.kernel_shutdown(reason)
     }
     loop {
@@ -225,9 +227,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     }
 }
 
-/// System reboot. Never returns.
 pub fn kernel_reboot(reason: *const c_char) -> ! {
-    if let Some(b) = unsafe { BOOT } {
+    if let Some(b) = boot() {
         b.kernel_reboot(reason)
     }
     loop {
@@ -235,36 +236,32 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     }
 }
 
-// =============================================================================
-// SchedulerForBoot wrappers
-// =============================================================================
+pub fn boot_request_reschedule_from_interrupt() {
+    if let Some(s) = sched() {
+        s.request_reschedule_from_interrupt();
+    }
+}
 
-sched_fn!(
-    boot_request_reschedule_from_interrupt,
-    SCHED_FOR_BOOT,
-    request_reschedule_from_interrupt()
-);
-sched_fn!(boot_get_current_task, SCHED_FOR_BOOT, get_current_task() -> *mut OpaqueTask, core::ptr::null_mut());
-sched_fn!(boot_task_terminate, SCHED_FOR_BOOT, task_terminate(task_id: u32) -> c_int, -1);
+pub fn boot_get_current_task() -> *mut OpaqueTask {
+    sched()
+        .map(|s| s.get_current_task_opaque())
+        .unwrap_or(core::ptr::null_mut())
+}
 
-// =============================================================================
-// Task Cleanup Hook
-// =============================================================================
+pub fn boot_task_terminate(task_id: u32) -> c_int {
+    sched().map(|s| s.task_terminate(task_id)).unwrap_or(-1)
+}
 
-/// Call the registered video task cleanup callback.
 pub fn video_task_cleanup(task_id: u32) {
-    if let Some(hook) = unsafe { CLEANUP_HOOK } {
+    if let Some(hook) = CLEANUP_HOOK.get() {
         hook.on_task_terminate(task_id);
         return;
     }
-    if let Some(cb) = unsafe { VIDEO_CLEANUP_FN } {
+    if let Some(cb) = VIDEO_CLEANUP.get() {
         cb(task_id);
     }
 }
 
-/// Register a cleanup callback using the legacy function pointer API.
 pub fn register_video_task_cleanup_callback(callback: fn(u32)) {
-    unsafe {
-        VIDEO_CLEANUP_FN = Some(callback);
-    }
+    VIDEO_CLEANUP.call_once(|| callback);
 }

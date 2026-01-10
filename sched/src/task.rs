@@ -2,13 +2,14 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem;
 use core::ptr;
 
+use slopos_lib::IrqMutex;
+
 use slopos_lib::cpu;
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::scheduler;
 
-// Re-export all task types and constants from abi
 pub use slopos_abi::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
@@ -23,9 +24,7 @@ use slopos_mm::mm_constants::{PROCESS_CODE_START_VA, PageFlags};
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = fn(*mut c_void);
 
-// Task::invalid(), TaskExitRecord::empty() and all types are now in abi
-
-struct TaskManager {
+struct TaskManagerInner {
     tasks: [Task; MAX_TASKS],
     num_tasks: u32,
     next_task_id: u32,
@@ -34,9 +33,14 @@ struct TaskManager {
     tasks_created: u32,
     tasks_terminated: u32,
     exit_records: [TaskExitRecord; MAX_TASKS],
+    initialized: bool,
 }
 
-impl TaskManager {
+// SAFETY: TaskManagerInner contains Task structs with raw pointers.
+// All access is serialized through the mutex.
+unsafe impl Send for TaskManagerInner {}
+
+impl TaskManagerInner {
     const fn new() -> Self {
         Self {
             tasks: [Task::invalid(); MAX_TASKS],
@@ -47,11 +51,12 @@ impl TaskManager {
             tasks_created: 0,
             tasks_terminated: 0,
             exit_records: [TaskExitRecord::empty(); MAX_TASKS],
+            initialized: false,
         }
     }
 }
 
-static mut TASK_MANAGER: TaskManager = TaskManager::new();
+static TASK_MANAGER: IrqMutex<TaskManagerInner> = IrqMutex::new(TaskManagerInner::new());
 
 use slopos_drivers::sched_bridge;
 use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
@@ -62,42 +67,56 @@ use slopos_mm::process_vm::{
 use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
 
-fn task_manager_mut() -> *mut TaskManager {
-    &raw mut TASK_MANAGER
+#[inline]
+fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {
+    let mut guard = TASK_MANAGER.lock();
+    f(&mut guard)
+}
+
+#[inline]
+fn try_with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> Option<R> {
+    let mut guard = TASK_MANAGER.lock();
+    if guard.initialized {
+        Some(f(&mut guard))
+    } else {
+        None
+    }
 }
 
 pub fn task_find_by_id(task_id: u32) -> *mut Task {
-    let mgr = unsafe { &mut *task_manager_mut() };
-    for task in mgr.tasks.iter_mut() {
-        if task.task_id == task_id {
-            return task as *mut Task;
+    with_task_manager(|mgr| {
+        for task in mgr.tasks.iter_mut() {
+            if task.task_id == task_id {
+                return task as *mut Task;
+            }
         }
-    }
-    ptr::null_mut()
-}
-
-fn find_free_task_slot() -> *mut Task {
-    let mgr = unsafe { &mut *task_manager_mut() };
-    for task in mgr.tasks.iter_mut() {
-        if task.state == TASK_STATE_INVALID {
-            return task as *mut Task;
-        }
-    }
-    ptr::null_mut()
+        ptr::null_mut()
+    })
 }
 
 fn release_task_dependents(completed_task_id: u32) {
-    let mgr = unsafe { &mut *task_manager_mut() };
-    for dependent in mgr.tasks.iter_mut() {
-        if !task_is_blocked(dependent) {
-            continue;
+    let dependents: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
+        let mut result = [None; MAX_TASKS];
+        let mut idx = 0;
+        for dependent in mgr.tasks.iter_mut() {
+            if !task_is_blocked(dependent) {
+                continue;
+            }
+            if dependent.waiting_on_task_id != completed_task_id {
+                continue;
+            }
+            dependent.waiting_on_task_id = INVALID_TASK_ID;
+            result[idx] = Some(dependent as *mut Task);
+            idx += 1;
         }
-        if dependent.waiting_on_task_id != completed_task_id {
-            continue;
-        }
-        dependent.waiting_on_task_id = INVALID_TASK_ID;
-        if scheduler::unblock_task(dependent as *mut Task) != 0 {
-            klog_info!("task_terminate: Failed to unblock dependent task");
+        result
+    });
+
+    for dep_opt in dependents.iter() {
+        if let Some(dep) = dep_opt {
+            if scheduler::unblock_task(*dep) != 0 {
+                klog_info!("task_terminate: Failed to unblock dependent task");
+            }
         }
     }
 }
@@ -116,21 +135,13 @@ fn user_entry_is_allowed(addr: u64) -> bool {
     addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
 }
 
-fn task_slot_index(task: *const Task) -> Option<usize> {
-    let mgr = task_manager_mut() as *const TaskManager;
+fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<usize> {
     if task.is_null() {
         return None;
     }
-    let start = unsafe { &(*mgr).tasks as *const Task as usize };
+    let start = mgr.tasks.as_ptr() as usize;
     let idx = (task as usize - start) / mem::size_of::<Task>();
     if idx < MAX_TASKS { Some(idx) } else { None }
-}
-
-fn clear_exit_record(task: *const Task) {
-    if let Some(idx) = task_slot_index(task) {
-        let mgr = unsafe { &mut *task_manager_mut() };
-        mgr.exit_records[idx] = TaskExitRecord::empty();
-    }
 }
 
 fn record_task_exit(
@@ -139,15 +150,16 @@ fn record_task_exit(
     fault_reason: TaskFaultReason,
     exit_code: u32,
 ) {
-    if let Some(idx) = task_slot_index(task) {
-        let mgr = unsafe { &mut *task_manager_mut() };
-        mgr.exit_records[idx] = TaskExitRecord {
-            task_id: unsafe { (*task).task_id },
-            exit_reason,
-            fault_reason,
-            exit_code,
-        };
-    }
+    with_task_manager(|mgr| {
+        if let Some(idx) = task_slot_index_inner(mgr, task) {
+            mgr.exit_records[idx] = TaskExitRecord {
+                task_id: unsafe { (*task).task_id },
+                exit_reason,
+                fault_reason,
+                exit_code,
+            };
+        }
+    });
 }
 
 fn init_task_context(task: &mut Task) {
@@ -221,19 +233,21 @@ unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     }
 }
 pub fn init_task_manager() -> c_int {
-    let mgr = unsafe { &mut *task_manager_mut() };
-    mgr.num_tasks = 0;
-    mgr.next_task_id = 1;
-    mgr.total_context_switches = 0;
-    mgr.total_yields = 0;
-    mgr.tasks_created = 0;
-    mgr.tasks_terminated = 0;
-    for task in mgr.tasks.iter_mut() {
-        *task = Task::invalid();
-    }
-    for rec in mgr.exit_records.iter_mut() {
-        *rec = TaskExitRecord::empty();
-    }
+    with_task_manager(|mgr| {
+        mgr.num_tasks = 0;
+        mgr.next_task_id = 1;
+        mgr.total_context_switches = 0;
+        mgr.total_yields = 0;
+        mgr.tasks_created = 0;
+        mgr.tasks_terminated = 0;
+        for task in mgr.tasks.iter_mut() {
+            *task = Task::invalid();
+        }
+        for rec in mgr.exit_records.iter_mut() {
+            *rec = TaskExitRecord::empty();
+        }
+        mgr.initialized = true;
+    });
     0
 }
 pub fn task_create(
@@ -257,20 +271,40 @@ pub fn task_create(
         return INVALID_TASK_ID;
     }
 
-    let mgr = unsafe { &mut *task_manager_mut() };
+    let (task, task_id) = with_task_manager(|mgr| {
+        if mgr.num_tasks >= MAX_TASKS as u32 {
+            klog_info!("task_create: Maximum tasks reached");
+            return (ptr::null_mut(), INVALID_TASK_ID);
+        }
 
-    if mgr.num_tasks >= MAX_TASKS as u32 {
-        klog_info!("task_create: Maximum tasks reached");
-        return INVALID_TASK_ID;
-    }
+        let task = {
+            let mut found = ptr::null_mut();
+            for t in mgr.tasks.iter_mut() {
+                if t.state == TASK_STATE_INVALID {
+                    found = t as *mut Task;
+                    break;
+                }
+            }
+            found
+        };
+        if task.is_null() {
+            klog_info!("task_create: No free task slots");
+            return (ptr::null_mut(), INVALID_TASK_ID);
+        }
 
-    let task = find_free_task_slot();
+        if let Some(idx) = task_slot_index_inner(mgr, task) {
+            mgr.exit_records[idx] = TaskExitRecord::empty();
+        }
+
+        let task_id = mgr.next_task_id;
+        mgr.next_task_id = task_id.wrapping_add(1);
+
+        (task, task_id)
+    });
+
     if task.is_null() {
-        klog_info!("task_create: No free task slots");
         return INVALID_TASK_ID;
     }
-
-    clear_exit_record(task);
 
     let mut process_id = INVALID_PROCESS_ID;
     let stack_base;
@@ -322,12 +356,6 @@ pub fn task_create(
         }
     }
 
-    let task_id = {
-        let next = mgr.next_task_id;
-        mgr.next_task_id = next.wrapping_add(1);
-        next
-    };
-
     let task_ref = unsafe { &mut *task };
     task_ref.task_id = task_id;
     unsafe { copy_name(&mut task_ref.name, name) };
@@ -337,7 +365,6 @@ pub fn task_create(
     task_ref.process_id = process_id;
     task_ref.stack_base = stack_base;
     task_ref.stack_size = TASK_STACK_SIZE;
-    // Align for System V ABI expectations (rsp is 16-byte aligned before CALL, 8-byte inside).
     task_ref.stack_pointer = stack_base + TASK_STACK_SIZE - 8;
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
@@ -363,11 +390,9 @@ pub fn task_create(
         let text_start = text_start as u64;
         let text_end = text_end as u64;
         if entry_addr >= text_start && entry_addr < text_end {
-            // Align to page boundaries to match map_user_sections behavior
             use slopos_lib::align_down;
             use slopos_mm::mm_constants::PAGE_SIZE_4KB;
             let text_start_aligned = align_down(text_start as usize, PAGE_SIZE_4KB as usize) as u64;
-            // Calculate offset from aligned start to match map_user_sections mapping
             let offset = entry_addr - text_start_aligned;
             task_ref.entry_point = PROCESS_CODE_START_VA + offset;
         } else {
@@ -405,8 +430,10 @@ pub fn task_create(
         }
     }
 
-    mgr.num_tasks = mgr.num_tasks.saturating_add(1);
-    mgr.tasks_created = mgr.tasks_created.saturating_add(1);
+    with_task_manager(|mgr| {
+        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
+        mgr.tasks_created = mgr.tasks_created.saturating_add(1);
+    });
 
     unsafe {
         use core::ffi::CStr;
@@ -493,35 +520,52 @@ pub fn task_terminate(task_id: u32) -> c_int {
         }
     }
 
-    let mgr = unsafe { &mut *task_manager_mut() };
-    if !is_current && mgr.num_tasks > 0 {
-        mgr.num_tasks -= 1;
-    }
-    mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
+    with_task_manager(|mgr| {
+        if !is_current && mgr.num_tasks > 0 {
+            mgr.num_tasks -= 1;
+        }
+        mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
+    });
 
     0
 }
+
 pub fn task_shutdown_all() -> c_int {
     let mut result = 0;
     let current = scheduler::scheduler_get_current_task();
-    for idx in 0..MAX_TASKS {
-        let task = unsafe { &mut (*task_manager_mut()).tasks[idx] };
-        if task.state == TASK_STATE_INVALID {
-            continue;
+
+    let tasks_to_terminate: [Option<u32>; MAX_TASKS] = with_task_manager(|mgr| {
+        let mut ids = [None; MAX_TASKS];
+        for (i, task) in mgr.tasks.iter().enumerate() {
+            if task.state == TASK_STATE_INVALID {
+                continue;
+            }
+            let task_ptr = &mgr.tasks[i] as *const Task as *mut Task;
+            if task_ptr == current {
+                continue;
+            }
+            if task.task_id == INVALID_TASK_ID {
+                continue;
+            }
+            ids[i] = Some(task.task_id);
         }
-        if (task as *mut Task) == current {
-            continue;
-        }
-        if task.task_id == INVALID_TASK_ID {
-            continue;
-        }
-        if task_terminate(task.task_id) != 0 {
-            result = -1;
+        ids
+    });
+
+    for id_opt in tasks_to_terminate.iter() {
+        if let Some(task_id) = id_opt {
+            if task_terminate(*task_id) != 0 {
+                result = -1;
+            }
         }
     }
-    unsafe { (*task_manager_mut()).num_tasks = 0 };
+
+    with_task_manager(|mgr| {
+        mgr.num_tasks = 0;
+    });
     result
 }
+
 pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     if task_info.is_null() {
         return -1;
@@ -536,18 +580,20 @@ pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     }
     0
 }
+
 pub fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_int {
     if record_out.is_null() {
         return -1;
     }
-    let mgr = unsafe { &mut *task_manager_mut() };
-    for rec in mgr.exit_records.iter() {
-        if rec.task_id == task_id {
-            unsafe { *record_out = *rec };
-            return 0;
+    with_task_manager(|mgr| {
+        for rec in mgr.exit_records.iter() {
+            if rec.task_id == task_id {
+                unsafe { *record_out = *rec };
+                return 0;
+            }
         }
-    }
-    -1
+        -1
+    })
 }
 
 fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
@@ -594,17 +640,19 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     0
 }
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
-    let mgr = unsafe { &mut *task_manager_mut() };
-    if !total_tasks.is_null() {
-        unsafe { *total_tasks = mgr.tasks_created };
-    }
-    if !active_tasks.is_null() {
-        unsafe { *active_tasks = mgr.num_tasks };
-    }
-    if !context_switches.is_null() {
-        unsafe { *context_switches = mgr.total_context_switches };
-    }
+    with_task_manager(|mgr| {
+        if !total_tasks.is_null() {
+            unsafe { *total_tasks = mgr.tasks_created };
+        }
+        if !active_tasks.is_null() {
+            unsafe { *active_tasks = mgr.num_tasks };
+        }
+        if !context_switches.is_null() {
+            unsafe { *context_switches = mgr.total_context_switches };
+        }
+    });
 }
+
 pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
     if !from.is_null() {
         unsafe {
@@ -620,18 +668,25 @@ pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64
     }
 
     if !to.is_null() && to != from {
-        unsafe { (*task_manager_mut()).total_context_switches += 1 };
+        with_task_manager(|mgr| {
+            mgr.total_context_switches += 1;
+        });
     }
 }
+
 pub fn task_record_yield(task: *mut Task) {
-    unsafe { (*task_manager_mut()).total_yields += 1 };
+    with_task_manager(|mgr| {
+        mgr.total_yields += 1;
+    });
     if !task.is_null() {
         unsafe { (*task).yield_count = (*task).yield_count.saturating_add(1) };
     }
 }
+
 pub fn task_get_total_yields() -> u64 {
-    unsafe { (*task_manager_mut()).total_yields }
+    try_with_task_manager(|mgr| mgr.total_yields).unwrap_or(0)
 }
+
 pub fn task_state_to_string(state: u8) -> *const c_char {
     match state {
         TASK_STATE_INVALID => b"invalid\0".as_ptr() as *const c_char,
@@ -642,17 +697,27 @@ pub fn task_state_to_string(state: u8) -> *const c_char {
         _ => b"unknown\0".as_ptr() as *const c_char,
     }
 }
+
 pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
     if callback.is_none() {
         return;
     }
     let cb = callback.unwrap();
-    let mgr = unsafe { &mut *task_manager_mut() };
-    for task in mgr.tasks.iter_mut() {
-        if task.state == TASK_STATE_INVALID || task.task_id == INVALID_TASK_ID {
-            continue;
+
+    let task_ptrs: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
+        let mut ptrs = [None; MAX_TASKS];
+        for (i, task) in mgr.tasks.iter_mut().enumerate() {
+            if task.state != TASK_STATE_INVALID && task.task_id != INVALID_TASK_ID {
+                ptrs[i] = Some(task as *mut Task);
+            }
         }
-        cb(task as *mut Task, context);
+        ptrs
+    });
+
+    for ptr_opt in task_ptrs.iter() {
+        if let Some(task) = ptr_opt {
+            cb(*task, context);
+        }
     }
 }
 pub fn task_get_current_id() -> u32 {

@@ -2,6 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::sched_traits::TaskRef;
 use slopos_lib::{COM1_BASE, cpu};
 use spin::Mutex;
 
@@ -141,10 +142,11 @@ fn tty_focus_queue_pop() -> *mut Task {
 }
 
 fn tty_current_task_id() -> Option<u32> {
-    let task = sched_bridge::get_current_task() as *mut Task;
-    if task.is_null() {
+    let task_ref = sched_bridge::get_current_task();
+    if task_ref.is_null() {
         return None;
     }
+    let task = task_ref.as_raw() as *mut Task;
     unsafe { Some((*task).task_id) }
 }
 
@@ -164,7 +166,8 @@ fn tty_wait_for_focus(task_id: u32) {
         return;
     }
     if sched_bridge::scheduler_is_enabled() != 0 {
-        let current = sched_bridge::get_current_task() as *mut Task;
+        let task_ref = sched_bridge::get_current_task();
+        let current = task_ref.as_raw() as *mut Task;
         if tty_focus_queue_push(current) {
             sched_bridge::block_current_task();
             return;
@@ -188,10 +191,8 @@ pub fn tty_notify_input_ready() {
 
     if !task.is_null() {
         let state = unsafe { (*task).state };
-        // Only wake tasks in valid waiting states (BLOCKED or READY)
-        // RUNNING tasks shouldn't be in the wait queue (would be a bug elsewhere)
         if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
-            sched_bridge::unblock_task(task as *mut core::ffi::c_void);
+            sched_bridge::unblock_task(TaskRef::from_raw(task as *mut _));
         }
     }
 }
@@ -202,14 +203,13 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         return 0;
     }
 
-    // Use irqsave/irqrestore to avoid re-enabling interrupts in IRQ context
     let flags = cpu::save_flags_cli();
     loop {
         let candidate = tty_focus_queue_pop();
         if candidate.is_null() {
             break;
         }
-        let _ = sched_bridge::unblock_task(candidate as *mut core::ffi::c_void);
+        let _ = sched_bridge::unblock_task(TaskRef::from_raw(candidate as *mut _));
     }
     cpu::restore_flags(flags);
     0
@@ -257,7 +257,8 @@ fn tty_block_until_input_ready() {
         return;
     }
     if sched_bridge::scheduler_is_enabled() != 0 {
-        let current = sched_bridge::get_current_task() as *mut Task;
+        let task_ref = sched_bridge::get_current_task();
+        let current = task_ref.as_raw() as *mut Task;
         if tty_wait_queue_push(current) {
             sched_bridge::block_current_task();
             return;

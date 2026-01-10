@@ -1,6 +1,9 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
 
+use slopos_lib::IrqMutex;
+use spin::Once;
+
 use slopos_drivers::{pit, sched_bridge, wl_currency};
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
@@ -13,8 +16,23 @@ use crate::task::{
     task_set_state,
 };
 
-#[repr(C)]
-pub struct Scheduler {
+const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
+const SCHED_POLICY_COOPERATIVE: u8 = 2;
+const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
+
+#[derive(Default)]
+struct ReadyQueue {
+    head: *mut Task,
+    tail: *mut Task,
+    count: u32,
+}
+
+// SAFETY: ReadyQueue contains raw pointers to Task which live in static storage.
+// Access is serialized through the SchedulerInner mutex.
+unsafe impl Send for ReadyQueue {}
+
+/// Internal scheduler state protected by a mutex.
+struct SchedulerInner {
     ready_queue: ReadyQueue,
     current_task: *mut Task,
     idle_task: *mut Task,
@@ -33,78 +51,86 @@ pub struct Scheduler {
     in_schedule: u8,
 }
 
-#[derive(Default)]
-struct ReadyQueue {
-    head: *mut Task,
-    tail: *mut Task,
-    count: u32,
+// SAFETY: SchedulerInner contains raw pointers to Task which live in static storage.
+// All access is serialized through the mutex.
+unsafe impl Send for SchedulerInner {}
+
+impl SchedulerInner {
+    const fn new() -> Self {
+        Self {
+            ready_queue: ReadyQueue {
+                head: ptr::null_mut(),
+                tail: ptr::null_mut(),
+                count: 0,
+            },
+            current_task: ptr::null_mut(),
+            idle_task: ptr::null_mut(),
+            policy: SCHED_POLICY_COOPERATIVE,
+            enabled: 0,
+            time_slice: SCHED_DEFAULT_TIME_SLICE as u16,
+            return_context: TaskContext {
+                rax: 0,
+                rbx: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                rbp: 0,
+                rsp: 0,
+                r8: 0,
+                r9: 0,
+                r10: 0,
+                r11: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rip: 0,
+                rflags: 0,
+                cs: 0,
+                ds: 0,
+                es: 0,
+                fs: 0,
+                gs: 0,
+                ss: 0,
+                cr3: 0,
+            },
+            total_switches: 0,
+            total_yields: 0,
+            idle_time: 0,
+            total_ticks: 0,
+            total_preemptions: 0,
+            schedule_calls: 0,
+            preemption_enabled: SCHEDULER_PREEMPTION_DEFAULT,
+            reschedule_pending: 0,
+            in_schedule: 0,
+        }
+    }
 }
 
-static mut SCHEDULER: Scheduler = Scheduler {
-    ready_queue: ReadyQueue {
-        head: ptr::null_mut(),
-        tail: ptr::null_mut(),
-        count: 0,
-    },
-    current_task: ptr::null_mut(),
-    idle_task: ptr::null_mut(),
-    policy: SCHED_POLICY_COOPERATIVE,
-    enabled: 0,
-    time_slice: SCHED_DEFAULT_TIME_SLICE as u16,
-    return_context: TaskContext {
-        rax: 0,
-        rbx: 0,
-        rcx: 0,
-        rdx: 0,
-        rsi: 0,
-        rdi: 0,
-        rbp: 0,
-        rsp: 0,
-        r8: 0,
-        r9: 0,
-        r10: 0,
-        r11: 0,
-        r12: 0,
-        r13: 0,
-        r14: 0,
-        r15: 0,
-        rip: 0,
-        rflags: 0,
-        cs: 0,
-        ds: 0,
-        es: 0,
-        fs: 0,
-        gs: 0,
-        ss: 0,
-        cr3: 0,
-    },
-    total_switches: 0,
-    total_yields: 0,
-    idle_time: 0,
-    total_ticks: 0,
-    total_preemptions: 0,
-    schedule_calls: 0,
-    preemption_enabled: SCHEDULER_PREEMPTION_DEFAULT,
-    reschedule_pending: 0,
-    in_schedule: 0,
-};
+static SCHEDULER: Once<IrqMutex<SchedulerInner>> = Once::new();
+static IDLE_WAKEUP_CB: Once<IrqMutex<Option<fn() -> c_int>>> = Once::new();
 
-static mut IDLE_WAKEUP_CB: Option<fn() -> c_int> = None;
+#[inline]
+fn with_scheduler<R>(f: impl FnOnce(&mut SchedulerInner) -> R) -> R {
+    let mutex = SCHEDULER.get().expect("scheduler not initialized");
+    let mut guard = mutex.lock();
+    f(&mut guard)
+}
 
-const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
-const SCHED_POLICY_COOPERATIVE: u8 = 2;
-const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
+#[inline]
+fn try_with_scheduler<R>(f: impl FnOnce(&mut SchedulerInner) -> R) -> Option<R> {
+    SCHEDULER.get().map(|mutex| {
+        let mut guard = mutex.lock();
+        f(&mut guard)
+    })
+}
 
 use slopos_mm::paging::{paging_get_kernel_directory, paging_set_current_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_mm::user_copy;
 
-// Use assembly functions from FFI boundary
 use crate::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
-
-fn scheduler_mut() -> *mut Scheduler {
-    &raw mut SCHEDULER
-}
 
 fn current_task_process_id() -> u32 {
     let task = scheduler_get_current_task();
@@ -114,104 +140,99 @@ fn current_task_process_id() -> u32 {
     unsafe { (*task).process_id }
 }
 
-fn ready_queue_init(queue: &mut ReadyQueue) {
-    queue.head = ptr::null_mut();
-    queue.tail = ptr::null_mut();
-    queue.count = 0;
-}
+impl ReadyQueue {
+    fn init(&mut self) {
+        self.head = ptr::null_mut();
+        self.tail = ptr::null_mut();
+        self.count = 0;
+    }
 
-fn ready_queue_empty(queue: &ReadyQueue) -> bool {
-    queue.count == 0
-}
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 
-fn ready_queue_contains(queue: &ReadyQueue, task: *mut Task) -> bool {
-    let mut cursor = queue.head;
-    while !cursor.is_null() {
-        if cursor == task {
-            return true;
-        }
-        unsafe {
-            cursor = (*cursor).next_ready;
-        }
-    }
-    false
-}
-
-fn ready_queue_enqueue(queue: &mut ReadyQueue, task: *mut Task) -> c_int {
-    if task.is_null() {
-        return -1;
-    }
-    if ready_queue_contains(queue, task) {
-        return 0;
-    }
-    unsafe { (*task).next_ready = ptr::null_mut() };
-    if queue.head.is_null() {
-        queue.head = task;
-        queue.tail = task;
-    } else {
-        unsafe { (*queue.tail).next_ready = task };
-        queue.tail = task;
-    }
-    queue.count += 1;
-    0
-}
-
-fn ready_queue_dequeue(queue: &mut ReadyQueue) -> *mut Task {
-    if ready_queue_empty(queue) {
-        return ptr::null_mut();
-    }
-    let task = queue.head;
-    unsafe {
-        queue.head = (*task).next_ready;
-        if queue.head.is_null() {
-            queue.tail = ptr::null_mut();
-        }
-        (*task).next_ready = ptr::null_mut();
-    }
-    queue.count -= 1;
-    task
-}
-
-fn ready_queue_remove(queue: &mut ReadyQueue, task: *mut Task) -> c_int {
-    if task.is_null() || ready_queue_empty(queue) {
-        return -1;
-    }
-    let mut prev: *mut Task = ptr::null_mut();
-    let mut cursor = queue.head;
-    while !cursor.is_null() {
-        if cursor == task {
-            if !prev.is_null() {
-                unsafe { (*prev).next_ready = (*cursor).next_ready };
-            } else {
-                queue.head = unsafe { (*cursor).next_ready };
+    fn contains(&self, task: *mut Task) -> bool {
+        let mut cursor = self.head;
+        while !cursor.is_null() {
+            if cursor == task {
+                return true;
             }
-            if queue.tail == cursor {
-                queue.tail = prev;
-            }
-            unsafe { (*cursor).next_ready = ptr::null_mut() };
-            queue.count -= 1;
+            cursor = unsafe { (*cursor).next_ready };
+        }
+        false
+    }
+
+    fn enqueue(&mut self, task: *mut Task) -> c_int {
+        if task.is_null() {
+            return -1;
+        }
+        if self.contains(task) {
             return 0;
         }
-        prev = cursor;
-        unsafe {
-            cursor = (*cursor).next_ready;
-        }
-    }
-    -1
-}
-
-fn scheduler_get_default_time_slice() -> u64 {
-    unsafe {
-        let sched = &mut *scheduler_mut();
-        if sched.time_slice != 0 {
-            sched.time_slice as u64
+        unsafe { (*task).next_ready = ptr::null_mut() };
+        if self.head.is_null() {
+            self.head = task;
+            self.tail = task;
         } else {
-            SCHED_DEFAULT_TIME_SLICE as u64
+            unsafe { (*self.tail).next_ready = task };
+            self.tail = task;
         }
+        self.count += 1;
+        0
+    }
+
+    fn dequeue(&mut self) -> *mut Task {
+        if self.is_empty() {
+            return ptr::null_mut();
+        }
+        let task = self.head;
+        unsafe {
+            self.head = (*task).next_ready;
+            if self.head.is_null() {
+                self.tail = ptr::null_mut();
+            }
+            (*task).next_ready = ptr::null_mut();
+        }
+        self.count -= 1;
+        task
+    }
+
+    fn remove(&mut self, task: *mut Task) -> c_int {
+        if task.is_null() || self.is_empty() {
+            return -1;
+        }
+        let mut prev: *mut Task = ptr::null_mut();
+        let mut cursor = self.head;
+        while !cursor.is_null() {
+            if cursor == task {
+                if !prev.is_null() {
+                    unsafe { (*prev).next_ready = (*cursor).next_ready };
+                } else {
+                    self.head = unsafe { (*cursor).next_ready };
+                }
+                if self.tail == cursor {
+                    self.tail = prev;
+                }
+                unsafe { (*cursor).next_ready = ptr::null_mut() };
+                self.count -= 1;
+                return 0;
+            }
+            prev = cursor;
+            cursor = unsafe { (*cursor).next_ready };
+        }
+        -1
     }
 }
 
-fn scheduler_reset_task_quantum(task: *mut Task) {
+fn get_default_time_slice(sched: &SchedulerInner) -> u64 {
+    if sched.time_slice != 0 {
+        sched.time_slice as u64
+    } else {
+        SCHED_DEFAULT_TIME_SLICE as u64
+    }
+}
+
+fn reset_task_quantum(sched: &SchedulerInner, task: *mut Task) {
     if task.is_null() {
         return;
     }
@@ -219,7 +240,7 @@ fn scheduler_reset_task_quantum(task: *mut Task) {
         if (*task).time_slice != 0 {
             (*task).time_slice
         } else {
-            scheduler_get_default_time_slice()
+            get_default_time_slice(sched)
         }
     };
     unsafe {
@@ -231,7 +252,6 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    let sched = unsafe { &mut *scheduler_mut() };
     if !task_is_ready(task) {
         unsafe {
             klog_info!(
@@ -242,47 +262,57 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         }
         return -1;
     }
-    if unsafe { (*task).time_slice_remaining } == 0 {
-        scheduler_reset_task_quantum(task);
-    }
-    if ready_queue_enqueue(&mut sched.ready_queue, task) != 0 {
-        klog_info!("schedule_task: ready queue full, request rejected");
-        wl_currency::award_loss();
-        return -1;
-    }
-    0
+    with_scheduler(|sched| {
+        if unsafe { (*task).time_slice_remaining } == 0 {
+            reset_task_quantum(sched, task);
+        }
+        if sched.ready_queue.enqueue(task) != 0 {
+            klog_info!("schedule_task: ready queue full, request rejected");
+            wl_currency::award_loss();
+            return -1;
+        }
+        0
+    })
 }
+
 pub fn unschedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    let sched = unsafe { &mut *scheduler_mut() };
-    ready_queue_remove(&mut sched.ready_queue, task);
-    if sched.current_task == task {
-        sched.current_task = ptr::null_mut();
-    }
-    0
+    with_scheduler(|sched| {
+        sched.ready_queue.remove(task);
+        if sched.current_task == task {
+            sched.current_task = ptr::null_mut();
+        }
+        0
+    })
 }
 
-fn select_next_task() -> *mut Task {
-    let sched = unsafe { &mut *scheduler_mut() };
-    let mut next = ready_queue_dequeue(&mut sched.ready_queue);
+fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
+    let mut next = sched.ready_queue.dequeue();
     if next.is_null() && !sched.idle_task.is_null() && !task_is_terminated(sched.idle_task) {
         next = sched.idle_task;
     }
     next
 }
 
-fn switch_to_task(new_task: *mut Task) {
+struct SwitchInfo {
+    new_task: *mut Task,
+    old_ctx_ptr: *mut TaskContext,
+    is_user_mode: bool,
+    rsp0: u64,
+}
+
+fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<SwitchInfo> {
     if new_task.is_null() {
-        return;
+        return None;
     }
-    let sched = unsafe { &mut *scheduler_mut() };
+
     let old_task = sched.current_task;
     if old_task == new_task {
         task_set_current(new_task);
-        scheduler_reset_task_quantum(new_task);
-        return;
+        reset_task_quantum(sched, new_task);
+        return None;
     }
 
     let timestamp = kdiag_timestamp();
@@ -290,13 +320,13 @@ fn switch_to_task(new_task: *mut Task) {
 
     sched.current_task = new_task;
     task_set_current(new_task);
-    scheduler_reset_task_quantum(new_task);
+    reset_task_quantum(sched, new_task);
     sched.total_switches += 1;
 
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
     unsafe {
         if !old_task.is_null() && (*old_task).context_from_user == 0 {
-            old_ctx_ptr = &mut (*old_task).context;
+            old_ctx_ptr = &raw mut (*old_task).context;
         } else if !old_task.is_null() {
             (*old_task).context_from_user = 0;
         }
@@ -314,91 +344,134 @@ fn switch_to_task(new_task: *mut Task) {
         }
     }
 
-    let _balance = wl_currency::check_balance();
-
-    unsafe {
-        if (*new_task).flags & TASK_FLAG_USER_MODE != 0 {
-            let rsp0 = if (*new_task).kernel_stack_top != 0 {
+    let is_user_mode = unsafe { (*new_task).flags & TASK_FLAG_USER_MODE != 0 };
+    let rsp0 = if is_user_mode {
+        unsafe {
+            if (*new_task).kernel_stack_top != 0 {
                 (*new_task).kernel_stack_top
             } else {
                 kernel_stack_top() as u64
-            };
-            sched_bridge::gdt_set_kernel_rsp0(rsp0);
-            context_switch_user(old_ctx_ptr, &(*new_task).context);
-        } else {
-            sched_bridge::gdt_set_kernel_rsp0(kernel_stack_top() as u64);
-            if !old_ctx_ptr.is_null() {
-                context_switch(old_ctx_ptr, &(*new_task).context);
-            } else {
-                context_switch(ptr::null_mut(), &(*new_task).context);
             }
+        }
+    } else {
+        kernel_stack_top() as u64
+    };
+
+    Some(SwitchInfo {
+        new_task,
+        old_ctx_ptr,
+        is_user_mode,
+        rsp0,
+    })
+}
+
+fn do_context_switch(info: SwitchInfo) {
+    let _balance = wl_currency::check_balance();
+
+    sched_bridge::gdt_set_kernel_rsp0(info.rsp0);
+
+    unsafe {
+        if info.is_user_mode {
+            context_switch_user(info.old_ctx_ptr, &(*info.new_task).context);
+        } else if !info.old_ctx_ptr.is_null() {
+            context_switch(info.old_ctx_ptr, &(*info.new_task).context);
+        } else {
+            context_switch(ptr::null_mut(), &(*info.new_task).context);
         }
     }
 }
 pub fn schedule() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    if sched.enabled == 0 {
-        return;
+    enum ScheduleResult {
+        Disabled,
+        NoTask,
+        IdleTerminated {
+            current_ctx: *mut TaskContext,
+            return_ctx: *const TaskContext,
+        },
+        Switch(SwitchInfo),
     }
-    sched.in_schedule = sched.in_schedule.saturating_add(1);
-    sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
-    let current = sched.current_task;
-    if !current.is_null() && current != sched.idle_task {
-        if task_is_running(current) {
-            if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
-                klog_info!("schedule: failed to mark task ready");
-            } else if ready_queue_enqueue(&mut sched.ready_queue, current) != 0 {
-                klog_info!("schedule: ready queue full when re-queuing task");
-                task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
-                scheduler_reset_task_quantum(current);
-                sched.in_schedule = sched.in_schedule.saturating_sub(1);
-                return;
-            } else {
-                scheduler_reset_task_quantum(current);
-            }
-        } else if !task_is_blocked(current) && !task_is_terminated(current) {
-            unsafe {
-                klog_info!("schedule: skipping requeue for task {}", (*current).task_id);
-            }
+    let result = with_scheduler(|sched| {
+        if sched.enabled == 0 {
+            return ScheduleResult::Disabled;
         }
-    }
+        sched.in_schedule = sched.in_schedule.saturating_add(1);
+        sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
-    let next_task = select_next_task();
-    if next_task.is_null() {
-        if !sched.idle_task.is_null() && task_is_terminated(sched.idle_task) {
-            sched.enabled = 0;
-            if !sched.current_task.is_null() {
-                sched.in_schedule = sched.in_schedule.saturating_sub(1);
-                unsafe {
-                    context_switch(&mut (*sched.current_task).context, &sched.return_context);
+        let current = sched.current_task;
+        if !current.is_null() && current != sched.idle_task {
+            if task_is_running(current) {
+                if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
+                    klog_info!("schedule: failed to mark task ready");
+                } else if sched.ready_queue.enqueue(current) != 0 {
+                    klog_info!("schedule: ready queue full when re-queuing task");
+                    task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
+                    reset_task_quantum(sched, current);
+                    sched.in_schedule = sched.in_schedule.saturating_sub(1);
+                    return ScheduleResult::NoTask;
+                } else {
+                    reset_task_quantum(sched, current);
                 }
-                return;
+            } else if !task_is_blocked(current) && !task_is_terminated(current) {
+                unsafe {
+                    klog_info!("schedule: skipping requeue for task {}", (*current).task_id);
+                }
             }
         }
-        sched.in_schedule = sched.in_schedule.saturating_sub(1);
-        return;
-    }
 
-    sched.in_schedule = sched.in_schedule.saturating_sub(1);
-    switch_to_task(next_task);
+        let next_task = select_next_task(sched);
+        if next_task.is_null() {
+            if !sched.idle_task.is_null() && task_is_terminated(sched.idle_task) {
+                sched.enabled = 0;
+                if !sched.current_task.is_null() {
+                    sched.in_schedule = sched.in_schedule.saturating_sub(1);
+                    let current_ctx = unsafe { &raw mut (*sched.current_task).context };
+                    let return_ctx = &raw const sched.return_context;
+                    return ScheduleResult::IdleTerminated {
+                        current_ctx,
+                        return_ctx,
+                    };
+                }
+            }
+            sched.in_schedule = sched.in_schedule.saturating_sub(1);
+            return ScheduleResult::NoTask;
+        }
+
+        sched.in_schedule = sched.in_schedule.saturating_sub(1);
+        match prepare_switch(sched, next_task) {
+            Some(info) => ScheduleResult::Switch(info),
+            None => ScheduleResult::NoTask,
+        }
+    });
+
+    match result {
+        ScheduleResult::Disabled | ScheduleResult::NoTask => {}
+        ScheduleResult::IdleTerminated {
+            current_ctx,
+            return_ctx,
+        } => unsafe {
+            context_switch(current_ctx, return_ctx);
+        },
+        ScheduleResult::Switch(info) => {
+            do_context_switch(info);
+        }
+    }
 }
 pub fn r#yield() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    sched.total_yields += 1;
-    if !sched.current_task.is_null() {
-        task_record_yield(sched.current_task);
-    }
+    with_scheduler(|sched| {
+        sched.total_yields += 1;
+        if !sched.current_task.is_null() {
+            task_record_yield(sched.current_task);
+        }
+    });
     schedule();
 }
 
-// C-ABI shim expected by syscall and TTY code.
 pub fn yield_() {
     r#yield();
 }
 pub fn block_current_task() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    let current = sched.current_task;
+    let current = with_scheduler(|sched| sched.current_task);
     if current.is_null() {
         return;
     }
@@ -408,9 +481,9 @@ pub fn block_current_task() {
     unschedule_task(current);
     schedule();
 }
+
 pub fn task_wait_for(task_id: u32) -> c_int {
-    let sched = unsafe { &mut *scheduler_mut() };
-    let current = sched.current_task;
+    let current = with_scheduler(|sched| sched.current_task);
     if current.is_null() {
         return -1;
     }
@@ -443,10 +516,8 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     schedule_task(task)
 }
 
-/// Implementation of scheduler_task_exit - called from FFI boundary
 pub fn scheduler_task_exit_impl() -> ! {
-    let sched = unsafe { &mut *scheduler_mut() };
-    let current = sched.current_task;
+    let current = with_scheduler(|sched| sched.current_task);
     if current.is_null() {
         klog_info!("scheduler_task_exit: No current task");
         schedule();
@@ -462,7 +533,9 @@ pub fn scheduler_task_exit_impl() -> ! {
         klog_info!("scheduler_task_exit: Failed to terminate current task");
     }
 
-    sched.current_task = ptr::null_mut();
+    with_scheduler(|sched| {
+        sched.current_task = ptr::null_mut();
+    });
     task_set_current(ptr::null_mut());
     schedule();
 
@@ -473,43 +546,51 @@ pub fn scheduler_task_exit_impl() -> ! {
 }
 
 fn idle_task_function(_: *mut c_void) {
-    let sched = unsafe { &mut *scheduler_mut() };
     loop {
-        if let Some(cb) = unsafe { IDLE_WAKEUP_CB } {
-            if cb() != 0 {
+        let cb = IDLE_WAKEUP_CB.get().and_then(|m| *m.lock());
+        if let Some(callback) = cb {
+            if callback() != 0 {
                 r#yield();
                 continue;
             }
         }
-        sched.idle_time = sched.idle_time.saturating_add(1);
-        if sched.idle_time % 1000 == 0 {
+        let should_yield = with_scheduler(|sched| {
+            sched.idle_time = sched.idle_time.saturating_add(1);
+            sched.idle_time % 1000 == 0
+        });
+        if should_yield {
             r#yield();
         }
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
+
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    unsafe {
-        IDLE_WAKEUP_CB = callback;
+    IDLE_WAKEUP_CB.call_once(|| IrqMutex::new(None));
+    if let Some(mutex) = IDLE_WAKEUP_CB.get() {
+        *mutex.lock() = callback;
     }
 }
+
 pub fn init_scheduler() -> c_int {
-    let sched = unsafe { &mut *scheduler_mut() };
-    ready_queue_init(&mut sched.ready_queue);
-    sched.current_task = ptr::null_mut();
-    sched.idle_task = ptr::null_mut();
-    sched.policy = SCHED_POLICY_COOPERATIVE;
-    sched.enabled = 0;
-    sched.time_slice = SCHED_DEFAULT_TIME_SLICE as u16;
-    sched.total_switches = 0;
-    sched.total_yields = 0;
-    sched.idle_time = 0;
-    sched.schedule_calls = 0;
-    sched.total_ticks = 0;
-    sched.total_preemptions = 0;
-    sched.preemption_enabled = SCHEDULER_PREEMPTION_DEFAULT;
-    sched.reschedule_pending = 0;
-    sched.in_schedule = 0;
+    SCHEDULER.call_once(|| IrqMutex::new(SchedulerInner::new()));
+    with_scheduler(|sched| {
+        sched.ready_queue.init();
+        sched.current_task = ptr::null_mut();
+        sched.idle_task = ptr::null_mut();
+        sched.policy = SCHED_POLICY_COOPERATIVE;
+        sched.enabled = 0;
+        sched.time_slice = SCHED_DEFAULT_TIME_SLICE as u16;
+        sched.total_switches = 0;
+        sched.total_yields = 0;
+        sched.idle_time = 0;
+        sched.schedule_calls = 0;
+        sched.total_ticks = 0;
+        sched.total_preemptions = 0;
+        sched.preemption_enabled = SCHEDULER_PREEMPTION_DEFAULT;
+        sched.reschedule_pending = 0;
+        sched.in_schedule = 0;
+    });
     user_copy::register_current_task_provider(current_task_process_id);
     0
 }
@@ -530,28 +611,44 @@ pub fn create_idle_task() -> c_int {
     if task_get_info(idle_task_id, &mut idle_task) != 0 {
         return -1;
     }
-    unsafe { (*scheduler_mut()).idle_task = idle_task };
+    with_scheduler(|sched| {
+        sched.idle_task = idle_task;
+    });
     0
 }
+
 pub fn start_scheduler() -> c_int {
-    let sched = unsafe { &mut *scheduler_mut() };
-    if sched.enabled != 0 {
+    let (already_enabled, has_ready_tasks) = with_scheduler(|sched| {
+        if sched.enabled != 0 {
+            return (true, false);
+        }
+        sched.enabled = 1;
+        unsafe { crate::ffi_boundary::init_kernel_context(&raw mut sched.return_context) };
+        let has_ready = !sched.ready_queue.is_empty();
+        (false, has_ready)
+    });
+
+    if already_enabled {
         return -1;
     }
-    sched.enabled = 1;
-    unsafe { crate::ffi_boundary::init_kernel_context(&mut sched.return_context) };
+
     scheduler_set_preemption_enabled(SCHEDULER_PREEMPTION_DEFAULT as c_int);
 
-    if !ready_queue_empty(&sched.ready_queue) {
+    if has_ready_tasks {
         schedule();
     }
 
-    if sched.current_task.is_null() && !sched.idle_task.is_null() {
-        sched.current_task = sched.idle_task;
-        task_set_current(sched.idle_task);
-        scheduler_reset_task_quantum(sched.idle_task);
+    let (current_null, idle_task) =
+        with_scheduler(|sched| (sched.current_task.is_null(), sched.idle_task));
+
+    if current_null && !idle_task.is_null() {
+        with_scheduler(|sched| {
+            sched.current_task = sched.idle_task;
+            task_set_current(sched.idle_task);
+            reset_task_quantum(sched, sched.idle_task);
+        });
         idle_task_function(ptr::null_mut());
-    } else if sched.current_task.is_null() {
+    } else if current_null {
         return -1;
     }
 
@@ -559,15 +656,20 @@ pub fn start_scheduler() -> c_int {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }
 }
+
 pub fn stop_scheduler() {
-    unsafe { (*scheduler_mut()).enabled = 0 };
+    with_scheduler(|sched| {
+        sched.enabled = 0;
+    });
 }
+
 pub fn scheduler_shutdown() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    sched.enabled = 0;
-    ready_queue_init(&mut sched.ready_queue);
-    sched.current_task = ptr::null_mut();
-    sched.idle_task = ptr::null_mut();
+    with_scheduler(|sched| {
+        sched.enabled = 0;
+        sched.ready_queue.init();
+        sched.current_task = ptr::null_mut();
+        sched.idle_task = ptr::null_mut();
+    });
 }
 pub fn get_scheduler_stats(
     context_switches: *mut u64,
@@ -575,104 +677,119 @@ pub fn get_scheduler_stats(
     ready_tasks: *mut u32,
     schedule_calls: *mut u32,
 ) {
-    let sched = unsafe { &mut *scheduler_mut() };
-    unsafe {
+    with_scheduler(|sched| {
         if !context_switches.is_null() {
-            *context_switches = sched.total_switches;
+            unsafe { *context_switches = sched.total_switches };
         }
         if !yields.is_null() {
-            *yields = sched.total_yields;
+            unsafe { *yields = sched.total_yields };
         }
         if !ready_tasks.is_null() {
-            *ready_tasks = sched.ready_queue.count;
+            unsafe { *ready_tasks = sched.ready_queue.count };
         }
         if !schedule_calls.is_null() {
-            *schedule_calls = sched.schedule_calls;
+            unsafe { *schedule_calls = sched.schedule_calls };
         }
-    }
+    });
 }
+
 pub fn scheduler_is_enabled() -> c_int {
-    unsafe { (*scheduler_mut()).enabled as c_int }
+    try_with_scheduler(|sched| sched.enabled as c_int).unwrap_or(0)
 }
+
 pub fn scheduler_get_current_task() -> *mut Task {
-    unsafe { (*scheduler_mut()).current_task }
+    try_with_scheduler(|sched| sched.current_task).unwrap_or(ptr::null_mut())
 }
+
 pub fn scheduler_set_preemption_enabled(enabled: c_int) {
-    let sched = unsafe { &mut *scheduler_mut() };
-    sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
-    if sched.preemption_enabled != 0 {
+    let preemption_enabled = with_scheduler(|sched| {
+        sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
+        if sched.preemption_enabled == 0 {
+            sched.reschedule_pending = 0;
+        }
+        sched.preemption_enabled
+    });
+    if preemption_enabled != 0 {
         pit::pit_enable_irq();
     } else {
-        sched.reschedule_pending = 0;
         pit::pit_disable_irq();
     }
 }
-pub fn scheduler_is_preemption_enabled() -> c_int {
-    unsafe { (*scheduler_mut()).preemption_enabled as c_int }
-}
-pub fn scheduler_timer_tick() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    sched.total_ticks = sched.total_ticks.saturating_add(1);
-    if sched.enabled == 0 || sched.preemption_enabled == 0 {
-        return;
-    }
 
-    let current = sched.current_task;
-    if current.is_null() {
-        return;
-    }
-    if sched.in_schedule != 0 {
-        return;
-    }
-    if current == sched.idle_task {
-        if sched.ready_queue.count > 0 {
-            sched.reschedule_pending = 1;
-        }
-        return;
-    }
-    if unsafe { (*current).flags } & TASK_FLAG_NO_PREEMPT != 0 {
-        return;
-    }
-    unsafe {
-        if (*current).time_slice_remaining > 0 {
-            (*current).time_slice_remaining -= 1;
-        }
-        if (*current).time_slice_remaining > 0 {
+pub fn scheduler_is_preemption_enabled() -> c_int {
+    try_with_scheduler(|sched| sched.preemption_enabled as c_int).unwrap_or(0)
+}
+
+pub fn scheduler_timer_tick() {
+    try_with_scheduler(|sched| {
+        sched.total_ticks = sched.total_ticks.saturating_add(1);
+        if sched.enabled == 0 || sched.preemption_enabled == 0 {
             return;
         }
-    }
-    if sched.ready_queue.count == 0 {
-        scheduler_reset_task_quantum(current);
-        return;
-    }
-    if sched.reschedule_pending == 0 {
-        sched.total_preemptions = sched.total_preemptions.saturating_add(1);
-    }
-    sched.reschedule_pending = 1;
-}
-pub fn scheduler_request_reschedule_from_interrupt() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    if sched.enabled == 0 || sched.preemption_enabled == 0 {
-        return;
-    }
-    if sched.in_schedule == 0 {
+
+        let current = sched.current_task;
+        if current.is_null() {
+            return;
+        }
+        if sched.in_schedule != 0 {
+            return;
+        }
+        if current == sched.idle_task {
+            if sched.ready_queue.count > 0 {
+                sched.reschedule_pending = 1;
+            }
+            return;
+        }
+        if unsafe { (*current).flags } & TASK_FLAG_NO_PREEMPT != 0 {
+            return;
+        }
+        unsafe {
+            if (*current).time_slice_remaining > 0 {
+                (*current).time_slice_remaining -= 1;
+            }
+            if (*current).time_slice_remaining > 0 {
+                return;
+            }
+        }
+        if sched.ready_queue.count == 0 {
+            reset_task_quantum(sched, current);
+            return;
+        }
+        if sched.reschedule_pending == 0 {
+            sched.total_preemptions = sched.total_preemptions.saturating_add(1);
+        }
         sched.reschedule_pending = 1;
-    }
+    });
+}
+
+pub fn scheduler_request_reschedule_from_interrupt() {
+    try_with_scheduler(|sched| {
+        if sched.enabled == 0 || sched.preemption_enabled == 0 {
+            return;
+        }
+        if sched.in_schedule == 0 {
+            sched.reschedule_pending = 1;
+        }
+    });
 }
 pub fn scheduler_handle_post_irq() {
-    let sched = unsafe { &mut *scheduler_mut() };
-    if sched.reschedule_pending == 0 {
-        return;
-    }
-    if sched.enabled == 0 || sched.preemption_enabled == 0 {
+    let should_schedule = try_with_scheduler(|sched| {
+        if sched.reschedule_pending == 0 {
+            return false;
+        }
+        if sched.enabled == 0 || sched.preemption_enabled == 0 {
+            sched.reschedule_pending = 0;
+            return false;
+        }
+        if sched.in_schedule != 0 {
+            return false;
+        }
         sched.reschedule_pending = 0;
-        return;
+        true
+    });
+    if should_schedule == Some(true) {
+        schedule();
     }
-    if sched.in_schedule != 0 {
-        return;
-    }
-    sched.reschedule_pending = 0;
-    schedule();
 }
 pub fn boot_step_task_manager_init() -> c_int {
     crate::task::init_task_manager()

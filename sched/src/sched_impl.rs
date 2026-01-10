@@ -1,32 +1,18 @@
-//! Scheduler trait implementations.
-//!
-//! This module implements the traits defined in `abi/sched_traits.rs`,
-//! providing the concrete implementations that get registered with the
-//! sched_bridge during initialization.
-
 use core::ffi::c_int;
-use slopos_abi::sched_traits::{
-    FateResult, OpaqueTask, SchedulerExecution, SchedulerFate, SchedulerForBoot, SchedulerState,
-    SchedulerTiming, TaskHandle,
-};
+use slopos_abi::sched_traits::{FateResult, OpaqueTask, SchedulerServices, TaskRef};
 
 use crate::fate_api;
 use crate::scheduler;
 use crate::task;
 
-/// Singleton scheduler trait implementation.
-/// All four scheduler traits are implemented on a single zero-sized struct.
 pub struct SchedImpl;
 
-/// Static instance for registration with sched_bridge.
 pub static SCHED_IMPL: SchedImpl = SchedImpl;
 
-// SAFETY: SchedImpl is a zero-sized type with no state; all methods delegate to
-// module-level functions that handle their own synchronization.
 unsafe impl Send for SchedImpl {}
 unsafe impl Sync for SchedImpl {}
 
-impl SchedulerTiming for SchedImpl {
+impl SchedulerServices for SchedImpl {
     fn timer_tick(&self) {
         scheduler::scheduler_timer_tick();
     }
@@ -38,11 +24,9 @@ impl SchedulerTiming for SchedImpl {
     fn request_reschedule_from_interrupt(&self) {
         scheduler::scheduler_request_reschedule_from_interrupt();
     }
-}
 
-impl SchedulerExecution for SchedImpl {
-    fn get_current_task(&self) -> TaskHandle {
-        scheduler::scheduler_get_current_task() as TaskHandle
+    fn get_current_task(&self) -> TaskRef {
+        TaskRef::from_raw(scheduler::scheduler_get_current_task() as *mut _)
     }
 
     fn yield_cpu(&self) {
@@ -61,16 +45,14 @@ impl SchedulerExecution for SchedImpl {
         scheduler::block_current_task();
     }
 
-    fn task_is_blocked(&self, task: TaskHandle) -> bool {
-        task::task_is_blocked(task as *const task::Task)
+    fn task_is_blocked(&self, task: TaskRef) -> bool {
+        task::task_is_blocked(task.as_raw() as *const task::Task)
     }
 
-    fn unblock_task(&self, task: TaskHandle) -> c_int {
-        scheduler::unblock_task(task as *mut task::Task)
+    fn unblock_task(&self, task: TaskRef) -> c_int {
+        scheduler::unblock_task(task.as_raw() as *mut task::Task)
     }
-}
 
-impl SchedulerState for SchedImpl {
     fn is_enabled(&self) -> c_int {
         scheduler::scheduler_is_enabled()
     }
@@ -99,9 +81,7 @@ impl SchedulerState for SchedImpl {
     fn register_idle_wakeup_callback(&self, cb: Option<fn() -> c_int>) {
         scheduler::scheduler_register_idle_wakeup_callback(cb);
     }
-}
 
-impl SchedulerFate for SchedImpl {
     fn fate_spin(&self) -> FateResult {
         fate_api::fate_spin()
     }
@@ -122,33 +102,12 @@ impl SchedulerFate for SchedImpl {
     fn fate_apply_outcome(&self, res: &FateResult, resolution: u32, award: bool) {
         fate_api::fate_apply_outcome(res as *const FateResult, resolution, award);
     }
-}
 
-/// Implementation of SchedulerForBoot - subset of scheduler for boot crate.
-impl SchedulerForBoot for SchedImpl {
-    fn request_reschedule_from_interrupt(&self) {
-        scheduler::scheduler_request_reschedule_from_interrupt();
-    }
-
-    fn get_current_task(&self) -> *mut OpaqueTask {
+    fn get_current_task_opaque(&self) -> *mut OpaqueTask {
         scheduler::scheduler_get_current_task() as *mut OpaqueTask
     }
-
-    fn task_terminate(&self, task_id: u32) -> c_int {
-        task::task_terminate(task_id)
-    }
 }
 
-/// Register all scheduler traits with the sched_bridge.
-/// Called during scheduler initialization.
 pub fn register_with_bridge() {
-    unsafe {
-        slopos_drivers::sched_bridge::register_scheduler(
-            &SCHED_IMPL,
-            &SCHED_IMPL,
-            &SCHED_IMPL,
-            &SCHED_IMPL,
-        );
-        slopos_drivers::sched_bridge::register_scheduler_for_boot(&SCHED_IMPL);
-    }
+    slopos_drivers::sched_bridge::init_scheduler(&SCHED_IMPL);
 }
