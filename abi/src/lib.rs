@@ -14,6 +14,7 @@
 pub mod addr;
 pub mod arch;
 pub mod error;
+pub mod font;
 pub mod fs;
 pub mod input;
 pub mod pixel;

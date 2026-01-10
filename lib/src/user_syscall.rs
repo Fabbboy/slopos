@@ -2,8 +2,8 @@ use core::arch::asm;
 use core::ffi::{c_char, c_int, c_void};
 use core::hint::unreachable_unchecked;
 
-use crate::user_syscall_defs::*;
-use slopos_abi::syscall::*;
+use slopos_abi::fs::{UserFsList, UserFsStat};
+use slopos_abi::syscall::{UserFbInfo, UserSysInfo, *};
 
 #[inline(always)]
 pub unsafe fn syscall_invoke(num: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
@@ -45,7 +45,7 @@ pub extern "C" fn sys_roulette() -> u64 {
 pub extern "C" fn sys_sleep_ms(ms: u64) -> i64 {
     invoke(SYSCALL_SLEEP_MS, ms, 0, 0)
 }
-pub extern "C" fn sys_fb_info(out_info: *mut user_fb_info) -> i64 {
+pub extern "C" fn sys_fb_info(out_info: *mut UserFbInfo) -> i64 {
     invoke(SYSCALL_FB_INFO, out_info as u64, 0, 0)
 }
 pub extern "C" fn sys_random_next() -> u32 {
@@ -66,7 +66,7 @@ pub extern "C" fn sys_fs_read(fd: c_int, buf: *mut c_void, len: usize) -> i64 {
 pub extern "C" fn sys_fs_write(fd: c_int, buf: *const c_void, len: usize) -> i64 {
     invoke(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64)
 }
-pub extern "C" fn sys_fs_stat(path: *const c_char, out_stat: *mut user_fs_stat) -> i64 {
+pub extern "C" fn sys_fs_stat(path: *const c_char, out_stat: *mut UserFsStat) -> i64 {
     invoke(SYSCALL_FS_STAT, path as u64, out_stat as u64, 0)
 }
 pub extern "C" fn sys_fs_mkdir(path: *const c_char) -> i64 {
@@ -75,10 +75,10 @@ pub extern "C" fn sys_fs_mkdir(path: *const c_char) -> i64 {
 pub extern "C" fn sys_fs_unlink(path: *const c_char) -> i64 {
     invoke(SYSCALL_FS_UNLINK, path as u64, 0, 0)
 }
-pub extern "C" fn sys_fs_list(path: *const c_char, list: *mut user_fs_list) -> i64 {
+pub extern "C" fn sys_fs_list(path: *const c_char, list: *mut UserFsList) -> i64 {
     invoke(SYSCALL_FS_LIST, path as u64, list as u64, 0)
 }
-pub extern "C" fn sys_sys_info(info: *mut user_sys_info) -> i64 {
+pub extern "C" fn sys_sys_info(info: *mut UserSysInfo) -> i64 {
     invoke(SYSCALL_SYS_INFO, info as u64, 0, 0)
 }
 pub extern "C" fn sys_halt() -> ! {
