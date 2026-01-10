@@ -8,6 +8,26 @@ pub struct RingBuffer<T, const N: usize> {
     count: u32,
 }
 
+impl<T: Copy, const N: usize> RingBuffer<T, N> {
+    /// Create a new ring buffer with all elements set to the given value.
+    /// This is const-compatible and can be used for static initialization.
+    #[inline(always)]
+    pub const fn new_with(value: T) -> Self {
+        Self {
+            data: [value; N],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    /// Returns the current number of elements in the buffer.
+    #[inline(always)]
+    pub const fn len(&self) -> u32 {
+        self.count
+    }
+}
+
 impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
     #[inline(always)]
     pub fn new() -> Self {

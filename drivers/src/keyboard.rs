@@ -1,4 +1,4 @@
-use slopos_lib::{cpu, klog_debug};
+use slopos_lib::{RingBuffer, cpu, klog_debug};
 
 use crate::input_event;
 use crate::irq;
@@ -7,6 +7,7 @@ use crate::sched_bridge;
 use crate::tty::tty_notify_input_ready;
 
 const KEYBOARD_BUFFER_SIZE: usize = 256;
+type KeyboardBuffer = RingBuffer<u8, KEYBOARD_BUFFER_SIZE>;
 
 #[derive(Clone, Copy)]
 struct KeyboardState {
@@ -29,28 +30,9 @@ impl KeyboardState {
     }
 }
 
-#[derive(Clone, Copy)]
-struct KeyboardBuffer {
-    data: [u8; KEYBOARD_BUFFER_SIZE],
-    head: u32,
-    tail: u32,
-    count: u32,
-}
-
-impl KeyboardBuffer {
-    const fn new() -> Self {
-        Self {
-            data: [0; KEYBOARD_BUFFER_SIZE],
-            head: 0,
-            tail: 0,
-            count: 0,
-        }
-    }
-}
-
 static mut KB_STATE: KeyboardState = KeyboardState::new();
-static mut CHAR_BUFFER: KeyboardBuffer = KeyboardBuffer::new();
-static mut SCANCODE_BUFFER: KeyboardBuffer = KeyboardBuffer::new(); // For debugging
+static mut CHAR_BUFFER: KeyboardBuffer = KeyboardBuffer::new_with(0);
+static mut SCANCODE_BUFFER: KeyboardBuffer = KeyboardBuffer::new_with(0);
 static mut EXTENDED_CODE: bool = false;
 
 const KEY_PAGE_UP: u8 = 0x80;
@@ -99,27 +81,14 @@ const SCANCODE_SHIFTED: [u8; 0x80] = [
 #[inline(always)]
 unsafe fn kb_buffer_push_overwrite(buf: *mut KeyboardBuffer, byte: u8) {
     let buf = unsafe { &mut *buf };
-    if buf.count >= KEYBOARD_BUFFER_SIZE as u32 {
-        buf.tail = (buf.tail + 1) % KEYBOARD_BUFFER_SIZE as u32;
-        buf.count = buf.count.saturating_sub(1);
-    }
-    buf.data[buf.head as usize] = byte;
-    buf.head = (buf.head + 1) % KEYBOARD_BUFFER_SIZE as u32;
-    buf.count = buf.count.saturating_add(1);
+    buf.push_overwrite(byte);
 }
 
 #[inline(always)]
 unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
     let buf = unsafe { &mut *buf };
-    let mut out = None;
-    // Use irqsave/irqrestore to avoid unexpectedly re-enabling interrupts
     let flags = cpu::save_flags_cli();
-    if buf.count > 0 {
-        let byte = buf.data[buf.tail as usize];
-        buf.tail = (buf.tail + 1) % KEYBOARD_BUFFER_SIZE as u32;
-        buf.count = buf.count.saturating_sub(1);
-        out = Some(byte);
-    }
+    let out = buf.try_pop();
     cpu::restore_flags(flags);
     out
 }
@@ -127,9 +96,8 @@ unsafe fn kb_buffer_pop(buf: *mut KeyboardBuffer) -> Option<u8> {
 #[inline(always)]
 unsafe fn kb_buffer_has_data(buf: *const KeyboardBuffer) -> bool {
     let buf = unsafe { &*buf };
-    // Use irqsave/irqrestore to avoid unexpectedly re-enabling interrupts
     let flags = cpu::save_flags_cli();
-    let has_data = buf.count > 0;
+    let has_data = !buf.is_empty();
     cpu::restore_flags(flags);
     has_data
 }
@@ -218,8 +186,8 @@ fn get_timestamp_ms() -> u64 {
 pub fn keyboard_init() {
     unsafe {
         KB_STATE = KeyboardState::new();
-        CHAR_BUFFER = KeyboardBuffer::new();
-        SCANCODE_BUFFER = KeyboardBuffer::new();
+        CHAR_BUFFER = KeyboardBuffer::new_with(0);
+        SCANCODE_BUFFER = KeyboardBuffer::new_with(0);
     }
 }
 pub fn keyboard_handle_scancode(scancode: u8) {
@@ -302,9 +270,7 @@ pub fn keyboard_has_input() -> i32 {
     let has_data = unsafe { kb_buffer_has_data(&raw const CHAR_BUFFER) };
     if has_data { 1 } else { 0 }
 }
-pub fn keyboard_buffer_pending() -> i32 {
-    unsafe { (CHAR_BUFFER.count > 0) as i32 }
-}
+
 pub fn keyboard_get_scancode() -> u8 {
     unsafe { kb_buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
 }

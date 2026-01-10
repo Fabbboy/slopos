@@ -116,29 +116,15 @@ define_syscall!(syscall_surface_frame(ctx, args, task_id) requires task_id {
     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
 });
 
-pub fn syscall_poll_frame_done(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok(0);
-    }
+define_syscall!(syscall_poll_frame_done(ctx, args, task_id) requires task_id {
     let timestamp = video_bridge::surface_poll_frame_done(task_id);
     ctx.ok(timestamp)
-}
+});
 
-pub fn syscall_buffer_age(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok(0);
-    }
+define_syscall!(syscall_buffer_age(ctx, args, task_id) requires task_id {
     let age = video_bridge::surface_get_buffer_age(task_id);
     ctx.ok(age as u64)
-}
+});
 
 define_syscall!(syscall_shm_poll_released(ctx, args) {
     let token = args.arg0_u32();
@@ -211,54 +197,24 @@ define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task
     if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
 });
 
-pub fn syscall_surface_set_role(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok((-1i64) as u64);
-    }
-    let args = ctx.args();
+define_syscall!(syscall_surface_set_role(ctx, args, task_id) requires task_id {
     let role = args.arg0 as u8;
     let result = video_bridge::surface_set_role(task_id, role);
     ctx.ok(result as u64)
-}
+});
 
-pub fn syscall_surface_set_parent(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok((-1i64) as u64);
-    }
-    let args = ctx.args();
+define_syscall!(syscall_surface_set_parent(ctx, args, task_id) requires task_id {
     let parent_task_id = args.arg0_u32();
     let result = video_bridge::surface_set_parent(task_id, parent_task_id);
     ctx.ok(result as u64)
-}
+});
 
-pub fn syscall_surface_set_rel_pos(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
-) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok((-1i64) as u64);
-    }
-    let args = ctx.args();
+define_syscall!(syscall_surface_set_rel_pos(ctx, args, task_id) requires task_id {
     let rel_x = args.arg0_i32();
     let rel_y = args.arg1_i32();
     let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
     ctx.ok(result as u64)
-}
+});
 
 pub fn syscall_surface_set_title(
     task: *mut Task,
@@ -342,17 +298,10 @@ pub fn syscall_input_poll_batch(task: *mut Task, frame: *mut InterruptFrame) -> 
     ctx.ok(count as u64)
 }
 
-pub fn syscall_input_has_events(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
-    let Some(ctx) = SyscallContext::new(task, frame) else {
-        return syscall_return_err(frame, u64::MAX);
-    };
-    let task_id = ctx.task_id().unwrap_or(0);
-    if task_id == 0 {
-        return ctx.ok(0);
-    }
+define_syscall!(syscall_input_has_events(ctx, args, task_id) requires task_id {
     let count = input_event::input_event_count(task_id);
     ctx.ok(count as u64)
-}
+});
 
 pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
