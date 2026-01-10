@@ -18,8 +18,11 @@ SlopOS currently has fragmented address translation APIs with three separate HHD
 - **User pointer type safety complete** (2026-01-10): `mm/src/user_ptr.rs` provides `UserVirtAddr`, `UserPtr<T>`, `UserBytes`, and `UserPtrError`. All user-copy APIs now use Result-based returns. No more panics from malformed user pointers.
 - **HHDM race condition fixed** (2026-01-10): `mm/src/hhdm.rs` now stores offset BEFORE setting initialized flag.
 - **MMIO overflow check added** (2026-01-10): `mm/src/mmio.rs` now uses `checked_add` for `phys + hhdm::offset()`.
+- **Shared memory typed addresses** (2026-01-10): `mm/src/shared_memory.rs` internal structures now use `PhysAddr`/`VirtAddr` instead of raw `u64`. Improves type safety for buffer tracking.
 - Remaining gaps (deferred - not type-safety issues):
   - Raw `u64` fields in `virtio_gpu.rs` (queue descriptors) and `ioapic.rs` (controller struct) are intentional for hardware/DMA compatibility. API boundaries already use `PhysAddr`.
+  - Raw `u64` in `process_vm.rs` internal structures (`VmArea`, `ProcessVm`) - extensive refactor for minimal gain; paging API boundaries already use typed addresses.
+  - Raw `u64` in `memory_reservations.rs` (`MmRegion.phys_base`) - `#[repr(C)]` struct for FFI compatibility; internal usage only.
   - `MmioAddr` type is defined but not used - may be useful for future MMIO-specific safety invariants.
 
 ---

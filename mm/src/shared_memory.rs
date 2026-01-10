@@ -103,7 +103,7 @@ pub enum ShmAccess {
 #[derive(Clone, Copy)]
 struct FreeListEntry {
     /// Starting virtual address of the free region
-    vaddr: u64,
+    vaddr: VirtAddr,
     /// Size of the free region in bytes (page-aligned)
     size: usize,
     /// Whether this entry is in use
@@ -113,7 +113,7 @@ struct FreeListEntry {
 impl FreeListEntry {
     const fn empty() -> Self {
         Self {
-            vaddr: 0,
+            vaddr: VirtAddr::NULL,
             size: 0,
             active: false,
         }
@@ -136,7 +136,7 @@ struct ShmMapping {
     /// Task/process ID that has this mapping
     task_id: u32,
     /// Virtual address in the task's address space
-    virt_addr: u64,
+    virt_addr: VirtAddr,
     /// Whether this slot is in use
     active: bool,
 }
@@ -145,7 +145,7 @@ impl ShmMapping {
     const fn empty() -> Self {
         Self {
             task_id: 0,
-            virt_addr: 0,
+            virt_addr: VirtAddr::NULL,
             active: false,
         }
     }
@@ -154,7 +154,7 @@ impl ShmMapping {
 /// A shared memory buffer with Wayland-style reference counting
 struct SharedBuffer {
     /// Physical address of the buffer (page-aligned)
-    phys_addr: u64,
+    phys_addr: PhysAddr,
     /// Size in bytes
     size: usize,
     /// Number of 4KB pages allocated
@@ -185,7 +185,7 @@ struct SharedBuffer {
 impl SharedBuffer {
     const fn empty() -> Self {
         Self {
-            phys_addr: 0,
+            phys_addr: PhysAddr::NULL,
             size: 0,
             pages: 0,
             owner_task: 0,
@@ -207,7 +207,7 @@ struct SharedBufferRegistry {
     buffers: [SharedBuffer; MAX_SHARED_BUFFERS],
     next_token: AtomicU32,
     /// Next virtual address offset for mappings (bump allocator fallback)
-    next_vaddr_offset: u64,
+    next_vaddr_offset: VirtAddr,
     /// Free list for virtual address reclamation
     free_list: [FreeListEntry; MAX_VADDR_FREE_LIST],
 }
@@ -217,7 +217,7 @@ impl SharedBufferRegistry {
         Self {
             buffers: [const { SharedBuffer::empty() }; MAX_SHARED_BUFFERS],
             next_token: AtomicU32::new(1), // Token 0 is invalid
-            next_vaddr_offset: 0,
+            next_vaddr_offset: VirtAddr::NULL,
             free_list: [const { FreeListEntry::empty() }; MAX_VADDR_FREE_LIST],
         }
     }
@@ -247,7 +247,7 @@ impl SharedBufferRegistry {
 
     /// Allocate a virtual address range for a mapping.
     /// Uses first-fit from free list, then falls back to bump allocation.
-    fn alloc_vaddr(&mut self, size: usize) -> u64 {
+    fn alloc_vaddr(&mut self, size: usize) -> VirtAddr {
         let aligned_size = align_up(size, PAGE_SIZE_4KB as usize);
 
         // First-fit search in free list
@@ -259,7 +259,7 @@ impl SharedBufferRegistry {
                 entry.active = false;
                 klog_debug!(
                     "alloc_vaddr: reused free entry vaddr={:#x} size={}",
-                    vaddr,
+                    vaddr.as_u64(),
                     aligned_size
                 );
                 return vaddr;
@@ -267,15 +267,14 @@ impl SharedBufferRegistry {
         }
 
         // Fall back to bump allocation
-        let vaddr = SHM_VADDR_BASE + self.next_vaddr_offset;
-        self.next_vaddr_offset += aligned_size as u64;
-        // Add a guard page gap between allocations
-        self.next_vaddr_offset += PAGE_SIZE_4KB;
+        let vaddr = VirtAddr::new(SHM_VADDR_BASE + self.next_vaddr_offset.as_u64());
+        self.next_vaddr_offset =
+            VirtAddr::new(self.next_vaddr_offset.as_u64() + aligned_size as u64 + PAGE_SIZE_4KB);
         vaddr
     }
 
     /// Return a virtual address range to the free list for reuse.
-    fn free_vaddr(&mut self, vaddr: u64, size: usize) {
+    fn free_vaddr(&mut self, vaddr: VirtAddr, size: usize) {
         let aligned_size = align_up(size, PAGE_SIZE_4KB as usize);
 
         // Find a free slot in the free list
@@ -286,7 +285,7 @@ impl SharedBufferRegistry {
                 entry.active = true;
                 klog_debug!(
                     "free_vaddr: added to free list vaddr={:#x} size={}",
-                    vaddr,
+                    vaddr.as_u64(),
                     aligned_size
                 );
                 return;
@@ -297,7 +296,7 @@ impl SharedBufferRegistry {
         // This is not an error - we just lose this vaddr range
         klog_debug!(
             "free_vaddr: free list full, discarding vaddr={:#x} size={}",
-            vaddr,
+            vaddr.as_u64(),
             aligned_size
         );
     }
@@ -349,7 +348,7 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
     let token = registry.next_token.fetch_add(1, Ordering::Relaxed);
 
     registry.buffers[slot] = SharedBuffer {
-        phys_addr: phys_addr.as_u64(),
+        phys_addr,
         size: aligned_size,
         pages,
         owner_task: owner_process,
@@ -400,7 +399,7 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
         for mapping in buffer.mappings.iter() {
             if mapping.active && mapping.task_id == process_id {
                 klog_debug!("shm_map: already mapped for process {}", process_id);
-                return mapping.virt_addr;
+                return mapping.virt_addr.as_u64();
             }
         }
 
@@ -435,20 +434,14 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
     };
 
     for i in 0..pages {
-        let page_vaddr = vaddr + (i as u64) * PAGE_SIZE_4KB;
-        let page_phys = phys_base + (i as u64) * PAGE_SIZE_4KB;
+        let page_vaddr = vaddr.offset((i as u64) * PAGE_SIZE_4KB);
+        let page_phys = phys_base.offset((i as u64) * PAGE_SIZE_4KB);
 
-        if map_page_4kb_in_dir(
-            page_dir,
-            VirtAddr::new(page_vaddr),
-            PhysAddr::new(page_phys),
-            map_flags,
-        ) != 0
-        {
+        if map_page_4kb_in_dir(page_dir, page_vaddr, page_phys, map_flags) != 0 {
             // Rollback on failure
             for j in 0..i {
-                let rollback_vaddr = vaddr + (j as u64) * PAGE_SIZE_4KB;
-                unmap_page_in_dir(page_dir, VirtAddr::new(rollback_vaddr));
+                let rollback_vaddr = vaddr.offset((j as u64) * PAGE_SIZE_4KB);
+                unmap_page_in_dir(page_dir, rollback_vaddr);
             }
             klog_info!("shm_map: failed to map page {} for token {}", i, token);
             return 0;
@@ -465,7 +458,7 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
     };
     buffer.mapping_count += 1;
 
-    vaddr
+    vaddr.as_u64()
 }
 
 /// Unmap a shared buffer from a process's address space.
@@ -482,10 +475,13 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         return -1;
     }
 
+    // Convert raw u64 to typed VirtAddr for comparison
+    let virt_addr_typed = VirtAddr::new(virt_addr);
+
     let mut registry = REGISTRY.lock();
 
     // First pass: find the buffer and mapping, capture size for free list
-    let mut found_info: Option<(usize, usize, usize)> = None; // (buffer_idx, mapping_idx, size)
+    let mut found_info: Option<(usize, usize, usize, VirtAddr)> = None; // (buffer_idx, mapping_idx, size, vaddr)
 
     for (buf_idx, buffer) in registry.buffers.iter().enumerate() {
         if !buffer.active {
@@ -493,8 +489,11 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         }
 
         for (map_idx, mapping) in buffer.mappings.iter().enumerate() {
-            if mapping.active && mapping.task_id == process_id && mapping.virt_addr == virt_addr {
-                found_info = Some((buf_idx, map_idx, buffer.size));
+            if mapping.active
+                && mapping.task_id == process_id
+                && mapping.virt_addr == virt_addr_typed
+            {
+                found_info = Some((buf_idx, map_idx, buffer.size, mapping.virt_addr));
                 break;
             }
         }
@@ -503,7 +502,7 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         }
     }
 
-    let (buf_idx, map_idx, buffer_size) = match found_info {
+    let (buf_idx, map_idx, buffer_size, mapping_vaddr) = match found_info {
         Some(info) => info,
         None => return -1,
     };
@@ -511,8 +510,8 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
     // Unmap all pages
     let pages = registry.buffers[buf_idx].pages;
     for i in 0..pages {
-        let page_vaddr = virt_addr + (i as u64) * PAGE_SIZE_4KB;
-        unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
+        let page_vaddr = mapping_vaddr.offset((i as u64) * PAGE_SIZE_4KB);
+        unmap_page_in_dir(page_dir, page_vaddr);
     }
 
     // Clear the mapping
@@ -521,7 +520,7 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         registry.buffers[buf_idx].mapping_count.saturating_sub(1);
 
     // Return virtual address to free list for reuse
-    registry.free_vaddr(virt_addr, buffer_size);
+    registry.free_vaddr(mapping_vaddr, buffer_size);
 
     klog_debug!(
         "shm_unmap: unmapped vaddr={:#x} for process={}, returned to free list",
@@ -561,14 +560,12 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         return -1;
     }
 
-    // Collect mapping info for free list before clearing
     let buffer_size = registry.buffers[slot].size;
     let pages = registry.buffers[slot].pages;
     let phys_addr = registry.buffers[slot].phys_addr;
 
-    // Collect virtual addresses to free (max 8 mappings per buffer)
-    let mut vaddrs_to_free: [(u64, u32); MAX_MAPPINGS_PER_BUFFER] =
-        [(0, 0); MAX_MAPPINGS_PER_BUFFER];
+    let mut vaddrs_to_free: [(VirtAddr, u32); MAX_MAPPINGS_PER_BUFFER] =
+        [(VirtAddr::NULL, 0); MAX_MAPPINGS_PER_BUFFER];
     let mut vaddr_count = 0;
 
     for mapping in registry.buffers[slot].mappings.iter() {
@@ -578,32 +575,27 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
         }
     }
 
-    // Unmap all pages from all tasks and collect vaddrs
     for i in 0..vaddr_count {
         let (vaddr, map_task_id) = vaddrs_to_free[i];
         let page_dir = process_vm_get_page_dir(map_task_id);
         if !page_dir.is_null() {
             for j in 0..pages {
-                let page_vaddr = vaddr + (j as u64) * PAGE_SIZE_4KB;
-                unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
+                let page_vaddr = vaddr.offset((j as u64) * PAGE_SIZE_4KB);
+                unmap_page_in_dir(page_dir, page_vaddr);
             }
         }
     }
 
-    // Clear all mappings
     for mapping in registry.buffers[slot].mappings.iter_mut() {
         *mapping = ShmMapping::empty();
     }
 
-    // Free physical pages
     for i in 0..pages {
-        free_page_frame(PhysAddr::new(phys_addr + (i as u64) * PAGE_SIZE_4KB));
+        free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
     }
 
-    // Clear the buffer slot
     registry.buffers[slot] = SharedBuffer::empty();
 
-    // Return all virtual addresses to free list
     for i in 0..vaddr_count {
         let (vaddr, _) = vaddrs_to_free[i];
         registry.free_vaddr(vaddr, buffer_size);
@@ -621,15 +613,15 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
 /// Get information about a shared buffer by token.
 ///
 /// # Returns
-/// (phys_addr, size, owner_task) or (0, 0, 0) if not found
-pub fn shm_get_buffer_info(token: u32) -> (u64, usize, u32) {
+/// (phys_addr, size, owner_task) or (NULL, 0, 0) if not found
+pub fn shm_get_buffer_info(token: u32) -> (PhysAddr, usize, u32) {
     let registry = REGISTRY.lock();
     match registry.find_by_token(token) {
         Some(slot) => {
             let buf = &registry.buffers[slot];
             (buf.phys_addr, buf.size, buf.owner_task)
         }
-        None => (0, 0, 0),
+        None => (PhysAddr::NULL, 0, 0),
     }
 }
 
@@ -679,7 +671,7 @@ pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c
 ///
 /// # Returns
 /// (token, width, height, phys_addr) or (0, 0, 0, NULL) if no surface
-pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, slopos_abi::addr::PhysAddr) {
+pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, PhysAddr) {
     let registry = REGISTRY.lock();
 
     for buffer in registry.buffers.iter() {
@@ -692,21 +684,21 @@ pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, slopos_abi::addr::P
                 buffer.token,
                 buffer.surface_width,
                 buffer.surface_height,
-                slopos_abi::addr::PhysAddr::new(buffer.phys_addr),
+                buffer.phys_addr,
             );
         }
     }
 
-    (0, 0, 0, slopos_abi::addr::PhysAddr::NULL)
+    (0, 0, 0, PhysAddr::NULL)
 }
 
 /// Get the physical address of a shared buffer by token.
 /// Used by FB_FLIP syscall.
-pub fn shm_get_phys_addr(token: u32) -> slopos_abi::addr::PhysAddr {
+pub fn shm_get_phys_addr(token: u32) -> PhysAddr {
     let registry = REGISTRY.lock();
     match registry.find_by_token(token) {
-        Some(slot) => slopos_abi::addr::PhysAddr::new(registry.buffers[slot].phys_addr),
-        None => slopos_abi::addr::PhysAddr::NULL,
+        Some(slot) => registry.buffers[slot].phys_addr,
+        None => PhysAddr::NULL,
     }
 }
 
@@ -724,12 +716,10 @@ pub fn shm_get_size(token: u32) -> usize {
 pub fn shm_cleanup_task(task_id: u32) {
     let mut registry = REGISTRY.lock();
 
-    // Collect vaddrs to free from this task's mappings in other buffers
-    // (max 64 buffers * 1 mapping per buffer for this task = 64 entries)
-    let mut vaddrs_from_mappings: [(u64, usize); MAX_SHARED_BUFFERS] = [(0, 0); MAX_SHARED_BUFFERS];
+    let mut vaddrs_from_mappings: [(VirtAddr, usize); MAX_SHARED_BUFFERS] =
+        [(VirtAddr::NULL, 0); MAX_SHARED_BUFFERS];
     let mut mapping_vaddr_count = 0;
 
-    // First, remove all mappings for this task from all buffers
     for buffer in registry.buffers.iter_mut() {
         if !buffer.active {
             continue;
@@ -737,21 +727,16 @@ pub fn shm_cleanup_task(task_id: u32) {
 
         for mapping in buffer.mappings.iter_mut() {
             if mapping.active && mapping.task_id == task_id {
-                // Collect vaddr for free list
                 if mapping_vaddr_count < MAX_SHARED_BUFFERS {
                     vaddrs_from_mappings[mapping_vaddr_count] = (mapping.virt_addr, buffer.size);
                     mapping_vaddr_count += 1;
                 }
-                // Note: page directory may already be torn down
-                // Just clear the mapping record
                 *mapping = ShmMapping::empty();
                 buffer.mapping_count = buffer.mapping_count.saturating_sub(1);
             }
         }
     }
 
-    // Collect info about buffers owned by this task
-    // (max 64 buffers, each with up to 8 mappings)
     let mut owned_buffer_slots: [usize; MAX_SHARED_BUFFERS] = [0; MAX_SHARED_BUFFERS];
     let mut owned_count = 0;
 
@@ -762,25 +747,23 @@ pub fn shm_cleanup_task(task_id: u32) {
         }
     }
 
-    // Collect vaddrs from owned buffers' mappings
-    let mut vaddrs_from_owned: [(u64, usize); MAX_SHARED_BUFFERS] = [(0, 0); MAX_SHARED_BUFFERS];
+    let mut vaddrs_from_owned: [(VirtAddr, usize); MAX_SHARED_BUFFERS] =
+        [(VirtAddr::NULL, 0); MAX_SHARED_BUFFERS];
     let mut owned_vaddr_count = 0;
 
-    // Destroy all buffers owned by this task
     for i in 0..owned_count {
         let slot = owned_buffer_slots[i];
         let buffer = &mut registry.buffers[slot];
         let buffer_size = buffer.size;
+        let phys_addr = buffer.phys_addr;
+        let pages = buffer.pages;
 
-        // Free physical pages
-        for j in 0..buffer.pages {
-            free_page_frame(PhysAddr::new(buffer.phys_addr + (j as u64) * PAGE_SIZE_4KB));
+        for j in 0..pages {
+            free_page_frame(phys_addr.offset((j as u64) * PAGE_SIZE_4KB));
         }
 
-        // Collect vaddrs and unmap from other tasks
         for mapping in buffer.mappings.iter_mut() {
             if mapping.active {
-                // Collect vaddr for free list
                 if owned_vaddr_count < MAX_SHARED_BUFFERS {
                     vaddrs_from_owned[owned_vaddr_count] = (mapping.virt_addr, buffer_size);
                     owned_vaddr_count += 1;
@@ -788,9 +771,9 @@ pub fn shm_cleanup_task(task_id: u32) {
 
                 let page_dir = process_vm_get_page_dir(mapping.task_id);
                 if !page_dir.is_null() {
-                    for j in 0..buffer.pages {
-                        let page_vaddr = mapping.virt_addr + (j as u64) * PAGE_SIZE_4KB;
-                        unmap_page_in_dir(page_dir, VirtAddr::new(page_vaddr));
+                    for j in 0..pages {
+                        let page_vaddr = mapping.virt_addr.offset((j as u64) * PAGE_SIZE_4KB);
+                        unmap_page_in_dir(page_dir, page_vaddr);
                     }
                 }
             }
@@ -800,7 +783,6 @@ pub fn shm_cleanup_task(task_id: u32) {
         *buffer = SharedBuffer::empty();
     }
 
-    // Return all virtual addresses to free list
     for i in 0..mapping_vaddr_count {
         let (vaddr, size) = vaddrs_from_mappings[i];
         registry.free_vaddr(vaddr, size);
@@ -971,11 +953,8 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
     let slot = match registry.find_free_slot() {
         Some(s) => s,
         None => {
-            // Free the allocated pages
             for i in 0..pages {
-                free_page_frame(PhysAddr::new(
-                    phys_addr.as_u64() + (i as u64) * PAGE_SIZE_4KB,
-                ));
+                free_page_frame(phys_addr.offset((i as u64) * PAGE_SIZE_4KB));
             }
             klog_info!("shm_create_with_format: no free slots");
             return 0;
@@ -985,7 +964,7 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
     let token = registry.next_token.fetch_add(1, Ordering::Relaxed);
 
     registry.buffers[slot] = SharedBuffer {
-        phys_addr: phys_addr.as_u64(),
+        phys_addr,
         size: aligned_size,
         pages,
         owner_task,
