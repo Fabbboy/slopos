@@ -7,70 +7,8 @@ use core::ptr;
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::wl_currency;
-use slopos_abi::arch::x86_64::pci::*;
+pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
 use slopos_abi::arch::x86_64::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct PciBarInfo {
-    pub base: u64,
-    pub size: u64,
-    pub is_io: u8,
-    pub is_64bit: u8,
-    pub prefetchable: u8,
-}
-
-impl PciBarInfo {
-    pub const fn zeroed() -> Self {
-        Self {
-            base: 0,
-            size: 0,
-            is_io: 0,
-            is_64bit: 0,
-            prefetchable: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct PciDeviceInfo {
-    pub bus: u8,
-    pub device: u8,
-    pub function: u8,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub class_code: u8,
-    pub subclass: u8,
-    pub prog_if: u8,
-    pub revision: u8,
-    pub header_type: u8,
-    pub irq_line: u8,
-    pub irq_pin: u8,
-    pub bar_count: u8,
-    pub bars: [PciBarInfo; PCI_MAX_BARS],
-}
-
-impl PciDeviceInfo {
-    pub const fn zeroed() -> Self {
-        Self {
-            bus: 0,
-            device: 0,
-            function: 0,
-            vendor_id: 0,
-            device_id: 0,
-            class_code: 0,
-            subclass: 0,
-            prog_if: 0,
-            revision: 0,
-            header_type: 0,
-            irq_line: 0,
-            irq_pin: 0,
-            bar_count: 0,
-            bars: [PciBarInfo::zeroed(); PCI_MAX_BARS],
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

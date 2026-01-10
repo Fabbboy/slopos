@@ -28,50 +28,6 @@ use slopos_drivers::{
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
-// FFI structs for reading PCI info from C pointers
-// These are used via unsafe pointer dereferencing: `unsafe { &*gpu }` in boot_step_pci_init_fn
-#[repr(C)]
-struct PciBarInfo {
-    base: u64,
-    size: u64,
-    is_io: u8,
-    is_64bit: u8,
-    prefetchable: u8,
-}
-
-#[repr(C)]
-struct PciDeviceInfo {
-    bus: u8,
-    device: u8,
-    function: u8,
-    vendor_id: u16,
-    device_id: u16,
-    class_code: u8,
-    subclass: u8,
-    prog_if: u8,
-    revision: u8,
-    header_type: u8,
-    irq_line: u8,
-    irq_pin: u8,
-    bar_count: u8,
-    bars: [PciBarInfo; 6],
-}
-
-#[repr(C)]
-struct PciGpuInfo {
-    present: i32,
-    device: PciDeviceInfo,
-    mmio_phys_base: u64,
-    mmio_region: slopos_mm::mmio::MmioRegion,
-    mmio_size: u64,
-}
-
-// Force Rust to recognize these types as used (they're used via unsafe pointer dereferencing)
-// Using size_of ensures the types are recognized as used at compile time
-const _: usize = core::mem::size_of::<PciBarInfo>()
-    + core::mem::size_of::<PciDeviceInfo>()
-    + core::mem::size_of::<PciGpuInfo>();
-
 fn serial_note(msg: &str) {
     slopos_drivers::serial::write_line(msg);
 }

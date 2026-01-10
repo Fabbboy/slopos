@@ -1,7 +1,11 @@
-//! PCI bus hardware definitions and configuration space constants.
+//! PCI bus hardware definitions, configuration space constants, and device structures.
 //!
-//! This module provides constants for PCI configuration space access,
-//! including register offsets, header types, BAR flags, and known device IDs.
+//! This module provides:
+//! - Constants for PCI configuration space access (register offsets, header types, BAR flags)
+//! - Known vendor/device IDs
+//! - Data structures for PCI device enumeration (`PciBarInfo`, `PciDeviceInfo`, `PciGpuInfo`)
+//!
+//! All PCI structures are `#[repr(C)]` for ABI stability between kernel subsystems.
 
 // =============================================================================
 // Configuration Space Register Offsets
@@ -174,3 +178,69 @@ pub const PCI_MAX_DEVICES: usize = 256;
 
 /// Maximum registered PCI drivers.
 pub const PCI_DRIVER_MAX: usize = 16;
+
+// =============================================================================
+// PCI Device Structures
+// =============================================================================
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct PciBarInfo {
+    pub base: u64,
+    pub size: u64,
+    pub is_io: u8,
+    pub is_64bit: u8,
+    pub prefetchable: u8,
+}
+
+impl PciBarInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            base: 0,
+            size: 0,
+            is_io: 0,
+            is_64bit: 0,
+            prefetchable: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct PciDeviceInfo {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class_code: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    pub revision: u8,
+    pub header_type: u8,
+    pub irq_line: u8,
+    pub irq_pin: u8,
+    pub bar_count: u8,
+    pub bars: [PciBarInfo; PCI_MAX_BARS],
+}
+
+impl PciDeviceInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            bus: 0,
+            device: 0,
+            function: 0,
+            vendor_id: 0,
+            device_id: 0,
+            class_code: 0,
+            subclass: 0,
+            prog_if: 0,
+            revision: 0,
+            header_type: 0,
+            irq_line: 0,
+            irq_pin: 0,
+            bar_count: 0,
+            bars: [PciBarInfo::zeroed(); PCI_MAX_BARS],
+        }
+    }
+}
