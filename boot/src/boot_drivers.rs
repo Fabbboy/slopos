@@ -106,8 +106,8 @@ fn boot_step_timer_setup_fn() {
         klog_info!("BOOT: WARNING - no PIT IRQs observed in 100ms window");
     }
 
-    let fb = limine_protocol::boot_info().framebuffer;
-    if fb.is_none() {
+    let boot_fb = limine_protocol::boot_info().framebuffer;
+    if boot_fb.is_none() {
         klog_info!(
             "WARNING: Limine framebuffer not available (will rely on alternative graphics initialization)"
         );
@@ -117,6 +117,7 @@ fn boot_step_timer_setup_fn() {
         klog_info!("BOOT: deferring video init until PCI for virgl");
         return;
     }
+    let fb = boot_fb.map(|bf| bf.to_legacy_info());
     video::init(fb, backend);
 }
 
@@ -181,7 +182,8 @@ fn boot_step_pci_init_fn() {
 
     let backend = boot_video_backend();
     if backend == video::VideoBackend::Virgl {
-        let fb = limine_protocol::boot_info().framebuffer;
+        let boot_fb = limine_protocol::boot_info().framebuffer;
+        let fb = boot_fb.map(|bf| bf.to_legacy_info());
         video::init(fb, backend);
     }
 }

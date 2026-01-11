@@ -1140,10 +1140,11 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     wm.set_output_info(output.bytes_pp, output.pitch);
 
     // Set pixel format based on framebuffer info
-    let pixel_format = if fb_info.pixel_format == 2 || fb_info.pixel_format == 4 {
-        PixelFormat::Bgra
-    } else {
-        PixelFormat::Rgba
+    // Argb8888=0, Xrgb8888=1, Bgra8888=5 are BGR memory order
+    // Rgb888=2, Bgr888=3, Rgba8888=4 are RGB memory order
+    let pixel_format = match fb_info.pixel_format {
+        0 | 1 | 5 => PixelFormat::Bgra,
+        _ => PixelFormat::Rgba,
     };
 
     // 60Hz fixed refresh rate compositor loop

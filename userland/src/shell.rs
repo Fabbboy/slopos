@@ -265,6 +265,7 @@ mod scrollback {
 
 mod surface {
     use super::*;
+    use gfx::PixelFormat;
 
     struct ShellSurface {
         shm_buffer: Option<ShmBuffer>,
@@ -272,6 +273,7 @@ mod surface {
         height: i32,
         pitch: usize,
         bytes_pp: u8,
+        pixel_format: PixelFormat,
     }
 
     impl ShellSurface {
@@ -282,18 +284,21 @@ mod surface {
                 height: 0,
                 pitch: 0,
                 bytes_pp: 4,
+                pixel_format: PixelFormat::Bgra,
             }
         }
 
         fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
             let buf = self.shm_buffer.as_mut()?;
-            DrawBuffer::new(
+            let mut draw_buf = DrawBuffer::new(
                 buf.as_mut_slice(),
                 self.width as u32,
                 self.height as u32,
                 self.pitch,
                 self.bytes_pp,
-            )
+            )?;
+            draw_buf.set_pixel_format(self.pixel_format);
+            Some(draw_buf)
         }
     }
 
@@ -305,12 +310,16 @@ mod surface {
         f(unsafe { &mut *SURFACE.get() })
     }
 
-    pub fn init(width: i32, height: i32, bpp: u8) -> bool {
+    pub fn init(width: i32, height: i32, bpp: u8, pixel_format: u8) -> bool {
         with_surface(|s| {
             s.width = width;
             s.height = height;
             s.bytes_pp = ((bpp as usize + 7) / 8) as u8;
             s.pitch = (width as usize) * (s.bytes_pp as usize);
+            s.pixel_format = match pixel_format {
+                0 | 1 | 5 => PixelFormat::Bgra,
+                _ => PixelFormat::Rgba,
+            };
 
             let buffer_size = s.pitch * (height as usize);
             let shm_buffer = match ShmBuffer::create(buffer_size) {
@@ -810,7 +819,7 @@ fn shell_console_init() {
     }
 
     // Initialize surface
-    if !surface::init(width, height, info.bpp) {
+    if !surface::init(width, height, info.bpp, info.pixel_format) {
         DISPLAY.enabled.set(false);
         return;
     }

@@ -137,14 +137,14 @@ impl DrawPixelFormat {
         }
     }
 
-    /// Convert a color from RGBA to this pixel format
+    /// Convert a color from standard format to this pixel format
     ///
-    /// Input color is 0xRRGGBB format (RGB in bits 0-23, alpha implicit 0xFF)
+    /// Input color is 0xAARRGGBB format. BGR formats (Bgr, Bgra) match this
+    /// layout on little-endian, so no conversion needed. RGB formats need swap.
     #[inline]
     pub fn convert_color(self, color: u32) -> u32 {
         match self {
-            Self::Bgr | Self::Bgra => {
-                // Swap R and B channels
+            Self::Rgb | Self::Rgba => {
                 ((color & 0xFF0000) >> 16)
                     | (color & 0x00FF00)
                     | ((color & 0x0000FF) << 16)

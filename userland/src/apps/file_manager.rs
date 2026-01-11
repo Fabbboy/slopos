@@ -6,7 +6,7 @@
 use core::ffi::c_void;
 use core::str;
 
-use crate::gfx::{self, DrawBuffer, rgb};
+use crate::gfx::{self, DrawBuffer, PixelFormat, rgb};
 use crate::syscall::{
     InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserFsEntry, UserFsList, sys_fb_info,
     sys_fs_list, sys_input_poll_batch, sys_surface_commit, sys_surface_set_title, sys_yield,
@@ -26,6 +26,7 @@ pub struct FileManager {
     height: i32,
     pitch: usize,
     bytes_pp: u8,
+    pixel_format: PixelFormat,
     needs_redraw: bool,
 
     // Input tracking (pointer position from motion events)
@@ -48,6 +49,7 @@ impl FileManager {
             height: FM_CONTENT_HEIGHT,
             pitch: 0,
             bytes_pp: 4,
+            pixel_format: PixelFormat::Bgra,
             needs_redraw: true,
             pointer_x: 0,
             pointer_y: 0,
@@ -63,7 +65,6 @@ impl FileManager {
 
     /// Initialize the surface buffer for rendering
     fn init_surface(&mut self) -> bool {
-        // Get framebuffer info for bpp
         let mut fb_info = UserFbInfo::default();
         if sys_fb_info(&mut fb_info) != 0 {
             return false;
@@ -71,6 +72,10 @@ impl FileManager {
 
         self.bytes_pp = ((fb_info.bpp as usize + 7) / 8) as u8;
         self.pitch = (self.width as usize) * (self.bytes_pp as usize);
+        self.pixel_format = match fb_info.pixel_format {
+            0 | 1 | 5 => PixelFormat::Bgra,
+            _ => PixelFormat::Rgba,
+        };
 
         let buffer_size = self.pitch * (self.height as usize);
         let shm = match ShmBuffer::create(buffer_size) {
@@ -92,13 +97,15 @@ impl FileManager {
     /// Get a DrawBuffer for rendering
     fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
         let shm = self.shm_buffer.as_mut()?;
-        DrawBuffer::new(
+        let mut buf = DrawBuffer::new(
             shm.as_mut_slice(),
             self.width as u32,
             self.height as u32,
             self.pitch,
             self.bytes_pp,
-        )
+        )?;
+        buf.set_pixel_format(self.pixel_format);
+        Some(buf)
     }
 
     /// Reload directory listing

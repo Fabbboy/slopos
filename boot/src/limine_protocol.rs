@@ -372,6 +372,8 @@ static KERNEL_ADDRESS_REQUEST: LimineKernelAddressRequest = LimineKernelAddressR
 #[unsafe(link_section = ".limine_requests_end_marker")]
 static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 
+use slopos_abi::DisplayInfo;
+
 pub type FramebufferInfo = slopos_lib::FramebufferInfo;
 
 #[derive(Clone, Copy, Debug)]
@@ -382,10 +384,28 @@ pub struct MemmapEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct BootFramebuffer {
+    pub address: *mut u8,
+    pub info: DisplayInfo,
+}
+
+impl BootFramebuffer {
+    pub fn to_legacy_info(&self) -> FramebufferInfo {
+        FramebufferInfo {
+            address: self.address,
+            width: self.info.width as u64,
+            height: self.info.height as u64,
+            pitch: self.info.pitch as u64,
+            bpp: self.info.format.bytes_per_pixel() as u16 * 8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct BootInfo {
     pub hhdm_offset: u64,
     pub cmdline: Option<&'static str>,
-    pub framebuffer: Option<FramebufferInfo>,
+    pub framebuffer: Option<BootFramebuffer>,
     pub memmap_entries: u64,
 }
 
@@ -413,7 +433,7 @@ impl SystemFlags {
 struct SystemInfo {
     total_memory: u64,
     available_memory: u64,
-    framebuffer: Option<FramebufferInfo>,
+    framebuffer: Option<BootFramebuffer>,
     hhdm_offset: u64,
     kernel_phys_base: u64,
     kernel_virt_base: u64,
@@ -579,12 +599,10 @@ pub fn init_limine_protocol() -> i32 {
         if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response.as_ref() {
             if fb_resp.framebuffer_count > 0 {
                 if let Some(fb) = (*fb_resp.framebuffers).as_ref() {
-                    info.framebuffer = Some(FramebufferInfo {
+                    let display_info = DisplayInfo::from_raw(fb.width, fb.height, fb.pitch, fb.bpp);
+                    info.framebuffer = Some(BootFramebuffer {
                         address: fb.address,
-                        width: fb.width,
-                        height: fb.height,
-                        pitch: fb.pitch,
-                        bpp: fb.bpp,
+                        info: display_info,
                     });
                     info.flags.framebuffer_available = true;
 
@@ -625,22 +643,22 @@ pub fn get_framebuffer_info(
     bpp: *mut u8,
 ) -> i32 {
     let info = sysinfo();
-    if let Some(fb) = info.framebuffer {
+    if let Some(boot_fb) = info.framebuffer {
         unsafe {
             if !addr.is_null() {
-                *addr = fb.address as u64;
+                *addr = boot_fb.address as u64;
             }
             if !width.is_null() {
-                *width = fb.width as u32;
+                *width = boot_fb.info.width;
             }
             if !height.is_null() {
-                *height = fb.height as u32;
+                *height = boot_fb.info.height;
             }
             if !pitch.is_null() {
-                *pitch = fb.pitch as u32;
+                *pitch = boot_fb.info.pitch;
             }
             if !bpp.is_null() {
-                *bpp = fb.bpp as u8;
+                *bpp = boot_fb.info.format.bytes_per_pixel() * 8;
             }
         }
         1

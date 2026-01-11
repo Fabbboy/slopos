@@ -14,6 +14,7 @@
 pub mod addr;
 pub mod arch;
 pub mod damage;
+pub mod display;
 pub mod draw;
 pub mod draw_primitives;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod window;
 
 pub use addr::*;
 pub use damage::{DamageRect, DamageTracker, MAX_DAMAGE_REGIONS};
+pub use display::DisplayInfo;
 pub use draw::{DamageTracking, DrawTarget};
 pub use error::*;
 pub use fate::FateResult;

@@ -16,7 +16,8 @@ fn boot_step_memory_init() -> i32 {
 
     let hhdm = boot_get_hhdm_offset();
     let hhdm_available = crate::limine_protocol::is_hhdm_available() != 0;
-    let framebuffer = crate::limine_protocol::boot_info().framebuffer;
+    let boot_fb = crate::limine_protocol::boot_info().framebuffer;
+    let framebuffer = boot_fb.map(|bf| bf.to_legacy_info());
 
     klog_debug!("Initializing memory management from Limine data...");
     let rc = init_memory_system(

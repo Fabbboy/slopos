@@ -1,8 +1,3 @@
-//! Graphics context and drawing operations for the kernel framebuffer.
-//!
-//! Implements `DrawTarget` from `slopos_abi` to enable use of the shared
-//! drawing primitives in `abi::draw_primitives`.
-
 use crate::framebuffer::{self, FbState};
 use slopos_abi::DrawTarget;
 use slopos_abi::draw_primitives;
@@ -21,11 +16,11 @@ impl GraphicsContext {
     }
 
     pub fn width(&self) -> u32 {
-        self.fb.width
+        self.fb.width()
     }
 
     pub fn height(&self) -> u32 {
-        self.fb.height
+        self.fb.height()
     }
 }
 
@@ -33,46 +28,39 @@ fn snapshot() -> GraphicsResult<FbState> {
     framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)
 }
 
-fn bytes_per_pixel(bpp: u8) -> u32 {
-    ((bpp as u32) + 7) / 8
-}
-
 impl DrawTarget for GraphicsContext {
     #[inline]
     fn width(&self) -> u32 {
-        self.fb.width
+        self.fb.width()
     }
 
     #[inline]
     fn height(&self) -> u32 {
-        self.fb.height
+        self.fb.height()
     }
 
     #[inline]
     fn pitch(&self) -> usize {
-        self.fb.pitch as usize
+        self.fb.pitch() as usize
     }
 
     #[inline]
     fn bytes_pp(&self) -> u8 {
-        self.fb.bpp
+        self.fb.info.bytes_per_pixel()
     }
 
     fn pixel_format(&self) -> DrawPixelFormat {
-        match self.fb.pixel_format {
-            0x02 | 0x04 => DrawPixelFormat::Bgr,
-            _ => DrawPixelFormat::Rgb,
-        }
+        DrawPixelFormat::from_pixel_format(self.fb.info.format)
     }
 
     #[inline]
     fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
-        if x < 0 || y < 0 || x >= self.fb.width as i32 || y >= self.fb.height as i32 {
+        if x < 0 || y < 0 || x >= self.fb.width() as i32 || y >= self.fb.height() as i32 {
             return;
         }
-        let bytes_pp = bytes_per_pixel(self.fb.bpp) as usize;
-        let offset = y as usize * self.fb.pitch as usize + x as usize * bytes_pp;
-        let pixel_ptr = unsafe { self.fb.base.add(offset) };
+        let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
+        let offset = y as usize * self.fb.pitch() as usize + x as usize * bytes_pp;
+        let pixel_ptr = unsafe { self.fb.base_ptr().add(offset) };
 
         unsafe {
             match bytes_pp {
@@ -90,7 +78,6 @@ impl DrawTarget for GraphicsContext {
         }
     }
 
-    /// Optimized fill_rect using row-based volatile writes.
     fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
         if w <= 0 || h <= 0 {
             return;
@@ -107,20 +94,20 @@ impl DrawTarget for GraphicsContext {
         if y1 < 0 {
             y1 = 0;
         }
-        if x2 >= self.fb.width as i32 {
-            x2 = self.fb.width as i32 - 1;
+        if x2 >= self.fb.width() as i32 {
+            x2 = self.fb.width() as i32 - 1;
         }
-        if y2 >= self.fb.height as i32 {
-            y2 = self.fb.height as i32 - 1;
+        if y2 >= self.fb.height() as i32 {
+            y2 = self.fb.height() as i32 - 1;
         }
 
         if x1 > x2 || y1 > y2 {
             return;
         }
 
-        let bytes_pp = bytes_per_pixel(self.fb.bpp) as usize;
-        let buffer = self.fb.base;
-        let pitch = self.fb.pitch as usize;
+        let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
+        let buffer = self.fb.base_ptr();
+        let pitch = self.fb.pitch() as usize;
 
         for row in y1..=y2 {
             let mut pixel_ptr =

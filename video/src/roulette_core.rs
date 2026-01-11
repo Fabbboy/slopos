@@ -985,10 +985,10 @@ fn kernel_get_size(ctx: *mut c_void, w: *mut i32, h: *mut i32) -> VideoResult {
     };
     unsafe {
         if !w.is_null() {
-            *w = fb.width as i32;
+            *w = fb.width() as i32;
         }
         if !h.is_null() {
-            *h = fb.height as i32;
+            *h = fb.height() as i32;
         }
     }
     Ok(())

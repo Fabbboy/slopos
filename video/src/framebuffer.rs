@@ -1,32 +1,54 @@
 use core::ffi::c_int;
 use core::ptr;
 
-use slopos_abi::addr::PhysAddr;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::video_traits::FramebufferInfoC;
+use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_drivers::serial_println;
 use slopos_lib::FramebufferInfo;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use spin::Mutex;
 
-const PIXEL_FORMAT_RGB: u8 = 0x01;
-const PIXEL_FORMAT_BGR: u8 = 0x02;
-const PIXEL_FORMAT_RGBA: u8 = 0x03;
-const PIXEL_FORMAT_BGRA: u8 = 0x04;
-
-const MAX_FRAMEBUFFER_WIDTH: u32 = 4096;
-const MAX_FRAMEBUFFER_HEIGHT: u32 = 4096;
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
 const MIN_FRAMEBUFFER_HEIGHT: u32 = 240;
 const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
 
 #[derive(Copy, Clone)]
 pub(crate) struct FbState {
-    pub(crate) base: *mut u8,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) pitch: u32,
-    pub(crate) bpp: u8,
-    pub(crate) pixel_format: u8,
+    pub(crate) base: VirtAddr,
+    pub(crate) info: DisplayInfo,
+}
+
+impl FbState {
+    #[inline]
+    pub(crate) fn width(&self) -> u32 {
+        self.info.width
+    }
+
+    #[inline]
+    pub(crate) fn height(&self) -> u32 {
+        self.info.height
+    }
+
+    #[inline]
+    pub(crate) fn pitch(&self) -> u32 {
+        self.info.pitch
+    }
+
+    #[inline]
+    pub(crate) fn bpp(&self) -> u8 {
+        self.info.bytes_per_pixel() * 8
+    }
+
+    #[inline]
+    pub(crate) fn base_ptr(&self) -> *mut u8 {
+        self.base.as_mut_ptr()
+    }
+
+    #[inline]
+    fn needs_bgr_swap(&self) -> bool {
+        self.info.format.is_bgr_order()
+    }
 }
 
 struct FramebufferState {
@@ -44,51 +66,28 @@ static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> =
     Mutex::new(const { FramebufferInfoC::new() });
 static FRAMEBUFFER_FLUSH: Mutex<Option<fn() -> c_int>> = Mutex::new(None);
 
-// SAFETY: FbState contains base pointer to MMIO-mapped framebuffer memory.
-// Thread-safety is guaranteed because:
-// 1. base is initialized once during boot from UEFI/Limine framebuffer info
-// 2. Only accessed through FRAMEBUFFER Mutex (single global lock serializes all access)
-// 3. MMIO address is stable for the lifetime of the kernel
-// 4. The kernel runs on a single CPU (no SMP) so no concurrent access possible
-// 5. All writes use volatile operations ensuring proper ordering
-unsafe impl Send for FbState {}
-
-// SAFETY: FramebufferState is a wrapper containing Option<FbState>.
-// Thread-safety is guaranteed because:
-// 1. Only accessed through FRAMEBUFFER static Mutex
-// 2. All FbState safety guarantees apply (see above)
-unsafe impl Send for FramebufferState {}
-
-fn determine_pixel_format(bpp: u8) -> u8 {
-    match bpp {
-        16 => PIXEL_FORMAT_RGB,
-        24 => PIXEL_FORMAT_RGB,
-        32 => PIXEL_FORMAT_RGBA,
-        _ => PIXEL_FORMAT_RGB,
-    }
-}
-
-fn bytes_per_pixel(bpp: u8) -> u32 {
-    ((bpp as u32) + 7) / 8
-}
-
 fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
-    match state.pixel_format {
-        PIXEL_FORMAT_BGR | PIXEL_FORMAT_BGRA => {
-            ((color & 0xFF0000) >> 16)
-                | (color & 0x00FF00)
-                | ((color & 0x0000FF) << 16)
-                | (color & 0xFF000000)
-        }
-        _ => color,
+    // Colors come in as 0xAARRGGBB format (standard ARGB).
+    // BGR memory order (Argb8888, Xrgb8888, Bgra8888) expects this exact format
+    // when written as a u32 on little-endian: B in low byte, R in byte 2.
+    // RGB memory order (Rgba8888, Rgb888, Bgr888) needs R and B swapped.
+    if state.needs_bgr_swap() {
+        // BGR memory order - no swap needed, format already matches
+        color
+    } else {
+        // RGB memory order - swap R and B channels
+        ((color & 0xFF0000) >> 16)
+            | (color & 0x00FF00)
+            | ((color & 0x0000FF) << 16)
+            | (color & 0xFF000000)
     }
 }
 
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
-    if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > MAX_FRAMEBUFFER_WIDTH {
+    if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > DisplayInfo::MAX_DIMENSION {
         return -1;
     }
-    if height < MIN_FRAMEBUFFER_HEIGHT || height > MAX_FRAMEBUFFER_HEIGHT {
+    if height < MIN_FRAMEBUFFER_HEIGHT || height > DisplayInfo::MAX_DIMENSION {
         return -1;
     }
     if bpp != 16 && bpp != 24 && bpp != 32 {
@@ -99,30 +98,29 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
         _ => return -1,
     };
 
-    // Translate physical addresses via HHDM, but accept already-mapped higher-half addresses.
     let mapped_base = if let Some(hhdm_base) = slopos_mm::hhdm::try_offset() {
         if addr >= hhdm_base {
-            addr
+            VirtAddr::try_new(addr).unwrap_or(VirtAddr::NULL)
         } else {
             PhysAddr::try_new(addr)
                 .and_then(|phys| phys.to_virt_checked())
-                .map(|v| v.as_u64())
-                .unwrap_or(addr)
+                .unwrap_or(VirtAddr::NULL)
         }
     } else {
         PhysAddr::try_new(addr)
             .and_then(|phys| phys.to_virt_checked())
-            .map(|v| v.as_u64())
-            .unwrap_or(addr)
+            .unwrap_or(VirtAddr::NULL)
     };
 
+    if mapped_base.is_null() {
+        return -1;
+    }
+
+    let display_info = DisplayInfo::new(width, height, pitch, PixelFormat::from_bpp(bpp));
+
     let fb_state = FbState {
-        base: mapped_base as *mut u8,
-        width,
-        height,
-        pitch,
-        bpp,
-        pixel_format: determine_pixel_format(bpp),
+        base: mapped_base,
+        info: display_info,
     };
 
     let mut guard = FRAMEBUFFER.lock();
@@ -144,11 +142,11 @@ pub fn init_with_info(info: FramebufferInfo) -> i32 {
             serial_println!(
                 "Framebuffer init: phys=0x{:x} virt=0x{:x} {}x{} pitch={} bpp={}",
                 info.address as u64,
-                fb.base as u64,
-                fb.width,
-                fb.height,
-                fb.pitch,
-                fb.bpp
+                fb.base.as_u64(),
+                fb.width(),
+                fb.height(),
+                fb.pitch(),
+                fb.bpp()
             );
         } else {
             serial_println!("Framebuffer init: state missing after init");
@@ -172,11 +170,11 @@ pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
     if let Some(fb) = guard.fb {
         *export = FramebufferInfoC {
             initialized: 1,
-            width: fb.width,
-            height: fb.height,
-            pitch: fb.pitch,
-            bpp: fb.bpp as u32,
-            pixel_format: fb.pixel_format as u32,
+            width: fb.width(),
+            height: fb.height(),
+            pitch: fb.pitch(),
+            bpp: fb.bpp() as u32,
+            pixel_format: fb.info.format as u32,
         };
     } else {
         *export = FramebufferInfoC::default();
@@ -184,23 +182,29 @@ pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
 
     &mut *export as *mut FramebufferInfoC
 }
+
+pub fn get_display_info() -> Option<DisplayInfo> {
+    FRAMEBUFFER.lock().fb.map(|fb| fb.info)
+}
+
 pub fn framebuffer_is_initialized() -> i32 {
     FRAMEBUFFER.lock().fb.is_some() as i32
 }
+
 pub fn framebuffer_clear(color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return,
     };
 
-    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let bytes_pp = fb.info.bytes_per_pixel() as usize;
     let converted = framebuffer_convert_color_internal(&fb, color);
-    let base = fb.base;
-    let pitch = fb.pitch as usize;
+    let base = fb.base_ptr();
+    let pitch = fb.pitch() as usize;
 
-    for y in 0..fb.height as usize {
+    for y in 0..fb.height() as usize {
         let row_ptr = unsafe { base.add(y * pitch) };
-        for x in 0..fb.width as usize {
+        for x in 0..fb.width() as usize {
             let pixel_ptr = unsafe { row_ptr.add(x * bytes_pp) };
             unsafe {
                 match bytes_pp {
@@ -217,20 +221,21 @@ pub fn framebuffer_clear(color: u32) {
         }
     }
 }
+
 pub fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return,
     };
 
-    if x >= fb.width || y >= fb.height {
+    if x >= fb.width() || y >= fb.height() {
         return;
     }
 
-    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
+    let bytes_pp = fb.info.bytes_per_pixel() as usize;
     let converted = framebuffer_convert_color_internal(&fb, color);
-    let offset = y as usize * fb.pitch as usize + x as usize * bytes_pp;
-    let pixel_ptr = unsafe { fb.base.add(offset) };
+    let offset = y as usize * fb.pitch() as usize + x as usize * bytes_pp;
+    let pixel_ptr = unsafe { fb.base_ptr().add(offset) };
 
     unsafe {
         match bytes_pp {
@@ -245,19 +250,20 @@ pub fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
         }
     }
 }
+
 pub fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return 0,
     };
 
-    if x >= fb.width || y >= fb.height {
+    if x >= fb.width() || y >= fb.height() {
         return 0;
     }
 
-    let bytes_pp = bytes_per_pixel(fb.bpp) as usize;
-    let offset = y as usize * fb.pitch as usize + x as usize * bytes_pp;
-    let pixel_ptr = unsafe { fb.base.add(offset) };
+    let bytes_pp = fb.info.bytes_per_pixel() as usize;
+    let offset = y as usize * fb.pitch() as usize + x as usize * bytes_pp;
+    let pixel_ptr = unsafe { fb.base_ptr().add(offset) };
 
     let mut color = 0u32;
     unsafe {
@@ -292,7 +298,7 @@ pub fn framebuffer_blit(
         Some(fb) => fb,
         None => return -1,
     };
-    let bpp = fb.bpp as usize;
+    let bpp = fb.bpp() as usize;
     if bpp == 0 {
         return -1;
     }
@@ -300,8 +306,8 @@ pub fn framebuffer_blit(
     if bytes_per_pixel == 0 {
         return -1;
     }
-    let fb_width = fb.width as i32;
-    let fb_height = fb.height as i32;
+    let fb_width = fb.width() as i32;
+    let fb_height = fb.height() as i32;
     if src_x < 0
         || src_y < 0
         || dst_x < 0
@@ -315,8 +321,8 @@ pub fn framebuffer_blit(
     }
 
     let row_bytes = width as usize * bytes_per_pixel;
-    let src_pitch = fb.pitch as usize;
-    let base = fb.base;
+    let src_pitch = fb.pitch() as usize;
+    let base = fb.base_ptr();
     if base.is_null() {
         return -1;
     }
@@ -340,21 +346,27 @@ pub fn framebuffer_blit(
     }
     0
 }
+
 pub fn framebuffer_get_width() -> u32 {
-    FRAMEBUFFER.lock().fb.map(|fb| fb.width).unwrap_or(0)
+    FRAMEBUFFER.lock().fb.map(|fb| fb.width()).unwrap_or(0)
 }
+
 pub fn framebuffer_get_height() -> u32 {
-    FRAMEBUFFER.lock().fb.map(|fb| fb.height).unwrap_or(0)
+    FRAMEBUFFER.lock().fb.map(|fb| fb.height()).unwrap_or(0)
 }
+
 pub fn framebuffer_get_bpp() -> u8 {
-    FRAMEBUFFER.lock().fb.map(|fb| fb.bpp).unwrap_or(0)
+    FRAMEBUFFER.lock().fb.map(|fb| fb.bpp()).unwrap_or(0)
 }
+
 pub fn framebuffer_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32) | ((a as u32) << 24)
 }
+
 pub fn framebuffer_rgb(r: u8, g: u8, b: u8) -> u32 {
     framebuffer_rgba(r, g, b, 0xFF)
 }
+
 pub fn framebuffer_convert_color(color: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
@@ -377,40 +389,25 @@ pub fn framebuffer_flush() -> c_int {
     if let Some(cb) = *guard { cb() } else { 0 }
 }
 
-/// Copy from a shared memory buffer (by physical address) to the MMIO framebuffer.
-/// This is the "page flip" operation for the userland compositor.
-///
-/// # Arguments
-/// * `shm_phys` - Physical address of the source shared memory buffer
-/// * `size` - Size of the buffer in bytes
-///
-/// # Returns
-/// 0 on success, -1 on failure
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
         None => return -1,
     };
 
-    // Calculate framebuffer size
-    let fb_size = (fb.pitch * fb.height) as usize;
-
-    // Ensure we don't copy more than framebuffer size
+    let fb_size = fb.info.buffer_size();
     let copy_size = size.min(fb_size);
     if copy_size == 0 {
         return -1;
     }
 
-    // Convert physical address to virtual using HHDM
     let shm_virt = match shm_phys.to_virt_checked() {
         Some(v) => v.as_u64(),
         None => return -1,
     };
 
-    // Copy from shared memory to framebuffer MMIO
-    // This is a simple memcpy for now - no page flipping hardware support
     unsafe {
-        ptr::copy_nonoverlapping(shm_virt as *const u8, fb.base, copy_size);
+        ptr::copy_nonoverlapping(shm_virt as *const u8, fb.base_ptr(), copy_size);
     }
 
     framebuffer_flush()

@@ -126,15 +126,3 @@ impl Default for WindowInfo {
         }
     }
 }
-
-/// Framebuffer information structure
-#[repr(C)]
-#[derive(Default, Copy, Clone, Debug)]
-pub struct FbInfo {
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u8,
-    pub pixel_format: u8,
-    pub _padding: [u8; 2],
-}
