@@ -1,6 +1,5 @@
-use core::sync::atomic::{AtomicPtr, Ordering};
-
 use slopos_abi::InputEvent;
+use slopos_lib::ServiceCell;
 
 #[repr(C)]
 pub struct InputServices {
@@ -15,22 +14,19 @@ pub struct InputServices {
     pub get_button_state: fn() -> u32,
 }
 
-static INPUT: AtomicPtr<InputServices> = AtomicPtr::new(core::ptr::null_mut());
+static INPUT: ServiceCell<InputServices> = ServiceCell::new("input");
 
 pub fn register_input_services(services: &'static InputServices) {
-    let prev = INPUT.swap(services as *const _ as *mut _, Ordering::Release);
-    assert!(prev.is_null(), "input services already registered");
+    INPUT.register(services);
 }
 
 pub fn is_input_initialized() -> bool {
-    !INPUT.load(Ordering::Acquire).is_null()
+    INPUT.is_initialized()
 }
 
 #[inline(always)]
 pub fn input_services() -> &'static InputServices {
-    let ptr = INPUT.load(Ordering::Acquire);
-    assert!(!ptr.is_null(), "input services not initialized");
-    unsafe { &*ptr }
+    INPUT.get()
 }
 
 #[inline(always)]

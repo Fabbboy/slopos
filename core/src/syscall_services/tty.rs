@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, Ordering};
+use slopos_lib::ServiceCell;
 
 #[repr(C)]
 pub struct TtyServices {
@@ -8,22 +8,19 @@ pub struct TtyServices {
     pub get_focus: fn() -> u32,
 }
 
-static TTY: AtomicPtr<TtyServices> = AtomicPtr::new(core::ptr::null_mut());
+static TTY: ServiceCell<TtyServices> = ServiceCell::new("tty");
 
 pub fn register_tty_services(services: &'static TtyServices) {
-    let prev = TTY.swap(services as *const _ as *mut _, Ordering::Release);
-    assert!(prev.is_null(), "tty services already registered");
+    TTY.register(services);
 }
 
 pub fn is_tty_initialized() -> bool {
-    !TTY.load(Ordering::Acquire).is_null()
+    TTY.is_initialized()
 }
 
 #[inline(always)]
 pub fn tty_services() -> &'static TtyServices {
-    let ptr = TTY.load(Ordering::Acquire);
-    assert!(!ptr.is_null(), "tty services not initialized");
-    unsafe { &*ptr }
+    TTY.get()
 }
 
 #[inline(always)]

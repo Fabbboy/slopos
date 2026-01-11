@@ -1,5 +1,6 @@
 use core::ffi::{c_char, c_int, c_void};
-use core::sync::atomic::{AtomicPtr, Ordering};
+
+use slopos_lib::ServiceCell;
 
 #[repr(C)]
 pub struct PlatformServices {
@@ -30,22 +31,19 @@ pub struct PlatformServices {
     pub irq_unmask_gsi: fn(u32) -> i32,
 }
 
-static PLATFORM: AtomicPtr<PlatformServices> = AtomicPtr::new(core::ptr::null_mut());
+static PLATFORM: ServiceCell<PlatformServices> = ServiceCell::new("platform");
 
 pub fn register_platform(services: &'static PlatformServices) {
-    let prev = PLATFORM.swap(services as *const _ as *mut _, Ordering::Release);
-    assert!(prev.is_null(), "platform already registered");
+    PLATFORM.register(services);
 }
 
 #[inline(always)]
 pub fn platform() -> &'static PlatformServices {
-    let ptr = PLATFORM.load(Ordering::Acquire);
-    assert!(!ptr.is_null(), "platform not initialized");
-    unsafe { &*ptr }
+    PLATFORM.get()
 }
 
 pub fn is_platform_initialized() -> bool {
-    !PLATFORM.load(Ordering::Acquire).is_null()
+    PLATFORM.is_initialized()
 }
 
 #[inline(always)]

@@ -183,6 +183,7 @@ pub mod math;
 pub mod memory;
 pub mod numfmt;
 pub mod ring_buffer;
+pub mod service_cell;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
@@ -198,5 +199,6 @@ pub use klog::{
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ports::COM1;
 pub use ring_buffer::RingBuffer;
+pub use service_cell::ServiceCell;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;

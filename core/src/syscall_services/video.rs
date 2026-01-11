@@ -1,16 +1,11 @@
-//! Video services for syscall handlers
-//!
-//! These callbacks are registered by drivers and called by syscall handlers in core.
-
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_abi::DisplayInfo;
 use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::video_traits::{VideoResult, video_result_from_code};
+use slopos_lib::ServiceCell;
 
-/// Video service callbacks - registered by drivers, called by syscall handlers
 #[repr(C)]
 pub struct VideoServices {
     pub get_display_info: fn() -> Option<DisplayInfo>,
@@ -34,25 +29,19 @@ pub struct VideoServices {
     pub surface_set_title: fn(u32, *const u8, usize) -> c_int,
 }
 
-static VIDEO: AtomicPtr<VideoServices> = AtomicPtr::new(core::ptr::null_mut());
+static VIDEO: ServiceCell<VideoServices> = ServiceCell::new("video");
 
-/// Register video services - called once by drivers during init
 pub fn register_video_services(services: &'static VideoServices) {
-    let prev = VIDEO.swap(services as *const _ as *mut _, Ordering::Release);
-    assert!(prev.is_null(), "video services already registered");
+    VIDEO.register(services);
 }
 
-/// Check if video services are registered
 pub fn is_video_initialized() -> bool {
-    !VIDEO.load(Ordering::Acquire).is_null()
+    VIDEO.is_initialized()
 }
 
-/// Get video services - panics if not initialized (kernel invariant)
 #[inline(always)]
 pub fn video_services() -> &'static VideoServices {
-    let ptr = VIDEO.load(Ordering::Acquire);
-    assert!(!ptr.is_null(), "video services not initialized");
-    unsafe { &*ptr }
+    VIDEO.get()
 }
 
 // =============================================================================
