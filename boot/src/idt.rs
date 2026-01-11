@@ -76,7 +76,6 @@ pub enum ExceptionMode {
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_core::irq::irq_dispatch;
 use slopos_core::syscall::syscall_handle;
-use slopos_core::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::{paging, process_vm};
@@ -439,7 +438,6 @@ fn terminate_user_task(
             (*task).exit_reason = TaskExitReason::UserFault;
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
-            wl_award_loss();
             task_terminate(tid);
             scheduler_request_reschedule_from_interrupt();
         }

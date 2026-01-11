@@ -10,7 +10,6 @@ use slopos_lib::string::cstr_to_str;
 use slopos_mm::mmio::MmioRegion;
 
 pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
-use slopos_core::wl_currency;
 
 const PCI_VENDOR_ID: u8 = PCI_VENDOR_ID_OFFSET;
 const PCI_DEVICE_ID: u8 = PCI_DEVICE_ID_OFFSET;
@@ -382,7 +381,6 @@ pub fn pci_register_driver(driver: &'static PciDriver) -> c_int {
         klog_info!("PCI: Registered driver {}", name);
         PCI_REGISTERED_DRIVERS[PCI_REGISTERED_DRIVER_COUNT] = driver;
         PCI_REGISTERED_DRIVER_COUNT += 1;
-        wl_currency::award_win();
         0
     }
 }
@@ -396,12 +394,7 @@ pub fn pci_probe_drivers() {
                 if let Some(mf) = drv.match_fn {
                     if mf(dev, drv.context) {
                         if let Some(probe) = drv.probe {
-                            let result = probe(dev, drv.context);
-                            if result == 0 {
-                                wl_currency::award_win();
-                            } else {
-                                wl_currency::award_loss();
-                            }
+                            let _ = probe(dev, drv.context);
                         }
                     }
                 }

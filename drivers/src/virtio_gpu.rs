@@ -13,7 +13,6 @@ use crate::pci::{
 use slopos_abi::arch::x86_64::pci::{
     PCI_COMMAND_BUS_MASTER, PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_OFFSET,
 };
-use slopos_core::wl_currency;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -1381,7 +1380,6 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         Some(b) => b,
         None => {
             klog_info!("PCI: virtio-gpu missing MMIO BAR");
-            wl_currency::award_loss();
             return -1;
         }
     };
@@ -1401,7 +1399,6 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
             "PCI: virtio-gpu MMIO mapping failed for phys=0x{:x}",
             bar.base
         );
-        wl_currency::award_loss();
         return -1;
     }
 
@@ -1416,13 +1413,10 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
             klog_debug!("PCI: virtio-gpu modern capability handshake ok");
         } else {
             klog_info!("PCI: virtio-gpu modern handshake failed");
-            wl_currency::award_loss();
         }
         if handshake_ok {
             if !virtio_gpu_setup_control_queue(&mut caps, &mmio_caps) {
                 klog_info!("PCI: virtio-gpu control queue setup failed");
-                // Recoverable failure: queue setup failed.
-                wl_currency::award_loss();
                 caps.supports_virgl = 0;
             }
         }
@@ -1469,7 +1463,6 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
                 "PCI: virtio-gpu handshake incomplete (status=0x{:02x})",
                 status_handshake
             );
-            wl_currency::award_loss();
             return -1;
         }
         handshake_ok = true;
@@ -1479,31 +1472,17 @@ fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
     klog_debug!("PCI: virtio-gpu MMIO sample value=0x{:08x}", sample_value);
 
     if handshake_ok {
-        klog_info!("PCI: virtio-gpu driver probe succeeded (wheel gave a W)");
+        klog_info!("PCI: virtio-gpu driver probe succeeded");
         if caps.supports_virgl != 0 {
             klog_info!("PCI: virtio-gpu reports virgl feature support");
         }
-        wl_currency::award_win();
         if caps.ctrl_queue.ready != 0 {
-            if virtio_gpu_get_display_info(&mut caps, &mmio_caps) {
-                // Successful display query earns a W for the driver path.
-                wl_currency::award_win();
-            } else {
-                // Recoverable failure: display info query failed.
-                wl_currency::award_loss();
-            }
+            let _ = virtio_gpu_get_display_info(&mut caps, &mmio_caps);
             if caps.supports_virgl != 0 {
-                if virtio_gpu_get_capset_info(&mut caps, &mmio_caps) {
-                    wl_currency::award_win();
-                } else {
-                    wl_currency::award_loss();
-                }
+                let _ = virtio_gpu_get_capset_info(&mut caps, &mmio_caps);
                 if virtio_gpu_create_context(&mut caps, &mmio_caps, 1) {
                     caps.virgl_ready = 1;
                     klog_info!("PCI: virtio-gpu virgl context ready");
-                    wl_currency::award_win();
-                } else {
-                    wl_currency::award_loss();
                 }
             }
         }
@@ -1589,7 +1568,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         let height = VIRTIO_GPU_DEVICE.display_height;
         if width == 0 || height == 0 {
             // Recoverable failure: no display geometry reported.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1597,7 +1575,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         let size = (pitch as u64).saturating_mul(height as u64);
         if size == 0 {
             // Recoverable failure: invalid framebuffer size.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1606,7 +1583,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         let phys = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
         if phys.is_null() {
             // Recoverable failure: backing store allocation failed.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1617,7 +1593,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         };
 
         let Some(mmio) = virtio_gpu_mmio_caps() else {
-            wl_currency::award_loss();
             return None;
         };
 
@@ -1625,7 +1600,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         {
             free_page_frame(phys);
             // Recoverable failure: resource creation failed.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1638,14 +1612,12 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         ) {
             free_page_frame(phys);
             // Recoverable failure: backing attach failed.
-            wl_currency::award_loss();
             return None;
         }
 
         if !virtio_gpu_set_scanout(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
             free_page_frame(phys);
             // Recoverable failure: scanout bind failed.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1664,7 +1636,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         ) {
             free_page_frame(phys);
             // Recoverable failure: initial transfer/flush failed.
-            wl_currency::award_loss();
             return None;
         }
 
@@ -1676,9 +1647,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         VIRTIO_GPU_DEVICE.fb_pitch = pitch;
         VIRTIO_GPU_DEVICE.fb_bpp = 32;
         VIRTIO_GPU_DEVICE.fb_ready = 1;
-
-        // Successful framebuffer bring-up earns a W.
-        wl_currency::award_win();
 
         Some(FramebufferInfo {
             address: phys.to_virt().as_mut_ptr::<u8>(),
@@ -1700,11 +1668,9 @@ pub fn virtio_gpu_flush_full() -> c_int {
         let resource_id = VIRTIO_GPU_DEVICE.fb_resource_id;
         if resource_id == 0 || width == 0 || height == 0 {
             // Recoverable failure: framebuffer metadata missing.
-            wl_currency::award_loss();
             return -1;
         }
         let Some(mmio) = virtio_gpu_mmio_caps() else {
-            wl_currency::award_loss();
             return -1;
         };
         if !virtio_gpu_transfer_to_host_2d(
@@ -1715,17 +1681,12 @@ pub fn virtio_gpu_flush_full() -> c_int {
             height,
         ) {
             // Recoverable failure: transfer to host failed.
-            wl_currency::award_loss();
             return -1;
         }
         if !virtio_gpu_resource_flush(&mut VIRTIO_GPU_DEVICE, &mmio, resource_id, width, height) {
-            // Recoverable failure: resource flush failed.
-            wl_currency::award_loss();
             return -1;
         }
 
-        // Successful flush earns a W.
-        wl_currency::award_win();
         0
     }
 }

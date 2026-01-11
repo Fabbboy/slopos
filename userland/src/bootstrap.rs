@@ -4,7 +4,6 @@ use slopos_lib::string::cstr_to_str;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_core::syscall::register_spawn_task_callback;
-use slopos_core::wl_currency;
 use slopos_core::{
     INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, Task,
     TaskEntry, schedule_task, task_get_info, task_set_state, task_terminate,
@@ -41,7 +40,6 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
             klog_info!("USERLAND: Failed to create task '{}'\n", task_name);
         });
-        wl_currency::award_loss();
         return -1;
     }
 
@@ -50,7 +48,6 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
             klog_info!("USERLAND: Failed to fetch task info for '{}'\n", task_name);
         });
-        wl_currency::award_loss();
         return -1;
     }
 
@@ -90,7 +87,6 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
                 task_name
             );
         });
-        wl_currency::award_loss();
         task_terminate(task_id);
         return -1;
     };
@@ -105,7 +101,6 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
                 new_entry
             );
         });
-        wl_currency::award_loss();
         task_terminate(task_id);
         return -1;
     }
@@ -124,10 +119,6 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), new_entry);
     }
 
-    // NOTE: Task is NOT scheduled here - caller must schedule explicitly.
-    // This allows boot code to block tasks before scheduling.
-
-    wl_currency::award_win();
     task_id as i32
 }
 
@@ -262,7 +253,6 @@ fn boot_step_userland_preinit() -> i32 {
         return -1;
     }
 
-    wl_currency::award_win();
     0
 }
 

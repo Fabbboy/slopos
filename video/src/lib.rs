@@ -6,7 +6,6 @@ extern crate alloc;
 use core::ffi::c_int;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
-use slopos_core::wl_currency;
 use slopos_drivers::serial_println;
 use slopos_drivers::virtio_gpu;
 use slopos_lib::FramebufferInfo;
@@ -233,25 +232,21 @@ fn try_init_virgl_backend() -> Option<FramebufferInfo> {
     let device = virtio_gpu::virtio_gpu_get_device();
     if device.is_null() {
         klog_info!("Video: virgl requested but no virtio-gpu device is present");
-        wl_currency::award_loss();
         return None;
     }
 
     if !virtio_gpu::virtio_gpu_has_modern_caps() {
         klog_info!("Video: virgl requested; virtio-gpu lacks modern capabilities");
-        wl_currency::award_loss();
         return None;
     }
 
     if !virtio_gpu::virtio_gpu_supports_virgl() {
         klog_info!("Video: virgl requested; device does not advertise virgl support");
-        wl_currency::award_loss();
         return None;
     }
 
     if !virtio_gpu::virtio_gpu_is_virgl_ready() {
         klog_info!("Video: virgl requested; virtio-gpu context not ready");
-        wl_currency::award_loss();
         return None;
     }
 
@@ -262,7 +257,6 @@ fn try_init_virgl_backend() -> Option<FramebufferInfo> {
         }
         None => {
             klog_info!("Video: virgl requested; virtio-gpu framebuffer init failed");
-            wl_currency::award_loss();
             None
         }
     }

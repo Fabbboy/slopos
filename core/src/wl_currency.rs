@@ -14,18 +14,6 @@ pub fn award_loss() {
     BALANCE.fetch_sub(10, Ordering::Relaxed);
 }
 
-pub fn wl_award_loss() {
-    award_loss();
-}
-
-pub fn wl_award_win() {
-    award_win();
-}
-
 pub fn check_balance() -> i64 {
     BALANCE.load(Ordering::Relaxed)
-}
-
-pub fn wl_check_balance() -> i64 {
-    check_balance()
 }

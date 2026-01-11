@@ -1,4 +1,3 @@
-use slopos_core::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 
@@ -30,8 +29,6 @@ fn boot_step_memory_init() -> i32 {
         klog_info!("ERROR: Memory system initialization failed");
         return -1;
     }
-
-    slopos_mm::kernel_heap::register_wl_hooks(wl_currency::award_win, wl_currency::award_loss);
 
     klog_debug!("Memory management initialized.");
     0

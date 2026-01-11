@@ -10,32 +10,6 @@ use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 
-static mut WL_WIN_HOOK: Option<fn()> = None;
-static mut WL_LOSS_HOOK: Option<fn()> = None;
-
-pub fn register_wl_hooks(win: fn(), loss: fn()) {
-    unsafe {
-        WL_WIN_HOOK = Some(win);
-        WL_LOSS_HOOK = Some(loss);
-    }
-}
-
-fn wl_award_win() {
-    unsafe {
-        if let Some(cb) = WL_WIN_HOOK {
-            cb();
-        }
-    }
-}
-
-fn wl_award_loss() {
-    unsafe {
-        if let Some(cb) = WL_LOSS_HOOK {
-            cb();
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct HeapStats {
@@ -264,7 +238,7 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
 
     if expansion_start >= heap.end_addr || expansion_start + total_bytes > heap.end_addr {
         klog_info!("expand_heap: Heap growth denied - would exceed heap window");
-        wl_award_loss();
+
         return -1;
     }
 
@@ -325,12 +299,11 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     if !heap.initialized {
         klog_info!("kmalloc: Heap not initialized");
-        wl_award_loss();
+
         return ptr::null_mut();
     }
 
     if size == 0 || size as u32 > MAX_ALLOC_SIZE {
-        wl_award_loss();
         return ptr::null_mut();
     }
 
@@ -340,7 +313,6 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     let mut block = find_free_block(&heap, total_size);
     if block.is_null() {
         if expand_heap(&mut heap, total_size) != 0 {
-            wl_award_loss();
             return ptr::null_mut();
         }
         block = find_free_block(&heap, total_size);
@@ -348,7 +320,7 @@ pub fn kmalloc(size: usize) -> *mut c_void {
 
     if block.is_null() {
         klog_info!("kmalloc: No suitable block found after expansion");
-        wl_award_loss();
+
         return ptr::null_mut();
     }
 
@@ -376,7 +348,6 @@ pub fn kmalloc(size: usize) -> *mut c_void {
         heap.stats.free_size = heap.stats.free_size.saturating_sub((*block).size as u64);
         heap.stats.allocation_count += 1;
 
-        wl_award_win();
         data_from_block(block) as *mut c_void
     }
 }
@@ -404,7 +375,7 @@ pub fn kfree(ptr_in: *mut c_void) {
     unsafe {
         if block.is_null() || !validate_block(&*block) || (*block).magic != BLOCK_MAGIC_ALLOCATED {
             klog_info!("kfree: Invalid block or double free detected");
-            wl_award_loss();
+
             return;
         }
 
@@ -416,7 +387,6 @@ pub fn kfree(ptr_in: *mut c_void) {
         heap.stats.free_count += 1;
 
         add_to_free_list(&mut heap, block);
-        wl_award_win();
     }
 }
 pub fn init_kernel_heap() -> c_int {

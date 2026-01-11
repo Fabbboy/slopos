@@ -7,7 +7,6 @@ use slopos_lib::{cpu, klog_debug, klog_info};
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::*;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
-use slopos_core::wl_currency;
 use slopos_mm::mmio::MmioRegion;
 
 /// APIC register region size (4KB page).
@@ -81,7 +80,6 @@ pub fn detect() -> bool {
 pub fn init() -> i32 {
     if !is_available() {
         klog_info!("APIC: Cannot initialize - APIC not available");
-        wl_currency::award_loss();
         return -1;
     }
 
@@ -96,17 +94,14 @@ pub fn init() -> i32 {
 
     enable();
 
-    // Mask all LVT entries to prevent spurious interrupts.
     write_register(LAPIC_LVT_TIMER, LAPIC_LVT_MASKED);
     write_register(LAPIC_LVT_LINT0, LAPIC_LVT_MASKED);
     write_register(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
     write_register(LAPIC_LVT_ERROR, LAPIC_LVT_MASKED);
     write_register(LAPIC_LVT_PERFCNT, LAPIC_LVT_MASKED);
 
-    // Route legacy PIC interrupts through LINT0 in ExtINT mode.
     write_register(LAPIC_LVT_LINT0, LAPIC_LVT_DELIVERY_MODE_EXTINT);
 
-    // Clear error status register twice per Intel SDM guidance.
     write_register(LAPIC_ESR, 0);
     write_register(LAPIC_ESR, 0);
 
@@ -118,7 +113,6 @@ pub fn init() -> i32 {
 
     APIC_ENABLED.store(true, Ordering::Relaxed);
     klog_debug!("APIC: Initialization complete");
-    wl_currency::award_win();
     0
 }
 

@@ -17,7 +17,6 @@ use crate::syscall::fs::{
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
 use crate::syscall_services::{fate as fate_svc, input, tty, video};
-use crate::wl_currency;
 use crate::{
     fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending, get_scheduler_stats,
     get_task_stats, schedule, scheduler_is_preemption_enabled, task_terminate, yield_,
@@ -91,12 +90,12 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
 define_syscall!(syscall_surface_commit(ctx, args, task_id) requires task_id {
     let rc = video::surface_commit(task_id);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_surface_frame(ctx, args, task_id) requires task_id {
     let rc = video::surface_request_frame_callback(task_id);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_poll_frame_done(ctx, args, task_id) requires task_id {
@@ -121,14 +120,14 @@ define_syscall!(syscall_surface_damage(ctx, args, task_id) requires task_id {
     let width = args.arg2_i32();
     let height = args.arg3_i32();
     let rc = video::surface_add_damage(task_id, x, y, width, height);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_shm_create(ctx, args, process_id) requires process_id {
     let size = args.arg0;
     let flags = args.arg1_u32();
     let token = slopos_mm::shared_memory::shm_create(process_id, size, flags);
-    if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
+    if token == 0 { ctx.err() } else { ctx.ok(token as u64) }
 });
 
 define_syscall!(syscall_shm_map(ctx, args, process_id) requires process_id {
@@ -136,24 +135,24 @@ define_syscall!(syscall_shm_map(ctx, args, process_id) requires process_id {
     let access_val = args.arg1_u32();
     let access = match slopos_mm::shared_memory::ShmAccess::from_u32(access_val) {
         Some(a) => a,
-        None => return ctx.err_loss(),
+        None => return ctx.err(),
     };
     let vaddr = slopos_mm::shared_memory::shm_map(process_id, token, access);
-    if vaddr == 0 { ctx.err_loss() } else { ctx.ok_win(vaddr) }
+    if vaddr == 0 { ctx.err() } else { ctx.ok(vaddr) }
 });
 
 define_syscall!(syscall_shm_unmap(ctx, args, process_id) requires process_id {
     let vaddr = args.arg0;
     let result = slopos_mm::shared_memory::shm_unmap(process_id, vaddr);
     check_result!(ctx, result);
-    ctx.ok_win(0)
+    ctx.ok(0)
 });
 
 define_syscall!(syscall_shm_destroy(ctx, args, process_id) requires process_id {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_destroy(process_id, token);
     check_result!(ctx, result);
-    ctx.ok_win(0)
+    ctx.ok(0)
 });
 
 define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires task_and_process {
@@ -164,7 +163,7 @@ define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires 
     check_result!(ctx, result);
     let video_result = video::register_surface(task_id, width, height, token);
     check_result!(ctx, video_result);
-    ctx.ok_win(0)
+    ctx.ok(0)
 });
 
 define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task_id {
@@ -172,10 +171,10 @@ define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task
     let format_val = args.arg1_u32();
     let format = match slopos_mm::shared_memory::PixelFormat::from_u32(format_val) {
         Some(f) => f,
-        None => return ctx.err_loss(),
+        None => return ctx.err(),
     };
     let token = slopos_mm::shared_memory::shm_create_with_format(task_id, size, format);
-    if token == 0 { ctx.err_loss() } else { ctx.ok_win(token as u64) }
+    if token == 0 { ctx.err() } else { ctx.ok(token as u64) }
 });
 
 define_syscall!(syscall_surface_set_role(ctx, args, task_id) requires task_id {
@@ -328,9 +327,8 @@ define_syscall!(syscall_input_get_button_state(ctx, args) requires compositor {
 define_syscall!(syscall_tty_set_focus(ctx, args) requires compositor {
     let target = args.arg0_u32();
     if tty::tty_set_focus(target) != 0 {
-        ctx.err_loss()
+        ctx.err()
     } else {
-        wl_currency::award_win();
         ctx.ok(tty::tty_get_focus() as u64)
     }
 });
@@ -339,7 +337,7 @@ define_syscall!(syscall_enumerate_windows(ctx, args) requires compositor {
     let out_buffer = args.arg0_ptr::<WindowInfo>();
     let max_count = args.arg1_u32();
     if out_buffer.is_null() || max_count == 0 {
-        return ctx.err_loss();
+        return ctx.err();
     }
     let count = video::surface_enumerate_windows(out_buffer, max_count);
     ctx.ok(count as u64)
@@ -350,20 +348,20 @@ define_syscall!(syscall_set_window_position(ctx, args) requires compositor {
     let x = args.arg1_i32();
     let y = args.arg2_i32();
     let rc = video::surface_set_window_position(target_task_id, x, y);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_set_window_state(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let state = args.arg1 as u8;
     let rc = video::surface_set_window_state(target_task_id, state);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_raise_window(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let rc = video::surface_raise_window(target_task_id);
-    if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
+    if rc < 0 { ctx.err() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
@@ -371,15 +369,15 @@ define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     let phys_addr = slopos_mm::shared_memory::shm_get_phys_addr(token);
     let size = slopos_mm::shared_memory::shm_get_size(token);
     if phys_addr.is_null() || size == 0 {
-        return ctx.err_loss();
+        return ctx.err();
     }
     let fb_info = video::framebuffer_get_info();
     if fb_info.is_null() {
-        return ctx.err_loss();
+        return ctx.err();
     }
     let result = video::fb_flip_from_shm(phys_addr, size);
     check_result!(ctx, result);
-    ctx.ok_win(0)
+    ctx.ok(0)
 });
 
 define_syscall!(syscall_drain_queue(ctx, args) requires compositor {
@@ -390,23 +388,13 @@ define_syscall!(syscall_drain_queue(ctx, args) requires compositor {
 define_syscall!(syscall_shm_acquire(ctx, args) requires compositor {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_acquire(token);
-    if result < 0 {
-        wl_currency::award_loss();
-        ctx.ok(result as u64)
-    } else {
-        ctx.ok_win(0)
-    }
+    ctx.ok(result as u64)
 });
 
 define_syscall!(syscall_shm_release(ctx, args) requires compositor {
     let token = args.arg0_u32();
     let result = slopos_mm::shared_memory::shm_release(token);
-    if result < 0 {
-        wl_currency::award_loss();
-        ctx.ok(result as u64)
-    } else {
-        ctx.ok_win(0)
-    }
+    ctx.ok(result as u64)
 });
 
 define_syscall!(syscall_mark_frames_done(ctx, args) requires compositor {
@@ -422,9 +410,9 @@ define_syscall!(syscall_roulette_draw(ctx, args) requires display_exclusive {
     let _ = paging::switch_page_directory(kernel_dir);
     let rc = video::roulette_draw(fate);
     let disp = if rc.is_ok() {
-        ctx.ok_win(0)
+        ctx.ok(0)
     } else {
-        ctx.err_loss()
+        ctx.err()
     };
     let _ = paging::switch_page_directory(original_dir);
     disp

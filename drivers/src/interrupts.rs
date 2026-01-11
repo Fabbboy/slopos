@@ -1,4 +1,4 @@
-use crate::{serial_println, wl_currency};
+use crate::serial_println;
 use slopos_lib::cpu;
 #[cfg(feature = "qemu-exit")]
 use slopos_lib::ports::QEMU_DEBUG_EXIT;
@@ -221,8 +221,7 @@ pub fn run(config: &InterruptTestConfig) -> bool {
         if config.shutdown { "on" } else { "off" }
     );
 
-    // Placeholder harness: mark success and award a win.
-    wl_currency::award_win();
+    // Placeholder harness: mark success.
     serial_println!("Interrupt tests: 13 total, 13 passed, 0 failed, timeout=0");
 
     if config.shutdown {

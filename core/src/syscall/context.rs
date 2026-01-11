@@ -1,5 +1,4 @@
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
-use crate::wl_currency;
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, Task,
 };
@@ -122,21 +121,9 @@ impl SyscallContext {
     }
 
     #[inline]
-    pub fn ok_win(&self, value: u64) -> SyscallDisposition {
-        wl_currency::award_win();
-        self.ok(value)
-    }
-
-    #[inline]
-    pub fn err_loss(&self) -> SyscallDisposition {
-        wl_currency::award_loss();
-        self.err()
-    }
-
-    #[inline]
     pub fn require_task(&self) -> Result<(), SyscallDisposition> {
         if self.task_ptr.is_null() {
-            Err(self.err_loss())
+            Err(self.err())
         } else {
             Ok(())
         }
@@ -144,21 +131,21 @@ impl SyscallContext {
 
     #[inline]
     pub fn require_task_id(&self) -> Result<u32, SyscallDisposition> {
-        self.task_id().ok_or_else(|| self.err_loss())
+        self.task_id().ok_or_else(|| self.err())
     }
 
     #[inline]
     pub fn require_process_id(&self) -> Result<u32, SyscallDisposition> {
         match self.process_id() {
             Some(pid) if pid != INVALID_PROCESS_ID => Ok(pid),
-            _ => Err(self.err_loss()),
+            _ => Err(self.err()),
         }
     }
 
     #[inline]
     pub fn require_compositor(&self) -> Result<(), SyscallDisposition> {
         if !self.is_compositor() {
-            Err(self.err_loss())
+            Err(self.err())
         } else {
             Ok(())
         }
@@ -167,7 +154,7 @@ impl SyscallContext {
     #[inline]
     pub fn require_display_exclusive(&self) -> Result<(), SyscallDisposition> {
         if !self.is_display_exclusive() {
-            Err(self.err_loss())
+            Err(self.err())
         } else {
             Ok(())
         }
@@ -175,25 +162,16 @@ impl SyscallContext {
 
     #[inline]
     pub fn check_result(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result != 0 {
-            Err(self.err_loss())
-        } else {
-            Ok(())
-        }
+        if result != 0 { Err(self.err()) } else { Ok(()) }
     }
 
     #[inline]
     pub fn check_negative(&self, result: i32) -> Result<(), SyscallDisposition> {
-        if result < 0 {
-            Err(self.err_loss())
-        } else {
-            Ok(())
-        }
+        if result < 0 { Err(self.err()) } else { Ok(()) }
     }
 
     #[inline]
     pub fn err_user_ptr(&self, _err: slopos_mm::user_ptr::UserPtrError) -> SyscallDisposition {
-        wl_currency::award_loss();
         self.err()
     }
 

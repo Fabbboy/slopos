@@ -3,7 +3,6 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_core::wl_currency;
 use slopos_drivers::interrupt_test as intr;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
 use slopos_drivers::interrupts::{SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER};
@@ -146,16 +145,7 @@ fn fill_summary_from_result(summary: &mut TestRunSummary, res: &TestSuiteResult)
     }
 }
 
-fn award_wl_for_result(res: &TestSuiteResult) {
-    if res.total == 0 {
-        return;
-    }
-    if res.failed == 0 && res.timed_out == 0 {
-        wl_currency::award_win();
-    } else {
-        wl_currency::award_loss();
-    }
-}
+fn award_wl_for_result(_res: &TestSuiteResult) {}
 pub fn tests_reset_registry() {
     unsafe {
         (*registry_mut()).iter_mut().for_each(|slot| *slot = None);

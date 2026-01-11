@@ -280,7 +280,6 @@ pub fn register_handler(
 ) -> i32 {
     if irq as usize >= IRQ_LINES {
         klog_info!("IRQ: Attempted to register handler for invalid line");
-        crate::wl_currency::award_loss();
         return -1;
     }
 
@@ -301,7 +300,6 @@ pub fn register_handler(
     }
 
     unmask_irq_line(irq);
-    crate::wl_currency::award_win();
     0
 }
 

@@ -8,7 +8,6 @@ use slopos_lib::{klog_debug, klog_info};
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
 use slopos_core::platform;
-use slopos_core::wl_currency;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 
@@ -506,32 +505,27 @@ pub fn init() -> i32 {
 
     if !hhdm::is_available() {
         klog_info!("IOAPIC: HHDM unavailable, cannot map MMIO registers");
-        wl_currency::award_loss();
         return init_fail();
     }
 
     if !platform::is_rsdp_available() {
         klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
-        wl_currency::award_loss();
         return init_fail();
     }
 
     let rsdp = platform::get_rsdp_address() as *const AcpiRsdp;
     if !acpi_validate_rsdp(rsdp) {
         klog_info!("IOAPIC: ACPI RSDP checksum failed");
-        wl_currency::award_loss();
         return init_fail();
     }
 
     let madt_header = acpi_find_table(rsdp, b"APIC");
     if madt_header.is_null() {
         klog_info!("IOAPIC: MADT not found in ACPI tables");
-        wl_currency::award_loss();
         return init_fail();
     }
     if !acpi_validate_table(madt_header) {
         klog_info!("IOAPIC: MADT checksum invalid");
-        wl_currency::award_loss();
         return init_fail();
     }
 
@@ -540,14 +534,12 @@ pub fn init() -> i32 {
     let count = IOAPIC_COUNT.load(Ordering::Relaxed);
     if count == 0 {
         klog_info!("IOAPIC: No controllers discovered");
-        wl_currency::award_loss();
         return init_fail();
     }
 
     klog_info!("IOAPIC: Discovery complete");
     IOAPIC_READY.store(true, Ordering::Release);
     IOAPIC_INIT_IN_PROGRESS.store(false, Ordering::Release);
-    wl_currency::award_win();
     0
 }
 

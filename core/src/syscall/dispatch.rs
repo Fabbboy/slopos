@@ -2,7 +2,6 @@ use slopos_lib::klog_info;
 
 use crate::scheduler_get_current_task;
 use crate::syscall::handlers::syscall_lookup;
-use crate::wl_currency;
 
 use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
 use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext};
@@ -47,18 +46,15 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
 
 pub fn syscall_handle(frame: *mut InterruptFrame) {
     if frame.is_null() {
-        wl_currency::award_loss();
         return;
     }
 
     let task = scheduler_get_current_task() as *mut Task;
     if task.is_null() {
-        wl_currency::award_loss();
         return;
     }
     unsafe {
         if ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
-            wl_currency::award_loss();
             return;
         }
     }
@@ -76,7 +72,6 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
     if entry.is_null() {
         klog_info!("SYSCALL: Unknown syscall {}", sysno);
         unsafe {
-            wl_currency::award_loss();
             (*frame).rax = u64::MAX;
         }
         unsafe {

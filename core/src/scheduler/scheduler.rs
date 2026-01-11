@@ -270,7 +270,6 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         }
         if sched.ready_queue.enqueue(task) != 0 {
             klog_info!("schedule_task: ready queue full, request rejected");
-            wl_currency::award_loss();
             return -1;
         }
         0
