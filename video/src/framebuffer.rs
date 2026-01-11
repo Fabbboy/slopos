@@ -2,6 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_lib::{klog_debug, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -44,8 +45,8 @@ impl FbState {
     }
 
     #[inline]
-    fn needs_bgr_swap(&self) -> bool {
-        self.info.format.is_bgr_order()
+    pub(crate) fn draw_pixel_format(&self) -> DrawPixelFormat {
+        DrawPixelFormat::from_pixel_format(self.info.format)
     }
 }
 
@@ -61,23 +62,6 @@ impl FramebufferState {
 
 static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
 static FRAMEBUFFER_FLUSH: Mutex<Option<fn() -> c_int>> = Mutex::new(None);
-
-fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
-    // Colors come in as 0xAARRGGBB format (standard ARGB).
-    // BGR memory order (Argb8888, Xrgb8888, Bgra8888) expects this exact format
-    // when written as a u32 on little-endian: B in low byte, R in byte 2.
-    // RGB memory order (Rgba8888, Rgb888, Bgr888) needs R and B swapped.
-    if state.needs_bgr_swap() {
-        // BGR memory order - no swap needed, format already matches
-        color
-    } else {
-        // RGB memory order - swap R and B channels
-        ((color & 0xFF0000) >> 16)
-            | (color & 0x00FF00)
-            | ((color & 0x0000FF) << 16)
-            | (color & 0xFF000000)
-    }
-}
 
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > DisplayInfo::MAX_DIMENSION {
@@ -175,7 +159,7 @@ pub fn framebuffer_clear(color: u32) {
     };
 
     let bytes_pp = fb.info.bytes_per_pixel() as usize;
-    let converted = framebuffer_convert_color_internal(&fb, color);
+    let converted = fb.draw_pixel_format().convert_color(color);
     let base = fb.base_ptr();
     let pitch = fb.pitch() as usize;
 
@@ -210,7 +194,7 @@ pub fn framebuffer_set_pixel(x: u32, y: u32, color: u32) {
     }
 
     let bytes_pp = fb.info.bytes_per_pixel() as usize;
-    let converted = framebuffer_convert_color_internal(&fb, color);
+    let converted = fb.draw_pixel_format().convert_color(color);
     let offset = y as usize * fb.pitch() as usize + x as usize * bytes_pp;
     let pixel_ptr = unsafe { fb.base_ptr().add(offset) };
 
@@ -257,7 +241,7 @@ pub fn framebuffer_get_pixel(x: u32, y: u32) -> u32 {
         }
     }
 
-    framebuffer_convert_color_internal(&fb, color)
+    fb.draw_pixel_format().convert_color(color)
 }
 
 pub fn framebuffer_blit(
@@ -341,7 +325,7 @@ pub fn framebuffer_convert_color(color: u32) -> u32 {
         Some(fb) => fb,
         None => return color,
     };
-    framebuffer_convert_color_internal(&fb, color)
+    fb.draw_pixel_format().convert_color(color)
 }
 
 pub(crate) fn snapshot() -> Option<FbState> {
