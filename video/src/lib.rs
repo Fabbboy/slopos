@@ -4,10 +4,10 @@
 extern crate alloc;
 
 use core::ffi::c_int;
+use slopos_abi::DisplayInfo;
 use slopos_abi::FramebufferData;
 use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 use slopos_drivers::serial_println;
@@ -28,8 +28,8 @@ pub enum VideoBackend {
     Virgl,
 }
 
-fn video_framebuffer_get_info() -> *mut FramebufferInfoC {
-    framebuffer::framebuffer_get_info() as *mut FramebufferInfoC
+fn video_get_display_info() -> Option<DisplayInfo> {
+    framebuffer::get_display_info()
 }
 
 fn video_roulette_draw(fate: u32) -> c_int {
@@ -144,7 +144,7 @@ fn video_surface_set_title(task_id: u32, title_ptr: *const u8, title_len: usize)
 }
 
 static VIDEO_SERVICES: VideoServices = VideoServices {
-    framebuffer_get_info: video_framebuffer_get_info,
+    get_display_info: video_get_display_info,
     roulette_draw: video_roulette_draw,
     surface_enumerate_windows: video_surface_enumerate_windows,
     surface_set_window_position: video_surface_set_window_position,

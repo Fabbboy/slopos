@@ -109,17 +109,6 @@ pub const SYSCALL_SPAWN_TASK: u64 = 64;
 // Syscall data structures
 // =============================================================================
 
-/// Framebuffer information returned by SYSCALL_FB_INFO
-#[repr(C)]
-#[derive(Default, Copy, Clone)]
-pub struct UserFbInfo {
-    pub width: u32,
-    pub height: u32,
-    pub pitch: u32,
-    pub bpp: u8,
-    pub pixel_format: u8,
-}
-
 /// System information returned by SYSCALL_SYS_INFO
 #[repr(C)]
 #[derive(Default, Copy, Clone)]

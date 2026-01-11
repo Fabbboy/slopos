@@ -1,5 +1,5 @@
 use crate::syscall::{
-    UserFbInfo, sys_exit, sys_fb_info, sys_roulette, sys_roulette_draw, sys_roulette_result,
+    DisplayInfo, sys_exit, sys_fb_info, sys_roulette, sys_roulette_draw, sys_roulette_result,
     sys_sleep_ms, sys_write,
 };
 use core::ffi::c_void;
@@ -46,7 +46,7 @@ pub fn roulette_user_main(_arg: *mut c_void) {
     let spin = sys_roulette();
     let fate = spin as u32;
 
-    let mut info = UserFbInfo::default();
+    let mut info = DisplayInfo::default();
     let fb_rc = sys_fb_info(&mut info);
     let fb_ok = fb_rc == 0 && info.width != 0 && info.height != 0;
 

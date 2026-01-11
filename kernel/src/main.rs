@@ -40,9 +40,7 @@ fn __link_boot_deps() {
         core::ptr::read_volatile(&((sched::task_shutdown_all as *const ()) as usize));
         core::ptr::read_volatile(&((sched::task_set_current as *const ()) as usize));
         core::ptr::read_volatile(&((sched::boot_step_idle_task as *const ()) as usize));
-        core::ptr::read_volatile(
-            &((video::framebuffer::framebuffer_get_info as *const ()) as usize),
-        );
+        core::ptr::read_volatile(&((video::framebuffer::get_display_info as *const ()) as usize));
         core::ptr::read_volatile(
             &((video::framebuffer::framebuffer_is_initialized as *const ()) as usize),
         );

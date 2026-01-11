@@ -5,14 +5,15 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use slopos_abi::DisplayInfo;
 use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::video_traits::{FramebufferInfoC, VideoResult, video_result_from_code};
+use slopos_abi::video_traits::{VideoResult, video_result_from_code};
 
 /// Video service callbacks - registered by drivers, called by syscall handlers
 #[repr(C)]
 pub struct VideoServices {
-    pub framebuffer_get_info: fn() -> *mut FramebufferInfoC,
+    pub get_display_info: fn() -> Option<DisplayInfo>,
     pub roulette_draw: fn(u32) -> c_int,
     pub surface_enumerate_windows: fn(*mut WindowInfo, u32) -> u32,
     pub surface_set_window_position: fn(u32, i32, i32) -> c_int,
@@ -59,8 +60,8 @@ pub fn video_services() -> &'static VideoServices {
 // =============================================================================
 
 #[inline(always)]
-pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
-    (video_services().framebuffer_get_info)()
+pub fn get_display_info() -> Option<DisplayInfo> {
+    (video_services().get_display_info)()
 }
 
 #[inline(always)]

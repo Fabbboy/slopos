@@ -8,7 +8,7 @@ use core::str;
 
 use crate::gfx::{self, DrawBuffer, PixelFormat, rgb};
 use crate::syscall::{
-    InputEvent, InputEventType, ShmBuffer, UserFbInfo, UserFsEntry, UserFsList, sys_fb_info,
+    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, sys_fb_info,
     sys_fs_list, sys_input_poll_batch, sys_surface_commit, sys_surface_set_title, sys_yield,
 };
 use crate::theme::*;
@@ -63,18 +63,18 @@ impl FileManager {
         fm
     }
 
-    /// Initialize the surface buffer for rendering
     fn init_surface(&mut self) -> bool {
-        let mut fb_info = UserFbInfo::default();
+        let mut fb_info = DisplayInfo::default();
         if sys_fb_info(&mut fb_info) != 0 {
             return false;
         }
 
-        self.bytes_pp = ((fb_info.bpp as usize + 7) / 8) as u8;
+        self.bytes_pp = fb_info.bytes_per_pixel();
         self.pitch = (self.width as usize) * (self.bytes_pp as usize);
-        self.pixel_format = match fb_info.pixel_format {
-            0 | 1 | 5 => PixelFormat::Bgra,
-            _ => PixelFormat::Rgba,
+        self.pixel_format = if fb_info.format.is_bgr_order() {
+            PixelFormat::Bgra
+        } else {
+            PixelFormat::Rgba
         };
 
         let buffer_size = self.pitch * (self.height as usize);

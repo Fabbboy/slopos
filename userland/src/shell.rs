@@ -37,7 +37,7 @@ unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFbInfo, UserFsEntry,
+    DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
     UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
     sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_surface_commit,
     sys_surface_set_title, sys_sys_info, sys_write,
@@ -310,15 +310,16 @@ mod surface {
         f(unsafe { &mut *SURFACE.get() })
     }
 
-    pub fn init(width: i32, height: i32, bpp: u8, pixel_format: u8) -> bool {
+    pub fn init(width: i32, height: i32, display_info: &DisplayInfo) -> bool {
         with_surface(|s| {
             s.width = width;
             s.height = height;
-            s.bytes_pp = ((bpp as usize + 7) / 8) as u8;
+            s.bytes_pp = display_info.bytes_per_pixel();
             s.pitch = (width as usize) * (s.bytes_pp as usize);
-            s.pixel_format = match pixel_format {
-                0 | 1 | 5 => PixelFormat::Bgra,
-                _ => PixelFormat::Rgba,
+            s.pixel_format = if display_info.format.is_bgr_order() {
+                PixelFormat::Bgra
+            } else {
+                PixelFormat::Rgba
             };
 
             let buffer_size = s.pitch * (height as usize);
@@ -789,7 +790,7 @@ fn console_rewrite_input(display: &DisplayState, prompt: &[u8], input: &[u8]) {
 
 #[unsafe(link_section = ".user_text")]
 fn shell_console_init() {
-    let mut info = UserFbInfo::default();
+    let mut info = DisplayInfo::default();
     if sys_fb_info(&mut info) != 0 || info.width == 0 || info.height == 0 {
         return;
     }
@@ -797,10 +798,9 @@ fn shell_console_init() {
     let width = SHELL_WINDOW_WIDTH;
     let height = SHELL_WINDOW_HEIGHT;
 
-    // Initialize display state
     DISPLAY.width.set(width);
     DISPLAY.height.set(height);
-    let bytes_pp = ((info.bpp as usize + 7) / 8) as u8;
+    let bytes_pp = info.bytes_per_pixel();
     DISPLAY.bytes_pp.set(bytes_pp);
     DISPLAY.pitch.set((width as usize) * (bytes_pp as usize));
 
@@ -818,8 +818,7 @@ fn shell_console_init() {
         return;
     }
 
-    // Initialize surface
-    if !surface::init(width, height, info.bpp, info.pixel_format) {
+    if !surface::init(width, height, &info) {
         DISPLAY.enabled.set(false);
         return;
     }

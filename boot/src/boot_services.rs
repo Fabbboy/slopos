@@ -2,7 +2,7 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
-use slopos_video::framebuffer::{framebuffer_get_info, framebuffer_is_initialized};
+use slopos_video::framebuffer::{framebuffer_is_initialized, get_display_info};
 
 fn boot_step_task_manager_init_wrapper() -> i32 {
     boot_step_task_manager_init()
@@ -46,8 +46,7 @@ fn boot_step_mark_kernel_ready_fn() {
 }
 
 fn boot_step_framebuffer_demo_fn() {
-    let fb_info = framebuffer_get_info();
-    if fb_info.is_null() || framebuffer_is_initialized() == 0 {
+    if get_display_info().is_none() || framebuffer_is_initialized() == 0 {
         klog_info!("Graphics demo: framebuffer not initialized, skipping");
         return;
     }

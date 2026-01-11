@@ -18,10 +18,10 @@ use core::ptr::NonNull;
 
 // Re-export all ABI types from slopos_abi for userland consumers
 pub use slopos_abi::{
-    INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData, InputEventType,
-    MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW, SurfaceRole,
-    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
+    DisplayInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData,
+    InputEventType, MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW,
+    SurfaceRole, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
 };
 
 // Re-export syscall numbers and data structures from canonical ABI source
@@ -141,7 +141,7 @@ pub fn sys_exit() -> ! {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-pub fn sys_fb_info(out: &mut UserFbInfo) -> i64 {
+pub fn sys_fb_info(out: &mut DisplayInfo) -> i64 {
     unsafe { syscall(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
 }
 

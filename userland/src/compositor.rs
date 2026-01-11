@@ -15,7 +15,7 @@ use core::ffi::c_void;
 
 use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, PixelFormat, rgb};
 use crate::syscall::{
-    CachedShmMapping, ShmBuffer, UserFbInfo, UserWindowInfo, sys_drain_queue,
+    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
     sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
     sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
     sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
@@ -206,17 +206,15 @@ struct CompositorOutput {
 }
 
 impl CompositorOutput {
-    /// Allocate compositor output buffer
-    fn new(fb: &UserFbInfo) -> Option<Self> {
+    fn new(fb: &DisplayInfo) -> Option<Self> {
         let pitch = fb.pitch as usize;
         let size = pitch * fb.height as usize;
-        let bytes_pp = (fb.bpp / 8) as u8;
+        let bytes_pp = fb.bytes_per_pixel();
 
         if size == 0 || bytes_pp < 3 {
             return None;
         }
 
-        // Allocate shared memory buffer using safe wrapper
         let buffer = ShmBuffer::create(size).ok()?;
 
         Some(Self {
@@ -1116,49 +1114,36 @@ fn title_to_str(title: &[u8; 32]) -> &str {
 #[unsafe(link_section = ".user_text")]
 pub fn compositor_user_main(_arg: *mut c_void) {
     let mut wm = WindowManager::new();
-    let mut fb_info = UserFbInfo::default();
+    let mut fb_info = DisplayInfo::default();
 
-    // Get framebuffer info
     if sys_fb_info(&mut fb_info) < 0 {
         loop {
             sys_yield();
         }
     }
 
-    // Allocate compositor output buffer
     let mut output = match CompositorOutput::new(&fb_info) {
         Some(out) => out,
-        None => {
-            // Failed to allocate output buffer - yield forever
-            loop {
-                sys_yield();
-            }
-        }
+        None => loop {
+            sys_yield();
+        },
     };
 
-    // Set output info on window manager for compositing
     wm.set_output_info(output.bytes_pp, output.pitch);
 
-    // Set pixel format based on framebuffer info
-    // Argb8888=0, Xrgb8888=1, Bgra8888=5 are BGR memory order
-    // Rgb888=2, Bgr888=3, Rgba8888=4 are RGB memory order
-    let pixel_format = match fb_info.pixel_format {
-        0 | 1 | 5 => PixelFormat::Bgra,
-        _ => PixelFormat::Rgba,
+    let pixel_format = if fb_info.format.is_bgr_order() {
+        PixelFormat::Bgra
+    } else {
+        PixelFormat::Rgba
     };
 
-    // 60Hz fixed refresh rate compositor loop
     const TARGET_FRAME_MS: u64 = 16;
 
     loop {
         let frame_start_ms = sys_get_time_ms();
 
-        // === QUEUE DRAIN PHASE ===
-        // Process all pending client operations (commits, registers, unregisters)
-        // Must be called before enumerate_windows to ensure consistent state
         sys_drain_queue();
 
-        // === INPUT PHASE ===
         wm.update_mouse();
         wm.refresh_windows();
         wm.handle_mouse_events(fb_info.height as i32);

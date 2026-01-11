@@ -1,6 +1,7 @@
 use core::ffi::c_char;
 use core::ptr;
 
+use slopos_abi::DisplayInfo;
 use slopos_abi::InputEvent;
 use slopos_abi::WindowInfo;
 use slopos_abi::fate::FateResult;
@@ -371,8 +372,7 @@ define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     if phys_addr.is_null() || size == 0 {
         return ctx.err();
     }
-    let fb_info = video::framebuffer_get_info();
-    if fb_info.is_null() {
+    if video::get_display_info().is_none() {
         return ctx.err();
     }
     let result = video::fb_flip_from_shm(phys_addr, size);
@@ -534,30 +534,20 @@ pub fn syscall_fb_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         return syscall_return_err(frame, u64::MAX);
     };
 
-    let info = video::framebuffer_get_info();
-    if info.is_null() {
-        return ctx.err();
-    }
-    let info_local = unsafe { core::ptr::read(info) };
-    if info_local.initialized == 0 {
-        klog_debug!("syscall_fb_info: framebuffer not initialized");
-        return ctx.err();
-    }
-
-    let user_info = UserFbInfo {
-        width: info_local.width,
-        height: info_local.height,
-        pitch: info_local.pitch,
-        bpp: info_local.bpp as u8,
-        pixel_format: info_local.pixel_format as u8,
+    let display_info = match video::get_display_info() {
+        Some(info) => info,
+        None => {
+            klog_debug!("syscall_fb_info: framebuffer not initialized");
+            return ctx.err();
+        }
     };
 
     let args = ctx.args();
-    let user_ptr = match UserPtr::<UserFbInfo>::try_new(args.arg0) {
+    let user_ptr = match UserPtr::<DisplayInfo>::try_new(args.arg0) {
         Ok(p) => p,
         Err(_) => return ctx.err(),
     };
-    if copy_to_user(user_ptr, &user_info).is_err() {
+    if copy_to_user(user_ptr, &display_info).is_err() {
         return ctx.err();
     }
 

@@ -2,7 +2,6 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_drivers::serial_println;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -61,8 +60,6 @@ impl FramebufferState {
 }
 
 static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
-static FRAMEBUFFER_INFO_EXPORT: Mutex<FramebufferInfoC> =
-    Mutex::new(const { FramebufferInfoC::new() });
 static FRAMEBUFFER_FLUSH: Mutex<Option<fn() -> c_int>> = Mutex::new(None);
 
 fn framebuffer_convert_color_internal(state: &FbState, color: u32) -> u32 {
@@ -163,25 +160,6 @@ pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
 
     rc
 }
-pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
-    let guard = FRAMEBUFFER.lock();
-    let mut export = FRAMEBUFFER_INFO_EXPORT.lock();
-    if let Some(fb) = guard.fb {
-        *export = FramebufferInfoC {
-            initialized: 1,
-            width: fb.width(),
-            height: fb.height(),
-            pitch: fb.pitch(),
-            bpp: fb.bpp() as u32,
-            pixel_format: fb.info.format as u32,
-        };
-    } else {
-        *export = FramebufferInfoC::default();
-    }
-
-    &mut *export as *mut FramebufferInfoC
-}
-
 pub fn get_display_info() -> Option<DisplayInfo> {
     FRAMEBUFFER.lock().fb.map(|fb| fb.info)
 }
