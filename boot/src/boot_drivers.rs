@@ -117,7 +117,10 @@ fn boot_step_timer_setup_fn() {
         klog_info!("BOOT: deferring video init until PCI for virgl");
         return;
     }
-    let fb = boot_fb.map(|bf| bf.to_legacy_info());
+    let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
+        address: bf.address,
+        info: bf.info,
+    });
     video::init(fb, backend);
 }
 
@@ -183,7 +186,10 @@ fn boot_step_pci_init_fn() {
     let backend = boot_video_backend();
     if backend == video::VideoBackend::Virgl {
         let boot_fb = limine_protocol::boot_info().framebuffer;
-        let fb = boot_fb.map(|bf| bf.to_legacy_info());
+        let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
+            address: bf.address,
+            info: bf.info,
+        });
         video::init(fb, backend);
     }
 }

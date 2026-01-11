@@ -4,16 +4,15 @@
 extern crate alloc;
 
 use core::ffi::c_int;
+use slopos_abi::FramebufferData;
+use slopos_abi::WindowInfo;
+use slopos_abi::addr::PhysAddr;
+use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 use slopos_drivers::serial_println;
 use slopos_drivers::virtio_gpu;
-use slopos_lib::FramebufferInfo;
 use slopos_lib::klog_info;
-
-use slopos_abi::WindowInfo;
-use slopos_abi::addr::PhysAddr;
-use slopos_abi::video_traits::FramebufferInfoC;
 
 pub mod compositor_context;
 pub mod font;
@@ -179,11 +178,10 @@ fn task_cleanup_callback(task_id: u32) {
 // Initialization
 // =============================================================================
 
-pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
-    // Register task cleanup callback early so it's available even if framebuffer init fails
+pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
     register_video_cleanup_hook(task_cleanup_callback);
 
-    let mut virgl_fb: Option<FramebufferInfo> = None;
+    let mut virgl_fb: Option<FramebufferData> = None;
     if backend == VideoBackend::Virgl {
         virgl_fb = try_init_virgl_backend();
         if virgl_fb.is_none() {
@@ -202,13 +200,13 @@ pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
     if let Some(fb) = fb_to_use {
         serial_println!(
             "Framebuffer online: {}x{} pitch {} bpp {}",
-            fb.width as u32,
-            fb.height as u32,
-            fb.pitch as u32,
-            fb.bpp as u8
+            fb.info.width,
+            fb.info.height,
+            fb.info.pitch,
+            fb.info.bytes_per_pixel() * 8
         );
 
-        if framebuffer::init_with_info(fb) != 0 {
+        if framebuffer::init_with_display_info(fb.address, &fb.info) != 0 {
             serial_println!("Framebuffer init failed; skipping banner paint.");
             return;
         }
@@ -228,7 +226,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
     }
 }
 
-fn try_init_virgl_backend() -> Option<FramebufferInfo> {
+fn try_init_virgl_backend() -> Option<FramebufferData> {
     let device = virtio_gpu::virtio_gpu_get_device();
     if device.is_null() {
         klog_info!("Video: virgl requested but no virtio-gpu device is present");

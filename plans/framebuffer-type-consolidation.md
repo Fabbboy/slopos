@@ -393,27 +393,28 @@ impl From<&limine::Framebuffer> for DisplayInfo {
 
 ## Type Mapping Reference
 
-### Current State (After Consolidation)
+### Final State (After Full Consolidation)
 
 | Type | Location | Status | Purpose |
 |------|----------|--------|---------|
 | `DisplayInfo` | `abi/src/display.rs` | ✅ **CANONICAL** | Single source of truth for display properties |
-| `BootFramebuffer` | `boot/src/limine_protocol.rs` | ✅ Active | Boot layer: `address + DisplayInfo` |
+| `FramebufferData` | `abi/src/display.rs` | ✅ **CANONICAL** | Framebuffer with address + DisplayInfo |
+| `BootFramebuffer` | `boot/src/limine_protocol.rs` | ✅ Active | Boot layer wrapper (same as FramebufferData) |
 | `FbState` | `video/src/framebuffer.rs` | ✅ Active | Video layer: `VirtAddr + DisplayInfo` |
-| `slopos_lib::FramebufferInfo` | `lib/src/lib.rs` | ⏸️ Legacy | Kept for `video::init()` interface compatibility |
-| `FramebufferInfoC` | `abi/src/video_traits.rs` | ⏸️ Legacy | Internal kernel export format |
-| `UserFbInfo` | `abi/src/syscall.rs` | ⏸️ Legacy | Userland ABI (separate bpp/pixel_format u8 fields) |
-| `FbInfo` | `abi/src/window.rs` | ❌ **REMOVED** | Was unused |
+| `FramebufferInfoC` | `abi/src/video_traits.rs` | ✅ Active | Syscall export format |
+| `UserFbInfo` | `abi/src/syscall.rs` | ✅ Active | Userland ABI |
+| `slopos_lib::FramebufferInfo` | — | ❌ **REMOVED** | Replaced by FramebufferData |
+| `FbInfo` | — | ❌ **REMOVED** | Was unused |
 
-### Before -> After
+### Migration Complete
 
-| Old Type | New Type | Notes |
-|----------|----------|-------|
-| `slopos_lib::FramebufferInfo` | `DisplayInfo` | Kept for interface compat, migrate in future |
-| `abi::video_traits::FramebufferInfoC` | `DisplayInfo` | Kept for syscall export |
-| `abi::window::FbInfo` | — | **Removed** (was unused) |
-| `abi::syscall::UserFbInfo` | `DisplayInfo` | Kept for userland ABI stability |
-| `video::FbState` | `FbState` (internal) | Now wraps `DisplayInfo` |
+| Old Type | New Type | Status |
+|----------|----------|--------|
+| `slopos_lib::FramebufferInfo` | `FramebufferData` | ✅ **REMOVED** |
+| `video::init(FramebufferInfo)` | `video::init(FramebufferData)` | ✅ Migrated |
+| `virtio_gpu -> FramebufferInfo` | `virtio_gpu -> FramebufferData` | ✅ Migrated |
+| `mm::init(FramebufferInfo)` | `mm::init((u64, &DisplayInfo))` | ✅ Migrated |
+| `abi::window::FbInfo` | — | ✅ **REMOVED** |
 
 ### Field Mapping
 
@@ -453,45 +454,43 @@ impl From<&limine::Framebuffer> for DisplayInfo {
 
 ---
 
-## Future Work (Deferred Tasks)
+## Future Work (Completed)
 
-### Immediate: Complete Legacy Type Removal
+### Phase 7: Complete Legacy Type Removal ✅ COMPLETED
 
-The following can be done when convenient:
+All legacy `FramebufferInfo` usages have been removed:
 
-#### 1. Migrate `video::init()` Interface
+#### 1. Migrate `video::init()` Interface ✅
 
-**Current**: `video::init(Option<FramebufferInfo>)` uses legacy type
-**Target**: `video::init(Option<BootFramebuffer>)` or `video::init(Option<DisplayInfo>, Option<VirtAddr>)`
+- `video::init()` now accepts `Option<FramebufferData>`
+- `FramebufferData` defined in `abi/src/display.rs` (shared across crates)
+- `init_with_display_info()` replaces `init_with_info()`
+- `boot/src/boot_drivers.rs` creates `FramebufferData` directly
+- Removed `to_legacy_info()` method from `BootFramebuffer`
 
-**Files to change**:
-- `video/src/lib.rs` - Change init signature
-- `boot/src/boot_drivers.rs` - Update caller (remove `to_legacy_info()`)
-- `lib/src/lib.rs` - Can remove `FramebufferInfo` after this
+#### 2. Migrate Memory Init ✅
 
-**Effort**: Low (1-2 hours)
+- `mm/src/memory_init.rs` now accepts `Option<(u64, &DisplayInfo)>`
+- Internal `FramebufferReservation` struct stores only needed fields
+- No longer depends on `slopos_lib::FramebufferInfo`
 
-#### 2. Migrate Memory Init
+#### 3. Migrate VirtIO GPU Driver ✅
 
-**Current**: `mm/src/memory_init.rs` uses `FramebufferInfo` for reservation
-**Target**: Use `BootFramebuffer` or just address + size
+- `virtio_gpu_framebuffer_init()` now returns `Option<FramebufferData>`
+- Uses `DisplayInfo::new()` to construct display info
+- Uses `PixelFormat::from_bpp()` for format detection
 
-**Files to change**:
-- `mm/src/memory_init.rs`
+#### 4. Remove Legacy Type ✅
 
-**Effort**: Low (30 min)
+- `slopos_lib::FramebufferInfo` **REMOVED** from `lib/src/lib.rs`
+- `FramebufferInfo` type alias **REMOVED** from `boot/src/limine_protocol.rs`
+- `BootFramebuffer` exported from `boot/src/lib.rs`
 
-#### 3. Migrate VirtIO GPU Driver
+---
 
-**Current**: `drivers/src/virtio_gpu.rs` returns `FramebufferInfo`
-**Target**: Return `DisplayInfo` + address separately
+## Remaining Future Work
 
-**Files to change**:
-- `drivers/src/virtio_gpu.rs`
-
-**Effort**: Low (30 min)
-
-#### 4. Unify Userland ABI
+### Unify Userland ABI (Optional)
 
 **Current**: `UserFbInfo` has separate `bpp: u8` and `pixel_format: u8` fields
 **Target**: Use `DisplayInfo` directly (with `PixelFormat` enum)
@@ -508,6 +507,7 @@ The following can be done when convenient:
 - `userland/src/apps/file_manager.rs` - Update usage
 
 **Effort**: Medium (2-3 hours)
+**Status**: Deferred - current ABI is stable and working
 
 ---
 

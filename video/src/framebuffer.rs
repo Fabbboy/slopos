@@ -5,7 +5,6 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::video_traits::FramebufferInfoC;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_drivers::serial_println;
-use slopos_lib::FramebufferInfo;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use spin::Mutex;
 
@@ -128,20 +127,20 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
     0
 }
 
-pub fn init_with_info(info: FramebufferInfo) -> i32 {
+pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
     let rc = init_state_from_raw(
-        info.address as u64,
-        info.width as u32,
-        info.height as u32,
-        info.pitch as u32,
-        info.bpp as u8,
+        address as u64,
+        info.width,
+        info.height,
+        info.pitch,
+        info.bytes_per_pixel() * 8,
     );
 
     if rc == 0 {
         if let Some(fb) = FRAMEBUFFER.lock().fb {
             serial_println!(
                 "Framebuffer init: phys=0x{:x} virt=0x{:x} {}x{} pitch={} bpp={}",
-                info.address as u64,
+                address as u64,
                 fb.base.as_u64(),
                 fb.width(),
                 fb.height(),
@@ -154,11 +153,11 @@ pub fn init_with_info(info: FramebufferInfo) -> i32 {
     } else {
         serial_println!(
             "Framebuffer init failed: phys=0x{:x} {}x{} pitch={} bpp={}",
-            info.address as u64,
+            address as u64,
             info.width,
             info.height,
             info.pitch,
-            info.bpp
+            info.bytes_per_pixel() * 8
         );
     }
 

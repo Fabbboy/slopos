@@ -4,7 +4,8 @@
 use core::ffi::{c_int, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{FramebufferInfo, align_up, klog_debug, klog_info};
+use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
+use slopos_lib::{align_up, klog_debug, klog_info};
 
 use crate::pci::{
     PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_read16, pci_config_read32,
@@ -1323,19 +1324,21 @@ pub fn virtio_gpu_is_virgl_ready() -> bool {
     unsafe { VIRTIO_GPU_DEVICE.present != 0 && VIRTIO_GPU_DEVICE.virgl_ready != 0 }
 }
 
-pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
+pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferData> {
     unsafe {
         if VIRTIO_GPU_DEVICE.present == 0 || VIRTIO_GPU_DEVICE.ctrl_queue.ready == 0 {
             return None;
         }
 
         if VIRTIO_GPU_DEVICE.fb_ready != 0 {
-            return Some(FramebufferInfo {
+            return Some(FramebufferData {
                 address: VIRTIO_GPU_DEVICE.fb_phys as *mut u8,
-                width: VIRTIO_GPU_DEVICE.fb_width as u64,
-                height: VIRTIO_GPU_DEVICE.fb_height as u64,
-                pitch: VIRTIO_GPU_DEVICE.fb_pitch as u64,
-                bpp: VIRTIO_GPU_DEVICE.fb_bpp,
+                info: DisplayInfo::new(
+                    VIRTIO_GPU_DEVICE.fb_width,
+                    VIRTIO_GPU_DEVICE.fb_height,
+                    VIRTIO_GPU_DEVICE.fb_pitch,
+                    PixelFormat::from_bpp(VIRTIO_GPU_DEVICE.fb_bpp as u8),
+                ),
             });
         }
 
@@ -1423,12 +1426,9 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferInfo> {
         VIRTIO_GPU_DEVICE.fb_bpp = 32;
         VIRTIO_GPU_DEVICE.fb_ready = 1;
 
-        Some(FramebufferInfo {
+        Some(FramebufferData {
             address: phys.to_virt().as_mut_ptr::<u8>(),
-            width: width as u64,
-            height: height as u64,
-            pitch: pitch as u64,
-            bpp: 32,
+            info: DisplayInfo::new(width, height, pitch, PixelFormat::Argb8888),
         })
     }
 }

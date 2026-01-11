@@ -200,13 +200,3 @@ pub use ports::COM1;
 pub use ring_buffer::RingBuffer;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct FramebufferInfo {
-    pub address: *mut u8,
-    pub width: u64,
-    pub height: u64,
-    pub pitch: u64,
-    pub bpp: u16,
-}

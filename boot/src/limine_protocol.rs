@@ -374,8 +374,6 @@ static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 
 use slopos_abi::DisplayInfo;
 
-pub type FramebufferInfo = slopos_lib::FramebufferInfo;
-
 #[derive(Clone, Copy, Debug)]
 pub struct MemmapEntry {
     pub base: u64,
@@ -387,18 +385,6 @@ pub struct MemmapEntry {
 pub struct BootFramebuffer {
     pub address: *mut u8,
     pub info: DisplayInfo,
-}
-
-impl BootFramebuffer {
-    pub fn to_legacy_info(&self) -> FramebufferInfo {
-        FramebufferInfo {
-            address: self.address,
-            width: self.info.width as u64,
-            height: self.info.height as u64,
-            pitch: self.info.pitch as u64,
-            bpp: self.info.format.bytes_per_pixel() as u16 * 8,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

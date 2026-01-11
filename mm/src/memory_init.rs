@@ -20,7 +20,8 @@ use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
 use slopos_lib::string::cstr_to_str;
 
-use slopos_lib::{FramebufferInfo, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
+use slopos_abi::DisplayInfo;
+use slopos_lib::{align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
 const MSR_APIC_BASE: u32 = 0x1B;
@@ -86,14 +87,21 @@ static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
 };
 static mut EARLY_PAGING_OK: bool = false;
 static mut MEMORY_SYSTEM_INITIALIZED: bool = false;
-static mut FRAMEBUFFER_BOOT_INFO: Option<FramebufferInfo> = None;
+#[derive(Clone, Copy)]
+struct FramebufferReservation {
+    address: u64,
+    pitch: u64,
+    height: u64,
+}
+
+static mut FRAMEBUFFER_RESERVATION: Option<FramebufferReservation> = None;
 
 fn mm_panic(msg: &str) -> ! {
     panic!("{msg}");
 }
 
-fn framebuffer_boot_info() -> Option<FramebufferInfo> {
-    unsafe { FRAMEBUFFER_BOOT_INFO }
+fn framebuffer_reservation() -> Option<FramebufferReservation> {
+    unsafe { FRAMEBUFFER_RESERVATION }
 }
 
 fn configure_region_store(memmap: *const LimineMemmapResponse) {
@@ -328,11 +336,11 @@ fn record_memmap_reservations(memmap: *const LimineMemmapResponse) {
 }
 
 fn record_framebuffer_reservation() {
-    let Some(fb) = framebuffer_boot_info() else {
+    let Some(fb) = framebuffer_reservation() else {
         return;
     };
 
-    let mut phys_base = fb.address as u64;
+    let mut phys_base = fb.address;
     if crate::hhdm::is_available() {
         let offset = crate::hhdm::offset();
         if phys_base >= offset {
@@ -524,13 +532,17 @@ pub fn init_memory_system(
     memmap: *const LimineMemmapResponse,
     hhdm_offset: u64,
     hhdm_available: bool,
-    framebuffer: Option<FramebufferInfo>,
+    framebuffer: Option<(u64, &DisplayInfo)>,
 ) -> c_int {
     unsafe {
         klog_debug!("========== SlopOS Memory System Initialization ==========");
         klog_debug!("Initializing complete memory management system...");
 
-        FRAMEBUFFER_BOOT_INFO = framebuffer;
+        FRAMEBUFFER_RESERVATION = framebuffer.map(|(addr, info)| FramebufferReservation {
+            address: addr,
+            pitch: info.pitch as u64,
+            height: info.height as u64,
+        });
 
         // Initialize the unified HHDM module (single source of truth)
         if hhdm_available {

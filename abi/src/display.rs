@@ -1,15 +1,3 @@
-//! Display information - the canonical type for all framebuffer layers.
-//!
-//! This is the single source of truth for display properties shared between
-//! kernel subsystems and userland. All other display-related types should
-//! either use this directly or implement `From` conversions.
-//!
-//! # ABI Stability
-//!
-//! This type is `#[repr(C)]` and forms part of the kernel-userland ABI.
-//! Field types and order must not change without careful consideration
-//! of backward compatibility.
-
 use crate::PixelFormat;
 
 /// Display information - the canonical type for all layers.
@@ -100,4 +88,10 @@ impl PixelFormat {
             _ => Self::Argb8888,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FramebufferData {
+    pub address: *mut u8,
+    pub info: DisplayInfo,
 }
