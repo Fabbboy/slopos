@@ -21,27 +21,12 @@ use core::ffi::{c_char, c_int};
 use slopos_lib::string::cstr_to_str;
 
 use slopos_abi::DisplayInfo;
+use slopos_abi::boot::LimineMemmapResponse;
 use slopos_lib::{align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
 const MSR_APIC_BASE: u32 = 0x1B;
 const APIC_BASE_ADDR_MASK: u64 = 0xFFFFF000;
-
-// Limine structures (subset needed for this module)
-#[repr(C)]
-pub struct LimineMemmapResponse {
-    pub revision: u64,
-    pub entry_count: u64,
-    pub entries: *mut *mut LimineMemmapEntry,
-}
-
-#[repr(C)]
-pub struct LimineMemmapEntry {
-    pub base: u64,
-    pub length: u64,
-    pub type_: u64,
-    pub unused: u64,
-}
 
 const LIMINE_MEMMAP_USABLE: u64 = 0;
 const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
@@ -190,7 +175,7 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
             }
             INIT_STATS.total_memory_bytes =
                 INIT_STATS.total_memory_bytes.saturating_add(entry.length);
-            if entry.type_ != LIMINE_MEMMAP_USABLE {
+            if entry.typ != LIMINE_MEMMAP_USABLE {
                 continue;
             }
             let base = align_up_u64(entry.base, PAGE_SIZE_4KB);
@@ -305,7 +290,7 @@ fn record_memmap_reservations(memmap: *const LimineMemmapResponse) {
             if entry.length == 0 {
                 continue;
             }
-            match entry.type_ {
+            match entry.typ {
                 LIMINE_MEMMAP_ACPI_RECLAIMABLE => add_reservation_or_panic(
                     entry.base,
                     entry.length,

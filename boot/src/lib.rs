@@ -23,7 +23,8 @@ pub use early_init::{
 pub use ffi_boundary::kernel_main;
 pub use kernel_panic::{kernel_assert, kernel_panic, kernel_panic_with_context};
 pub use limine_protocol::{
-    BootFramebuffer, BootInfo, MemmapEntry, boot_info, ensure_base_revision,
+    BootFramebuffer, BootInfo, MemmapEntry, MemoryRegion, MemoryRegionKind, boot_info,
+    ensure_base_revision, memmap_entry_count, memory_regions,
 };
 pub use shutdown::{
     execute_kernel, kernel_drain_serial_output, kernel_quiesce_interrupts, kernel_reboot,

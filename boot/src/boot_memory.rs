@@ -20,12 +20,7 @@ fn boot_step_memory_init() -> i32 {
     let framebuffer = boot_fb.as_ref().map(|bf| (bf.address as u64, &bf.info));
 
     klog_debug!("Initializing memory management from Limine data...");
-    let rc = init_memory_system(
-        memmap as *const slopos_mm::memory_init::LimineMemmapResponse,
-        hhdm,
-        hhdm_available,
-        framebuffer,
-    );
+    let rc = init_memory_system(memmap, hhdm, hhdm_available, framebuffer);
     if rc != 0 {
         klog_info!("ERROR: Memory system initialization failed");
         return -1;

@@ -13,6 +13,7 @@
 
 pub mod addr;
 pub mod arch;
+pub mod boot;
 pub mod damage;
 pub mod display;
 pub mod draw;
