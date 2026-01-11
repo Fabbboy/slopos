@@ -17,11 +17,11 @@
 use alloc::collections::{BTreeMap, VecDeque};
 
 use slopos_abi::damage::DamageRect;
+use slopos_abi::video_traits::VideoResult;
 use slopos_abi::{
     CompositorError, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
     SurfaceRole, WINDOW_STATE_NORMAL, WindowDamageRect, WindowInfo,
 };
-use slopos_drivers::video_bridge::VideoResult;
 use spin::Mutex;
 
 /// Advanced damage tracker with 32 regions and automatic merging.

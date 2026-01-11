@@ -18,7 +18,6 @@ pub mod random;
 pub mod serial;
 pub mod syscall_services_init;
 pub mod tty;
-pub mod video_bridge;
 pub mod virtio_gpu;
 // wl_currency moved to slopos_core - re-export for backward compatibility
 pub use slopos_core::wl_currency;

@@ -4,10 +4,10 @@
 extern crate alloc;
 
 use core::ffi::c_int;
+use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 use slopos_core::wl_currency;
 use slopos_drivers::serial_println;
-use slopos_drivers::video_bridge::{self, VideoCallbacks};
 use slopos_drivers::virtio_gpu;
 use slopos_lib::FramebufferInfo;
 use slopos_lib::klog_info;
@@ -145,7 +145,7 @@ fn video_surface_set_title(task_id: u32, title_ptr: *const u8, title_len: usize)
         .unwrap_or_else(|e| e.as_c_int())
 }
 
-static VIDEO_CALLBACKS: VideoCallbacks = VideoCallbacks {
+static VIDEO_SERVICES: VideoServices = VideoServices {
     framebuffer_get_info: video_framebuffer_get_info,
     roulette_draw: video_roulette_draw,
     surface_enumerate_windows: video_surface_enumerate_windows,
@@ -214,7 +214,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
             return;
         }
 
-        video_bridge::register_video_services(&VIDEO_CALLBACKS);
+        register_video_services(&VIDEO_SERVICES);
 
         if let Err(err) = splash::splash_show_boot_screen() {
             serial_println!(

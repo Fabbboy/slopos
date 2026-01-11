@@ -5,8 +5,8 @@ use spin::Mutex;
 use crate::font;
 use crate::framebuffer;
 use crate::graphics::{self, GraphicsContext, GraphicsResult};
+use slopos_abi::video_traits::VideoError;
 use slopos_drivers::pit;
-use slopos_drivers::video_bridge::VideoError;
 
 const SPLASH_BG_COLOR: u32 = 0x0000_0000;
 const SPLASH_TEXT_COLOR: u32 = 0xE6E6_E6FF;

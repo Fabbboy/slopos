@@ -7,7 +7,7 @@ use crate::framebuffer::{self, FbState};
 use slopos_abi::DrawTarget;
 use slopos_abi::draw_primitives;
 use slopos_abi::pixel::DrawPixelFormat;
-use slopos_drivers::video_bridge::VideoError;
+use slopos_abi::video_traits::VideoError;
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 

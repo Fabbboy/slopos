@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_void};
+use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::pit::pit_poll_delay_ms;
-use slopos_drivers::video_bridge::{VideoError, VideoResult};
 
 use crate::graphics::GraphicsContext;
 use crate::{font, framebuffer, graphics};
