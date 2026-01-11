@@ -100,6 +100,7 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     timer_get_ticks: || irq::get_timer_ticks(),
     timer_get_frequency: || pit::pit_get_frequency(),
     timer_poll_delay_ms: |ms| pit::pit_poll_delay_ms(ms),
+    timer_sleep_ms: |ms| pit::pit_sleep_ms(ms),
     timer_enable_irq: || pit::pit_enable_irq(),
     timer_disable_irq: || pit::pit_disable_irq(),
     console_putc: |c| serial::serial_putc_com1(c),

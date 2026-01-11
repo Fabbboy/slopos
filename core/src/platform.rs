@@ -6,6 +6,7 @@ pub struct PlatformServices {
     pub timer_get_ticks: fn() -> u64,
     pub timer_get_frequency: fn() -> u32,
     pub timer_poll_delay_ms: fn(u32),
+    pub timer_sleep_ms: fn(u32),
     pub timer_enable_irq: fn(),
     pub timer_disable_irq: fn(),
 
@@ -65,6 +66,16 @@ pub fn get_time_ms() -> u64 {
         return 0;
     }
     (ticks * 1000) / freq as u64
+}
+
+#[inline(always)]
+pub fn timer_poll_delay_ms(ms: u32) {
+    (platform().timer_poll_delay_ms)(ms)
+}
+
+#[inline(always)]
+pub fn timer_sleep_ms(ms: u32) {
+    (platform().timer_sleep_ms)(ms)
 }
 
 #[inline(always)]

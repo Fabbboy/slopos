@@ -1,6 +1,7 @@
 use core::ffi::{c_char, c_int};
 
-use crate::syscall_types::{InterruptFrame, Task};
+use slopos_abi::task::Task;
+use slopos_lib::InterruptFrame;
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtrError};
@@ -24,8 +25,6 @@ pub struct SyscallEntry {
     pub name: *const c_char,
 }
 
-// SAFETY: SyscallEntry contains only function pointers and raw pointers to static strings,
-// which are inherently thread-safe for read-only access in the static syscall table.
 unsafe impl Sync for SyscallEntry {}
 
 pub fn syscall_return_ok(frame: *mut InterruptFrame, value: u64) -> SyscallDisposition {

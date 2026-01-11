@@ -1,13 +1,12 @@
 use slopos_lib::klog_info;
 
-use crate::syscall_handlers::syscall_lookup;
-use crate::syscall_types::{
-    InterruptFrame, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext,
-};
-use slopos_core::scheduler_get_current_task;
-use slopos_core::wl_currency;
+use crate::scheduler_get_current_task;
+use crate::syscall::handlers::syscall_lookup;
+use crate::wl_currency;
 
 use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
+use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext};
+use slopos_lib::InterruptFrame;
 
 fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
     if frame.is_null() || task.is_null() {
@@ -45,6 +44,7 @@ fn save_user_context(frame: *mut InterruptFrame, task: *mut Task) {
         (*task).user_started = 1;
     }
 }
+
 pub fn syscall_handle(frame: *mut InterruptFrame) {
     if frame.is_null() {
         wl_currency::award_loss();
@@ -68,8 +68,6 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         (*task).flags |= TASK_FLAG_NO_PREEMPT;
     }
 
-    // Temporarily set current task provider to use this task's process_id
-    // This ensures user_copy_from_user can find the correct page directory
     let pid = unsafe { (*task).process_id };
     let original_provider = slopos_mm::user_copy::set_syscall_process_id(pid);
 

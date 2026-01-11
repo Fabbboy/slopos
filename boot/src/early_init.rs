@@ -539,6 +539,7 @@ pub fn kernel_main_impl() {
     // Register boot services and platform early to break circular dependencies
     crate::boot_impl::register_boot_services();
     slopos_drivers::platform_init::init_platform_services();
+    slopos_drivers::syscall_services_init::init_syscall_services();
 
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {

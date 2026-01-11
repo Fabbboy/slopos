@@ -7,6 +7,9 @@ global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 pub mod irq;
 pub mod platform;
 pub mod scheduler;
+#[macro_use]
+pub mod syscall;
+pub mod syscall_services;
 pub mod wl_currency;
 
 pub use scheduler::fate_api;

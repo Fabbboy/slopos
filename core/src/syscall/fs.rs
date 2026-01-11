@@ -1,18 +1,17 @@
-//! Filesystem syscall handlers
-
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::{mem, ptr};
 
+use slopos_abi::task::Task;
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
+use slopos_lib::InterruptFrame;
 
-use crate::syscall_common::{
+use crate::syscall::common::{
     SyscallDisposition, USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_copy_user_str_to_cstr, syscall_return_err,
 };
-use crate::syscall_context::SyscallContext;
-use crate::syscall_types::{InterruptFrame, Task};
+use crate::syscall::context::SyscallContext;
 
 type RamfsNode = ramfs_node_t;
 

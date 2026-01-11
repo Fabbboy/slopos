@@ -1,50 +1,35 @@
-//! Syscall handler implementations
-//!
-//! All handlers use SyscallContext for safe pointer access.
-
 use core::ffi::c_char;
 use core::ptr;
 
+use slopos_abi::InputEvent;
+use slopos_abi::WindowInfo;
+use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::*;
 
-use crate::input_event;
-use crate::random;
-use crate::serial;
-use crate::syscall_common::{
+use crate::platform;
+use crate::syscall::common::{
     SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
     syscall_copy_to_user_bounded, syscall_return_err,
 };
-use crate::syscall_context::SyscallContext;
-use crate::syscall_fs::{
+use crate::syscall::context::SyscallContext;
+use crate::syscall::fs::{
     syscall_fs_close, syscall_fs_list, syscall_fs_mkdir, syscall_fs_open, syscall_fs_read,
     syscall_fs_stat, syscall_fs_unlink, syscall_fs_write,
 };
-use crate::syscall_types::{InterruptFrame, Task, TaskExitReason, TaskFaultReason};
-use crate::video_bridge;
-use slopos_core::wl_currency;
-use slopos_lib::klog_debug;
-use slopos_mm::user_copy::copy_to_user;
-use slopos_mm::user_ptr::UserPtr;
-
-use crate::fate;
-use slopos_abi::fate::FateResult;
-
-use slopos_mm::page_alloc::get_page_allocator_stats;
-use slopos_mm::paging;
-
-use slopos_core::platform;
-use slopos_core::{
+use crate::syscall_services::{fate as fate_svc, input, tty, video};
+use crate::wl_currency;
+use crate::{
     fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending, get_scheduler_stats,
     get_task_stats, schedule, scheduler_is_preemption_enabled, task_terminate, yield_,
 };
 
-use crate::irq;
-use crate::pit::{pit_get_frequency, pit_poll_delay_ms, pit_sleep_ms};
-use crate::tty::{tty_get_focus, tty_read_char_blocking, tty_read_line, tty_set_focus};
-
-// =============================================================================
-// Simple handlers (no special requirements)
-// =============================================================================
+use slopos_abi::task::{Task, TaskExitReason, TaskFaultReason};
+use slopos_lib::InterruptFrame;
+use slopos_lib::klog_debug;
+use slopos_mm::page_alloc::get_page_allocator_stats;
+use slopos_mm::paging;
+use slopos_mm::user_copy::copy_to_user;
+use slopos_mm::user_ptr::UserPtr;
 
 pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
@@ -56,14 +41,12 @@ pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
 }
 
 define_syscall!(syscall_random_next(ctx, args) {
-    let value = random::random_next();
-    ctx.ok(value as u64)
+    let value = platform::rng_next();
+    ctx.ok(value)
 });
 
 define_syscall!(syscall_get_time_ms(ctx, args) {
-    let ticks = irq::get_timer_ticks();
-    let freq = pit_get_frequency();
-    let ms = (ticks * 1000) / freq as u64;
+    let ms = platform::get_time_ms();
     ctx.ok(ms)
 });
 
@@ -84,16 +67,12 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
         ms = 60000;
     }
     if scheduler_is_preemption_enabled() != 0 {
-        pit_sleep_ms(ms as u32);
+        crate::platform::timer_sleep_ms(ms as u32);
     } else {
-        pit_poll_delay_ms(ms as u32);
+        crate::platform::timer_poll_delay_ms(ms as u32);
     }
     ctx.ok(0)
 });
-
-// =============================================================================
-// Handlers requiring valid task
-// =============================================================================
 
 pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let ctx = SyscallContext::new(task, frame);
@@ -111,22 +90,22 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 }
 
 define_syscall!(syscall_surface_commit(ctx, args, task_id) requires task_id {
-    let rc = video_bridge::surface_commit(task_id);
+    let rc = video::surface_commit(task_id);
     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
 });
 
 define_syscall!(syscall_surface_frame(ctx, args, task_id) requires task_id {
-    let rc = video_bridge::surface_request_frame_callback(task_id);
+    let rc = video::surface_request_frame_callback(task_id);
     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
 });
 
 define_syscall!(syscall_poll_frame_done(ctx, args, task_id) requires task_id {
-    let timestamp = video_bridge::surface_poll_frame_done(task_id);
+    let timestamp = video::surface_poll_frame_done(task_id);
     ctx.ok(timestamp)
 });
 
 define_syscall!(syscall_buffer_age(ctx, args, task_id) requires task_id {
-    let age = video_bridge::surface_get_buffer_age(task_id);
+    let age = video::surface_get_buffer_age(task_id);
     ctx.ok(age as u64)
 });
 
@@ -141,7 +120,7 @@ define_syscall!(syscall_surface_damage(ctx, args, task_id) requires task_id {
     let y = args.arg1_i32();
     let width = args.arg2_i32();
     let height = args.arg3_i32();
-    let rc = video_bridge::surface_add_damage(task_id, x, y, width, height);
+    let rc = video::surface_add_damage(task_id, x, y, width, height);
     if rc < 0 { ctx.err_loss() } else { ctx.ok_win(0) }
 });
 
@@ -181,11 +160,9 @@ define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires 
     let token = args.arg0_u32();
     let width = args.arg1_u32();
     let height = args.arg2_u32();
-    // surface_attach checks ownership using process_id
     let result = slopos_mm::shared_memory::surface_attach(process_id, token, width, height);
     check_result!(ctx, result);
-    // video_bridge still uses task_id for surface registration
-    let video_result = video_bridge::register_surface(task_id, width, height, token);
+    let video_result = video::register_surface(task_id, width, height, token);
     check_result!(ctx, video_result);
     ctx.ok_win(0)
 });
@@ -203,20 +180,20 @@ define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task
 
 define_syscall!(syscall_surface_set_role(ctx, args, task_id) requires task_id {
     let role = args.arg0 as u8;
-    let result = video_bridge::surface_set_role(task_id, role);
+    let result = video::surface_set_role(task_id, role);
     ctx.ok(result as u64)
 });
 
 define_syscall!(syscall_surface_set_parent(ctx, args, task_id) requires task_id {
     let parent_task_id = args.arg0_u32();
-    let result = video_bridge::surface_set_parent(task_id, parent_task_id);
+    let result = video::surface_set_parent(task_id, parent_task_id);
     ctx.ok(result as u64)
 });
 
 define_syscall!(syscall_surface_set_rel_pos(ctx, args, task_id) requires task_id {
     let rel_x = args.arg0_i32();
     let rel_y = args.arg1_i32();
-    let result = video_bridge::surface_set_relative_position(task_id, rel_x, rel_y);
+    let result = video::surface_set_relative_position(task_id, rel_x, rel_y);
     ctx.ok(result as u64)
 });
 
@@ -241,7 +218,7 @@ pub fn syscall_surface_set_title(
 
     let copy_len = title_len.min(31);
     let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, copy_len) };
-    let result = video_bridge::surface_set_title(task_id, title_slice);
+    let result = video::surface_set_title(task_id, title_slice);
     ctx.ok(result as u64)
 }
 
@@ -255,18 +232,17 @@ pub fn syscall_input_poll(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     }
 
     let args = ctx.args();
-    let event_ptr = args.arg0_ptr::<input_event::InputEvent>();
+    let event_ptr = args.arg0_ptr::<InputEvent>();
 
     if event_ptr.is_null() {
         return ctx.ok((-1i64) as u64);
     }
 
-    // Auto-set pointer focus to compositor if not set
-    if ctx.is_compositor() && input_event::input_get_pointer_focus() == 0 {
-        input_event::input_set_pointer_focus(task_id, 0);
+    if ctx.is_compositor() && input::input_get_pointer_focus() == 0 {
+        input::input_set_pointer_focus(task_id, 0);
     }
 
-    if let Some(event) = input_event::input_poll(task_id) {
+    if let Some(event) = input::input_poll(task_id) {
         unsafe {
             *event_ptr = event;
         }
@@ -286,24 +262,23 @@ pub fn syscall_input_poll_batch(task: *mut Task, frame: *mut InterruptFrame) -> 
     }
 
     let args = ctx.args();
-    let buffer_ptr = args.arg0_ptr::<input_event::InputEvent>();
+    let buffer_ptr = args.arg0_ptr::<InputEvent>();
     let max_count = args.arg1_usize();
 
     if buffer_ptr.is_null() || max_count == 0 {
         return ctx.ok(0);
     }
 
-    // Auto-set pointer focus to compositor if not set
-    if ctx.is_compositor() && input_event::input_get_pointer_focus() == 0 {
-        input_event::input_set_pointer_focus(task_id, 0);
+    if ctx.is_compositor() && input::input_get_pointer_focus() == 0 {
+        input::input_set_pointer_focus(task_id, 0);
     }
 
-    let count = input_event::input_drain_batch(task_id, buffer_ptr, max_count);
+    let count = input::input_drain_batch(task_id, buffer_ptr, max_count);
     ctx.ok(count as u64)
 }
 
 define_syscall!(syscall_input_has_events(ctx, args, task_id) requires task_id {
-    let count = input_event::input_event_count(task_id);
+    let count = input::input_event_count(task_id);
     ctx.ok(count as u64)
 });
 
@@ -320,68 +295,53 @@ pub fn syscall_input_set_focus(task: *mut Task, frame: *mut InterruptFrame) -> S
     let target_task_id = args.arg0_u32();
     let focus_type = args.arg1_u32();
 
-    let ticks = irq::get_timer_ticks();
-    let freq = pit_get_frequency();
-    let timestamp_ms = (ticks * 1000) / freq as u64;
+    let timestamp_ms = platform::get_time_ms();
 
     match focus_type {
-        0 => input_event::input_set_keyboard_focus(target_task_id),
-        1 => input_event::input_set_pointer_focus(target_task_id, timestamp_ms),
+        0 => input::input_set_keyboard_focus(target_task_id),
+        1 => input::input_set_pointer_focus(target_task_id, timestamp_ms),
         _ => return ctx.ok((-1i64) as u64),
     }
     ctx.ok(0)
 }
 
-// Set pointer focus with window offset for coordinate translation.
-// SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET (65)
 define_syscall!(syscall_input_set_focus_with_offset(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let offset_x = args.arg1 as i32;
     let offset_y = args.arg2 as i32;
-    let ticks = irq::get_timer_ticks();
-    let freq = pit_get_frequency();
-    let timestamp_ms = (ticks * 1000) / freq as u64;
-    input_event::input_set_pointer_focus_with_offset(target_task_id, offset_x, offset_y, timestamp_ms);
+    let timestamp_ms = platform::get_time_ms();
+    input::input_set_pointer_focus_with_offset(target_task_id, offset_x, offset_y, timestamp_ms);
     ctx.ok(0)
 });
 
-// SYSCALL_INPUT_GET_POINTER_POS (66)
-// Get current global pointer position (compositor use)
 define_syscall!(syscall_input_get_pointer_pos(ctx, args) requires compositor {
-    let (x, y) = input_event::input_get_pointer_position();
-    // Pack x and y into a single u64: upper 32 = x, lower 32 = y
+    let (x, y) = input::input_get_pointer_position();
     let result = ((x as u32 as u64) << 32) | (y as u32 as u64);
     ctx.ok(result)
 });
 
-// SYSCALL_INPUT_GET_BUTTON_STATE (67)
-// Get current global pointer button state (compositor use)
 define_syscall!(syscall_input_get_button_state(ctx, args) requires compositor {
-    let buttons = input_event::input_get_button_state();
+    let buttons = input::input_get_button_state();
     ctx.ok(buttons as u64)
 });
 
-// =============================================================================
-// Compositor-only handlers
-// =============================================================================
-
 define_syscall!(syscall_tty_set_focus(ctx, args) requires compositor {
     let target = args.arg0_u32();
-    if tty_set_focus(target) != 0 {
+    if tty::tty_set_focus(target) != 0 {
         ctx.err_loss()
     } else {
         wl_currency::award_win();
-        ctx.ok(tty_get_focus() as u64)
+        ctx.ok(tty::tty_get_focus() as u64)
     }
 });
 
 define_syscall!(syscall_enumerate_windows(ctx, args) requires compositor {
-    let out_buffer = args.arg0_ptr::<video_bridge::WindowInfo>();
+    let out_buffer = args.arg0_ptr::<WindowInfo>();
     let max_count = args.arg1_u32();
     if out_buffer.is_null() || max_count == 0 {
         return ctx.err_loss();
     }
-    let count = video_bridge::surface_enumerate_windows(out_buffer, max_count);
+    let count = video::surface_enumerate_windows(out_buffer, max_count);
     ctx.ok(count as u64)
 });
 
@@ -389,20 +349,20 @@ define_syscall!(syscall_set_window_position(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let x = args.arg1_i32();
     let y = args.arg2_i32();
-    let rc = video_bridge::surface_set_window_position(target_task_id, x, y);
+    let rc = video::surface_set_window_position(target_task_id, x, y);
     if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_set_window_state(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let state = args.arg1 as u8;
-    let rc = video_bridge::surface_set_window_state(target_task_id, state);
+    let rc = video::surface_set_window_state(target_task_id, state);
     if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
 });
 
 define_syscall!(syscall_raise_window(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
-    let rc = video_bridge::surface_raise_window(target_task_id);
+    let rc = video::surface_raise_window(target_task_id);
     if rc < 0 { ctx.err_loss() } else { ctx.ok(0) }
 });
 
@@ -413,17 +373,17 @@ define_syscall!(syscall_fb_flip(ctx, args) requires compositor {
     if phys_addr.is_null() || size == 0 {
         return ctx.err_loss();
     }
-    let fb_info = video_bridge::framebuffer_get_info();
+    let fb_info = video::framebuffer_get_info();
     if fb_info.is_null() {
         return ctx.err_loss();
     }
-    let result = video_bridge::fb_flip_from_shm(phys_addr, size);
+    let result = video::fb_flip_from_shm(phys_addr, size);
     check_result!(ctx, result);
     ctx.ok_win(0)
 });
 
 define_syscall!(syscall_drain_queue(ctx, args) requires compositor {
-    video_bridge::drain_queue();
+    video::drain_queue();
     ctx.ok(0)
 });
 
@@ -451,20 +411,16 @@ define_syscall!(syscall_shm_release(ctx, args) requires compositor {
 
 define_syscall!(syscall_mark_frames_done(ctx, args) requires compositor {
     let present_time_ms = args.arg0;
-    video_bridge::surface_mark_frames_done(present_time_ms);
+    video::surface_mark_frames_done(present_time_ms);
     ctx.ok(0)
 });
-
-// =============================================================================
-// Display exclusive handlers
-// =============================================================================
 
 define_syscall!(syscall_roulette_draw(ctx, args) requires display_exclusive {
     let fate = args.arg0_u32();
     let original_dir = paging::get_current_page_directory();
     let kernel_dir = paging::paging_get_kernel_directory();
     let _ = paging::switch_page_directory(kernel_dir);
-    let rc = video_bridge::roulette_draw(fate);
+    let rc = video::roulette_draw(fate);
     let disp = if rc.is_ok() {
         ctx.ok_win(0)
     } else {
@@ -473,10 +429,6 @@ define_syscall!(syscall_roulette_draw(ctx, args) requires display_exclusive {
     let _ = paging::switch_page_directory(original_dir);
     disp
 });
-
-// =============================================================================
-// Complex handlers
-// =============================================================================
 
 pub fn syscall_roulette_spin(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
@@ -521,7 +473,7 @@ pub fn syscall_roulette_result(task: *mut Task, frame: *mut InterruptFrame) -> S
 
     if is_win {
         fate_apply_outcome(&stored as *const FateResult, 0, true);
-        fate::fate_notify_outcome(&stored as *const FateResult);
+        fate_svc::fate_notify_outcome(&stored as *const FateResult);
         ctx.ok(0)
     } else {
         fate_apply_outcome(&stored as *const FateResult, 0, false);
@@ -546,8 +498,7 @@ pub fn syscall_user_write(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
             Err(_) => return ctx.err(),
         };
 
-    let text = core::str::from_utf8(&tmp[..write_len]).unwrap_or("");
-    serial::write_str(text);
+    platform::console_puts(&tmp[..write_len]);
     ctx.ok(write_len as u64)
 }
 
@@ -568,7 +519,7 @@ pub fn syscall_user_read(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
         args.arg1_usize()
     };
 
-    let mut read_len = tty_read_line(tmp.as_mut_ptr(), max_len);
+    let mut read_len = tty::tty_read_line(tmp.as_mut_ptr(), max_len);
     if max_len > 0 {
         read_len = read_len.min(max_len.saturating_sub(1));
         tmp[read_len] = 0;
@@ -584,7 +535,7 @@ pub fn syscall_user_read(task: *mut Task, frame: *mut InterruptFrame) -> Syscall
 
 define_syscall!(syscall_user_read_char(ctx, args) {
     let mut c = 0u8;
-    if tty_read_char_blocking(&mut c as *mut u8) != 0 {
+    if tty::tty_read_char_blocking(&mut c as *mut u8) != 0 {
         return ctx.err();
     }
     ctx.ok(c as u64)
@@ -595,7 +546,7 @@ pub fn syscall_fb_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         return syscall_return_err(frame, u64::MAX);
     };
 
-    let info = video_bridge::framebuffer_get_info();
+    let info = video::framebuffer_get_info();
     if info.is_null() {
         return ctx.err();
     }
@@ -676,18 +627,10 @@ pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
     ctx.ok(0)
 }
 
-// =============================================================================
-// Task spawning syscall
-// =============================================================================
-
-/// Type for the task spawn callback function.
-/// Takes a task name slice and returns task_id (> 0) on success, -1 on failure.
 pub type SpawnTaskFn = fn(&[u8]) -> i32;
 
-/// Global callback for spawning tasks, registered by userland at boot.
 static SPAWN_TASK_CALLBACK: spin::Mutex<Option<SpawnTaskFn>> = spin::Mutex::new(None);
 
-/// Register the task spawn callback (called by userland bootstrap at init).
 pub fn register_spawn_task_callback(callback: SpawnTaskFn) {
     *SPAWN_TASK_CALLBACK.lock() = Some(callback);
 }
@@ -698,11 +641,9 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     };
     let args = ctx.args();
 
-    // Get task name from user space
     let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
 
-    // Validate and copy name from user space
     if name_ptr.is_null() || name_len == 0 || name_len > 64 {
         return ctx.err();
     }
@@ -714,11 +655,10 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
             Err(_) => return ctx.err(),
         };
 
-    // Call the registered spawn callback
     let callback = *SPAWN_TASK_CALLBACK.lock();
     let result = match callback {
         Some(spawn_fn) => spawn_fn(&name_buf[..copied_len]),
-        None => -1, // No callback registered
+        None => -1,
     };
 
     if result > 0 {
@@ -727,10 +667,6 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
         ctx.err()
     }
 }
-
-// =============================================================================
-// Syscall table and dispatch
-// =============================================================================
 
 static SYSCALL_TABLE: [SyscallEntry; 128] = {
     let mut table: [SyscallEntry; 128] = [SyscallEntry {

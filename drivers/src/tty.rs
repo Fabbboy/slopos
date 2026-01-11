@@ -7,7 +7,7 @@ use spin::Mutex;
 
 use crate::keyboard;
 use crate::serial;
-use crate::syscall_types::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
+use slopos_abi::task::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
 use slopos_core::sched::{
     block_current_task, scheduler_get_current_task, scheduler_is_enabled,
     scheduler_register_idle_wakeup_callback, unblock_task,
