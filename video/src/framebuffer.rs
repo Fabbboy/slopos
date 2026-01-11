@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::{DisplayInfo, PixelFormat};
-use slopos_drivers::serial_println;
+use slopos_lib::{klog_debug, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use spin::Mutex;
 
@@ -135,7 +135,7 @@ pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
 
     if rc == 0 {
         if let Some(fb) = FRAMEBUFFER.lock().fb {
-            serial_println!(
+            klog_debug!(
                 "Framebuffer init: phys=0x{:x} virt=0x{:x} {}x{} pitch={} bpp={}",
                 address as u64,
                 fb.base.as_u64(),
@@ -145,10 +145,10 @@ pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
                 fb.bpp()
             );
         } else {
-            serial_println!("Framebuffer init: state missing after init");
+            klog_warn!("Framebuffer init: state missing after init");
         }
     } else {
-        serial_println!(
+        klog_warn!(
             "Framebuffer init failed: phys=0x{:x} {}x{} pitch={} bpp={}",
             address as u64,
             info.width,

@@ -1,7 +1,7 @@
-use crate::{random::Lfsr64, serial_println};
+use crate::random::Lfsr64;
 use slopos_abi::fate::FateResult;
 use slopos_core::wl_currency;
-use slopos_lib::cpu;
+use slopos_lib::{cpu, klog_info};
 
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 pub fn fate_register_outcome_hook(cb: fn(*const FateResult)) {
@@ -39,8 +39,8 @@ impl Wheel {
 
     pub fn spin(&mut self) -> RouletteOutcome {
         let roll = self.rng.next();
-        serial_println!("=== KERNEL ROULETTE: Spinning the Wheel of Fate ===");
-        serial_println!("Random number: 0x{:016x}", roll);
+        klog_info!("=== KERNEL ROULETTE: Spinning the Wheel of Fate ===");
+        klog_info!("Random number: 0x{:016x}", roll);
         let hook = OUTCOME_HOOK.load(core::sync::atomic::Ordering::SeqCst);
         if hook != 0 {
             unsafe {
@@ -54,18 +54,18 @@ impl Wheel {
         }
         if roll & 1 == 0 {
             wl_currency::award_loss();
-            serial_println!("Even number. The wheel has spoken. Destiny awaits in the abyss.");
+            klog_info!("Even number. The wheel has spoken. Destiny awaits in the abyss.");
             RouletteOutcome::Panic
         } else {
             wl_currency::award_win();
-            serial_println!("Odd number. The wizards live to gamble another boot.");
+            klog_info!("Odd number. The wizards live to gamble another boot.");
             RouletteOutcome::Survive
         }
     }
 }
 
 pub fn detonate() -> ! {
-    serial_println!("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===");
+    klog_info!("=== INITIATING KERNEL PANIC (ROULETTE RESULT) ===");
     loop {
         cpu::hlt();
     }

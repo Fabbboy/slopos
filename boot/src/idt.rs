@@ -4,7 +4,6 @@
 use core::arch::{asm, global_asm};
 use core::ffi::{CStr, c_char, c_void};
 
-use slopos_drivers::serial_println;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
@@ -126,7 +125,7 @@ unsafe extern "C" {
     fn irq15();
 }
 pub fn idt_init() {
-    serial_println!("IDT: init start");
+    klog_debug!("IDT: init start");
     unsafe {
         core::ptr::write_bytes(
             IDT.as_mut_ptr() as *mut u8,
@@ -180,7 +179,7 @@ pub fn idt_init() {
     klog_debug!("IDT: Configured 256 interrupt vectors");
     let base = unsafe { IDT_POINTER.base };
     let limit = unsafe { IDT_POINTER.limit };
-    serial_println!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
+    klog_debug!("IDT: init prepared base=0x{:x} limit=0x{:x}", base, limit);
 }
 pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
     unsafe {

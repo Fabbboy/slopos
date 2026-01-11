@@ -11,9 +11,9 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 use slopos_core as sched;
-use slopos_drivers::{serial, serial_println};
+use slopos_drivers::serial;
 use slopos_fs as fs;
-use slopos_lib::cpu;
+use slopos_lib::{cpu, klog_error};
 use slopos_mm::BumpAllocator;
 use slopos_userland as userland;
 mod ffi;
@@ -64,13 +64,13 @@ static FORCE_LINK_BOOT_DEPS: fn() = __link_boot_deps;
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     serial::init();
-    serial_println!("Allocation failure: {:?}", layout);
+    klog_error!("Allocation failure: {:?}", layout);
     cpu::halt_loop();
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     serial::init();
-    serial_println!("Kernel panic: {:?}", info);
+    klog_error!("Kernel panic: {:?}", info);
     cpu::halt_loop();
 }

@@ -222,23 +222,3 @@ impl Write for SerialPort {
         Ok(())
     }
 }
-
-#[macro_export]
-macro_rules! serial_print {
-    ($($arg:tt)*) => {{
-        $crate::serial::print_args(core::format_args!($($arg)*));
-    }};
-}
-
-#[macro_export]
-macro_rules! serial_println {
-    () => {
-        $crate::serial::write_line("");
-    };
-    ($fmt:expr) => {
-        $crate::serial::write_line($fmt);
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::serial::print_args(core::format_args!(concat!($fmt, "\n"), $($arg)*));
-    };
-}

@@ -10,9 +10,8 @@ use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
-use slopos_drivers::serial_println;
 use slopos_drivers::virtio_gpu;
-use slopos_lib::klog_info;
+use slopos_lib::{klog_info, klog_warn};
 
 pub mod compositor_context;
 pub mod font;
@@ -198,7 +197,7 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
     };
 
     if let Some(fb) = fb_to_use {
-        serial_println!(
+        klog_info!(
             "Framebuffer online: {}x{} pitch {} bpp {}",
             fb.info.width,
             fb.info.height,
@@ -207,14 +206,14 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
         );
 
         if framebuffer::init_with_display_info(fb.address, &fb.info) != 0 {
-            serial_println!("Framebuffer init failed; skipping banner paint.");
+            klog_warn!("Framebuffer init failed; skipping banner paint.");
             return;
         }
 
         register_video_services(&VIDEO_SERVICES);
 
         if let Err(err) = splash::splash_show_boot_screen() {
-            serial_println!(
+            klog_warn!(
                 "Splash paint failed ({:?}); falling back to banner stripe.",
                 err
             );
@@ -222,7 +221,7 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
         }
         framebuffer::framebuffer_flush();
     } else {
-        serial_println!("No framebuffer provided; skipping video init.");
+        klog_warn!("No framebuffer provided; skipping video init.");
     }
 }
 
@@ -267,7 +266,7 @@ fn paint_banner() {
     };
 
     if fb.bpp() < 24 {
-        serial_println!(
+        klog_warn!(
             "Framebuffer bpp {} unsupported for banner paint; skipping.",
             fb.bpp()
         );

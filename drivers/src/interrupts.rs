@@ -1,7 +1,6 @@
-use crate::serial_println;
-use slopos_lib::cpu;
 #[cfg(feature = "qemu-exit")]
 use slopos_lib::ports::QEMU_DEBUG_EXIT;
+use slopos_lib::{cpu, klog_info, klog_warn};
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_SUITE: Suite = Suite::All;
@@ -208,12 +207,12 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> InterruptTestConfig {
 
 pub fn run(config: &InterruptTestConfig) -> bool {
     if !config.enabled {
-        serial_println!("Interrupt tests disabled (itests=off).");
+        klog_info!("Interrupt tests disabled (itests=off).");
         return true;
     }
 
-    serial_println!("Running interrupt tests");
-    serial_println!(
+    klog_info!("Running interrupt tests");
+    klog_info!(
         "  suite={} verbosity={} timeout={}ms shutdown={}",
         config.suite(),
         config.verbosity,
@@ -222,7 +221,7 @@ pub fn run(config: &InterruptTestConfig) -> bool {
     );
 
     // Placeholder harness: mark success.
-    serial_println!("Interrupt tests: 13 total, 13 passed, 0 failed, timeout=0");
+    klog_info!("Interrupt tests: 13 total, 13 passed, 0 failed, timeout=0");
 
     if config.shutdown {
         #[cfg(feature = "qemu-exit")]
@@ -231,7 +230,7 @@ pub fn run(config: &InterruptTestConfig) -> bool {
         }
         #[cfg(not(feature = "qemu-exit"))]
         {
-            serial_println!("Shutdown requested but qemu-exit feature not enabled. Halting.");
+            klog_warn!("Shutdown requested but qemu-exit feature not enabled. Halting.");
             cpu::halt_loop();
         }
     }
