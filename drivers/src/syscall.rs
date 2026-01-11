@@ -4,8 +4,8 @@ use crate::syscall_handlers::syscall_lookup;
 use crate::syscall_types::{
     InterruptFrame, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext,
 };
-use crate::wl_currency;
 use slopos_core::scheduler_get_current_task;
+use slopos_core::wl_currency;
 
 use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
 

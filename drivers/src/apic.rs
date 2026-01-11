@@ -4,10 +4,10 @@ use spin::Once;
 
 use slopos_lib::{cpu, klog_debug, klog_info};
 
-use crate::wl_currency;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::apic::*;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
+use slopos_core::wl_currency;
 use slopos_mm::mmio::MmioRegion;
 
 /// APIC register region size (4KB page).

@@ -8,6 +8,240 @@ This plan proposes restructuring SlopOS's crate dependencies by introducing a ne
 
 ---
 
+## Current Implementation Status
+
+> **Last Updated**: January 2025
+
+### Phases Completed
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Create `core` crate and move scheduler | ✅ COMPLETE | Core crate exists with scheduler, platform services, IRQ framework |
+| Phase 3: Implement platform services and remove bridge | ✅ COMPLETE | `sched_bridge.rs` deleted, platform services working |
+| Phase 4: Move IRQ framework to core | ✅ COMPLETE | `core/src/irq.rs` has dispatch logic |
+| Phase 5: Delete `sched` crate and legacy traits | ✅ COMPLETE | `sched/` deleted, traits removed |
+| **Phase 2: Move syscalls to core** | ❌ NOT DONE | See "Remaining Work" section |
+
+### What Works Now
+
+- ✅ `core` crate exists with scheduler, IRQ framework, platform services, wl_currency
+- ✅ `sched/` crate deleted
+- ✅ `drivers/src/sched_bridge.rs` deleted
+- ✅ `SchedulerServices` and `BootServices` traits removed
+- ✅ Dependency graph is correct: `core` has NO dependency on `drivers`
+- ✅ `drivers` depends on `core`
+- ✅ Build passes, tests pass, system boots
+- ✅ `abi/src/sched_traits.rs` renamed to `abi/src/fate.rs` (now only contains `FateResult`)
+- ✅ `wl_currency` consolidated in `core` (drivers re-exports for compatibility)
+
+### Verification Results (All Pass)
+
+```bash
+grep -r "sched_bridge" --include="*.rs" .     # ✅ Nothing
+grep -r "SchedulerServices" --include="*.rs" . # ✅ Nothing
+grep -r "BootServices" --include="*.rs" .      # ✅ Nothing
+grep -r "slopos-sched" .                       # ✅ Nothing
+grep -r "slopos_sched" --include="*.rs" .      # ✅ Nothing
+ls sched/                                       # ✅ No such directory
+make build                                      # ✅ Succeeds
+make test                                       # ✅ Passes
+```
+
+---
+
+## Remaining Work: Phase 2 - Move Syscalls to Core
+
+### Current State
+
+Syscalls remain in `drivers/src/`:
+- `syscall.rs` - dispatch entry point
+- `syscall_handlers.rs` - all handler implementations
+- `syscall_common.rs` - utilities
+- `syscall_context.rs` - context extraction
+- `syscall_fs.rs` - filesystem syscalls
+- `syscall_macros.rs` - `define_syscall!` macro
+- `syscall_types.rs` - type re-exports
+
+### Why It Wasn't Done
+
+Moving syscalls to `core` requires **abstracting all driver services** used by syscall handlers. The handlers currently call directly into:
+
+| Driver Module | Functions Used |
+|---------------|----------------|
+| `input_event` | `input_poll`, `input_set_keyboard_focus`, `input_set_pointer_focus`, etc. |
+| `random` | `random_next()` |
+| `serial` | `write_str()` |
+| `video_bridge` | 20+ functions: `surface_commit`, `roulette_draw`, `framebuffer_get_info`, etc. |
+| `fate` | `fate_notify_outcome()` |
+| `irq` | `get_timer_ticks()` |
+| `pit` | `pit_get_frequency()`, `pit_poll_delay_ms()`, `pit_sleep_ms()` |
+| `tty` | `tty_read_line()`, `tty_read_char_blocking()`, `tty_set_focus()`, etc. |
+
+If syscalls move to `core`, and `core` cannot depend on `drivers`, then all these services must be abstracted via callback registration.
+
+### Required Changes to Complete Phase 2
+
+#### 1. Extend Platform Services (or create Syscall Services)
+
+Add callback registrations for each driver service used by syscalls:
+
+```rust
+// core/src/syscall_services.rs (NEW)
+
+pub struct SyscallServices {
+    // Input services
+    pub input_poll: fn(u32) -> Option<InputEvent>,
+    pub input_set_keyboard_focus: fn(u32),
+    pub input_set_pointer_focus: fn(u32, u64),
+    pub input_event_count: fn(u32) -> usize,
+    // ... 10+ more input functions
+    
+    // Video services
+    pub surface_commit: fn(u32) -> i32,
+    pub surface_request_frame: fn(u32) -> i32,
+    pub framebuffer_get_info: fn() -> *mut FramebufferInfoC,
+    pub roulette_draw: fn(u32) -> Result<(), VideoError>,
+    // ... 20+ more video functions
+    
+    // TTY services
+    pub tty_read_line: fn(*mut u8, usize) -> usize,
+    pub tty_read_char_blocking: fn(*mut u8) -> i32,
+    pub tty_set_focus: fn(u32) -> i32,
+    // ... more tty functions
+    
+    // Fate services
+    pub fate_notify_outcome: fn(*const FateResult),
+}
+
+static SYSCALL_SERVICES: AtomicPtr<SyscallServices> = AtomicPtr::new(ptr::null_mut());
+
+pub fn register_syscall_services(services: &'static SyscallServices) { ... }
+pub fn syscall_services() -> &'static SyscallServices { ... }
+```
+
+#### 2. Register Services from Drivers
+
+```rust
+// drivers/src/syscall_services_init.rs (NEW)
+
+use slopos_core::syscall_services::{SyscallServices, register_syscall_services};
+
+static SERVICES: SyscallServices = SyscallServices {
+    input_poll: |task_id| crate::input_event::input_poll(task_id),
+    input_set_keyboard_focus: |task_id| crate::input_event::input_set_keyboard_focus(task_id),
+    surface_commit: |task_id| crate::video_bridge::surface_commit(task_id),
+    tty_read_line: |buf, len| crate::tty::tty_read_line(buf, len),
+    // ... all other functions
+};
+
+pub fn init() {
+    register_syscall_services(&SERVICES);
+}
+```
+
+#### 3. Update Boot Sequence
+
+```rust
+// boot/src/early_init.rs
+
+// After drivers init, before syscalls can be called:
+slopos_drivers::syscall_services_init::init();
+```
+
+#### 4. Move and Refactor Syscall Files
+
+Move files to `core/src/syscall/`:
+```
+core/src/syscall/
+├── mod.rs
+├── dispatch.rs      (from drivers/src/syscall.rs)
+├── handlers.rs      (from drivers/src/syscall_handlers.rs)
+├── common.rs        (from drivers/src/syscall_common.rs)
+├── context.rs       (from drivers/src/syscall_context.rs)
+├── fs.rs            (from drivers/src/syscall_fs.rs)
+├── macros.rs        (from drivers/src/syscall_macros.rs)
+└── types.rs         (from drivers/src/syscall_types.rs)
+```
+
+#### 5. Refactor All Handler Functions
+
+Change every driver call to go through the service abstraction:
+
+```rust
+// BEFORE (in drivers):
+use crate::video_bridge;
+let rc = video_bridge::surface_commit(task_id);
+
+// AFTER (in core):
+use crate::syscall_services::syscall_services;
+let rc = (syscall_services().surface_commit)(task_id);
+```
+
+This affects 50+ call sites across all syscall handlers.
+
+#### 6. Update IDT Entry Point
+
+```rust
+// boot/src/idt.rs
+// BEFORE:
+use slopos_drivers::syscall::syscall_handle;
+
+// AFTER:
+use slopos_core::syscall::syscall_handle;
+```
+
+#### 7. Remove Syscall Modules from Drivers
+
+```rust
+// drivers/src/lib.rs
+// Remove:
+pub mod syscall;
+pub mod syscall_handlers;
+pub mod syscall_common;
+pub mod syscall_context;
+pub mod syscall_fs;
+pub mod syscall_macros;
+pub mod syscall_types;
+```
+
+#### 8. Delete Old Files
+
+```bash
+rm drivers/src/syscall.rs
+rm drivers/src/syscall_handlers.rs
+rm drivers/src/syscall_common.rs
+rm drivers/src/syscall_context.rs
+rm drivers/src/syscall_fs.rs
+rm drivers/src/syscall_macros.rs
+rm drivers/src/syscall_types.rs
+```
+
+### Effort Estimate
+
+| Task | Files Changed | Complexity |
+|------|---------------|------------|
+| Create SyscallServices struct | 1 new file | Medium |
+| Register services from drivers | 1 new file | Medium |
+| Move syscall files to core | 7 files | Low |
+| Refactor all handler functions | 7 files, 50+ call sites | High |
+| Update boot sequence | 2 files | Low |
+| Update IDT entry | 1 file | Low |
+| Delete old files | 7 files | Low |
+| Testing and debugging | - | Medium-High |
+
+**Total estimated effort**: 2-4 hours of focused work
+
+### Alternative: Keep Syscalls in Drivers
+
+The current architecture works correctly. Keeping syscalls in drivers is a valid choice that:
+- ✅ Avoids 50+ function pointer indirections
+- ✅ Keeps syscall handlers simple (direct calls)
+- ✅ Still maintains correct dependency graph (core has no dependency on drivers)
+- ❌ Doesn't match the plan's "core owns all policy" vision
+- ❌ Syscalls are split between drivers (handlers) and core (scheduler calls)
+
+---
+
 ## Problem Statement
 
 ### Current Architecture
@@ -267,74 +501,78 @@ extern "C" fn keyboard_irq_handler(...) {
 
 ### 3. Core Crate Structure
 
+**Current actual structure:**
 ```
 core/
 ├── Cargo.toml
+├── context_switch.s
 └── src/
     ├── lib.rs
-    │
-    ├── scheduler/
-    │   ├── mod.rs           # Public scheduler API
-    │   ├── task.rs          # Task struct, task management
-    │   ├── queue.rs         # Ready queue implementation
-    │   ├── context_switch.rs # Context switch (calls asm)
-    │   └── fate.rs          # Fate/roulette logic
-    │
-    ├── syscall/
-    │   ├── mod.rs           # Syscall dispatch
-    │   ├── dispatch.rs      # syscall_handle() entry point
-    │   ├── context.rs       # SyscallContext helper
-    │   ├── common.rs        # Shared utilities
-    │   ├── macros.rs        # define_syscall! macro
-    │   └── handlers/
-    │       ├── mod.rs
-    │       ├── process.rs   # yield, exit, spawn, sleep
-    │       ├── memory.rs    # shm_*, mmap (calls mm crate)
-    │       ├── fs.rs        # fs_* (calls fs crate)
-    │       ├── video.rs     # surface_*, fb_* (calls video crate)
-    │       ├── input.rs     # input_* handlers
-    │       └── system.rs    # sys_info, halt, etc.
-    │
-    ├── irq/
-    │   ├── mod.rs           # IRQ framework
-    │   └── dispatch.rs      # irq_dispatch() entry point
-    │
-    ├── waitqueue.rs         # Wait/wake primitives
+    ├── irq.rs               # IRQ framework and dispatch
     ├── platform.rs          # Platform service registration
-    ├── events.rs            # Event signaling (drivers -> core)
-    ├── panic.rs             # kernel_panic implementation
-    ├── shutdown.rs          # kernel_shutdown, kernel_reboot
-    └── wl_currency.rs       # W/L currency (moved from drivers)
+    ├── wl_currency.rs       # W/L currency system
+    └── scheduler/
+        ├── mod.rs           # Public scheduler API
+        ├── scheduler.rs     # Core scheduler implementation
+        ├── task.rs          # Task struct, task management
+        ├── fate_api.rs      # Fate/roulette logic
+        ├── kthread.rs       # Kernel threads
+        ├── ffi_boundary.rs  # Context switch support
+        └── test_tasks.rs    # Test infrastructure
+```
+
+**Target structure (after Phase 2 complete):**
+```
+core/
+├── Cargo.toml
+├── context_switch.s
+└── src/
+    ├── lib.rs
+    ├── irq.rs
+    ├── platform.rs
+    ├── syscall_services.rs  # NEW: Callback registrations for driver services
+    ├── wl_currency.rs
+    ├── scheduler/
+    │   └── ...
+    └── syscall/             # NEW: Moved from drivers
+        ├── mod.rs
+        ├── dispatch.rs
+        ├── handlers.rs
+        ├── common.rs
+        ├── context.rs
+        ├── fs.rs
+        ├── macros.rs
+        └── types.rs
 ```
 
 ### 4. What Moves Where
 
 #### From `drivers/` to `core/`:
 
-| File | Destination | Reason |
-|------|-------------|--------|
-| `syscall.rs` | `core/src/syscall/dispatch.rs` | Kernel policy |
-| `syscall_handlers.rs` | `core/src/syscall/handlers/*.rs` | Kernel policy |
-| `syscall_common.rs` | `core/src/syscall/common.rs` | Syscall utilities |
-| `syscall_context.rs` | `core/src/syscall/context.rs` | Syscall state |
-| `syscall_fs.rs` | `core/src/syscall/handlers/fs.rs` | FS syscalls |
-| `syscall_macros.rs` | `core/src/syscall/macros.rs` | Macro helpers |
-| `syscall_types.rs` | **DELETE** (re-exports from abi) | Use abi directly |
-| `sched_bridge.rs` | **DELETE** | Core IS the scheduler |
-| `wl_currency.rs` | `core/src/wl_currency.rs` | Not a hardware driver |
-| `irq.rs` (dispatch logic) | `core/src/irq/` | IRQ framework is core |
+| File | Destination | Reason | Status |
+|------|-------------|--------|--------|
+| `syscall.rs` | `core/src/syscall/dispatch.rs` | Kernel policy | ❌ NOT DONE |
+| `syscall_handlers.rs` | `core/src/syscall/handlers.rs` | Kernel policy | ❌ NOT DONE |
+| `syscall_common.rs` | `core/src/syscall/common.rs` | Syscall utilities | ❌ NOT DONE |
+| `syscall_context.rs` | `core/src/syscall/context.rs` | Syscall state | ❌ NOT DONE |
+| `syscall_fs.rs` | `core/src/syscall/fs.rs` | FS syscalls | ❌ NOT DONE |
+| `syscall_macros.rs` | `core/src/syscall/macros.rs` | Macro helpers | ❌ NOT DONE |
+| `syscall_types.rs` | **DELETE** (re-exports from abi) | Use abi directly | ❌ NOT DONE |
+| `sched_bridge.rs` | **DELETE** | Core IS the scheduler | ✅ DONE |
+| `wl_currency.rs` | `core/src/wl_currency.rs` | Not a hardware driver | ✅ DONE |
+| `irq.rs` (dispatch logic) | `core/src/irq.rs` | IRQ framework is core | ✅ DONE |
 
 #### From `sched/` to `core/`:
 
-| File | Destination | Reason |
-|------|-------------|--------|
-| `scheduler.rs` | `core/src/scheduler/mod.rs` | Scheduler is core |
-| `task.rs` | `core/src/scheduler/task.rs` | Task model is core |
-| `sched_impl.rs` | **DELETE** (integrated) | No longer needed |
-| `fate_api.rs` | `core/src/scheduler/fate.rs` | Part of scheduler |
-| `kthread.rs` | `core/src/scheduler/kthread.rs` | Kernel threads |
-| `ffi_boundary.rs` | **DELETE** or integrate | Context switch support |
-| `test_tasks.rs` | `core/src/scheduler/test_tasks.rs` | Test infrastructure |
+| File | Destination | Reason | Status |
+|------|-------------|--------|--------|
+| `scheduler.rs` | `core/src/scheduler/scheduler.rs` | Scheduler is core | ✅ DONE |
+| `task.rs` | `core/src/scheduler/task.rs` | Task model is core | ✅ DONE |
+| `sched_impl.rs` | **DELETE** (integrated) | No longer needed | ✅ DONE |
+| `fate_api.rs` | `core/src/scheduler/fate_api.rs` | Part of scheduler | ✅ DONE |
+| `kthread.rs` | `core/src/scheduler/kthread.rs` | Kernel threads | ✅ DONE |
+| `ffi_boundary.rs` | `core/src/scheduler/ffi_boundary.rs` | Context switch support | ✅ DONE |
+| `test_tasks.rs` | `core/src/scheduler/test_tasks.rs` | Test infrastructure | ✅ DONE |
 
 #### Stays in `drivers/`:
 
@@ -352,44 +590,15 @@ core/
 
 #### Legacy Code to DELETE:
 
-| File/Item | Reason for Deletion |
-|-----------|---------------------|
-| `drivers/src/sched_bridge.rs` | Replaced by direct `core::` calls |
-| `sched/` (entire crate) | Merged into `core` |
-| `abi/src/sched_traits.rs` | No longer needed - no trait objects |
-| All `sched_bridge::*` call sites | Replaced with `slopos_core::` calls |
-| `SchedulerServices` trait | Replaced by direct function calls |
-| `BootServices` trait | Replaced by direct function calls |
-| `init_scheduler()` / `init_boot()` | Replaced by `register_platform()` |
-
-#### IRQ Split:
-
-The current `drivers/src/irq.rs` contains both:
-1. IRQ dispatch framework (moves to `core/src/irq/`)
-2. Hardware-specific handlers (stays in `drivers/`)
-
-```rust
-// core/src/irq/dispatch.rs
-pub fn irq_dispatch(irq: u8, frame: *mut InterruptFrame) {
-    // Call registered handler
-    if let Some(handler) = IRQ_TABLE[irq as usize].handler {
-        handler(irq, frame, IRQ_TABLE[irq as usize].context);
-    }
-    
-    // Send EOI
-    apic::send_eoi();  // Called via platform service
-    
-    // Handle post-IRQ scheduling
-    scheduler::handle_post_irq();
-}
-
-// drivers/src/irq_handlers.rs
-pub fn register_irq_handlers() {
-    core::irq::register(0, timer_irq_handler, "timer");
-    core::irq::register(1, keyboard_irq_handler, "keyboard");
-    core::irq::register(12, mouse_irq_handler, "mouse");
-}
-```
+| File/Item | Reason for Deletion | Status |
+|-----------|---------------------|--------|
+| `drivers/src/sched_bridge.rs` | Replaced by direct `core::` calls | ✅ DELETED |
+| `sched/` (entire crate) | Merged into `core` | ✅ DELETED |
+| `abi/src/sched_traits.rs` | Renamed to `abi/src/fate.rs` (only contains `FateResult` now) | ✅ RENAMED |
+| All `sched_bridge::*` call sites | Replaced with `slopos_core::` calls | ✅ DONE |
+| `SchedulerServices` trait | Replaced by direct function calls | ✅ DELETED |
+| `BootServices` trait | Replaced by direct function calls | ✅ DELETED |
+| `init_scheduler()` / `init_boot()` | Replaced by `register_platform()` | ✅ DONE |
 
 ---
 
@@ -448,182 +657,39 @@ abi -> (nothing)
 
 ---
 
-## Platform Service Registration
-
-### Driver Side (Registration)
-
-```rust
-// drivers/src/platform_init.rs
-
-use slopos_core::platform::{PlatformServices, register_platform};
-use crate::{pit, serial, random};
-
-static PLATFORM_SERVICES: PlatformServices = PlatformServices {
-    timer_get_ticks: || crate::irq::get_timer_ticks(),
-    timer_get_frequency: || pit::pit_get_frequency(),
-    timer_poll_delay_ms: |ms| pit::pit_poll_delay_ms(ms),
-    console_putc: |c| serial::serial_putc_com1(c),
-    console_puts: |s| {
-        for &c in s {
-            serial::serial_putc_com1(c);
-        }
-    },
-    rng_next: || random::random_next(),
-    gdt_set_kernel_rsp0: |rsp0| crate::gdt::set_kernel_rsp0(rsp0),
-};
-
-pub fn init_platform_services() {
-    register_platform(&PLATFORM_SERVICES);
-}
-```
-
-### Boot Sequence
-
-```rust
-// boot/src/init.rs
-
-pub fn kernel_init() {
-    // Phase 1: Hardware init (no scheduler yet)
-    slopos_drivers::early_init();      // Serial, basic hardware
-    slopos_mm::init();                  // Memory management
-    
-    // Phase 2: Register platform services
-    slopos_drivers::platform_init::init_platform_services();
-    
-    // Phase 3: Core init (scheduler, IRQ framework)
-    slopos_core::init();               // Can now use platform services
-    
-    // Phase 4: Full driver init
-    slopos_drivers::late_init();       // PCI, virtio, etc.
-    
-    // Phase 5: Video, userland
-    slopos_video::init();
-    slopos_userland::init();
-    
-    // Phase 6: Enable interrupts, start scheduler
-    slopos_core::scheduler::start();
-}
-```
-
----
-
-## Rust Language Features Leveraged
-
-### 1. Function Pointers over Trait Objects (Hot Paths)
-
-```rust
-// OLD (current approach) - DELETE THIS:
-static SERVICE: Once<&'static dyn TimerService> = Once::new();
-fn timer_ticks() -> u64 {
-    SERVICE.get().map(|s| s.get_ticks()).unwrap_or(0)  // vtable + Option
-}
-
-// NEW (proposed):
-static TIMER_GET_TICKS: AtomicPtr<fn() -> u64> = AtomicPtr::new(ptr::null_mut());
-#[inline(always)]
-fn timer_ticks() -> u64 {
-    let f = unsafe { *TIMER_GET_TICKS.load(Ordering::Acquire) };
-    f()  // Direct call, no vtable
-}
-```
-
-### 2. `#[inline(always)]` for Platform Accessors
-
-```rust
-#[inline(always)]
-pub fn timer_ticks() -> u64 {
-    (platform().timer_get_ticks)()
-}
-```
-
-### 3. Module Visibility for Encapsulation
-
-```rust
-// core/src/scheduler/mod.rs
-pub(crate) mod queue;           // Only core can access queue internals
-pub(crate) mod context_switch;  // Implementation detail
-
-pub use task::Task;             // Public API
-pub fn schedule() { ... }       // Public API
-```
-
-### 4. `const` Initialization
-
-```rust
-// Instead of Once<>, use const where possible
-static SERVICES: PlatformServices = PlatformServices {
-    timer_get_ticks: || panic!("not initialized"),
-    // ... stub implementations that panic
-};
-static INITIALIZED: AtomicBool = AtomicBool::new(false);
-```
-
-### 5. Feature Flags for Testing
-
-```rust
-#[cfg(feature = "test-platform")]
-pub fn register_test_platform(services: &'static PlatformServices) {
-    // Allow tests to inject mock platform
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    static TEST_SERVICES: PlatformServices = PlatformServices {
-        timer_get_ticks: || 12345,
-        // ... mock implementations
-    };
-    
-    #[test]
-    fn test_scheduler_timing() {
-        register_test_platform(&TEST_SERVICES);
-        // Test scheduler behavior with controlled time
-    }
-}
-```
-
----
-
 ## Migration Phases
 
 Each phase ends with a working system verified by `make boot` (with appropriate timeout).
 
-### Phase 1: Create `core` Crate and Move Scheduler
+### Phase 1: Create `core` Crate and Move Scheduler ✅ COMPLETE
 
 **Goal**: `core` crate exists with scheduler, compiles, boots.
 
 **Tasks**:
-1. Create `core/Cargo.toml` with dependencies on `abi`, `lib`, `mm`, `fs`
-2. Create directory structure under `core/src/`
-3. Add `core` to workspace in root `Cargo.toml`
-4. Move `sched/src/*.rs` to `core/src/scheduler/`
-5. Create `core/src/platform.rs` with stub implementations (panic on call)
-6. Update imports in moved files to use `crate::` 
-7. Temporarily keep `sched` crate as a thin re-export of `core::scheduler` for compatibility
-8. Update `drivers`, `boot`, `kernel` to depend on `slopos-core`
-
-**Verification**:
-```bash
-make build           # Must compile
-make boot            # Must boot, scheduler works
-```
-
-**Legacy removed**: None yet (compatibility shim in place)
+1. ✅ Create `core/Cargo.toml` with dependencies on `abi`, `lib`, `mm`, `fs`
+2. ✅ Create directory structure under `core/src/`
+3. ✅ Add `core` to workspace in root `Cargo.toml`
+4. ✅ Move `sched/src/*.rs` to `core/src/scheduler/`
+5. ✅ Create `core/src/platform.rs` with stub implementations (panic on call)
+6. ✅ Update imports in moved files to use `crate::` 
+7. ✅ Temporarily keep `sched` crate as a thin re-export of `core::scheduler` for compatibility
+8. ✅ Update `drivers`, `boot`, `kernel` to depend on `slopos-core`
 
 ---
 
-### Phase 2: Move Syscalls to Core
+### Phase 2: Move Syscalls to Core ❌ NOT DONE
 
 **Goal**: All syscall handling is in `core`, `drivers` no longer has syscall code.
 
 **Tasks**:
-1. Move `drivers/src/syscall*.rs` to `core/src/syscall/`
-2. Split `syscall_handlers.rs` into `handlers/*.rs` by category
-3. Update all imports
-4. Remove syscall modules from `drivers/src/lib.rs`
-5. Update `boot/src/idt.rs` to call `slopos_core::syscall::syscall_handle()`
-6. Delete `drivers/src/syscall*.rs` files
+1. ❌ Create `core/src/syscall_services.rs` with callback registrations
+2. ❌ Create `drivers/src/syscall_services_init.rs` to register driver functions
+3. ❌ Move `drivers/src/syscall*.rs` to `core/src/syscall/`
+4. ❌ Refactor all handler functions to use service callbacks instead of direct calls
+5. ❌ Update all imports
+6. ❌ Remove syscall modules from `drivers/src/lib.rs`
+7. ❌ Update `boot/src/idt.rs` to call `slopos_core::syscall::syscall_handle()`
+8. ❌ Delete `drivers/src/syscall*.rs` files
 
 **Verification**:
 ```bash
@@ -631,7 +697,7 @@ make build           # Must compile
 make boot            # Syscalls must work (shell responds to commands)
 ```
 
-**Legacy removed**: 
+**Legacy to remove**: 
 - `drivers/src/syscall.rs`
 - `drivers/src/syscall_handlers.rs`
 - `drivers/src/syscall_common.rs`
@@ -642,131 +708,79 @@ make boot            # Syscalls must work (shell responds to commands)
 
 ---
 
-### Phase 3: Implement Platform Services and Remove Bridge
+### Phase 3: Implement Platform Services and Remove Bridge ✅ COMPLETE
 
 **Goal**: Platform services work, `sched_bridge.rs` is deleted.
 
 **Tasks**:
-1. Implement full `PlatformServices` struct in `core/src/platform.rs`
-2. Create `drivers/src/platform_init.rs` with real function pointers
-3. Update boot sequence to call `init_platform_services()` before `core::init()`
-4. Replace ALL `sched_bridge::` calls with direct `slopos_core::` calls:
-   - `sched_bridge::timer_tick()` -> `slopos_core::scheduler::timer_tick()`
-   - `sched_bridge::schedule()` -> `slopos_core::scheduler::schedule()`
-   - `sched_bridge::get_current_task()` -> `slopos_core::scheduler::get_current_task()`
-   - `sched_bridge::kernel_panic()` -> `slopos_core::panic::kernel_panic()`
-   - etc.
-5. Delete `drivers/src/sched_bridge.rs`
-6. Move `wl_currency.rs` from `drivers` to `core`
-
-**Verification**:
-```bash
-make build           # Must compile with no sched_bridge references
-make boot            # Timer ticks, scheduling, panic all work
-grep -r "sched_bridge" .  # Must return nothing
-```
-
-**Legacy removed**:
-- `drivers/src/sched_bridge.rs`
-- All `sched_bridge::` call sites (48 locations)
+1. ✅ Implement full `PlatformServices` struct in `core/src/platform.rs`
+2. ✅ Create `drivers/src/platform_init.rs` with real function pointers
+3. ✅ Update boot sequence to call `init_platform_services()` before `core::init()`
+4. ✅ Replace ALL `sched_bridge::` calls with direct `slopos_core::` calls
+5. ✅ Delete `drivers/src/sched_bridge.rs`
+6. ✅ Move `wl_currency.rs` from `drivers` to `core`
 
 ---
 
-### Phase 4: Move IRQ Framework to Core
+### Phase 4: Move IRQ Framework to Core ✅ COMPLETE
 
 **Goal**: IRQ dispatch is in `core`, handlers register from `drivers`.
 
 **Tasks**:
-1. Create `core/src/irq/mod.rs` with IRQ table and dispatch
-2. Create `core/src/irq/dispatch.rs` with `irq_dispatch()` 
-3. Create `core::irq::register()` API for drivers to register handlers
-4. Split `drivers/src/irq.rs`:
-   - Keep handler functions (`timer_irq_handler`, etc.)
-   - Move dispatch logic to core
-5. Create `drivers/src/irq_handlers.rs` with registration
-6. Update boot to call `slopos_drivers::irq_handlers::register_irq_handlers()`
-7. Update `boot/src/idt.rs` to call `slopos_core::irq::irq_dispatch()`
-
-**Verification**:
-```bash
-make build           # Must compile
-make boot            # Timer interrupts fire, keyboard works
-make test            # Interrupt test harness passes
-```
-
-**Legacy removed**: Old IRQ dispatch code in drivers
+1. ✅ Create `core/src/irq.rs` with IRQ table and dispatch
+2. ✅ Create `core::irq::register()` API for drivers to register handlers
+3. ✅ Split `drivers/src/irq.rs` (keep handlers, move dispatch)
+4. ✅ Update `boot/src/idt.rs` to call `slopos_core::irq::irq_dispatch()`
 
 ---
 
-### Phase 5: Delete `sched` Crate and Legacy Traits
+### Phase 5: Delete `sched` Crate and Legacy Traits ✅ COMPLETE
 
 **Goal**: No legacy code remains. Clean architecture.
 
 **Tasks**:
-1. Remove `sched` from workspace in root `Cargo.toml`
-2. Update all `slopos-sched` dependencies to `slopos-core`
-3. Delete `sched/` directory entirely
-4. Delete `abi/src/sched_traits.rs` (SchedulerServices, BootServices, TaskCleanupHook)
-5. Remove trait-related code from `abi/src/lib.rs`
-6. Delete any remaining compatibility shims
-7. Update `AGENTS.md` to reflect new crate structure
-8. Run `cargo clippy` and fix any warnings
-9. Verify no dead code remains
-
-**Verification**:
-```bash
-make build           # Must compile with no warnings
-make test            # All tests pass
-make boot            # Full boot to shell works
-make boot VIDEO=1    # Graphical boot works
-```
-
-**Final grep checks** (all must return nothing):
-```bash
-grep -r "sched_bridge" --include="*.rs" .
-grep -r "SchedulerServices" --include="*.rs" .
-grep -r "BootServices" --include="*.rs" .
-grep -r "slopos-sched" .
-grep -r "slopos_sched" --include="*.rs" .
-```
-
-**Legacy removed**:
-- `sched/` crate (entire directory)
-- `abi/src/sched_traits.rs`
-- All trait object infrastructure
+1. ✅ Remove `sched` from workspace in root `Cargo.toml`
+2. ✅ Update all `slopos-sched` dependencies to `slopos-core`
+3. ✅ Delete `sched/` directory entirely
+4. ✅ Remove `SchedulerServices` and `BootServices` traits
+5. ✅ Rename `abi/src/sched_traits.rs` to `abi/src/fate.rs` (only contains `FateResult`)
+6. ✅ Delete any remaining compatibility shims
+7. ✅ Run `cargo clippy` and fix any warnings
+8. ✅ Verify no dead code remains
 
 ---
 
 ## Final State Verification
 
-After all phases complete:
-
 ### Code Verification
-- [ ] `grep -r "sched_bridge" .` returns nothing
-- [ ] `grep -r "SchedulerServices" .` returns nothing  
-- [ ] `grep -r "BootServices" .` returns nothing
-- [ ] `grep -r "slopos-sched" .` returns nothing
-- [ ] `grep -r "Once<&'static dyn" .` returns nothing in core/drivers
-- [ ] No `sched/` directory exists
-- [ ] No `drivers/src/syscall*.rs` files exist
-- [ ] `cargo clippy` has no warnings
+
+- [x] `grep -r "sched_bridge" .` returns nothing
+- [x] `grep -r "SchedulerServices" .` returns nothing  
+- [x] `grep -r "BootServices" .` returns nothing
+- [x] `grep -r "slopos-sched" .` returns nothing
+- [x] `grep -r "slopos_sched" .` returns nothing
+- [x] No `sched/` directory exists
+- [ ] No `drivers/src/syscall*.rs` files exist *(Phase 2 not done)*
+- [x] `cargo clippy` has no warnings
 
 ### Runtime Verification
-- [ ] `make build` succeeds
-- [ ] `make test` passes (interrupt test harness)
-- [ ] `make boot` boots to shell (15s timeout)
-- [ ] `make boot VIDEO=1` shows graphical output
-- [ ] Keyboard input works
-- [ ] Shell commands execute (syscalls work)
-- [ ] Timer interrupts fire (visible in debug output)
-- [ ] Task switching works (run roulette)
-- [ ] W/L currency tracking works
+
+- [x] `make build` succeeds
+- [x] `make test` passes (interrupt test harness)
+- [x] `make boot` boots to shell (15s timeout)
+- [x] `make boot VIDEO=1` shows graphical output
+- [x] Keyboard input works
+- [x] Shell commands execute (syscalls work)
+- [x] Timer interrupts fire (visible in debug output)
+- [x] Task switching works (run roulette)
+- [x] W/L currency tracking works
 
 ### Architecture Verification
-- [ ] `core` has NO dependency on `drivers` (check Cargo.toml)
-- [ ] `drivers` depends on `core` (check Cargo.toml)
-- [ ] All scheduler calls are direct function calls (no trait objects)
-- [ ] Platform services use function pointers, not dyn traits
+
+- [x] `core` has NO dependency on `drivers` (check Cargo.toml)
+- [x] `drivers` depends on `core` (check Cargo.toml)
+- [x] All scheduler calls are direct function calls (no trait objects)
+- [x] Platform services use function pointers, not dyn traits
 
 ---
 
@@ -774,10 +788,10 @@ After all phases complete:
 
 The migration is complete when:
 
-1. **No legacy code** - `sched` crate deleted, `sched_bridge.rs` deleted, all traits deleted
-2. **No trait objects in hot paths** - Timer tick, syscall dispatch use direct/function-pointer calls
-3. **Acyclic dependency graph** - `core` does not depend on `drivers`
-4. **Clear ownership** - Syscalls, scheduler, IRQ framework are in `core`; hardware is in `drivers`
-5. **All tests pass** - `make test` and manual verification
-6. **All greps clean** - No references to old patterns remain
-7. **Documentation updated** - `AGENTS.md` reflects new structure
+1. **No legacy code** - `sched` crate deleted, `sched_bridge.rs` deleted, all traits deleted ✅
+2. **No trait objects in hot paths** - Timer tick, syscall dispatch use direct/function-pointer calls ✅
+3. **Acyclic dependency graph** - `core` does not depend on `drivers` ✅
+4. **Clear ownership** - Syscalls, scheduler, IRQ framework are in `core`; hardware is in `drivers` ⚠️ Syscalls still in drivers
+5. **All tests pass** - `make test` and manual verification ✅
+6. **All greps clean** - No references to old patterns remain ✅
+7. **Documentation updated** - `AGENTS.md` reflects new structure *(needs update after Phase 2)*

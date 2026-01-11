@@ -1,4 +1,4 @@
-use slopos_drivers::wl_currency;
+use slopos_core::wl_currency;
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 

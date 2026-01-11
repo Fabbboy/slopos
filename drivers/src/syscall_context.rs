@@ -7,7 +7,7 @@ use crate::syscall_common::{SyscallDisposition, syscall_return_err, syscall_retu
 use crate::syscall_types::{
     InterruptFrame, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, Task,
 };
-use crate::wl_currency;
+use slopos_core::wl_currency;
 
 /// Arguments extracted from InterruptFrame registers (System V AMD64 ABI)
 #[derive(Clone, Copy)]

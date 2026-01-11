@@ -14,11 +14,11 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 [features]
-builtin-tests = ["slopos-core"]
+builtin-tests = []
 
 [dependencies]
 slopos-lib = { workspace = true }
-slopos-core = { workspace = true, optional = true }
+slopos-core = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-video = { workspace = true }

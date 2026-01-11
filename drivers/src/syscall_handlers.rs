@@ -21,13 +21,13 @@ use crate::syscall_fs::{
 };
 use crate::syscall_types::{InterruptFrame, Task, TaskExitReason, TaskFaultReason};
 use crate::video_bridge;
-use crate::wl_currency;
+use slopos_core::wl_currency;
 use slopos_lib::klog_debug;
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 
 use crate::fate;
-use slopos_abi::sched_traits::FateResult;
+use slopos_abi::fate::FateResult;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;

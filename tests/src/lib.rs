@@ -3,10 +3,10 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_core::wl_currency;
 use slopos_drivers::interrupt_test as intr;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
 use slopos_drivers::interrupts::{SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER};
-use slopos_drivers::wl_currency;
 use slopos_lib::klog_info;
 
 pub const TESTS_MAX_SUITES: usize = 8;

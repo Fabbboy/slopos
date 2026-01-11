@@ -5,10 +5,10 @@ extern crate alloc;
 
 use core::ffi::c_int;
 use slopos_core::task::register_video_cleanup_hook;
+use slopos_core::wl_currency;
 use slopos_drivers::serial_println;
 use slopos_drivers::video_bridge::{self, VideoCallbacks};
 use slopos_drivers::virtio_gpu;
-use slopos_drivers::wl_currency;
 use slopos_lib::FramebufferInfo;
 use slopos_lib::klog_info;
 

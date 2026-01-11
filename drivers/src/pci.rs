@@ -9,8 +9,8 @@ use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
 use slopos_mm::mmio::MmioRegion;
 
-use crate::wl_currency;
 pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
+use slopos_core::wl_currency;
 
 const PCI_VENDOR_ID: u8 = PCI_VENDOR_ID_OFFSET;
 const PCI_DEVICE_ID: u8 = PCI_DEVICE_ID_OFFSET;

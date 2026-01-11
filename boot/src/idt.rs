@@ -75,8 +75,8 @@ pub enum ExceptionMode {
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_core::irq::irq_dispatch;
+use slopos_core::wl_currency::wl_award_loss;
 use slopos_drivers::syscall::syscall_handle;
-use slopos_drivers::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::{paging, process_vm};

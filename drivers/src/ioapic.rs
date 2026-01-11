@@ -5,10 +5,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::wl_currency;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
 use slopos_core::platform;
+use slopos_core::wl_currency;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 

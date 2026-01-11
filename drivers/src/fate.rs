@@ -1,5 +1,6 @@
-use crate::{random::Lfsr64, serial_println, wl_currency};
-use slopos_abi::sched_traits::FateResult;
+use crate::{random::Lfsr64, serial_println};
+use slopos_abi::fate::FateResult;
+use slopos_core::wl_currency;
 use slopos_lib::cpu;
 
 static OUTCOME_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
