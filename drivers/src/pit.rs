@@ -1,13 +1,12 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_core::irq;
 use slopos_lib::ports::{
     IO_DELAY, PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND, PIT_COMMAND_ACCESS_LOHI,
     PIT_COMMAND_BINARY, PIT_COMMAND_CHANNEL0, PIT_COMMAND_MODE_SQUARE, PIT_DEFAULT_FREQUENCY_HZ,
     PIT_IRQ_LINE,
 };
 use slopos_lib::{cpu, klog_debug, klog_info};
-
-use crate::irq;
 
 static CURRENT_FREQUENCY_HZ: AtomicU32 = AtomicU32::new(0);
 static CURRENT_RELOAD_DIVISOR: AtomicU32 = AtomicU32::new(0);

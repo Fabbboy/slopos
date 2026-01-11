@@ -1,9 +1,6 @@
 use core::ffi::{c_char, c_void};
 
-use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
-use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
-
-use crate::{apic, ioapic, keyboard, mouse};
+use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_abi::arch::x86_64::ioapic::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
@@ -13,8 +10,10 @@ use slopos_core::irq::{
 };
 use slopos_core::platform;
 use slopos_core::sched::scheduler_timer_tick;
+use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
+use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
-use slopos_abi::arch::IRQ_BASE_VECTOR;
+use crate::{apic, ioapic, keyboard, mouse};
 
 extern "C" fn timer_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     irq::increment_timer_ticks();
@@ -50,7 +49,7 @@ extern "C" fn mouse_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mu
     }
 }
 
-fn irq_program_ioapic_route(irq_line: u8) {
+fn program_ioapic_route(irq_line: u8) {
     if irq_line as usize >= irq::IRQ_LINES {
         return;
     }
@@ -107,27 +106,23 @@ fn irq_program_ioapic_route(irq_line: u8) {
     }
 }
 
-fn irq_setup_ioapic_routes() {
+fn setup_ioapic_routes() {
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
         platform::kernel_panic(
             b"IRQ: APIC/IOAPIC not ready during dispatcher init\0".as_ptr() as *const c_char,
         );
     }
 
-    irq_program_ioapic_route(LEGACY_IRQ_TIMER);
-    irq_program_ioapic_route(LEGACY_IRQ_KEYBOARD);
-    irq_program_ioapic_route(LEGACY_IRQ_MOUSE);
-    irq_program_ioapic_route(LEGACY_IRQ_COM1);
-}
-
-pub fn get_timer_ticks() -> u64 {
-    irq::get_timer_ticks()
+    program_ioapic_route(LEGACY_IRQ_TIMER);
+    program_ioapic_route(LEGACY_IRQ_KEYBOARD);
+    program_ioapic_route(LEGACY_IRQ_MOUSE);
+    program_ioapic_route(LEGACY_IRQ_COM1);
 }
 
 pub fn init() {
     irq::init();
 
-    irq_setup_ioapic_routes();
+    setup_ioapic_routes();
     keyboard::keyboard_init();
     mouse::mouse_init();
 
@@ -151,37 +146,4 @@ pub fn init() {
     );
 
     cpu::enable_interrupts();
-}
-
-pub fn register_handler(
-    irq_line: u8,
-    handler: Option<irq::IrqHandler>,
-    context: *mut c_void,
-    name: *const c_char,
-) -> i32 {
-    irq::register_handler(irq_line, handler, context, name)
-}
-
-pub fn unregister_handler(irq_line: u8) {
-    irq::unregister_handler(irq_line)
-}
-
-pub fn enable_line(irq_line: u8) {
-    irq::enable_line(irq_line)
-}
-
-pub fn disable_line(irq_line: u8) {
-    irq::disable_line(irq_line)
-}
-
-pub use slopos_core::irq::irq_dispatch;
-
-#[repr(C)]
-pub struct IrqStats {
-    count: u64,
-    last_timestamp: u64,
-}
-
-pub fn get_stats(irq_line: u8, out_stats: *mut IrqStats) -> i32 {
-    irq::get_stats(irq_line, out_stats as *mut irq::IrqStats)
 }

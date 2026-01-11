@@ -94,9 +94,9 @@ fn boot_step_timer_setup_fn() {
     pit_init(PIT_DEFAULT_FREQUENCY_HZ);
     klog_debug!("Programmable interval timer configured.");
 
-    let ticks_before = slopos_drivers::irq::get_timer_ticks();
+    let ticks_before = slopos_core::irq::get_timer_ticks();
     pit_poll_delay_ms(100);
-    let ticks_after = slopos_drivers::irq::get_timer_ticks();
+    let ticks_after = slopos_core::irq::get_timer_ticks();
     klog_info!(
         "BOOT: PIT ticks after 100ms poll: {} -> {}",
         ticks_before,

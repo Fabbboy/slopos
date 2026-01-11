@@ -1,8 +1,8 @@
+use slopos_core::irq;
 use slopos_lib::ports::{PS2_COMMAND, PS2_DATA, PS2_STATUS};
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use crate::input_event;
-use crate::irq;
 use crate::pit::pit_get_frequency;
 
 // Mouse buttons

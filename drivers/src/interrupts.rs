@@ -1,6 +1,8 @@
+#[cfg(not(feature = "qemu-exit"))]
+use slopos_lib::klog_warn;
 #[cfg(feature = "qemu-exit")]
 use slopos_lib::ports::QEMU_DEBUG_EXIT;
-use slopos_lib::{cpu, klog_info, klog_warn};
+use slopos_lib::{cpu, klog_info};
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_SUITE: Suite = Suite::All;

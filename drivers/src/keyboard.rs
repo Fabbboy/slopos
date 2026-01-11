@@ -1,7 +1,7 @@
+use slopos_core::irq;
 use slopos_lib::{RingBuffer, cpu, klog_debug};
 
 use crate::input_event;
-use crate::irq;
 use crate::pit::pit_get_frequency;
 use crate::tty::tty_notify_input_ready;
 use slopos_core::scheduler_request_reschedule_from_interrupt;
