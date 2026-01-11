@@ -251,6 +251,297 @@ struct VirtioGpuCtxCreate {
     padding1: u32,
 }
 
+trait GpuCommand: Sized {
+    const CMD_TYPE: u32;
+    const EXPECTED_RESP: u32 = VIRTIO_GPU_RESP_OK_NODATA;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader;
+
+    fn init_header(&mut self) {
+        *self.header_mut() = VirtioGpuCtrlHeader {
+            type_: Self::CMD_TYPE,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        };
+    }
+}
+
+impl GpuCommand for VirtioGpuCtrlHeader {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+    const EXPECTED_RESP: u32 = VIRTIO_GPU_RESP_OK_DISPLAY_INFO;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        self
+    }
+}
+
+impl GpuCommand for VirtioGpuGetCapsetInfo {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_GET_CAPSET_INFO;
+    const EXPECTED_RESP: u32 = VIRTIO_GPU_RESP_OK_CAPSET_INFO;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuCtxCreate {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_CTX_CREATE;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuResourceCreate2d {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuResourceAttachBacking {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuSetScanout {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_SET_SCANOUT;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuTransferToHost2d {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+impl GpuCommand for VirtioGpuResourceFlush {
+    const CMD_TYPE: u32 = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+
+    fn header_mut(&mut self) -> &mut VirtioGpuCtrlHeader {
+        &mut self.header
+    }
+}
+
+struct CmdBuffer {
+    cmd_phys: PhysAddr,
+    resp_phys: PhysAddr,
+}
+
+impl CmdBuffer {
+    fn new() -> Option<Self> {
+        let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+        let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+
+        if cmd_phys.is_null() || resp_phys.is_null() {
+            if !cmd_phys.is_null() {
+                free_page_frame(cmd_phys);
+            }
+            if !resp_phys.is_null() {
+                free_page_frame(resp_phys);
+            }
+            return None;
+        }
+
+        let cmd_virt = cmd_phys.to_virt().as_u64();
+        let resp_virt = resp_phys.to_virt().as_u64();
+        if cmd_virt == 0 || resp_virt == 0 {
+            free_page_frame(cmd_phys);
+            free_page_frame(resp_phys);
+            return None;
+        }
+
+        Some(Self {
+            cmd_phys,
+            resp_phys,
+        })
+    }
+
+    fn cmd_mut<T>(&self) -> &mut T {
+        unsafe { &mut *(self.cmd_phys.to_virt().as_u64() as *mut T) }
+    }
+
+    fn resp<T>(&self) -> &T {
+        unsafe { &*(self.resp_phys.to_virt().as_u64() as *const T) }
+    }
+
+    fn cmd_phys(&self) -> u64 {
+        self.cmd_phys.as_u64()
+    }
+
+    fn resp_phys(&self) -> u64 {
+        self.resp_phys.as_u64()
+    }
+
+    fn cmd_virt(&self) -> u64 {
+        self.cmd_phys.to_virt().as_u64()
+    }
+}
+
+impl Drop for CmdBuffer {
+    fn drop(&mut self) {
+        free_page_frame(self.cmd_phys);
+        free_page_frame(self.resp_phys);
+    }
+}
+
+fn execute_cmd<C: GpuCommand>(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+    init: impl FnOnce(&mut C),
+) -> bool {
+    if device.ctrl_queue.ready == 0 {
+        return false;
+    }
+
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
+
+    let buf = match CmdBuffer::new() {
+        Some(b) => b,
+        None => return false,
+    };
+
+    let cmd: &mut C = buf.cmd_mut();
+    cmd.init_header();
+    init(cmd);
+
+    unsafe {
+        core::ptr::write_volatile(buf.cmd_mut::<C>(), core::ptr::read(cmd));
+    }
+
+    let submitted = virtio_gpu_send_cmd(
+        &mut device.ctrl_queue,
+        &notify_cfg,
+        device.notify_off_multiplier,
+        buf.cmd_phys(),
+        core::mem::size_of::<C>(),
+        buf.resp_phys(),
+        core::mem::size_of::<VirtioGpuCtrlHeader>(),
+    );
+
+    if !submitted {
+        return false;
+    }
+
+    let resp_header = unsafe { core::ptr::read_volatile(buf.resp::<VirtioGpuCtrlHeader>()) };
+    resp_header.type_ == C::EXPECTED_RESP
+}
+
+/// Execute a GPU command and provide access to the response buffer.
+/// Returns `Some(R)` if the command succeeds, `None` otherwise.
+fn execute_cmd_with_response<C: GpuCommand, R, F>(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+    resp_size: usize,
+    init: impl FnOnce(&mut C),
+    read_response: F,
+) -> Option<R>
+where
+    F: FnOnce(&CmdBuffer) -> R,
+{
+    if device.ctrl_queue.ready == 0 {
+        return None;
+    }
+
+    let notify_cfg = mmio.notify_cfg?;
+
+    let buf = CmdBuffer::new()?;
+
+    let cmd: &mut C = buf.cmd_mut();
+    cmd.init_header();
+    init(cmd);
+
+    unsafe {
+        core::ptr::write_volatile(buf.cmd_mut::<C>(), core::ptr::read(cmd));
+    }
+
+    let submitted = virtio_gpu_send_cmd(
+        &mut device.ctrl_queue,
+        &notify_cfg,
+        device.notify_off_multiplier,
+        buf.cmd_phys(),
+        core::mem::size_of::<C>(),
+        buf.resp_phys(),
+        resp_size,
+    );
+
+    if !submitted {
+        return None;
+    }
+
+    let resp_header = unsafe { core::ptr::read_volatile(buf.resp::<VirtioGpuCtrlHeader>()) };
+    if resp_header.type_ != C::EXPECTED_RESP {
+        return None;
+    }
+
+    Some(read_response(&buf))
+}
+
+fn execute_cmd_with_extra<C: GpuCommand>(
+    device: &mut virtio_gpu_device_t,
+    mmio: &VirtioGpuMmioCaps,
+    extra_len: usize,
+    init: impl FnOnce(&mut C),
+    write_extra: impl FnOnce(*mut u8),
+) -> bool {
+    if device.ctrl_queue.ready == 0 {
+        return false;
+    }
+
+    let notify_cfg = match mmio.notify_cfg {
+        Some(cfg) => cfg,
+        None => return false,
+    };
+
+    let buf = match CmdBuffer::new() {
+        Some(b) => b,
+        None => return false,
+    };
+
+    let cmd: &mut C = buf.cmd_mut();
+    cmd.init_header();
+    init(cmd);
+
+    unsafe {
+        core::ptr::write_volatile(buf.cmd_mut::<C>(), core::ptr::read(cmd));
+    }
+
+    let extra_ptr = unsafe { (buf.cmd_virt() as *mut u8).add(core::mem::size_of::<C>()) };
+    write_extra(extra_ptr);
+
+    let cmd_len = core::mem::size_of::<C>() + extra_len;
+    let submitted = virtio_gpu_send_cmd(
+        &mut device.ctrl_queue,
+        &notify_cfg,
+        device.notify_off_multiplier,
+        buf.cmd_phys(),
+        cmd_len,
+        buf.resp_phys(),
+        core::mem::size_of::<VirtioGpuCtrlHeader>(),
+    );
+
+    if !submitted {
+        return false;
+    }
+
+    let resp_header = unsafe { core::ptr::read_volatile(buf.resp::<VirtioGpuCtrlHeader>()) };
+    resp_header.type_ == C::EXPECTED_RESP
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct virtio_gpu_device_t {
@@ -660,73 +951,23 @@ fn virtio_gpu_queue_submit(
 }
 
 fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t, mmio: &VirtioGpuMmioCaps) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuCtrlHeader;
-    let resp = resp_virt as *mut VirtioGpuRespDisplayInfo;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuCtrlHeader {
-                type_: VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-        );
-    }
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-        resp_phys.as_u64(),
+    let display = execute_cmd_with_response::<VirtioGpuCtrlHeader, Option<VirtioGpuDisplayOne>, _>(
+        device,
+        mmio,
         core::mem::size_of::<VirtioGpuRespDisplayInfo>(),
+        |_cmd| {},
+        |buf| {
+            let resp = buf.resp::<VirtioGpuRespDisplayInfo>();
+            let display = unsafe { core::ptr::read_volatile(&(*resp).displays[0]) };
+            if display.enabled != 0 {
+                Some(display)
+            } else {
+                None
+            }
+        },
     );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
 
-    let resp_header = unsafe { core::ptr::read_volatile(&(*resp).header) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let display = unsafe { core::ptr::read_volatile(&(*resp).displays[0]) };
-    if display.enabled != 0 {
+    if let Some(Some(display)) = display {
         device.display_width = display.rect.width;
         device.display_height = display.rect.height;
         klog_info!(
@@ -738,98 +979,44 @@ fn virtio_gpu_get_display_info(device: &mut virtio_gpu_device_t, mmio: &VirtioGp
         );
     }
 
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    display.is_some()
 }
 
 fn virtio_gpu_get_capset_info(device: &mut virtio_gpu_device_t, mmio: &VirtioGpuMmioCaps) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuGetCapsetInfo;
-    let resp = resp_virt as *mut VirtioGpuRespCapsetInfo;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuGetCapsetInfo {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_GET_CAPSET_INFO,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                capset_index: 0,
-                padding: 0,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuGetCapsetInfo>(),
-        resp_phys.as_u64(),
+    let capset_info = execute_cmd_with_response::<VirtioGpuGetCapsetInfo, (u32, u32, u32), _>(
+        device,
+        mmio,
         core::mem::size_of::<VirtioGpuRespCapsetInfo>(),
+        |cmd| {
+            cmd.capset_index = 0;
+            cmd.padding = 0;
+        },
+        |buf| {
+            let resp = buf.resp::<VirtioGpuRespCapsetInfo>();
+            unsafe {
+                (
+                    core::ptr::read_volatile(&(*resp).capset_id),
+                    core::ptr::read_volatile(&(*resp).capset_max_version),
+                    core::ptr::read_volatile(&(*resp).capset_max_size),
+                )
+            }
+        },
     );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
 
-    let resp_header = unsafe { core::ptr::read_volatile(&(*resp).header) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_CAPSET_INFO {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
+    if let Some((capset_id, capset_version, capset_size)) = capset_info {
+        klog_info!(
+            "PCI: virtio-gpu capset id {} (max ver {}, max size {})",
+            capset_id,
+            capset_version,
+            capset_size
+        );
+        if capset_id == VIRTIO_GPU_CAPSET_VIRGL || capset_id == VIRTIO_GPU_CAPSET_VIRGL2 {
+            klog_info!("PCI: virtio-gpu virgl capset detected");
+        }
+        true
+    } else {
+        false
     }
-
-    let capset_id = unsafe { core::ptr::read_volatile(&(*resp).capset_id) };
-    let capset_version = unsafe { core::ptr::read_volatile(&(*resp).capset_max_version) };
-    let capset_size = unsafe { core::ptr::read_volatile(&(*resp).capset_max_size) };
-    klog_info!(
-        "PCI: virtio-gpu capset id {} (max ver {}, max size {})",
-        capset_id,
-        capset_version,
-        capset_size
-    );
-    if capset_id == VIRTIO_GPU_CAPSET_VIRGL || capset_id == VIRTIO_GPU_CAPSET_VIRGL2 {
-        klog_info!("PCI: virtio-gpu virgl capset detected");
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
 }
 
 fn virtio_gpu_create_context(
@@ -837,81 +1024,12 @@ fn virtio_gpu_create_context(
     mmio: &VirtioGpuMmioCaps,
     ctx_id: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuCtxCreate;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuCtxCreate {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_CTX_CREATE,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                ctx_id,
-                name_len: 0,
-                padding0: 0,
-                padding1: 0,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtxCreate>(),
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    execute_cmd::<VirtioGpuCtxCreate>(device, mmio, |cmd| {
+        cmd.ctx_id = ctx_id;
+        cmd.name_len = 0;
+        cmd.padding0 = 0;
+        cmd.padding1 = 0;
+    })
 }
 
 fn virtio_gpu_resource_create_2d(
@@ -921,81 +1039,12 @@ fn virtio_gpu_resource_create_2d(
     width: u32,
     height: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuResourceCreate2d;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuResourceCreate2d {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                resource_id,
-                format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-                width,
-                height,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuResourceCreate2d>(),
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    execute_cmd::<VirtioGpuResourceCreate2d>(device, mmio, |cmd| {
+        cmd.resource_id = resource_id;
+        cmd.format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        cmd.width = width;
+        cmd.height = height;
+    })
 }
 
 fn virtio_gpu_resource_attach_backing(
@@ -1005,92 +1054,25 @@ fn virtio_gpu_resource_attach_backing(
     backing_phys: u64,
     backing_len: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuResourceAttachBacking;
-    let entry =
-        unsafe { (cmd as *mut u8).add(core::mem::size_of::<VirtioGpuResourceAttachBacking>()) }
-            as *mut VirtioGpuMemEntry;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuResourceAttachBacking {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
+    execute_cmd_with_extra::<VirtioGpuResourceAttachBacking>(
+        device,
+        mmio,
+        core::mem::size_of::<VirtioGpuMemEntry>(),
+        |cmd| {
+            cmd.resource_id = resource_id;
+            cmd.nr_entries = 1;
+        },
+        |extra_ptr| unsafe {
+            core::ptr::write_volatile(
+                extra_ptr as *mut VirtioGpuMemEntry,
+                VirtioGpuMemEntry {
+                    addr: backing_phys,
+                    length: backing_len,
                     padding: 0,
                 },
-                resource_id,
-                nr_entries: 1,
-            },
-        );
-        core::ptr::write_volatile(
-            entry,
-            VirtioGpuMemEntry {
-                addr: backing_phys,
-                length: backing_len,
-                padding: 0,
-            },
-        );
-    }
-
-    let cmd_len = core::mem::size_of::<VirtioGpuResourceAttachBacking>()
-        + core::mem::size_of::<VirtioGpuMemEntry>();
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        cmd_len,
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+            );
+        },
+    )
 }
 
 fn virtio_gpu_set_scanout(
@@ -1100,85 +1082,16 @@ fn virtio_gpu_set_scanout(
     width: u32,
     height: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuSetScanout;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuSetScanout {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_SET_SCANOUT,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                rect: VirtioGpuRect {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                },
-                scanout_id: 0,
-                resource_id,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuSetScanout>(),
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    execute_cmd::<VirtioGpuSetScanout>(device, mmio, |cmd| {
+        cmd.rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        cmd.scanout_id = 0;
+        cmd.resource_id = resource_id;
+    })
 }
 
 fn virtio_gpu_transfer_to_host_2d(
@@ -1188,86 +1101,17 @@ fn virtio_gpu_transfer_to_host_2d(
     width: u32,
     height: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuTransferToHost2d;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuTransferToHost2d {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                rect: VirtioGpuRect {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                },
-                offset: 0,
-                resource_id,
-                padding: 0,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuTransferToHost2d>(),
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    execute_cmd::<VirtioGpuTransferToHost2d>(device, mmio, |cmd| {
+        cmd.rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        cmd.offset = 0;
+        cmd.resource_id = resource_id;
+        cmd.padding = 0;
+    })
 }
 
 fn virtio_gpu_resource_flush(
@@ -1277,85 +1121,16 @@ fn virtio_gpu_resource_flush(
     width: u32,
     height: u32,
 ) -> bool {
-    if device.ctrl_queue.ready == 0 {
-        return false;
-    }
-
-    let cmd_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    let resp_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if cmd_phys.is_null() || resp_phys.is_null() {
-        if !cmd_phys.is_null() {
-            free_page_frame(cmd_phys);
-        }
-        if !resp_phys.is_null() {
-            free_page_frame(resp_phys);
-        }
-        return false;
-    }
-
-    let cmd_virt = cmd_phys.to_virt().as_u64();
-    let resp_virt = resp_phys.to_virt().as_u64();
-    if cmd_virt == 0 || resp_virt == 0 {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let cmd = cmd_virt as *mut VirtioGpuResourceFlush;
-    let resp = resp_virt as *mut VirtioGpuCtrlHeader;
-    unsafe {
-        core::ptr::write_volatile(
-            cmd,
-            VirtioGpuResourceFlush {
-                header: VirtioGpuCtrlHeader {
-                    type_: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                rect: VirtioGpuRect {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                },
-                resource_id,
-                padding: 0,
-            },
-        );
-    }
-
-    let notify_cfg = match mmio.notify_cfg {
-        Some(cfg) => cfg,
-        None => return false,
-    };
-    let notify_mult = device.notify_off_multiplier;
-    let submitted = virtio_gpu_send_cmd(
-        &mut device.ctrl_queue,
-        &notify_cfg,
-        notify_mult,
-        cmd_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuResourceFlush>(),
-        resp_phys.as_u64(),
-        core::mem::size_of::<VirtioGpuCtrlHeader>(),
-    );
-    if !submitted {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    let resp_header = unsafe { core::ptr::read_volatile(resp) };
-    if resp_header.type_ != VIRTIO_GPU_RESP_OK_NODATA {
-        free_page_frame(cmd_phys);
-        free_page_frame(resp_phys);
-        return false;
-    }
-
-    free_page_frame(cmd_phys);
-    free_page_frame(resp_phys);
-    true
+    execute_cmd::<VirtioGpuResourceFlush>(device, mmio, |cmd| {
+        cmd.rect = VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        cmd.resource_id = resource_id;
+        cmd.padding = 0;
+    })
 }
 
 fn virtio_gpu_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
