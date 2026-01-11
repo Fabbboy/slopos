@@ -1003,7 +1003,7 @@ pub fn create_process_vm() -> u32 {
         return INVALID_PROCESS_ID;
     }
     unsafe {
-        (*pml4).entries.fill(0);
+        (*pml4).zero();
     }
 
     let process_id = manager.next_process_id;

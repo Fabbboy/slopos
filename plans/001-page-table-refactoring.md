@@ -1,9 +1,10 @@
 # Plan 001: Page Table Infrastructure Refactoring
 
-**Status**: Draft  
+**Status**: Implemented  
 **Priority**: High  
-**Scope**: `mm/src/paging.rs`, `abi/src/arch/x86_64/`  
+**Scope**: `mm/src/paging/`, `abi/src/arch/x86_64/page_table.rs`  
 **Estimated Effort**: 3-4 phases over multiple sessions  
+**Completed**: 2026-01-11  
 
 ---
 
