@@ -340,12 +340,6 @@ impl slopos_abi::DamageTracking for DrawBuffer<'_> {
     }
 }
 
-pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
-    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32) | ((a as u32) << 24)
-}
-
-pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
-    rgba(r, g, b, 0xFF)
-}
+pub use slopos_abi::pixel::{rgb, rgba};
 
 pub use primitives::*;

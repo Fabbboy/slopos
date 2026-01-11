@@ -1,5 +1,17 @@
 //! Pixel format definitions (Wayland wl_shm compatible)
 
+/// Construct an ARGB color value: 0xAARRGGBB (alpha high byte, blue low byte).
+#[inline]
+pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+/// Construct an opaque ARGB color value (alpha=0xFF).
+#[inline]
+pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    rgba(r, g, b, 0xFF)
+}
+
 /// Pixel format for shared memory buffers.
 ///
 /// These values match the Wayland wl_shm format constants.

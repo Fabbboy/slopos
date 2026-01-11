@@ -336,14 +336,6 @@ pub fn framebuffer_get_bpp() -> u8 {
     FRAMEBUFFER.lock().fb.map(|fb| fb.bpp()).unwrap_or(0)
 }
 
-pub fn framebuffer_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
-    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32) | ((a as u32) << 24)
-}
-
-pub fn framebuffer_rgb(r: u8, g: u8, b: u8) -> u32 {
-    framebuffer_rgba(r, g, b, 0xFF)
-}
-
 pub fn framebuffer_convert_color(color: u32) -> u32 {
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,

@@ -696,28 +696,7 @@ pub fn sys_input_get_button_state() -> u8 {
     unsafe { syscall(SYSCALL_INPUT_GET_BUTTON_STATE, 0, 0, 0) as u8 }
 }
 
-// =============================================================================
-// Safe Shared Memory Abstractions
-// =============================================================================
-
-/// Error type for shared memory operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShmError {
-    /// Failed to allocate physical memory for buffer
-    AllocationFailed,
-    /// Failed to map buffer into address space
-    MappingFailed,
-    /// Invalid or expired buffer token
-    InvalidToken,
-    /// Operation not permitted (e.g., non-owner trying to destroy)
-    PermissionDenied,
-    /// Maximum number of shared buffers reached
-    BufferLimitReached,
-    /// Maximum number of mappings per buffer reached
-    MappingLimitReached,
-    /// Invalid size (zero or too large)
-    InvalidSize,
-}
+pub use slopos_abi::ShmError;
 
 /// Safe wrapper for an owned shared memory buffer (read-write access).
 ///
