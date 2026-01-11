@@ -40,6 +40,14 @@ pub const KERNEL_PDPT_INDEX: usize = 510;
 /// Physical memory is identity-mapped starting at this virtual address.
 pub const HHDM_VIRT_BASE: u64 = 0xFFFF_8000_0000_0000;
 
+/// MMIO virtual address space base.
+/// Device MMIO regions are mapped starting at this virtual address.
+/// This is separate from HHDM because Limine v8+ only maps RAM in HHDM.
+pub const MMIO_VIRT_BASE: u64 = 0xFFFF_8100_0000_0000;
+
+/// MMIO virtual address space size (16 GB should be more than enough).
+pub const MMIO_VIRT_SIZE: u64 = 0x0000_0004_0000_0000;
+
 /// Kernel heap virtual base address.
 pub const KERNEL_HEAP_VBASE: u64 = 0xFFFF_FFFF_9000_0000;
 

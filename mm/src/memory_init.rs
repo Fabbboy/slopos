@@ -10,14 +10,15 @@ use crate::memory_reservations::{
 };
 use crate::mm_constants::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
-    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB,
+    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB, PageFlags,
 };
 use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
 };
-use crate::paging::init_paging;
+use crate::paging::{init_paging, map_page_4kb};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::string::cstr_to_str;
 
 use slopos_abi::DisplayInfo;
@@ -270,6 +271,46 @@ fn record_kernel_core_reservations() {
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
         b"Early PD\0".as_ptr() as *const c_char,
     );
+}
+
+fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
+    if memmap.is_null() {
+        return;
+    }
+    unsafe {
+        let response = &*memmap;
+        if response.entry_count == 0 || response.entries.is_null() {
+            return;
+        }
+        let flags = PageFlags::KERNEL_RW.bits();
+        let mut mapped_count = 0u32;
+        for i in 0..response.entry_count {
+            let entry_ptr = *response.entries.add(i as usize);
+            if entry_ptr.is_null() {
+                continue;
+            }
+            let entry = &*entry_ptr;
+            if entry.length == 0 {
+                continue;
+            }
+            if entry.typ != LIMINE_MEMMAP_ACPI_RECLAIMABLE {
+                continue;
+            }
+            let aligned_base = align_down_u64(entry.base, PAGE_SIZE_4KB);
+            let aligned_end = align_up_u64(entry.base + entry.length, PAGE_SIZE_4KB);
+            let mut phys = aligned_base;
+            while phys < aligned_end {
+                let virt = phys + hhdm_offset;
+                if map_page_4kb(VirtAddr::new(virt), PhysAddr::new(phys), flags) == 0 {
+                    mapped_count += 1;
+                }
+                phys += PAGE_SIZE_4KB;
+            }
+        }
+        if mapped_count > 0 {
+            klog_debug!("MM: Mapped {} ACPI reclaimable pages to HHDM", mapped_count);
+        }
+    }
 }
 
 fn record_memmap_reservations(memmap: *const LimineMemmapResponse) {
@@ -577,6 +618,10 @@ pub fn init_memory_system(
         }
 
         init_paging();
+
+        // Map ACPI reclaimable regions into HHDM so drivers can parse ACPI tables
+        // This is required for Limine revision 3 which no longer maps these regions
+        map_acpi_regions(memmap, hhdm_offset);
 
         if init_kernel_heap() != 0 {
             mm_panic("MM: Kernel heap initialization failed");

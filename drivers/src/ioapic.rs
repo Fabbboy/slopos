@@ -225,7 +225,6 @@ fn acpi_map_table(phys_addr: u64) -> *const AcpiSdtHeader {
     if phys_addr == 0 {
         return core::ptr::null();
     }
-    // Map via HHDM for ACPI table access
     use slopos_mm::hhdm::PhysAddrHhdm;
     PhysAddr::new(phys_addr)
         .try_to_virt()

@@ -31,7 +31,7 @@ BOOT_CMDLINE_EFFECTIVE := $(strip $(BOOT_CMDLINE) $(DEBUG_CMDLINE))
 
 LIMINE_DIR := third_party/limine
 LIMINE_REPO := https://github.com/limine-bootloader/limine.git
-LIMINE_BRANCH := v5.x-branch-binary
+LIMINE_BRANCH := v8.x-branch-binary
 
 OVMF_DIR := third_party/ovmf
 OVMF_CODE := $(OVMF_DIR)/OVMF_CODE.fd
@@ -134,9 +134,9 @@ define build_iso
 	ISO_ROOT="$$STAGING/iso_root"; \
 	mkdir -p "$$ISO_ROOT/boot" "$$ISO_ROOT/EFI/BOOT"; \
 	cp "$$KERNEL" "$$ISO_ROOT/boot/kernel.elf"; \
-	cp limine.cfg "$$ISO_ROOT/boot/limine.cfg"; \
+	cp limine.conf "$$ISO_ROOT/boot/limine.conf"; \
 	if [ -n "$$CMDLINE" ]; then \
-		printf 'CMDLINE=%s\n' "$$CMDLINE" >> "$$ISO_ROOT/boot/limine.cfg"; \
+		printf '    cmdline: %s\n' "$$CMDLINE" >> "$$ISO_ROOT/boot/limine.conf"; \
 	fi; \
 	cp $(LIMINE_DIR)/limine-bios.sys "$$ISO_ROOT/boot/"; \
 	cp $(LIMINE_DIR)/limine-bios-cd.bin "$$ISO_ROOT/boot/"; \

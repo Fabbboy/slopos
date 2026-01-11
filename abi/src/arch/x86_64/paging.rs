@@ -61,6 +61,7 @@ bitflags! {
         const USER_RO = Self::PRESENT.bits() | Self::USER.bits();
         /// Large kernel page (PRESENT | WRITABLE | HUGE).
         const LARGE_KERNEL_RW = Self::PRESENT.bits() | Self::WRITABLE.bits() | Self::HUGE.bits();
+        const MMIO = Self::PRESENT.bits() | Self::WRITABLE.bits() | Self::CACHE_DISABLE.bits() | Self::NO_EXECUTE.bits();
     }
 }
 

@@ -26,7 +26,7 @@ static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static BASE_REVISION: BaseRevision = BaseRevision::with_revision(1);
+static BASE_REVISION: BaseRevision = BaseRevision::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
@@ -410,16 +410,24 @@ pub fn get_rsdp_phys_address() -> u64 {
 
 pub fn get_rsdp_address() -> *const c_void {
     let info = sysinfo();
-    if !info.flags.rsdp_available {
+    if !info.flags.rsdp_available || info.rsdp_phys_addr == 0 {
         return ptr::null();
     }
 
-    if info.rsdp_virt_addr != 0 {
-        info.rsdp_virt_addr as *const c_void
-    } else if info.flags.hhdm_available && info.rsdp_phys_addr != 0 {
-        (info.rsdp_phys_addr + info.hhdm_offset) as *const c_void
+    let addr = info.rsdp_phys_addr;
+
+    // Limine protocol states pointers have HHDM offset added, but Limine v8 with
+    // revision 3 returns physical addresses for RSDP (ACPI regions not pre-mapped).
+    // Detect if address is already virtual (in HHDM range) or needs conversion.
+    if addr >= info.hhdm_offset && info.flags.hhdm_available {
+        // Already an HHDM virtual address
+        addr as *const c_void
+    } else if info.flags.hhdm_available {
+        // Physical address - convert to HHDM virtual
+        (addr + info.hhdm_offset) as *const c_void
     } else {
-        info.rsdp_phys_addr as *const c_void
+        // Fallback: return as-is (will likely fault)
+        addr as *const c_void
     }
 }
 
