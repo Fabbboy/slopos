@@ -3,9 +3,9 @@ use core::ffi::{c_char, c_int, c_void};
 use slopos_lib::klog_info;
 use slopos_lib::string::cstr_to_str;
 
-use crate::scheduler;
-use crate::scheduler::task_wait_for;
-use crate::task::{
+use super::scheduler;
+use super::scheduler::task_wait_for;
+use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskEntry, task_create,
 };
 
@@ -47,5 +47,5 @@ pub fn kthread_join(thread_id: KthreadId) -> c_int {
     task_wait_for(thread_id)
 }
 pub fn kthread_exit() -> ! {
-    crate::ffi_boundary::scheduler_task_exit();
+    super::ffi_boundary::scheduler_task_exit();
 }

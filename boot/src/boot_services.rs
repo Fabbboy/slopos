@@ -1,7 +1,7 @@
 use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
-use slopos_sched::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
+use slopos_core::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
 use slopos_video::framebuffer::{framebuffer_get_info, framebuffer_is_initialized};
 
 fn boot_step_task_manager_init_wrapper() -> i32 {

@@ -37,7 +37,7 @@ pub use error::*;
 pub use fs::*;
 pub use input::*;
 pub use pixel::*;
-pub use sched_traits::*;
+pub use sched_traits::FateResult;
 pub use shm::*;
 pub use surface::*;
 pub use syscall::*;

@@ -1,7 +1,8 @@
-use crate::task::{Task, task_find_by_id};
+use super::task::{Task, task_find_by_id};
+use crate::platform;
+use crate::wl_currency;
 use core::ffi::c_int;
 use slopos_abi::sched_traits::FateResult;
-use slopos_drivers::{random, wl_currency};
 
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
@@ -17,7 +18,7 @@ where
     0
 }
 pub fn fate_spin() -> FateResult {
-    let val = random::random_next() as u32;
+    let val = platform::rng_next() as u32;
     FateResult {
         token: val,
         value: val,

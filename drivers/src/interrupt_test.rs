@@ -11,7 +11,7 @@ use slopos_lib::string::cstr_to_str;
 use crate::interrupts::{
     InterruptTestConfig, SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER,
 };
-use crate::sched_bridge;
+use slopos_core::platform;
 
 #[repr(C)]
 pub struct test_stats {
@@ -279,7 +279,7 @@ pub fn interrupt_test_request_shutdown(failed_tests: c_int) {
     klog_info!("INTERRUPT_TEST: Auto shutdown requested");
     let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
     unsafe { QEMU_DEBUG_EXIT.write(exit_value) };
-    sched_bridge::kernel_shutdown(if failed_tests == 0 {
+    platform::kernel_shutdown(if failed_tests == 0 {
         b"Interrupt tests completed successfully\0".as_ptr() as *const c_char
     } else {
         b"Interrupt tests failed\0".as_ptr() as *const c_char

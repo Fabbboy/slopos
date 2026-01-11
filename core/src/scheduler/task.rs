@@ -9,7 +9,7 @@ use slopos_lib::kdiag_timestamp;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::scheduler;
+use super::scheduler;
 
 pub use slopos_abi::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
@@ -22,8 +22,22 @@ pub use slopos_abi::task::{
 
 use slopos_mm::mm_constants::{PROCESS_CODE_START_VA, PageFlags};
 
+use spin::Once;
+
 pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
 pub type TaskEntry = fn(*mut c_void);
+
+static VIDEO_CLEANUP_HOOK: Once<fn(u32)> = Once::new();
+
+pub fn register_video_cleanup_hook(hook: fn(u32)) {
+    VIDEO_CLEANUP_HOOK.call_once(|| hook);
+}
+
+fn video_task_cleanup(task_id: u32) {
+    if let Some(hook) = VIDEO_CLEANUP_HOOK.get() {
+        hook(task_id);
+    }
+}
 
 struct TaskManagerInner {
     tasks: [Task; MAX_TASKS],
@@ -59,7 +73,6 @@ impl TaskManagerInner {
 
 static TASK_MANAGER: IrqMutex<TaskManagerInner> = IrqMutex::new(TaskManagerInner::new());
 
-use slopos_drivers::sched_bridge;
 use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
@@ -501,8 +514,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
         unsafe {
             if (*task_ptr).process_id != INVALID_PROCESS_ID {
                 fileio_destroy_table_for_process((*task_ptr).process_id);
-                // Clean up video/surface resources for this task
-                sched_bridge::video_task_cleanup(resolved_id);
+                video_task_cleanup(resolved_id);
                 // Clean up shared memory buffers owned by this task
                 // Must happen before destroy_process_vm to properly unmap pages
                 shm_cleanup_task(resolved_id);
@@ -758,4 +770,4 @@ pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_TERMINATED
 }
 
-use crate::ffi_boundary::task_entry_wrapper;
+use super::ffi_boundary::task_entry_wrapper;

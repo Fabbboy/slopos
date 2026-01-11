@@ -18,6 +18,7 @@ qemu-exit = []
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-core = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }

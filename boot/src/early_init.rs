@@ -429,7 +429,7 @@ pub fn report_kernel_status() {
     }
 }
 
-use slopos_sched::start_scheduler;
+use slopos_core::start_scheduler;
 
 fn boot_step_serial_init_fn() {
     serial::write_line("BOOT: serial step -> init");
@@ -536,8 +536,9 @@ pub fn kernel_main_impl() {
     serial::write_line("BOOT: after idt_load (early)");
     serial::write_line("BOOT: early GDT/IDT initialized");
 
-    // Register boot services early to break circular dependencies
-    crate::boot_impl::register_with_bridge();
+    // Register boot services and platform early to break circular dependencies
+    crate::boot_impl::register_boot_services();
+    slopos_drivers::platform_init::init_platform_services();
 
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {

@@ -1,93 +1,159 @@
-//! Video bridge - thin wrapper over VideoServices trait object.
-//!
-//! This module provides the video subsystem interface for syscall handlers.
-//! Uses trait objects to break the circular dependency between drivers and video crates.
-
 use core::ffi::c_int;
-use spin::Once;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
-// Re-export ABI types for consumers
 pub use slopos_abi::video_traits::{
     FramebufferInfoC, VideoError, VideoResult, video_result_from_code,
 };
 pub use slopos_abi::{MAX_WINDOW_DAMAGE_REGIONS, WindowDamageRect, WindowInfo};
 
-use slopos_abi::video_traits::VideoServices;
+use slopos_abi::addr::PhysAddr;
 
-// =============================================================================
-// Static trait object storage
-// =============================================================================
-
-static VIDEO: Once<&'static dyn VideoServices> = Once::new();
-
-/// Register the video services implementation (called by boot crate).
-pub fn register_video_services(svc: &'static dyn VideoServices) {
-    VIDEO.call_once(|| svc);
+#[repr(C)]
+pub struct VideoCallbacks {
+    pub framebuffer_get_info: fn() -> *mut FramebufferInfoC,
+    pub roulette_draw: fn(u32) -> c_int,
+    pub surface_enumerate_windows: fn(*mut WindowInfo, u32) -> u32,
+    pub surface_set_window_position: fn(u32, i32, i32) -> c_int,
+    pub surface_set_window_state: fn(u32, u8) -> c_int,
+    pub surface_raise_window: fn(u32) -> c_int,
+    pub surface_commit: fn(u32) -> c_int,
+    pub register_surface: fn(u32, u32, u32, u32) -> c_int,
+    pub drain_queue: fn(),
+    pub fb_flip: fn(PhysAddr, usize) -> c_int,
+    pub surface_request_frame_callback: fn(u32) -> c_int,
+    pub surface_mark_frames_done: fn(u64),
+    pub surface_poll_frame_done: fn(u32) -> u64,
+    pub surface_add_damage: fn(u32, i32, i32, i32, i32) -> c_int,
+    pub surface_get_buffer_age: fn(u32) -> u8,
+    pub surface_set_role: fn(u32, u8) -> c_int,
+    pub surface_set_parent: fn(u32, u32) -> c_int,
+    pub surface_set_relative_position: fn(u32, i32, i32) -> c_int,
+    pub surface_set_title: fn(u32, *const u8, usize) -> c_int,
 }
 
-// =============================================================================
-// Macro for generating wrapper functions
-// =============================================================================
+static VIDEO: AtomicPtr<VideoCallbacks> = AtomicPtr::new(core::ptr::null_mut());
 
-macro_rules! video_fn {
-    // Pattern for functions returning a value
-    ($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty, $default:expr) => {
-        pub fn $name($($arg: $ty),*) -> $ret {
-            VIDEO.get().map(|v| v.$name($($arg),*)).unwrap_or($default)
-        }
-    };
-    // Pattern for void functions
-    ($name:ident($($arg:ident: $ty:ty),*)) => {
-        pub fn $name($($arg: $ty),*) {
-            if let Some(v) = VIDEO.get() { v.$name($($arg),*); }
-        }
-    };
+pub fn register_video_services(callbacks: &'static VideoCallbacks) {
+    VIDEO.store(callbacks as *const _ as *mut _, Ordering::Release);
 }
 
-// =============================================================================
-// Generated wrapper functions
-// =============================================================================
-
-video_fn!(framebuffer_get_info() -> *mut FramebufferInfoC, core::ptr::null_mut());
-video_fn!(surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32, 0);
-video_fn!(surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int, -1);
-video_fn!(surface_set_window_state(task_id: u32, state: u8) -> c_int, -1);
-video_fn!(surface_raise_window(task_id: u32) -> c_int, -1);
-video_fn!(surface_commit(task_id: u32) -> c_int, -1);
-video_fn!(register_surface(task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int, -1);
-video_fn!(drain_queue());
-video_fn!(surface_request_frame_callback(task_id: u32) -> c_int, -1);
-video_fn!(surface_mark_frames_done(present_time_ms: u64));
-video_fn!(surface_poll_frame_done(task_id: u32) -> u64, 0);
-video_fn!(surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int, -1);
-video_fn!(surface_get_buffer_age(task_id: u32) -> u8, 0);
-video_fn!(surface_set_role(task_id: u32, role: u8) -> c_int, -1);
-video_fn!(surface_set_parent(task_id: u32, parent_task_id: u32) -> c_int, -1);
-video_fn!(surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_int, -1);
-
-// =============================================================================
-// Special functions with custom logic
-// =============================================================================
-
-/// Draw roulette wheel - returns VideoResult instead of c_int.
-pub fn roulette_draw(fate: u32) -> VideoResult {
-    VIDEO
-        .get()
-        .map(|v| video_result_from_code(v.roulette_draw(fate)))
-        .unwrap_or(Err(VideoError::NoFramebuffer))
+#[inline(always)]
+fn video() -> Option<&'static VideoCallbacks> {
+    let ptr = VIDEO.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
 }
 
-/// Set window title - takes slice instead of raw pointer.
-pub fn surface_set_title(task_id: u32, title: &[u8]) -> c_int {
-    VIDEO
-        .get()
-        .map(|v| v.surface_set_title(task_id, title.as_ptr(), title.len()))
+pub fn framebuffer_get_info() -> *mut FramebufferInfoC {
+    video()
+        .map(|v| (v.framebuffer_get_info)())
+        .unwrap_or(core::ptr::null_mut())
+}
+
+pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
+    video()
+        .map(|v| (v.surface_enumerate_windows)(out_buffer, max_count))
+        .unwrap_or(0)
+}
+
+pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
+    video()
+        .map(|v| (v.surface_set_window_position)(task_id, x, y))
         .unwrap_or(-1)
 }
 
-/// Copy from a shared memory buffer to the MMIO framebuffer (page flip).
-/// This is the "page flip" operation for the userland compositor.
-pub fn fb_flip_from_shm(shm_phys: slopos_abi::addr::PhysAddr, size: usize) -> c_int {
+pub fn surface_set_window_state(task_id: u32, state: u8) -> c_int {
+    video()
+        .map(|v| (v.surface_set_window_state)(task_id, state))
+        .unwrap_or(-1)
+}
+
+pub fn surface_raise_window(task_id: u32) -> c_int {
+    video()
+        .map(|v| (v.surface_raise_window)(task_id))
+        .unwrap_or(-1)
+}
+
+pub fn surface_commit(task_id: u32) -> c_int {
+    video().map(|v| (v.surface_commit)(task_id)).unwrap_or(-1)
+}
+
+pub fn register_surface(task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int {
+    video()
+        .map(|v| (v.register_surface)(task_id, width, height, shm_token))
+        .unwrap_or(-1)
+}
+
+pub fn drain_queue() {
+    if let Some(v) = video() {
+        (v.drain_queue)();
+    }
+}
+
+pub fn surface_request_frame_callback(task_id: u32) -> c_int {
+    video()
+        .map(|v| (v.surface_request_frame_callback)(task_id))
+        .unwrap_or(-1)
+}
+
+pub fn surface_mark_frames_done(present_time_ms: u64) {
+    if let Some(v) = video() {
+        (v.surface_mark_frames_done)(present_time_ms);
+    }
+}
+
+pub fn surface_poll_frame_done(task_id: u32) -> u64 {
+    video()
+        .map(|v| (v.surface_poll_frame_done)(task_id))
+        .unwrap_or(0)
+}
+
+pub fn surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
+    video()
+        .map(|v| (v.surface_add_damage)(task_id, x, y, width, height))
+        .unwrap_or(-1)
+}
+
+pub fn surface_get_buffer_age(task_id: u32) -> u8 {
+    video()
+        .map(|v| (v.surface_get_buffer_age)(task_id))
+        .unwrap_or(0)
+}
+
+pub fn surface_set_role(task_id: u32, role: u8) -> c_int {
+    video()
+        .map(|v| (v.surface_set_role)(task_id, role))
+        .unwrap_or(-1)
+}
+
+pub fn surface_set_parent(task_id: u32, parent_task_id: u32) -> c_int {
+    video()
+        .map(|v| (v.surface_set_parent)(task_id, parent_task_id))
+        .unwrap_or(-1)
+}
+
+pub fn surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
+    video()
+        .map(|v| (v.surface_set_relative_position)(task_id, rel_x, rel_y))
+        .unwrap_or(-1)
+}
+
+pub fn roulette_draw(fate: u32) -> VideoResult {
+    video()
+        .map(|v| video_result_from_code((v.roulette_draw)(fate)))
+        .unwrap_or(Err(VideoError::NoFramebuffer))
+}
+
+pub fn surface_set_title(task_id: u32, title: &[u8]) -> c_int {
+    video()
+        .map(|v| (v.surface_set_title)(task_id, title.as_ptr(), title.len()))
+        .unwrap_or(-1)
+}
+
+pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
     let fb_ptr = framebuffer_get_info();
     if fb_ptr.is_null() {
         return -1;
@@ -104,14 +170,12 @@ pub fn fb_flip_from_shm(shm_phys: slopos_abi::addr::PhysAddr, size: usize) -> c_
         return -1;
     }
 
-    // Verify source address is valid via HHDM (use typed translation)
     use slopos_mm::hhdm::PhysAddrHhdm;
     if shm_phys.to_virt_checked().is_none() {
         return -1;
     }
 
-    VIDEO
-        .get()
-        .map(|v| v.fb_flip(shm_phys, copy_size))
+    video()
+        .map(|v| (v.fb_flip)(shm_phys, copy_size))
         .unwrap_or(-1)
 }

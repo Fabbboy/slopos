@@ -1,6 +1,6 @@
 use core::ffi::{c_char, c_void};
 
-use slopos_sched::{TASK_FLAG_USER_MODE, TaskEntry, task_create};
+use slopos_core::{TASK_FLAG_USER_MODE, TaskEntry, task_create};
 #[unsafe(link_section = ".user_text")]
 pub fn user_spawn_program(
     name: *const c_char,

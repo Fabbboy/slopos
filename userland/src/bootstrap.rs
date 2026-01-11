@@ -3,13 +3,13 @@ use core::ptr;
 use slopos_lib::string::cstr_to_str;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
-use slopos_drivers::{syscall_handlers::register_spawn_task_callback, wl_currency};
-use slopos_lib::klog_info;
-use slopos_mm::process_vm::process_vm_load_elf;
-use slopos_sched::{
+use slopos_core::{
     INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, Task,
     TaskEntry, schedule_task, task_get_info, task_set_state, task_terminate,
 };
+use slopos_drivers::{syscall_handlers::register_spawn_task_callback, wl_currency};
+use slopos_lib::klog_info;
+use slopos_mm::process_vm::process_vm_load_elf;
 
 use crate::loader::user_spawn_program_with_flags;
 

@@ -4,7 +4,8 @@ use crate::syscall_handlers::syscall_lookup;
 use crate::syscall_types::{
     InterruptFrame, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, Task, TaskContext,
 };
-use crate::{sched_bridge, wl_currency};
+use crate::wl_currency;
+use slopos_core::scheduler_get_current_task;
 
 use slopos_abi::arch::GDT_USER_DATA_SELECTOR;
 
@@ -50,12 +51,11 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task_ref = sched_bridge::get_current_task();
-    if task_ref.is_null() {
+    let task = scheduler_get_current_task() as *mut Task;
+    if task.is_null() {
         wl_currency::award_loss();
         return;
     }
-    let task = task_ref.as_raw() as *mut Task;
     unsafe {
         if ((*task).flags & TASK_FLAG_USER_MODE) == 0 {
             wl_currency::award_loss();

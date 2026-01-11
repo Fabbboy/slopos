@@ -10,11 +10,11 @@ use core::alloc::Layout;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 
+use slopos_core as sched;
 use slopos_drivers::{serial, serial_println, wl_currency};
 use slopos_fs as fs;
 use slopos_lib::cpu;
 use slopos_mm::BumpAllocator;
-use slopos_sched as sched;
 use slopos_userland as userland;
 mod ffi;
 use slopos_video as video;

@@ -4,9 +4,9 @@
 extern crate alloc;
 
 use core::ffi::c_int;
-use slopos_drivers::sched_bridge::register_video_task_cleanup_callback;
+use slopos_core::task::register_video_cleanup_hook;
 use slopos_drivers::serial_println;
-use slopos_drivers::video_bridge;
+use slopos_drivers::video_bridge::{self, VideoCallbacks};
 use slopos_drivers::virtio_gpu;
 use slopos_drivers::wl_currency;
 use slopos_lib::FramebufferInfo;
@@ -14,7 +14,7 @@ use slopos_lib::klog_info;
 
 use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::video_traits::{FramebufferInfoC, VideoServices};
+use slopos_abi::video_traits::FramebufferInfoC;
 
 pub mod compositor_context;
 pub mod font;
@@ -30,133 +30,142 @@ pub enum VideoBackend {
     Virgl,
 }
 
-// =============================================================================
-// VideoServices trait implementation
-// =============================================================================
+fn video_framebuffer_get_info() -> *mut FramebufferInfoC {
+    framebuffer::framebuffer_get_info() as *mut FramebufferInfoC
+}
 
-/// Static instance of VideoServices for registration with drivers crate.
-static VIDEO_SERVICES: VideoServicesImpl = VideoServicesImpl;
-
-/// Implementation of VideoServices trait.
-struct VideoServicesImpl;
-
-impl VideoServices for VideoServicesImpl {
-    fn framebuffer_get_info(&self) -> *mut FramebufferInfoC {
-        framebuffer::framebuffer_get_info() as *mut FramebufferInfoC
-    }
-
-    fn roulette_draw(&self, fate: u32) -> c_int {
-        match roulette_core::roulette_draw_kernel(fate) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
-    }
-
-    fn surface_enumerate_windows(&self, out: *mut WindowInfo, max: u32) -> u32 {
-        compositor_context::surface_enumerate_windows(out, max)
-    }
-
-    fn surface_set_window_position(&self, task_id: u32, x: i32, y: i32) -> c_int {
-        compositor_context::surface_set_window_position(task_id, x, y)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_set_window_state(&self, task_id: u32, state: u8) -> c_int {
-        compositor_context::surface_set_window_state(task_id, state)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_raise_window(&self, task_id: u32) -> c_int {
-        compositor_context::surface_raise_window(task_id)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_commit(&self, task_id: u32) -> c_int {
-        match compositor_context::surface_commit(task_id) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
-    }
-
-    fn register_surface(&self, task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int {
-        compositor_context::register_surface_for_task(task_id, width, height, shm_token)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn drain_queue(&self) {
-        compositor_context::drain_queue();
-    }
-
-    fn fb_flip(&self, shm_phys: PhysAddr, size: usize) -> c_int {
-        framebuffer::fb_flip_from_shm(shm_phys, size)
-    }
-
-    fn surface_request_frame_callback(&self, task_id: u32) -> c_int {
-        compositor_context::surface_request_frame_callback(task_id)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_mark_frames_done(&self, present_time_ms: u64) {
-        compositor_context::surface_mark_frames_done(present_time_ms);
-    }
-
-    fn surface_poll_frame_done(&self, task_id: u32) -> u64 {
-        compositor_context::surface_poll_frame_done(task_id)
-    }
-
-    fn surface_add_damage(&self, task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
-        compositor_context::surface_add_damage(task_id, x, y, width, height)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_get_buffer_age(&self, task_id: u32) -> u8 {
-        compositor_context::surface_get_buffer_age(task_id)
-    }
-
-    fn surface_set_role(&self, task_id: u32, role: u8) -> c_int {
-        compositor_context::surface_set_role(task_id, role)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_set_parent(&self, task_id: u32, parent_task_id: u32) -> c_int {
-        compositor_context::surface_set_parent(task_id, parent_task_id)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_set_relative_position(&self, task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
-        compositor_context::surface_set_relative_position(task_id, rel_x, rel_y)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
-    }
-
-    fn surface_set_title(&self, task_id: u32, title_ptr: *const u8, title_len: usize) -> c_int {
-        if title_ptr.is_null() {
-            return -1;
-        }
-
-        // Validate pointer is in user address space
-        let ptr_addr = title_ptr as u64;
-        let len = title_len.min(31);
-        let end_addr = ptr_addr.saturating_add(len as u64);
-        use slopos_mm::mm_constants::USER_SPACE_END_VA;
-        if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
-            return -1;
-        }
-
-        let title = unsafe { core::slice::from_raw_parts(title_ptr, len) };
-        compositor_context::surface_set_title(task_id, title)
-            .map(|()| 0)
-            .unwrap_or_else(|e| e.as_c_int())
+fn video_roulette_draw(fate: u32) -> c_int {
+    match roulette_core::roulette_draw_kernel(fate) {
+        Ok(()) => 0,
+        Err(_) => -1,
     }
 }
+
+fn video_surface_enumerate_windows(out: *mut WindowInfo, max: u32) -> u32 {
+    compositor_context::surface_enumerate_windows(out, max)
+}
+
+fn video_surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
+    compositor_context::surface_set_window_position(task_id, x, y)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_set_window_state(task_id: u32, state: u8) -> c_int {
+    compositor_context::surface_set_window_state(task_id, state)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_raise_window(task_id: u32) -> c_int {
+    compositor_context::surface_raise_window(task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_commit(task_id: u32) -> c_int {
+    match compositor_context::surface_commit(task_id) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn video_register_surface(task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int {
+    compositor_context::register_surface_for_task(task_id, width, height, shm_token)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_drain_queue() {
+    compositor_context::drain_queue();
+}
+
+fn video_fb_flip(shm_phys: PhysAddr, size: usize) -> c_int {
+    framebuffer::fb_flip_from_shm(shm_phys, size)
+}
+
+fn video_surface_request_frame_callback(task_id: u32) -> c_int {
+    compositor_context::surface_request_frame_callback(task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_mark_frames_done(present_time_ms: u64) {
+    compositor_context::surface_mark_frames_done(present_time_ms);
+}
+
+fn video_surface_poll_frame_done(task_id: u32) -> u64 {
+    compositor_context::surface_poll_frame_done(task_id)
+}
+
+fn video_surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
+    compositor_context::surface_add_damage(task_id, x, y, width, height)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_get_buffer_age(task_id: u32) -> u8 {
+    compositor_context::surface_get_buffer_age(task_id)
+}
+
+fn video_surface_set_role(task_id: u32, role: u8) -> c_int {
+    compositor_context::surface_set_role(task_id, role)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_set_parent(task_id: u32, parent_task_id: u32) -> c_int {
+    compositor_context::surface_set_parent(task_id, parent_task_id)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
+    compositor_context::surface_set_relative_position(task_id, rel_x, rel_y)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+fn video_surface_set_title(task_id: u32, title_ptr: *const u8, title_len: usize) -> c_int {
+    if title_ptr.is_null() {
+        return -1;
+    }
+
+    let ptr_addr = title_ptr as u64;
+    let len = title_len.min(31);
+    let end_addr = ptr_addr.saturating_add(len as u64);
+    use slopos_mm::mm_constants::USER_SPACE_END_VA;
+    if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
+        return -1;
+    }
+
+    let title = unsafe { core::slice::from_raw_parts(title_ptr, len) };
+    compositor_context::surface_set_title(task_id, title)
+        .map(|()| 0)
+        .unwrap_or_else(|e| e.as_c_int())
+}
+
+static VIDEO_CALLBACKS: VideoCallbacks = VideoCallbacks {
+    framebuffer_get_info: video_framebuffer_get_info,
+    roulette_draw: video_roulette_draw,
+    surface_enumerate_windows: video_surface_enumerate_windows,
+    surface_set_window_position: video_surface_set_window_position,
+    surface_set_window_state: video_surface_set_window_state,
+    surface_raise_window: video_surface_raise_window,
+    surface_commit: video_surface_commit,
+    register_surface: video_register_surface,
+    drain_queue: video_drain_queue,
+    fb_flip: video_fb_flip,
+    surface_request_frame_callback: video_surface_request_frame_callback,
+    surface_mark_frames_done: video_surface_mark_frames_done,
+    surface_poll_frame_done: video_surface_poll_frame_done,
+    surface_add_damage: video_surface_add_damage,
+    surface_get_buffer_age: video_surface_get_buffer_age,
+    surface_set_role: video_surface_set_role,
+    surface_set_parent: video_surface_set_parent,
+    surface_set_relative_position: video_surface_set_relative_position,
+    surface_set_title: video_surface_set_title,
+};
 
 // =============================================================================
 // Task cleanup callback
@@ -173,7 +182,7 @@ fn task_cleanup_callback(task_id: u32) {
 
 pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
     // Register task cleanup callback early so it's available even if framebuffer init fails
-    register_video_task_cleanup_callback(task_cleanup_callback);
+    register_video_cleanup_hook(task_cleanup_callback);
 
     let mut virgl_fb: Option<FramebufferInfo> = None;
     if backend == VideoBackend::Virgl {
@@ -205,8 +214,7 @@ pub fn init(framebuffer: Option<FramebufferInfo>, backend: VideoBackend) {
             return;
         }
 
-        // Register the trait object with the drivers crate
-        video_bridge::register_video_services(&VIDEO_SERVICES);
+        video_bridge::register_video_services(&VIDEO_CALLBACKS);
 
         if let Err(err) = splash::splash_show_boot_screen() {
             serial_println!(

@@ -8,7 +8,7 @@
 //!
 //! All other Rust-to-Rust calls should use regular Rust functions without extern "C".
 
-use crate::task::TaskContext;
+use super::task::TaskContext;
 
 // ============================================================================
 // Functions called FROM assembly (must be extern "C")
@@ -18,7 +18,7 @@ use crate::task::TaskContext;
 /// This is called when a task returns from its entry function
 #[unsafe(no_mangle)]
 pub extern "C" fn scheduler_task_exit() -> ! {
-    crate::scheduler::scheduler_task_exit_impl();
+    super::scheduler::scheduler_task_exit_impl()
 }
 
 // ============================================================================

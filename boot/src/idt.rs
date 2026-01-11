@@ -73,16 +73,17 @@ pub enum ExceptionMode {
     Test = 1,
 }
 
-// Import functions from other crates - they're now regular Rust functions
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_drivers::irq::irq_dispatch;
+use slopos_core::irq::irq_dispatch;
 use slopos_drivers::syscall::syscall_handle;
 use slopos_drivers::wl_currency::wl_award_loss;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::{paging, process_vm};
 
-use slopos_drivers::sched_bridge;
+use slopos_core::{
+    scheduler_get_current_task, scheduler_request_reschedule_from_interrupt, task_terminate,
+};
 
 // Task and related types are now imported from abi
 use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskFaultReason};
@@ -386,7 +387,7 @@ fn terminate_user_task(
     frame: &slopos_lib::InterruptFrame,
     detail: &'static CStr,
 ) {
-    let task = sched_bridge::boot_get_current_task() as *mut Task;
+    let task = scheduler_get_current_task() as *mut Task;
     let tid = if task.is_null() {
         INVALID_TASK_ID
     } else {
@@ -439,8 +440,8 @@ fn terminate_user_task(
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
             wl_award_loss();
-            sched_bridge::boot_task_terminate(tid);
-            sched_bridge::boot_request_reschedule_from_interrupt();
+            task_terminate(tid);
+            scheduler_request_reschedule_from_interrupt();
         }
     }
     let _ = frame;
@@ -595,7 +596,7 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         let mut rip_phys = PhysAddr::NULL;
         let mut ctx_rip = 0u64;
         let mut ctx_rsp = 0u64;
-        let task_ptr = sched_bridge::boot_get_current_task() as *mut Task;
+        let task_ptr = scheduler_get_current_task() as *mut Task;
         if !task_ptr.is_null() {
             pid = unsafe { (*task_ptr).process_id };
             unsafe {

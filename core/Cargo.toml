@@ -1,5 +1,5 @@
 [package]
-name = "slopos-sched"
+name = "slopos-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,12 +13,10 @@ crate-type = ["rlib"]
 
 test = false
 doctest = false
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
-slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 spin.workspace = true
-
-[dev-dependencies]

@@ -5,10 +5,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_lib::{klog_debug, klog_info};
 
-use crate::sched_bridge;
 use crate::wl_currency;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
+use slopos_core::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 
@@ -510,13 +510,13 @@ pub fn init() -> i32 {
         return init_fail();
     }
 
-    if sched_bridge::is_rsdp_available() == 0 {
+    if !platform::is_rsdp_available() {
         klog_info!("IOAPIC: ACPI RSDP unavailable, skipping IOAPIC init");
         wl_currency::award_loss();
         return init_fail();
     }
 
-    let rsdp = sched_bridge::get_rsdp_address() as *const AcpiRsdp;
+    let rsdp = platform::get_rsdp_address() as *const AcpiRsdp;
     if !acpi_validate_rsdp(rsdp) {
         klog_info!("IOAPIC: ACPI RSDP checksum failed");
         wl_currency::award_loss();

@@ -479,7 +479,7 @@ mod suites {
     #[cfg(feature = "builtin-tests")]
     fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
-        let result = slopos_sched::run_privilege_separation_invariant_test();
+        let result = slopos_core::run_privilege_separation_invariant_test();
         let passed = if result == 0 { 1 } else { 0 };
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, PRIVSEP_NAME, 1, passed, elapsed);
@@ -549,50 +549,6 @@ mod suites {
         0
     }
 
-    #[cfg(feature = "builtin-tests")]
-    fn run_roulette_exec_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        use slopos_sched::{
-            INVALID_TASK_ID, TASK_FLAG_USER_MODE, TASK_STATE_READY, Task, schedule_task,
-            task_create, task_get_info, task_terminate,
-        };
-
-        let start = slopos_lib::tsc::rdtsc();
-        let total = 1u32;
-        let mut passed = 0u32;
-
-        let tid = unsafe {
-            task_create(
-                b"roulette-test\0".as_ptr() as *const c_char,
-                slopos_userland::roulette::roulette_user_main,
-                ptr::null_mut(),
-                5,
-                TASK_FLAG_USER_MODE,
-            )
-        };
-
-        if tid != INVALID_TASK_ID {
-            let mut info: *mut Task = ptr::null_mut();
-            if unsafe { task_get_info(tid, &mut info) } == 0 && !info.is_null() {
-                if unsafe { schedule_task(info) } == 0
-                    && unsafe { (*info).state } == TASK_STATE_READY
-                {
-                    passed = 1;
-                }
-            }
-            unsafe {
-                task_terminate(tid);
-            }
-        }
-
-        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
-        fill_simple_result(out, ROULETTE_EXEC_NAME, total, passed, elapsed);
-        if passed == total { 0 } else { -1 }
-    }
-
-    #[cfg(not(feature = "builtin-tests"))]
     fn run_roulette_exec_suite(
         _config: *const InterruptTestConfig,
         out: *mut TestSuiteResult,

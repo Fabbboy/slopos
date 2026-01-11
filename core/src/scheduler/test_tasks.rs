@@ -1,25 +1,38 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_drivers::sched_bridge;
-use slopos_drivers::serial::serial_putc_com1;
 use slopos_lib::klog_info;
 use slopos_lib::string::cstr_to_str;
 
-use crate::scheduler;
-use crate::task::{
+use super::scheduler;
+use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_NORMAL, Task, TaskContext, TaskIterateCb, task_create, task_get_info,
     task_get_total_yields, task_iterate_active, task_shutdown_all, task_state_to_string,
 };
+use crate::platform;
 
-use crate::ffi_boundary::simple_context_switch;
+use super::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
 
 use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
 
-// IdtEntry is now imported from abi via crate::task
+use spin::Once;
+
+static IDT_GATE_HOOK: Once<fn(u8, *mut c_void) -> c_int> = Once::new();
+
+pub fn register_idt_gate_hook(hook: fn(u8, *mut c_void) -> c_int) {
+    IDT_GATE_HOOK.call_once(|| hook);
+}
+
+fn idt_get_gate(vector: u8, entry: *mut c_void) -> c_int {
+    if let Some(hook) = IDT_GATE_HOOK.get() {
+        hook(vector, entry)
+    } else {
+        -1
+    }
+}
 
 /* ========================================================================
  * TEST TASK IMPLEMENTATIONS
@@ -56,7 +69,7 @@ pub fn test_task_b(arg: *mut c_void) {
             current_char as char,
             current_char as c_int
         );
-        serial_putc_com1(current_char);
+        platform::console_putc(current_char);
         klog_info!(")");
 
         current_char = current_char.wrapping_add(1);
@@ -246,7 +259,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
     };
 
     let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
-    if sched_bridge::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
+    if idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
         klog_info!("PRIVSEP_TEST: cannot read syscall gate");
         failed = 1;
     } else {
@@ -505,8 +518,8 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     }
 }
 pub fn print_scheduler_stats() {
-    use crate::scheduler::get_scheduler_stats;
-    use crate::task::get_task_stats;
+    use super::scheduler::get_scheduler_stats;
+    use super::task::get_task_stats;
 
     let mut sched_switches: u64 = 0;
     let mut sched_yields: u64 = 0;

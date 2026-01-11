@@ -2,14 +2,16 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_abi::sched_traits::TaskRef;
 use slopos_lib::{cpu, ports::COM1};
 use spin::Mutex;
 
 use crate::keyboard;
-use crate::sched_bridge;
 use crate::serial;
 use crate::syscall_types::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
+use slopos_core::sched::{
+    block_current_task, scheduler_get_current_task, scheduler_is_enabled,
+    scheduler_register_idle_wakeup_callback, unblock_task,
+};
 
 const TTY_MAX_WAITERS: usize = 32;
 
@@ -72,7 +74,7 @@ fn tty_register_idle_callback() {
         if REGISTERED {
             return;
         }
-        sched_bridge::register_idle_wakeup_callback(Some(tty_input_available_cb));
+        scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
         REGISTERED = true;
     }
 }
@@ -142,12 +144,11 @@ fn tty_focus_queue_pop() -> *mut Task {
 }
 
 fn tty_current_task_id() -> Option<u32> {
-    let task_ref = sched_bridge::get_current_task();
-    if task_ref.is_null() {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
         return None;
     }
-    let task = task_ref.as_raw() as *mut Task;
-    unsafe { Some((*task).task_id) }
+    unsafe { Some((*(task as *mut Task)).task_id) }
 }
 
 fn tty_task_has_focus(task_id: u32) -> bool {
@@ -165,11 +166,10 @@ fn tty_wait_for_focus(task_id: u32) {
     if tty_task_has_focus(task_id) {
         return;
     }
-    if sched_bridge::scheduler_is_enabled() != 0 {
-        let task_ref = sched_bridge::get_current_task();
-        let current = task_ref.as_raw() as *mut Task;
+    if scheduler_is_enabled() != 0 {
+        let current = scheduler_get_current_task() as *mut Task;
         if tty_focus_queue_push(current) {
-            sched_bridge::block_current_task();
+            block_current_task();
             return;
         }
     }
@@ -178,13 +178,10 @@ fn tty_wait_for_focus(task_id: u32) {
     }
 }
 pub fn tty_notify_input_ready() {
-    if sched_bridge::scheduler_is_enabled() == 0 {
+    if scheduler_is_enabled() == 0 {
         return;
     }
 
-    // Use irqsave/irqrestore to avoid re-enabling interrupts when called from IRQ context.
-    // If called from keyboard IRQ handler, interrupts are disabled and must stay disabled
-    // until the IRQ handler completes to prevent nested interrupts and stack corruption.
     let flags = cpu::save_flags_cli();
     let task = tty_wait_queue_pop();
     cpu::restore_flags(flags);
@@ -192,14 +189,14 @@ pub fn tty_notify_input_ready() {
     if !task.is_null() {
         let state = unsafe { (*task).state };
         if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
-            sched_bridge::unblock_task(TaskRef::from_raw(task as *mut _));
+            unblock_task(task);
         }
     }
 }
 
 pub fn tty_set_focus(task_id: u32) -> c_int {
     TTY_FOCUSED_TASK_ID.store(task_id, Ordering::Relaxed);
-    if sched_bridge::scheduler_is_enabled() == 0 {
+    if scheduler_is_enabled() == 0 {
         return 0;
     }
 
@@ -209,7 +206,7 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         if candidate.is_null() {
             break;
         }
-        let _ = sched_bridge::unblock_task(TaskRef::from_raw(candidate as *mut _));
+        let _ = unblock_task(candidate);
     }
     cpu::restore_flags(flags);
     0
@@ -256,11 +253,10 @@ fn tty_block_until_input_ready() {
     if tty_input_available() != 0 {
         return;
     }
-    if sched_bridge::scheduler_is_enabled() != 0 {
-        let task_ref = sched_bridge::get_current_task();
-        let current = task_ref.as_raw() as *mut Task;
+    if scheduler_is_enabled() != 0 {
+        let current = scheduler_get_current_task() as *mut Task;
         if tty_wait_queue_push(current) {
-            sched_bridge::block_current_task();
+            block_current_task();
             return;
         }
     }

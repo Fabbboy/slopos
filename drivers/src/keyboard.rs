@@ -3,8 +3,8 @@ use slopos_lib::{RingBuffer, cpu, klog_debug};
 use crate::input_event;
 use crate::irq;
 use crate::pit::pit_get_frequency;
-use crate::sched_bridge;
 use crate::tty::tty_notify_input_ready;
+use slopos_core::scheduler_request_reschedule_from_interrupt;
 
 const KEYBOARD_BUFFER_SIZE: usize = 256;
 type KeyboardBuffer = RingBuffer<u8, KEYBOARD_BUFFER_SIZE>;
@@ -242,7 +242,7 @@ pub fn keyboard_handle_scancode(scancode: u8) {
                 kb_buffer_push_overwrite(&raw mut CHAR_BUFFER, extended_key);
             }
             tty_notify_input_ready();
-            sched_bridge::request_reschedule_from_interrupt();
+            scheduler_request_reschedule_from_interrupt();
         }
         return;
     }
@@ -260,7 +260,7 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         }
         klog_debug!("[KBD] Adding to buffer");
         tty_notify_input_ready();
-        sched_bridge::request_reschedule_from_interrupt();
+        scheduler_request_reschedule_from_interrupt();
     }
 }
 pub fn keyboard_getchar() -> u8 {

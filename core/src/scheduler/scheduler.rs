@@ -4,11 +4,13 @@ use core::ptr;
 use slopos_lib::IrqMutex;
 use spin::Once;
 
-use slopos_drivers::{pit, sched_bridge, wl_currency};
 use slopos_lib::kdiag_timestamp;
 use slopos_lib::klog_info;
 
-use crate::task::{
+use crate::platform;
+use crate::wl_currency;
+
+use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
     TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
@@ -130,7 +132,7 @@ use slopos_mm::paging::{paging_get_kernel_directory, paging_set_current_director
 use slopos_mm::process_vm::process_vm_get_page_dir;
 use slopos_mm::user_copy;
 
-use crate::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
+use super::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
 
 fn current_task_process_id() -> u32 {
     let task = scheduler_get_current_task();
@@ -368,7 +370,7 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
 fn do_context_switch(info: SwitchInfo) {
     let _balance = wl_currency::check_balance();
 
-    sched_bridge::gdt_set_kernel_rsp0(info.rsp0);
+    platform::gdt_set_kernel_rsp0(info.rsp0);
 
     unsafe {
         if info.is_user_mode {
@@ -710,9 +712,9 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
         sched.preemption_enabled
     });
     if preemption_enabled != 0 {
-        pit::pit_enable_irq();
+        platform::timer_enable_irq();
     } else {
-        pit::pit_disable_irq();
+        platform::timer_disable_irq();
     }
 }
 
@@ -795,12 +797,7 @@ pub fn boot_step_task_manager_init() -> c_int {
     crate::task::init_task_manager()
 }
 pub fn boot_step_scheduler_init() -> c_int {
-    let rc = init_scheduler();
-    if rc == 0 {
-        // Register scheduler traits with the sched_bridge
-        crate::sched_impl::register_with_bridge();
-    }
-    rc
+    init_scheduler()
 }
 pub fn boot_step_idle_task() -> c_int {
     create_idle_task()
