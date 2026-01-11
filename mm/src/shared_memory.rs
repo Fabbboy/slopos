@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+pub use slopos_abi::pixel::PixelFormat;
 
 use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
@@ -16,64 +17,11 @@ use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
 use crate::process_vm::process_vm_get_page_dir;
 use slopos_lib::{align_up, klog_debug, klog_info};
 
-// =============================================================================
-// Pixel Format Types (Wayland wl_shm compatible)
-// =============================================================================
-
-/// Pixel format for shared memory buffers (matches Wayland wl_shm formats).
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
-    /// 32-bit ARGB (alpha in high byte, red in bits 16-23)
-    Argb8888 = 0,
-    /// 32-bit XRGB (alpha ignored, red in bits 16-23)
-    Xrgb8888 = 1,
-    /// 24-bit RGB (no alpha)
-    Rgb888 = 2,
-    /// 24-bit BGR (no alpha)
-    Bgr888 = 3,
-    /// 32-bit RGBA (red in high byte, alpha in bits 0-7)
-    Rgba8888 = 4,
-    /// 32-bit BGRA (blue in high byte, alpha in bits 0-7)
-    Bgra8888 = 5,
-}
-
-impl PixelFormat {
-    /// Convert from u32 representation.
-    pub fn from_u32(val: u32) -> Option<Self> {
-        match val {
-            0 => Some(Self::Argb8888),
-            1 => Some(Self::Xrgb8888),
-            2 => Some(Self::Rgb888),
-            3 => Some(Self::Bgr888),
-            4 => Some(Self::Rgba8888),
-            5 => Some(Self::Bgra8888),
-            _ => None,
-        }
-    }
-
-    /// Get bytes per pixel for this format.
-    pub fn bytes_per_pixel(&self) -> u8 {
-        match self {
-            Self::Argb8888 | Self::Xrgb8888 | Self::Rgba8888 | Self::Bgra8888 => 4,
-            Self::Rgb888 | Self::Bgr888 => 3,
-        }
-    }
-
-    /// Check if format has an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        matches!(self, Self::Argb8888 | Self::Rgba8888 | Self::Bgra8888)
-    }
-}
-
-/// Bitmap of supported pixel formats (for format negotiation syscall).
-/// Bit N is set if PixelFormat with value N is supported.
 pub const SUPPORTED_FORMATS_BITMAP: u32 = (1 << PixelFormat::Argb8888 as u32)
     | (1 << PixelFormat::Xrgb8888 as u32)
     | (1 << PixelFormat::Rgba8888 as u32)
     | (1 << PixelFormat::Bgra8888 as u32);
 
-/// Default pixel format (matches typical framebuffer setup)
 pub const DEFAULT_PIXEL_FORMAT: PixelFormat = PixelFormat::Argb8888;
 
 /// Maximum number of shared buffers in the system

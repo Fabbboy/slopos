@@ -1,15 +1,4 @@
 //! Architecture-specific definitions.
-//!
-//! This module provides architecture-dependent constants, newtypes, and
-//! bitflags for x86_64. Future architectures can be added with #[cfg].
-//!
-//! # Module Organization
-//!
-//! The `x86_64` submodule contains:
-//! - `msr` - Model-Specific Register addresses
-//! - `gdt` - GDT segment selectors
-//! - `paging` - Page table flags and page sizes
-//! - (Future phases: apic, ioapic, ports, pci, idt, memory, cpuid)
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
