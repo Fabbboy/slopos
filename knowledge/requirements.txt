@@ -1,0 +1,4 @@
+numpy>=1.24
+sentence-transformers>=2.6
+tqdm>=4.65
+faiss-cpu>=1.7

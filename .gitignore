@@ -15,6 +15,14 @@ slop.iso
 iso/boot/kernel.elf
 iso/EFI/BOOT/BOOTX64.EFI
 
+# Local knowledge index artifacts
+knowledge/.venv/
+knowledge/.cache/
+knowledge/index.sqlite
+knowledge/index.sqlite-shm
+knowledge/index.sqlite-wal
+knowledge/index.sqlite-journal
+
 # Node/Bun artifacts for MCP tooling
 **/node_modules/
 mcp/.bun/

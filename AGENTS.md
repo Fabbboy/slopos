@@ -6,6 +6,22 @@ Kernel sources are split by subsystem: `boot/`, `mm/`, `drivers/`, `sched/`, `vi
 ## Build, Test, and Development Commands
 Run `git submodule update --init --recursive` after cloning to sync `third_party/limine`. The Makefile now drives cargo + `rust-lld`: `make setup` installs the pinned nightly from `rust-toolchain.toml`, `make build` emits `builddir/kernel.elf`, and `make iso` regenerates `builddir/slop.iso`. For quick launches use `make boot` (interactive) or `make boot-log` (non-interactive, default 15 s timeout). Both boot targets rebuild a secondary image (`builddir/slop-notests.iso`) with `itests=off` on the kernel command line; override with `BOOT_CMDLINE=... make boot` and add `VIDEO=1` for a graphical window. CI and AI agents can call `make test`, which generates `builddir/slop-tests.iso` with `itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and fails if the harness reports anything but a clean pass. If you still want Meson, `meson.compile` via `meson.build` simply shells out to cargo.
 
+## Knowledge Index (AI)
+The `knowledge/` directory hosts a local semantic index for querying the codebase. Build it with:
+- `python3 -m venv knowledge/.venv`
+- `. knowledge/.venv/bin/activate`
+- `pip install -r knowledge/requirements.txt`
+- `python knowledge/index.py`
+Use `python knowledge/query.py \"<question>\"` to ask about signatures, drivers, or file locations. Rebuild the index after large refactors or merges. Do not commit the venv or embedding database artifacts.
+
+## Knowledge Index (AI)
+The `knowledge/` directory hosts a local semantic index for querying the codebase. Build it with:
+- `python3 -m venv knowledge/.venv`
+- `. knowledge/.venv/bin/activate`
+- `pip install -r knowledge/requirements.txt`
+- `python knowledge/index.py`
+Use `python knowledge/query.py \"<question>\"` to ask about signatures, drivers, or file locations. Rebuild the index after large refactors or merges. Do not commit the venv or embedding database artifacts.
+
 ## Coding Style & Naming Conventions
 All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
