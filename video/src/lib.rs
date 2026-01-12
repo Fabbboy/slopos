@@ -10,7 +10,7 @@ use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
-use slopos_drivers::virtio_gpu;
+use slopos_drivers::{virtio_gpu, xe};
 use slopos_lib::{klog_info, klog_warn};
 
 pub mod compositor_context;
@@ -25,6 +25,7 @@ pub mod splash;
 pub enum VideoBackend {
     Framebuffer,
     Virgl,
+    Xe,
 }
 
 fn video_get_display_info() -> Option<DisplayInfo> {
@@ -188,6 +189,9 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
         } else {
             framebuffer::register_flush_callback(virtio_gpu::virtio_gpu_flush_full);
         }
+    }
+    if backend == VideoBackend::Xe {
+        framebuffer::register_flush_callback(xe::xe_flush);
     }
 
     let fb_to_use = if virgl_fb.is_some() {

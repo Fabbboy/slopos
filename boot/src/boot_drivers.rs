@@ -24,6 +24,7 @@ use slopos_drivers::{
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
     virtio_gpu::virtio_gpu_register_driver,
+    xe,
 };
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
@@ -50,7 +51,9 @@ fn cmdline_contains(cmdline: *const c_char, needle: &str) -> bool {
 
 fn boot_video_backend() -> video::VideoBackend {
     let cmdline = boot_get_cmdline();
-    if cmdline_contains(cmdline, "video=virgl") {
+    if cmdline_contains(cmdline, "video=xe") {
+        video::VideoBackend::Xe
+    } else if cmdline_contains(cmdline, "video=virgl") {
         video::VideoBackend::Virgl
     } else {
         video::VideoBackend::Framebuffer
@@ -113,8 +116,8 @@ fn boot_step_timer_setup_fn() {
         );
     }
     let backend = boot_video_backend();
-    if backend == video::VideoBackend::Virgl {
-        klog_info!("BOOT: deferring video init until PCI for virgl");
+    if backend == video::VideoBackend::Virgl || backend == video::VideoBackend::Xe {
+        klog_info!("BOOT: deferring video init until PCI for GPU backend");
         return;
     }
     let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
@@ -157,6 +160,9 @@ fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_gpu_register_driver();
     pci_init();
+    if boot_video_backend() == video::VideoBackend::Xe {
+        xe::xe_probe();
+    }
 
     klog_debug!("PCI subsystem initialized.");
     let gpu = pci_get_primary_gpu();
@@ -191,6 +197,14 @@ fn boot_step_pci_init_fn() {
             info: bf.info,
         });
         video::init(fb, backend);
+    } else if backend == video::VideoBackend::Xe {
+        let boot_fb = limine_protocol::boot_info().framebuffer;
+        let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
+            address: bf.address,
+            info: bf.info,
+        });
+        let xe_fb = xe::xe_framebuffer_init(fb);
+        video::init(xe_fb, backend);
     }
 }
 
