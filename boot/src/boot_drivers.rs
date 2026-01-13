@@ -19,9 +19,10 @@ use slopos_drivers::{
     interrupts::config_from_cmdline,
     ioapic::init,
     mouse::mouse_init,
-    pci::{pci_get_primary_gpu, pci_init},
+    pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
+    virtio_blk::virtio_blk_register_driver,
     virtio_gpu::virtio_gpu_register_driver,
     xe,
 };
@@ -152,8 +153,10 @@ fn boot_step_ioapic_setup_fn() {
 
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
+    virtio_blk_register_driver();
     virtio_gpu_register_driver();
     pci_init();
+    pci_probe_drivers();
     if boot_video_backend() == video::VideoBackend::Xe {
         xe::xe_probe();
     }

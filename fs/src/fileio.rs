@@ -1,15 +1,14 @@
 use core::ffi::{c_char, c_int};
 use core::mem::{self, MaybeUninit};
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::slice;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex;
 
 use slopos_abi::fs::{FS_TYPE_FILE, UserFsEntry};
 
 use crate::ext2_state::{
-    ext2_get_size, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink,
-    ext2_write,
+    ext2_get_size, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink, ext2_write,
 };
 
 #[allow(non_camel_case_types)]

@@ -112,3 +112,45 @@ impl BlockDevice for MemoryBlockDevice {
         self.len as u64
     }
 }
+
+pub type ReadFn = fn(u64, &mut [u8]) -> bool;
+pub type WriteFn = fn(u64, &[u8]) -> bool;
+pub type CapacityFn = fn() -> u64;
+
+pub struct CallbackBlockDevice {
+    read_fn: ReadFn,
+    write_fn: WriteFn,
+    capacity_fn: CapacityFn,
+}
+
+impl CallbackBlockDevice {
+    pub fn new(read_fn: ReadFn, write_fn: WriteFn, capacity_fn: CapacityFn) -> Self {
+        Self {
+            read_fn,
+            write_fn,
+            capacity_fn,
+        }
+    }
+}
+
+impl BlockDevice for CallbackBlockDevice {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
+        if (self.read_fn)(offset, buffer) {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
+
+    fn write_at(&mut self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        if (self.write_fn)(offset, buffer) {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::InvalidBuffer)
+        }
+    }
+
+    fn capacity(&self) -> u64 {
+        (self.capacity_fn)()
+    }
+}

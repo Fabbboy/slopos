@@ -3,20 +3,32 @@ use core::{ptr, slice};
 
 use spin::Mutex;
 
+use crate::blockdev::{CallbackBlockDevice, CapacityFn, MemoryBlockDevice, ReadFn, WriteFn};
+use crate::ext2::{Ext2Error, Ext2Fs};
 use slopos_abi::fs::{
     FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_UNKNOWN, USER_FS_OPEN_CREAT, USER_PATH_MAX,
     UserFsEntry,
 };
-use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::{Ext2Error, Ext2Fs};
+
+enum BlockDeviceType {
+    None,
+    Memory(MemoryBlockDevice),
+    Callback(CallbackBlockDevice),
+}
 
 struct Ext2State {
-    device: Option<MemoryBlockDevice>,
+    device: BlockDeviceType,
 }
 
 impl Ext2State {
     const fn new() -> Self {
-        Self { device: None }
+        Self {
+            device: BlockDeviceType::None,
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        !matches!(self.device, BlockDeviceType::None)
     }
 }
 
@@ -26,7 +38,7 @@ const MAX_PATH: usize = USER_PATH_MAX;
 
 pub fn ext2_is_available() -> bool {
     let state = EXT2_STATE.lock();
-    state.device.is_some()
+    state.is_available()
 }
 
 pub fn ext2_init_with_image(image: &[u8]) -> c_int {
@@ -34,7 +46,7 @@ pub fn ext2_init_with_image(image: &[u8]) -> c_int {
         return -1;
     }
     let mut state = EXT2_STATE.lock();
-    if state.device.is_some() {
+    if state.is_available() {
         return 0;
     }
     let mut device = match MemoryBlockDevice::allocate(image.len()) {
@@ -47,7 +59,24 @@ pub fn ext2_init_with_image(image: &[u8]) -> c_int {
     if Ext2Fs::init_internal(&mut device).is_err() {
         return -1;
     }
-    state.device = Some(device);
+    state.device = BlockDeviceType::Memory(device);
+    0
+}
+
+pub fn ext2_init_with_callbacks(
+    read_fn: ReadFn,
+    write_fn: WriteFn,
+    capacity_fn: CapacityFn,
+) -> c_int {
+    let mut state = EXT2_STATE.lock();
+    if state.is_available() {
+        return 0;
+    }
+    let mut device = CallbackBlockDevice::new(read_fn, write_fn, capacity_fn);
+    if Ext2Fs::init_internal(&mut device).is_err() {
+        return -1;
+    }
+    state.device = BlockDeviceType::Callback(device);
     0
 }
 
@@ -153,11 +182,17 @@ pub fn ext2_unlink(path: *const c_char) -> Result<(), Ext2Error> {
 
 fn with_fs<R>(f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> Result<R, Ext2Error> {
     let mut state = EXT2_STATE.lock();
-    let Some(device) = state.device.as_mut() else {
-        return Err(Ext2Error::InvalidSuperblock);
-    };
-    let mut fs = Ext2Fs::init_internal(device)?;
-    f(&mut fs)
+    match &mut state.device {
+        BlockDeviceType::None => Err(Ext2Error::InvalidSuperblock),
+        BlockDeviceType::Memory(device) => {
+            let mut fs = Ext2Fs::init_internal(device)?;
+            f(&mut fs)
+        }
+        BlockDeviceType::Callback(device) => {
+            let mut fs = Ext2Fs::init_internal(device)?;
+            f(&mut fs)
+        }
+    }
 }
 
 unsafe fn cstr_len(ptr_in: *const c_char) -> usize {
@@ -202,7 +237,11 @@ fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
     if idx == 0 {
         return None;
     }
-    let parent = if idx == 1 { &trimmed[..1] } else { &trimmed[..idx - 1] };
+    let parent = if idx == 1 {
+        &trimmed[..1]
+    } else {
+        &trimmed[..idx - 1]
+    };
     let name = &trimmed[idx..];
     if name.is_empty() {
         return None;

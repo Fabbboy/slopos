@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 
-use slopos_lib::klog_info;
 use slopos_abi::fs::{USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry};
+use slopos_lib::klog_info;
 
 use crate::ext2_image::EXT2_IMAGE;
 use crate::ext2_state::{
@@ -11,7 +11,6 @@ use crate::ext2_state::{
 fn as_c(path: &[u8]) -> *const i8 {
     path.as_ptr() as *const i8
 }
-
 
 fn test_ext2_init() -> c_int {
     klog_info!("EXT2_TEST: init image");

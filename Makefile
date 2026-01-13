@@ -287,6 +287,8 @@ boot: iso-notests
 	  -device ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3 \
 	  -drive if=none,id=cdrom,media=cdrom,readonly=on,file="$$ISO" \
 	  -device ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0 \
+	  -drive file="$(FS_IMAGE)",if=none,id=virtio-disk0,format=raw \
+	  -device virtio-blk-pci,drive=virtio-disk0,disable-legacy=on \
 	  -boot order=d,menu=on \
 	  -serial stdio \
 	  -monitor none \
@@ -354,6 +356,8 @@ boot-log: iso-notests
 	  -device ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3 \
 	  -drive if=none,id=cdrom,media=cdrom,readonly=on,file="$$ISO" \
 	  -device ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0 \
+	  -drive file="$(FS_IMAGE)",if=none,id=virtio-disk0,format=raw \
+	  -device virtio-blk-pci,drive=virtio-disk0,disable-legacy=on \
 	  -boot order=d,menu=on \
 	  -serial stdio \
 	  -monitor none \
@@ -394,6 +398,8 @@ test: iso-tests
 	  -device ich9-ahci,id=ahci0,bus=pcie.0,addr=0x3 \
 	  -drive if=none,id=cdrom,media=cdrom,readonly=on,file="$$ISO" \
 	  -device ide-cd,bus=ahci0.0,drive=cdrom,bootindex=0 \
+	  -drive file="$(FS_IMAGE)",if=none,id=virtio-disk0,format=raw \
+	  -device virtio-blk-pci,drive=virtio-disk0,disable-legacy=on \
 	  -boot order=d,menu=on \
 	  -serial stdio \
 	  -monitor none \

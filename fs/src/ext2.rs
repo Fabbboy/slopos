@@ -132,11 +132,7 @@ impl<'a> Ext2Fs<'a> {
         result
     }
 
-    pub fn for_each_dir_entry<F>(
-        &mut self,
-        inode: u32,
-        mut f: F,
-    ) -> Result<(), Ext2Error>
+    pub fn for_each_dir_entry<F>(&mut self, inode: u32, mut f: F) -> Result<(), Ext2Error>
     where
         F: FnMut(Ext2DirEntry<'_>) -> bool,
     {
@@ -226,8 +222,7 @@ impl<'a> Ext2Fs<'a> {
         let block_offset = inode_offset / self.block_size as u64;
         let within = (inode_offset % self.block_size as u64) as usize;
         let mut block_buf = [0u8; 4096];
-        let block_slice =
-            &mut block_buf[..self.block_size as usize];
+        let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block_offset as u32, block_slice)?;
         let inode_bytes = &block_slice[within..within + self.inode_size as usize];
         Ok(parse_inode(inode_bytes))
@@ -268,11 +263,7 @@ impl<'a> Ext2Fs<'a> {
         Ok(read_total)
     }
 
-    fn for_each_dir_entry_internal<F>(
-        &mut self,
-        inode: u32,
-        f: &mut F,
-    ) -> Result<(), Ext2Error>
+    fn for_each_dir_entry_internal<F>(&mut self, inode: u32, f: &mut F) -> Result<(), Ext2Error>
     where
         F: FnMut(Ext2DirEntry<'_>) -> bool,
     {
@@ -430,7 +421,9 @@ impl<'a> Ext2Fs<'a> {
         }
         if allocated_blocks > 0 {
             let sectors_per_block = (self.block_size / 512) as u32;
-            inode.blocks = inode.blocks.saturating_add(allocated_blocks * sectors_per_block);
+            inode.blocks = inode
+                .blocks
+                .saturating_add(allocated_blocks * sectors_per_block);
         }
         self.write_inode(inode_num, inode)?;
         Ok(written)
@@ -448,11 +441,7 @@ impl<'a> Ext2Fs<'a> {
         parent.ok_or(Ext2Error::PathNotFound)
     }
 
-    fn remove_dir_entry(
-        &mut self,
-        parent_inode: u32,
-        name: &[u8],
-    ) -> Result<(), Ext2Error> {
+    fn remove_dir_entry(&mut self, parent_inode: u32, name: &[u8]) -> Result<(), Ext2Error> {
         let parent = self.read_inode_internal(parent_inode)?;
         if !parent.is_directory() {
             return Err(Ext2Error::NotDirectory);
@@ -701,8 +690,8 @@ impl<'a> Ext2Fs<'a> {
     }
 
     fn allocate_block(&mut self) -> Result<u32, Ext2Error> {
-        let groups = (self.superblock.blocks_count + self.blocks_per_group - 1)
-            / self.blocks_per_group;
+        let groups =
+            (self.superblock.blocks_count + self.blocks_per_group - 1) / self.blocks_per_group;
         let mut block_buf = [0u8; 4096];
         for group in 0..groups {
             let mut desc = self.read_group_desc(group)?;
@@ -741,16 +730,15 @@ impl<'a> Ext2Fs<'a> {
         clear_bit(block_slice, bit);
         self.write_block(desc.block_bitmap, block_slice)?;
         desc.free_blocks_count = desc.free_blocks_count.saturating_add(1);
-        self.superblock.free_blocks_count =
-            self.superblock.free_blocks_count.saturating_add(1);
+        self.superblock.free_blocks_count = self.superblock.free_blocks_count.saturating_add(1);
         self.write_group_desc(group, desc)?;
         self.write_superblock()?;
         Ok(())
     }
 
     fn allocate_inode(&mut self) -> Result<u32, Ext2Error> {
-        let groups = (self.superblock.inodes_count + self.inodes_per_group - 1)
-            / self.inodes_per_group;
+        let groups =
+            (self.superblock.inodes_count + self.inodes_per_group - 1) / self.inodes_per_group;
         let mut block_buf = [0u8; 4096];
         for group in 0..groups {
             let mut desc = self.read_group_desc(group)?;
@@ -793,8 +781,7 @@ impl<'a> Ext2Fs<'a> {
         clear_bit(block_slice, bit);
         self.write_block(desc.inode_bitmap, block_slice)?;
         desc.free_inodes_count = desc.free_inodes_count.saturating_add(1);
-        self.superblock.free_inodes_count =
-            self.superblock.free_inodes_count.saturating_add(1);
+        self.superblock.free_inodes_count = self.superblock.free_inodes_count.saturating_add(1);
         self.write_group_desc(group, desc)?;
         self.write_superblock()?;
         let empty = Ext2Inode {
@@ -833,8 +820,7 @@ impl<'a> Ext2Fs<'a> {
         let mut block_buf = [0u8; 4096];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block as u32, block_slice)?;
-        let inode_bytes =
-            &mut block_slice[within..within + self.inode_size as usize];
+        let inode_bytes = &mut block_slice[within..within + self.inode_size as usize];
         encode_inode(inode_bytes, inode);
         self.write_block(block as u32, block_slice)?;
         Ok(())
@@ -873,7 +859,7 @@ impl<'a> Ext2Fs<'a> {
                         write_le_u16(&mut block_slice[cursor + 4..cursor + 6], used as u16);
                         let new_off = cursor + used;
                         write_dir_entry(
-                            &mut block_slice[new_off..new_off + entry_size],
+                            &mut block_slice[new_off..],
                             child_inode,
                             name,
                             is_dir,
@@ -901,7 +887,7 @@ impl<'a> Ext2Fs<'a> {
             *byte = 0;
         }
         write_dir_entry(
-            &mut block_slice[..entry_size],
+            block_slice,
             child_inode,
             name,
             is_dir,
@@ -1046,13 +1032,7 @@ fn dir_entry_size(name_len: usize) -> usize {
     (base + 3) & !3
 }
 
-fn write_dir_entry(
-    data: &mut [u8],
-    inode: u32,
-    name: &[u8],
-    is_dir: bool,
-    rec_len: usize,
-) {
+fn write_dir_entry(data: &mut [u8], inode: u32, name: &[u8], is_dir: bool, rec_len: usize) {
     write_le_u32(&mut data[0..4], inode);
     write_le_u16(&mut data[4..6], rec_len as u16);
     data[6] = name.len() as u8;
@@ -1083,7 +1063,11 @@ fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
     if idx == 0 {
         return None;
     }
-    let parent = if idx == 1 { &trimmed[..1] } else { &trimmed[..idx - 1] };
+    let parent = if idx == 1 {
+        &trimmed[..1]
+    } else {
+        &trimmed[..idx - 1]
+    };
     let name = &trimmed[idx..];
     if name.is_empty() {
         return None;
@@ -1102,7 +1086,11 @@ fn find_free_bit_from(bitmap: &[u8], start_bit: usize) -> Option<usize> {
         if *byte == 0xFF {
             continue;
         }
-        let bit_start = if byte_idx == start_byte { start_offset } else { 0 };
+        let bit_start = if byte_idx == start_byte {
+            start_offset
+        } else {
+            0
+        };
         for bit in bit_start..8 {
             if (*byte & (1 << bit)) == 0 {
                 return Some(byte_idx * 8 + bit);
