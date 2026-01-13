@@ -3,6 +3,7 @@
 //! All panics flow through `panic_handler_impl()`. Exception handlers can
 //! enrich diagnostics by calling `set_panic_cpu_state()` before panicking.
 
+use core::ffi::c_int;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,6 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use slopos_drivers::keyboard::keyboard_poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_lib::cpu;
+use slopos_lib::stacktrace::{self, StacktraceEntry};
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_video::panic_screen;
 
@@ -19,6 +21,7 @@ static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
 static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
 static PANIC_HAS_CPU_STATE: AtomicBool = AtomicBool::new(false);
+const PANIC_BACKTRACE_MAX: usize = 16;
 
 /// Set CPU state from an interrupt frame to be included in panic diagnostics.
 #[inline]
@@ -48,6 +51,11 @@ fn read_rsp() -> u64 {
     rsp
 }
 
+#[inline]
+fn read_rbp() -> u64 {
+    cpu::read_rbp()
+}
+
 #[derive(Clone, Copy)]
 enum ControlRegister {
     Cr0,
@@ -75,6 +83,35 @@ fn read_cr(reg: ControlRegister) -> u64 {
 
 fn panic_serial_write(s: &str) {
     serial::write_line(s);
+}
+
+fn panic_dump_backtrace() {
+    let rbp = read_rbp();
+    let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
+        frame_pointer: 0,
+        return_address: 0,
+    }; PANIC_BACKTRACE_MAX];
+
+    let captured =
+        stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), PANIC_BACKTRACE_MAX as c_int);
+    if captured <= 0 {
+        panic_serial_write("Backtrace: <empty>");
+        return;
+    }
+
+    panic_serial_write("Backtrace (most recent call first):");
+    for i in 0..captured as usize {
+        let entry = &entries[i];
+        let mut line = MessageBuffer::new();
+        let _ = write!(
+            line,
+            "  #{} rbp=0x{:016x} rip=0x{:016x}",
+            i,
+            entry.frame_pointer,
+            entry.return_address
+        );
+        panic_serial_write(line.as_str());
+    }
 }
 
 /// Core panic implementation. Called by the kernel's `#[panic_handler]`.
@@ -140,6 +177,8 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         let mut hex_buf = HexBuffer::new();
         panic_serial_write(hex_buf.format_labeled("CR4", cr4));
     }
+
+    panic_dump_backtrace();
 
     panic_serial_write("===================");
     panic_serial_write("Kernel panic: unrecoverable error");

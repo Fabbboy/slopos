@@ -32,6 +32,7 @@ ifneq ($(filter 1 true on yes,$(DEBUG)),)
 DEBUG_CMDLINE += boot.debug=on
 endif
 BOOT_CMDLINE_EFFECTIVE := $(strip $(BOOT_CMDLINE) $(DEBUG_CMDLINE))
+KERNEL_RUSTFLAGS ?= -C force-frame-pointers=yes
 
 LIMINE_DIR := third_party/limine
 LIMINE_REPO := https://github.com/limine-bootloader/limine.git
@@ -109,6 +110,7 @@ define build_kernel
 	rm -f $(BUILD_DIR)/kernel $(BUILD_DIR)/kernel.elf; \
 	$(call ensure_rust_toolchain) \
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
+	RUSTFLAGS="$$RUSTFLAGS $(KERNEL_RUSTFLAGS)" \
 	$(CARGO) +$(RUST_CHANNEL) build \
 	  -Zbuild-std=core,alloc \
 	  -Zunstable-options \
