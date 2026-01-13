@@ -149,7 +149,7 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
         return boot_fb;
     }
 
-    // Placeholder for real XE display init. Keep legacy framebuffer for now.
+    // XE display output not yet implemented - continue using boot-provided framebuffer.
     klog_info!("XE: Using boot framebuffer until XE scanout is wired");
     boot_fb
 }
