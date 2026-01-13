@@ -457,33 +457,7 @@ pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
     // Calculate usage (stack grows down, so top - current = used)
     let usage = stack.stack_top - frame_ptr;
 
-    // Record if this is a new peak
-    if metrics.record_usage(usage) {
-        // Use integer math to avoid FPU state corruption in interrupt context
-        // pct_tenths = (usage * 1000) / stack_size gives percentage * 10
-        let pct_tenths = if stack.stack_size > 0 {
-            (usage * 1000 / stack.stack_size) as u32
-        } else {
-            0
-        };
-        klog_info!(
-            "IST: New peak usage on {} stack: {} bytes ({}.{}%)",
-            stack.name_str(),
-            usage,
-            pct_tenths / 10,
-            pct_tenths % 10
-        );
-
-        // Warn if we're getting close to the guard page
-        if usage > stack.stack_size - PAGE_SIZE_4KB {
-            klog_info!(
-                "IST WARNING: {} stack within one page of overflow ({} bytes used of {})",
-                stack.name_str(),
-                usage,
-                stack.stack_size
-            );
-        }
-    }
+    metrics.record_usage(usage);
 }
 
 /// Checks if a fault address is within an IST guard page.
@@ -515,6 +489,15 @@ pub fn ist_guard_fault(fault_addr: u64, stack_name: *mut *const c_char) -> i32 {
         }
     }
     0
+}
+
+pub fn ist_is_on_ist_stack(rsp: u64) -> bool {
+    for stack in IST_CONFIGS.iter() {
+        if rsp >= stack.stack_base && rsp <= stack.stack_top {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns statistics for an IST stack by vector number.

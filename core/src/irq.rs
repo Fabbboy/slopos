@@ -12,9 +12,10 @@ use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
+use slopos_abi::arch::x86_64::memory::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
+use slopos_lib::{cpu, InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
 
 use crate::platform;
 use crate::scheduler::scheduler::scheduler_handle_post_irq;
@@ -396,7 +397,14 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     }
 
     acknowledge_irq();
-    scheduler_handle_post_irq();
+    
+    let rsp = cpu::read_rsp();
+    let ist_region_end = EXCEPTION_STACK_REGION_BASE + 7 * EXCEPTION_STACK_REGION_STRIDE;
+    let on_ist_stack = rsp >= EXCEPTION_STACK_REGION_BASE && rsp < ist_region_end;
+    
+    if !on_ist_stack {
+        scheduler_handle_post_irq();
+    }
 }
 
 /// IRQ statistics structure.
