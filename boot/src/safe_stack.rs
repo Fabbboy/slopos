@@ -8,7 +8,6 @@ use crate::idt::{
     EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
     EXCEPTION_STACK_FAULT, idt_set_ist,
 };
-use crate::kernel_panic::kernel_panic;
 
 use slopos_mm::mm_constants::{
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
@@ -133,16 +132,10 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
         let virt_addr = stack.stack_base + page * PAGE_SIZE_4KB;
         let phys_addr = alloc_page_frame(0);
         if phys_addr.is_null() {
-            kernel_panic(
-                b"safe_stack_init: Failed to allocate exception stack page\0".as_ptr()
-                    as *const c_char,
-            );
+            panic!("safe_stack_init: Failed to allocate exception stack page");
         }
         let Some(virt) = phys_addr.to_virt_checked() else {
-            kernel_panic(
-                b"safe_stack_init: HHDM unavailable for exception stack page\0".as_ptr()
-                    as *const c_char,
-            );
+            panic!("safe_stack_init: HHDM unavailable for exception stack page");
         };
         unsafe {
             ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE_4KB as usize);
@@ -153,9 +146,7 @@ fn map_stack_pages(stack: &ExceptionStackInfoConfig) {
             PageFlags::KERNEL_RW.bits(),
         ) != 0
         {
-            kernel_panic(
-                b"safe_stack_init: Failed to map exception stack page\0".as_ptr() as *const c_char,
-            );
+            panic!("safe_stack_init: Failed to map exception stack page");
         }
     }
 }

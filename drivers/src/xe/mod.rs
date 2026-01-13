@@ -7,7 +7,7 @@ use slopos_core::wl_currency::{award_loss, award_win};
 use slopos_lib::{klog_info, klog_warn};
 use slopos_mm::mmio::MmioRegion;
 
-use crate::pci::{pci_get_primary_gpu, PciDeviceInfo, PciGpuInfo};
+use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
 
 mod forcewake;
 mod mmio;

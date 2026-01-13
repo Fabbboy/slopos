@@ -12,7 +12,7 @@ use slopos_lib::{klog_debug, klog_info, klog_newline, klog_set_level};
 use slopos_video::splash;
 
 use crate::limine_protocol;
-use crate::{gdt, idt, kernel_panic::kernel_panic};
+use crate::{gdt, idt};
 
 pub const BOOT_INIT_FLAG_OPTIONAL: u32 = 1 << 0;
 const BOOT_INIT_PRIORITY_SHIFT: u32 = 8;
@@ -311,7 +311,7 @@ fn boot_run_step(phase_name: &[u8], step: &BootInitStep) -> i32 {
             boot_init_report_progress(step);
             return 0;
         }
-        kernel_panic(b"Boot init step failed\0".as_ptr() as *const c_char);
+        panic!("Boot init step failed");
     }
     boot_init_report_progress(step);
     0
@@ -349,7 +349,7 @@ pub fn boot_init_run_phase(phase: BootInitPhase) -> i32 {
     let mut cursor = start;
     while cursor < end {
         if ordered_count >= BOOT_INIT_MAX_STEPS {
-            kernel_panic(b"Boot init: too many steps for phase\0".as_ptr() as *const c_char);
+            panic!("Boot init: too many steps for phase");
         }
 
         let prio = unsafe { (*cursor).priority() };
@@ -543,7 +543,7 @@ pub fn kernel_main_impl() {
 
     serial::write_line("BOOT: entering boot init");
     if boot_init_run_all() != 0 {
-        kernel_panic(b"Boot initialization failed\0".as_ptr() as *const c_char);
+        panic!("Boot initialization failed");
     }
     serial::write_line("BOOT: boot init complete");
 
@@ -564,8 +564,7 @@ pub fn kernel_main_impl() {
 
     let rc = start_scheduler();
     if rc != 0 {
-        klog_info!("ERROR: Scheduler startup failed");
-        kernel_panic(b"Scheduler startup failed\0".as_ptr() as *const c_char);
+        panic!("Scheduler startup failed");
     }
 
     klog_info!("WARNING: Scheduler exited unexpectedly");

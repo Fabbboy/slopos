@@ -11,7 +11,6 @@ use slopos_video as video;
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::gdt::gdt_init;
 use crate::idt::{idt_init, idt_load};
-use crate::kernel_panic::kernel_panic;
 use crate::limine_protocol;
 use crate::safe_stack::safe_stack_init;
 use slopos_drivers::{
@@ -130,14 +129,12 @@ fn boot_step_timer_setup_fn() {
 fn boot_step_apic_setup_fn() {
     klog_debug!("Detecting Local APIC...");
     if apic_detect() == 0 {
-        kernel_panic(
-            b"SlopOS requires a Local APIC - legacy PIC is gone\0".as_ptr() as *const c_char,
-        );
+        panic!("SlopOS requires a Local APIC - legacy PIC is gone");
     }
 
     klog_debug!("Initializing Local APIC...");
     if apic_init() != 0 {
-        kernel_panic(b"Local APIC initialization failed\0".as_ptr() as *const c_char);
+        panic!("Local APIC initialization failed");
     }
 
     pic_quiesce_disable();
@@ -148,10 +145,7 @@ fn boot_step_apic_setup_fn() {
 fn boot_step_ioapic_setup_fn() {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
     if init() != 0 {
-        kernel_panic(
-            b"IOAPIC discovery failed - SlopOS cannot operate without it\0".as_ptr()
-                as *const c_char,
-        );
+        panic!("IOAPIC discovery failed - SlopOS cannot operate without it");
     }
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
 }

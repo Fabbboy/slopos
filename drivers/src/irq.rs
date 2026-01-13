@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_abi::arch::x86_64::ioapic::{
@@ -8,7 +8,6 @@ use slopos_abi::arch::x86_64::ioapic::{
 use slopos_core::irq::{
     self, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, LEGACY_IRQ_TIMER,
 };
-use slopos_core::platform;
 use slopos_core::sched::scheduler_timer_tick;
 use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
@@ -55,15 +54,13 @@ fn program_ioapic_route(irq_line: u8) {
     }
 
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
-        platform::kernel_panic(
-            b"IRQ: APIC/IOAPIC unavailable during route programming\0".as_ptr() as *const c_char,
-        );
+        panic!("IRQ: APIC/IOAPIC unavailable during route programming");
     }
 
     let mut gsi = 0u32;
     let mut legacy_flags = 0u32;
     if ioapic::legacy_irq_info(irq_line, &mut gsi, &mut legacy_flags) != 0 {
-        platform::kernel_panic(b"IRQ: Failed to translate legacy IRQ\0".as_ptr() as *const c_char);
+        panic!("IRQ: Failed to translate legacy IRQ");
     }
 
     let vector = IRQ_BASE_VECTOR.wrapping_add(irq_line) as u8;
@@ -72,7 +69,7 @@ fn program_ioapic_route(irq_line: u8) {
         IOAPIC_FLAG_DELIVERY_FIXED | IOAPIC_FLAG_DEST_PHYSICAL | legacy_flags | IOAPIC_FLAG_MASK;
 
     if ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
-        platform::kernel_panic(b"IRQ: Failed to program IOAPIC route\0".as_ptr() as *const c_char);
+        panic!("IRQ: Failed to program IOAPIC route");
     }
 
     irq::set_irq_route(irq_line, gsi);
@@ -108,9 +105,7 @@ fn program_ioapic_route(irq_line: u8) {
 
 fn setup_ioapic_routes() {
     if !apic::is_enabled() || ioapic::is_ready() == 0 {
-        platform::kernel_panic(
-            b"IRQ: APIC/IOAPIC not ready during dispatcher init\0".as_ptr() as *const c_char,
-        );
+        panic!("IRQ: APIC/IOAPIC not ready during dispatcher init");
     }
 
     program_ioapic_route(LEGACY_IRQ_TIMER);

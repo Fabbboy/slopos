@@ -82,10 +82,6 @@ struct FramebufferReservation {
 
 static mut FRAMEBUFFER_RESERVATION: Option<FramebufferReservation> = None;
 
-fn mm_panic(msg: &str) -> ! {
-    panic!("{msg}");
-}
-
 fn framebuffer_reservation() -> Option<FramebufferReservation> {
     unsafe { FRAMEBUFFER_RESERVATION }
 }
@@ -132,13 +128,13 @@ fn add_reservation_or_panic(
     label: *const c_char,
 ) {
     if mm_region_reserve(base, length, type_, flags, label) != 0 {
-        mm_panic("MM: Failed to record reserved region");
+        panic!("MM: Failed to record reserved region");
     }
 }
 
 fn add_usable_or_panic(base: u64, length: u64, label: *const c_char) {
     if mm_region_add_usable(base, length, label) != 0 {
-        mm_panic("MM: Failed to record usable region");
+        panic!("MM: Failed to record usable region");
     }
 }
 
@@ -157,12 +153,12 @@ fn virt_to_phys_kernel(virt: u64) -> u64 {
 
 fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
     if memmap.is_null() {
-        mm_panic("MM: Missing Limine memmap for usable regions");
+        panic!("MM: Missing Limine memmap for usable regions");
     }
     unsafe {
         let response = &*memmap;
         if response.entry_count == 0 || response.entries.is_null() {
-            mm_panic("MM: Missing Limine memmap for usable regions");
+            panic!("MM: Missing Limine memmap for usable regions");
         }
         INIT_STATS.total_memory_bytes = 0;
         for i in 0..response.entry_count {
@@ -206,7 +202,7 @@ fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
             };
         }
         if INIT_STATS.tracked_page_frames == 0 && INIT_STATS.available_memory_bytes > 0 {
-            mm_panic("MM: Usable memory exceeds supported frame range");
+            panic!("MM: Usable memory exceeds supported frame range");
         }
         INIT_STATS.reserved_region_count = mm_reservations_count();
         INIT_STATS.reserved_device_bytes =
@@ -438,7 +434,7 @@ fn plan_allocator_metadata(
 ) -> AllocatorPlan {
     unsafe {
         if INIT_STATS.tracked_page_frames == 0 {
-            mm_panic("MM: No tracked frames available for allocator sizing");
+            panic!("MM: No tracked frames available for allocator sizing");
         }
         let desc_bytes =
             (INIT_STATS.tracked_page_frames as u64) * page_allocator_descriptor_size() as u64;
@@ -448,7 +444,7 @@ fn plan_allocator_metadata(
 
         let phys_base = select_allocator_window(aligned_bytes);
         if phys_base == 0 {
-            mm_panic("MM: Failed to find window for allocator metadata");
+            panic!("MM: Failed to find window for allocator metadata");
         }
         add_reservation_or_panic(
             phys_base,
@@ -475,7 +471,7 @@ fn finalize_reserved_regions() {
         log_reserved_regions();
 
         if mm_reservations_overflow_count() > 0 {
-            mm_panic("MM: Reserved region capacity exceeded");
+            panic!("MM: Reserved region capacity exceeded");
         }
     }
 }
@@ -583,12 +579,12 @@ pub fn init_memory_system(
         }
 
         if memmap.is_null() {
-            mm_panic("MM: Missing Limine memory map");
+            panic!("MM: Missing Limine memory map");
         }
 
         init_kernel_memory_layout();
         if !crate::hhdm::is_available() {
-            mm_panic("MM: HHDM unavailable; cannot translate physical addresses");
+            panic!("MM: HHDM unavailable; cannot translate physical addresses");
         }
 
         configure_region_store(memmap);
@@ -611,7 +607,7 @@ pub fn init_memory_system(
             allocator_plan.capacity_frames,
         ) != 0
         {
-            mm_panic("MM: Page allocator initialization failed");
+            panic!("MM: Page allocator initialization failed");
         }
         if finalize_page_allocator() != 0 {
             klog_info!("MM: WARNING - page allocator finalization reported issues");
@@ -624,11 +620,11 @@ pub fn init_memory_system(
         map_acpi_regions(memmap, hhdm_offset);
 
         if init_kernel_heap() != 0 {
-            mm_panic("MM: Kernel heap initialization failed");
+            panic!("MM: Kernel heap initialization failed");
         }
 
         if init_process_vm() != 0 {
-            mm_panic("MM: Process VM initialization failed");
+            panic!("MM: Process VM initialization failed");
         }
 
         MEMORY_SYSTEM_INITIALIZED = true;

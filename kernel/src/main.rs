@@ -70,7 +70,5 @@ fn alloc_error(layout: Layout) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    serial::init();
-    klog_error!("Kernel panic: {:?}", info);
-    cpu::halt_loop();
+    slopos_boot::panic_handler_impl(info)
 }

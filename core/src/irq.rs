@@ -392,7 +392,7 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
         klog_info!("IRQ: Frame corruption detected on IRQ {} - aborting", irq);
         kdiag_dump_interrupt_frame(frame);
-        platform::kernel_panic(b"IRQ: frame corrupted\0".as_ptr() as *const c_char);
+        panic!("IRQ: frame corrupted");
     }
 
     acknowledge_irq();

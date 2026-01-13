@@ -10,8 +10,8 @@ pub mod ffi_boundary;
 pub mod gdt;
 pub use gdt::gdt_set_kernel_rsp0;
 pub mod idt;
-pub mod kernel_panic;
 pub mod limine_protocol;
+pub mod panic;
 pub mod safe_stack;
 pub mod shutdown;
 
@@ -21,11 +21,11 @@ pub use early_init::{
     kernel_main_no_multiboot, report_kernel_status,
 };
 pub use ffi_boundary::kernel_main;
-pub use kernel_panic::{kernel_assert, kernel_panic, kernel_panic_with_context};
 pub use limine_protocol::{
     BootFramebuffer, BootInfo, MemmapEntry, MemoryRegion, MemoryRegionKind, boot_info,
     ensure_base_revision, memmap_entry_count, memory_regions,
 };
+pub use panic::{panic_handler_impl, set_panic_cpu_state};
 pub use shutdown::{
     execute_kernel, kernel_drain_serial_output, kernel_quiesce_interrupts, kernel_reboot,
     kernel_shutdown,
