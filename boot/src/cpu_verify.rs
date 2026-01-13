@@ -1,5 +1,3 @@
-use crate::kernel_panic::kernel_panic;
-use core::ffi::c_char;
 use slopos_mm::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 
 #[inline(always)]
@@ -33,37 +31,37 @@ fn get_stack_pointer() -> u64 {
     }
     rsp
 }
+
 pub fn verify_cpu_state() {
     let cr0 = read_cr0();
     let cr4 = read_cr4();
     let efer = read_efer();
 
     if (cr0 & (1 << 31)) == 0 {
-        kernel_panic(b"Paging not enabled in CR0\0".as_ptr() as *const c_char);
+        panic!("Paging not enabled in CR0");
     }
     if (cr0 & 1) == 0 {
-        kernel_panic(b"Protected mode not enabled in CR0\0".as_ptr() as *const c_char);
+        panic!("Protected mode not enabled in CR0");
     }
     if (cr4 & (1 << 5)) == 0 {
-        kernel_panic(b"PAE not enabled in CR4\0".as_ptr() as *const c_char);
+        panic!("PAE not enabled in CR4");
     }
     if (efer & (1 << 8)) == 0 {
-        kernel_panic(b"Long mode not enabled in EFER\0".as_ptr() as *const c_char);
+        panic!("Long mode not enabled in EFER");
     }
     if (efer & (1 << 10)) == 0 {
-        kernel_panic(b"Long mode not active in EFER\0".as_ptr() as *const c_char);
+        panic!("Long mode not active in EFER");
     }
 }
+
 pub fn verify_memory_layout() {
     let addr = verify_memory_layout as *const () as u64;
     if addr < KERNEL_VIRTUAL_BASE {
-        kernel_panic(
-            b"Kernel not running in higher-half virtual memory\0".as_ptr() as *const c_char,
-        );
+        panic!("Kernel not running in higher-half virtual memory");
     }
     if let Some(hhdm_base) = slopos_mm::hhdm::try_offset() {
         if addr < hhdm_base {
-            kernel_panic(b"Kernel running in user space address range\0".as_ptr() as *const c_char);
+            panic!("Kernel running in user space address range");
         }
     }
 
@@ -72,37 +70,40 @@ pub fn verify_memory_layout() {
     }
     let _ = unsafe { core::ptr::read_volatile(&_start) };
 }
+
 pub fn check_stack_health() {
     let rsp = get_stack_pointer();
     if rsp == 0 {
-        kernel_panic(b"Stack pointer is null\0".as_ptr() as *const c_char);
+        panic!("Stack pointer is null");
     }
     if (rsp & 0xF) != 0 {
-        kernel_panic(b"Stack pointer not properly aligned\0".as_ptr() as *const c_char);
+        panic!("Stack pointer not properly aligned");
     }
     if rsp < PAGE_SIZE_4KB {
-        kernel_panic(b"Stack pointer too low (possible corruption)\0".as_ptr() as *const c_char);
+        panic!("Stack pointer too low (possible corruption)");
     }
     if let Some(hhdm_base) = slopos_mm::hhdm::try_offset() {
         if rsp >= PAGE_SIZE_1GB && rsp < hhdm_base {
-            kernel_panic(b"Stack pointer in invalid memory region\0".as_ptr() as *const c_char);
+            panic!("Stack pointer in invalid memory region");
         }
     }
 }
+
 pub fn verify_cpu_features() {
     let (_eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
     if (edx1 & (1 << 6)) == 0 {
-        kernel_panic(b"CPU does not support PAE\0".as_ptr() as *const c_char);
+        panic!("CPU does not support PAE");
     }
     if (edx1 & (1 << 13)) == 0 {
-        kernel_panic(b"CPU does not support PGE\0".as_ptr() as *const c_char);
+        panic!("CPU does not support PGE");
     }
 
     let (_eax2, _ebx2, _ecx2, edx2) = slopos_lib::cpu::cpuid(0x8000_0001);
     if (edx2 & (1 << 29)) == 0 {
-        kernel_panic(b"CPU does not support long mode\0".as_ptr() as *const c_char);
+        panic!("CPU does not support long mode");
     }
 }
+
 pub fn complete_system_verification() {
     verify_cpu_state();
     verify_memory_layout();

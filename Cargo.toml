@@ -42,6 +42,7 @@ slopos-mm = { path = "mm" }
 slopos-tests = { path = "tests" }
 slopos-userland = { path = "userland" }
 slopos-video = { path = "video" }
+paste = { version = "1.0", default-features = false }
 spin = { version = "0.10.0", default-features = false, features = ["mutex", "spin_mutex", "once"] }
 uart_16550 = { version = "0.4.0", default-features = false }
 x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }

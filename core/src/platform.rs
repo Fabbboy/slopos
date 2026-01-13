@@ -18,7 +18,6 @@ pub struct PlatformServices {
 
     pub gdt_set_kernel_rsp0: fn(u64),
 
-    pub kernel_panic: fn(*const c_char) -> !,
     pub kernel_shutdown: fn(*const c_char) -> !,
     pub kernel_reboot: fn(*const c_char) -> !,
     pub is_rsdp_available: fn() -> bool,
@@ -104,11 +103,6 @@ pub fn rng_next() -> u64 {
 #[inline(always)]
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
     (platform().gdt_set_kernel_rsp0)(rsp0)
-}
-
-#[inline(always)]
-pub fn kernel_panic(msg: *const c_char) -> ! {
-    (platform().kernel_panic)(msg)
 }
 
 #[inline(always)]

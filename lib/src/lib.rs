@@ -184,10 +184,14 @@ pub mod memory;
 pub mod numfmt;
 pub mod ring_buffer;
 pub mod service_cell;
+pub mod service_macro;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
 pub mod wl_currency;
+
+#[doc(hidden)]
+pub use paste;
 
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};

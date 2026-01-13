@@ -7,7 +7,6 @@ use slopos_core::platform::{PlatformServices, register_platform};
 use spin::Once;
 
 static GDT_SET_RSP0: Once<fn(u64)> = Once::new();
-static KERNEL_PANIC: Once<fn(*const c_char) -> !> = Once::new();
 static KERNEL_SHUTDOWN: Once<fn(*const c_char) -> !> = Once::new();
 static KERNEL_REBOOT: Once<fn(*const c_char) -> !> = Once::new();
 static IS_RSDP_AVAILABLE: Once<fn() -> bool> = Once::new();
@@ -17,10 +16,6 @@ static IDT_GET_GATE: Once<fn(u8, *mut c_void) -> c_int> = Once::new();
 
 pub fn register_gdt_rsp0_callback(cb: fn(u64)) {
     GDT_SET_RSP0.call_once(|| cb);
-}
-
-pub fn register_kernel_panic_callback(cb: fn(*const c_char) -> !) {
-    KERNEL_PANIC.call_once(|| cb);
 }
 
 pub fn register_kernel_shutdown_callback(cb: fn(*const c_char) -> !) {
@@ -47,15 +42,6 @@ pub fn register_idt_get_gate_callback(cb: fn(u8, *mut c_void) -> c_int) {
 fn gdt_set_kernel_rsp0_impl(rsp0: u64) {
     if let Some(cb) = GDT_SET_RSP0.get() {
         cb(rsp0);
-    }
-}
-
-fn kernel_panic_impl(msg: *const c_char) -> ! {
-    if let Some(cb) = KERNEL_PANIC.get() {
-        cb(msg)
-    }
-    loop {
-        core::hint::spin_loop();
     }
 }
 
@@ -111,7 +97,6 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
     },
     rng_next: || random::random_next(),
     gdt_set_kernel_rsp0: gdt_set_kernel_rsp0_impl,
-    kernel_panic: kernel_panic_impl,
     kernel_shutdown: kernel_shutdown_impl,
     kernel_reboot: kernel_reboot_impl,
     is_rsdp_available: is_rsdp_available_impl,

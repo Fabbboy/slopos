@@ -3,10 +3,6 @@ use core::ffi::{c_char, c_int, c_void};
 use crate::{early_init, gdt, idt, limine_protocol, shutdown};
 use slopos_drivers::platform_init;
 
-fn kernel_panic_fn(msg: *const c_char) -> ! {
-    crate::kernel_panic::kernel_panic(msg)
-}
-
 fn kernel_shutdown_fn(reason: *const c_char) -> ! {
     shutdown::kernel_shutdown(reason)
 }
@@ -33,7 +29,6 @@ fn idt_get_gate_fn(vector: u8, entry: *mut c_void) -> c_int {
 
 pub fn register_boot_services() {
     platform_init::register_gdt_rsp0_callback(gdt::gdt_set_kernel_rsp0);
-    platform_init::register_kernel_panic_callback(kernel_panic_fn);
     platform_init::register_kernel_shutdown_callback(kernel_shutdown_fn);
     platform_init::register_kernel_reboot_callback(kernel_reboot_fn);
     platform_init::register_rsdp_callbacks(is_rsdp_available_fn, get_rsdp_address_fn);
