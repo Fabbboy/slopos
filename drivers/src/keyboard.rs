@@ -191,6 +191,12 @@ pub fn keyboard_init() {
     }
 }
 pub fn keyboard_handle_scancode(scancode: u8) {
+    let flags = cpu::save_flags_cli();
+    keyboard_handle_scancode_inner(scancode);
+    cpu::restore_flags(flags);
+}
+
+fn keyboard_handle_scancode_inner(scancode: u8) {
     klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
     if scancode == 0xE0 {
@@ -211,16 +217,11 @@ pub fn keyboard_handle_scancode(scancode: u8) {
 
     unsafe { kb_buffer_push_overwrite(&raw mut SCANCODE_BUFFER, scancode) };
 
-    // Route all key events to the input event system for the focused task.
-    // This includes modifier keys, extended keys, and regular keys.
     let ascii = translate_scancode(scancode);
     let timestamp_ms = get_timestamp_ms();
     input_event::input_route_key_event(make_code, ascii, is_press, timestamp_ms);
 
-    if matches!(
-        make_code,
-        0x2A | 0x36 | 0x1D | 0x38 | 0x3A // Shift / Ctrl / Alt / Caps
-    ) {
+    if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
         handle_modifier_key(make_code, is_press);
         return;
     }
@@ -251,7 +252,6 @@ pub fn keyboard_handle_scancode(scancode: u8) {
         return;
     }
 
-    // ascii was already computed above for input_event routing
     klog_debug!("[KBD] ASCII: 0x{:02x}\n", ascii);
 
     if ascii != 0 {

@@ -2,8 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::{cpu, ports::COM1};
-use spin::Mutex;
+use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
 use crate::keyboard;
 use crate::serial;
@@ -27,13 +26,13 @@ struct TtyWaitQueue {
 // and access is synchronized through the TTY_WAIT_QUEUE mutex.
 unsafe impl Send for TtyWaitQueue {}
 
-static TTY_WAIT_QUEUE: Mutex<TtyWaitQueue> = Mutex::new(TtyWaitQueue {
+static TTY_WAIT_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
     tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
     count: 0,
 });
-static TTY_FOCUS_QUEUE: Mutex<TtyWaitQueue> = Mutex::new(TtyWaitQueue {
+static TTY_FOCUS_QUEUE: IrqMutex<TtyWaitQueue> = IrqMutex::new(TtyWaitQueue {
     tasks: [ptr::null_mut(); TTY_MAX_WAITERS],
     head: 0,
     tail: 0,
@@ -182,9 +181,7 @@ pub fn tty_notify_input_ready() {
         return;
     }
 
-    let flags = cpu::save_flags_cli();
     let task = tty_wait_queue_pop();
-    cpu::restore_flags(flags);
 
     if !task.is_null() {
         let state = unsafe { (*task).state };
@@ -200,7 +197,6 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         return 0;
     }
 
-    let flags = cpu::save_flags_cli();
     loop {
         let candidate = tty_focus_queue_pop();
         if candidate.is_null() {
@@ -208,7 +204,6 @@ pub fn tty_set_focus(task_id: u32) -> c_int {
         }
         let _ = unblock_task(candidate);
     }
-    cpu::restore_flags(flags);
     0
 }
 

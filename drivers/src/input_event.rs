@@ -367,11 +367,19 @@ pub fn input_get_button_state() -> u8 {
 // =============================================================================
 
 /// Route a keyboard event to the focused task
+///
+/// SAFETY: This function is called from IRQ context (keyboard interrupt handler).
+/// We must disable interrupts before acquiring the lock to prevent nested interrupts
+/// from causing deadlock and stack overflow.
 pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_ms: u64) {
+    // Disable interrupts to prevent nested IRQs from deadlocking on the lock
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
     let focus = mgr.keyboard_focus;
 
     if focus == 0 {
+        drop(mgr);
+        cpu::restore_flags(flags);
         return;
     }
 
@@ -383,34 +391,40 @@ pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_m
         };
         mgr.queues[idx].push(InputEvent::key(event_type, scancode, ascii, timestamp_ms));
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
 
-/// Route a pointer motion event to the focused task
-/// Coordinates are translated from screen coords to window-local coords
+/// Route a pointer motion event to the focused task (called from mouse IRQ).
+/// Coordinates are translated from screen coords to window-local coords.
 pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
     mgr.pointer_x = x;
     mgr.pointer_y = y;
 
     let focus = mgr.pointer_focus;
     if focus == 0 {
+        drop(mgr);
+        cpu::restore_flags(flags);
         return;
     }
 
-    // Translate to window-local coordinates
     let local_x = x - mgr.window_offset_x;
     let local_y = y - mgr.window_offset_y;
 
     if let Some(idx) = mgr.find_or_create_queue(focus) {
         mgr.queues[idx].push(InputEvent::pointer_motion(local_x, local_y, timestamp_ms));
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
 
-/// Route a pointer button event to the focused task
+/// Route a pointer button event to the focused task (called from mouse IRQ).
 pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) {
+    let flags = cpu::save_flags_cli();
     let mut mgr = INPUT_MANAGER.lock();
 
-    // Update button state
     if pressed {
         mgr.pointer_buttons |= button;
     } else {
@@ -419,12 +433,16 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
 
     let focus = mgr.pointer_focus;
     if focus == 0 {
+        drop(mgr);
+        cpu::restore_flags(flags);
         return;
     }
 
     if let Some(idx) = mgr.find_or_create_queue(focus) {
         mgr.queues[idx].push(InputEvent::pointer_button(pressed, button, timestamp_ms));
     }
+    drop(mgr);
+    cpu::restore_flags(flags);
 }
 
 // =============================================================================

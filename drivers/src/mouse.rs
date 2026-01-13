@@ -142,6 +142,12 @@ fn get_timestamp_ms() -> u64 {
 }
 
 pub fn mouse_handle_irq(scancode: u8) {
+    let flags = cpu::save_flags_cli();
+    mouse_handle_irq_inner(scancode);
+    cpu::restore_flags(flags);
+}
+
+fn mouse_handle_irq_inner(scancode: u8) {
     unsafe {
         let state = &raw mut MOUSE_STATE;
         let byte_num = (*state).packet_byte;
@@ -149,58 +155,46 @@ pub fn mouse_handle_irq(scancode: u8) {
         (*state).packet[byte_num as usize] = scancode;
         (*state).packet_byte = (byte_num + 1) % 3;
 
-        // Wait for complete 3-byte packet
         if (*state).packet_byte != 0 {
             return;
         }
 
-        let flags = (*state).packet[0];
+        let packet_flags = (*state).packet[0];
         let dx_raw = (*state).packet[1];
         let dy_raw = (*state).packet[2];
 
-        // Check for overflow or invalid packet
-        if flags & 0xC0 != 0 {
-            klog_debug!("[MOUSE] Invalid packet flags: 0x{:02x}", flags);
+        if packet_flags & 0xC0 != 0 {
+            klog_debug!("[MOUSE] Invalid packet flags: 0x{:02x}", packet_flags);
             return;
         }
 
-        // Save old button state for detecting button events
         let old_buttons = (*state).buttons;
+        (*state).buttons = packet_flags & 0x07;
 
-        // Extract button state
-        (*state).buttons = flags & 0x07;
-
-        // Convert to signed delta (9-bit sign-extended)
         let mut dx = dx_raw as i16;
-        if flags & 0x10 != 0 {
+        if packet_flags & 0x10 != 0 {
             dx = (dx as i16) - 256;
         }
 
         let mut dy = dy_raw as i16;
-        if flags & 0x20 != 0 {
+        if packet_flags & 0x20 != 0 {
             dy = (dy as i16) - 256;
         }
 
-        // PS/2 mouse Y is inverted
         dy = -dy;
 
-        // Update absolute position
         (*state).x += dx as i32;
         (*state).y += dy as i32;
 
-        // Clamp to bounds
         (*state).x = (*state).x.clamp(0, (*state).max_x - 1);
         (*state).y = (*state).y.clamp(0, (*state).max_y - 1);
 
-        // Route events to input_event system for Wayland-like per-task queues
         let timestamp_ms = get_timestamp_ms();
 
-        // Route motion event if mouse moved
         if dx != 0 || dy != 0 {
             input_event::input_route_pointer_motion((*state).x, (*state).y, timestamp_ms);
         }
 
-        // Route button events for any buttons that changed state
         let button_changes = old_buttons ^ (*state).buttons;
         for button_bit in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE] {
             if button_changes & button_bit != 0 {
