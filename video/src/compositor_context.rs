@@ -22,7 +22,7 @@ use slopos_abi::{
     CompositorError, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
     SurfaceRole, WINDOW_STATE_NORMAL, WindowDamageRect, WindowInfo,
 };
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 /// Advanced damage tracker with 32 regions and automatic merging.
 struct DamageTracker {
@@ -344,7 +344,7 @@ impl CompositorContext {
     }
 }
 
-static CONTEXT: Mutex<CompositorContext> = Mutex::new(CompositorContext::new());
+static CONTEXT: IrqMutex<CompositorContext> = IrqMutex::new(CompositorContext::new());
 
 // =============================================================================
 // PUBLIC API - Client Operations (ENQUEUE and return immediately)

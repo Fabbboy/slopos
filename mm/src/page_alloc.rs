@@ -2,8 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info};
-use spin::Mutex;
+use slopos_lib::{IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
@@ -337,7 +336,7 @@ impl PageAllocator {
     }
 }
 
-static PAGE_ALLOCATOR: Mutex<PageAllocator> = Mutex::new(PageAllocator::new());
+static PAGE_ALLOCATOR: IrqMutex<PageAllocator> = IrqMutex::new(PageAllocator::new());
 
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 

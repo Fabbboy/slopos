@@ -2,8 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{klog_debug, klog_info};
-use spin::Mutex;
+use slopos_lib::{IrqMutex, klog_debug, klog_info};
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
 use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
@@ -85,7 +84,7 @@ impl KernelHeap {
     }
 }
 
-static KERNEL_HEAP: Mutex<KernelHeap> = Mutex::new(KernelHeap::new());
+static KERNEL_HEAP: IrqMutex<KernelHeap> = IrqMutex::new(KernelHeap::new());
 
 const MIN_ALLOC_SIZE: u32 = 16;
 const MAX_ALLOC_SIZE: u32 = 0x100000;

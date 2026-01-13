@@ -405,13 +405,6 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
     }
 
     ctrl.write_reg(reg, value);
-    klog_debug!(
-        "IOAPIC: {} GSI {} (pin {}) -> low=0x{:x}",
-        if mask { "Masked" } else { "Unmasked" },
-        gsi,
-        pin,
-        value
-    );
     0
 }
 

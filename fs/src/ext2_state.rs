@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::{ptr, slice};
 
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 use crate::blockdev::{CallbackBlockDevice, CapacityFn, MemoryBlockDevice, ReadFn, WriteFn};
 use crate::ext2::{Ext2Error, Ext2Fs};
@@ -32,7 +32,7 @@ impl Ext2State {
     }
 }
 
-static EXT2_STATE: Mutex<Ext2State> = Mutex::new(Ext2State::new());
+static EXT2_STATE: IrqMutex<Ext2State> = IrqMutex::new(Ext2State::new());
 
 const MAX_PATH: usize = USER_PATH_MAX;
 

@@ -4,9 +4,8 @@ use core::ptr;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{DisplayInfo, PixelFormat};
-use slopos_lib::{klog_debug, klog_warn};
+use slopos_lib::{IrqMutex, klog_debug, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
-use spin::Mutex;
 
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
 const MIN_FRAMEBUFFER_HEIGHT: u32 = 240;
@@ -60,8 +59,8 @@ impl FramebufferState {
     }
 }
 
-static FRAMEBUFFER: Mutex<FramebufferState> = Mutex::new(FramebufferState::new());
-static FRAMEBUFFER_FLUSH: Mutex<Option<fn() -> c_int>> = Mutex::new(None);
+static FRAMEBUFFER: IrqMutex<FramebufferState> = IrqMutex::new(FramebufferState::new());
+static FRAMEBUFFER_FLUSH: IrqMutex<Option<fn() -> c_int>> = IrqMutex::new(None);
 
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > DisplayInfo::MAX_DIMENSION {

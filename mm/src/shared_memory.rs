@@ -6,7 +6,7 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
@@ -250,7 +250,7 @@ impl SharedBufferRegistry {
     }
 }
 
-static REGISTRY: Mutex<SharedBufferRegistry> = Mutex::new(SharedBufferRegistry::new());
+static REGISTRY: IrqMutex<SharedBufferRegistry> = IrqMutex::new(SharedBufferRegistry::new());
 
 /// Create a new shared memory buffer.
 ///

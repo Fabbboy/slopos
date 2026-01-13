@@ -1,4 +1,5 @@
 use core::fmt::{self, Write};
+use slopos_lib::IrqMutex;
 use slopos_lib::RingBuffer;
 use slopos_lib::io::Port;
 use slopos_lib::ports::{
@@ -11,7 +12,6 @@ use slopos_lib::ports::{
     UART_REG_LCR as REG_LCR, UART_REG_LSR as REG_LSR, UART_REG_MCR as REG_MCR,
     UART_REG_RBR as REG_RBR, UART_REG_SCR as REG_SCR,
 };
-use spin::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UartType {
@@ -32,12 +32,12 @@ pub struct UartCapabilities {
     pub fifo_size: usize,
 }
 
-static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
+static SERIAL: IrqMutex<SerialPort> = IrqMutex::new(SerialPort::new(COM1));
 const BUF_SIZE: usize = 256;
 
 type SerialBuffer = RingBuffer<u8, BUF_SIZE>;
 
-static INPUT_BUFFER: Mutex<SerialBuffer> = Mutex::new(SerialBuffer::new_with(0));
+static INPUT_BUFFER: IrqMutex<SerialBuffer> = IrqMutex::new(SerialBuffer::new_with(0));
 
 pub fn init() {
     let mut port = SERIAL.lock();

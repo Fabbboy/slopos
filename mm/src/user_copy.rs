@@ -1,6 +1,6 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 use slopos_abi::addr::VirtAddr;
 
@@ -10,7 +10,7 @@ use crate::process_vm::process_vm_get_page_dir;
 use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 
 static KERNEL_GUARD_CHECKED: AtomicBool = AtomicBool::new(false);
-static CURRENT_TASK_PROVIDER: Mutex<Option<fn() -> u32>> = Mutex::new(None);
+static CURRENT_TASK_PROVIDER: IrqMutex<Option<fn() -> u32>> = IrqMutex::new(None);
 
 static mut SYSCALL_CURRENT_PID: u32 = crate::mm_constants::INVALID_PROCESS_ID;
 

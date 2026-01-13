@@ -2,8 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{align_down, align_up, klog_debug, klog_info};
-use spin::Mutex;
+use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
@@ -103,7 +102,7 @@ impl VmManager {
     }
 }
 
-static VM_MANAGER: Mutex<VmManager> = Mutex::new(VmManager::new());
+static VM_MANAGER: IrqMutex<VmManager> = IrqMutex::new(VmManager::new());
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0

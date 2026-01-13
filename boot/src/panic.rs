@@ -92,8 +92,11 @@ fn panic_dump_backtrace() {
         return_address: 0,
     }; PANIC_BACKTRACE_MAX];
 
-    let captured =
-        stacktrace::stacktrace_capture_from(rbp, entries.as_mut_ptr(), PANIC_BACKTRACE_MAX as c_int);
+    let captured = stacktrace::stacktrace_capture_from(
+        rbp,
+        entries.as_mut_ptr(),
+        PANIC_BACKTRACE_MAX as c_int,
+    );
     if captured <= 0 {
         panic_serial_write("Backtrace: <empty>");
         return;
@@ -106,9 +109,7 @@ fn panic_dump_backtrace() {
         let _ = write!(
             line,
             "  #{} rbp=0x{:016x} rip=0x{:016x}",
-            i,
-            entry.frame_pointer,
-            entry.return_address
+            i, entry.frame_pointer, entry.return_address
         );
         panic_serial_write(line.as_str());
     }

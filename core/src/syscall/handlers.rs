@@ -607,7 +607,8 @@ pub fn syscall_sys_info(task: *mut Task, frame: *mut InterruptFrame) -> SyscallD
 
 pub type SpawnTaskFn = fn(&[u8]) -> i32;
 
-static SPAWN_TASK_CALLBACK: spin::Mutex<Option<SpawnTaskFn>> = spin::Mutex::new(None);
+static SPAWN_TASK_CALLBACK: slopos_lib::IrqMutex<Option<SpawnTaskFn>> =
+    slopos_lib::IrqMutex::new(None);
 
 pub fn register_spawn_task_callback(callback: SpawnTaskFn) {
     *SPAWN_TASK_CALLBACK.lock() = Some(callback);

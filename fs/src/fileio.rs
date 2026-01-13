@@ -3,7 +3,7 @@ use core::mem::{self, MaybeUninit};
 use core::slice;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 use slopos_abi::fs::{FS_TYPE_FILE, UserFsEntry};
 
@@ -46,7 +46,7 @@ unsafe impl Send for FileDescriptor {}
 struct FileTableSlot {
     process_id: u32,
     in_use: bool,
-    lock: Mutex<()>,
+    lock: IrqMutex<()>,
     descriptors: [FileDescriptor; FILEIO_MAX_OPEN_FILES],
 }
 
@@ -55,7 +55,7 @@ impl FileTableSlot {
         Self {
             process_id: INVALID_PROCESS_ID,
             in_use,
-            lock: Mutex::new(()),
+            lock: IrqMutex::new(()),
             descriptors: [FileDescriptor::new(); FILEIO_MAX_OPEN_FILES],
         }
     }
@@ -84,7 +84,8 @@ impl FileioStateStorage {
 
 unsafe impl Send for FileioStateStorage {}
 
-static FILEIO_STATE: Mutex<FileioStateStorage> = Mutex::new(FileioStateStorage::uninitialized());
+static FILEIO_STATE: IrqMutex<FileioStateStorage> =
+    IrqMutex::new(FileioStateStorage::uninitialized());
 static FILEIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 fn with_state<R>(f: impl FnOnce(&mut FileioStateStorage) -> R) -> R {

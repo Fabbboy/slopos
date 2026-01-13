@@ -1,6 +1,6 @@
 use core::ffi::c_char;
 
-use spin::Mutex;
+use slopos_lib::IrqMutex;
 
 use crate::font;
 use crate::framebuffer;
@@ -41,7 +41,7 @@ impl SplashState {
     }
 }
 
-static STATE: Mutex<SplashState> = Mutex::new(SplashState::new());
+static STATE: IrqMutex<SplashState> = IrqMutex::new(SplashState::new());
 
 struct SplashLayout {
     center_x: i32,
