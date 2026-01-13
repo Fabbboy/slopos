@@ -625,21 +625,23 @@ fn console_write(display: &DisplayState, text: &[u8]) {
     // Phase 2: Render if following
     if follow {
         surface::draw(|buf| {
+            let view_top = display.view_top.get();
+            let rows = display.rows.get();
+            let cursor_line = display.cursor_line.get();
+
             if needs_scroll {
                 let view_diff = display.view_top.get() - old_view_top;
-                if view_diff == 1 {
-                    if !scroll_up_fast(buf, display) {
-                        redraw_view(buf, display);
+                if view_diff == 1 && scroll_up_fast(buf, display) {
+                    for line in start_line..=cursor_line {
+                        let row = line - view_top;
+                        if row >= 0 && row < rows {
+                            draw_row_from_scrollback(buf, display, line, row);
+                        }
                     }
                 } else {
                     redraw_view(buf, display);
                 }
             } else {
-                // Draw all lines from start_line to cursor_line (inclusive)
-                // This ensures lines completed by newlines are rendered
-                let view_top = display.view_top.get();
-                let rows = display.rows.get();
-                let cursor_line = display.cursor_line.get();
                 for line in start_line..=cursor_line {
                     let row = line - view_top;
                     if row >= 0 && row < rows {
