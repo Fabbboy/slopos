@@ -12,7 +12,7 @@ use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::gdt::gdt_init;
 use crate::idt::{idt_init, idt_load};
 use crate::limine_protocol;
-use crate::safe_stack::safe_stack_init;
+use crate::ist_stacks::ist_stacks_init;
 use slopos_drivers::{
     apic::{apic_detect, apic_init},
     interrupt_test::interrupt_test_request_shutdown,
@@ -74,7 +74,7 @@ fn boot_step_idt_setup_fn() {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
     idt_init();
-    safe_stack_init();
+    ist_stacks_init();
     idt_load();
     serial_note("boot: idt setup done");
     klog_debug!("IDT initialized and loaded.");

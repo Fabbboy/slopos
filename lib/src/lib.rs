@@ -123,6 +123,105 @@ pub mod cpu {
             (res.eax, res.ebx, res.ecx, res.edx)
         }
     }
+
+    #[inline(always)]
+    pub fn read_rsp() -> u64 {
+        let rsp: u64;
+        unsafe {
+            asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+        }
+        rsp
+    }
+
+    #[inline(always)]
+    pub fn read_r15() -> u64 {
+        let r15: u64;
+        unsafe {
+            asm!("mov {}, r15", out(reg) r15, options(nomem, nostack, preserves_flags));
+        }
+        r15
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct RegSnapshot {
+        pub rax: u64,
+        pub rbx: u64,
+        pub rcx: u64,
+        pub rdx: u64,
+        pub rsi: u64,
+        pub rdi: u64,
+        pub rbp: u64,
+        pub rsp: u64,
+        pub r8: u64,
+        pub r9: u64,
+        pub r10: u64,
+        pub r11: u64,
+        pub r12: u64,
+        pub r13: u64,
+        pub r14: u64,
+        pub r15: u64,
+    }
+
+    #[inline(never)]
+    pub fn snapshot_regs() -> RegSnapshot {
+        let (rax, rbx, rcx, rdx): (u64, u64, u64, u64);
+        let (rsi, rdi, rbp, rsp): (u64, u64, u64, u64);
+        let (r8, r9, r10, r11): (u64, u64, u64, u64);
+        let (r12, r13, r14, r15): (u64, u64, u64, u64);
+        unsafe {
+            asm!(
+                "mov {0}, rax",
+                "mov {1}, rbx",
+                "mov {2}, rcx",
+                "mov {3}, rdx",
+                out(reg) rax,
+                out(reg) rbx,
+                out(reg) rcx,
+                out(reg) rdx,
+                options(nomem, nostack, preserves_flags)
+            );
+            asm!(
+                "mov {0}, rsi",
+                "mov {1}, rdi",
+                "mov {2}, rbp",
+                "mov {3}, rsp",
+                out(reg) rsi,
+                out(reg) rdi,
+                out(reg) rbp,
+                out(reg) rsp,
+                options(nomem, nostack, preserves_flags)
+            );
+            asm!(
+                "mov {0}, r8",
+                "mov {1}, r9",
+                "mov {2}, r10",
+                "mov {3}, r11",
+                out(reg) r8,
+                out(reg) r9,
+                out(reg) r10,
+                out(reg) r11,
+                options(nomem, nostack, preserves_flags)
+            );
+            asm!(
+                "mov {0}, r12",
+                "mov {1}, r13",
+                "mov {2}, r14",
+                "mov {3}, r15",
+                out(reg) r12,
+                out(reg) r13,
+                out(reg) r14,
+                out(reg) r15,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        RegSnapshot {
+            rax, rbx, rcx, rdx,
+            rsi, rdi, rbp, rsp,
+            r8, r9, r10, r11,
+            r12, r13, r14, r15,
+        }
+    }
 }
 
 pub mod io;

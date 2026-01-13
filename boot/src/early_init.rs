@@ -528,7 +528,7 @@ pub fn kernel_main_impl() {
 
     // Install basic GDT/IDT early so faults have somewhere to land. IST
     // stacks are deferred to the driver phase (after memory is online) so
-    // safe_stack_init can allocate pages.
+    // ist_stacks_init can allocate pages.
     gdt::gdt_init();
     idt::idt_init();
     serial::write_line("BOOT: before idt_load (early)");

@@ -7,8 +7,8 @@ use core::ffi::{CStr, c_char, c_void};
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::ist_stacks;
 use crate::panic::set_panic_cpu_state;
-use crate::safe_stack;
 
 global_asm!(include_str!("../idt_handlers.s"));
 
@@ -264,7 +264,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
     let vector = (frame_ref.vector & 0xFF) as u8;
 
-    safe_stack::safe_stack_record_usage(vector, frame as u64);
+    ist_stacks::ist_record_usage(vector, frame as u64);
 
     if vector == SYSCALL_VECTOR {
         syscall_handle(frame);
@@ -540,14 +540,14 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     }
 
     let mut stack_name: *const c_char = core::ptr::null();
-    if safe_stack::safe_stack_guard_fault(fault_addr, &mut stack_name) != 0 {
-        klog_info!("FATAL: Exception stack overflow detected via guard page");
+    if ist_stacks::ist_guard_fault(fault_addr, &mut stack_name) != 0 {
+        klog_info!("FATAL: IST stack overflow detected via guard page");
         if !stack_name.is_null() {
-            klog_info!("Guard page owner: {}", unsafe { cstr_to_str(stack_name) });
+            klog_info!("Stack: {}", unsafe { cstr_to_str(stack_name) });
         }
         klog_info!("Fault address: 0x{:x}", fault_addr);
         kdiag_dump_interrupt_frame(frame);
-        panic_with_frame("Exception stack overflow", frame);
+        panic_with_frame("IST stack overflow", frame);
         return;
     }
 

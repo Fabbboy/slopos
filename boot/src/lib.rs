@@ -12,7 +12,10 @@ pub use gdt::gdt_set_kernel_rsp0;
 pub mod idt;
 pub mod limine_protocol;
 pub mod panic;
-pub mod safe_stack;
+pub mod ist_stacks;
+pub mod safe_stack {
+    pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_init, safe_stack_record_usage};
+}
 pub mod shutdown;
 
 pub use early_init::{
