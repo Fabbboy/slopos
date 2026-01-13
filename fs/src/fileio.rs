@@ -1,14 +1,15 @@
 use core::ffi::{c_char, c_int};
 use core::mem::{self, MaybeUninit};
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::slice;
 
 use spin::Mutex;
 
-use crate::ramfs::{
-    RAMFS_TYPE_FILE, ramfs_acquire_node, ramfs_create_file, ramfs_find_node, ramfs_get_size,
-    ramfs_node_release, ramfs_node_retain, ramfs_node_t, ramfs_read_bytes, ramfs_remove_file,
-    ramfs_write_bytes,
+use slopos_abi::fs::{FS_TYPE_FILE, UserFsEntry};
+
+use crate::ext2_state::{
+    ext2_get_size, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink,
+    ext2_write,
 };
 
 #[allow(non_camel_case_types)]
@@ -16,7 +17,6 @@ type ssize_t = isize;
 
 const FILE_OPEN_READ: u32 = 1 << 0;
 const FILE_OPEN_WRITE: u32 = 1 << 1;
-const FILE_OPEN_CREAT: u32 = 1 << 2;
 const FILE_OPEN_APPEND: u32 = 1 << 3;
 
 use slopos_mm::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES};
@@ -25,7 +25,7 @@ const FILEIO_MAX_OPEN_FILES: usize = 32;
 
 #[derive(Copy, Clone)]
 struct FileDescriptor {
-    node: *mut ramfs_node_t,
+    inode: u32,
     position: usize,
     flags: u32,
     valid: bool,
@@ -34,7 +34,7 @@ struct FileDescriptor {
 impl FileDescriptor {
     const fn new() -> Self {
         Self {
-            node: ptr::null_mut(),
+            inode: 0,
             position: 0,
             flags: 0,
             valid: false,
@@ -107,10 +107,7 @@ fn with_tables<R>(
 }
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
-    if !desc.node.is_null() {
-        ramfs_node_release(desc.node);
-    }
-    desc.node = ptr::null_mut();
+    desc.inode = 0;
     desc.position = 0;
     desc.flags = 0;
     desc.valid = false;
@@ -259,30 +256,28 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
             return -1;
         };
 
-        let mut node = ramfs_acquire_node(path);
-        if node.is_null() && (flags & FILE_OPEN_CREAT) != 0 {
-            node = ramfs_create_file(path, ptr::null(), 0);
-            if !node.is_null() {
-                ramfs_node_retain(node);
-            }
-        }
-
-        if node.is_null() || unsafe { (*node).type_ } != RAMFS_TYPE_FILE {
-            if !node.is_null() {
-                ramfs_node_release(node);
-            }
-            drop(guard);
-            return -1;
-        }
-
         let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
-        desc.node = node;
-        desc.flags = flags;
-        desc.position = if (flags & FILE_OPEN_APPEND) != 0 {
-            ramfs_get_size(node)
+        let inode = match ext2_open(path, flags) {
+            Ok(inode) => inode,
+            Err(_) => {
+                drop(guard);
+                return -1;
+            }
+        };
+        let position = if (flags & FILE_OPEN_APPEND) != 0 {
+            match ext2_get_size(inode) {
+                Ok(size) => size as usize,
+                Err(_) => {
+                    drop(guard);
+                    return -1;
+                }
+            }
         } else {
             0
         };
+        desc.inode = inode;
+        desc.flags = flags;
+        desc.position = position;
         desc.valid = true;
 
         drop(guard);
@@ -307,27 +302,20 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             drop(guard);
             return -1;
         };
-        if (desc.flags & FILE_OPEN_READ) == 0
-            || desc.node.is_null()
-            || unsafe { (*desc.node).type_ } != RAMFS_TYPE_FILE
-        {
+        if (desc.flags & FILE_OPEN_READ) == 0 {
             drop(guard);
             return -1;
         }
 
-        let mut read_len: usize = 0;
-        let rc = ramfs_read_bytes(
-            desc.node,
-            desc.position,
-            buffer as *mut _,
-            count,
-            &mut read_len as *mut usize,
-        );
-        if rc == 0 {
+        let buf = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, count) };
+        let rc = ext2_read(desc.inode, desc.position as u32, buf);
+        if let Ok(read_len) = rc {
             desc.position = desc.position.saturating_add(read_len);
+            drop(guard);
+            return read_len as ssize_t;
         }
         drop(guard);
-        if rc == 0 { read_len as ssize_t } else { -1 }
+        -1
     })
 }
 pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
@@ -347,20 +335,20 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
             drop(guard);
             return -1;
         };
-        if (desc.flags & FILE_OPEN_WRITE) == 0
-            || desc.node.is_null()
-            || unsafe { (*desc.node).type_ } != RAMFS_TYPE_FILE
-        {
+        if (desc.flags & FILE_OPEN_WRITE) == 0 {
             drop(guard);
             return -1;
         }
 
-        let rc = ramfs_write_bytes(desc.node, desc.position, buffer as *const _, count);
-        if rc == 0 {
-            desc.position = desc.position.saturating_add(count);
+        let buf = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
+        let rc = ext2_write(desc.inode, desc.position as u32, buf);
+        if let Ok(written) = rc {
+            desc.position = desc.position.saturating_add(written);
+            drop(guard);
+            return written as ssize_t;
         }
         drop(guard);
-        if rc == 0 { count as ssize_t } else { -1 }
+        -1
     })
 }
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
@@ -396,11 +384,13 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
             drop(guard);
             return -1;
         };
-        if desc.node.is_null() || unsafe { (*desc.node).type_ } != RAMFS_TYPE_FILE {
-            drop(guard);
-            return -1;
-        }
-        let size = ramfs_get_size(desc.node);
+        let size = match ext2_get_size(desc.inode) {
+            Ok(size) => size as usize,
+            Err(_) => {
+                drop(guard);
+                return -1;
+            }
+        };
         let delta = offset as usize;
         let new_pos = match whence {
             0 => {
@@ -452,10 +442,9 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let desc = unsafe { get_descriptor(&mut *table_ptr, fd) };
         let size = if let Some(desc) = desc {
-            if !desc.node.is_null() && unsafe { (*desc.node).type_ } == RAMFS_TYPE_FILE {
-                ramfs_get_size(desc.node)
-            } else {
-                usize::MAX
+            match ext2_get_size(desc.inode) {
+                Ok(size) => size as usize,
+                Err(_) => usize::MAX,
             }
         } else {
             usize::MAX
@@ -468,16 +457,54 @@ pub fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
     }
-    let node = ramfs_find_node(path);
-    if node.is_null() || unsafe { (*node).type_ } != RAMFS_TYPE_FILE {
-        0
-    } else {
-        1
+    let rc = ext2_stat(path);
+    if let Ok((kind, _)) = rc {
+        return if kind == FS_TYPE_FILE { 1 } else { 0 };
     }
+    0
 }
 pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }
-    ramfs_remove_file(path)
+    if ext2_unlink(path).is_ok() { 0 } else { -1 }
+}
+
+pub fn file_mkdir_path(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    if ext2_mkdir(path).is_ok() { 0 } else { -1 }
+}
+
+pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    if let Ok((kind, size)) = ext2_stat(path) {
+        *out_type = kind;
+        *out_size = size;
+        return 0;
+    }
+    -1
+}
+
+pub fn file_list_path(
+    path: *const c_char,
+    entries: *mut UserFsEntry,
+    max: u32,
+    out_count: &mut u32,
+) -> c_int {
+    if path.is_null() || entries.is_null() || max == 0 {
+        return -1;
+    }
+    let cap = max as usize;
+    let out_slice = unsafe { slice::from_raw_parts_mut(entries, cap) };
+    match ext2_list(path, out_slice) {
+        Ok(count) => {
+            *out_count = count as u32;
+            0
+        }
+        Err(_) => -1,
+    }
 }

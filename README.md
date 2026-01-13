@@ -10,6 +10,7 @@ SlopOS is a gloriously sloppy x86-64 kernel where every boot spins the Wheel of 
 - **Memory Management**: Buddy allocator, paging, process VM spaces
 - **User Mode Tasks**: Shell and roulette run in Ring 3 with syscall-based kernel services
 - **The Wheel of Fate**: Kernel roulette system with W/L currency for the gambling-addicted wizards
+- **Filesystem Migration (WIP)**: ext2 backend is the sole filesystem (`ext2_init_with_image` is required)
 
 For detailed documentation on privilege separation and segment switching, see [`docs/PRIVILEGE_SEPARATION.md`](docs/PRIVILEGE_SEPARATION.md).
 

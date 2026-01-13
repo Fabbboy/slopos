@@ -16,4 +16,5 @@ doctest = false
 [dependencies]
 slopos-mm = { workspace = true }
 slopos-lib = { workspace = true }
+slopos-abi = { workspace = true }
 spin.workspace = true

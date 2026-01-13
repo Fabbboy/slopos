@@ -10,7 +10,7 @@ pub mod scheduler;
 #[macro_use]
 pub mod syscall;
 pub mod syscall_services;
-pub mod wl_currency;
+pub use slopos_lib::wl_currency;
 
 pub use scheduler::fate_api;
 pub use scheduler::ffi_boundary;

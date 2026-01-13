@@ -268,7 +268,7 @@ mod suites {
     const INTERRUPT_NAME: &[u8] = b"interrupt\0";
     const VM_NAME: &[u8] = b"vm\0";
     const HEAP_NAME: &[u8] = b"heap\0";
-    const RAMFS_NAME: &[u8] = b"ramfs\0";
+    const EXT2_NAME: &[u8] = b"ext2\0";
     const PRIVSEP_NAME: &[u8] = b"privsep\0";
     const CTXSWITCH_NAME: &[u8] = b"ctxswitch_regs\0";
     const ROULETTE_NAME: &[u8] = b"roulette\0";
@@ -451,18 +451,18 @@ mod suites {
     }
 
     #[cfg(feature = "builtin-tests")]
-    fn run_ramfs_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+    fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let total = 5u32;
-        let passed = slopos_fs::tests::run_ramfs_tests().max(0) as u32;
+        let passed = slopos_fs::tests::run_ext2_tests().max(0) as u32;
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
-        fill_simple_result(out, RAMFS_NAME, total, passed, elapsed);
+        fill_simple_result(out, EXT2_NAME, total, passed, elapsed);
         if passed == total { 0 } else { -1 }
     }
 
     #[cfg(not(feature = "builtin-tests"))]
-    fn run_ramfs_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, RAMFS_NAME, 0, 0, 0);
+    fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        fill_simple_result(out, EXT2_NAME, 0, 0, 0);
         0
     }
 
@@ -628,10 +628,10 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_heap_suite),
         };
-        static RAMFS_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-            name: RAMFS_NAME.as_ptr() as *const c_char,
+        static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: EXT2_NAME.as_ptr() as *const c_char,
             mask_bit: SUITE_SCHEDULER,
-            run: Some(run_ramfs_suite),
+            run: Some(run_ext2_suite),
         };
         static PRIVSEP_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: PRIVSEP_NAME.as_ptr() as *const c_char,
@@ -661,7 +661,7 @@ mod suites {
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
-        let _ = tests_register_suite(&RAMFS_SUITE_DESC);
+        let _ = tests_register_suite(&EXT2_SUITE_DESC);
         let _ = tests_register_suite(&PRIVSEP_SUITE_DESC);
         let _ = tests_register_suite(&CTX_SUITE_DESC);
         let _ = tests_register_suite(&ROULETTE_SUITE_DESC);

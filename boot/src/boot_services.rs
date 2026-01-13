@@ -2,6 +2,8 @@ use slopos_lib::{klog_debug, klog_info};
 
 use crate::early_init::{boot_init_priority, boot_mark_initialized};
 use slopos_core::{boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init};
+use slopos_fs::ext2_image::EXT2_IMAGE;
+use slopos_fs::ext2_init_with_image;
 use slopos_video::framebuffer::{framebuffer_is_initialized, get_display_info};
 
 fn boot_step_task_manager_init_wrapper() -> i32 {
@@ -14,6 +16,15 @@ fn boot_step_scheduler_init_wrapper() -> i32 {
 
 fn boot_step_idle_task_wrapper() -> i32 {
     boot_step_idle_task()
+}
+
+fn boot_step_fs_init() -> i32 {
+    if ext2_init_with_image(EXT2_IMAGE) != 0 {
+        klog_info!("FS: ext2 image init failed");
+        return -1;
+    }
+    klog_info!("FS: ext2 image mounted");
+    0
 }
 
 crate::boot_init_step_with_flags!(
@@ -38,6 +49,14 @@ crate::boot_init_step_with_flags!(
     b"idle task\0",
     boot_step_idle_task_wrapper,
     boot_init_priority(50)
+);
+
+crate::boot_init_step_with_flags!(
+    BOOT_STEP_FS_INIT,
+    services,
+    b"fs init\0",
+    boot_step_fs_init,
+    boot_init_priority(55)
 );
 
 fn boot_step_mark_kernel_ready_fn() {

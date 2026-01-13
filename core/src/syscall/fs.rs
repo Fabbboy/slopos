@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
-use core::ffi::{CStr, c_char, c_int, c_void};
-use core::{mem, ptr};
+use core::ffi::{c_char, c_int, c_void};
+use core::mem;
 
 use slopos_abi::task::Task;
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
@@ -13,14 +13,9 @@ use crate::syscall::common::{
 };
 use crate::syscall::context::SyscallContext;
 
-type RamfsNode = ramfs_node_t;
-
 use slopos_fs::fileio::{
-    file_close_fd, file_open_for_process, file_read_fd, file_unlink_path, file_write_fd,
-};
-use slopos_fs::ramfs::{
-    RAMFS_TYPE_DIRECTORY, RAMFS_TYPE_FILE, ramfs_acquire_node, ramfs_create_directory,
-    ramfs_get_size, ramfs_list_directory, ramfs_node_release, ramfs_node_t, ramfs_release_list,
+    file_close_fd, file_list_path, file_mkdir_path, file_open_for_process, file_read_fd,
+    file_stat_path, file_unlink_path, file_write_fd,
 };
 
 use slopos_mm::kernel_heap::{kfree, kmalloc};
@@ -118,23 +113,9 @@ define_syscall!(syscall_fs_stat(ctx, args) {
         return ctx.err();
     }
 
-    let node = ramfs_acquire_node(path.as_ptr());
-    if node.is_null() {
-        return ctx.err();
-    }
-
     let mut stat = UserFsStat { type_: 0, size: 0 };
-    unsafe {
-        stat.size = ramfs_get_size(node) as u32;
-        let kind = (*node).type_;
-        stat.type_ = if kind == RAMFS_TYPE_DIRECTORY {
-            1
-        } else if kind == RAMFS_TYPE_FILE {
-            0
-        } else {
-            0xFF
-        };
-        ramfs_node_release(node);
+    if file_stat_path(path.as_ptr(), &mut stat.type_, &mut stat.size) != 0 {
+        return ctx.err();
     }
 
     let stat_ptr = match UserPtr::<UserFsStat>::try_new(args.arg1) {
@@ -154,8 +135,7 @@ define_syscall!(syscall_fs_mkdir(ctx, args) {
         return ctx.err();
     }
 
-    let created = ramfs_create_directory(path.as_ptr());
-    if !created.is_null() {
+    if file_mkdir_path(path.as_ptr()) == 0 {
         ctx.ok(0)
     } else {
         ctx.err()
@@ -201,62 +181,23 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         return ctx.err();
     }
 
-    let mut entries: *mut *mut RamfsNode = ptr::null_mut();
-    let mut count: c_int = 0;
-    let rc = ramfs_list_directory(path.as_ptr(), &mut entries, &mut count);
-    if rc != 0 {
-        return ctx.err();
-    }
-
-    if count < 0 {
-        count = 0;
-    }
-    if (count as u32) > cap {
-        count = cap as c_int;
-    }
-
     let tmp_size = mem::size_of::<UserFsEntry>() * cap as usize;
     let tmp_ptr = kmalloc(tmp_size) as *mut UserFsEntry;
     if tmp_ptr.is_null() {
-        if !entries.is_null() {
-            ramfs_release_list(entries, count);
-            kfree(entries as *mut c_void);
-        }
         return ctx.err();
     }
     unsafe {
         core::ptr::write_bytes(tmp_ptr as *mut u8, 0, tmp_size);
     }
 
-    for i in 0..(count as usize) {
-        unsafe {
-            let entry_ptr = *entries.add(i);
-            let dst = &mut *tmp_ptr.add(i);
-            if entry_ptr.is_null() {
-                dst.type_ = 0;
-                dst.size = 0;
-                continue;
-            }
-
-            let cstr = CStr::from_ptr((*entry_ptr).name);
-            let name_bytes = cstr.to_bytes();
-            let nlen = name_bytes.len().min(dst.name.len());
-            for (dst_byte, src_byte) in dst.name[..nlen].iter_mut().zip(name_bytes[..nlen].iter()) {
-                *dst_byte = *src_byte;
-            }
-            if nlen < dst.name.len() {
-                dst.name[nlen] = 0;
-            }
-            dst.type_ = if (*entry_ptr).type_ == RAMFS_TYPE_DIRECTORY {
-                1
-            } else {
-                0
-            };
-            dst.size = (*entry_ptr).size as u32;
-        }
+    let mut count: u32 = 0;
+    let rc = file_list_path(path.as_ptr(), tmp_ptr, cap, &mut count);
+    if rc != 0 {
+        kfree(tmp_ptr as *mut c_void);
+        return ctx.err();
     }
 
-    list_hdr.count = count as u32;
+    list_hdr.count = count;
 
     let entries_bytes = unsafe {
         core::slice::from_raw_parts(
@@ -267,10 +208,6 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
     let entries_user = match UserBytes::try_new(list_hdr.entries as u64, entries_bytes.len()) {
         Ok(b) => b,
         Err(_) => {
-            if !entries.is_null() {
-                ramfs_release_list(entries, count);
-                kfree(entries as *mut c_void);
-            }
             kfree(tmp_ptr as *mut c_void);
             return ctx.err();
         }
@@ -282,10 +219,6 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         let hdr_ptr = match UserPtr::<UserFsList>::try_new(args.arg1) {
             Ok(p) => p,
             Err(_) => {
-                if !entries.is_null() {
-                    ramfs_release_list(entries, count);
-                    kfree(entries as *mut c_void);
-                }
                 kfree(tmp_ptr as *mut c_void);
                 return ctx.err();
             }
@@ -295,10 +228,6 @@ pub fn syscall_fs_list(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDi
         rc_entries.map(|_| ())
     };
 
-    if !entries.is_null() {
-        ramfs_release_list(entries, count);
-        kfree(entries as *mut c_void);
-    }
     kfree(tmp_ptr as *mut c_void);
 
     if rc_hdr.is_err() {

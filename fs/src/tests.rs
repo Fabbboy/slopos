@@ -1,198 +1,121 @@
 use core::ffi::c_int;
-use core::ptr;
 
 use slopos_lib::klog_info;
+use slopos_abi::fs::{USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry};
 
-use crate::ramfs::{
-    RAMFS_TYPE_DIRECTORY, ramfs_create_directory, ramfs_create_file, ramfs_find_node,
-    ramfs_get_root, ramfs_list_directory, ramfs_node_release, ramfs_node_t, ramfs_read_file,
-    ramfs_release_list, ramfs_write_file,
+use crate::ext2_image::EXT2_IMAGE;
+use crate::ext2_state::{
+    ext2_init_with_image, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink,
+    ext2_write,
 };
-
 fn as_c(path: &[u8]) -> *const i8 {
     path.as_ptr() as *const i8
 }
 
-fn expect_dir(path: &[u8]) -> bool {
-    let node = ramfs_find_node(as_c(path));
-    if node.is_null() {
-        return false;
-    }
-    let ok = unsafe { (*node).type_ == RAMFS_TYPE_DIRECTORY };
-    ramfs_node_release(node);
-    ok
-}
 
-fn test_root_node() -> c_int {
-    klog_info!("RAMFS_TEST: Verifying root node");
-    let root = ramfs_get_root();
-    if root.is_null() {
+fn test_ext2_init() -> c_int {
+    klog_info!("EXT2_TEST: init image");
+    if ext2_init_with_image(EXT2_IMAGE) != 0 {
         return -1;
     }
-    unsafe {
-        if (*root).type_ != RAMFS_TYPE_DIRECTORY || !(*root).parent.is_null() {
+    0
+}
+
+fn test_ext2_root() -> c_int {
+    klog_info!("EXT2_TEST: root stat");
+    let (kind, _size) = match ext2_stat(as_c(b"/\0")) {
+        Ok(stat) => stat,
+        Err(_) => return -1,
+    };
+    if kind != 1 {
+        return -1;
+    }
+    0
+}
+
+fn test_ext2_file_roundtrip() -> c_int {
+    klog_info!("EXT2_TEST: file roundtrip");
+    if ext2_mkdir(as_c(b"/itests\0")).is_err() {
+        return -1;
+    }
+    let flags = USER_FS_OPEN_READ | USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT;
+    let inode = match ext2_open(as_c(b"/itests/hello.txt\0"), flags) {
+        Ok(inode) => inode,
+        Err(_) => return -1,
+    };
+    let content = b"hello ext2";
+    if ext2_write(inode, 0, content).is_err() {
+        return -1;
+    }
+    let mut buf = [0u8; 32];
+    let read_len = match ext2_read(inode, 0, &mut buf) {
+        Ok(len) => len,
+        Err(_) => return -1,
+    };
+    if read_len != content.len() || &buf[..content.len()] != content {
+        return -1;
+    }
+    0
+}
+
+fn test_ext2_list() -> c_int {
+    klog_info!("EXT2_TEST: list directory");
+    let mut entries = [UserFsEntry::new(); 8];
+    let count = match ext2_list(as_c(b"/itests\0"), &mut entries) {
+        Ok(count) => count,
+        Err(_) => return -1,
+    };
+    let mut found = false;
+    for entry in entries.iter().take(count) {
+        if entry.name_str() == "hello.txt" {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return -1;
+    }
+    0
+}
+
+fn test_ext2_unlink() -> c_int {
+    klog_info!("EXT2_TEST: unlink file");
+    if ext2_unlink(as_c(b"/itests/hello.txt\0")).is_err() {
+        return -1;
+    }
+    let mut entries = [UserFsEntry::new(); 8];
+    let count = match ext2_list(as_c(b"/itests\0"), &mut entries) {
+        Ok(count) => count,
+        Err(_) => return -1,
+    };
+    for entry in entries.iter().take(count) {
+        if entry.name_str() == "hello.txt" {
             return -1;
         }
     }
     0
 }
 
-fn test_file_roundtrip() -> c_int {
-    klog_info!("RAMFS_TEST: file roundtrip");
-    let dir = ramfs_create_directory(as_c(b"/itests\0"));
-    if dir.is_null() || unsafe { (*dir).type_ } != RAMFS_TYPE_DIRECTORY {
-        return -1;
-    }
-    let file = ramfs_create_file(
-        as_c(b"/itests/hello.txt\0"),
-        b"hello".as_ptr() as *const _,
-        5,
-    );
-    if file.is_null() {
-        return -1;
-    }
-    let mut buf = [0u8; 16];
-    let mut read_len: usize = 0;
-    if ramfs_read_file(
-        as_c(b"/itests/hello.txt\0"),
-        buf.as_mut_ptr() as *mut _,
-        buf.len(),
-        &mut read_len as *mut usize,
-    ) != 0
-        || read_len != 5
-        || &buf[..5] != b"hello"
-    {
-        return -1;
-    }
-    0
-}
-
-fn test_write_updates_file() -> c_int {
-    klog_info!("RAMFS_TEST: overwrite path");
-    let content = b"goodbye world";
-    if ramfs_write_file(
-        as_c(b"/itests/hello.txt\0"),
-        content.as_ptr() as *const _,
-        content.len(),
-    ) != 0
-    {
-        return -1;
-    }
-    let node = ramfs_find_node(as_c(b"/itests/hello.txt\0"));
-    if node.is_null() {
-        return -1;
-    }
-    let size = unsafe { (*node).size };
-    ramfs_node_release(node);
-    if size != content.len() {
-        return -1;
-    }
-    let mut buf = [0u8; 32];
-    let mut read_len = 0usize;
-    if ramfs_read_file(
-        as_c(b"/itests/hello.txt\0"),
-        buf.as_mut_ptr() as *mut _,
-        buf.len(),
-        &mut read_len as *mut usize,
-    ) != 0
-        || read_len != content.len()
-        || &buf[..content.len()] != content
-    {
-        return -1;
-    }
-    0
-}
-
-fn test_nested_directories() -> c_int {
-    klog_info!("RAMFS_TEST: nested traversal");
-    let nested_dir = ramfs_create_directory(as_c(b"/itests/nested\0"));
-    if nested_dir.is_null() || unsafe { (*nested_dir).type_ } != RAMFS_TYPE_DIRECTORY {
-        return -1;
-    }
-    let nested_file = ramfs_create_file(
-        as_c(b"/itests/nested/file.txt\0"),
-        b"nested data".as_ptr() as *const _,
-        "nested data".len(),
-    );
-    if nested_file.is_null() {
-        return -1;
-    }
-
-    let via_dot = ramfs_find_node(as_c(b"/itests/nested/./file.txt\0"));
-    if via_dot != nested_file {
-        return -1;
-    }
-    if expect_dir(b"/itests/nested/../nested\0") == false {
-        return -1;
-    }
-    ramfs_node_release(nested_file);
-    0
-}
-
-fn test_list_directory() -> c_int {
-    klog_info!("RAMFS_TEST: list directory");
-    let mut entries_ptr: *mut *mut ramfs_node_t = ptr::null_mut();
-    let mut count: c_int = 0;
-    if ramfs_list_directory(
-        as_c(b"/itests\0"),
-        &mut entries_ptr as *mut *mut *mut ramfs_node_t,
-        &mut count as *mut c_int,
-    ) != 0
-    {
-        return -1;
-    }
-
-    let entries = entries_ptr;
-    let mut found_file = false;
-    let mut found_nested = false;
-    for idx in 0..(count as isize) {
-        let entry = unsafe { *entries.offset(idx) };
-        if entry.is_null() {
-            continue;
-        }
-        let name = unsafe {
-            let ptr = (*entry).name as *const u8;
-            let mut len = 0;
-            while *ptr.add(len) != 0 {
-                len += 1;
-            }
-            core::slice::from_raw_parts(ptr, len)
-        };
-        if name == b"hello.txt" {
-            found_file = true;
-        }
-        if name == b"nested" {
-            found_nested = true;
-        }
-    }
-    if !entries.is_null() {
-        ramfs_release_list(entries, count);
-    }
-    if !found_file || !found_nested {
-        return -1;
-    }
-    0
-}
-pub fn run_ramfs_tests() -> c_int {
-    klog_info!("RAMFS_TEST: running suite");
+pub fn run_ext2_tests() -> c_int {
+    klog_info!("EXT2_TEST: running suite");
     let mut passed = 0;
 
-    if test_root_node() == 0 {
+    if test_ext2_init() == 0 {
         passed += 1;
     }
-    if test_file_roundtrip() == 0 {
+    if test_ext2_root() == 0 {
         passed += 1;
     }
-    if test_write_updates_file() == 0 {
+    if test_ext2_file_roundtrip() == 0 {
         passed += 1;
     }
-    if test_nested_directories() == 0 {
+    if test_ext2_list() == 0 {
         passed += 1;
     }
-    if test_list_directory() == 0 {
+    if test_ext2_unlink() == 0 {
         passed += 1;
     }
 
-    klog_info!("RAMFS_TEST: {passed}/5 passed");
+    klog_info!("EXT2_TEST: {passed}/5 passed");
     passed
 }

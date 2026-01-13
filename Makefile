@@ -1,6 +1,6 @@
 # Convenience targets for building, booting, and testing SlopOS (Rust rewrite)
 
-.PHONY: setup build build-userland iso iso-notests iso-tests boot boot-log test clean distclean
+.PHONY: setup build build-userland fs-image iso iso-notests iso-tests boot boot-log test clean distclean
 
 BUILD_DIR ?= builddir
 CARGO ?= cargo
@@ -14,6 +14,10 @@ ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
 ISO_TESTS := $(BUILD_DIR)/slop-tests.iso
 LOG_FILE ?= test_output.log
+
+FS_IMAGE_DIR := fs/assets
+FS_IMAGE := $(FS_IMAGE_DIR)/ext2.img
+FS_IMAGE_SIZE ?= 8M
 
 BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
@@ -199,7 +203,7 @@ build-userland:
 	fi; \
 	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf"
 
-build: build-userland
+build: fs-image build-userland
 	@$(call build_kernel)
 
 iso: build
@@ -208,9 +212,23 @@ iso: build
 iso-notests: build
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
-iso-tests:
+iso-tests: fs-image
 	@$(call build_kernel,slopos-drivers/qemu-exit)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
+
+fs-image: $(FS_IMAGE)
+
+$(FS_IMAGE):
+	@mkdir -p $(FS_IMAGE_DIR)
+	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
+		echo "mkfs.ext2 is required to create $(FS_IMAGE)" >&2; \
+		exit 1; \
+	fi
+	@if [ ! -f "$@" ]; then \
+		echo "Creating ext2 image at $@ ($(FS_IMAGE_SIZE))"; \
+		truncate -s $(FS_IMAGE_SIZE) "$@"; \
+		mkfs.ext2 -F "$@" >/dev/null; \
+	fi
 
 boot: iso-notests
 	@set -e; \
