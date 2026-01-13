@@ -127,6 +127,36 @@ fn acknowledge_irq() {
     (platform::platform().irq_send_eoi)();
 }
 
+/// Mask an IRQ line at hardware level only (for use during IRQ handling).
+#[inline]
+fn mask_irq_hw(irq: u8) {
+    let gsi = with_irq_tables(|_, routes| {
+        if routes[irq as usize].via_ioapic {
+            Some(routes[irq as usize].gsi)
+        } else {
+            None
+        }
+    });
+    if let Some(gsi) = gsi {
+        (platform::platform().irq_mask_gsi)(gsi);
+    }
+}
+
+/// Unmask an IRQ line at hardware level only (for use during IRQ handling).
+#[inline]
+fn unmask_irq_hw(irq: u8) {
+    let gsi = with_irq_tables(|_, routes| {
+        if routes[irq as usize].via_ioapic {
+            Some(routes[irq as usize].gsi)
+        } else {
+            None
+        }
+    });
+    if let Some(gsi) = gsi {
+        (platform::platform().irq_unmask_gsi)(gsi);
+    }
+}
+
 /// Mask an IRQ line.
 pub fn mask_irq_line(irq: u8) {
     if irq as usize >= IRQ_LINES {
@@ -387,7 +417,11 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
         return;
     };
 
+    mask_irq_hw(irq);
+
     handler(irq, frame, context);
+
+    unmask_irq_hw(irq);
 
     if frame_ref.cs != expected_cs || frame_ref.rip != expected_rip {
         klog_info!("IRQ: Frame corruption detected on IRQ {} - aborting", irq);

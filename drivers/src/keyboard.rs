@@ -191,12 +191,6 @@ pub fn keyboard_init() {
     }
 }
 pub fn keyboard_handle_scancode(scancode: u8) {
-    let flags = cpu::save_flags_cli();
-    keyboard_handle_scancode_inner(scancode);
-    cpu::restore_flags(flags);
-}
-
-fn keyboard_handle_scancode_inner(scancode: u8) {
     klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
     if scancode == 0xE0 {

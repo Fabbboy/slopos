@@ -188,6 +188,7 @@ pub mod service_macro;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
+pub mod sync;
 pub mod wl_currency;
 
 #[doc(hidden)]
@@ -207,3 +208,7 @@ pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
+pub use sync::{
+    CleanLockToken, L0, L1, L2, L3, L4, L5, Level, LockToken, Lower, Mutex as OrderedMutex,
+    MutexGuard as OrderedMutexGuard,
+};

@@ -142,12 +142,6 @@ fn get_timestamp_ms() -> u64 {
 }
 
 pub fn mouse_handle_irq(scancode: u8) {
-    let flags = cpu::save_flags_cli();
-    mouse_handle_irq_inner(scancode);
-    cpu::restore_flags(flags);
-}
-
-fn mouse_handle_irq_inner(scancode: u8) {
     unsafe {
         let state = &raw mut MOUSE_STATE;
         let byte_num = (*state).packet_byte;
