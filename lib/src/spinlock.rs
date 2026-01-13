@@ -45,27 +45,27 @@ impl<T> IrqMutex<T> {
 
     /// Acquire the lock, disabling interrupts. Returns a guard that releases
     /// the lock and restores interrupt state on drop.
+    ///
+    /// # Safety Note
+    /// Interrupts remain disabled while spinning for the lock. This prevents
+    /// nested interrupt storms that can cause stack overflow when IRQ handlers
+    /// contend for locks (e.g., rapid keyboard input causing nested IRQs that
+    /// each push ~500 bytes onto the stack).
     #[inline]
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
         // Save flags and disable interrupts BEFORE trying to acquire lock
         let saved_flags = read_rflags();
         cpu::disable_interrupts();
 
-        // Now spin to acquire the lock (interrupts are off, so no deadlock risk)
+        // Spin to acquire the lock with interrupts disabled.
+        // DO NOT re-enable interrupts while spinning - this prevents nested
+        // interrupt storms that can overflow the kernel stack.
         while self
             .lock
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            // Re-enable interrupts briefly while spinning to avoid missing
-            // critical interrupts for too long, then disable again
-            if saved_flags & (1 << 9) != 0 {
-                cpu::enable_interrupts();
-                spin_loop();
-                cpu::disable_interrupts();
-            } else {
-                spin_loop();
-            }
+            spin_loop();
         }
 
         IrqMutexGuard {
