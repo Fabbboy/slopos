@@ -14,8 +14,8 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 - [x] **No FPU state save** - SSE/AVX registers corrupted across task switches *(Fixed: added FXSAVE/FXRSTOR to context switch)*
 - [ ] **No TLB shootdown** - Will cause memory corruption on SMP
-- [ ] **Syscall table overflow** - Potential code execution if sysno >= 128
-- [ ] **ELF loader validation** - Insufficient input validation
+- [x] **Syscall table overflow** - Potential code execution if sysno >= 128 *(Fixed: syscall_lookup() bounds-checks against SYSCALL_TABLE.len())*
+- [x] **ELF loader validation** - Insufficient input validation *(Fixed: comprehensive ElfValidator with bounds checking, overflow prevention, segment overlap detection, and address space validation)*
 
 ### P1 - Performance
 

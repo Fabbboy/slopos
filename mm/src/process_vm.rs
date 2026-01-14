@@ -4,6 +4,7 @@ use core::ptr;
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
 
+use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
@@ -692,276 +693,82 @@ pub fn process_vm_load_elf(
     payload_len: usize,
     entry_out: *mut u64,
 ) -> c_int {
-    if payload.is_null() || payload_len < 64 || process_id == INVALID_PROCESS_ID {
+    if payload.is_null() || process_id == INVALID_PROCESS_ID {
         return -1;
     }
 
-    #[repr(C)]
-    struct Elf64Ehdr {
-        ident: [u8; 16],
-        e_type: u16,
-        e_machine: u16,
-        e_version: u32,
-        e_entry: u64,
-        e_phoff: u64,
-        e_shoff: u64,
-        e_flags: u32,
-        e_ehsize: u16,
-        e_phentsize: u16,
-        e_phnum: u16,
-        e_shentsize: u16,
-        e_shnum: u16,
-        e_shstrndx: u16,
-    }
+    let data = unsafe { core::slice::from_raw_parts(payload, payload_len) };
 
-    #[repr(C)]
-    struct Elf64Phdr {
-        p_type: u32,
-        p_flags: u32,
-        p_offset: u64,
-        p_vaddr: u64,
-        p_paddr: u64,
-        p_filesz: u64,
-        p_memsz: u64,
-        p_align: u64,
+    match process_vm_load_elf_validated(process_id, data, entry_out) {
+        Ok(()) => 0,
+        Err(e) => {
+            klog_info!("ELF load failed: {}", e);
+            -1
+        }
     }
+}
 
-    const PT_LOAD: u32 = 1;
-    const PF_W: u32 = 0x2;
+fn process_vm_load_elf_validated(
+    process_id: u32,
+    data: &[u8],
+    entry_out: *mut u64,
+) -> Result<(), ElfError> {
+    let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
 
-    // Safety: payload points to in-kernel memory provided by caller.
-    let ehdr = unsafe { &*(payload as *const Elf64Ehdr) };
-    if &ehdr.ident[0..4] != b"\x7fELF"
-        || ehdr.ident[4] != 2
-        || ehdr.e_machine != 0x3E
-        || ehdr.e_phoff == 0
-        || ehdr.e_phnum == 0
-    {
-        return -1;
-    }
+    let validator = ElfValidator::new(data)?.with_load_base(code_base);
+    let header = validator.header();
+
+    let (segments, segment_count) = validator.validate_load_segments()?;
+    let segments = &segments[..segment_count];
 
     let process = find_process_vm(process_id);
     if process.is_null() {
-        return -1;
+        return Err(ElfError::NullPointer);
     }
     let page_dir = unsafe { (*process).page_dir };
     if page_dir.is_null() {
-        return -1;
+        return Err(ElfError::NullPointer);
     }
 
-    // Unmap any existing code region at the payload VMA to avoid overlaps.
-    let code_base = crate::mm_constants::PROCESS_CODE_START_VA;
-    let code_limit = code_base + 0x100000; // generous 1 MiB window for this payload
-    // Unmap a larger range to ensure we clear any existing mappings
-    unmap_user_range(page_dir, code_base - 0x100000, code_limit + 0x100000);
+    let (min_vaddr, needs_reloc) = calculate_load_offset(segments, code_base);
 
-    let ph_size = ehdr.e_phentsize as usize;
-    let ph_num = ehdr.e_phnum as usize;
-    let ph_off = ehdr.e_phoff as usize;
-    if ph_off + ph_num * ph_size > payload_len {
-        return -1;
-    }
+    unmap_existing_code_region(page_dir, code_base);
 
-    // Track section mappings for relocation: (kernel_va, kernel_va_end, user_va)
-    // ELF binaries may be linked at kernel VAs, but we load them at user space addresses
-    // kernel_va is the p_vaddr from the ELF, user_va is where we actually map it
-    let mut section_mappings: [(u64, u64, u64); 8] = [(0, 0, 0); 8];
+    let mut section_mappings: [(u64, u64, u64); MAX_LOAD_SEGMENTS] = [(0, 0, 0); MAX_LOAD_SEGMENTS];
     let mut mapping_count = 0usize;
-
-    // Find the lowest p_vaddr to calculate offset for user space mapping
-    let mut min_vaddr = u64::MAX;
-    for i in 0..ph_num {
-        let ph_ptr = unsafe { payload.add(ph_off + i * ph_size) as *const Elf64Phdr };
-        let ph = unsafe { &*ph_ptr };
-        if ph.p_type == PT_LOAD && ph.p_vaddr < min_vaddr {
-            min_vaddr = ph.p_vaddr;
-        }
-    }
-
-    // If min_vaddr is a kernel VA, we'll map at user space instead
-    // Calculate offset from min_vaddr to code_base
-    const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-    let vaddr_offset = if min_vaddr >= KERNEL_BASE {
-        // Kernel VA -> user space: offset = code_base - (min_vaddr - KERNEL_BASE)
-        // = code_base - min_vaddr + KERNEL_BASE
-        code_base.wrapping_add(KERNEL_BASE).wrapping_sub(min_vaddr)
-    } else if min_vaddr >= code_base {
-        // Already in user space, use as-is
-        0
-    } else {
-        // Below user space, offset to code_base
-        code_base.wrapping_sub(min_vaddr)
-    };
-
     let mut mapped_pages: u32 = 0;
-    for i in 0..ph_num {
-        let ph_ptr = unsafe { payload.add(ph_off + i * ph_size) as *const Elf64Phdr };
-        let ph = unsafe { &*ph_ptr };
-        if ph.p_type != PT_LOAD {
-            continue;
-        }
-        let seg_start = ph.p_vaddr;
-        let seg_end = ph.p_vaddr.saturating_add(ph.p_memsz);
-        if seg_end <= seg_start {
-            continue;
-        }
 
-        // Map at user space address, not the ELF's p_vaddr
-        // For kernel VAs, calculate: user_addr = kernel_addr - KERNEL_BASE + code_base
-        let user_seg_start = if seg_start >= KERNEL_BASE {
-            let offset_from_kernel_base = seg_start.wrapping_sub(KERNEL_BASE);
-            code_base.wrapping_add(offset_from_kernel_base)
-        } else {
-            seg_start.wrapping_add(vaddr_offset)
-        };
-        let user_seg_end = if seg_end >= KERNEL_BASE {
-            let offset_from_kernel_base = seg_end.wrapping_sub(KERNEL_BASE);
-            code_base.wrapping_add(offset_from_kernel_base)
-        } else {
-            seg_end.wrapping_add(vaddr_offset)
-        };
+    for segment in segments.iter() {
+        let user_start = translate_address(segment.original_vaddr, min_vaddr, code_base);
+        let user_end = translate_address(
+            segment.original_vaddr + segment.mem_size,
+            min_vaddr,
+            code_base,
+        );
 
-        let map_flags = if (ph.p_flags & PF_W) != 0 {
-            PageFlags::USER_RW.bits()
-        } else {
-            PageFlags::USER_RO.bits()
-        };
-
-        let page_start = align_down(user_seg_start as usize, PAGE_SIZE_4KB as usize) as u64;
-        let page_end = align_up(user_seg_end as usize, PAGE_SIZE_4KB as usize) as u64;
-
-        // Record mapping for relocation (use p_vaddr as kernel VA, user_seg_start as user VA)
         if mapping_count < section_mappings.len() {
-            section_mappings[mapping_count] = (seg_start, seg_end, user_seg_start);
+            section_mappings[mapping_count] = (
+                segment.original_vaddr,
+                segment.original_vaddr + segment.mem_size,
+                user_start,
+            );
             mapping_count += 1;
         }
 
-        let mut dst = page_start;
-        let mut pages_mapped_seg = 0u32;
-        while dst < page_end {
-            // Check if this page is already mapped (from a previous segment)
-            let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(dst));
-            let phys = if !existing_phys.is_null() {
-                // Page already mapped, reuse it (for overlapping segments)
-                // But we still need to copy the data for this segment's portion
-                if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
-                    let _ = paging_mark_range_user(
-                        page_dir,
-                        VirtAddr::new(dst),
-                        VirtAddr::new(dst + PAGE_SIZE_4KB),
-                        1,
-                    );
-                }
-                existing_phys
-            } else {
-                // Allocate new page
-                let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
-                if new_phys.is_null() {
-                    return -1;
-                }
-                if map_page_4kb_in_dir(page_dir, VirtAddr::new(dst), new_phys, map_flags) != 0 {
-                    free_page_frame(new_phys);
-                    return -1;
-                }
-                pages_mapped_seg += 1;
-                new_phys
-            };
-            let dest_virt = phys.to_virt();
-            if dest_virt.is_null() {
-                if existing_phys.is_null() {
-                    free_page_frame(phys);
-                }
-                return -1;
-            }
-
-            // Copy file-backed portion that falls within this page.
-            let page_end = dst.wrapping_add(PAGE_SIZE_4KB as u64);
-            let seg_file_end = user_seg_start.wrapping_add(ph.p_filesz);
-            let seg_mem_end = user_seg_start.wrapping_add(ph.p_memsz);
-
-            let copy_start = core::cmp::max(dst, user_seg_start);
-            let copy_end = core::cmp::min(page_end, seg_file_end);
-            if copy_start < copy_end {
-                let page_off_in_seg = copy_start - user_seg_start;
-                let dest_off = (copy_start - dst) as usize;
-                let copy_len = (copy_end - copy_start) as usize;
-                let src_off = (ph.p_offset + page_off_in_seg) as usize;
-                if src_off < payload_len && src_off + copy_len <= payload_len {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            payload.add(src_off),
-                            dest_virt.as_mut_ptr::<u8>().add(dest_off),
-                            copy_len,
-                        );
-                    }
-                }
-            }
-
-            // Zero-fill BSS region that falls within this page (if any).
-            if seg_mem_end > seg_file_end {
-                let zero_start = core::cmp::max(dst, seg_file_end);
-                let zero_end = core::cmp::min(page_end, seg_mem_end);
-                if zero_start < zero_end {
-                    let zero_off = (zero_start - dst) as usize;
-                    let zero_len = (zero_end - zero_start) as usize;
-                    unsafe {
-                        core::ptr::write_bytes(
-                            dest_virt.as_mut_ptr::<u8>().add(zero_off),
-                            0,
-                            zero_len,
-                        );
-                    }
-                }
-            }
-
-            dst += PAGE_SIZE_4KB;
-        }
-        mapped_pages += pages_mapped_seg;
+        let pages = load_segment_pages(page_dir, data, segment, user_start, user_end)?;
+        mapped_pages = mapped_pages.saturating_add(pages);
     }
 
-    // Apply relocations after all segments are loaded
-    // For static binaries, symbols are typically absolute addresses in the ELF's VAs
-    // We need to map those to the actual user VAs where we loaded the segments
-    // However, if the binary is already linked at the correct address (0x400000),
-    // and we're loading it at that same address, relocations are already correct
-    // and we should skip applying them to avoid corrupting the code.
-    // Check if we're loading at the link address - if so, skip relocations
-    let needs_reloc = if min_vaddr >= KERNEL_BASE {
-        // Kernel VA -> user space mapping needed
-        true
-    } else if min_vaddr != code_base {
-        // Different address, needs relocation
-        true
-    } else {
-        // Same address, relocations already correct
-        false
-    };
-
     if needs_reloc {
-        let _reloc_result = apply_elf_relocations(
-            payload,
-            payload_len,
+        let _ = apply_elf_relocations(
+            data.as_ptr(),
+            data.len(),
             page_dir,
             &section_mappings[..mapping_count],
         );
-        // Continue even if relocations fail - some ELF files might not have relocations
     }
 
-    // Update entry point to user space address
-    // Entry point in ELF is at kernel VA, we need to map it to user space
-    let user_entry = if ehdr.e_entry >= KERNEL_BASE {
-        // Entry point is kernel VA: user_addr = kernel_addr - KERNEL_BASE + code_base
-        // Calculate offset from kernel base: offset = kernel_addr - KERNEL_BASE
-        let offset_from_kernel_base = ehdr.e_entry.wrapping_sub(KERNEL_BASE);
-        code_base.wrapping_add(offset_from_kernel_base)
-    } else if ehdr.e_entry >= code_base {
-        // Already in user space
-        ehdr.e_entry
-    } else {
-        // Below user space, calculate offset from min_vaddr
-        let offset_from_min = ehdr.e_entry.wrapping_sub(min_vaddr);
-        code_base.wrapping_add(offset_from_min)
-    };
+    let user_entry = translate_address(header.e_entry, min_vaddr, code_base);
 
     unsafe {
         (*process).total_pages = (*process).total_pages.saturating_add(mapped_pages);
@@ -969,7 +776,144 @@ pub fn process_vm_load_elf(
             *entry_out = user_entry;
         }
     }
-    0
+
+    Ok(())
+}
+
+const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+fn calculate_load_offset(segments: &[ValidatedSegment], code_base: u64) -> (u64, bool) {
+    let min_vaddr = segments.iter().map(|s| s.original_vaddr).min().unwrap_or(0);
+
+    let needs_reloc = min_vaddr >= KERNEL_BASE || min_vaddr != code_base;
+    (min_vaddr, needs_reloc)
+}
+
+fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
+    if addr >= KERNEL_BASE {
+        let offset = addr.wrapping_sub(KERNEL_BASE);
+        code_base.wrapping_add(offset)
+    } else if min_vaddr >= KERNEL_BASE {
+        let offset = addr.wrapping_sub(min_vaddr);
+        code_base.wrapping_add(offset)
+    } else if min_vaddr < code_base {
+        addr.wrapping_add(code_base.wrapping_sub(min_vaddr))
+    } else {
+        addr
+    }
+}
+
+fn unmap_existing_code_region(page_dir: *mut ProcessPageDir, code_base: u64) {
+    let code_limit = code_base + 0x100000;
+    unmap_user_range(
+        page_dir,
+        code_base.saturating_sub(0x100000),
+        code_limit + 0x100000,
+    );
+}
+
+fn load_segment_pages(
+    page_dir: *mut ProcessPageDir,
+    data: &[u8],
+    segment: &ValidatedSegment,
+    user_start: u64,
+    user_end: u64,
+) -> Result<u32, ElfError> {
+    let map_flags = if (segment.flags & PF_W) != 0 {
+        PageFlags::USER_RW.bits()
+    } else {
+        PageFlags::USER_RO.bits()
+    };
+
+    let page_start = align_down(user_start as usize, PAGE_SIZE_4KB as usize) as u64;
+    let page_end = align_up(user_end as usize, PAGE_SIZE_4KB as usize) as u64;
+
+    let mut dst = page_start;
+    let mut pages_mapped = 0u32;
+
+    while dst < page_end {
+        let existing_phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(dst));
+        let phys = if !existing_phys.is_null() {
+            if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
+                let _ = paging_mark_range_user(
+                    page_dir,
+                    VirtAddr::new(dst),
+                    VirtAddr::new(dst + PAGE_SIZE_4KB),
+                    1,
+                );
+            }
+            existing_phys
+        } else {
+            let new_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+            if new_phys.is_null() {
+                return Err(ElfError::NullPointer);
+            }
+            if map_page_4kb_in_dir(page_dir, VirtAddr::new(dst), new_phys, map_flags) != 0 {
+                free_page_frame(new_phys);
+                return Err(ElfError::NullPointer);
+            }
+            pages_mapped += 1;
+            new_phys
+        };
+
+        let dest_virt = phys.to_virt();
+        if dest_virt.is_null() {
+            if existing_phys.is_null() {
+                free_page_frame(phys);
+            }
+            return Err(ElfError::NullPointer);
+        }
+
+        copy_segment_page_data(data, segment, dst, user_start, dest_virt.as_mut_ptr());
+
+        dst += PAGE_SIZE_4KB;
+    }
+
+    Ok(pages_mapped)
+}
+
+fn copy_segment_page_data(
+    data: &[u8],
+    segment: &ValidatedSegment,
+    page_va: u64,
+    user_seg_start: u64,
+    dest_ptr: *mut u8,
+) {
+    let page_end_va = page_va.wrapping_add(PAGE_SIZE_4KB);
+    let seg_file_end = user_seg_start.wrapping_add(segment.file_size);
+    let seg_mem_end = user_seg_start.wrapping_add(segment.mem_size);
+
+    let copy_start = core::cmp::max(page_va, user_seg_start);
+    let copy_end = core::cmp::min(page_end_va, seg_file_end);
+
+    if copy_start < copy_end {
+        let page_off_in_seg = copy_start - user_seg_start;
+        let dest_off = (copy_start - page_va) as usize;
+        let copy_len = (copy_end - copy_start) as usize;
+        let src_off = segment.file_offset.wrapping_add(page_off_in_seg) as usize;
+
+        if src_off < data.len() && src_off.saturating_add(copy_len) <= data.len() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_off),
+                    dest_ptr.add(dest_off),
+                    copy_len,
+                );
+            }
+        }
+    }
+
+    if seg_mem_end > seg_file_end {
+        let zero_start = core::cmp::max(page_va, seg_file_end);
+        let zero_end = core::cmp::min(page_end_va, seg_mem_end);
+        if zero_start < zero_end {
+            let zero_off = (zero_start - page_va) as usize;
+            let zero_len = (zero_end - zero_start) as usize;
+            unsafe {
+                core::ptr::write_bytes(dest_ptr.add(zero_off), 0, zero_len);
+            }
+        }
+    }
 }
 pub fn create_process_vm() -> u32 {
     let layout = unsafe { &*mm_get_process_layout() };
