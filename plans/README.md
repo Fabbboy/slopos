@@ -20,7 +20,7 @@ This directory contains architectural analysis, comparisons, and improvement roa
 ### P1 - Performance
 
 - [ ] **No per-CPU page caches** - Global lock contention on every allocation
-- [ ] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(SYSCALL/SYSRET attempted but caused freeze after roulette - reverted, needs investigation)*
+- [x] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(Fixed: SYSCALL/SYSRET fast path with SWAPGS, per-CPU kernel stack, canonical address validation)*
 - [ ] **O(n) VMA lookup** - Linked list doesn't scale
 - [ ] **Priority field unused** - Scheduler ignores task priorities
 
