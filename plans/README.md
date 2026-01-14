@@ -12,7 +12,7 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ### P0 - Critical (Fix Immediately)
 
-- [ ] **No FPU state save** - SSE/AVX registers corrupted across task switches
+- [x] **No FPU state save** - SSE/AVX registers corrupted across task switches *(Fixed: added FXSAVE/FXRSTOR to context switch)*
 - [ ] **No TLB shootdown** - Will cause memory corruption on SMP
 - [ ] **Syscall table overflow** - Potential code execution if sysno >= 128
 - [ ] **ELF loader validation** - Insufficient input validation

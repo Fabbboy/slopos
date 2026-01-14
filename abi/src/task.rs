@@ -41,6 +41,7 @@ pub const TASK_PRIORITY_IDLE: u8 = 3;
 // =============================================================================
 
 pub const TASK_FLAG_USER_MODE: u16 = 0x01;
+pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
 pub const TASK_FLAG_KERNEL_MODE: u16 = 0x02;
 pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
@@ -117,6 +118,60 @@ impl TaskContext {
 }
 
 // =============================================================================
+// FpuState - FPU/SSE register state for context switching
+// =============================================================================
+
+pub const FPU_STATE_SIZE: usize = 512;
+pub const MXCSR_DEFAULT: u32 = 0x1F80;
+
+// FXSAVE area offsets (Intel SDM Vol. 1, Table 10-2)
+const FXSAVE_FCW_OFFSET: usize = 0;
+const FXSAVE_MXCSR_OFFSET: usize = 24;
+
+/// FXSAVE area for x87/MMX/SSE state. Must be 16-byte aligned.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct FpuState {
+    pub data: [u8; FPU_STATE_SIZE],
+}
+
+impl FpuState {
+    pub const fn zero() -> Self {
+        Self {
+            data: [0u8; FPU_STATE_SIZE],
+        }
+    }
+
+    /// Initialize with default FCW (0x037F) and MXCSR (0x1F80) - all exceptions masked.
+    pub const fn new() -> Self {
+        let mut state = Self::zero();
+        // FCW: exceptions masked, 64-bit precision, round-to-nearest
+        state.data[FXSAVE_FCW_OFFSET] = 0x7F;
+        state.data[FXSAVE_FCW_OFFSET + 1] = 0x03;
+        // MXCSR: SSE exceptions masked, round-to-nearest
+        state.data[FXSAVE_MXCSR_OFFSET] = 0x80;
+        state.data[FXSAVE_MXCSR_OFFSET + 1] = 0x1F;
+        state
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.data.as_ptr()
+    }
+
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
+    }
+}
+
+impl Default for FpuState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // Task Exit/Fault Reason Enums
 // =============================================================================
 
@@ -144,10 +199,18 @@ pub enum TaskFaultReason {
 }
 
 // =============================================================================
+// Task Struct Layout Constants (for assembly access)
+// =============================================================================
+
+// Offset from &Task.context to &Task.fpu_state
+// TaskContext is 200 bytes (packed), FpuState needs 16-byte alignment
+// So there's 8 bytes padding: 200 + 8 = 208 (0xD0)
+pub const TASK_FPU_OFFSET_FROM_CONTEXT: usize = 0xD0;
+
+// =============================================================================
 // Task Struct
 // =============================================================================
 
-/// Task control block containing all task state.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Task {
@@ -166,6 +229,7 @@ pub struct Task {
     pub entry_point: u64,
     pub entry_arg: *mut c_void,
     pub context: TaskContext,
+    pub fpu_state: FpuState,
     pub time_slice: u64,
     pub time_slice_remaining: u64,
     pub total_runtime: u64,
@@ -203,6 +267,7 @@ impl Task {
             entry_point: 0,
             entry_arg: ptr::null_mut(),
             context: TaskContext::zero(),
+            fpu_state: FpuState::new(),
             time_slice: 0,
             time_slice_remaining: 0,
             total_runtime: 0,

@@ -7,29 +7,31 @@
 .section .text
 .global context_switch
 
+# FPU state offset from TaskContext pointer (TaskContext is 200 bytes, +8 padding for 16-byte alignment)
+.equ FPU_STATE_OFFSET, 0xD0
+
 #
 # context_switch(void *old_context, void *new_context)
 #   rdi = old_context (may be NULL)
 #   rsi = new_context (must not be NULL)
-# Saves the current CPU state into old_context and restores the state from
-# new_context, then returns into new_context->rip. Uses RET to avoid consuming
-# a general-purpose register for the branch target.
 #
-# Context layout (task_context_t):
-#   0x00 rax  0x08 rbx  0x10 rcx  0x18 rdx
-#   0x20 rsi  0x28 rdi  0x30 rbp  0x38 rsp
-#   0x40 r8   0x48 r9   0x50 r10  0x58 r11
-#   0x60 r12  0x68 r13  0x70 r14  0x78 r15
-#   0x80 rip  0x88 rflags
-#   0x90 cs   0x98 ds   0xA0 es   0xA8 fs   0xB0 gs   0xB8 ss
-#   0xC0 cr3
+# Context layout (TaskContext, 200 bytes):
+#   0x00-0x78: GPRs (rax-r15)
+#   0x80: rip, 0x88: rflags
+#   0x90-0xB8: segment registers
+#   0xC0: cr3
+# FPU state at offset 0xD0 from context pointer (512 bytes, 16-byte aligned)
 #
 
 context_switch:
-    /* Save current context if provided */
     test    %rdi, %rdi
     jz      .Lctx_load
 
+    # Save FPU/SSE state first (before we clobber any XMM regs)
+    leaq    FPU_STATE_OFFSET(%rdi), %rax
+    fxsave64 (%rax)
+
+    # Save GPRs
     movq    %rax, 0x00(%rdi)
     movq    %rbx, 0x08(%rdi)
     movq    %rcx, 0x10(%rdi)
@@ -47,7 +49,7 @@ context_switch:
     movq    %r14, 0x70(%rdi)
     movq    %r15, 0x78(%rdi)
 
-    movq    (%rsp), %rax            /* return address -> rip */
+    movq    (%rsp), %rax
     movq    %rax, 0x80(%rdi)
 
     pushfq
@@ -71,9 +73,9 @@ context_switch:
     movq    %rax, 0xC0(%rdi)
 
 .Lctx_load:
-    movq    %rsi, %r15              /* new_context base */
+    movq    %rsi, %r15
 
-    /* Switch CR3 if needed */
+    # Switch CR3 if needed
     movq    0xC0(%r15), %rax
     movq    %cr3, %rdx
     cmpq    %rax, %rdx
@@ -81,7 +83,11 @@ context_switch:
     movq    %rax, %cr3
 .Lctx_cr3_done:
 
-    /* Segments (CS remains unchanged for kernel switches) */
+    # Restore FPU/SSE state before loading GPRs
+    leaq    FPU_STATE_OFFSET(%r15), %rax
+    fxrstor64 (%rax)
+
+    # Segments
     movq    0x98(%r15), %rax
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
@@ -93,7 +99,7 @@ context_switch:
     movq    0xB8(%r15), %rax
     movw    %ax, %ss
 
-    /* General purpose registers (except rsp) */
+    # GPRs
     movq    0x00(%r15), %rax
     movq    0x08(%r15), %rbx
     movq    0x10(%r15), %rcx
@@ -109,16 +115,15 @@ context_switch:
     movq    0x68(%r15), %r13
     movq    0x70(%r15), %r14
 
-    /* RFLAGS from context */
+    # RFLAGS
     movq    0x88(%r15), %rax
     pushq   %rax
     popfq
 
-    /* Stack pointer and return target */
+    # Stack and return
     movq    0x38(%r15), %rsp
-    pushq   0x80(%r15)              /* push rip onto new stack */
+    pushq   0x80(%r15)
 
-    /* Restore r15 last */
     movq    0x78(%r15), %r15
 
     retq
@@ -126,14 +131,17 @@ context_switch:
 #
 # context_switch_user(void *old_context, void *new_context)
 # Save kernel context (if provided) and enter user mode via IRETQ.
-# new_context must contain user selectors for CS/SS.
 #
 .global context_switch_user
 context_switch_user:
-    /* Save current context if provided */
     test    %rdi, %rdi
     jz      .Lctx_user_load
 
+    # Save FPU/SSE state first
+    leaq    FPU_STATE_OFFSET(%rdi), %rax
+    fxsave64 (%rax)
+
+    # Save GPRs
     movq    %rax, 0x00(%rdi)
     movq    %rbx, 0x08(%rdi)
     movq    %rcx, 0x10(%rdi)
@@ -175,21 +183,21 @@ context_switch_user:
     movq    %rax, 0xC0(%rdi)
 
 .Lctx_user_load:
-    movq    %rsi, %r15              /* new_context base */
+    movq    %rsi, %r15
 
-    /* Build IRET frame on kernel stack (target RSP/SS are user values) */
-    movq    0xB8(%r15), %rax        /* ss */
+    # Build IRET frame
+    movq    0xB8(%r15), %rax
     pushq   %rax
-    movq    0x38(%r15), %rax        /* user rsp */
+    movq    0x38(%r15), %rax
     pushq   %rax
-    movq    0x88(%r15), %rax        /* rflags */
+    movq    0x88(%r15), %rax
     pushq   %rax
-    movq    0x90(%r15), %rax        /* cs */
+    movq    0x90(%r15), %rax
     pushq   %rax
-    movq    0x80(%r15), %rax        /* rip */
+    movq    0x80(%r15), %rax
     pushq   %rax
 
-    /* Switch CR3 to user address space if needed */
+    # Switch CR3
     movq    0xC0(%r15), %rax
     movq    %cr3, %rdx
     cmpq    %rax, %rdx
@@ -197,7 +205,11 @@ context_switch_user:
     movq    %rax, %cr3
 .Lctx_user_cr3_done:
 
-    /* User data segments (CS/SS via IRET frame) */
+    # Restore FPU/SSE state
+    leaq    FPU_STATE_OFFSET(%r15), %rax
+    fxrstor64 (%rax)
+
+    # Segments
     movq    0x98(%r15), %rax
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
@@ -207,7 +219,7 @@ context_switch_user:
     movq    0xB0(%r15), %rax
     movw    %ax, %gs
 
-    /* General purpose registers */
+    # GPRs
     movq    0x00(%r15), %rax
     movq    0x08(%r15), %rbx
     movq    0x10(%r15), %rcx
@@ -227,52 +239,53 @@ context_switch_user:
     iretq
 
 #
-# Alternative simplified context switch for debugging
-# Uses simple jmp instead of full iret mechanism
+# Simplified context switch for debugging (uses jmp instead of iret)
 #
 .global simple_context_switch
 simple_context_switch:
-    # Save actual RDI and RSI register values before using them as context pointers
-    # Use R8 and R9 as temporary storage for the context pointers
-    movq    %rdi, %r8               # Save old_context pointer to r8
-    movq    %rsi, %r9               # Save new_context pointer to r9
+    movq    %rdi, %r8
+    movq    %rsi, %r9
 
-    # Check if we need to save old context
-    test    %r8, %r8                # Test if old_context is NULL
-    jz      simple_load_new         # Skip save if NULL
+    test    %r8, %r8
+    jz      simple_load_new
 
-    # Save essential registers only (using r8 as pointer)
-    movq    %rsp, 0x38(%r8)         # Save stack pointer
-    movq    %rbp, 0x30(%r8)         # Save base pointer
-    movq    %rbx, 0x08(%r8)         # Save rbx (callee-saved)
-    movq    %rsi, 0x20(%r8)         # Save rsi (actual task value)
-    movq    %rdi, 0x28(%r8)         # Save rdi (actual task value)
-    movq    %r12, 0x60(%r8)         # Save r12 (callee-saved)
-    movq    %r13, 0x68(%r8)         # Save r13 (callee-saved)
-    movq    %r14, 0x70(%r8)         # Save r14 (callee-saved)
-    movq    %r15, 0x78(%r8)         # Save r15 (callee-saved)
+    # Save FPU/SSE state
+    leaq    FPU_STATE_OFFSET(%r8), %rax
+    fxsave64 (%rax)
 
-    # Save return address
-    movq    (%rsp), %rax            # Get return address
-    movq    %rax, 0x80(%r8)         # Save as rip
+    # Save callee-saved registers
+    movq    %rsp, 0x38(%r8)
+    movq    %rbp, 0x30(%r8)
+    movq    %rbx, 0x08(%r8)
+    movq    %rsi, 0x20(%r8)
+    movq    %rdi, 0x28(%r8)
+    movq    %r12, 0x60(%r8)
+    movq    %r13, 0x68(%r8)
+    movq    %r14, 0x70(%r8)
+    movq    %r15, 0x78(%r8)
 
-    # Restore new_context pointer from r9
-    movq    %r9, %rsi               # Restore new_context pointer to rsi
+    movq    (%rsp), %rax
+    movq    %rax, 0x80(%r8)
+
+    movq    %r9, %rsi
 
 simple_load_new:
-    # Load new context (using r9 which still holds new_context pointer)
-    movq    0x38(%r9), %rsp         # Load stack pointer
-    movq    0x30(%r9), %rbp         # Load base pointer
-    movq    0x08(%r9), %rbx         # Load rbx
-    movq    0x60(%r9), %r12         # Load r12
-    movq    0x68(%r9), %r13         # Load r13
-    movq    0x70(%r9), %r14         # Load r14
-    movq    0x78(%r9), %r15         # Load r15
-    movq    0x20(%r9), %rsi         # Load rsi (actual task value)
-    movq    0x28(%r9), %rdi         # Load rdi (actual task value)
+    # Restore FPU/SSE state
+    leaq    FPU_STATE_OFFSET(%r9), %rax
+    fxrstor64 (%rax)
 
-    # Jump to new instruction pointer
-    jmpq    *0x80(%r9)              # Jump to new rip (using r9 as pointer)
+    # Restore callee-saved registers
+    movq    0x38(%r9), %rsp
+    movq    0x30(%r9), %rbp
+    movq    0x08(%r9), %rbx
+    movq    0x60(%r9), %r12
+    movq    0x68(%r9), %r13
+    movq    0x70(%r9), %r14
+    movq    0x78(%r9), %r15
+    movq    0x20(%r9), %rsi
+    movq    0x28(%r9), %rdi
+
+    jmpq    *0x80(%r9)
 
 #
 # Task entry point wrapper

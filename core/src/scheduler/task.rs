@@ -12,7 +12,7 @@ use slopos_lib::{klog_debug, klog_info};
 use super::scheduler;
 
 pub use slopos_abi::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
@@ -178,6 +178,7 @@ fn record_task_exit(
 
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
+    task.fpu_state = FpuState::new();
     task.context.rsi = task.entry_arg as u64;
     task.context.rdi = task.entry_point;
     task.context.rsp = task.stack_pointer;
