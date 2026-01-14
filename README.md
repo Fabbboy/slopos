@@ -1,29 +1,136 @@
-# SlopOS
+<p align="center">
+  <img src="https://img.shields.io/badge/status-it%20boots%20(sometimes)-brightgreen?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/vibes-immaculate-blueviolet?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/stability-the%20wheel%20decides-orange?style=for-the-badge" />
+</p>
 
-SlopOS is a gloriously sloppy x86-64 kernel where every boot spins the Wheel of Fate. Subsystems live under familiar directories (`boot/`, `mm/`, `drivers/`, `sched/`, `video/`) while lore and contributor guidance stay in `AGENTS.md`. Read that file first—it sets the tone and workflow expectations. The kernel is now a Rust-first build on nightly, keeping the same module split while we retire the legacy C sources.
+<h1 align="center">SlopOS</h1>
 
-## Key Features
+<p align="center">
+  <i>Three kernel wizards shipwrecked on the island of Sloptopia.<br/>
+  Armed with Rust, mass AI token consumption, and zero fear of <code>unsafe</code>,<br/>
+  they built an operating system that boots—when the Wheel of Fate allows it.</i>
+</p>
 
-- **Full Privilege Separation**: Ring 0 (kernel) and Ring 3 (user mode) with proper GDT, TSS, and page table isolation
-- **Cooperative Scheduler**: Task switching with preemption support
-- **Syscall Interface**: `int 0x80` gateway for user→kernel transitions
-- **Memory Management**: Buddy allocator, paging, process VM spaces
-- **User Mode Tasks**: Shell and roulette run in Ring 3 with syscall-based kernel services
-- **The Wheel of Fate**: Kernel roulette system with W/L currency for the gambling-addicted wizards
-- **Filesystem Migration (WIP)**: ext2 backend is the sole filesystem (`ext2_init_with_image` is required)
+<p align="center">
+  <b>Win the spin → enter the shell.<br/>
+  Lose → reboot and try again.<br/>
+  The house always wins. Eventually.</b>
+</p>
 
-For detailed documentation on privilege separation and segment switching, see [`docs/PRIVILEGE_SEPARATION.md`](docs/PRIVILEGE_SEPARATION.md).
+---
 
-## Build Workflow (Rust)
+<br/>
 
-- `make setup` installs the pinned nightly from `rust-toolchain.toml` (via rustup) and primes `builddir/`.
-- `make build` compiles the Rust kernel with `cargo` using the custom target JSON at `targets/x86_64-slos.json`.
-- `make iso`, `make boot`, `make boot-log`, `make test` keep the same UX as before; the Makefile still handles Limine/OVMF fetching and ISO assembly.
+## Get It Running
 
-Artifacts land in `builddir/` (kernel at `builddir/kernel.elf`, cargo intermediates in `builddir/target/`), and `test_output.log` captures non-interactive boots.
+> **You need:** QEMU, xorriso, mkfs.ext2, and mass skill issue tolerance
 
-### Video requirement
+```bash
+# Debian/Ubuntu
+sudo apt install qemu-system-x86 xorriso e2fsprogs
 
-SlopOS boots only with a Limine-provided framebuffer; video output is mandatory and the kernel will panic if no framebuffer is available. Run under QEMU/OVMF with GOP enabled (e.g., `-machine q35`) so Limine can hand off a valid framebuffer.
+# Then:
+make setup          # installs rust nightly
+make boot VIDEO=1   # spins the wheel
+```
 
-That's all you need to get started; everything else (style, lore, and subsystem breakdowns) lives in `AGENTS.md`. Go spin the wheel.
+<br/>
+
+|  | Command | What it does |
+|:--:|---------|--------------|
+| | `make boot VIDEO=1` | Boot with display window |
+| | `make boot` | Headless boot (serial only) |
+| | `make boot-log` | Boot with timeout, saves to `test_output.log` |
+| | `make test` | Run the test harness |
+
+<details>
+<summary><b>Advanced Options</b></summary>
+
+```bash
+VIRGL=1 VIDEO=1 make boot         # GPU acceleration
+QEMU_DISPLAY=gtk make boot VIDEO=1    # Force GTK
+QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL
+DEBUG=1 make boot VIDEO=1             # Debug logging
+```
+
+</details>
+
+<br/>
+
+---
+
+<br/>
+
+## What's Inside
+
+```
+                          ┌─────────────────────────────────────┐
+                          │            USERLAND (Ring 3)        │
+                          │  ┌─────────┐ ┌────────┐ ┌─────────┐ │
+                          │  │  Shell  │ │Roulette│ │Composit.│ │
+                          │  └────┬────┘ └───┬────┘ └────┬────┘ │
+                          └───────┼──────────┼──────────┼───────┘
+                                  │ SYSCALL  │          │
+                          ┌───────▼──────────▼──────────▼───────┐
+                          │             KERNEL (Ring 0)         │
+                          │  ┌────────┐ ┌────────┐ ┌──────────┐ │
+                          │  │ Sched  │ │   MM   │ │  Video   │ │
+                          │  └────────┘ └────────┘ └──────────┘ │
+                          │  ┌────────┐ ┌────────┐ ┌──────────┐ │
+                          │  │  VirtIO│ │  ext2  │ │  PS/2    │ │
+                          │  └────────┘ └────────┘ └──────────┘ │
+                          └─────────────────────────────────────┘
+```
+
+<br/>
+
+| | Feature |
+|:--:|---------|
+| | Buddy allocator + demand paging |
+| | Ring 0/3 with proper TSS isolation |
+| | Preemptive scheduler |
+| | SYSCALL/SYSRET fast path |
+| | IOAPIC + LAPIC interrupts |
+| | PS/2 keyboard & mouse |
+| | ext2 on VirtIO block |
+| | Framebuffer graphics |
+| | The Wheel of Fate + W/L currency |
+
+<br/>
+
+---
+
+<br/>
+
+## Project Layout
+
+```
+slopos/
+├── boot/       → GDT, IDT, TSS, early init, SYSCALL MSRs
+├── core/       → scheduler, syscall handlers, task management  
+├── mm/         → physical frames, virtual memory, ELF loader
+├── drivers/    → PIT, PS/2, IOAPIC, VirtIO, PCI enumeration
+├── video/      → framebuffer, graphics primitives, roulette wheel
+├── fs/         → ext2 implementation
+├── userland/   → shell, compositor, roulette, file manager
+├── kernel/     → main entry point
+└── lore/       → the sacred chronicles (worth reading)
+```
+
+<br/>
+
+---
+
+<br/>
+
+<p align="center">
+  <sub>
+    <i>"still no progress but ai said it works soo it has t be working :)"</i><br/>
+    — from the sacred commit logs
+  </sub>
+</p>
+
+<p align="center">
+  <b>GPL-3.0-only</b>
+</p>
