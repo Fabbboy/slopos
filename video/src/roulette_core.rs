@@ -72,7 +72,7 @@ const TEXT_WHEEL_TITLE: &[u8] = b"=== THE WHEEL OF FATE ===\0";
 const TEXT_WHEEL_SUB: &[u8] = b"Pointers choose your destiny...\0";
 const TEXT_CURRENCY_WIN: &[u8] = b"+10 W's (currency units)\0";
 const TEXT_CURRENCY_LOSE: &[u8] = b"-10 W's (currency units)\0";
-const TEXT_RESET: &[u8] = b"Press RESET to try again...\0";
+const TEXT_RESET: &[u8] = b"Rebooting... The Wheel spins again!\0";
 const TEXT_CONTINUE: &[u8] = b"Continuing to OS...\0";
 
 // Precomputed trig tables (scaled by 1024) carried over from the original C.
