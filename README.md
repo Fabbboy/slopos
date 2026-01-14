@@ -30,6 +30,9 @@
 # Debian/Ubuntu
 sudo apt install qemu-system-x86 xorriso e2fsprogs
 
+# Arch (btw)
+sudo pacman -S qemu-full xorriso e2fsprogs
+
 # Then:
 make setup          # installs rust nightly
 make boot VIDEO=1   # spins the wheel
