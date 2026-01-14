@@ -2,10 +2,12 @@
 
 use core::arch::asm;
 
+use slopos_abi::arch::x86_64::msr::Msr;
 use slopos_lib::klog_debug;
 
 const GDT_CODE_SELECTOR: u16 = 0x08;
 const GDT_DATA_SELECTOR: u16 = 0x10;
+const GDT_USER_DATA_SELECTOR: u16 = 0x1B;
 const GDT_TSS_SELECTOR: u16 = 0x28;
 
 // GDT Access Byte bit fields (bits 40-47)
@@ -120,6 +122,12 @@ struct Tss64 {
     iomap_base: u16,
 }
 
+#[repr(C)]
+struct PerCpuSyscallData {
+    user_rsp_scratch: u64,
+    kernel_rsp: u64,
+}
+
 #[repr(C, packed)]
 struct GdtTssEntry {
     limit_low: u16,
@@ -169,6 +177,14 @@ static mut KERNEL_TSS: Tss64 = Tss64 {
     reserved3: 0,
     iomap_base: 0,
 };
+
+static mut SYSCALL_CPU_DATA: PerCpuSyscallData = PerCpuSyscallData {
+    user_rsp_scratch: 0,
+    kernel_rsp: 0,
+};
+
+#[unsafe(no_mangle)]
+static mut SYSCALL_CPU_DATA_PTR: u64 = 0;
 
 unsafe extern "C" {
     static kernel_stack_top: u8;
@@ -246,6 +262,7 @@ pub fn gdt_init() {
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
     unsafe {
         KERNEL_TSS.rsp0 = rsp0;
+        SYSCALL_CPU_DATA.kernel_rsp = rsp0;
     }
 }
 pub fn gdt_set_ist(index: u8, stack_top: u64) {
@@ -254,5 +271,90 @@ pub fn gdt_set_ist(index: u8, stack_top: u64) {
     }
     unsafe {
         KERNEL_TSS.ist[(index - 1) as usize] = stack_top;
+    }
+}
+
+unsafe extern "C" {
+    fn syscall_entry();
+}
+
+#[inline(always)]
+fn wrmsr(msr: Msr, value: u64) {
+    let low = value as u32;
+    let high = (value >> 32) as u32;
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr.address(),
+            in("eax") low,
+            in("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+fn rdmsr(msr: Msr) -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr.address(),
+            out("eax") low,
+            out("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
+    ((high as u64) << 32) | (low as u64)
+}
+
+const EFER_SCE: u64 = 1 << 0;
+
+pub fn syscall_msr_init() {
+    klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
+
+    let efer = rdmsr(Msr::EFER);
+    if (efer & EFER_SCE) == 0 {
+        wrmsr(Msr::EFER, efer | EFER_SCE);
+        klog_debug!("SYSCALL: Enabled SCE bit in EFER");
+    }
+
+    let star_value: u64 =
+        ((GDT_USER_DATA_SELECTOR as u64 - 8) << 48) | ((GDT_CODE_SELECTOR as u64) << 32);
+
+    let lstar_value = syscall_entry as *const () as u64;
+
+    let sfmask_value: u64 = 0x0000_0000_0004_7700;
+
+    wrmsr(Msr::STAR, star_value);
+    wrmsr(Msr::LSTAR, lstar_value);
+    wrmsr(Msr::SFMASK, sfmask_value);
+
+    klog_debug!(
+        "SYSCALL: STAR=0x{:016x} LSTAR=0x{:016x} SFMASK=0x{:016x}",
+        star_value,
+        lstar_value,
+        sfmask_value
+    );
+
+    syscall_gs_base_init();
+}
+
+fn syscall_gs_base_init() {
+    unsafe {
+        SYSCALL_CPU_DATA.kernel_rsp = KERNEL_TSS.rsp0;
+        SYSCALL_CPU_DATA_PTR = &SYSCALL_CPU_DATA as *const _ as u64;
+    }
+    let cpu_data_ptr = unsafe { SYSCALL_CPU_DATA_PTR };
+    wrmsr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
+    klog_debug!(
+        "SYSCALL: KERNEL_GS_BASE=0x{:016x} (per-CPU syscall data)",
+        cpu_data_ptr
+    );
+}
+
+pub fn syscall_update_kernel_rsp(rsp: u64) {
+    unsafe {
+        SYSCALL_CPU_DATA.kernel_rsp = rsp;
     }
 }

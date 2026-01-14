@@ -33,16 +33,18 @@ pub type UserWindowInfo = WindowInfo;
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let mut ret = num;
+unsafe fn syscall_impl(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+    let ret: u64;
     unsafe {
         asm!(
-            "int 0x80",
+            "syscall",
+            in("rax") num,
             in("rdi") arg0,
             in("rsi") arg1,
             in("rdx") arg2,
-            inout("rax") ret,
-            clobber_abi("sysv64"),
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
             options(nostack),
         );
     }
@@ -51,17 +53,19 @@ unsafe fn syscall(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let mut ret = num;
+unsafe fn syscall4_impl(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    let ret: u64;
     unsafe {
         asm!(
-            "int 0x80",
+            "syscall",
+            in("rax") num,
             in("rdi") arg0,
             in("rsi") arg1,
             in("rdx") arg2,
-            in("rcx") arg3,
-            inout("rax") ret,
-            clobber_abi("sysv64"),
+            in("r10") arg3,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
             options(nostack),
         );
     }
@@ -72,33 +76,33 @@ unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
 #[unsafe(link_section = ".user_text")]
 pub fn sys_yield() {
     unsafe {
-        syscall(SYSCALL_YIELD, 0, 0, 0);
+        syscall_impl(SYSCALL_YIELD, 0, 0, 0);
     }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_write(buf: &[u8]) -> i64 {
-    unsafe { syscall(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_read(buf: &mut [u8]) -> i64 {
-    unsafe { syscall(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_read_char() -> i64 {
-    unsafe { syscall(SYSCALL_READ_CHAR, 0, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_READ_CHAR, 0, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sleep_ms(ms: u32) {
     unsafe {
-        syscall(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
+        syscall_impl(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
     }
 }
 
@@ -107,34 +111,34 @@ pub fn sys_sleep_ms(ms: u32) {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_get_time_ms() -> u64 {
-    unsafe { syscall(SYSCALL_GET_TIME_MS, 0, 0, 0) }
+    unsafe { syscall_impl(SYSCALL_GET_TIME_MS, 0, 0, 0) }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette() -> u64 {
-    unsafe { syscall(SYSCALL_ROULETTE, 0, 0, 0) }
+    unsafe { syscall_impl(SYSCALL_ROULETTE, 0, 0, 0) }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette_result(fate_packed: u64) {
     unsafe {
-        syscall(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
+        syscall_impl(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
     }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette_draw(fate: u32) -> i64 {
-    unsafe { syscall(SYSCALL_ROULETTE_DRAW, fate as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_ROULETTE_DRAW, fate as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_exit() -> ! {
     unsafe {
-        syscall(SYSCALL_EXIT, 0, 0, 0);
+        syscall_impl(SYSCALL_EXIT, 0, 0, 0);
     }
     loop {}
 }
@@ -142,80 +146,80 @@ pub fn sys_exit() -> ! {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_info(out: &mut DisplayInfo) -> i64 {
-    unsafe { syscall(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_tty_set_focus(task_id: u32) -> i64 {
-    unsafe { syscall(SYSCALL_TTY_SET_FOCUS, task_id as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_TTY_SET_FOCUS, task_id as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_random_next() -> u32 {
-    unsafe { syscall(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32 }
+    unsafe { syscall_impl(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
-    unsafe { syscall(SYSCALL_FS_OPEN, path as u64, flags as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_OPEN, path as u64, flags as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fs_close(fd: i32) -> i64 {
-    unsafe { syscall(SYSCALL_FS_CLOSE, fd as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_CLOSE, fd as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_read(fd: i32, buf: *mut c_void, len: usize) -> i64 {
-    unsafe { syscall(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_write(fd: i32, buf: *const c_void, len: usize) -> i64 {
-    unsafe { syscall(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_stat(path: *const c_char, out_stat: &mut UserFsStat) -> i64 {
-    unsafe { syscall(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_mkdir(path: *const c_char) -> i64 {
-    unsafe { syscall(SYSCALL_FS_MKDIR, path as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_MKDIR, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_unlink(path: *const c_char) -> i64 {
-    unsafe { syscall(SYSCALL_FS_UNLINK, path as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_UNLINK, path as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
-    unsafe { syscall(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sys_info(info: &mut UserSysInfo) -> i64 {
-    unsafe { syscall(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_ENUMERATE_WINDOWS,
             windows.as_mut_ptr() as u64,
             windows.len() as u64,
@@ -228,7 +232,7 @@ pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_SET_WINDOW_POSITION,
             task_id as u64,
             x as u64,
@@ -240,20 +244,20 @@ pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_set_window_state(task_id: u32, state: u8) -> i64 {
-    unsafe { syscall(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_raise_window(task_id: u32) -> i64 {
-    unsafe { syscall(SYSCALL_RAISE_WINDOW, task_id as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_RAISE_WINDOW, task_id as u64, 0, 0) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_halt() -> ! {
     unsafe {
-        syscall(SYSCALL_HALT, 0, 0, 0);
+        syscall_impl(SYSCALL_HALT, 0, 0, 0);
     }
     loop {}
 }
@@ -266,7 +270,7 @@ pub fn sys_halt() -> ! {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_spawn_task(name: &[u8]) -> i32 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_SPAWN_TASK,
             name.as_ptr() as u64,
             name.len() as u64,
@@ -280,7 +284,7 @@ pub fn sys_spawn_task(name: &[u8]) -> i32 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_commit() -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_COMMIT, 0, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SURFACE_COMMIT, 0, 0, 0) as i64 }
 }
 
 // =============================================================================
@@ -296,7 +300,7 @@ pub fn sys_surface_commit() -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_create(size: u64, flags: u32) -> u32 {
-    unsafe { syscall(SYSCALL_SHM_CREATE, size, flags as u64, 0) as u32 }
+    unsafe { syscall_impl(SYSCALL_SHM_CREATE, size, flags as u64, 0) as u32 }
 }
 
 /// Map a shared memory buffer into the caller's address space.
@@ -308,7 +312,7 @@ pub fn sys_shm_create(size: u64, flags: u32) -> u32 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_map(token: u32, access: u32) -> u64 {
-    unsafe { syscall(SYSCALL_SHM_MAP, token as u64, access as u64, 0) }
+    unsafe { syscall_impl(SYSCALL_SHM_MAP, token as u64, access as u64, 0) }
 }
 
 /// Unmap a shared memory buffer from the caller's address space.
@@ -319,7 +323,7 @@ pub fn sys_shm_map(token: u32, access: u32) -> u64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_shm_unmap(virt_addr: u64) -> i64 {
-    unsafe { syscall(SYSCALL_SHM_UNMAP, virt_addr, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SHM_UNMAP, virt_addr, 0, 0) as i64 }
 }
 
 /// Destroy a shared memory buffer (owner only).
@@ -330,7 +334,7 @@ pub unsafe fn sys_shm_unmap(virt_addr: u64) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_destroy(token: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SHM_DESTROY, token as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SHM_DESTROY, token as u64, 0, 0) as i64 }
 }
 
 /// Attach a shared memory buffer as a window surface.
@@ -344,7 +348,7 @@ pub fn sys_shm_destroy(token: u32) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_SURFACE_ATTACH,
             token as u64,
             width as u64,
@@ -362,7 +366,7 @@ pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_flip(token: u32) -> i64 {
-    unsafe { syscall(SYSCALL_FB_FLIP, token as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_FB_FLIP, token as u64, 0, 0) as i64 }
 }
 
 /// Drain the compositor queue (compositor only).
@@ -372,7 +376,7 @@ pub fn sys_fb_flip(token: u32) -> i64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_drain_queue() {
     unsafe {
-        syscall(SYSCALL_DRAIN_QUEUE, 0, 0, 0);
+        syscall_impl(SYSCALL_DRAIN_QUEUE, 0, 0, 0);
     }
 }
 
@@ -391,7 +395,7 @@ pub fn sys_drain_queue() {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_acquire(token: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SHM_ACQUIRE, token as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SHM_ACQUIRE, token as u64, 0, 0) as i64 }
 }
 
 /// Release a buffer reference (compositor only).
@@ -405,7 +409,7 @@ pub fn sys_shm_acquire(token: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_release(token: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SHM_RELEASE, token as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SHM_RELEASE, token as u64, 0, 0) as i64 }
 }
 
 /// Poll whether a buffer has been released by the compositor.
@@ -418,7 +422,7 @@ pub fn sys_shm_release(token: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_poll_released(token: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SHM_POLL_RELEASED, token as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SHM_POLL_RELEASED, token as u64, 0, 0) as i64 }
 }
 
 // =============================================================================
@@ -436,7 +440,7 @@ pub fn sys_shm_poll_released(token: u32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_frame() -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_FRAME, 0, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SURFACE_FRAME, 0, 0, 0) as i64 }
 }
 
 /// Poll for frame completion (Wayland frame callback done).
@@ -450,7 +454,7 @@ pub fn sys_surface_frame() -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_poll_frame_done() -> u64 {
-    unsafe { syscall(SYSCALL_POLL_FRAME_DONE, 0, 0, 0) }
+    unsafe { syscall_impl(SYSCALL_POLL_FRAME_DONE, 0, 0, 0) }
 }
 
 /// Mark all pending frame callbacks as done (compositor only).
@@ -464,7 +468,7 @@ pub fn sys_poll_frame_done() -> u64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_mark_frames_done(present_time_ms: u64) {
     unsafe {
-        syscall(SYSCALL_MARK_FRAMES_DONE, present_time_ms, 0, 0);
+        syscall_impl(SYSCALL_MARK_FRAMES_DONE, present_time_ms, 0, 0);
     }
 }
 
@@ -487,7 +491,7 @@ pub fn sys_mark_frames_done(present_time_ms: u64) {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_get_formats() -> u32 {
-    unsafe { syscall(SYSCALL_SHM_GET_FORMATS, 0, 0, 0) as u32 }
+    unsafe { syscall_impl(SYSCALL_SHM_GET_FORMATS, 0, 0, 0) as u32 }
 }
 
 /// Create a shared memory buffer with a specific pixel format.
@@ -501,7 +505,7 @@ pub fn sys_shm_get_formats() -> u32 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_create_with_format(size: u64, format: PixelFormat) -> u32 {
-    unsafe { syscall(SYSCALL_SHM_CREATE_WITH_FORMAT, size, format as u64, 0) as u32 }
+    unsafe { syscall_impl(SYSCALL_SHM_CREATE_WITH_FORMAT, size, format as u64, 0) as u32 }
 }
 
 // =============================================================================
@@ -526,7 +530,7 @@ pub fn sys_shm_create_with_format(size: u64, format: PixelFormat) -> u32 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
     unsafe {
-        syscall4(
+        syscall4_impl(
             SYSCALL_SURFACE_DAMAGE,
             x as u64,
             y as u64,
@@ -551,7 +555,7 @@ pub fn sys_surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_buffer_age() -> u8 {
-    unsafe { syscall(SYSCALL_BUFFER_AGE, 0, 0, 0) as u8 }
+    unsafe { syscall_impl(SYSCALL_BUFFER_AGE, 0, 0, 0) as u8 }
 }
 
 // =============================================================================
@@ -562,21 +566,21 @@ pub fn sys_buffer_age() -> u8 {
 /// Role can only be set once per surface (Wayland semantics).
 /// Returns 0 on success, -1 if role already set or invalid.
 pub fn sys_surface_set_role(role: SurfaceRole) -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_SET_ROLE, role as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SURFACE_SET_ROLE, role as u64, 0, 0) as i64 }
 }
 
 /// Set the parent surface for a subsurface.
 /// Only valid for surfaces with role Subsurface.
 /// Returns 0 on success, -1 on failure.
 pub fn sys_surface_set_parent(parent_task_id: u32) -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_SET_PARENT, parent_task_id as u64, 0, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SURFACE_SET_PARENT, parent_task_id as u64, 0, 0) as i64 }
 }
 
 /// Set the relative position of a subsurface.
 /// Position is relative to the parent surface's top-left corner.
 /// Only valid for surfaces with role Subsurface.
 pub fn sys_surface_set_relative_position(rel_x: i32, rel_y: i32) -> i64 {
-    unsafe { syscall(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64, 0) as i64 }
+    unsafe { syscall_impl(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64, 0) as i64 }
 }
 
 /// Set the window title.
@@ -584,7 +588,7 @@ pub fn sys_surface_set_relative_position(rel_x: i32, rel_y: i32) -> i64 {
 pub fn sys_surface_set_title(title: &str) -> i64 {
     let bytes = title.as_bytes();
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_SURFACE_SET_TITLE,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
@@ -601,7 +605,7 @@ pub fn sys_surface_set_title(title: &str) -> i64 {
 /// Returns Some(event) if an event was available, None if queue is empty.
 pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
     let result = unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_INPUT_POLL,
             event_out as *mut InputEvent as u64,
             0,
@@ -624,7 +628,7 @@ pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_input_poll_batch(events: &mut [InputEvent]) -> u64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_INPUT_POLL_BATCH,
             events.as_mut_ptr() as u64,
             events.len() as u64,
@@ -636,7 +640,7 @@ pub fn sys_input_poll_batch(events: &mut [InputEvent]) -> u64 {
 /// Check if the current task has pending input events.
 /// Returns the number of pending events.
 pub fn sys_input_has_events() -> u32 {
-    unsafe { syscall(SYSCALL_INPUT_HAS_EVENTS, 0, 0, 0) as u32 }
+    unsafe { syscall_impl(SYSCALL_INPUT_HAS_EVENTS, 0, 0, 0) as u32 }
 }
 
 /// Set keyboard or pointer focus to a task (compositor only).
@@ -644,7 +648,7 @@ pub fn sys_input_has_events() -> u32 {
 /// Returns 0 on success, -1 on failure.
 pub fn sys_input_set_focus(target_task_id: u32, focus_type: u32) -> i64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_INPUT_SET_FOCUS,
             target_task_id as u64,
             focus_type as u64,
@@ -672,7 +676,7 @@ pub fn sys_input_set_pointer_focus_with_offset(
     offset_y: i32,
 ) -> i64 {
     unsafe {
-        syscall(
+        syscall_impl(
             SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET,
             target_task_id as u64,
             offset_x as u64,
@@ -684,7 +688,7 @@ pub fn sys_input_set_pointer_focus_with_offset(
 /// Get the current global pointer position (compositor only).
 /// Returns (x, y) in screen coordinates.
 pub fn sys_input_get_pointer_pos() -> (i32, i32) {
-    let result = unsafe { syscall(SYSCALL_INPUT_GET_POINTER_POS, 0, 0, 0) };
+    let result = unsafe { syscall_impl(SYSCALL_INPUT_GET_POINTER_POS, 0, 0, 0) };
     let x = (result >> 32) as i32;
     let y = result as i32;
     (x, y)
@@ -693,7 +697,7 @@ pub fn sys_input_get_pointer_pos() -> (i32, i32) {
 /// Get the current global pointer button state (compositor only).
 /// Returns button state as u8 (bit 0 = left, bit 1 = right, bit 2 = middle).
 pub fn sys_input_get_button_state() -> u8 {
-    unsafe { syscall(SYSCALL_INPUT_GET_BUTTON_STATE, 0, 0, 0) as u8 }
+    unsafe { syscall_impl(SYSCALL_INPUT_GET_BUTTON_STATE, 0, 0, 0) as u8 }
 }
 
 pub use slopos_abi::ShmError;

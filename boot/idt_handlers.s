@@ -7,21 +7,30 @@
 .att_syntax prefix
 .section .text
 
+# Segment selector constants
+.equ SEL_KERNEL_DATA, 0x10    # Kernel data segment (GDT index 2, RPL 0)
+.equ SEL_USER_DATA,   0x1B    # User data segment (GDT index 3, RPL 3)
+.equ SEL_USER_CODE,   0x23    # User code segment (GDT index 4, RPL 3)
+
+# Canonical address check - user addresses must be < 0x0000_8000_0000_0000
+# (lower half of virtual address space, bit 47 = 0, bits 63:48 = 0)
+.equ USER_ADDR_MAX_HIGH, 0x00007FFF  # Upper 32 bits must be <= this
+
 # External C function
 .extern common_exception_handler
 
-# Common interrupt handler macro
-# Saves all registers and calls C handler
 .macro INTERRUPT_HANDLER vector, has_error_code
     .if \has_error_code == 0
-        # Push dummy error code if none provided by CPU
         pushq $0
     .endif
 
-    # Push vector number
     pushq $\vector
 
-    # Save all general-purpose registers
+    testb $3, 24(%rsp)
+    jz 1f
+    swapgs
+1:
+
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -38,18 +47,16 @@
     pushq %r14
     pushq %r15
 
-    # Set up kernel data segments
-    movw $0x10, %ax    # Kernel data segment
+    # Set up kernel data segments (excluding GS which is managed by SWAPGS)
+    movw $SEL_KERNEL_DATA, %ax
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %fs
-    movw %ax, %gs
+    # GS is NOT touched - SWAPGS manages the GS base MSRs
 
-    # Call C handler with interrupt frame pointer
-    movq %rsp, %rdi    # First argument: pointer to interrupt frame
+    movq %rsp, %rdi
     call common_exception_handler
 
-    # Restore all general-purpose registers
     popq %r15
     popq %r14
     popq %r13
@@ -66,10 +73,14 @@
     popq %rbx
     popq %rax
 
-    # Remove vector number and error code from stack
     addq $16, %rsp
 
-    # Return from interrupt
+    # Check if returning to user mode - if so, swap GS back
+    # CS is now at offset 8 from RSP (after removing vector+error: [RIP] [CS] ...)
+    testb $3, 8(%rsp)
+    jz 2f
+    swapgs
+2:
     iretq
 .endm
 
@@ -221,3 +232,129 @@ irq14:
 .global irq15
 irq15:
     INTERRUPT_HANDLER 47, 0   # ATA Secondary
+
+# TLB Shootdown IPI handler (vector 0xFD = 253)
+.global isr_tlb_shootdown
+isr_tlb_shootdown:
+    INTERRUPT_HANDLER 253, 0
+
+# =============================================================================
+# SYSCALL Entry Point (modern fast syscall via SYSCALL instruction)
+# =============================================================================
+#
+# On SYSCALL entry, the CPU performs:
+#   - RCX = return RIP (next instruction after SYSCALL)
+#   - R11 = RFLAGS
+#   - CS = STAR[47:32] & 0xFFFC (kernel code segment)
+#   - SS = STAR[47:32] + 8 (kernel data segment)
+#   - RIP = LSTAR (this handler)
+#   - RFLAGS &= ~SFMASK (typically clears IF, TF, DF)
+#
+# Register convention (Linux/SlopOS compatible):
+#   - RAX = syscall number
+#   - RDI = arg0, RSI = arg1, RDX = arg2, R10 = arg3, R8 = arg4, R9 = arg5
+#   - RAX = return value
+#
+# Note: RCX and R11 are clobbered by SYSCALL/SYSRET, so userspace must
+# save them if needed. R10 is used instead of RCX for arg3.
+#
+.global syscall_entry
+syscall_entry:
+    swapgs
+
+    movq %rsp, %gs:0
+    movq %gs:8, %rsp
+
+    pushq $SEL_USER_DATA
+    pushq %gs:0
+    pushq %r11
+    pushq $SEL_USER_CODE
+    pushq %rcx
+    pushq $0
+    pushq $128
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    # Set up kernel data segments for syscall context
+    movw $SEL_KERNEL_DATA, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    # GS is NOT touched - SWAPGS manages the GS base MSRs
+
+    sti
+
+    movq %rsp, %rdi
+    call common_exception_handler
+
+    cli
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp
+    popq %rcx
+    addq $8, %rsp
+    popq %r11
+    orq $0x200, %r11
+
+    # SYSRET safety: validate RCX (user RIP) is canonical user address
+    # User addresses must be < 0x0000_8000_0000_0000 (lower half)
+    # Use stack to preserve RAX (syscall return value)
+    pushq %rax
+    movq %rcx, %rax
+    shrq $47, %rax                  # If user addr, bits 63:47 are all 0
+    jnz .sysret_unsafe              # Non-zero means non-canonical or kernel addr
+    popq %rax
+
+    movq (%rsp), %rsp
+
+    swapgs
+
+    sysretq
+
+.sysret_unsafe:
+    # RCX contains non-canonical or kernel address - fall back to IRETQ
+    # This is safer than SYSRET which can #GP in ring 0
+    popq %rax                       # Restore RAX (return value)
+    
+    # Build IRET frame on kernel stack
+    # Current: RCX=RIP, R11=RFLAGS, gs:0=user RSP, gs:8=kernel stack
+    movq %gs:8, %rsp                # Switch to kernel stack
+    
+    pushq $SEL_USER_DATA            # SS
+    pushq %gs:0                     # RSP (user RSP)
+    pushq %r11                      # RFLAGS
+    pushq $SEL_USER_CODE            # CS  
+    pushq %rcx                      # RIP
+    
+    swapgs
+    
+    iretq

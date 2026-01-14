@@ -20,7 +20,7 @@ pub use slopos_abi::arch::x86_64::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    SYSCALL_VECTOR,
+    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 // IdtEntry is now imported from abi
@@ -75,8 +75,10 @@ pub enum ExceptionMode {
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_core::irq::irq_dispatch;
 use slopos_core::syscall::syscall_handle;
+use slopos_drivers::apic::send_eoi;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
 
 use slopos_core::{
@@ -106,6 +108,7 @@ unsafe extern "C" {
     fn isr18();
     fn isr19();
     fn isr128();
+    fn isr_tlb_shootdown();
 
     fn irq0();
     fn irq1();
@@ -173,6 +176,13 @@ pub fn idt_init() {
     idt_set_gate(47, handler_ptr(irq15), 0x08, IDT_GATE_INTERRUPT);
 
     idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
+
+    idt_set_gate(
+        TLB_SHOOTDOWN_VECTOR,
+        handler_ptr(isr_tlb_shootdown),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
 
     initialize_handler_tables();
 
@@ -259,6 +269,11 @@ pub fn idt_load() {
     }
 }
 
+fn handle_tlb_shootdown_ipi() {
+    tlb::handle_shootdown_ipi(0);
+    send_eoi();
+}
+
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
@@ -268,6 +283,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     if vector == SYSCALL_VECTOR {
         syscall_handle(frame);
+        return;
+    }
+
+    if vector == TLB_SHOOTDOWN_VECTOR {
+        handle_tlb_shootdown_ipi();
         return;
     }
 

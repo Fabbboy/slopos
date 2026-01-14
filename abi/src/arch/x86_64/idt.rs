@@ -97,8 +97,11 @@ pub const EXCEPTION_CONTROL_PROTECTION: u8 = 21;
 pub const IRQ_BASE_VECTOR: u8 = 32;
 
 /// Syscall interrupt vector (int 0x80).
-/// This is the legacy interrupt-based syscall mechanism.
 pub const SYSCALL_VECTOR: u8 = 0x80;
+
+/// TLB shootdown IPI vector (0xFD).
+/// Used for cross-CPU TLB invalidation on SMP systems.
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 
 // =============================================================================
 // IDT Size

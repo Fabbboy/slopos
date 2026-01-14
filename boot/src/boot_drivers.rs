@@ -11,10 +11,10 @@ use slopos_video as video;
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
 use crate::gdt::gdt_init;
 use crate::idt::{idt_init, idt_load};
-use crate::limine_protocol;
 use crate::ist_stacks::ist_stacks_init;
+use crate::limine_protocol;
 use slopos_drivers::{
-    apic::{apic_detect, apic_init},
+    apic::{apic_detect, apic_init, send_ipi_all_excluding_self},
     interrupt_test::interrupt_test_request_shutdown,
     interrupts::config_from_cmdline,
     ioapic::init,
@@ -26,6 +26,7 @@ use slopos_drivers::{
     virtio_gpu::virtio_gpu_register_driver,
     xe,
 };
+use slopos_mm::tlb;
 
 const PIT_DEFAULT_FREQUENCY_HZ: u32 = 100;
 
@@ -139,6 +140,9 @@ fn boot_step_apic_setup_fn() {
     }
 
     pic_quiesce_disable();
+
+    tlb::register_ipi_sender(send_ipi_all_excluding_self);
+    tlb::init();
 
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
 }

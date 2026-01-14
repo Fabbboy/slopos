@@ -32,7 +32,7 @@ impl SyscallContext {
                 arg0: f.rdi,
                 arg1: f.rsi,
                 arg2: f.rdx,
-                arg3: f.rcx,
+                arg3: f.r10,
                 arg4: f.r8,
                 arg5: f.r9,
             }

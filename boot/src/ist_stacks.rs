@@ -384,7 +384,10 @@ fn map_stack_pages(stack: &IstStackConfig) {
 /// - GDT/TSS is initialized
 /// - IDT is initialized (but before interrupts are enabled)
 pub fn ist_stacks_init() {
-    klog_debug!("IST: Initializing {} dedicated interrupt stacks", IST_STACK_COUNT);
+    klog_debug!(
+        "IST: Initializing {} dedicated interrupt stacks",
+        IST_STACK_COUNT
+    );
 
     for (i, stack) in IST_CONFIGS.iter().enumerate() {
         // Reset metrics for this stack
@@ -413,8 +416,14 @@ pub fn ist_stacks_init() {
     klog_info!(
         "IST: Initialized {} stacks ({} exceptions, {} IRQs)",
         IST_STACK_COUNT,
-        IST_CONFIGS.iter().filter(|c| c.category != IstCategory::HighFreqIrq).count(),
-        IST_CONFIGS.iter().filter(|c| c.category == IstCategory::HighFreqIrq).count()
+        IST_CONFIGS
+            .iter()
+            .filter(|c| c.category != IstCategory::HighFreqIrq)
+            .count(),
+        IST_CONFIGS
+            .iter()
+            .filter(|c| c.category == IstCategory::HighFreqIrq)
+            .count()
     );
 }
 

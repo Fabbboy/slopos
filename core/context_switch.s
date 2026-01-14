@@ -209,17 +209,39 @@ context_switch_user:
     leaq    FPU_STATE_OFFSET(%r15), %rax
     fxrstor64 (%rax)
 
-    # Segments
+    # Segments (excluding GS - managed by SWAPGS for SYSCALL compatibility)
     movq    0x98(%r15), %rax
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
     movw    %ax, %es
     movq    0xA8(%r15), %rax
     movw    %ax, %fs
-    movq    0xB0(%r15), %rax
-    movw    %ax, %gs
+    # GS selector is NOT restored - SWAPGS manages GS_BASE MSR state
+    # Writing to GS selector would not affect the MSR anyway in 64-bit mode
 
-    # GPRs
+    # Set up MSRs for SYSCALL compatibility before returning to user mode
+    # This is deterministic regardless of prior SWAPGS state
+    #
+    # 1. Set IA32_GS_BASE (0xC0000101) = 0 (user GS base)
+    # 2. Set IA32_KERNEL_GS_BASE (0xC0000102) = SYSCALL_CPU_DATA_PTR
+    #
+    # After IRETQ, user runs with GS_BASE=0. When user does SYSCALL,
+    # SWAPGS will swap GS_BASE(0) <-> KERNEL_GS_BASE(per-cpu), which is correct.
+
+    # Set GS_BASE = 0
+    movl $0xC0000101, %ecx
+    xorl %eax, %eax
+    xorl %edx, %edx
+    wrmsr
+
+    # Set KERNEL_GS_BASE = SYSCALL_CPU_DATA_PTR
+    movl $0xC0000102, %ecx
+    movq SYSCALL_CPU_DATA_PTR(%rip), %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
+    wrmsr
+
+    # GPRs (restore after MSR writes since we clobbered eax/ecx/edx)
     movq    0x00(%r15), %rax
     movq    0x08(%r15), %rbx
     movq    0x10(%r15), %rcx

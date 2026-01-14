@@ -16,6 +16,7 @@ pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;
 pub mod tests;
+pub mod tlb;
 pub mod user_copy;
 pub mod user_ptr;
 

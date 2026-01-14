@@ -5,9 +5,15 @@ use spin::Once;
 use slopos_lib::{cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::arch::x86_64::apic::*;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
 use slopos_mm::mmio::MmioRegion;
+
+use slopos_abi::arch::x86_64::apic::*;
+pub use slopos_abi::arch::x86_64::apic::{
+    LAPIC_ICR_DELIVERY_FIXED, LAPIC_ICR_DELIVERY_STATUS, LAPIC_ICR_DEST_BROADCAST,
+    LAPIC_ICR_DEST_PHYSICAL, LAPIC_ICR_HIGH, LAPIC_ICR_LEVEL_ASSERT, LAPIC_ICR_LOW,
+    LAPIC_ICR_TRIGGER_EDGE,
+};
 
 /// APIC register region size (4KB page).
 const APIC_REGION_SIZE: usize = 0x1000;
@@ -417,4 +423,37 @@ pub fn apic_write_register(reg: u32, value: u32) {
 }
 pub fn apic_send_ipi_halt_all() {
     send_ipi_halt_all();
+}
+
+/// Send IPI to all CPUs except self with the given vector.
+/// Used as callback for TLB shootdown.
+pub fn send_ipi_all_excluding_self(vector: u8) {
+    if !is_available() || !is_enabled() {
+        return;
+    }
+
+    let mut timeout = 10000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
+
+    const ICR_DEST_ALL_EXCLUDING_SELF: u32 = 0x3 << 18;
+
+    write_register(LAPIC_ICR_HIGH, 0);
+
+    let icr_low = (vector as u32)
+        | LAPIC_ICR_DELIVERY_FIXED
+        | LAPIC_ICR_DEST_PHYSICAL
+        | LAPIC_ICR_LEVEL_ASSERT
+        | LAPIC_ICR_TRIGGER_EDGE
+        | ICR_DEST_ALL_EXCLUDING_SELF;
+
+    write_register(LAPIC_ICR_LOW, icr_low);
+
+    timeout = 10000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
 }

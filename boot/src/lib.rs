@@ -8,11 +8,11 @@ pub mod cpu_verify;
 pub mod early_init;
 pub mod ffi_boundary;
 pub mod gdt;
-pub use gdt::gdt_set_kernel_rsp0;
+pub use gdt::{gdt_set_kernel_rsp0, syscall_msr_init, syscall_update_kernel_rsp};
 pub mod idt;
+pub mod ist_stacks;
 pub mod limine_protocol;
 pub mod panic;
-pub mod ist_stacks;
 pub mod safe_stack {
     pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_init, safe_stack_record_usage};
 }

@@ -13,14 +13,14 @@ This directory contains architectural analysis, comparisons, and improvement roa
 ### P0 - Critical (Fix Immediately)
 
 - [x] **No FPU state save** - SSE/AVX registers corrupted across task switches *(Fixed: added FXSAVE/FXRSTOR to context switch)*
-- [ ] **No TLB shootdown** - Will cause memory corruption on SMP
+- [x] **No TLB shootdown** - Will cause memory corruption on SMP *(Fixed: IPI-based TLB shootdown in mm/src/tlb.rs with per-CPU state, INVPCID detection, callback-based IPI sender)*
 - [x] **Syscall table overflow** - Potential code execution if sysno >= 128 *(Fixed: syscall_lookup() bounds-checks against SYSCALL_TABLE.len())*
 - [x] **ELF loader validation** - Insufficient input validation *(Fixed: comprehensive ElfValidator with bounds checking, overflow prevention, segment overlap detection, and address space validation)*
 
 ### P1 - Performance
 
 - [ ] **No per-CPU page caches** - Global lock contention on every allocation
-- [ ] **`int 0x80` syscalls** - 3x slower than `syscall` instruction
+- [ ] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(SYSCALL/SYSRET attempted but caused freeze after roulette - reverted, needs investigation)*
 - [ ] **O(n) VMA lookup** - Linked list doesn't scale
 - [ ] **Priority field unused** - Scheduler ignores task priorities
 

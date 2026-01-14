@@ -76,6 +76,8 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
 
 pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let ctx = SyscallContext::new(task, frame);
+    let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
+    klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
     if let Some(ref c) = ctx {
         if let Some(t) = c.task_mut() {
             t.exit_reason = TaskExitReason::Normal;
@@ -83,9 +85,14 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
             t.exit_code = 0;
         }
     }
-    let task_id = ctx.as_ref().and_then(|c| c.task_id()).unwrap_or(u32::MAX);
+    klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
     task_terminate(task_id);
+    klog_debug!("SYSCALL_EXIT: task {} calling schedule", task_id);
     schedule();
+    klog_debug!(
+        "SYSCALL_EXIT: task {} schedule returned (should not happen)",
+        task_id
+    );
     SyscallDisposition::NoReturn
 }
 

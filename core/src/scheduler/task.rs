@@ -128,8 +128,12 @@ fn release_task_dependents(completed_task_id: u32) {
 
     for dep_opt in dependents.iter() {
         if let Some(dep) = dep_opt {
+            let dep_id = unsafe { (*(*dep)).task_id };
             if scheduler::unblock_task(*dep) != 0 {
-                klog_info!("task_terminate: Failed to unblock dependent task");
+                klog_info!(
+                    "task_terminate: Failed to unblock dependent task {}",
+                    dep_id
+                );
             }
         }
     }

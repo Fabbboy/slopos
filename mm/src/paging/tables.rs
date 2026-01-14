@@ -14,6 +14,7 @@ use crate::mm_constants::{
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
+use crate::tlb;
 
 #[repr(C)]
 pub struct ProcessPageDir {
@@ -73,17 +74,6 @@ fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
 fn is_user_address(vaddr: VirtAddr) -> bool {
     let raw = vaddr.as_u64();
     raw < KERNEL_VIRTUAL_BASE && raw >= crate::mm_constants::USER_SPACE_START_VA
-}
-
-#[inline(always)]
-fn invlpg(vaddr: VirtAddr) {
-    unsafe {
-        core::arch::asm!(
-            "invlpg [{}]",
-            in(reg) vaddr.as_u64(),
-            options(nostack, preserves_flags)
-        );
-    }
 }
 
 #[inline(always)]
@@ -216,7 +206,7 @@ fn map_page_in_directory(
                 return -1;
             }
             pdpt_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
-            invlpg(vaddr);
+            tlb::flush_page(vaddr);
             return 0;
         }
 
@@ -243,7 +233,7 @@ fn map_page_in_directory(
                 return -1;
             }
             pd_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
-            invlpg(vaddr);
+            tlb::flush_page(vaddr);
             return 0;
         }
 
@@ -273,7 +263,7 @@ fn map_page_in_directory(
         }
 
         pt_entry.set(paddr, flags | PageFlags::PRESENT);
-        invlpg(vaddr);
+        tlb::flush_page(vaddr);
     }
     0
 }
@@ -351,7 +341,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
             if page_frame_can_free(phys) != 0 {
                 free_page_frame(phys);
             }
-            invlpg(vaddr);
+            tlb::flush_page(vaddr);
             if table_empty(&*pdpt) {
                 pml4_entry.clear();
                 if page_frame_can_free(pml4_entry_phys) != 0 {
@@ -374,7 +364,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
             if page_frame_can_free(phys) != 0 {
                 free_page_frame(phys);
             }
-            invlpg(vaddr);
+            tlb::flush_page(vaddr);
         } else {
             let pd_entry_phys = pd_entry.address();
             let pt = phys_to_table(pd_entry_phys);
@@ -385,7 +375,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
             if pt_entry.is_present() {
                 let phys = pt_entry.address();
                 pt_entry.clear();
-                invlpg(vaddr);
+                tlb::flush_page(vaddr);
                 if page_frame_can_free(phys) != 0 {
                     free_page_frame(phys);
                 }

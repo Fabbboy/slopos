@@ -526,15 +526,13 @@ crate::boot_init_step_unit!(
 pub fn kernel_main_impl() {
     wl_currency::reset();
 
-    // Install basic GDT/IDT early so faults have somewhere to land. IST
-    // stacks are deferred to the driver phase (after memory is online) so
-    // ist_stacks_init can allocate pages.
     gdt::gdt_init();
     idt::idt_init();
     serial::write_line("BOOT: before idt_load (early)");
     idt::idt_load();
     serial::write_line("BOOT: after idt_load (early)");
-    serial::write_line("BOOT: early GDT/IDT initialized");
+    gdt::syscall_msr_init();
+    serial::write_line("BOOT: early GDT/IDT/SYSCALL initialized");
 
     // Register boot services and platform early to break circular dependencies
     crate::boot_impl::register_boot_services();
