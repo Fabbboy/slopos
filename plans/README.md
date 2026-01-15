@@ -8,12 +8,15 @@ This directory contains architectural analysis, comparisons, and improvement roa
 |----------|-------------|
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS, with detailed analysis of memory management, scheduler, synchronization, and recommendations |
 | [USERLAND_APP_SYSTEM_ANALYSIS.md](./USERLAND_APP_SYSTEM_ANALYSIS.md) | Analysis of implementing filesystem-loaded apps, libc/GNU toolchain support, and unified UI framework with dependency mapping to existing roadmap |
+| [VFS_IMPLEMENTATION_PLAN.md](./VFS_IMPLEMENTATION_PLAN.md) | **Active** - Detailed implementation plan for the VFS layer including traits, mount table, ramfs, and devfs with phased approach |
 
 ---
 
 ## Roadmap
 
 > **Current Focus**: VFS Layer (critical path for userland app system)
+> 
+> **Implementation Plan**: See [VFS_IMPLEMENTATION_PLAN.md](./VFS_IMPLEMENTATION_PLAN.md) for detailed design and phases
 
 ### Stage 1: Foundation (Current)
 
@@ -21,7 +24,7 @@ These items enable filesystem-loaded applications. VFS is the critical blocker.
 
 | Task | Type | Complexity | Depends On | Blocks | Status |
 |------|------|:----------:|------------|--------|:------:|
-| **VFS Layer** | Feature | High | - | exec(), ramfs, devfs | |
+| **VFS Layer** | Feature | High | - | exec(), ramfs, devfs | Planning |
 | exec() syscall | Feature | Medium | VFS | libslop, /bin apps | |
 | ramfs (/tmp, /dev) | Feature | Low | VFS | - | |
 | devfs | Feature | Low | VFS | - | |
