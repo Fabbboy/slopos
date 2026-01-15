@@ -7,6 +7,7 @@ This directory contains architectural analysis, comparisons, and improvement roa
 | Document | Description |
 |----------|-------------|
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS, with detailed analysis of memory management, scheduler, synchronization, and recommendations |
+| [USERLAND_APP_SYSTEM_ANALYSIS.md](./USERLAND_APP_SYSTEM_ANALYSIS.md) | Analysis of implementing filesystem-loaded apps, libc/GNU toolchain support, and unified UI framework with dependency mapping to existing roadmap |
 
 ## Quick Reference: Priority Issues
 
