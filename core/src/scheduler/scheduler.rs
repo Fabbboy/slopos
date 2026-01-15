@@ -22,6 +22,9 @@ const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHED_POLICY_COOPERATIVE: u8 = 2;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
+/// Number of priority levels (HIGH=0, NORMAL=1, LOW=2, IDLE=3)
+const NUM_PRIORITY_LEVELS: usize = 4;
+
 #[derive(Default)]
 struct ReadyQueue {
     head: *mut Task,
@@ -33,9 +36,8 @@ struct ReadyQueue {
 // Access is serialized through the SchedulerInner mutex.
 unsafe impl Send for ReadyQueue {}
 
-/// Internal scheduler state protected by a mutex.
 struct SchedulerInner {
-    ready_queue: ReadyQueue,
+    ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
     current_task: *mut Task,
     idle_task: *mut Task,
     policy: u8,
@@ -57,14 +59,16 @@ struct SchedulerInner {
 // All access is serialized through the mutex.
 unsafe impl Send for SchedulerInner {}
 
+const EMPTY_QUEUE: ReadyQueue = ReadyQueue {
+    head: ptr::null_mut(),
+    tail: ptr::null_mut(),
+    count: 0,
+};
+
 impl SchedulerInner {
     const fn new() -> Self {
         Self {
-            ready_queue: ReadyQueue {
-                head: ptr::null_mut(),
-                tail: ptr::null_mut(),
-                count: 0,
-            },
+            ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
             current_task: ptr::null_mut(),
             idle_task: ptr::null_mut(),
             policy: SCHED_POLICY_COOPERATIVE,
@@ -106,6 +110,44 @@ impl SchedulerInner {
             preemption_enabled: SCHEDULER_PREEMPTION_DEFAULT,
             reschedule_pending: 0,
             in_schedule: 0,
+        }
+    }
+
+    fn total_ready_count(&self) -> u32 {
+        self.ready_queues.iter().map(|q| q.count).sum()
+    }
+
+    fn enqueue_task(&mut self, task: *mut Task) -> c_int {
+        if task.is_null() {
+            return -1;
+        }
+        let priority = unsafe { (*task).priority as usize };
+        let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+        self.ready_queues[idx].enqueue(task)
+    }
+
+    fn dequeue_highest_priority(&mut self) -> *mut Task {
+        for queue in self.ready_queues.iter_mut() {
+            let task = queue.dequeue();
+            if !task.is_null() {
+                return task;
+            }
+        }
+        ptr::null_mut()
+    }
+
+    fn remove_task(&mut self, task: *mut Task) -> c_int {
+        if task.is_null() {
+            return -1;
+        }
+        let priority = unsafe { (*task).priority as usize };
+        let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+        self.ready_queues[idx].remove(task)
+    }
+
+    fn init_queues(&mut self) {
+        for queue in self.ready_queues.iter_mut() {
+            queue.init();
         }
     }
 }
@@ -268,7 +310,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         if unsafe { (*task).time_slice_remaining } == 0 {
             reset_task_quantum(sched, task);
         }
-        if sched.ready_queue.enqueue(task) != 0 {
+        if sched.enqueue_task(task) != 0 {
             klog_info!("schedule_task: ready queue full, request rejected");
             return -1;
         }
@@ -281,7 +323,7 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
         return -1;
     }
     with_scheduler(|sched| {
-        sched.ready_queue.remove(task);
+        sched.remove_task(task);
         if sched.current_task == task {
             sched.current_task = ptr::null_mut();
         }
@@ -290,7 +332,7 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
 }
 
 fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
-    let mut next = sched.ready_queue.dequeue();
+    let mut next = sched.dequeue_highest_priority();
     if next.is_null() && !sched.idle_task.is_null() && !task_is_terminated(sched.idle_task) {
         next = sched.idle_task;
     }
@@ -404,7 +446,7 @@ pub fn schedule() {
             if task_is_running(current) {
                 if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
                     klog_info!("schedule: failed to mark task ready");
-                } else if sched.ready_queue.enqueue(current) != 0 {
+                } else if sched.enqueue_task(current) != 0 {
                     klog_info!("schedule: ready queue full when re-queuing task");
                     task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
                     reset_task_quantum(sched, current);
@@ -576,7 +618,7 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
 pub fn init_scheduler() -> c_int {
     SCHEDULER.call_once(|| IrqMutex::new(SchedulerInner::new()));
     with_scheduler(|sched| {
-        sched.ready_queue.init();
+        sched.init_queues();
         sched.current_task = ptr::null_mut();
         sched.idle_task = ptr::null_mut();
         sched.policy = SCHED_POLICY_COOPERATIVE;
@@ -625,7 +667,7 @@ pub fn start_scheduler() -> c_int {
         }
         sched.enabled = 1;
         unsafe { crate::ffi_boundary::init_kernel_context(&raw mut sched.return_context) };
-        let has_ready = !sched.ready_queue.is_empty();
+        let has_ready = sched.total_ready_count() > 0;
         (false, has_ready)
     });
 
@@ -667,7 +709,7 @@ pub fn stop_scheduler() {
 pub fn scheduler_shutdown() {
     with_scheduler(|sched| {
         sched.enabled = 0;
-        sched.ready_queue.init();
+        sched.init_queues();
         sched.current_task = ptr::null_mut();
         sched.idle_task = ptr::null_mut();
     });
@@ -686,7 +728,7 @@ pub fn get_scheduler_stats(
             unsafe { *yields = sched.total_yields };
         }
         if !ready_tasks.is_null() {
-            unsafe { *ready_tasks = sched.ready_queue.count };
+            unsafe { *ready_tasks = sched.total_ready_count() };
         }
         if !schedule_calls.is_null() {
             unsafe { *schedule_calls = sched.schedule_calls };
@@ -736,7 +778,7 @@ pub fn scheduler_timer_tick() {
             return;
         }
         if current == sched.idle_task {
-            if sched.ready_queue.count > 0 {
+            if sched.total_ready_count() > 0 {
                 sched.reschedule_pending = 1;
             }
             return;
@@ -752,7 +794,7 @@ pub fn scheduler_timer_tick() {
                 return;
             }
         }
-        if sched.ready_queue.count == 0 {
+        if sched.total_ready_count() == 0 {
             reset_task_quantum(sched, current);
             return;
         }

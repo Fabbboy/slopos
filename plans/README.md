@@ -23,7 +23,7 @@ This directory contains architectural analysis, comparisons, and improvement roa
 - [ ] **No per-CPU page caches** - Global lock contention on every allocation
 - [x] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(Fixed: SYSCALL/SYSRET fast path with SWAPGS, per-CPU kernel stack, canonical address validation)*
 - [ ] **O(n) VMA lookup** - Linked list doesn't scale
-- [ ] **Priority field unused** - Scheduler ignores task priorities
+- [x] **Priority field unused** - Scheduler ignores task priorities *(Fixed: priority-based ready queues array with 4 levels, select_next_task scans HIGH→IDLE)*
 
 ### P2 - Missing Features
 
