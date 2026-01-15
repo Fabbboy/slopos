@@ -5,11 +5,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::IrqMutex;
 
-use slopos_abi::fs::{FS_TYPE_FILE, UserFsEntry};
+use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry};
 
-use crate::ext2_state::{
-    ext2_get_size, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink, ext2_write,
-};
+use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -21,10 +19,12 @@ const FILE_OPEN_APPEND: u32 = 1 << 3;
 use slopos_mm::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES};
 
 const FILEIO_MAX_OPEN_FILES: usize = 32;
+const MAX_PATH: usize = 256;
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy)]
 struct FileDescriptor {
-    inode: u32,
+    inode: InodeId,
+    fs: Option<&'static dyn FileSystem>,
     position: usize,
     flags: u32,
     valid: bool,
@@ -34,6 +34,7 @@ impl FileDescriptor {
     const fn new() -> Self {
         Self {
             inode: 0,
+            fs: None,
             position: 0,
             flags: 0,
             valid: false,
@@ -63,13 +64,13 @@ impl FileTableSlot {
 
 unsafe impl Send for FileTableSlot {}
 
-struct FileioStateStorage {
+struct FileioState {
     initialized: bool,
     kernel: MaybeUninit<FileTableSlot>,
     processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES],
 }
 
-impl FileioStateStorage {
+impl FileioState {
     const fn uninitialized() -> Self {
         let processes: [MaybeUninit<FileTableSlot>; MAX_PROCESSES] = unsafe {
             MaybeUninit::<[MaybeUninit<FileTableSlot>; MAX_PROCESSES]>::uninit().assume_init()
@@ -82,13 +83,12 @@ impl FileioStateStorage {
     }
 }
 
-unsafe impl Send for FileioStateStorage {}
+unsafe impl Send for FileioState {}
 
-static FILEIO_STATE: IrqMutex<FileioStateStorage> =
-    IrqMutex::new(FileioStateStorage::uninitialized());
+static FILEIO_STATE: IrqMutex<FileioState> = IrqMutex::new(FileioState::uninitialized());
 static FILEIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-fn with_state<R>(f: impl FnOnce(&mut FileioStateStorage) -> R) -> R {
+fn with_state<R>(f: impl FnOnce(&mut FileioState) -> R) -> R {
     let mut guard = FILEIO_STATE.lock();
     f(&mut *guard)
 }
@@ -108,6 +108,7 @@ fn with_tables<R>(
 
 fn reset_descriptor(desc: &mut FileDescriptor) {
     desc.inode = 0;
+    desc.fs = None;
     desc.position = 0;
     desc.flags = 0;
     desc.valid = false;
@@ -164,7 +165,7 @@ fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
     None
 }
 
-fn ensure_initialized(state: &mut FileioStateStorage) {
+fn ensure_initialized(state: &mut FileioState) {
     if FILEIO_INITIALIZED.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -173,7 +174,6 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
     for slot in state.processes.iter_mut() {
         slot.write(FileTableSlot::new(false));
     }
-    // Now that memory is populated, clear descriptors and mark free.
     let kernel = unsafe { state.kernel.assume_init_mut() };
     reset_table(kernel);
     let processes =
@@ -185,6 +185,30 @@ fn ensure_initialized(state: &mut FileioStateStorage) {
     }
     state.initialized = true;
 }
+
+unsafe fn cstr_len(ptr_in: *const c_char) -> usize {
+    if ptr_in.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *ptr_in.add(len) != 0 {
+            len += 1;
+        }
+    }
+    len
+}
+
+unsafe fn path_bytes<'a>(path: *const c_char) -> Option<&'a [u8]> {
+    if path.is_null() {
+        return None;
+    }
+    unsafe {
+        let len = cstr_len(path);
+        Some(slice::from_raw_parts(path as *const u8, len.min(MAX_PATH)))
+    }
+}
+
 pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
     if process_id == INVALID_PROCESS_ID {
         return 0;
@@ -202,6 +226,7 @@ pub fn fileio_create_table_for_process(process_id: u32) -> c_int {
         0
     })
 }
+
 pub fn fileio_destroy_table_for_process(process_id: u32) {
     if process_id == INVALID_PROCESS_ID {
         return;
@@ -223,6 +248,7 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
         }
     });
 }
+
 pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int {
     if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
         return -1;
@@ -230,6 +256,18 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
     if (flags & FILE_OPEN_APPEND) != 0 && (flags & FILE_OPEN_WRITE) == 0 {
         return -1;
     }
+
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    let create = (flags & USER_FS_OPEN_CREAT) != 0;
+
+    let handle = match vfs_open(path_bytes, create) {
+        Ok(h) => h,
+        Err(_) => return -1,
+    };
 
     with_tables(|kernel, processes| {
         let kernel_ptr = kernel as *mut FileTableSlot;
@@ -257,15 +295,9 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         };
 
         let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
-        let inode = match ext2_open(path, flags) {
-            Ok(inode) => inode,
-            Err(_) => {
-                drop(guard);
-                return -1;
-            }
-        };
+
         let position = if (flags & FILE_OPEN_APPEND) != 0 {
-            match ext2_get_size(inode) {
+            match handle.size() {
                 Ok(size) => size as usize,
                 Err(_) => {
                     drop(guard);
@@ -275,7 +307,9 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         } else {
             0
         };
-        desc.inode = inode;
+
+        desc.inode = handle.inode;
+        desc.fs = Some(handle.fs);
         desc.flags = flags;
         desc.position = position;
         desc.valid = true;
@@ -284,6 +318,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         slot_idx as c_int
     })
 }
+
 pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
@@ -307,8 +342,16 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             return -1;
         }
 
+        let fs = match desc.fs {
+            Some(fs) => fs,
+            None => {
+                drop(guard);
+                return -1;
+            }
+        };
+
         let buf = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, count) };
-        let rc = ext2_read(desc.inode, desc.position as u32, buf);
+        let rc = fs.read(desc.inode, desc.position as u64, buf);
         if let Ok(read_len) = rc {
             desc.position = desc.position.saturating_add(read_len);
             drop(guard);
@@ -318,6 +361,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
         -1
     })
 }
+
 pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
     if buffer.is_null() || count == 0 {
         return 0;
@@ -340,8 +384,16 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
             return -1;
         }
 
+        let fs = match desc.fs {
+            Some(fs) => fs,
+            None => {
+                drop(guard);
+                return -1;
+            }
+        };
+
         let buf = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
-        let rc = ext2_write(desc.inode, desc.position as u32, buf);
+        let rc = fs.write(desc.inode, desc.position as u64, buf);
         if let Ok(written) = rc {
             desc.position = desc.position.saturating_add(written);
             drop(guard);
@@ -351,6 +403,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
         -1
     })
 }
+
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -370,6 +423,7 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
         0
     })
 }
+
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c_int {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -384,13 +438,23 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
             drop(guard);
             return -1;
         };
-        let size = match ext2_get_size(desc.inode) {
-            Ok(size) => size as usize,
+
+        let fs = match desc.fs {
+            Some(fs) => fs,
+            None => {
+                drop(guard);
+                return -1;
+            }
+        };
+
+        let size = match fs.stat(desc.inode) {
+            Ok(stat) => stat.size as usize,
             Err(_) => {
                 drop(guard);
                 return -1;
             }
         };
+
         let delta = offset as usize;
         let new_pos = match whence {
             0 => {
@@ -430,6 +494,7 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: u64, whence: c_int) -> c
         0
     })
 }
+
 pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
     with_tables(|kernel, processes| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
@@ -442,9 +507,13 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let desc = unsafe { get_descriptor(&mut *table_ptr, fd) };
         let size = if let Some(desc) = desc {
-            match ext2_get_size(desc.inode) {
-                Ok(size) => size as usize,
-                Err(_) => usize::MAX,
+            if let Some(fs) = desc.fs {
+                match fs.stat(desc.inode) {
+                    Ok(stat) => stat.size as usize,
+                    Err(_) => usize::MAX,
+                }
+            } else {
+                usize::MAX
             }
         } else {
             usize::MAX
@@ -453,35 +522,57 @@ pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
         size
     })
 }
+
 pub fn file_exists_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return 0;
     }
-    let rc = ext2_stat(path);
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    let rc = vfs_stat(path_bytes);
     if let Ok((kind, _)) = rc {
         return if kind == FS_TYPE_FILE { 1 } else { 0 };
     }
     0
 }
+
 pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }
-    if ext2_unlink(path).is_ok() { 0 } else { -1 }
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return -1,
+    };
+    if vfs_unlink(path_bytes).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn file_mkdir_path(path: *const c_char) -> c_int {
     if path.is_null() {
         return -1;
     }
-    if ext2_mkdir(path).is_ok() { 0 } else { -1 }
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return -1,
+    };
+    if vfs_mkdir(path_bytes).is_ok() { 0 } else { -1 }
 }
 
 pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
     if path.is_null() {
         return -1;
     }
-    if let Ok((kind, size)) = ext2_stat(path) {
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return -1,
+    };
+    if let Ok((kind, size)) = vfs_stat(path_bytes) {
         *out_type = kind;
         *out_size = size;
         return 0;
@@ -498,9 +589,13 @@ pub fn file_list_path(
     if path.is_null() || entries.is_null() || max == 0 {
         return -1;
     }
+    let path_bytes = match unsafe { path_bytes(path) } {
+        Some(p) => p,
+        None => return -1,
+    };
     let cap = max as usize;
     let out_slice = unsafe { slice::from_raw_parts_mut(entries, cap) };
-    match ext2_list(path, out_slice) {
+    match vfs_list(path_bytes, out_slice) {
         Ok(count) => {
             *out_count = count as u32;
             0

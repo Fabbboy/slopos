@@ -1,28 +1,21 @@
 use core::ffi::c_int;
 
-use slopos_abi::fs::{USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry};
+use slopos_abi::fs::UserFsEntry;
 use slopos_lib::klog_info;
 
-use crate::ext2_image::EXT2_IMAGE;
-use crate::ext2_state::{
-    ext2_init_with_image, ext2_list, ext2_mkdir, ext2_open, ext2_read, ext2_stat, ext2_unlink,
-    ext2_write,
-};
-fn as_c(path: &[u8]) -> *const i8 {
-    path.as_ptr() as *const i8
-}
+use crate::vfs::{vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
-fn test_ext2_init() -> c_int {
-    klog_info!("EXT2_TEST: init image");
-    if ext2_init_with_image(EXT2_IMAGE) != 0 {
+fn test_vfs_initialized() -> c_int {
+    klog_info!("VFS_TEST: check initialized");
+    if !vfs_is_initialized() {
         return -1;
     }
     0
 }
 
-fn test_ext2_root() -> c_int {
-    klog_info!("EXT2_TEST: root stat");
-    let (kind, _size) = match ext2_stat(as_c(b"/\0")) {
+fn test_vfs_root_stat() -> c_int {
+    klog_info!("VFS_TEST: root stat");
+    let (kind, _size) = match vfs_stat(b"/") {
         Ok(stat) => stat,
         Err(_) => return -1,
     };
@@ -32,38 +25,42 @@ fn test_ext2_root() -> c_int {
     0
 }
 
-fn test_ext2_file_roundtrip() -> c_int {
-    klog_info!("EXT2_TEST: file roundtrip");
-    if ext2_mkdir(as_c(b"/itests\0")).is_err() {
+fn test_vfs_file_roundtrip() -> c_int {
+    klog_info!("VFS_TEST: file roundtrip");
+    if vfs_mkdir(b"/vfs_test").is_err() {
         return -1;
     }
-    let flags = USER_FS_OPEN_READ | USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT;
-    let inode = match ext2_open(as_c(b"/itests/hello.txt\0"), flags) {
-        Ok(inode) => inode,
+
+    let handle = match vfs_open(b"/vfs_test/hello.txt", true) {
+        Ok(h) => h,
         Err(_) => return -1,
     };
-    let content = b"hello ext2";
-    if ext2_write(inode, 0, content).is_err() {
+
+    let content = b"hello vfs";
+    if handle.write(0, content).is_err() {
         return -1;
     }
+
     let mut buf = [0u8; 32];
-    let read_len = match ext2_read(inode, 0, &mut buf) {
+    let read_len = match handle.read(0, &mut buf) {
         Ok(len) => len,
         Err(_) => return -1,
     };
+
     if read_len != content.len() || &buf[..content.len()] != content {
         return -1;
     }
     0
 }
 
-fn test_ext2_list() -> c_int {
-    klog_info!("EXT2_TEST: list directory");
+fn test_vfs_list() -> c_int {
+    klog_info!("VFS_TEST: list directory");
     let mut entries = [UserFsEntry::new(); 8];
-    let count = match ext2_list(as_c(b"/itests\0"), &mut entries) {
+    let count = match vfs_list(b"/vfs_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return -1,
     };
+
     let mut found = false;
     for entry in entries.iter().take(count) {
         if entry.name_str() == "hello.txt" {
@@ -71,22 +68,25 @@ fn test_ext2_list() -> c_int {
             break;
         }
     }
+
     if !found {
         return -1;
     }
     0
 }
 
-fn test_ext2_unlink() -> c_int {
-    klog_info!("EXT2_TEST: unlink file");
-    if ext2_unlink(as_c(b"/itests/hello.txt\0")).is_err() {
+fn test_vfs_unlink() -> c_int {
+    klog_info!("VFS_TEST: unlink file");
+    if vfs_unlink(b"/vfs_test/hello.txt").is_err() {
         return -1;
     }
+
     let mut entries = [UserFsEntry::new(); 8];
-    let count = match ext2_list(as_c(b"/itests\0"), &mut entries) {
+    let count = match vfs_list(b"/vfs_test", &mut entries) {
         Ok(count) => count,
         Err(_) => return -1,
     };
+
     for entry in entries.iter().take(count) {
         if entry.name_str() == "hello.txt" {
             return -1;
@@ -96,25 +96,25 @@ fn test_ext2_unlink() -> c_int {
 }
 
 pub fn run_ext2_tests() -> c_int {
-    klog_info!("EXT2_TEST: running suite");
+    klog_info!("VFS_TEST: running suite");
     let mut passed = 0;
 
-    if test_ext2_init() == 0 {
+    if test_vfs_initialized() == 0 {
         passed += 1;
     }
-    if test_ext2_root() == 0 {
+    if test_vfs_root_stat() == 0 {
         passed += 1;
     }
-    if test_ext2_file_roundtrip() == 0 {
+    if test_vfs_file_roundtrip() == 0 {
         passed += 1;
     }
-    if test_ext2_list() == 0 {
+    if test_vfs_list() == 0 {
         passed += 1;
     }
-    if test_ext2_unlink() == 0 {
+    if test_vfs_unlink() == 0 {
         passed += 1;
     }
 
-    klog_info!("EXT2_TEST: {passed}/5 passed");
+    klog_info!("VFS_TEST: {passed}/5 passed");
     passed
 }
