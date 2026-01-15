@@ -1,8 +1,9 @@
 # VFS Layer Implementation Plan
 
 > **Created**: January 2026
-> **Status**: Planning Phase
+> **Status**: ✅ COMPLETE
 > **Priority**: Stage 1 - Critical Path (blocks exec(), ramfs, devfs)
+> **Completed**: January 2026 - All 5 phases implemented and integrated
 
 ---
 
@@ -255,42 +256,47 @@ pub fn resolve_path(path: &[u8]) -> VfsResult<(Arc<dyn FileSystem>, InodeId)> {
 
 ## Implementation Phases
 
-### Phase 1: Core VFS Traits (Week 1)
+### Phase 1: Core VFS Traits (Week 1) ✅ COMPLETE
 
 **Goal**: Define the abstraction layer without breaking existing functionality
 
-| Task | File | Description |
-|------|------|-------------|
-| 1.1 | `fs/src/vfs/mod.rs` | Create VFS module structure |
-| 1.2 | `fs/src/vfs/traits.rs` | Define `FileSystem`, `FileStat`, `VfsError` |
-| 1.3 | `fs/src/vfs/mount.rs` | Implement `MountTable` with basic mount/unmount |
-| 1.4 | `fs/src/vfs/path.rs` | Path resolution with mount awareness |
+| Task | File | Description | Status |
+|------|------|-------------|--------|
+| 1.1 | `fs/src/vfs/mod.rs` | Create VFS module structure | ✅ |
+| 1.2 | `fs/src/vfs/traits.rs` | Define `FileSystem`, `FileStat`, `VfsError` | ✅ |
+| 1.3 | `fs/src/vfs/mount.rs` | Implement `MountTable` with basic mount/unmount | ✅ |
+| 1.4 | `fs/src/vfs/path.rs` | Path resolution with mount awareness | ✅ |
 
 **Deliverable**: VFS traits compile, no runtime changes yet
 
-### Phase 2: Ext2 Adapter (Week 1-2)
+### Phase 2: Ext2 Adapter (Week 1-2) ✅ COMPLETE
 
 **Goal**: Wrap existing Ext2 implementation in VFS trait
 
-| Task | File | Description |
-|------|------|-------------|
-| 2.1 | `fs/src/ext2_vfs.rs` | Create `Ext2VfsAdapter` implementing `FileSystem` |
-| 2.2 | `fs/src/ext2_vfs.rs` | Translate `Ext2Error` to `VfsError` |
-| 2.3 | `fs/src/vfs/ops.rs` | Create VFS-level file operations |
-| 2.4 | `boot/src/boot_services.rs` | Mount ext2 via VFS at boot |
+| Task | File | Description | Status |
+|------|------|-------------|--------|
+| 2.1 | `fs/src/ext2_vfs.rs` | Create `Ext2VfsAdapter` implementing `FileSystem` | ✅ |
+| 2.2 | `fs/src/ext2_vfs.rs` | Translate `Ext2Error` to `VfsError` | ✅ |
+| 2.3 | `fs/src/vfs/ops.rs` | Create VFS-level file operations | ✅ |
+| 2.4 | `boot/src/boot_services.rs` | Mount ext2 via VFS at boot | ✅ |
 
 **Deliverable**: Existing functionality works through VFS layer
 
-### Phase 3: RamFS Implementation (Week 2)
+### Phase 3: RamFS Implementation (Week 2) ✅ COMPLETE
 
 **Goal**: First non-ext2 filesystem for `/tmp`
 
-| Task | File | Description |
-|------|------|-------------|
-| 3.1 | `fs/src/ramfs/mod.rs` | In-memory filesystem implementation |
-| 3.2 | `fs/src/ramfs/inode.rs` | RamFS inode with data storage |
-| 3.3 | `fs/src/ramfs/dir.rs` | Directory entry management |
-| 3.4 | Boot integration | Mount ramfs at `/tmp` |
+| Task | File | Description | Status |
+|------|------|-------------|--------|
+| 3.1 | `fs/src/ramfs/mod.rs` | In-memory filesystem implementation | ✅ |
+| 3.2 | `fs/src/ramfs/mod.rs` | RamFS inode with data storage (combined) | ✅ |
+| 3.3 | `fs/src/ramfs/mod.rs` | Directory entry management (combined) | ✅ |
+| 3.4 | `fs/src/vfs/init.rs` | Mount ramfs at `/tmp` | ✅ |
+
+**Implementation Notes:**
+- Fixed-size design: 64 inodes × 4KB data each, 32 dir entries per directory
+- Uses `new_const()` for static initialization (no heap at mount time)
+- Supports create/read/write/unlink/readdir operations
 
 **RamFS Design:**
 ```rust
@@ -310,18 +316,23 @@ struct RamFs {
 
 **Deliverable**: `/tmp` works as a separate mount
 
-### Phase 4: DevFS Implementation (Week 3)
+### Phase 4: DevFS Implementation (Week 3) ✅ COMPLETE
 
 **Goal**: Device special files at `/dev`
 
-| Task | File | Description |
-|------|------|-------------|
-| 4.1 | `fs/src/devfs/mod.rs` | DevFS skeleton |
-| 4.2 | `fs/src/devfs/null.rs` | `/dev/null` - reads return 0, writes succeed |
-| 4.3 | `fs/src/devfs/zero.rs` | `/dev/zero` - reads return zeros |
-| 4.4 | `fs/src/devfs/random.rs` | `/dev/random` - reads return random bytes |
-| 4.5 | `fs/src/devfs/console.rs` | `/dev/console` - maps to serial/framebuffer |
-| 4.6 | Boot integration | Mount devfs at `/dev` |
+| Task | File | Description | Status |
+|------|------|-------------|--------|
+| 4.1 | `fs/src/devfs/mod.rs` | DevFS skeleton | ✅ |
+| 4.2 | `fs/src/devfs/mod.rs` | `/dev/null` - reads return 0, writes succeed | ✅ |
+| 4.3 | `fs/src/devfs/mod.rs` | `/dev/zero` - reads return zeros | ✅ |
+| 4.4 | `fs/src/devfs/mod.rs` | `/dev/random` - reads return random bytes | ✅ |
+| 4.5 | `fs/src/devfs/mod.rs` | `/dev/console` - maps to serial/framebuffer | ✅ |
+| 4.6 | `fs/src/vfs/init.rs` | Mount devfs at `/dev` | ✅ |
+
+**Implementation Notes:**
+- All devices implemented in single `mod.rs` file for simplicity
+- XorShift64 PRNG for `/dev/random`
+- Read-only directory structure with character device nodes
 
 **DevFS Design:**
 ```rust
@@ -348,16 +359,22 @@ impl DeviceOps for ZeroDevice {
 
 **Deliverable**: `/dev/null`, `/dev/zero`, `/dev/random` work
 
-### Phase 5: Syscall Integration (Week 3-4)
+### Phase 5: Syscall Integration (Week 3-4) ✅ COMPLETE
 
 **Goal**: Route syscalls through VFS layer
 
-| Task | File | Description |
-|------|------|-------------|
-| 5.1 | `fs/src/vfs/file.rs` | VFS-level file handle with position tracking |
-| 5.2 | `fs/src/fileio.rs` | Update to use VFS instead of direct ext2 |
-| 5.3 | `core/src/syscall/fs.rs` | Update syscall handlers (minimal changes) |
-| 5.4 | Tests | Verify all file operations work |
+| Task | File | Description | Status |
+|------|------|-------------|--------|
+| 5.1 | `fs/src/vfs_fileio.rs` | VFS-level file handle with position tracking | ✅ |
+| 5.2 | `fs/src/vfs_fileio.rs` | New VFS-based file descriptor table | ✅ |
+| 5.3 | `core/src/syscall/fs.rs` | Update syscall handlers to use VFS | ✅ |
+| 5.4 | `make test` | Verify all file operations work | ✅ |
+
+**Implementation Notes:**
+- Created new `vfs_fileio.rs` parallel to legacy `fileio.rs`
+- Syscalls switched from `file_*` to `vfs_file_*` functions
+- File descriptors store both inode and filesystem pointer for cross-FS support
+- Legacy `fileio.rs` and `ext2_state.rs` kept for backward compatibility (can be removed later)
 
 **Deliverable**: Full VFS integration, backwards compatible
 

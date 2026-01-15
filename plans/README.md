@@ -14,9 +14,9 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ## Roadmap
 
-> **Current Focus**: VFS Layer (critical path for userland app system)
+> **Current Focus**: exec() syscall (VFS complete, now unblocked)
 > 
-> **Implementation Plan**: See [VFS_IMPLEMENTATION_PLAN.md](./VFS_IMPLEMENTATION_PLAN.md) for detailed design and phases
+> **Completed**: VFS Layer - See [VFS_IMPLEMENTATION_PLAN.md](./VFS_IMPLEMENTATION_PLAN.md) for implementation details
 
 ### Stage 1: Foundation (Current)
 
@@ -24,10 +24,10 @@ These items enable filesystem-loaded applications. VFS is the critical blocker.
 
 | Task | Type | Complexity | Depends On | Blocks | Status |
 |------|------|:----------:|------------|--------|:------:|
-| **VFS Layer** | Feature | High | - | exec(), ramfs, devfs | Planning |
-| exec() syscall | Feature | Medium | VFS | libslop, /bin apps | |
-| ramfs (/tmp, /dev) | Feature | Low | VFS | - | |
-| devfs | Feature | Low | VFS | - | |
+| **VFS Layer** | Feature | High | - | exec(), ramfs, devfs | ✅ Complete |
+| exec() syscall | Feature | Medium | VFS | libslop, /bin apps | Ready |
+| ramfs (/tmp, /dev) | Feature | Low | VFS | - | ✅ Complete |
+| devfs | Feature | Low | VFS | - | ✅ Complete |
 
 ### Stage 2: Userland Runtime
 
