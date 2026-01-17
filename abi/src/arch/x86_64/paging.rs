@@ -48,6 +48,14 @@ bitflags! {
         const NO_EXECUTE    = 1 << 63;
 
         // =====================================================================
+        // Software-defined flags (bits 9-11 are available for OS use)
+        // =====================================================================
+
+        /// Copy-on-Write marker (bit 9).
+        /// When set with !WRITABLE, a write fault triggers COW resolution.
+        const COW           = 1 << 9;
+
+        // =====================================================================
         // Convenience Combinations
         // =====================================================================
 

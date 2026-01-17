@@ -77,6 +77,7 @@ use slopos_core::irq::irq_dispatch;
 use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
 use slopos_lib::kdiag_dump_interrupt_frame;
+use slopos_mm::cow;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
@@ -573,6 +574,20 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
 
     let frame_ref = unsafe { &*frame };
     let from_user = in_user(frame_ref);
+
+    if from_user {
+        let task_ptr = scheduler_get_current_task() as *mut Task;
+        if !task_ptr.is_null() {
+            let pid = unsafe { (*task_ptr).process_id };
+            let page_dir = process_vm::process_vm_get_page_dir(pid);
+            if !page_dir.is_null() && cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr)
+            {
+                if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
+                    return;
+                }
+            }
+        }
+    }
 
     klog_info!("FATAL: Page fault");
     klog_info!("Fault address: 0x{:x}", fault_addr);

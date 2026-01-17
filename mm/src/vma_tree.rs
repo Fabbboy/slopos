@@ -15,7 +15,8 @@ use core::ptr;
 
 use crate::kernel_heap::{kfree, kmalloc};
 
-/// Color for red-black tree nodes
+pub const VMA_FLAG_COW: u32 = 1 << 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Color {

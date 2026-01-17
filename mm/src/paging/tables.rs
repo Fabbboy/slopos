@@ -700,3 +700,148 @@ pub fn paging_is_user_accessible(page_dir: *mut ProcessPageDir, vaddr: VirtAddr)
         (result.is_ok() && all_user) as c_int
     }
 }
+
+pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
+        return -1;
+    }
+
+    let aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !(PAGE_SIZE_4KB - 1));
+
+    unsafe {
+        let pml4 = (*page_dir).pml4;
+        let pml4_idx = PageTableLevel::Four.index_of(aligned_vaddr);
+        let pdpt_idx = PageTableLevel::Three.index_of(aligned_vaddr);
+        let pd_idx = PageTableLevel::Two.index_of(aligned_vaddr);
+        let pt_idx = PageTableLevel::One.index_of(aligned_vaddr);
+
+        let pml4_entry = (&*pml4).entry(pml4_idx);
+        if !pml4_entry.is_present() {
+            return -1;
+        }
+
+        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt_entry = (&*pdpt).entry(pdpt_idx);
+        if !pdpt_entry.is_present() {
+            return -1;
+        }
+        if pdpt_entry.is_huge() {
+            return -1;
+        }
+
+        let pd = phys_to_table(pdpt_entry.address());
+        let pd_entry = (&*pd).entry(pd_idx);
+        if !pd_entry.is_present() {
+            return -1;
+        }
+        if pd_entry.is_huge() {
+            return -1;
+        }
+
+        let pt = phys_to_table(pd_entry.address());
+        let pt_entry = (&mut *pt).entry_mut(pt_idx);
+        if !pt_entry.is_present() {
+            return -1;
+        }
+
+        pt_entry.remove_flags(PageFlags::WRITABLE);
+        pt_entry.add_flags(PageFlags::COW);
+        tlb::flush_page(aligned_vaddr);
+    }
+
+    0
+}
+
+pub fn paging_is_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> bool {
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
+        return false;
+    }
+
+    let aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !(PAGE_SIZE_4KB - 1));
+
+    unsafe {
+        let pml4 = (*page_dir).pml4;
+        let pml4_idx = PageTableLevel::Four.index_of(aligned_vaddr);
+        let pdpt_idx = PageTableLevel::Three.index_of(aligned_vaddr);
+        let pd_idx = PageTableLevel::Two.index_of(aligned_vaddr);
+        let pt_idx = PageTableLevel::One.index_of(aligned_vaddr);
+
+        let pml4_entry = (&*pml4).entry(pml4_idx);
+        if !pml4_entry.is_present() {
+            return false;
+        }
+
+        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt_entry = (&*pdpt).entry(pdpt_idx);
+        if !pdpt_entry.is_present() {
+            return false;
+        }
+        if pdpt_entry.is_huge() {
+            return false;
+        }
+
+        let pd = phys_to_table(pdpt_entry.address());
+        let pd_entry = (&*pd).entry(pd_idx);
+        if !pd_entry.is_present() {
+            return false;
+        }
+        if pd_entry.is_huge() {
+            return false;
+        }
+
+        let pt = phys_to_table(pd_entry.address());
+        let pt_entry = (&*pt).entry(pt_idx);
+        if !pt_entry.is_present() {
+            return false;
+        }
+
+        pt_entry.flags().contains(PageFlags::COW)
+    }
+}
+
+pub fn paging_get_pte_flags(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Option<PageFlags> {
+    if page_dir.is_null() || unsafe { (*page_dir).pml4.is_null() } {
+        return None;
+    }
+
+    let aligned_vaddr = VirtAddr::new(vaddr.as_u64() & !(PAGE_SIZE_4KB - 1));
+
+    unsafe {
+        let pml4 = (*page_dir).pml4;
+        let pml4_idx = PageTableLevel::Four.index_of(aligned_vaddr);
+        let pdpt_idx = PageTableLevel::Three.index_of(aligned_vaddr);
+        let pd_idx = PageTableLevel::Two.index_of(aligned_vaddr);
+        let pt_idx = PageTableLevel::One.index_of(aligned_vaddr);
+
+        let pml4_entry = (&*pml4).entry(pml4_idx);
+        if !pml4_entry.is_present() {
+            return None;
+        }
+
+        let pdpt = phys_to_table(pml4_entry.address());
+        let pdpt_entry = (&*pdpt).entry(pdpt_idx);
+        if !pdpt_entry.is_present() {
+            return None;
+        }
+        if pdpt_entry.is_huge() {
+            return Some(pdpt_entry.flags());
+        }
+
+        let pd = phys_to_table(pdpt_entry.address());
+        let pd_entry = (&*pd).entry(pd_idx);
+        if !pd_entry.is_present() {
+            return None;
+        }
+        if pd_entry.is_huge() {
+            return Some(pd_entry.flags());
+        }
+
+        let pt = phys_to_table(pd_entry.address());
+        let pt_entry = (&*pt).entry(pt_idx);
+        if !pt_entry.is_present() {
+            return None;
+        }
+
+        Some(pt_entry.flags())
+    }
+}

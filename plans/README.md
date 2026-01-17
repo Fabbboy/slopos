@@ -59,7 +59,7 @@ Required for efficient fork() and full POSIX compatibility (Tier 3 userland).
 
 | Task | Type | Complexity | Depends On | Status |
 |------|------|:----------:|------------|:------:|
-| Copy-on-Write (CoW) | Feature | High | - | |
+| Copy-on-Write (CoW) | Feature | High | - | ✅ Complete |
 | Demand Paging | Feature | Medium | - | |
 | fork() syscall | Feature | Medium | CoW | |
 
@@ -97,7 +97,7 @@ No dependencies on VFS/exec. Can start immediately.
                         │  /bin apps   │
                         └──────────────┘         STAGE 4
                                                 ┌──────────────┐
-                                                │    CoW       │───► fork()
+                                                │    CoW     ✅│───► fork()
                                                 └──────────────┘
 
  PARALLEL TRACK

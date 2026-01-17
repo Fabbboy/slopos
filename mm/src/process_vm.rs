@@ -10,11 +10,15 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
 use crate::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags};
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free};
+use crate::page_alloc::{
+    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
+};
 use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
-    paging_free_user_space, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir,
+    paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
+    unmap_page_in_dir, virt_to_phys_in_dir,
 };
+use crate::vma_tree::VMA_FLAG_COW;
 use crate::vma_tree::{VmaNode, VmaTree};
 
 #[derive(Clone, Copy)]
@@ -1263,4 +1267,193 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     }
 
     process.heap_end
+}
+
+/// Clone address space with COW for fork(). Returns child PID or INVALID_PROCESS_ID.
+pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
+    let parent_ptr = find_process_vm(parent_id);
+    if parent_ptr.is_null() {
+        klog_info!(
+            "process_vm_clone_cow: Parent process {} not found",
+            parent_id
+        );
+        return INVALID_PROCESS_ID;
+    }
+
+    let parent = unsafe { &*parent_ptr };
+    if parent.page_dir.is_null() {
+        klog_info!("process_vm_clone_cow: Parent has no page directory");
+        return INVALID_PROCESS_ID;
+    }
+
+    let mut manager = VM_MANAGER.lock();
+    if manager.num_processes >= MAX_PROCESSES as u32 {
+        klog_info!("process_vm_clone_cow: Maximum processes reached");
+        return INVALID_PROCESS_ID;
+    }
+
+    let mut child_ptr: *mut ProcessVm = ptr::null_mut();
+    for i in 0..MAX_PROCESSES {
+        if manager.processes[i].process_id == INVALID_PROCESS_ID {
+            child_ptr = &manager.processes[i] as *const _ as *mut ProcessVm;
+            break;
+        }
+    }
+    if child_ptr.is_null() {
+        klog_info!("process_vm_clone_cow: No free process slots");
+        return INVALID_PROCESS_ID;
+    }
+
+    let pml4_phys = alloc_page_frame(ALLOC_FLAG_ZERO);
+    if pml4_phys.is_null() {
+        klog_info!("process_vm_clone_cow: Failed to allocate PML4");
+        return INVALID_PROCESS_ID;
+    }
+    let pml4 = pml4_phys.to_virt().as_mut_ptr::<PageTable>();
+    if pml4.is_null() {
+        klog_info!("process_vm_clone_cow: No HHDM mapping for PML4");
+        free_page_frame(pml4_phys);
+        return INVALID_PROCESS_ID;
+    }
+    unsafe {
+        (*pml4).zero();
+    }
+
+    let child_id = manager.next_process_id;
+    manager.next_process_id += 1;
+
+    let child_page_dir = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
+    if child_page_dir.is_null() {
+        klog_info!("process_vm_clone_cow: Failed to allocate page directory struct");
+        free_page_frame(pml4_phys);
+        return INVALID_PROCESS_ID;
+    }
+    unsafe {
+        (*child_page_dir).pml4 = pml4;
+        (*child_page_dir).pml4_phys = pml4_phys;
+        (*child_page_dir).ref_count = 1;
+        (*child_page_dir).process_id = child_id;
+        (*child_page_dir).next = ptr::null_mut();
+    }
+
+    unsafe {
+        paging_copy_kernel_mappings((*child_page_dir).pml4);
+    }
+
+    let child = unsafe { &mut *child_ptr };
+    child.process_id = child_id;
+    child.page_dir = child_page_dir;
+    child.vma_tree.clear();
+    child.code_start = parent.code_start;
+    child.data_start = parent.data_start;
+    child.heap_start = parent.heap_start;
+    child.heap_end = parent.heap_end;
+    child.stack_start = parent.stack_start;
+    child.stack_end = parent.stack_end;
+    child.total_pages = 0;
+    child.flags = parent.flags;
+    child.next = manager.process_list;
+
+    drop(manager);
+
+    let mut cow_pages: u32 = 0;
+    let mut clone_failed = false;
+
+    unsafe {
+        let parent_tree = &(*parent_ptr).vma_tree;
+        let child_tree = &mut (*child_ptr).vma_tree;
+
+        let mut cursor = parent_tree.first();
+        while !cursor.is_null() {
+            let vma = &*cursor;
+            let vma_start = vma.start;
+            let vma_end = vma.end;
+            let vma_flags = vma.flags | VMA_FLAG_COW;
+
+            let child_vma = child_tree.insert(vma_start, vma_end, vma_flags);
+            if child_vma.is_null() {
+                klog_info!(
+                    "process_vm_clone_cow: Failed to insert VMA [{:#x}, {:#x})",
+                    vma_start,
+                    vma_end
+                );
+                clone_failed = true;
+                break;
+            }
+
+            let mut addr = vma_start;
+            while addr < vma_end {
+                let vaddr = VirtAddr::new(addr);
+                let phys = virt_to_phys_in_dir(parent.page_dir, vaddr);
+
+                if !phys.is_null() {
+                    let flags_opt = paging_get_pte_flags(parent.page_dir, vaddr);
+                    if let Some(flags) = flags_opt {
+                        if !flags.contains(PageFlags::USER) {
+                            addr += PAGE_SIZE_4KB;
+                            continue;
+                        }
+
+                        if flags.contains(PageFlags::WRITABLE) {
+                            paging_mark_cow(parent.page_dir, vaddr);
+                        }
+
+                        page_frame_inc_ref(phys);
+
+                        let child_flags = (flags.bits() & !PageFlags::WRITABLE.bits())
+                            | PageFlags::COW.bits()
+                            | PageFlags::USER.bits()
+                            | PageFlags::PRESENT.bits();
+
+                        if map_page_4kb_in_dir(child_page_dir, vaddr, phys, child_flags) != 0 {
+                            klog_info!("process_vm_clone_cow: Failed to map page {:#x}", addr);
+                            free_page_frame(phys);
+                            clone_failed = true;
+                            break;
+                        }
+
+                        cow_pages += 1;
+                    }
+                }
+
+                addr += PAGE_SIZE_4KB;
+            }
+
+            if clone_failed {
+                break;
+            }
+
+            cursor = parent_tree.next(cursor);
+        }
+    }
+
+    if clone_failed {
+        klog_info!("process_vm_clone_cow: Clone failed, cleaning up");
+        unsafe {
+            teardown_process_mappings(child_ptr);
+            paging_free_user_space(child_page_dir);
+            if !(*child_page_dir).pml4_phys.is_null() {
+                free_page_frame((*child_page_dir).pml4_phys);
+            }
+            kfree(child_page_dir as *mut _);
+            (*child_ptr).reset();
+        }
+        return INVALID_PROCESS_ID;
+    }
+
+    let mut manager = VM_MANAGER.lock();
+    unsafe {
+        (*child_ptr).total_pages = cow_pages;
+        manager.process_list = child_ptr;
+        manager.num_processes += 1;
+    }
+
+    klog_info!(
+        "process_vm_clone_cow: Cloned PID {} -> PID {} ({} COW pages)",
+        parent_id,
+        child_id,
+        cow_pages
+    );
+
+    child_id
 }

@@ -941,6 +941,30 @@ pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
     PageAllocator::frame_state_is_allocated(frame.state) as c_int
 }
 
+pub fn page_frame_inc_ref(phys_addr: PhysAddr) -> c_int {
+    let alloc = PAGE_ALLOCATOR.lock();
+    let frame_num = alloc.phys_to_frame(phys_addr);
+    if !alloc.is_valid_frame(frame_num) {
+        return -1;
+    }
+    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+    if !PageAllocator::frame_state_is_allocated(frame.state) {
+        return -1;
+    }
+    frame.ref_count = frame.ref_count.saturating_add(1);
+    frame.ref_count as c_int
+}
+
+pub fn page_frame_get_ref(phys_addr: PhysAddr) -> u32 {
+    let alloc = PAGE_ALLOCATOR.lock();
+    let frame_num = alloc.phys_to_frame(phys_addr);
+    if !alloc.is_valid_frame(frame_num) {
+        return 0;
+    }
+    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+    frame.ref_count
+}
+
 pub fn page_allocator_paint_all(value: u8) {
     let alloc = PAGE_ALLOCATOR.lock();
     if alloc.frames.is_null() {
