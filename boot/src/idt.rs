@@ -78,6 +78,7 @@ use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
 use slopos_lib::kdiag_dump_interrupt_frame;
 use slopos_mm::cow;
+use slopos_mm::demand;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
@@ -580,10 +581,19 @@ pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
         if !task_ptr.is_null() {
             let pid = unsafe { (*task_ptr).process_id };
             let page_dir = process_vm::process_vm_get_page_dir(pid);
-            if !page_dir.is_null() && cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr)
-            {
-                if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
-                    return;
+            if !page_dir.is_null() {
+                if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
+                    if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
+                        return;
+                    }
+                }
+
+                if demand::is_demand_fault(frame_ref.error_code, pid, fault_addr) {
+                    if demand::handle_demand_fault(page_dir, pid, fault_addr, frame_ref.error_code)
+                        .is_ok()
+                    {
+                        return;
+                    }
                 }
             }
         }

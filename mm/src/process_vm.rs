@@ -18,7 +18,7 @@ use crate::paging::{
     paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
     unmap_page_in_dir, virt_to_phys_in_dir,
 };
-use crate::vma_tree::VMA_FLAG_COW;
+use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
 
 #[derive(Clone, Copy)]
@@ -208,7 +208,7 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*process_ptr).page_dir }
 }
 
-fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: u32) -> c_int {
+fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: VmaFlags) -> c_int {
     if process.is_null() || !vma_range_valid(start, end) {
         return -1;
     }
@@ -935,19 +935,19 @@ pub fn create_process_vm() -> u32 {
             process_ptr,
             proc.code_start,
             proc.data_start,
-            PageFlags::USER_RO.bits() as u32,
+            VmaFlags::USER_CODE,
         ) != 0
             || add_vma_to_process(
                 process_ptr,
                 proc.data_start,
                 proc.heap_start,
-                PageFlags::USER_RW.bits() as u32,
+                VmaFlags::USER_DATA,
             ) != 0
             || add_vma_to_process(
                 process_ptr,
                 proc.stack_start,
                 proc.stack_end,
-                PageFlags::USER_RW.bits() as u32,
+                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK,
             ) != 0
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
@@ -959,7 +959,8 @@ pub fn create_process_vm() -> u32 {
             return INVALID_PROCESS_ID;
         }
 
-        let stack_map_flags = PageFlags::USER_RW.bits();
+        let stack_vma_flags = VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK;
+        let stack_map_flags = stack_vma_flags.to_page_flags().bits();
         let mut stack_pages: u32 = 0;
         if map_user_range(
             proc.page_dir,
@@ -995,7 +996,7 @@ pub fn create_process_vm() -> u32 {
                 process_ptr,
                 0,
                 PAGE_SIZE_4KB,
-                PageFlags::USER_RW.bits() as u32,
+                VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER,
             );
             proc.total_pages += null_pages;
         } else {
@@ -1076,43 +1077,18 @@ pub fn process_vm_alloc(process_id: u32, size: u64, flags: u32) -> u64 {
         return 0;
     }
 
-    let mut protection_flags =
-        flags & (PageFlags::PRESENT.bits() as u32 | PageFlags::WRITABLE.bits() as u32 | 0x04);
-    if protection_flags == 0 {
-        protection_flags = PageFlags::KERNEL_RW.bits() as u32;
+    let mut vma_flags =
+        VmaFlags::READ | VmaFlags::USER | VmaFlags::HEAP | VmaFlags::LAZY | VmaFlags::ANON;
+    if flags & PageFlags::WRITABLE.bits() as u32 != 0 {
+        vma_flags |= VmaFlags::WRITE;
     }
 
-    let mut pages_mapped: u32 = 0;
-    let mut map_flags = PageFlags::USER_RO.bits();
-    if protection_flags & PageFlags::WRITABLE.bits() as u32 != 0 {
-        map_flags |= PageFlags::WRITABLE.bits();
-    }
-    if map_user_range(
-        process.page_dir,
-        start_addr,
-        end_addr,
-        map_flags,
-        &mut pages_mapped,
-    ) != 0
-    {
-        return 0;
-    }
-
-    if add_vma_to_process(
-        process_ptr,
-        start_addr,
-        end_addr,
-        protection_flags | PageFlags::USER.bits() as u32,
-    ) != 0
-    {
+    if add_vma_to_process(process_ptr, start_addr, end_addr, vma_flags) != 0 {
         klog_info!("process_vm_alloc: Failed to record VMA");
-        unmap_user_range(process.page_dir, start_addr, end_addr);
-        process.heap_end = start_addr;
         return 0;
     }
 
     process.heap_end = end_addr;
-    process.total_pages += pages_mapped;
     start_addr
 }
 pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
@@ -1199,6 +1175,32 @@ pub fn get_current_process_id() -> u32 {
     }
 }
 
+pub fn process_vm_get_vma_flags(process_id: u32, addr: u64) -> Option<VmaFlags> {
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return None;
+    }
+
+    let aligned_addr = addr & !(PAGE_SIZE_4KB - 1);
+    let vma = unsafe { (*process_ptr).vma_tree.find_containing(aligned_addr) };
+    if vma.is_null() {
+        return None;
+    }
+
+    Some(unsafe { (*vma).flags })
+}
+
+pub fn process_vm_increment_pages(process_id: u32, count: u32) {
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        (*process_ptr).total_pages = (*process_ptr).total_pages.saturating_add(count);
+    }
+}
+
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     let process_ptr = find_process_vm(process_id);
     if process_ptr.is_null() {
@@ -1224,33 +1226,18 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
     if aligned_brk > process.heap_end {
         let start_addr = process.heap_end;
         let end_addr = aligned_brk;
-        let mut pages_mapped: u32 = 0;
-        let map_flags = PageFlags::USER_RW.bits();
+        let heap_vma_flags = VmaFlags::READ
+            | VmaFlags::WRITE
+            | VmaFlags::USER
+            | VmaFlags::HEAP
+            | VmaFlags::LAZY
+            | VmaFlags::ANON;
 
-        if map_user_range(
-            process.page_dir,
-            start_addr,
-            end_addr,
-            map_flags,
-            &mut pages_mapped,
-        ) != 0
-        {
-            return process.heap_end;
-        }
-
-        if add_vma_to_process(
-            process_ptr,
-            start_addr,
-            end_addr,
-            PageFlags::USER_RW.bits() as u32,
-        ) != 0
-        {
-            unmap_user_range(process.page_dir, start_addr, end_addr);
+        if add_vma_to_process(process_ptr, start_addr, end_addr, heap_vma_flags) != 0 {
             return process.heap_end;
         }
 
         process.heap_end = aligned_brk;
-        process.total_pages += pages_mapped;
     } else if aligned_brk < process.heap_end {
         let start_addr = aligned_brk;
         let end_addr = process.heap_end;
@@ -1368,9 +1355,9 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
             let vma = &*cursor;
             let vma_start = vma.start;
             let vma_end = vma.end;
-            let vma_flags = vma.flags | VMA_FLAG_COW;
+            let child_vma_flags = vma.flags | VmaFlags::COW;
 
-            let child_vma = child_tree.insert(vma_start, vma_end, vma_flags);
+            let child_vma = child_tree.insert(vma_start, vma_end, child_vma_flags);
             if child_vma.is_null() {
                 klog_info!(
                     "process_vm_clone_cow: Failed to insert VMA [{:#x}, {:#x})",

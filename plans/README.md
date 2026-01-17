@@ -14,9 +14,9 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ## Roadmap
 
-> **Current Focus**: Stage 4 (Advanced Memory) or UI Toolkit
+> **Current Focus**: UI Toolkit
 > 
-> **Completed**: VFS Layer, exec() syscall, ramfs, devfs, libslop minimal, CRT0, brk syscall, Stage 3 (Performance & Security)
+> **Completed**: VFS Layer, exec() syscall, ramfs, devfs, libslop minimal, CRT0, brk syscall, Stage 3 (Performance & Security), Stage 4 (Advanced Memory)
 
 ### Stage 1: Foundation (Complete)
 
@@ -53,14 +53,14 @@ Can be worked on **in parallel** with Stage 1-2. No hard dependencies.
 | RwLock primitive | Feature | Low | - | ✅ Complete |
 | RwLock adoption (MOUNT_TABLE, REGISTRY) | Refactor | Low | RwLock | ✅ Complete |
 
-### Stage 4: Advanced Memory
+### Stage 4: Advanced Memory (Complete)
 
 Required for efficient fork() and full POSIX compatibility (Tier 3 userland).
 
 | Task | Type | Complexity | Depends On | Status |
 |------|------|:----------:|------------|:------:|
 | Copy-on-Write (CoW) | Feature | High | - | ✅ Complete |
-| Demand Paging | Feature | Medium | - | |
+| Demand Paging | Feature | Medium | - | ✅ Complete |
 | fork() syscall | Feature | Medium | CoW | ✅ Complete |
 
 ### Parallel Track: UI Toolkit
@@ -98,6 +98,9 @@ No dependencies on VFS/exec. Can start immediately.
                         └──────────────┘                                                          STAGE 4
                                                 ┌──────────────┐
                                                 │    CoW     ✅│───► fork() ✅
+                                                └──────────────┘
+                                                ┌──────────────┐
+                                                │ Demand Page✅│
                                                 └──────────────┘
 
  PARALLEL TRACK

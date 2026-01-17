@@ -4,6 +4,7 @@
 
 pub mod aslr;
 pub mod cow;
+pub mod demand;
 pub mod elf;
 pub mod hhdm;
 pub mod kernel_heap;
@@ -21,6 +22,7 @@ pub mod tests;
 pub mod tlb;
 pub mod user_copy;
 pub mod user_ptr;
+pub mod vma_flags;
 pub mod vma_tree;
 
 use core::alloc::{GlobalAlloc, Layout};

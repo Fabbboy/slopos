@@ -14,8 +14,9 @@ use core::cmp::{self, Ordering};
 use core::ptr;
 
 use crate::kernel_heap::{kfree, kmalloc};
+use crate::vma_flags::VmaFlags;
 
-pub const VMA_FLAG_COW: u32 = 1 << 16;
+pub use crate::vma_flags::VMA_FLAG_COW;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -24,26 +25,16 @@ enum Color {
     Black = 1,
 }
 
-/// A node in the VMA interval tree
 #[repr(C)]
 pub struct VmaNode {
-    /// Start address of this VMA (inclusive)
     pub start: u64,
-    /// End address of this VMA (exclusive)
     pub end: u64,
-    /// VMA flags (permissions, etc.)
-    pub flags: u32,
-    /// Reference count for shared mappings
+    pub flags: VmaFlags,
     pub ref_count: u32,
-    /// Maximum end address in this subtree (for interval queries)
     max_end: u64,
-    /// Node color for RB-tree balancing
     color: Color,
-    /// Parent node
     parent: *mut VmaNode,
-    /// Left child
     left: *mut VmaNode,
-    /// Right child
     right: *mut VmaNode,
 }
 
@@ -51,8 +42,7 @@ unsafe impl Send for VmaNode {}
 unsafe impl Sync for VmaNode {}
 
 impl VmaNode {
-    /// Allocate a new VMA node
-    fn new(start: u64, end: u64, flags: u32) -> *mut Self {
+    fn new(start: u64, end: u64, flags: VmaFlags) -> *mut Self {
         let ptr = kmalloc(core::mem::size_of::<VmaNode>()) as *mut VmaNode;
         if ptr.is_null() {
             return ptr::null_mut();
@@ -71,13 +61,11 @@ impl VmaNode {
         ptr
     }
 
-    /// Check if this interval overlaps with [start, end)
     #[inline]
     fn overlaps(&self, start: u64, end: u64) -> bool {
         self.start < end && start < self.end
     }
 
-    /// Check if this interval fully covers [start, end)
     #[inline]
     fn covers(&self, start: u64, end: u64) -> bool {
         self.start <= start && self.end >= end
@@ -114,9 +102,7 @@ impl VmaTree {
         self.root.is_null()
     }
 
-    /// Insert a new VMA into the tree
-    /// Returns the inserted node, or null if allocation failed
-    pub fn insert(&mut self, start: u64, end: u64, flags: u32) -> *mut VmaNode {
+    pub fn insert(&mut self, start: u64, end: u64, flags: VmaFlags) -> *mut VmaNode {
         let node = VmaNode::new(start, end, flags);
         if node.is_null() {
             return ptr::null_mut();
