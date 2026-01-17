@@ -720,6 +720,12 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
 }
 
+define_syscall!(syscall_brk(ctx, args, process_id) requires process_id {
+    let new_brk = args.arg0;
+    let result = slopos_mm::process_vm::process_vm_brk(process_id, new_brk);
+    ctx.ok(result)
+});
+
 static SYSCALL_TABLE: [SyscallEntry; 128] = {
     let mut table: [SyscallEntry; 128] = [SyscallEntry {
         handler: None,
@@ -956,6 +962,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_EXEC as usize] = SyscallEntry {
         handler: Some(syscall_exec),
         name: b"exec\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_BRK as usize] = SyscallEntry {
+        handler: Some(syscall_brk),
+        name: b"brk\0".as_ptr() as *const c_char,
     };
     table
 };

@@ -1260,3 +1260,73 @@ pub fn get_current_process_id() -> u32 {
         unsafe { (*manager.active_process).process_id }
     }
 }
+
+pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return 0;
+    }
+    let process = unsafe { &mut *process_ptr };
+    let layout = unsafe { &*mm_get_process_layout() };
+
+    if new_brk == 0 {
+        return process.heap_end;
+    }
+
+    let aligned_brk = (new_brk + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
+
+    if aligned_brk < process.heap_start {
+        return process.heap_end;
+    }
+
+    if aligned_brk > layout.heap_max {
+        return process.heap_end;
+    }
+
+    if aligned_brk > process.heap_end {
+        let start_addr = process.heap_end;
+        let end_addr = aligned_brk;
+        let mut pages_mapped: u32 = 0;
+        let map_flags = PageFlags::USER_RW.bits();
+
+        if map_user_range(
+            process.page_dir,
+            start_addr,
+            end_addr,
+            map_flags,
+            &mut pages_mapped,
+        ) != 0
+        {
+            return process.heap_end;
+        }
+
+        if add_vma_to_process(
+            process_ptr,
+            start_addr,
+            end_addr,
+            PageFlags::USER_RW.bits() as u32,
+        ) != 0
+        {
+            unmap_user_range(process.page_dir, start_addr, end_addr);
+            return process.heap_end;
+        }
+
+        process.heap_end = aligned_brk;
+        process.total_pages += pages_mapped;
+    } else if aligned_brk < process.heap_end {
+        let start_addr = aligned_brk;
+        let end_addr = process.heap_end;
+
+        let freed = unmap_and_free_range(process_ptr, start_addr, end_addr);
+        remove_vma_from_process(process_ptr, start_addr, end_addr);
+
+        if process.total_pages >= freed {
+            process.total_pages -= freed;
+        } else {
+            process.total_pages = 0;
+        }
+        process.heap_end = aligned_brk;
+    }
+
+    process.heap_end
+}

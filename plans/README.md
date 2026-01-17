@@ -14,9 +14,9 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ## Roadmap
 
-> **Current Focus**: libslop minimal (Stage 1 complete, moving to Stage 2)
+> **Current Focus**: Stage 3 (Performance & Security) or UI Toolkit
 > 
-> **Completed**: VFS Layer, exec() syscall, ramfs, devfs
+> **Completed**: VFS Layer, exec() syscall, ramfs, devfs, libslop minimal, CRT0, brk syscall
 
 ### Stage 1: Foundation (Complete)
 
@@ -29,16 +29,17 @@ These items enable filesystem-loaded applications.
 | ramfs (/tmp, /dev) | Feature | Low | VFS | - | ✅ Complete |
 | devfs | Feature | Low | VFS | - | ✅ Complete |
 
-### Stage 2: Userland Runtime
+### Stage 2: Userland Runtime (Complete)
 
 Once VFS + exec() are done, build the minimal C runtime for external apps.
 
 | Task | Type | Complexity | Depends On | Blocks | Status |
 |------|------|:----------:|------------|--------|:------:|
-| libslop minimal (read/write/exit/malloc) | Feature | High | exec() | external apps | |
-| CRT0 (_start entry point) | Feature | Low | exec() | libslop | |
-| argv/envp passing | Feature | Low | exec() | libslop | |
-| Cross-compiler target (x86_64-slopos) | Tooling | Low | libslop | - | |
+| libslop minimal (read/write/exit/malloc) | Feature | High | exec() | external apps | ✅ Complete |
+| CRT0 (_start entry point) | Feature | Low | exec() | libslop | ✅ Complete |
+| argv/envp passing | Feature | Low | exec() | libslop | ✅ Complete |
+| brk syscall (heap management) | Feature | Medium | exec() | malloc | ✅ Complete |
+| Cross-compiler target (x86_64-slopos) | Tooling | Low | libslop | - | ⚠️ Exists |
 
 ### Stage 3: Performance & Security
 
@@ -78,16 +79,16 @@ No dependencies on VFS/exec. Can start immediately.
 ## Dependency Graph
 
 ```
- STAGE 1 (DONE)          STAGE 2                 STAGE 3-4
+ STAGE 1 (DONE)          STAGE 2 (DONE)          STAGE 3-4
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
-│  VFS Layer ✅│───────►│   libslop    │        │  Per-CPU     │
+│  VFS Layer ✅│───────►│  libslop ✅  │        │  Per-CPU     │
 └──────────────┘        └──────┬───────┘        │  page cache  │
        │                       │                └──────────────┘
        ├──► ramfs ✅           │                ┌──────────────┐
        │                       │                │  VMA tree    │
        ├──► devfs ✅           ▼                └──────────────┘
        │                ┌──────────────┐        ┌──────────────┐
-       └──► exec() ✅   │ Cross-comp.  │        │    ASLR      │
+       └──► exec() ✅   │ Cross-comp ⚠️│        │    ASLR      │
                         └──────┬───────┘        └──────────────┘
                                │                ┌──────────────┐
                                ▼                │   RwLock     │

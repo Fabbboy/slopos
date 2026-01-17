@@ -10,6 +10,7 @@ pub mod loader;
 pub mod apps;
 pub mod compositor;
 pub mod gfx;
+pub mod libslop;
 pub mod roulette;
 pub mod runtime;
 pub mod shell;
