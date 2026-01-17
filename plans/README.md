@@ -14,9 +14,9 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ## Roadmap
 
-> **Current Focus**: Stage 3 (Performance & Security) or UI Toolkit
+> **Current Focus**: Stage 4 (Advanced Memory) or UI Toolkit
 > 
-> **Completed**: VFS Layer, exec() syscall, ramfs, devfs, libslop minimal, CRT0, brk syscall
+> **Completed**: VFS Layer, exec() syscall, ramfs, devfs, libslop minimal, CRT0, brk syscall, Stage 3 (Performance & Security)
 
 ### Stage 1: Foundation (Complete)
 
@@ -41,14 +41,14 @@ Once VFS + exec() are done, build the minimal C runtime for external apps.
 | brk syscall (heap management) | Feature | Medium | exec() | malloc | ✅ Complete |
 | Cross-compiler target (x86_64-slopos) | Tooling | Low | libslop | - | ⚠️ Exists |
 
-### Stage 3: Performance & Security
+### Stage 3: Performance & Security (Complete)
 
 Can be worked on **in parallel** with Stage 1-2. No hard dependencies.
 
 | Task | Type | Complexity | Depends On | Status |
 |------|------|:----------:|------------|:------:|
 | Per-CPU page caches | Performance | Medium | - | ✅ Complete |
-| O(n) VMA lookup → tree/RB-tree | Performance | Medium | - | |
+| O(n) VMA lookup → tree/RB-tree | Performance | Medium | - | ✅ Complete |
 | ASLR | Security | Medium | - | ✅ Complete |
 | RwLock primitive | Feature | Low | - | ✅ Complete |
 | RwLock adoption (MOUNT_TABLE, REGISTRY) | Refactor | Low | RwLock | ✅ Complete |
@@ -80,13 +80,13 @@ No dependencies on VFS/exec. Can start immediately.
 ## Dependency Graph
 
 ```
- STAGE 1 (DONE)          STAGE 2 (DONE)          STAGE 3-4
+ STAGE 1 (DONE)          STAGE 2 (DONE)          STAGE 3 (DONE)
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
 │  VFS Layer ✅│───────►│  libslop ✅  │        │  Per-CPU   ✅│
 └──────────────┘        └──────┬───────┘        │  page cache  │
        │                       │                └──────────────┘
        ├──► ramfs ✅           │                ┌──────────────┐
-       │                       │                │  VMA tree    │
+       │                       │                │  VMA tree  ✅│
        ├──► devfs ✅           ▼                └──────────────┘
        │                ┌──────────────┐        ┌──────────────┐
        └──► exec() ✅   │ Cross-comp ⚠️│        │  ASLR      ✅│
@@ -94,8 +94,10 @@ No dependencies on VFS/exec. Can start immediately.
                                │                ┌──────────────┐
                                ▼                │  RwLock    ✅│
                         ┌──────────────┐        └──────────────┘
-                        │  /bin apps   │        ┌──────────────┐
-                        └──────────────┘        │    CoW       │───► fork()
+                        │  /bin apps   │
+                        └──────────────┘         STAGE 4
+                                                ┌──────────────┐
+                                                │    CoW       │───► fork()
                                                 └──────────────┘
 
  PARALLEL TRACK
@@ -120,6 +122,7 @@ No dependencies on VFS/exec. Can start immediately.
 - [x] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(Fixed: SYSCALL/SYSRET fast path with SWAPGS, per-CPU kernel stack, canonical address validation)*
 - [x] **Priority field unused** - Scheduler ignores task priorities *(Fixed: priority-based ready queues array with 4 levels, select_next_task scans HIGH→IDLE)*
 - [x] **No per-CPU page caches** - Every allocation/free contends on global lock *(Fixed: PCP layer in `mm/src/page_alloc.rs` with lock-free CAS-based cache per CPU, batch refill/drain, high/low watermarks)*
+- [x] **O(n) VMA lookup** - Linked list doesn't scale with many mappings *(Fixed: Augmented red-black interval tree in `mm/src/vma_tree.rs` with O(log n) insert/delete/find operations)*
 
 ### P2 - Synchronization
 

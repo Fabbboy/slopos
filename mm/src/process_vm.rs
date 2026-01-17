@@ -15,41 +15,13 @@ use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
     paging_free_user_space, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir,
 };
+use crate::vma_tree::{VmaNode, VmaTree};
 
-#[repr(C)]
-struct VmArea {
-    start_addr: u64,
-    end_addr: u64,
-    flags: u32,
-    ref_count: u32,
-    next: *mut VmArea,
-}
-
-unsafe impl Send for VmArea {}
-
-impl VmArea {
-    fn new(start: u64, end: u64, flags: u32) -> *mut Self {
-        let ptr = kmalloc(core::mem::size_of::<VmArea>()) as *mut VmArea;
-        if ptr.is_null() {
-            return ptr::null_mut();
-        }
-        unsafe {
-            (*ptr).start_addr = start;
-            (*ptr).end_addr = end;
-            (*ptr).flags = flags;
-            (*ptr).ref_count = 1;
-            (*ptr).next = ptr::null_mut();
-        }
-        ptr
-    }
-}
-
-#[repr(C)]
 #[derive(Clone, Copy)]
 struct ProcessVm {
     process_id: u32,
     page_dir: *mut ProcessPageDir,
-    vma_list: *mut VmArea,
+    vma_tree: VmaTree,
     code_start: u64,
     data_start: u64,
     heap_start: u64,
@@ -64,11 +36,11 @@ struct ProcessVm {
 unsafe impl Send for ProcessVm {}
 
 impl ProcessVm {
-    const fn empty() -> Self {
+    const fn new() -> Self {
         Self {
             process_id: INVALID_PROCESS_ID,
             page_dir: ptr::null_mut(),
-            vma_list: ptr::null_mut(),
+            vma_tree: VmaTree::new(),
             code_start: 0,
             data_start: 0,
             heap_start: 0,
@@ -79,6 +51,21 @@ impl ProcessVm {
             flags: 0,
             next: ptr::null_mut(),
         }
+    }
+
+    fn reset(&mut self) {
+        self.process_id = INVALID_PROCESS_ID;
+        self.page_dir = ptr::null_mut();
+        self.vma_tree.clear();
+        self.code_start = 0;
+        self.data_start = 0;
+        self.heap_start = 0;
+        self.heap_end = 0;
+        self.stack_start = 0;
+        self.stack_end = 0;
+        self.total_pages = 0;
+        self.flags = 0;
+        self.next = ptr::null_mut();
     }
 }
 
@@ -95,7 +82,7 @@ unsafe impl Send for VmManager {}
 impl VmManager {
     const fn new() -> Self {
         Self {
-            processes: [ProcessVm::empty(); MAX_PROCESSES],
+            processes: [ProcessVm::new(); MAX_PROCESSES],
             num_processes: 0,
             next_process_id: 1,
             active_process: ptr::null_mut(),
@@ -108,13 +95,6 @@ static VM_MANAGER: IrqMutex<VmManager> = IrqMutex::new(VmManager::new());
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
-}
-
-fn vma_overlaps_range(vma: *const VmArea, start: u64, end: u64) -> bool {
-    if vma.is_null() {
-        return false;
-    }
-    unsafe { start < (*vma).end_addr && end > (*vma).start_addr }
 }
 
 fn map_user_range(
@@ -229,48 +209,47 @@ fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: u32)
         return -1;
     }
     unsafe {
-        let mut link = &mut (*process).vma_list;
-        let mut prev: *mut VmArea = ptr::null_mut();
-        while !(*link).is_null() && (**link).start_addr < start {
-            prev = *link;
-            link = &mut (**link).next;
-        }
-        let next = *link;
-        if !prev.is_null() && vma_overlaps_range(prev, start, end) && (*prev).flags != flags {
+        let tree = &mut (*process).vma_tree;
+
+        let overlap = tree.find_overlapping(start, end);
+        if !overlap.is_null() && (*overlap).flags != flags {
             klog_info!("add_vma_to_process: Overlap with incompatible VMA");
             return -1;
         }
-        if !next.is_null() && vma_overlaps_range(next, start, end) && (*next).flags != flags {
-            klog_info!("add_vma_to_process: Overlap with incompatible next VMA");
-            return -1;
-        }
 
-        let mut vma = VmArea::new(start, end, flags);
-        if vma.is_null() {
+        let node = tree.insert(start, end, flags);
+        if node.is_null() {
             klog_info!("add_vma_to_process: Failed to allocate VMA");
             return -1;
         }
 
-        if !prev.is_null() && (*prev).end_addr == start && (*prev).flags == flags {
-            (*prev).end_addr = end;
-            kfree(vma as *mut _);
-            vma = prev;
-        } else {
-            (*vma).next = next;
-            *link = vma;
-        }
-
-        if !(*vma).next.is_null()
-            && (*(*vma).next).start_addr == (*vma).end_addr
-            && (*(*vma).next).flags == (*vma).flags
-        {
-            let to_merge = (*vma).next;
-            (*vma).end_addr = (*to_merge).end_addr;
-            (*vma).next = (*to_merge).next;
-            kfree(to_merge as *mut _);
-        }
+        try_merge_adjacent(tree, node);
     }
     0
+}
+
+unsafe fn try_merge_adjacent(tree: &mut VmaTree, node: *mut VmaNode) {
+    if node.is_null() {
+        return;
+    }
+
+    let start = (*node).start;
+    let end = (*node).end;
+    let flags = (*node).flags;
+
+    let prev = tree.find_overlapping(start.saturating_sub(1), start);
+    if !prev.is_null() && prev != node && (*prev).end == start && (*prev).flags == flags {
+        let new_start = (*prev).start;
+        tree.remove((*prev).start, (*prev).end);
+        tree.set_start(node, new_start);
+    }
+
+    let next = tree.find_overlapping(end, end.saturating_add(1));
+    if !next.is_null() && next != node && (*next).start == (*node).end && (*next).flags == flags {
+        let new_end = (*next).end;
+        tree.remove((*next).start, (*next).end);
+        tree.set_end(node, new_end);
+    }
 }
 
 fn remove_vma_from_process(process: *mut ProcessVm, start: u64, end: u64) -> c_int {
@@ -278,35 +257,19 @@ fn remove_vma_from_process(process: *mut ProcessVm, start: u64, end: u64) -> c_i
         return -1;
     }
     unsafe {
-        let mut current = &mut (*process).vma_list;
-        while !(*current).is_null() {
-            let vma = *current;
-            if (*vma).start_addr == start && (*vma).end_addr == end {
-                *current = (*vma).next;
-                (*vma).next = ptr::null_mut();
-                kfree(vma as *mut _);
-                return 0;
-            }
-            current = &mut (*vma).next;
+        if (*process).vma_tree.remove(start, end) {
+            0
+        } else {
+            -1
         }
     }
-    -1
 }
 
-fn find_vma_covering(process: *mut ProcessVm, start: u64, end: u64) -> *mut VmArea {
+fn find_vma_covering(process: *mut ProcessVm, start: u64, end: u64) -> *mut VmaNode {
     if process.is_null() || !vma_range_valid(start, end) {
         return ptr::null_mut();
     }
-    unsafe {
-        let mut cursor = (*process).vma_list;
-        while !cursor.is_null() {
-            if (*cursor).start_addr <= start && (*cursor).end_addr >= end {
-                return cursor;
-            }
-            cursor = (*cursor).next;
-        }
-    }
-    ptr::null_mut()
+    unsafe { (*process).vma_tree.find_covering(start, end) }
 }
 
 fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
@@ -332,56 +295,24 @@ fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
     freed
 }
 
-fn merge_adjacent(process: *mut ProcessVm, mut vma: *mut VmArea) {
-    if process.is_null() || vma.is_null() {
-        return;
-    }
-    unsafe {
-        let mut cursor = (*process).vma_list;
-        let mut prev: *mut VmArea = ptr::null_mut();
-        while !cursor.is_null() && cursor != vma {
-            prev = cursor;
-            cursor = (*cursor).next;
-        }
-
-        if !prev.is_null() && (*prev).end_addr == (*vma).start_addr && (*prev).flags == (*vma).flags
-        {
-            (*prev).end_addr = (*vma).end_addr;
-            (*prev).next = (*vma).next;
-            kfree(vma as *mut _);
-            vma = prev;
-        }
-
-        if !(*vma).next.is_null()
-            && (*(*vma).next).start_addr == (*vma).end_addr
-            && (*(*vma).next).flags == (*vma).flags
-        {
-            let n = (*vma).next;
-            (*vma).end_addr = (*n).end_addr;
-            (*vma).next = (*n).next;
-            kfree(n as *mut _);
-        }
-    }
-}
-
 fn teardown_process_mappings(process: *mut ProcessVm) {
     if process.is_null() || unsafe { (*process).page_dir.is_null() } {
         return;
     }
     unsafe {
-        let mut cursor = (*process).vma_list;
+        let tree = &mut (*process).vma_tree;
+        let mut cursor = tree.first();
         while !cursor.is_null() {
-            let next = (*cursor).next;
-            let freed = unmap_and_free_range(process, (*cursor).start_addr, (*cursor).end_addr);
+            let next = tree.next(cursor);
+            let freed = unmap_and_free_range(process, (*cursor).start, (*cursor).end);
             if (*process).total_pages >= freed {
                 (*process).total_pages -= freed;
             } else {
                 (*process).total_pages = 0;
             }
-            kfree(cursor as *mut _);
             cursor = next;
         }
-        (*process).vma_list = ptr::null_mut();
+        tree.clear();
         (*process).heap_end = (*process).heap_start;
     }
 }
@@ -986,7 +917,7 @@ pub fn create_process_vm() -> u32 {
         let proc = &mut *process_ptr;
         proc.process_id = process_id;
         proc.page_dir = page_dir_ptr;
-        proc.vma_list = ptr::null_mut();
+        proc.vma_tree.clear();
         proc.code_start = layout.code_start;
         proc.data_start = layout.data_start;
         proc.heap_start = layout.heap_start;
@@ -1114,7 +1045,7 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
             manager.active_process = ptr::null_mut();
         }
         (*process_ptr).process_id = INVALID_PROCESS_ID;
-        (*process_ptr).vma_list = ptr::null_mut();
+        (*process_ptr).vma_tree.clear();
         (*process_ptr).next = ptr::null_mut();
         (*process_ptr).total_pages = 0;
         (*process_ptr).flags = 0;
@@ -1203,22 +1134,23 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     let freed = unmap_and_free_range(process_ptr, start, end);
 
     unsafe {
-        if start == (*vma).start_addr && end == (*vma).end_addr {
-            remove_vma_from_process(process_ptr, (*vma).start_addr, (*vma).end_addr);
-        } else if start == (*vma).start_addr {
-            (*vma).start_addr = end;
-        } else if end == (*vma).end_addr {
-            (*vma).end_addr = start;
+        let tree = &mut (*process_ptr).vma_tree;
+        if start == (*vma).start && end == (*vma).end {
+            tree.remove((*vma).start, (*vma).end);
+        } else if start == (*vma).start {
+            tree.set_start(vma, end);
+        } else if end == (*vma).end {
+            tree.set_end(vma, start);
         } else {
             let right_start = end;
-            let right_end = (*vma).end_addr;
-            (*vma).end_addr = start;
-            if add_vma_to_process(process_ptr, right_start, right_end, (*vma).flags) != 0 {
+            let right_end = (*vma).end;
+            let flags = (*vma).flags;
+            tree.set_end(vma, start);
+            if tree.insert(right_start, right_end, flags).is_null() {
                 klog_info!("process_vm_free: Failed to create right split VMA");
                 return -1;
             }
         }
-        merge_adjacent(process_ptr, vma);
         if process.total_pages >= freed {
             process.total_pages -= freed;
         } else {
@@ -1237,7 +1169,7 @@ pub fn init_process_vm() -> c_int {
     manager.active_process = ptr::null_mut();
     manager.process_list = ptr::null_mut();
     for i in 0..MAX_PROCESSES {
-        manager.processes[i] = ProcessVm::empty();
+        manager.processes[i].reset();
     }
     klog_debug!("Process VM manager initialized");
 
