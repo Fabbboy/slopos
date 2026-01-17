@@ -7,10 +7,12 @@ use slopos_abi::WindowInfo;
 use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::*;
 
+use crate::exec;
+
 use crate::platform;
 use crate::syscall::common::{
     SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
-    syscall_copy_to_user_bounded, syscall_return_err,
+    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
@@ -654,6 +656,70 @@ pub fn syscall_spawn_task(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
     }
 }
 
+pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let process_id = match ctx.require_process_id() {
+        Ok(id) => id,
+        Err(d) => return d,
+    };
+
+    let args = ctx.args();
+    let path_ptr = args.arg0;
+
+    if path_ptr == 0 {
+        return ctx.err();
+    }
+
+    let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
+    if syscall_copy_user_str(&mut path_buf, path_ptr).is_err() {
+        return ctx.err();
+    }
+
+    let path_len = path_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(path_buf.len());
+    let path = &path_buf[..path_len];
+
+    let mut entry_point = 0u64;
+    let mut stack_ptr = 0u64;
+
+    match exec::do_exec(
+        process_id,
+        path,
+        None,
+        None,
+        &mut entry_point,
+        &mut stack_ptr,
+    ) {
+        Ok(()) => {
+            unsafe {
+                (*frame).rip = entry_point;
+                (*frame).rsp = stack_ptr;
+                (*frame).rax = 0;
+                (*frame).rdi = 0;
+                (*frame).rsi = 0;
+                (*frame).rdx = 0;
+                (*frame).rcx = 0;
+                (*frame).r8 = 0;
+                (*frame).r9 = 0;
+                (*frame).r10 = 0;
+                (*frame).r11 = 0;
+            }
+            SyscallDisposition::Ok
+        }
+        Err(e) => {
+            unsafe {
+                (*frame).rax = e as i32 as u64;
+            }
+            SyscallDisposition::Ok
+        }
+    }
+}
+
 static SYSCALL_TABLE: [SyscallEntry; 128] = {
     let mut table: [SyscallEntry; 128] = [SyscallEntry {
         handler: None,
@@ -886,6 +952,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_SPAWN_TASK as usize] = SyscallEntry {
         handler: Some(syscall_spawn_task),
         name: b"spawn_task\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_EXEC as usize] = SyscallEntry {
+        handler: Some(syscall_exec),
+        name: b"exec\0".as_ptr() as *const c_char,
     };
     table
 };

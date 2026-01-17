@@ -279,6 +279,15 @@ pub fn sys_spawn_task(name: &[u8]) -> i32 {
     }
 }
 
+/// Execute an ELF binary from the filesystem, replacing the current process.
+/// On success, this function does not return - the process image is replaced.
+/// On failure, returns a negative error code.
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_exec(path: &[u8]) -> i64 {
+    unsafe { syscall_impl(SYSCALL_EXEC, path.as_ptr() as u64, 0, 0) as i64 }
+}
+
 /// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
 /// Swaps buffer pointers atomically and transfers damage tracking
 #[inline(always)]

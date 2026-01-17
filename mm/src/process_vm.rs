@@ -202,6 +202,10 @@ fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u6
     }
 }
 
+pub fn unmap_user_range_pub(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u64) {
+    unmap_user_range(page_dir, start_addr, end_addr);
+}
+
 fn find_process_vm(process_id: u32) -> *mut ProcessVm {
     let manager = VM_MANAGER.lock();
     for process in manager.processes.iter() {

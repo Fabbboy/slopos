@@ -14,18 +14,18 @@ This directory contains architectural analysis, comparisons, and improvement roa
 
 ## Roadmap
 
-> **Current Focus**: exec() syscall (VFS complete, now unblocked)
+> **Current Focus**: libslop minimal (Stage 1 complete, moving to Stage 2)
 > 
-> **Completed**: VFS Layer - See [VFS_IMPLEMENTATION_PLAN.md](./VFS_IMPLEMENTATION_PLAN.md) for implementation details
+> **Completed**: VFS Layer, exec() syscall, ramfs, devfs
 
-### Stage 1: Foundation (Current)
+### Stage 1: Foundation (Complete)
 
-These items enable filesystem-loaded applications. VFS is the critical blocker.
+These items enable filesystem-loaded applications.
 
 | Task | Type | Complexity | Depends On | Blocks | Status |
 |------|------|:----------:|------------|--------|:------:|
 | **VFS Layer** | Feature | High | - | exec(), ramfs, devfs | ✅ Complete |
-| exec() syscall | Feature | Medium | VFS | libslop, /bin apps | Ready |
+| exec() syscall | Feature | Medium | VFS | libslop, /bin apps | ✅ Complete |
 | ramfs (/tmp, /dev) | Feature | Low | VFS | - | ✅ Complete |
 | devfs | Feature | Low | VFS | - | ✅ Complete |
 
@@ -78,27 +78,23 @@ No dependencies on VFS/exec. Can start immediately.
 ## Dependency Graph
 
 ```
- STAGE 1                 STAGE 2                 STAGE 3-4
+ STAGE 1 (DONE)          STAGE 2                 STAGE 3-4
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
-│  VFS Layer   │───────►│   exec()     │        │  Per-CPU     │
+│  VFS Layer ✅│───────►│   libslop    │        │  Per-CPU     │
 └──────────────┘        └──────┬───────┘        │  page cache  │
        │                       │                └──────────────┘
-       ├──► ramfs              │                ┌──────────────┐
+       ├──► ramfs ✅           │                ┌──────────────┐
        │                       │                │  VMA tree    │
-       └──► devfs              ▼                └──────────────┘
-                        ┌──────────────┐        ┌──────────────┐
-                        │   libslop    │        │    ASLR      │
+       ├──► devfs ✅           ▼                └──────────────┘
+       │                ┌──────────────┐        ┌──────────────┐
+       └──► exec() ✅   │ Cross-comp.  │        │    ASLR      │
                         └──────┬───────┘        └──────────────┘
                                │                ┌──────────────┐
                                ▼                │   RwLock     │
                         ┌──────────────┐        └──────────────┘
-                        │ Cross-comp.  │        ┌──────────────┐
-                        └──────┬───────┘        │    CoW       │───► fork()
-                               │                └──────────────┘
-                               ▼
-                        ┌──────────────┐
-                        │  /bin apps   │
-                        └──────────────┘
+                        │  /bin apps   │        ┌──────────────┐
+                        └──────────────┘        │    CoW       │───► fork()
+                                                └──────────────┘
 
  PARALLEL TRACK
 ┌──────────────────────────────────────┐

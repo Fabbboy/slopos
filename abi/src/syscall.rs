@@ -106,6 +106,25 @@ pub const SYSCALL_SHM_CREATE_WITH_FORMAT: u64 = 54;
 pub const SYSCALL_SPAWN_TASK: u64 = 64;
 
 // =============================================================================
+// Process execution
+// =============================================================================
+
+/// Execute an ELF binary from the filesystem, replacing the current process.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): Pointer to null-terminated path string
+/// * rsi (arg1): Pointer to null-terminated argv array (or NULL)
+/// * rdx (arg2): Pointer to null-terminated envp array (or NULL)
+///
+/// # Returns
+/// * Does not return on success (process image is replaced)
+/// * -ENOENT: File not found
+/// * -ENOEXEC: Not a valid ELF executable
+/// * -ENOMEM: Insufficient memory
+/// * -EFAULT: Invalid pointer
+pub const SYSCALL_EXEC: u64 = 70;
+
+// =============================================================================
 // Syscall data structures
 // =============================================================================
 

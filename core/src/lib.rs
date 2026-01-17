@@ -1,9 +1,12 @@
 #![no_std]
 
+extern crate alloc;
+
 use core::arch::global_asm;
 
 global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 
+pub mod exec;
 pub mod irq;
 pub mod platform;
 pub mod scheduler;
