@@ -2,6 +2,7 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 use slopos_lib::IrqMutex;
+use slopos_lib::preempt::PreemptGuard;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -22,7 +23,6 @@ const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHED_POLICY_COOPERATIVE: u8 = 2;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
 
-/// Number of priority levels (HIGH=0, NORMAL=1, LOW=2, IDLE=3)
 const NUM_PRIORITY_LEVELS: usize = 4;
 
 #[derive(Default)]
@@ -32,8 +32,8 @@ struct ReadyQueue {
     count: u32,
 }
 
-// SAFETY: ReadyQueue contains raw pointers to Task which live in static storage.
-// Access is serialized through the SchedulerInner mutex.
+// SAFETY: ReadyQueue contains raw pointers to Task in static storage.
+// Access serialized through SchedulerInner mutex.
 unsafe impl Send for ReadyQueue {}
 
 struct SchedulerInner {
@@ -51,12 +51,10 @@ struct SchedulerInner {
     total_preemptions: u64,
     schedule_calls: u32,
     preemption_enabled: u8,
-    reschedule_pending: u8,
-    in_schedule: u8,
 }
 
-// SAFETY: SchedulerInner contains raw pointers to Task which live in static storage.
-// All access is serialized through the mutex.
+// SAFETY: SchedulerInner contains raw pointers to Task in static storage.
+// All access serialized through mutex.
 unsafe impl Send for SchedulerInner {}
 
 const EMPTY_QUEUE: ReadyQueue = ReadyQueue {
@@ -108,8 +106,6 @@ impl SchedulerInner {
             total_preemptions: 0,
             schedule_calls: 0,
             preemption_enabled: SCHEDULER_PREEMPTION_DEFAULT,
-            reschedule_pending: 0,
-            in_schedule: 0,
         }
     }
 
@@ -292,6 +288,7 @@ fn reset_task_quantum(sched: &SchedulerInner, task: *mut Task) {
         (*task).time_slice_remaining = slice;
     }
 }
+
 pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -408,7 +405,7 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
     })
 }
 
-fn do_context_switch(info: SwitchInfo) {
+fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
     let _balance = wl_currency::check_balance();
 
     platform::gdt_set_kernel_rsp0(info.rsp0);
@@ -422,8 +419,13 @@ fn do_context_switch(info: SwitchInfo) {
             context_switch(ptr::null_mut(), &(*info.new_task).context);
         }
     }
+    // PreemptGuard is dropped here after context_switch returns to new task
 }
+
 pub fn schedule() {
+    // Acquire preempt guard FIRST - this prevents concurrent context switches
+    let preempt_guard = PreemptGuard::new();
+
     enum ScheduleResult {
         Disabled,
         NoTask,
@@ -438,7 +440,6 @@ pub fn schedule() {
         if sched.enabled == 0 {
             return ScheduleResult::Disabled;
         }
-        sched.in_schedule = sched.in_schedule.saturating_add(1);
         sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
         let current = sched.current_task;
@@ -450,7 +451,6 @@ pub fn schedule() {
                     klog_info!("schedule: ready queue full when re-queuing task");
                     task_set_state(unsafe { (*current).task_id }, TASK_STATE_RUNNING);
                     reset_task_quantum(sched, current);
-                    sched.in_schedule = sched.in_schedule.saturating_sub(1);
                     return ScheduleResult::NoTask;
                 } else {
                     reset_task_quantum(sched, current);
@@ -467,7 +467,6 @@ pub fn schedule() {
             if !sched.idle_task.is_null() && task_is_terminated(sched.idle_task) {
                 sched.enabled = 0;
                 if !sched.current_task.is_null() {
-                    sched.in_schedule = sched.in_schedule.saturating_sub(1);
                     let current_ctx = unsafe { &raw mut (*sched.current_task).context };
                     let return_ctx = &raw const sched.return_context;
                     return ScheduleResult::IdleTerminated {
@@ -476,11 +475,9 @@ pub fn schedule() {
                     };
                 }
             }
-            sched.in_schedule = sched.in_schedule.saturating_sub(1);
             return ScheduleResult::NoTask;
         }
 
-        sched.in_schedule = sched.in_schedule.saturating_sub(1);
         match prepare_switch(sched, next_task) {
             Some(info) => ScheduleResult::Switch(info),
             None => ScheduleResult::NoTask,
@@ -488,18 +485,22 @@ pub fn schedule() {
     });
 
     match result {
-        ScheduleResult::Disabled | ScheduleResult::NoTask => {}
+        ScheduleResult::Disabled | ScheduleResult::NoTask => {
+            drop(preempt_guard);
+        }
         ScheduleResult::IdleTerminated {
             current_ctx,
             return_ctx,
         } => unsafe {
             context_switch(current_ctx, return_ctx);
+            drop(preempt_guard);
         },
         ScheduleResult::Switch(info) => {
-            do_context_switch(info);
+            do_context_switch(info, preempt_guard);
         }
     }
 }
+
 pub fn r#yield() {
     with_scheduler(|sched| {
         sched.total_yields += 1;
@@ -513,6 +514,7 @@ pub fn r#yield() {
 pub fn yield_() {
     r#yield();
 }
+
 pub fn block_current_task() {
     let current = with_scheduler(|sched| sched.current_task);
     if current.is_null() {
@@ -544,6 +546,7 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     unsafe { (*current).waiting_on_task_id = INVALID_TASK_ID };
     0
 }
+
 pub fn unblock_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -615,6 +618,16 @@ pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) 
     }
 }
 
+fn deferred_reschedule_callback() {
+    if !PreemptGuard::is_active() {
+        let should_schedule =
+            try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
+        if should_schedule == Some(true) {
+            schedule();
+        }
+    }
+}
+
 pub fn init_scheduler() -> c_int {
     SCHEDULER.call_once(|| IrqMutex::new(SchedulerInner::new()));
     with_scheduler(|sched| {
@@ -631,12 +644,16 @@ pub fn init_scheduler() -> c_int {
         sched.total_ticks = 0;
         sched.total_preemptions = 0;
         sched.preemption_enabled = SCHEDULER_PREEMPTION_DEFAULT;
-        sched.reschedule_pending = 0;
-        sched.in_schedule = 0;
     });
     user_copy::register_current_task_provider(current_task_process_id);
+
+    // SAFETY: Called during early boot before interrupts enabled
+    unsafe {
+        slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
+    }
     0
 }
+
 pub fn create_idle_task() -> c_int {
     let idle_task_id = unsafe {
         crate::task::task_create(
@@ -714,6 +731,7 @@ pub fn scheduler_shutdown() {
         sched.idle_task = ptr::null_mut();
     });
 }
+
 pub fn get_scheduler_stats(
     context_switches: *mut u64,
     yields: *mut u64,
@@ -748,7 +766,7 @@ pub fn scheduler_set_preemption_enabled(enabled: c_int) {
     let preemption_enabled = with_scheduler(|sched| {
         sched.preemption_enabled = if enabled != 0 { 1 } else { 0 };
         if sched.preemption_enabled == 0 {
-            sched.reschedule_pending = 0;
+            PreemptGuard::clear_reschedule_pending();
         }
         sched.preemption_enabled
     });
@@ -764,6 +782,12 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
+    // If preemption is disabled via PreemptGuard, just mark pending
+    if PreemptGuard::is_active() {
+        PreemptGuard::set_reschedule_pending();
+        return;
+    }
+
     try_with_scheduler(|sched| {
         sched.total_ticks = sched.total_ticks.saturating_add(1);
         if sched.enabled == 0 || sched.preemption_enabled == 0 {
@@ -774,12 +798,9 @@ pub fn scheduler_timer_tick() {
         if current.is_null() {
             return;
         }
-        if sched.in_schedule != 0 {
-            return;
-        }
         if current == sched.idle_task {
             if sched.total_ready_count() > 0 {
-                sched.reschedule_pending = 1;
+                PreemptGuard::set_reschedule_pending();
             }
             return;
         }
@@ -798,48 +819,45 @@ pub fn scheduler_timer_tick() {
             reset_task_quantum(sched, current);
             return;
         }
-        if sched.reschedule_pending == 0 {
-            sched.total_preemptions = sched.total_preemptions.saturating_add(1);
-        }
-        sched.reschedule_pending = 1;
+        sched.total_preemptions = sched.total_preemptions.saturating_add(1);
+        PreemptGuard::set_reschedule_pending();
     });
 }
 
 pub fn scheduler_request_reschedule_from_interrupt() {
-    try_with_scheduler(|sched| {
-        if sched.enabled == 0 || sched.preemption_enabled == 0 {
-            return;
-        }
-        if sched.in_schedule == 0 {
-            sched.reschedule_pending = 1;
-        }
-    });
+    let should_set =
+        try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
+    if should_set == Some(true) && !PreemptGuard::is_active() {
+        PreemptGuard::set_reschedule_pending();
+    }
 }
+
 pub fn scheduler_handle_post_irq() {
-    let should_schedule = try_with_scheduler(|sched| {
-        if sched.reschedule_pending == 0 {
-            return false;
-        }
-        if sched.enabled == 0 || sched.preemption_enabled == 0 {
-            sched.reschedule_pending = 0;
-            return false;
-        }
-        if sched.in_schedule != 0 {
-            return false;
-        }
-        sched.reschedule_pending = 0;
-        true
-    });
+    if PreemptGuard::is_active() {
+        return;
+    }
+
+    if !PreemptGuard::is_reschedule_pending() {
+        return;
+    }
+
+    let should_schedule =
+        try_with_scheduler(|sched| sched.enabled != 0 && sched.preemption_enabled != 0);
+
     if should_schedule == Some(true) {
+        PreemptGuard::clear_reschedule_pending();
         schedule();
     }
 }
+
 pub fn boot_step_task_manager_init() -> c_int {
     crate::task::init_task_manager()
 }
+
 pub fn boot_step_scheduler_init() -> c_int {
     init_scheduler()
 }
+
 pub fn boot_step_idle_task() -> c_int {
     create_idle_task()
 }

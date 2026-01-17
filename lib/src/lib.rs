@@ -293,6 +293,7 @@ pub mod klog;
 pub mod math;
 pub mod memory;
 pub mod numfmt;
+pub mod preempt;
 pub mod ring_buffer;
 pub mod service_cell;
 pub mod service_macro;
@@ -315,6 +316,7 @@ pub use klog::{
 };
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ports::COM1;
+pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};
 pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
