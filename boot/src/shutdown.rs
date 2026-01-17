@@ -16,7 +16,7 @@ use slopos_core::{scheduler_shutdown, task_shutdown_all};
 use slopos_drivers::apic::apic_is_available;
 use slopos_drivers::apic::{apic_disable, apic_send_eoi, apic_send_ipi_halt_all, apic_timer_stop};
 use slopos_drivers::pit::pit_poll_delay_ms;
-use slopos_mm::page_alloc::page_allocator_paint_all;
+use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 
 fn serial_flush() {
@@ -85,6 +85,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     if !reason.is_null() {
         klog_info!("Reason: {}", unsafe { cstr_to_str(reason) });
     }
+
+    pcp_drain_all();
 
     scheduler_shutdown();
 

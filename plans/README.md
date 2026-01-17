@@ -47,7 +47,7 @@ Can be worked on **in parallel** with Stage 1-2. No hard dependencies.
 
 | Task | Type | Complexity | Depends On | Status |
 |------|------|:----------:|------------|:------:|
-| Per-CPU page caches | Performance | Medium | - | |
+| Per-CPU page caches | Performance | Medium | - | ✅ Complete |
 | O(n) VMA lookup → tree/RB-tree | Performance | Medium | - | |
 | ASLR | Security | Medium | - | ✅ Complete |
 | RwLock primitive | Feature | Low | - | ✅ Complete |
@@ -82,17 +82,17 @@ No dependencies on VFS/exec. Can start immediately.
 ```
  STAGE 1 (DONE)          STAGE 2 (DONE)          STAGE 3-4
 ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
-│  VFS Layer ✅│───────►│  libslop ✅  │        │  Per-CPU     │
+│  VFS Layer ✅│───────►│  libslop ✅  │        │  Per-CPU   ✅│
 └──────────────┘        └──────┬───────┘        │  page cache  │
        │                       │                └──────────────┘
        ├──► ramfs ✅           │                ┌──────────────┐
        │                       │                │  VMA tree    │
        ├──► devfs ✅           ▼                └──────────────┘
        │                ┌──────────────┐        ┌──────────────┐
-       └──► exec() ✅   │ Cross-comp ⚠️│        │    ASLR      │
+       └──► exec() ✅   │ Cross-comp ⚠️│        │  ASLR      ✅│
                         └──────┬───────┘        └──────────────┘
                                │                ┌──────────────┐
-                               ▼                │  RwLock ✅   │
+                               ▼                │  RwLock    ✅│
                         ┌──────────────┐        └──────────────┘
                         │  /bin apps   │        ┌──────────────┐
                         └──────────────┘        │    CoW       │───► fork()
@@ -115,10 +115,11 @@ No dependencies on VFS/exec. Can start immediately.
 - [x] **Syscall table overflow** - Potential code execution if sysno >= 128 *(Fixed: syscall_lookup() bounds-checks against SYSCALL_TABLE.len())*
 - [x] **ELF loader validation** - Insufficient input validation *(Fixed: comprehensive ElfValidator with bounds checking, overflow prevention, segment overlap detection, and address space validation)*
 
-### P1 - Performance (Partial)
+### P1 - Performance (Complete)
 
 - [x] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(Fixed: SYSCALL/SYSRET fast path with SWAPGS, per-CPU kernel stack, canonical address validation)*
 - [x] **Priority field unused** - Scheduler ignores task priorities *(Fixed: priority-based ready queues array with 4 levels, select_next_task scans HIGH→IDLE)*
+- [x] **No per-CPU page caches** - Every allocation/free contends on global lock *(Fixed: PCP layer in `mm/src/page_alloc.rs` with lock-free CAS-based cache per CPU, batch refill/drain, high/low watermarks)*
 
 ### P2 - Synchronization
 

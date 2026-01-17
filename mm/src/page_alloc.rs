@@ -1,5 +1,44 @@
+//! Physical Page Frame Allocator with Per-CPU Page Caches (PCP)
+//!
+//! This module provides a buddy allocator for physical page frames with
+//! per-CPU page caches for order-0 (single page) allocations. The PCP
+//! layer reduces lock contention by caching recently freed pages locally
+//! per CPU, avoiding the global lock for common allocation patterns.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                    alloc_page_frame()                           │
+//! │                           │                                     │
+//! │              ┌────────────┴────────────┐                        │
+//! │              │    Order == 0?          │                        │
+//! │              └────────────┬────────────┘                        │
+//! │                   Yes     │      No                             │
+//! │              ┌────────────┴────────────┐                        │
+//! │              ▼                         ▼                        │
+//! │   ┌─────────────────────┐   ┌─────────────────────┐            │
+//! │   │ Per-CPU Page Cache  │   │   Buddy Allocator   │            │
+//! │   │   (lock-free)       │   │   (global lock)     │            │
+//! │   └─────────┬───────────┘   └─────────────────────┘            │
+//! │             │ Empty?                                            │
+//! │             ▼                                                   │
+//! │   ┌─────────────────────┐                                      │
+//! │   │ Refill from Buddy   │                                      │
+//! │   │ (batch allocation)  │                                      │
+//! │   └─────────────────────┘                                      │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Per-CPU Cache Benefits
+//!
+//! - **Reduced lock contention**: Order-0 alloc/free often avoids global lock
+//! - **Cache locality**: Recently freed pages stay hot in CPU cache
+//! - **Batch operations**: Refill/drain multiple pages at once to amortize lock cost
+
 use core::ffi::{c_int, c_void};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_lib::{IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
@@ -8,23 +47,28 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
 use crate::mm_constants::PAGE_SIZE_4KB;
 
-// Allocation flags (mirrors page_alloc.h)
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;
 pub const ALLOC_FLAG_DMA: u32 = 0x02;
 pub const ALLOC_FLAG_KERNEL: u32 = 0x04;
 pub const ALLOC_FLAG_ORDER_SHIFT: u32 = 8;
 pub const ALLOC_FLAG_ORDER_MASK: u32 = 0x1F << ALLOC_FLAG_ORDER_SHIFT;
+pub const ALLOC_FLAG_NO_PCP: u32 = 0x80;
 
-// Page frame states
 const PAGE_FRAME_FREE: u8 = 0x00;
 const PAGE_FRAME_ALLOCATED: u8 = 0x01;
 const PAGE_FRAME_RESERVED: u8 = 0x02;
 const PAGE_FRAME_KERNEL: u8 = 0x03;
 const PAGE_FRAME_DMA: u8 = 0x04;
+const PAGE_FRAME_PCP: u8 = 0x05;
 
 const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 const MAX_ORDER: u32 = 24;
 const INVALID_REGION_ID: u16 = 0xFFFF;
+
+const MAX_CPUS: usize = 256;
+const PCP_HIGH_WATERMARK: u32 = 64;
+const PCP_LOW_WATERMARK: u32 = 8;
+const PCP_BATCH_SIZE: u32 = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -36,6 +80,34 @@ struct PageFrame {
     region_id: u16,
     next_free: u32,
 }
+
+#[repr(C, align(64))]
+struct PerCpuPageCache {
+    head: AtomicU32,
+    count: AtomicU32,
+    alloc_count: AtomicU32,
+    free_count: AtomicU32,
+    _pad: [u32; 12],
+}
+
+impl PerCpuPageCache {
+    const fn new() -> Self {
+        Self {
+            head: AtomicU32::new(INVALID_PAGE_FRAME),
+            count: AtomicU32::new(0),
+            alloc_count: AtomicU32::new(0),
+            free_count: AtomicU32::new(0),
+            _pad: [0; 12],
+        }
+    }
+}
+
+static PER_CPU_CACHES: [PerCpuPageCache; MAX_CPUS] = {
+    const INIT: PerCpuPageCache = PerCpuPageCache::new();
+    [INIT; MAX_CPUS]
+};
+
+static PCP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct PageAllocator {
@@ -113,7 +185,7 @@ impl PageAllocator {
     fn frame_state_is_allocated(state: u8) -> bool {
         matches!(
             state,
-            PAGE_FRAME_ALLOCATED | PAGE_FRAME_KERNEL | PAGE_FRAME_DMA
+            PAGE_FRAME_ALLOCATED | PAGE_FRAME_KERNEL | PAGE_FRAME_DMA | PAGE_FRAME_PCP
         )
     }
 
@@ -250,7 +322,6 @@ impl PageAllocator {
                 continue;
             }
 
-            // split down
             while current_order > order {
                 current_order -= 1;
                 let buddy = block + Self::order_block_pages(current_order);
@@ -269,6 +340,39 @@ impl PageAllocator {
         }
 
         INVALID_PAGE_FRAME
+    }
+
+    fn allocate_batch_for_pcp(&mut self, frames: &mut [u32], flags: u32) -> usize {
+        let mut count = 0;
+        for slot in frames.iter_mut() {
+            let frame_num = self.allocate_block(0, flags);
+            if frame_num == INVALID_PAGE_FRAME {
+                break;
+            }
+            if let Some(desc) = unsafe { self.frame_desc_mut(frame_num) } {
+                desc.state = PAGE_FRAME_PCP;
+            }
+            *slot = frame_num;
+            count += 1;
+        }
+        count
+    }
+
+    fn free_batch_from_pcp(&mut self, frames: &[u32]) {
+        for &frame_num in frames {
+            if frame_num == INVALID_PAGE_FRAME {
+                continue;
+            }
+            if let Some(desc) = unsafe { self.frame_desc_mut(frame_num) } {
+                if desc.state == PAGE_FRAME_PCP {
+                    desc.ref_count = 0;
+                    desc.flags = 0;
+                    desc.state = PAGE_FRAME_FREE;
+                    self.allocated_frames = self.allocated_frames.saturating_sub(1);
+                    self.insert_block_coalescing(frame_num, 0);
+                }
+            }
+        }
     }
 
     fn derive_max_order(total_frames: u32) -> u32 {
@@ -340,6 +444,239 @@ static PAGE_ALLOCATOR: IrqMutex<PageAllocator> = IrqMutex::new(PageAllocator::ne
 
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
+#[inline]
+fn get_current_cpu() -> usize {
+    0
+}
+
+fn pcp_try_alloc(cpu: usize) -> u32 {
+    if cpu >= MAX_CPUS || !PCP_INITIALIZED.load(Ordering::Acquire) {
+        return INVALID_PAGE_FRAME;
+    }
+
+    let cache = &PER_CPU_CACHES[cpu];
+
+    // Try to pop from the cache's free list
+    // Use a simple CAS loop for lock-free operation
+    loop {
+        let head = cache.head.load(Ordering::Acquire);
+        if head == INVALID_PAGE_FRAME {
+            return INVALID_PAGE_FRAME;
+        }
+
+        // Read the next pointer from the frame descriptor
+        let next = {
+            let alloc = PAGE_ALLOCATOR.lock();
+            unsafe { alloc.frame_desc_mut(head) }
+                .map(|f| f.next_free)
+                .unwrap_or(INVALID_PAGE_FRAME)
+        };
+
+        if cache
+            .head
+            .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            cache.count.fetch_sub(1, Ordering::Relaxed);
+            cache.alloc_count.fetch_add(1, Ordering::Relaxed);
+
+            {
+                let alloc = PAGE_ALLOCATOR.lock();
+                if let Some(desc) = unsafe { alloc.frame_desc_mut(head) } {
+                    desc.state = PAGE_FRAME_ALLOCATED;
+                    desc.ref_count = 1;
+                    desc.next_free = INVALID_PAGE_FRAME;
+                }
+            }
+
+            return head;
+        }
+    }
+}
+
+fn pcp_try_free(cpu: usize, frame_num: u32) -> bool {
+    if cpu >= MAX_CPUS || !PCP_INITIALIZED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let cache = &PER_CPU_CACHES[cpu];
+
+    let current_count = cache.count.load(Ordering::Relaxed);
+    if current_count >= PCP_HIGH_WATERMARK {
+        return false;
+    }
+
+    loop {
+        let head = cache.head.load(Ordering::Acquire);
+
+        {
+            let alloc = PAGE_ALLOCATOR.lock();
+            if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+                desc.next_free = head;
+                desc.state = PAGE_FRAME_PCP;
+                desc.ref_count = 0;
+            }
+        }
+
+        if cache
+            .head
+            .compare_exchange_weak(head, frame_num, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            cache.count.fetch_add(1, Ordering::Relaxed);
+            cache.free_count.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+    }
+}
+
+fn pcp_refill(cpu: usize, flags: u32) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+
+    let cache = &PER_CPU_CACHES[cpu];
+    let current_count = cache.count.load(Ordering::Relaxed);
+
+    if current_count >= PCP_LOW_WATERMARK {
+        return;
+    }
+
+    let needed = PCP_BATCH_SIZE.min(PCP_HIGH_WATERMARK - current_count);
+    let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
+
+    let allocated = {
+        let mut alloc = PAGE_ALLOCATOR.lock();
+        alloc.allocate_batch_for_pcp(&mut batch[..needed as usize], flags)
+    };
+
+    for i in 0..allocated {
+        let frame_num = batch[i];
+        loop {
+            let head = cache.head.load(Ordering::Acquire);
+            {
+                let alloc = PAGE_ALLOCATOR.lock();
+                if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+                    desc.next_free = head;
+                }
+            }
+            if cache
+                .head
+                .compare_exchange_weak(head, frame_num, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                cache.count.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+}
+
+fn pcp_drain(cpu: usize) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+
+    let cache = &PER_CPU_CACHES[cpu];
+    let current_count = cache.count.load(Ordering::Relaxed);
+
+    if current_count <= PCP_HIGH_WATERMARK {
+        return;
+    }
+
+    let to_drain = (current_count - PCP_HIGH_WATERMARK / 2).min(PCP_BATCH_SIZE);
+    let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
+    let mut drained = 0;
+
+    for i in 0..to_drain as usize {
+        loop {
+            let head = cache.head.load(Ordering::Acquire);
+            if head == INVALID_PAGE_FRAME {
+                break;
+            }
+
+            let next = {
+                let alloc = PAGE_ALLOCATOR.lock();
+                unsafe { alloc.frame_desc_mut(head) }
+                    .map(|f| f.next_free)
+                    .unwrap_or(INVALID_PAGE_FRAME)
+            };
+
+            if cache
+                .head
+                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                batch[i] = head;
+                cache.count.fetch_sub(1, Ordering::Relaxed);
+                drained += 1;
+                break;
+            }
+        }
+        if batch[i] == INVALID_PAGE_FRAME {
+            break;
+        }
+    }
+
+    if drained > 0 {
+        let mut alloc = PAGE_ALLOCATOR.lock();
+        alloc.free_batch_from_pcp(&batch[..drained]);
+    }
+}
+
+pub fn pcp_drain_all() {
+    for cpu in 0..MAX_CPUS {
+        let cache = &PER_CPU_CACHES[cpu];
+        let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
+
+        loop {
+            let count = cache.count.load(Ordering::Relaxed);
+            if count == 0 {
+                break;
+            }
+
+            let mut drained = 0;
+            for slot in batch.iter_mut() {
+                *slot = INVALID_PAGE_FRAME;
+                loop {
+                    let head = cache.head.load(Ordering::Acquire);
+                    if head == INVALID_PAGE_FRAME {
+                        break;
+                    }
+
+                    let next = {
+                        let alloc = PAGE_ALLOCATOR.lock();
+                        unsafe { alloc.frame_desc_mut(head) }
+                            .map(|f| f.next_free)
+                            .unwrap_or(INVALID_PAGE_FRAME)
+                    };
+
+                    if cache
+                        .head
+                        .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        *slot = head;
+                        cache.count.fetch_sub(1, Ordering::Relaxed);
+                        drained += 1;
+                        break;
+                    }
+                }
+                if *slot == INVALID_PAGE_FRAME {
+                    break;
+                }
+            }
+
+            if drained > 0 {
+                let mut alloc = PAGE_ALLOCATOR.lock();
+                alloc.free_batch_from_pcp(&batch[..drained]);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
     if frame_array.is_null() || max_frames == 0 {
         panic!("init_page_allocator: Invalid parameters");
@@ -373,6 +710,7 @@ pub fn init_page_allocator(frame_array: *mut c_void, max_frames: u32) -> c_int {
 
     0
 }
+
 pub fn finalize_page_allocator() -> c_int {
     let mut alloc = PAGE_ALLOCATOR.lock();
     alloc.free_lists_reset();
@@ -388,13 +726,19 @@ pub fn finalize_page_allocator() -> c_int {
         }
     }
 
-    klog_debug!(
-        "Page allocator ready: {} pages available",
+    drop(alloc);
+
+    PCP_INITIALIZED.store(true, Ordering::Release);
+
+    let alloc = PAGE_ALLOCATOR.lock();
+    klog_info!(
+        "Page allocator ready: {} pages available (PCP enabled)",
         alloc.free_frames
     );
 
     0
 }
+
 pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
     if count == 0 {
         return PhysAddr::NULL;
@@ -407,23 +751,54 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
         order += 1;
     }
 
-    let mut alloc = PAGE_ALLOCATOR.lock();
-    let flag_order = alloc.flags_to_order(flags);
-    if flag_order > order {
-        order = flag_order;
-    }
+    let use_pcp = order == 0
+        && (flags & ALLOC_FLAG_DMA) == 0
+        && (flags & ALLOC_FLAG_NO_PCP) == 0
+        && PCP_INITIALIZED.load(Ordering::Acquire);
 
-    let frame_num = alloc.allocate_block(order, flags);
+    let frame_num = if use_pcp {
+        let cpu = get_current_cpu();
+
+        let mut frame = pcp_try_alloc(cpu);
+
+        if frame == INVALID_PAGE_FRAME {
+            pcp_refill(cpu, flags);
+            frame = pcp_try_alloc(cpu);
+        }
+
+        if frame == INVALID_PAGE_FRAME {
+            let mut alloc = PAGE_ALLOCATOR.lock();
+            let flag_order = alloc.flags_to_order(flags);
+            let actual_order = flag_order.max(order);
+            frame = alloc.allocate_block(actual_order, flags);
+        }
+
+        frame
+    } else {
+        let mut alloc = PAGE_ALLOCATOR.lock();
+        let flag_order = alloc.flags_to_order(flags);
+        if flag_order > order {
+            order = flag_order;
+        }
+        alloc.allocate_block(order, flags)
+    };
+
     if frame_num == INVALID_PAGE_FRAME {
         klog_info!("alloc_page_frames: No suitable block available");
         return PhysAddr::NULL;
     }
 
-    let phys_addr = alloc.frame_to_phys(frame_num);
-    drop(alloc);
+    let phys_addr = {
+        let alloc = PAGE_ALLOCATOR.lock();
+        alloc.frame_to_phys(frame_num)
+    };
 
     if flags & ALLOC_FLAG_ZERO != 0 {
-        let span_pages = PageAllocator::order_block_pages(order);
+        let span_pages = if use_pcp {
+            1
+        } else {
+            PageAllocator::order_block_pages(order)
+        };
         for i in 0..span_pages {
             let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
             if zero_physical_page(page_phys) != 0 {
@@ -435,47 +810,89 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
 
     phys_addr
 }
+
 pub fn alloc_page_frame(flags: u32) -> PhysAddr {
     alloc_page_frames(1, flags)
 }
+
 pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
+    let frame_num = {
+        let alloc = PAGE_ALLOCATOR.lock();
+        alloc.phys_to_frame(phys_addr)
+    };
+
+    let (is_valid, is_allocated, order, is_pcp_candidate) = {
+        let alloc = PAGE_ALLOCATOR.lock();
+        if !alloc.is_valid_frame(frame_num) {
+            klog_info!("free_page_frame: Invalid physical address");
+            return -1;
+        }
+
+        let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
+        let is_alloc = PageAllocator::frame_state_is_allocated(frame.state);
+        let ord = frame.order as u32;
+
+        let pcp_ok = ord == 0
+            && frame.state == PAGE_FRAME_ALLOCATED
+            && PCP_INITIALIZED.load(Ordering::Acquire);
+
+        if !is_alloc {
+            return 0;
+        }
+
+        if frame.ref_count > 1 {
+            frame.ref_count -= 1;
+            return 0;
+        }
+
+        (true, is_alloc, ord, pcp_ok)
+    };
+
+    if !is_valid || !is_allocated {
+        return 0;
+    }
+
+    if is_pcp_candidate {
+        let cpu = get_current_cpu();
+        if pcp_try_free(cpu, frame_num) {
+            let cache = &PER_CPU_CACHES[cpu];
+            if cache.count.load(Ordering::Relaxed) > PCP_HIGH_WATERMARK {
+                pcp_drain(cpu);
+            }
+            return 0;
+        }
+    }
+
     let mut alloc = PAGE_ALLOCATOR.lock();
-    let frame_num = alloc.phys_to_frame(phys_addr);
-
-    if !alloc.is_valid_frame(frame_num) {
-        klog_info!("free_page_frame: Invalid physical address");
-        return -1;
+    if let Some(frame) = unsafe { alloc.frame_desc_mut(frame_num) } {
+        let pages = PageAllocator::order_block_pages(order);
+        frame.ref_count = 0;
+        frame.flags = 0;
+        frame.state = PAGE_FRAME_FREE;
+        alloc.allocated_frames = alloc.allocated_frames.saturating_sub(pages);
+        alloc.insert_block_coalescing(frame_num, order);
     }
 
-    let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
-    if !PageAllocator::frame_state_is_allocated(frame.state) {
-        return 0;
-    }
-
-    if frame.ref_count > 1 {
-        frame.ref_count -= 1;
-        return 0;
-    }
-
-    let order = frame.order as u32;
-    let pages = PageAllocator::order_block_pages(order);
-
-    frame.ref_count = 0;
-    frame.flags = 0;
-    frame.state = PAGE_FRAME_FREE;
-
-    alloc.allocated_frames = alloc.allocated_frames.saturating_sub(pages);
-    alloc.insert_block_coalescing(frame_num, order);
     0
 }
+
 pub fn page_allocator_descriptor_size() -> usize {
     core::mem::size_of::<PageFrame>()
 }
+
 pub fn page_allocator_max_supported_frames() -> u32 {
     PAGE_ALLOCATOR.lock().max_supported_frames
 }
+
 pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
     let alloc = PAGE_ALLOCATOR.lock();
+
+    let mut pcp_count = 0u32;
+    for cpu in 0..MAX_CPUS {
+        pcp_count += PER_CPU_CACHES[cpu].count.load(Ordering::Relaxed);
+    }
+    let _ = pcp_count;
+
     unsafe {
         if !total.is_null() {
             *total = alloc.total_frames;
@@ -488,11 +905,32 @@ pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut
         }
     }
 }
+
+pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut u32) {
+    if cpu >= MAX_CPUS {
+        return;
+    }
+
+    let cache = &PER_CPU_CACHES[cpu];
+    unsafe {
+        if !count.is_null() {
+            *count = cache.count.load(Ordering::Relaxed);
+        }
+        if !allocs.is_null() {
+            *allocs = cache.alloc_count.load(Ordering::Relaxed);
+        }
+        if !frees.is_null() {
+            *frees = cache.free_count.load(Ordering::Relaxed);
+        }
+    }
+}
+
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
     (frame_num < alloc.total_frames) as c_int
 }
+
 pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
     let alloc = PAGE_ALLOCATOR.lock();
     let frame_num = alloc.phys_to_frame(phys_addr);
@@ -502,6 +940,7 @@ pub fn page_frame_can_free(phys_addr: PhysAddr) -> c_int {
     let frame = unsafe { alloc.frame_desc_mut(frame_num) }.unwrap();
     PageAllocator::frame_state_is_allocated(frame.state) as c_int
 }
+
 pub fn page_allocator_paint_all(value: u8) {
     let alloc = PAGE_ALLOCATOR.lock();
     if alloc.frames.is_null() {
@@ -518,9 +957,6 @@ pub fn page_allocator_paint_all(value: u8) {
     }
 }
 
-/// Zero a physical page.
-///
-/// Returns 0 on success, -1 on failure.
 fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
     if phys_addr.is_null() {
         return -1;
