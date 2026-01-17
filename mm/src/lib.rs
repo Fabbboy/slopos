@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(static_mut_refs)]
 
+pub mod aslr;
 pub mod elf;
 pub mod hhdm;
 pub mod kernel_heap;

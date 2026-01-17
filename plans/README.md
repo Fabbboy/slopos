@@ -49,7 +49,7 @@ Can be worked on **in parallel** with Stage 1-2. No hard dependencies.
 |------|------|:----------:|------------|:------:|
 | Per-CPU page caches | Performance | Medium | - | |
 | O(n) VMA lookup → tree/RB-tree | Performance | Medium | - | |
-| ASLR | Security | Medium | - | |
+| ASLR | Security | Medium | - | ✅ Complete |
 | RwLock primitive | Feature | Low | - | |
 
 ### Stage 4: Advanced Memory

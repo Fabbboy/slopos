@@ -4,6 +4,7 @@ use core::ptr;
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
 
+use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
@@ -920,7 +921,8 @@ fn copy_segment_page_data(
     }
 }
 pub fn create_process_vm() -> u32 {
-    let layout = unsafe { &*mm_get_process_layout() };
+    let base_layout = unsafe { &*mm_get_process_layout() };
+    let layout = aslr::randomize_process_layout(base_layout);
     let mut manager = VM_MANAGER.lock();
     if manager.num_processes >= MAX_PROCESSES as u32 {
         klog_info!("create_process_vm: Maximum processes reached");
