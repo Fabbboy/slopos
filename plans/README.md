@@ -50,7 +50,8 @@ Can be worked on **in parallel** with Stage 1-2. No hard dependencies.
 | Per-CPU page caches | Performance | Medium | - | |
 | O(n) VMA lookup → tree/RB-tree | Performance | Medium | - | |
 | ASLR | Security | Medium | - | ✅ Complete |
-| RwLock primitive | Feature | Low | - | |
+| RwLock primitive | Feature | Low | - | ✅ Complete |
+| RwLock adoption (MOUNT_TABLE, REGISTRY) | Refactor | Low | RwLock | ✅ Complete |
 
 ### Stage 4: Advanced Memory
 
@@ -91,7 +92,7 @@ No dependencies on VFS/exec. Can start immediately.
        └──► exec() ✅   │ Cross-comp ⚠️│        │    ASLR      │
                         └──────┬───────┘        └──────────────┘
                                │                ┌──────────────┐
-                               ▼                │   RwLock     │
+                               ▼                │  RwLock ✅   │
                         ┌──────────────┐        └──────────────┘
                         │  /bin apps   │        ┌──────────────┐
                         └──────────────┘        │    CoW       │───► fork()
@@ -118,6 +119,13 @@ No dependencies on VFS/exec. Can start immediately.
 
 - [x] **`int 0x80` syscalls** - 3x slower than `syscall` instruction *(Fixed: SYSCALL/SYSRET fast path with SWAPGS, per-CPU kernel stack, canonical address validation)*
 - [x] **Priority field unused** - Scheduler ignores task priorities *(Fixed: priority-based ready queues array with 4 levels, select_next_task scans HIGH→IDLE)*
+
+### P2 - Synchronization
+
+- [x] **RwLock primitive** - Implemented level-based RwLock (L0-L5) in `lib/src/sync/rwlock.rs` for deadlock prevention
+- [x] **RwLock adoption** - Converted read-heavy structures to RwLock:
+  - `MOUNT_TABLE` (`fs/src/vfs/mount.rs`) - L1, reads on every file operation
+  - `REGISTRY` (`mm/src/shared_memory.rs`) - L2, frequent read-only lookups
 
 ---
 

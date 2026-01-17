@@ -6,7 +6,7 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::IrqMutex;
+use slopos_lib::{CleanLockToken, L2, RwLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
@@ -250,7 +250,7 @@ impl SharedBufferRegistry {
     }
 }
 
-static REGISTRY: IrqMutex<SharedBufferRegistry> = IrqMutex::new(SharedBufferRegistry::new());
+static REGISTRY: RwLock<L2, SharedBufferRegistry> = RwLock::new(SharedBufferRegistry::new());
 
 /// Create a new shared memory buffer.
 ///
@@ -263,7 +263,6 @@ static REGISTRY: IrqMutex<SharedBufferRegistry> = IrqMutex::new(SharedBufferRegi
 /// Buffer token on success, 0 on failure
 pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
     if size == 0 || size > 64 * 1024 * 1024 {
-        // Limit to 64MB per buffer
         klog_info!("shm_create: invalid size {}", size);
         return 0;
     }
@@ -271,14 +270,14 @@ pub fn shm_create(owner_process: u32, size: u64, flags: u32) -> u32 {
     let aligned_size = align_up(size as usize, PAGE_SIZE_4KB as usize);
     let pages = (aligned_size / PAGE_SIZE_4KB as usize) as u32;
 
-    // Allocate physical pages
     let phys_addr = alloc_page_frames(pages, flags | ALLOC_FLAG_ZERO);
     if phys_addr.is_null() {
         klog_info!("shm_create: failed to allocate {} pages", pages);
         return 0;
     }
 
-    let mut registry = REGISTRY.lock();
+    let mut token = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token.token());
     let slot = match registry.find_free_slot() {
         Some(s) => s,
         None => {
@@ -330,7 +329,8 @@ pub fn shm_map(process_id: u32, token: u32, access: ShmAccess) -> u64 {
         return 0;
     }
 
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
         None => {
@@ -422,10 +422,10 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
         return -1;
     }
 
-    // Convert raw u64 to typed VirtAddr for comparison
     let virt_addr_typed = VirtAddr::new(virt_addr);
 
-    let mut registry = REGISTRY.lock();
+    let mut token = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token.token());
 
     // First pass: find the buffer and mapping, capture size for free list
     let mut found_info: Option<(usize, usize, usize, VirtAddr)> = None; // (buffer_idx, mapping_idx, size, vaddr)
@@ -490,7 +490,8 @@ pub fn shm_unmap(process_id: u32, virt_addr: u64) -> c_int {
 /// # Returns
 /// 0 on success, -1 on failure
 pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
 
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
@@ -562,7 +563,8 @@ pub fn shm_destroy(process_id: u32, token: u32) -> c_int {
 /// # Returns
 /// (phys_addr, size, owner_task) or (NULL, 0, 0) if not found
 pub fn shm_get_buffer_info(token: u32) -> (PhysAddr, usize, u32) {
-    let registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token_lock.token());
     match registry.find_by_token(token) {
         Some(slot) => {
             let buf = &registry.buffers[slot];
@@ -583,7 +585,8 @@ pub fn shm_get_buffer_info(token: u32) -> (PhysAddr, usize, u32) {
 /// # Returns
 /// 0 on success, -1 on failure
 pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c_int {
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
 
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
@@ -619,7 +622,8 @@ pub fn surface_attach(process_id: u32, token: u32, width: u32, height: u32) -> c
 /// # Returns
 /// (token, width, height, phys_addr) or (0, 0, 0, NULL) if no surface
 pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, PhysAddr) {
-    let registry = REGISTRY.lock();
+    let mut token = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token.token());
 
     for buffer in registry.buffers.iter() {
         if buffer.active
@@ -642,7 +646,8 @@ pub fn get_surface_for_task(task_id: u32) -> (u32, u32, u32, PhysAddr) {
 /// Get the physical address of a shared buffer by token.
 /// Used by FB_FLIP syscall.
 pub fn shm_get_phys_addr(token: u32) -> PhysAddr {
-    let registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token_lock.token());
     match registry.find_by_token(token) {
         Some(slot) => registry.buffers[slot].phys_addr,
         None => PhysAddr::NULL,
@@ -651,7 +656,8 @@ pub fn shm_get_phys_addr(token: u32) -> PhysAddr {
 
 /// Get the size of a shared buffer by token.
 pub fn shm_get_size(token: u32) -> usize {
-    let registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token_lock.token());
     match registry.find_by_token(token) {
         Some(slot) => registry.buffers[slot].size,
         None => 0,
@@ -661,7 +667,8 @@ pub fn shm_get_size(token: u32) -> usize {
 /// Clean up all shared buffers owned by a task.
 /// Called when a task terminates.
 pub fn shm_cleanup_task(task_id: u32) {
-    let mut registry = REGISTRY.lock();
+    let mut token = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token.token());
 
     let mut vaddrs_from_mappings: [(VirtAddr, usize); MAX_SHARED_BUFFERS] =
         [(VirtAddr::NULL, 0); MAX_SHARED_BUFFERS];
@@ -755,7 +762,8 @@ pub fn shm_cleanup_task(task_id: u32) {
 /// # Returns
 /// 0 on success, -1 on failure
 pub fn shm_acquire(token: u32) -> c_int {
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
 
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
@@ -787,7 +795,8 @@ pub fn shm_acquire(token: u32) -> c_int {
 /// # Returns
 /// 0 on success, -1 on failure
 pub fn shm_release(token: u32) -> c_int {
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
 
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
@@ -818,7 +827,8 @@ pub fn shm_release(token: u32) -> c_int {
 /// # Returns
 /// 1 if released (client can reuse), 0 if not released, -1 on error
 pub fn shm_poll_released(token: u32) -> c_int {
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
 
     let slot = match registry.find_by_token(token) {
         Some(s) => s,
@@ -842,7 +852,8 @@ pub fn shm_poll_released(token: u32) -> c_int {
 /// # Returns
 /// Reference count, or 0 if token is invalid
 pub fn shm_get_ref_count(token: u32) -> u32 {
-    let registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token_lock.token());
 
     match registry.find_by_token(token) {
         Some(slot) => registry.buffers[slot].ref_count,
@@ -896,7 +907,8 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
         return 0;
     }
 
-    let mut registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let mut registry = REGISTRY.write(token_lock.token());
     let slot = match registry.find_free_slot() {
         Some(s) => s,
         None => {
@@ -945,7 +957,8 @@ pub fn shm_create_with_format(owner_task: u32, size: u64, format: PixelFormat) -
 /// # Returns
 /// Pixel format as u32 (PixelFormat enum value), or u32::MAX on error
 pub fn shm_get_format(token: u32) -> u32 {
-    let registry = REGISTRY.lock();
+    let mut token_lock = unsafe { CleanLockToken::new() };
+    let registry = REGISTRY.read(token_lock.token());
 
     match registry.find_by_token(token) {
         Some(slot) => registry.buffers[slot].format as u32,

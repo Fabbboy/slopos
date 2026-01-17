@@ -321,5 +321,5 @@ pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
 pub use sync::{
     CleanLockToken, L0, L1, L2, L3, L4, L5, Level, LockToken, Lower, Mutex as OrderedMutex,
-    MutexGuard as OrderedMutexGuard,
+    MutexGuard as OrderedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };

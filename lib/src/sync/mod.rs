@@ -1,7 +1,9 @@
 mod level;
 mod mutex;
+mod rwlock;
 mod token;
 
 pub use level::{L0, L1, L2, L3, L4, L5, Level, Lower};
 pub use mutex::{Mutex, MutexGuard};
+pub use rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use token::{CleanLockToken, LockToken};
