@@ -726,6 +726,19 @@ define_syscall!(syscall_brk(ctx, args, process_id) requires process_id {
     ctx.ok(result)
 });
 
+pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
+    let Some(ctx) = SyscallContext::new(task, frame) else {
+        return syscall_return_err(frame, u64::MAX);
+    };
+
+    let child_id = crate::scheduler::task::task_fork(task);
+    if child_id == slopos_abi::task::INVALID_TASK_ID {
+        return ctx.err();
+    }
+
+    ctx.ok(child_id as u64)
+}
+
 static SYSCALL_TABLE: [SyscallEntry; 128] = {
     let mut table: [SyscallEntry; 128] = [SyscallEntry {
         handler: None,
@@ -966,6 +979,10 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_BRK as usize] = SyscallEntry {
         handler: Some(syscall_brk),
         name: b"brk\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_FORK as usize] = SyscallEntry {
+        handler: Some(syscall_fork),
+        name: b"fork\0".as_ptr() as *const c_char,
     };
     table
 };

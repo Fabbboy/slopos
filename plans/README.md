@@ -61,7 +61,7 @@ Required for efficient fork() and full POSIX compatibility (Tier 3 userland).
 |------|------|:----------:|------------|:------:|
 | Copy-on-Write (CoW) | Feature | High | - | ✅ Complete |
 | Demand Paging | Feature | Medium | - | |
-| fork() syscall | Feature | Medium | CoW | |
+| fork() syscall | Feature | Medium | CoW | ✅ Complete |
 
 ### Parallel Track: UI Toolkit
 
@@ -95,9 +95,9 @@ No dependencies on VFS/exec. Can start immediately.
                                ▼                │  RwLock    ✅│
                         ┌──────────────┐        └──────────────┘
                         │  /bin apps   │
-                        └──────────────┘         STAGE 4
+                        └──────────────┘                                                          STAGE 4
                                                 ┌──────────────┐
-                                                │    CoW     ✅│───► fork()
+                                                │    CoW     ✅│───► fork() ✅
                                                 └──────────────┘
 
  PARALLEL TRACK

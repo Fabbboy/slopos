@@ -131,6 +131,18 @@ pub const SYSCALL_EXEC: u64 = 70;
 pub const SYSCALL_BRK: u64 = 71;
 
 // =============================================================================
+// Process management
+// =============================================================================
+
+/// Fork the current process, creating a child with copy-on-write address space.
+///
+/// # Returns
+/// * In parent: child's task ID (positive)
+/// * In child: 0
+/// * On error: negative error code
+pub const SYSCALL_FORK: u64 = 72;
+
+// =============================================================================
 // Syscall data structures
 // =============================================================================
 

@@ -73,10 +73,14 @@ impl TaskManagerInner {
 
 static TASK_MANAGER: IrqMutex<TaskManagerInner> = IrqMutex::new(TaskManagerInner::new());
 
-use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
+use slopos_fs::fileio::{
+    fileio_clone_table_for_process, fileio_create_table_for_process,
+    fileio_destroy_table_for_process,
+};
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
-    create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_get_page_dir,
+    create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_clone_cow,
+    process_vm_get_page_dir,
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
@@ -773,6 +777,128 @@ pub fn task_is_blocked(task: *const Task) -> bool {
 }
 pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_TERMINATED
+}
+
+pub fn task_fork(parent_task: *mut Task) -> u32 {
+    if parent_task.is_null() {
+        klog_info!("task_fork: null parent task");
+        return INVALID_TASK_ID;
+    }
+
+    let parent = unsafe { &*parent_task };
+
+    if parent.process_id == INVALID_PROCESS_ID {
+        klog_info!("task_fork: parent has no process VM (kernel task?)");
+        return INVALID_TASK_ID;
+    }
+
+    if parent.flags & TASK_FLAG_KERNEL_MODE != 0 {
+        klog_info!("task_fork: cannot fork kernel-mode task");
+        return INVALID_TASK_ID;
+    }
+
+    let child_process_id = process_vm_clone_cow(parent.process_id);
+    if child_process_id == INVALID_PROCESS_ID {
+        klog_info!("task_fork: process_vm_clone_cow failed");
+        return INVALID_TASK_ID;
+    }
+
+    let child_kernel_stack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
+    if child_kernel_stack.is_null() {
+        klog_info!("task_fork: failed to allocate kernel stack");
+        destroy_process_vm(child_process_id);
+        return INVALID_TASK_ID;
+    }
+
+    if fileio_clone_table_for_process(parent.process_id, child_process_id) != 0 {
+        klog_info!("task_fork: failed to clone file table");
+        kfree(child_kernel_stack);
+        destroy_process_vm(child_process_id);
+        return INVALID_TASK_ID;
+    }
+
+    let (child_task_ptr, child_task_id) = with_task_manager(|mgr| {
+        if mgr.num_tasks >= MAX_TASKS as u32 {
+            return (ptr::null_mut(), INVALID_TASK_ID);
+        }
+
+        let mut slot: *mut Task = ptr::null_mut();
+        for t in mgr.tasks.iter_mut() {
+            if t.state == TASK_STATE_INVALID {
+                slot = t as *mut Task;
+                break;
+            }
+        }
+
+        if slot.is_null() {
+            return (ptr::null_mut(), INVALID_TASK_ID);
+        }
+
+        let task_id = mgr.next_task_id;
+        mgr.next_task_id = task_id.wrapping_add(1);
+
+        if let Some(idx) = task_slot_index_inner(mgr, slot) {
+            mgr.exit_records[idx] = TaskExitRecord::empty();
+        }
+
+        (slot, task_id)
+    });
+
+    if child_task_ptr.is_null() {
+        klog_info!("task_fork: no free task slots");
+        fileio_destroy_table_for_process(child_process_id);
+        kfree(child_kernel_stack);
+        destroy_process_vm(child_process_id);
+        return INVALID_TASK_ID;
+    }
+
+    let child = unsafe { &mut *child_task_ptr };
+
+    *child = *parent;
+
+    child.task_id = child_task_id;
+    child.process_id = child_process_id;
+    child.state = TASK_STATE_READY;
+
+    child.kernel_stack_base = child_kernel_stack as u64;
+    child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;
+    child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
+
+    child.context.rax = 0;
+
+    let child_page_dir = process_vm_get_page_dir(child_process_id);
+    if !child_page_dir.is_null() {
+        child.context.cr3 = unsafe { (*child_page_dir).pml4_phys.as_u64() };
+    }
+
+    child.time_slice_remaining = child.time_slice;
+    child.total_runtime = 0;
+    child.creation_time = kdiag_timestamp();
+    child.yield_count = 0;
+    child.last_run_timestamp = 0;
+    child.waiting_on_task_id = INVALID_TASK_ID;
+    child.exit_reason = TaskExitReason::None;
+    child.fault_reason = TaskFaultReason::None;
+    child.exit_code = 0;
+    child.fate_token = 0;
+    child.fate_value = 0;
+    child.fate_pending = 0;
+    child.next_ready = ptr::null_mut();
+
+    with_task_manager(|mgr| {
+        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
+        mgr.tasks_created = mgr.tasks_created.saturating_add(1);
+    });
+
+    klog_info!(
+        "task_fork: created child task {} (process {}) from parent task {} (process {})",
+        child_task_id,
+        child_process_id,
+        parent.task_id,
+        parent.process_id
+    );
+
+    child_task_id
 }
 
 use super::ffi_boundary::task_entry_wrapper;

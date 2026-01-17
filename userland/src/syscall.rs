@@ -288,6 +288,12 @@ pub fn sys_exec(path: &[u8]) -> i64 {
     unsafe { syscall_impl(SYSCALL_EXEC, path.as_ptr() as u64, 0, 0) as i64 }
 }
 
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_fork() -> i32 {
+    unsafe { syscall_impl(SYSCALL_FORK, 0, 0, 0) as i32 }
+}
+
 /// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
 /// Swaps buffer pointers atomically and transfers damage tracking
 #[inline(always)]
