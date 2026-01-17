@@ -319,7 +319,7 @@ boot-log: iso-notests
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
 	fi; \
-	DISPLAY_ARGS="-nographic -vga std"; \
+	DISPLAY_ARGS="-display none -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$$'; then \
