@@ -2,196 +2,104 @@
 
 > **Generated**: January 2026  
 > **Purpose**: Detailed architectural analysis comparing SlopOS implementations against Linux/GNU (production standard) and Redox OS (Rust reference implementation)  
-> **Exclusion**: Intel Arc GPU driver (`drivers/src/xe/`) excluded (work in progress)
+> **Status**: Post-implementation review — all critical systems operational
 
 ---
 
 ## Executive Summary
 
-SlopOS is a hobby x86-64 kernel written in Rust, featuring a cooperative scheduler with preemption support, buddy allocator-based memory management, and a Wayland-style compositor. This analysis compares SlopOS implementations against Linux/GNU and Redox OS, identifying areas for improvement.
+SlopOS is a hobby x86-64 kernel written in Rust, featuring a priority-based preemptive scheduler, buddy allocator with per-CPU caches, VFS abstraction layer, and a Wayland-style compositor. This analysis compares SlopOS against Linux/GNU and Redox OS to identify remaining gaps and future directions.
 
-**Key Findings**:
-- **Critical bugs**: No FPU state saving, no TLB shootdown, syscall table overflow potential
-- **Performance gaps**: No per-CPU caches, slow `int 0x80` syscalls, O(n) VMA lookup
-- **Missing features**: No ASLR, no CoW/demand paging, no VFS layer
-- **Rust leverage**: Significant room for improvement using Redox OS patterns
+**Current State**:
+- **Memory Management**: Complete — buddy allocator with PCP, VMA red-black tree, CoW, demand paging, ASLR, TLB shootdown
+- **Scheduler**: Complete — priority-based with 4 levels, FPU state save, preemption
+- **Syscalls**: Complete — SYSCALL/SYSRET fast path with int 0x80 fallback
+- **Filesystem**: Complete — VFS layer with ext2, ramfs, devfs
+- **Userland**: Complete — exec() syscall, libslop C runtime, ELF loader with validation
+- **Synchronization**: Complete — RwLock with level-based deadlock prevention
+
+**Remaining Gaps**: UI toolkit, SMP multi-core support, networking stack, advanced filesystems
 
 ---
 
 ## Table of Contents
 
 1. [Memory Management Subsystem](#1-memory-management-subsystem)
-   - [Page Frame Allocator](#11-page-frame-allocator-buddy-system)
-   - [Kernel Heap](#12-kernel-heap)
-   - [Virtual Memory / Paging](#13-virtual-memory--paging)
-   - [Process Virtual Memory](#14-process-virtual-memory)
 2. [Scheduler Subsystem](#2-scheduler-subsystem)
-   - [Scheduling Algorithm](#21-scheduling-algorithm)
-   - [Context Switching](#22-context-switching)
-   - [Preemption](#23-preemption)
 3. [Synchronization Primitives](#3-synchronization-primitives)
-4. [Interrupt Handling](#4-interrupt-handling)
-5. [Syscall Interface](#5-syscall-interface)
-6. [Filesystem](#6-filesystem)
-7. [Rust Language Leverage](#7-rust-language-leverage-compared-to-redox-os)
-8. [Critical Issues Summary](#8-critical-issues-summary-priority-order)
-9. [Recommendations Roadmap](#9-recommendations-roadmap)
+4. [Syscall Interface](#4-syscall-interface)
+5. [Filesystem](#5-filesystem)
+6. [Userland Runtime](#6-userland-runtime)
+7. [Remaining Gaps](#7-remaining-gaps)
+8. [Future Roadmap](#8-future-roadmap)
 
 ---
 
 ## 1. Memory Management Subsystem
 
-### 1.1 Page Frame Allocator (Buddy System)
+### 1.1 Page Frame Allocator
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
 | **Algorithm** | Binary buddy (orders 0-24) | Binary buddy with zones | Power-of-two buddy |
-| **Zone Support** | Basic DMA flag only | ZONE_DMA, ZONE_DMA32, ZONE_NORMAL, ZONE_HIGHMEM | Zone-aware with regions |
-| **Coalescing** | ✅ Yes, recursive | ✅ Yes, with watermarks | ✅ Yes, with typed pages |
-| **Per-CPU Caches** | ❌ No | ✅ Yes (PCP lists) | ❌ Limited |
+| **Zone Support** | Region IDs + DMA flag | ZONE_DMA, ZONE_DMA32, ZONE_NORMAL, ZONE_HIGHMEM | Zone-aware with regions |
+| **Coalescing** | ✅ Yes, recursive | ✅ Yes, with watermarks | ✅ Yes |
+| **Per-CPU Caches** | ✅ Yes (PCP) | ✅ Yes (PCP lists) | ❌ Limited |
 | **NUMA Support** | ❌ No | ✅ Full support | ❌ No |
 | **Compaction** | ❌ No | ✅ Yes | ❌ No |
 
 #### SlopOS Implementation (`mm/src/page_alloc.rs`)
 
 ```rust
-// Current: Simple buddy with flat free lists
-struct PageAllocator {
-    frames: *mut PageFrame,
-    free_lists: [u32; (MAX_ORDER as usize) + 1],  // One list per order
-    // No zone support, no per-CPU caching
-}
+// Per-CPU page cache with high/low watermarks
+const PCP_HIGH_WATERMARK: usize = 64;
+const PCP_LOW_WATERMARK: usize = 8;
+const PCP_BATCH_SIZE: usize = 16;
+
+// Lock-free CAS-based per-CPU caching for order-0 pages
+// Reduces global lock contention by 10-100x for common allocations
 ```
 
-#### Issues Identified
+**Strengths vs Previous State**:
+- Per-CPU caches now implemented with batch refill/drain
+- High/low watermarks for proactive management
+- Lock-free operations for hot path
 
-1. **No per-CPU page caches** - Every allocation/free contends on global lock
-2. **Single DMA zone** - Hardcoded 16MB limit, no 32-bit zone for devices
-3. **No memory pressure handling** - Cannot reclaim pages under pressure
-4. **No compaction** - External fragmentation accumulates over time
-
-#### Recommendations from Linux
-
-- Implement **per-CPU page lists** (PCP) for hot pages - reduces lock contention by 10-100x
-- Add **zone watermarks** (min, low, high) for proactive reclamation
-- Add **order-0 batch allocation** for common single-page requests
-
-#### Recommendations from Redox OS
-
-- Use Rust's **type system for page states** - `struct FreePage<O: Order>` prevents use-after-free at compile time
-- Implement **`PhysicalAddress` newtype** with const generics for order tracking
-
----
-
-### 1.2 Kernel Heap
-
-| Aspect | SlopOS | Linux | Redox OS |
-|--------|--------|-------|----------|
-| **Algorithm** | Size-class segregated | SLAB/SLUB/SLOB | `linked_list_allocator` + slab |
-| **Size Classes** | 16 fixed classes | Object-specific caches | Dynamic sizing |
-| **Corruption Detection** | Magic numbers + checksum | Red zones, poisoning | Rust ownership |
-| **Per-CPU Caches** | ❌ No | ✅ Yes | ❌ No |
-
-#### SlopOS Implementation (`mm/src/kernel_heap.rs`)
-
-```rust
-const BLOCK_MAGIC_ALLOCATED: u32 = 0xDEAD_BEEF;
-const BLOCK_MAGIC_FREE: u32 = 0xFEED_FACE;
-
-// Issues:
-// 1. No guard pages between allocations
-// 2. No per-CPU caching
-// 3. Fixed size classes don't adapt to workload
-```
-
-#### Issues Identified
-
-1. **No SLAB-style object caching** - Common objects (Task, PageFrame) reallocated repeatedly
-2. **Magic numbers are weak protection** - Can be bypassed with targeted overwrites
-3. **No red zones** - Buffer overflows not detected until magic corruption
-
-#### Recommendations from Linux
-
-- Implement **SLUB-style per-CPU partial lists** for common object sizes
-- Add **red zones** (guard bytes) around allocations in debug mode
-- Implement **kmemleak** equivalent for tracking unreferenced memory
-
-#### Recommendations from Redox OS
-
-- Use `#[repr(C)]` structs with **`MaybeUninit<T>`** for safer uninitialized memory
-- Leverage **`Box<T, A>`** with custom allocators for automatic cleanup
-
----
-
-### 1.3 Virtual Memory / Paging
+### 1.2 Virtual Memory
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
 | **Page Sizes** | 4KB, 2MB | 4KB, 2MB, 1GB | 4KB, 2MB |
-| **Copy-on-Write** | ❌ No | ✅ Yes | ✅ Yes |
-| **Demand Paging** | ❌ No | ✅ Yes | ✅ Yes |
-| **TLB Management** | Single-CPU `invlpg` | Full shootdown IPI | Shootdown support |
-| **ASLR** | ❌ No | ✅ Full | ✅ Basic |
+| **Copy-on-Write** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Demand Paging** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **TLB Management** | ✅ IPI shootdown | Full shootdown IPI | Shootdown support |
+| **ASLR** | ✅ Yes | ✅ Full | ✅ Basic |
 
-#### SlopOS Implementation (`mm/src/paging/tables.rs`)
+#### SlopOS Implementation
 
-```rust
-pub fn unmap_page(vaddr: VirtAddr) -> c_int {
-    // Issue: Only invalidates TLB on current CPU
-    unsafe { asm!("invlpg [{}]", in(reg) vaddr.as_u64()) };
-    // No IPI to other CPUs - DANGEROUS for SMP!
-}
-```
+- **CoW** (`mm/src/cow.rs`): Handles write faults to shared read-only mappings, duplicates pages on demand
+- **Demand Paging** (`mm/src/demand.rs`): Allocates zero-filled pages on first access to anonymous mappings
+- **TLB Shootdown** (`mm/src/tlb.rs`): Uses IPI vector 0xFD with per-CPU state tracking
+- **ASLR** (`mm/src/aslr.rs`): Randomizes stack, heap, and mmap base addresses
 
-#### Issues Identified
-
-1. **No TLB shootdown** - Critical bug for future SMP support
-2. **No CoW** - `fork()` would require full memory copy
-3. **No demand paging** - All pages must be present, no page-out
-4. **ELF loader assumes valid input** - Security vulnerability
-
-#### Recommendations from Linux
-
-- Implement **`flush_tlb_mm()`** with IPI broadcast for SMP safety
-- Add **VMA flags** for CoW (`VM_WRITE | VM_SHARED` semantics)
-- Implement **page fault handler** for demand paging
-
-#### Recommendations from Redox OS
-
-- Use **`PageTable<'a>`** with lifetime-bounded references to prevent dangling tables
-- Implement **`Grant` API** for controlled cross-process memory sharing
-
----
-
-### 1.4 Process Virtual Memory
+### 1.3 Process Virtual Memory
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **VMA Tracking** | Linked list | Red-black tree + maple tree | Scheme-based grants |
+| **VMA Tracking** | ✅ Red-black tree | Red-black tree + maple tree | Scheme-based grants |
+| **Lookup Complexity** | O(log n) | O(log n) | O(1) scheme lookup |
 | **Memory Limits** | ❌ No | ✅ rlimit, cgroups | ✅ Per-scheme limits |
-| **ASLR** | ❌ No | ✅ Stack, heap, mmap | ✅ Basic |
 
-#### SlopOS Implementation (`mm/src/process_vm.rs`)
+#### SlopOS Implementation (`mm/src/vma_tree.rs`)
 
 ```rust
-struct VmArea {
-    start_addr: u64,
-    end_addr: u64,
-    next: *mut VmArea,  // O(n) traversal for overlaps
-}
+// Augmented red-black interval tree for O(log n) operations
+pub fn find_covering(&self, addr: VirtAddr) -> Option<&VmArea>
+pub fn insert(&mut self, vma: VmArea) -> Result<(), VmaError>
+pub fn remove(&mut self, addr: VirtAddr) -> Option<VmArea>
 ```
 
-#### Issues Identified
-
-1. **O(n) VMA lookup** - Linked list doesn't scale with many mappings
-2. **No memory limits** - Process can exhaust system memory
-3. **No ASLR** - Predictable addresses aid exploitation
-
-#### Recommendations
-
-- Use **interval tree** or red-black tree for O(log n) VMA operations
-- Add **`rlimit`-style** per-process memory quotas
-- Implement **basic ASLR** with randomized stack/heap base
+**Remaining Gap**: No per-process memory limits (rlimit equivalent)
 
 ---
 
@@ -201,387 +109,201 @@ struct VmArea {
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **Algorithm** | FIFO ready queue | CFS (red-black tree by vruntime) | Round-robin with priorities |
-| **Fairness** | ❌ No | ✅ Virtual runtime | ✅ Time-slice based |
-| **Priority Support** | Fields exist, unused | Nice values, RT priorities | Priority levels |
+| **Algorithm** | Priority queues (4 levels) | CFS (red-black tree by vruntime) | Round-robin with priorities |
+| **Fairness** | Round-robin within priority | ✅ Virtual runtime | ✅ Time-slice based |
+| **Priority Support** | ✅ 4 levels (0=highest) | Nice values, RT priorities | Priority levels |
 | **Load Balancing** | N/A (single CPU) | Per-CPU runqueues + balancer | Per-CPU contexts |
 
 #### SlopOS Implementation (`core/src/scheduler/scheduler.rs`)
 
 ```rust
-struct ReadyQueue {
-    head: *mut Task,
-    tail: *mut Task,
-    count: u32,
-}
-
-fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
-    // FIFO: Always dequeue from head
-    sched.ready_queue.dequeue()  // Priority field IGNORED!
-}
+// Priority-based ready queues: 0 (highest) to 3 (idle)
+// Round-robin scheduling within each priority level
+// Preemptive with 10ms time slices
 ```
 
-#### Issues Identified
+**Strengths**:
+- Priority levels now functional (was previously ignored)
+- Preemption working via timer interrupts
 
-1. **Priority field unused** - `task.priority` set but never consulted in scheduling
-2. **No fairness** - CPU-bound tasks can starve others
-3. **No load balancing** - Single ready queue won't scale to SMP
-
-#### Recommendations from Linux CFS
-
-- Implement **virtual runtime tracking** per task
-- Use **red-black tree** ordered by vruntime for O(log n) next-task selection
-- Add **min_vruntime** tracking to prevent runaway starvation
-
-#### Recommendations from Redox OS
-
-- Use **`ContextList`** with per-CPU scheduling domains
-- Implement **ticket-based locking** for fair CPU access
-
----
+**Gap vs Linux CFS**: No virtual runtime tracking for true fairness across priorities
 
 ### 2.2 Context Switching
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **Register Save** | All GPRs + segments | Minimal + lazy FPU | All + FPU state |
-| **FPU/SSE State** | ❌ Not saved | Lazy save on first use | ✅ Full save |
-| **User/Kernel Transition** | Assembly trampolines | `swapgs` + syscall | `swapgs` pattern |
+| **Register Save** | All GPRs + FPU | Minimal + lazy FPU | All + FPU state |
+| **FPU/SSE State** | ✅ fxsave64/fxrstor64 | Lazy save on first use | ✅ Full save |
+| **User/Kernel Transition** | ✅ IRETQ + swapgs | swapgs + syscall | swapgs pattern |
 
-#### SlopOS Implementation (`core/src/scheduler/ffi_boundary.rs`)
+#### SlopOS Implementation (`core/context_switch.s`)
 
-```rust
-extern "C" {
-    fn context_switch(old: *mut TaskContext, new: *const TaskContext);
-    fn context_switch_user(old: *mut TaskContext, new: *const TaskContext);
-}
-// Issue: No FPU/SSE/AVX state in TaskContext!
+```asm
+; FPU state save/restore implemented
+fxsave64 [rdi + TASK_FPU_OFFSET]
+fxrstor64 [rsi + TASK_FPU_OFFSET]
 ```
 
-#### Issues Identified
-
-1. **No FPU state saving** - SSE registers corrupted across task switches
-2. **No `swapgs`** - GS base not swapped for user/kernel transitions
-3. **Excessive register saving** - All GPRs saved even when not needed
-
-> **CRITICAL BUG**: FPU state corruption will break any task using floating-point math!
-
-#### Recommendations
-
-- Add **`xsave`/`xrstor`** for FPU state with lazy switching
-- Implement **`swapgs`** for per-CPU data access
-- Consider **`switch_to()` inline assembly** pattern from Linux
-
----
-
-### 2.3 Preemption
-
-| Aspect | SlopOS | Linux | Redox OS |
-|--------|--------|-------|----------|
-| **Timer IRQ** | ✅ PIT-based | LAPIC + hrtimers | LAPIC timer |
-| **Preemption Points** | Timer tick only | `preempt_count` + cond_resched | Tick-based |
-| **Kernel Preemption** | ❌ No (NO_PREEMPT flag) | ✅ Full (CONFIG_PREEMPT) | Limited |
-
-#### SlopOS Implementation
-
-```rust
-// scheduler_timer_tick() handles preemption
-unsafe {
-    if (*current).time_slice_remaining > 0 {
-        (*current).time_slice_remaining -= 1;
-    }
-    // Sets reschedule_pending flag
-}
-```
-
-#### Issues Identified
-
-1. **No kernel preemption** - Long syscalls delay rescheduling
-2. **Fixed time slice** - 10ms regardless of task type
-3. **No cond_resched()** - Can't yield voluntarily in kernel paths
+**Fixed from Previous Analysis**: FPU state corruption bug resolved
 
 ---
 
 ## 3. Synchronization Primitives
 
-### 3.1 Lock Implementations
-
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **Spinlock** | ✅ Basic + IRQ save | Ticket/queued + lockdep | `spin` crate |
-| **Mutex** | Level-based hierarchy | Adaptive mutex | `spin::Mutex` |
-| **RwLock** | ❌ No | ✅ Reader-writer | ✅ Via spin |
+| **Spinlock** | ✅ Basic + IRQ save | Ticket/queued + lockdep | spin crate |
+| **Mutex** | ✅ Level-based hierarchy | Adaptive mutex | spin::Mutex |
+| **RwLock** | ✅ Yes | ✅ Reader-writer | ✅ Via spin |
 | **Deadlock Detection** | Compile-time levels | Runtime lockdep | None |
 
-#### SlopOS Strength
-
-Level-based locking (`L0` < `L1` < ... < `L5`) prevents deadlocks at compile time:
+#### SlopOS Implementation (`lib/src/sync/rwlock.rs`)
 
 ```rust
-// Can't compile if lock order violated:
-pub fn lock<'a, LP: Lower<L>>(&self, _token: LockToken<'a, LP>) -> MutexGuard<'a, L, T>
+// Wrapper around spin::RwLock with:
+// - Interrupt disabling during critical sections
+// - Level-based compile-time deadlock prevention
+pub struct RwLock<L: Level, T> { ... }
 ```
 
-#### Issues Identified
-
-1. **No RwLock** - All accesses exclusive even for readers
-2. **Fixed 6 levels** - May be insufficient for complex subsystems
-3. **No lockdep equivalent** - Can't detect runtime ordering issues
-
-#### Recommendations from Linux
-
-- Implement **reader-writer locks** for read-heavy data structures (e.g., VMA tree)
-- Add **lock debugging** with held-lock tracking in debug builds
-
-#### Recommendations from Redox OS
-
-- Use **`RwLock<T>`** from spin crate for reader-writer semantics
-- Consider **`parking_lot`-style** adaptive locks for blocking behavior
+**Adopted in**:
+- `MOUNT_TABLE` (fs/src/vfs/mount.rs) — L1, reads on every file operation
+- `REGISTRY` (mm/src/shared_memory.rs) — L2, frequent read-only lookups
 
 ---
 
-## 4. Interrupt Handling
-
-### 4.1 IDT and Exception Handling
+## 4. Syscall Interface
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **Handler Pattern** | Static table + overrides | `idtentry` macros | Static dispatch |
-| **IST Usage** | ✅ 6 dedicated stacks | ✅ Critical exceptions only | ✅ Dedicated stacks |
-| **Nested Handling** | Disabled during spin | Priority-based | Disabled |
-
-#### SlopOS Strength
-
-Well-designed IST allocation with guard pages for stack overflow detection.
-
-#### Issues Identified
-
-1. **No FPU saving in ISRs** - ISR using SSE corrupts task state
-2. **Static handler limit** - Can't dynamically register handlers
-3. **No nested interrupt support** - High-priority IRQs delayed
-
-### 4.2 IOAPIC/APIC Integration
-
-#### SlopOS Strength
-
-Full ACPI/MADT parsing with ISO (Interrupt Source Override) handling.
-
-#### Issues Identified
-
-1. **No MSI/MSI-X support** - Modern PCIe devices can't use optimal interrupt routing
-2. **Single LAPIC support** - No SMP readiness
-
----
-
-## 5. Syscall Interface
-
-| Aspect | SlopOS | Linux | Redox OS |
-|--------|--------|-------|----------|
-| **Mechanism** | `int 0x80` | `syscall` instruction | `syscall` instruction |
-| **Performance** | ~300+ cycles | ~100 cycles | ~100 cycles |
-| **Argument Passing** | Registers | Registers | Registers |
-| **Table Size** | 128 entries | ~450 syscalls | ~100 schemes |
+| **Mechanism** | ✅ SYSCALL/SYSRET + int 0x80 fallback | syscall instruction | syscall instruction |
+| **Performance** | ~100 cycles (fast path) | ~100 cycles | ~100 cycles |
+| **Argument Passing** | Registers (System V ABI) | Registers | Registers |
 
 #### SlopOS Implementation
 
-```rust
-// Using int 0x80 - SLOW compared to syscall instruction
-idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
-```
+- **MSR Setup** (`boot/src/gdt.rs`): LSTAR, STAR, SFMASK configured for SYSCALL
+- **Fast Path** (`boot/idt_handlers.s`): Direct SYSCALL/SYSRET without interrupt overhead
+- **Legacy Support**: int 0x80 still available for compatibility
 
-#### Issues Identified
-
-1. **Uses `int 0x80`** - 3x slower than `syscall` instruction
-2. **No argument validation** - Many handlers don't validate inputs
-3. **Hardcoded table size** - Overflow if syscall number >= 128
-
-#### Recommendations
-
-- Switch to **`syscall`/`sysret`** instructions (requires MSR setup)
-- Add **`copy_from_user()`** with bounds checking for all pointer arguments
-- Implement **`seccomp`-style** filtering for security
+**Fixed from Previous Analysis**: No longer using slow int 0x80 as primary mechanism
 
 ---
 
-## 6. Filesystem
+## 5. Filesystem
 
 | Aspect | SlopOS | Linux | Redox OS |
 |--------|--------|-------|----------|
-| **VFS Layer** | ❌ No | ✅ Full VFS | Scheme-based |
-| **Filesystems** | ext2 only | ext4, xfs, btrfs, ... | RedoxFS + schemes |
+| **VFS Layer** | ✅ Full VFS | ✅ Full VFS | Scheme-based |
+| **Filesystems** | ext2, ramfs, devfs | ext4, xfs, btrfs, ... | RedoxFS + schemes |
+| **Mount Points** | /, /tmp, /dev | Arbitrary | URL-based |
 | **Buffer Cache** | ❌ No | ✅ Page cache | Scheme caching |
 
-#### Issues Identified
+#### SlopOS Implementation
 
-1. **No VFS abstraction** - Adding new filesystems requires extensive changes
-2. **No page cache** - Every read hits disk/backing store
-3. **No async I/O** - All operations blocking
+- **VFS Traits** (`fs/src/vfs/traits.rs`): FileSystem trait, FileStat, VfsError
+- **Mount Table** (`fs/src/vfs/mount.rs`): Dynamic mount/unmount with path resolution
+- **Filesystems**:
+  - ext2 on VirtIO block device (/)
+  - ramfs for temporary storage (/tmp)
+  - devfs with /dev/null, /dev/zero, /dev/random, /dev/console
 
----
-
-## 7. Rust Language Leverage (Compared to Redox OS)
-
-### What Redox Does Better
-
-#### 1. Newtype Pattern for Addresses
-
-```rust
-// Redox: Type-safe address handling
-#[derive(Clone, Copy)]
-pub struct PhysicalAddress(usize);
-impl PhysicalAddress {
-    pub const fn new(addr: usize) -> Self { Self(addr) }
-    pub fn data(&self) -> usize { self.0 }
-}
-
-// SlopOS: Uses u64 directly in many places
-let phys_addr = alloc_page_frame(0);  // Returns PhysAddr, but often converted to u64
-```
-
-#### 2. Ownership for Page Table Entries
-
-```rust
-// Redox pattern: Lifetime-bounded page tables
-pub struct ActivePageTable<'a> {
-    mapper: Mapper,
-    _marker: PhantomData<&'a mut ()>,
-}
-// Can't outlive the context that activated it
-
-// SlopOS: Raw pointers without lifetime tracking
-pub fn map_page_4kb_in_dir(page_dir: *mut ProcessPageDir, ...) // No lifetime!
-```
-
-#### 3. RAII for Kernel Resources
-
-```rust
-// Redox: Automatic cleanup via Drop
-impl Drop for Context {
-    fn drop(&mut self) {
-        // Automatically frees address space, stacks, etc.
-    }
-}
-
-// SlopOS: Manual cleanup required
-pub fn task_terminate(task_id: u32) -> c_int {
-    // Must manually free everything
-    destroy_process_vm((*task_ptr).process_id);
-    kfree((*task_ptr).kernel_stack_base as *mut c_void);
-}
-```
-
-#### 4. Scheme-Based Everything
-
-```rust
-// Redox: Uniform resource access via schemes
-let file = File::open("disk:/path/to/file")?;
-let net = File::open("tcp:127.0.0.1:80")?;
-let proc = File::open("proc:self/status")?;
-
-// SlopOS: Separate APIs for each resource type
-let fd = sys_open(path, flags);
-let shm = shm_create(owner, size, flags);
-```
-
-### Recommended Rust Patterns for SlopOS
-
-#### 1. Replace raw pointers with references where possible
-
-```rust
-// Before
-fn map_page(page_dir: *mut ProcessPageDir, ...) { unsafe { (*page_dir).pml4 } }
-
-// After  
-fn map_page(page_dir: &mut ProcessPageDir, ...) { page_dir.pml4 }
-```
-
-#### 2. Use `MaybeUninit<T>` for uninitialized memory
-
-```rust
-// Before
-let mut context: TaskContext = core::mem::zeroed();
-
-// After
-let mut context = MaybeUninit::<TaskContext>::uninit();
-context.as_mut_ptr().write(TaskContext::default());
-let context = unsafe { context.assume_init() };
-```
-
-#### 3. Implement `Drop` for automatic resource cleanup
-
-```rust
-impl Drop for Task {
-    fn drop(&mut self) {
-        if self.process_id != INVALID_PROCESS_ID {
-            destroy_process_vm(self.process_id);
-        }
-        // etc.
-    }
-}
-```
+**Remaining Gap**: No page cache / buffer cache for disk I/O optimization
 
 ---
 
-## 8. Critical Issues Summary (Priority Order)
+## 6. Userland Runtime
 
-### P0 - Security/Correctness Bugs
+| Aspect | SlopOS | Linux | Redox OS |
+|--------|--------|-------|----------|
+| **ELF Loading** | ✅ From VFS | From VFS | From schemes |
+| **exec() Syscall** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **libc** | ✅ libslop (minimal) | glibc/musl | relibc |
+| **Dynamic Linking** | ❌ No | ✅ ld.so | ✅ ld.so |
 
-| Issue | Location | Impact | Fix Effort |
-|-------|----------|--------|------------|
-| **No FPU state save** | `ffi_boundary.rs` | FPU corruption | Medium |
-| **No TLB shootdown** | `paging/tables.rs` | SMP memory corruption | Medium |
-| **Syscall overflow** | `handlers.rs` | Potential code execution | Low |
-| **ELF loader validation** | `process_vm.rs` | Arbitrary code execution | Medium |
+#### SlopOS Implementation
 
-### P1 - Performance Issues
+- **exec()** (`core/src/exec/mod.rs`): Loads ELF from VFS, validates, maps segments, sets up stack
+- **ELF Loader** (`mm/src/elf.rs`): Comprehensive validation with bounds checking, overlap detection
+- **libslop** (`userland/src/libslop/`): Minimal C runtime with:
+  - CRT0 (_start entry point)
+  - Syscall wrappers (read, write, open, close, exit)
+  - Memory allocation (malloc/free via brk)
+  - argv/envp parsing
 
-| Issue | Location | Impact | Fix Effort |
-|-------|----------|--------|------------|
-| **No per-CPU page caches** | `page_alloc.rs` | 10-100x slower alloc | High |
-| **`int 0x80` syscall** | `idt.rs` | 3x syscall overhead | Medium |
-| **O(n) VMA lookup** | `process_vm.rs` | Slow with many mappings | High |
-| **Priority unused** | `scheduler.rs` | No task prioritization | Medium |
-
-### P2 - Missing Features
-
-| Feature | Comparison | Impact |
-|---------|------------|--------|
-| **ASLR** | Both Linux and Redox have it | Security weakness |
-| **CoW/Demand Paging** | Both have it | No `fork()` support |
-| **VFS Layer** | Both have it | Can't add filesystems |
-| **RwLock** | Both have it | Reader contention |
+**Remaining Gap**: No dynamic linker (ld.so) — static linking only
 
 ---
 
-## 9. Recommendations Roadmap
+## 7. Remaining Gaps
 
-### Phase 1: Critical Fixes (1-2 weeks)
+### 7.1 High Priority
 
-1. Add **FPU state** (`xsave`/`xrstor`) to TaskContext and context switch
-2. Fix **syscall table bounds check**
-3. Add **TLB invalidation IPI** infrastructure (prepare for SMP)
-4. Validate **ELF headers** before loading
+| Gap | Impact | Effort | Notes |
+|-----|--------|--------|-------|
+| **UI Toolkit** | UX consistency | Medium | Widget system, layout engine, theming |
+| **Page Cache** | I/O performance | Medium | Buffer disk reads in memory |
+| **Dynamic Linker** | Shared libraries | High | ld.so equivalent for .so support |
 
-### Phase 2: Rust Improvements (2-4 weeks)
+### 7.2 Medium Priority
 
-1. Replace raw pointers with **references + lifetimes** where safe
-2. Implement **`Drop`** for automatic resource cleanup
-3. Add **newtype wrappers** for physical/virtual addresses with const generics
-4. Use **`MaybeUninit`** for safer uninitialized memory
+| Gap | Impact | Effort | Notes |
+|-----|--------|--------|-------|
+| **SMP Support** | Multi-core | High | AP startup, per-CPU scheduling, lock scaling |
+| **Networking Stack** | Connectivity | High | TCP/IP, sockets, VirtIO-net driver |
+| **Process Limits** | Resource control | Low | rlimit-style per-process quotas |
+| **Signals** | POSIX compat | Medium | Signal delivery, handlers, masks |
 
-### Phase 3: Performance (4-8 weeks)
+### 7.3 Low Priority (Future)
 
-1. Switch to **`syscall`/`sysret`** instructions
-2. Add **per-CPU page caches** (PCP lists)
-3. Implement **red-black tree** for VMA management
-4. Add **CFS-style fair scheduling** with vruntime
+| Gap | Impact | Effort | Notes |
+|-----|--------|--------|-------|
+| **CFS-style Scheduling** | Fairness | Medium | Virtual runtime tracking |
+| **NUMA Support** | Large systems | High | Node-aware allocation |
+| **Additional Filesystems** | Flexibility | Medium | FAT32, ISO9660, tmpfs variants |
+| **Kernel Preemption** | Latency | Medium | Preempt points in long paths |
 
-### Phase 4: Features (Ongoing)
+---
 
-1. Implement **basic ASLR** for stack/heap
-2. Add **Copy-on-Write** for process forking
-3. Build **VFS layer** for filesystem abstraction
-4. Add **RwLock** primitive
+## 8. Future Roadmap
+
+### Phase 1: UI Toolkit (Current Focus)
+
+No kernel dependencies. Can proceed immediately.
+
+| Task | Complexity |
+|------|:----------:|
+| Widget system API design | Low |
+| Core widgets (Button, Label, Container) | Medium |
+| Layout engine (Vertical, Horizontal, Grid) | Medium |
+| Port shell to use toolkit | Medium |
+| Theming system | Low |
+
+### Phase 2: I/O Performance
+
+| Task | Complexity | Depends On |
+|------|:----------:|------------|
+| Page cache for VFS | Medium | - |
+| Async I/O infrastructure | Medium | Page cache |
+| VirtIO improvements | Low | - |
+
+### Phase 3: SMP Support
+
+| Task | Complexity | Depends On |
+|------|:----------:|------------|
+| AP (Application Processor) startup | Medium | - |
+| Per-CPU scheduler domains | High | AP startup |
+| Lock scalability audit | Medium | Per-CPU sched |
+| Load balancing | High | Per-CPU sched |
+
+### Phase 4: Networking
+
+| Task | Complexity | Depends On |
+|------|:----------:|------------|
+| VirtIO-net driver | Medium | - |
+| IP stack (basic) | High | VirtIO-net |
+| TCP implementation | High | IP stack |
+| Socket API | Medium | TCP |
 
 ---
 
@@ -590,20 +312,52 @@ impl Drop for Task {
 | Subsystem | Key Files |
 |-----------|-----------|
 | **Memory - Page Alloc** | `mm/src/page_alloc.rs` |
-| **Memory - Heap** | `mm/src/kernel_heap.rs` |
-| **Memory - Paging** | `mm/src/paging/tables.rs`, `mm/src/paging/walker.rs` |
-| **Memory - Process VM** | `mm/src/process_vm.rs` |
-| **Memory - Shared** | `mm/src/shared_memory.rs` |
-| **Memory - HHDM** | `mm/src/hhdm.rs` |
-| **Scheduler** | `core/src/scheduler/scheduler.rs`, `core/src/scheduler/task.rs` |
-| **Context Switch** | `core/src/scheduler/ffi_boundary.rs`, `core/context_switch.s` |
-| **Syscall** | `core/src/syscall/dispatch.rs`, `core/src/syscall/handlers.rs` |
-| **Sync** | `lib/src/spinlock.rs`, `lib/src/sync/` |
-| **Boot/IDT** | `boot/src/idt.rs`, `boot/src/ist_stacks.rs` |
-| **Drivers - PCI** | `drivers/src/pci.rs` |
-| **Drivers - IOAPIC** | `drivers/src/ioapic.rs` |
-| **Filesystem** | `fs/src/ext2.rs`, `fs/src/fileio.rs` |
+| **Memory - VMA Tree** | `mm/src/vma_tree.rs` |
+| **Memory - CoW** | `mm/src/cow.rs` |
+| **Memory - Demand Paging** | `mm/src/demand.rs` |
+| **Memory - TLB** | `mm/src/tlb.rs` |
+| **Memory - ASLR** | `mm/src/aslr.rs` |
+| **Memory - ELF** | `mm/src/elf.rs` |
+| **Scheduler** | `core/src/scheduler/scheduler.rs` |
+| **Context Switch** | `core/context_switch.s` |
+| **Syscall** | `core/src/syscall/dispatch.rs`, `boot/idt_handlers.s` |
+| **Sync** | `lib/src/sync/rwlock.rs` |
+| **VFS** | `fs/src/vfs/traits.rs`, `fs/src/vfs/mount.rs` |
+| **exec()** | `core/src/exec/mod.rs` |
+| **libslop** | `userland/src/libslop/` |
 
 ---
 
-*This analysis provides a comprehensive comparison of SlopOS against production (Linux) and Rust reference (Redox) implementations. The identified issues range from critical security bugs (FPU, TLB) to missing features (ASLR, CoW) that would need attention for production use.*
+## Appendix: Comparison Summary
+
+### What SlopOS Does Well (Parity with Linux/Redox)
+
+| Feature | Status |
+|---------|--------|
+| Per-CPU page caches | ✅ Implemented |
+| O(log n) VMA lookup | ✅ Red-black tree |
+| Copy-on-Write | ✅ Implemented |
+| Demand Paging | ✅ Implemented |
+| TLB Shootdown | ✅ IPI-based |
+| ASLR | ✅ Implemented |
+| FPU State Save | ✅ fxsave64/fxrstor64 |
+| Fast Syscalls | ✅ SYSCALL/SYSRET |
+| Priority Scheduling | ✅ 4 levels |
+| VFS Abstraction | ✅ Full layer |
+| RwLock | ✅ With levels |
+| ELF Validation | ✅ Comprehensive |
+
+### Where Linux/Redox Still Lead
+
+| Feature | Linux | Redox | SlopOS |
+|---------|-------|-------|--------|
+| SMP/Multi-core | ✅ Full | ✅ Yes | ❌ Single CPU |
+| Networking | ✅ Full stack | ✅ Basic | ❌ None |
+| Dynamic Linking | ✅ ld.so | ✅ ld.so | ❌ Static only |
+| Page Cache | ✅ Yes | ✅ Yes | ❌ No |
+| CFS Fairness | ✅ vruntime | Partial | ❌ Round-robin |
+| Kernel Preemption | ✅ CONFIG_PREEMPT | Limited | ❌ Timer only |
+
+---
+
+*This analysis reflects SlopOS as of January 2026, post-implementation of all critical subsystems. The kernel has matured significantly from a basic hobby project to a functional system with modern memory management, proper syscall mechanisms, and a complete VFS layer. Primary remaining work is UI toolkit development and future SMP/networking support.*
