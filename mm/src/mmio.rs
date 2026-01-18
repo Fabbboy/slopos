@@ -3,18 +3,15 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::paging::PageFlags;
+use slopos_lib::align_up_u64;
 
 use crate::mm_constants::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE, PAGE_SIZE_4KB};
 use crate::paging::map_page_4kb;
 
 static MMIO_NEXT_VIRT: AtomicU64 = AtomicU64::new(MMIO_VIRT_BASE);
 
-fn align_up(val: u64, align: u64) -> u64 {
-    (val + align - 1) & !(align - 1)
-}
-
 fn mmio_alloc_virt(size: u64) -> Option<u64> {
-    let aligned_size = align_up(size, PAGE_SIZE_4KB);
+    let aligned_size = align_up_u64(size, PAGE_SIZE_4KB);
     let mut current = MMIO_NEXT_VIRT.load(Ordering::Relaxed);
 
     loop {
@@ -62,7 +59,7 @@ impl MmioRegion {
 
         let aligned_phys = phys.as_u64() & !(PAGE_SIZE_4KB - 1);
         let offset_in_page = phys.as_u64() - aligned_phys;
-        let total_size = align_up(offset_in_page + size as u64, PAGE_SIZE_4KB);
+        let total_size = align_up_u64(offset_in_page + size as u64, PAGE_SIZE_4KB);
         let num_pages = total_size / PAGE_SIZE_4KB;
 
         let virt_base = mmio_alloc_virt(total_size)?;

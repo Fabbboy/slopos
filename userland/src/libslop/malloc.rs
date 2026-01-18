@@ -3,6 +3,8 @@
 use core::ffi::c_void;
 use core::ptr;
 
+use slopos_lib::align_up_usize;
+
 use super::syscall::sys_brk;
 
 const BLOCK_MAGIC: u32 = 0xDEAD_BEEF;
@@ -24,10 +26,6 @@ const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
 static mut HEAP_START: *mut BlockHeader = ptr::null_mut();
 static mut HEAP_END: *mut u8 = ptr::null_mut();
 static mut FREE_LIST: *mut BlockHeader = ptr::null_mut();
-
-fn align_up(size: usize) -> usize {
-    (size + ALIGNMENT - 1) & !(ALIGNMENT - 1)
-}
 
 unsafe fn init_heap() {
     if !HEAP_START.is_null() {
@@ -60,7 +58,7 @@ unsafe fn init_heap() {
 }
 
 unsafe fn extend_heap(min_size: usize) -> *mut BlockHeader {
-    let extend_size = align_up(min_size + HEADER_SIZE).max(64 * 1024);
+    let extend_size = align_up_usize(min_size + HEADER_SIZE, ALIGNMENT).max(64 * 1024);
     let new_brk = HEAP_END.add(extend_size);
     let result = sys_brk(new_brk as *mut c_void) as *mut u8;
 
@@ -162,7 +160,7 @@ pub fn alloc(size: usize) -> *mut c_void {
             return ptr::null_mut();
         }
 
-        let aligned_size = align_up(size).max(MIN_ALLOC_SIZE);
+        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_ALLOC_SIZE);
         let mut block = find_free_block(aligned_size);
 
         if block.is_null() {
@@ -220,7 +218,7 @@ pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         }
 
         let old_size = (*block).size as usize;
-        let aligned_size = align_up(size).max(MIN_ALLOC_SIZE);
+        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_ALLOC_SIZE);
 
         if old_size >= aligned_size {
             return ptr;
