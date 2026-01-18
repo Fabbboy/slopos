@@ -299,6 +299,7 @@ pub mod tsc {
 }
 
 pub mod alignment;
+pub mod free_list;
 pub mod kdiag;
 pub mod klog;
 pub mod math;

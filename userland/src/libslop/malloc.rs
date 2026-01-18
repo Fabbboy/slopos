@@ -1,31 +1,57 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(static_mut_refs)]
 
 use core::ffi::c_void;
 use core::ptr;
 
 use slopos_lib::align_up_usize;
+use slopos_lib::free_list::{
+    BlockHeader, HEADER_SIZE, MAGIC_FREE, MIN_BLOCK_SIZE, try_split_block,
+};
 
 use super::syscall::sys_brk;
 
-const BLOCK_MAGIC: u32 = 0xDEAD_BEEF;
-const MIN_ALLOC_SIZE: usize = 16;
 const ALIGNMENT: usize = 16;
-
-#[repr(C)]
-struct BlockHeader {
-    magic: u32,
-    size: u32,
-    is_free: u32,
-    _padding: u32,
-    next: *mut BlockHeader,
-    prev: *mut BlockHeader,
-}
-
-const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
+const INITIAL_HEAP_SIZE: usize = 64 * 1024;
+const EXTEND_MIN_SIZE: usize = 64 * 1024;
 
 static mut HEAP_START: *mut BlockHeader = ptr::null_mut();
 static mut HEAP_END: *mut u8 = ptr::null_mut();
-static mut FREE_LIST: *mut BlockHeader = ptr::null_mut();
+static mut FREE_LIST_HEAD: *mut BlockHeader = ptr::null_mut();
+
+unsafe fn push_to_free_list(block: *mut BlockHeader) {
+    (*block).mark_free();
+    (*block).next = FREE_LIST_HEAD;
+    (*block).prev = ptr::null_mut();
+    if !FREE_LIST_HEAD.is_null() {
+        (*FREE_LIST_HEAD).prev = block;
+    }
+    FREE_LIST_HEAD = block;
+}
+
+unsafe fn remove_from_free_list(block: *mut BlockHeader) {
+    if !(*block).prev.is_null() {
+        (*(*block).prev).next = (*block).next;
+    } else {
+        FREE_LIST_HEAD = (*block).next;
+    }
+    if !(*block).next.is_null() {
+        (*(*block).next).prev = (*block).prev;
+    }
+    (*block).next = ptr::null_mut();
+    (*block).prev = ptr::null_mut();
+}
+
+unsafe fn find_first_fit(min_size: usize) -> *mut BlockHeader {
+    let mut current = FREE_LIST_HEAD;
+    while !current.is_null() {
+        if (*current).size as usize >= min_size {
+            return current;
+        }
+        current = (*current).next;
+    }
+    ptr::null_mut()
+}
 
 unsafe fn init_heap() {
     if !HEAP_START.is_null() {
@@ -37,8 +63,7 @@ unsafe fn init_heap() {
         return;
     }
 
-    let initial_size: usize = 64 * 1024;
-    let new_brk = current_brk.add(initial_size);
+    let new_brk = current_brk.add(INITIAL_HEAP_SIZE);
     let result = sys_brk(new_brk as *mut c_void) as *mut u8;
 
     if result != new_brk {
@@ -49,16 +74,16 @@ unsafe fn init_heap() {
     HEAP_END = new_brk;
 
     let first_block = HEAP_START;
-    (*first_block).magic = BLOCK_MAGIC;
-    (*first_block).size = (initial_size - HEADER_SIZE) as u32;
-    (*first_block).is_free = 1;
-    (*first_block).next = ptr::null_mut();
-    (*first_block).prev = ptr::null_mut();
-    FREE_LIST = first_block;
+    BlockHeader::init(
+        first_block,
+        (INITIAL_HEAP_SIZE - HEADER_SIZE) as u32,
+        MAGIC_FREE,
+    );
+    push_to_free_list(first_block);
 }
 
 unsafe fn extend_heap(min_size: usize) -> *mut BlockHeader {
-    let extend_size = align_up_usize(min_size + HEADER_SIZE, ALIGNMENT).max(64 * 1024);
+    let extend_size = align_up_usize(min_size + HEADER_SIZE, ALIGNMENT).max(EXTEND_MIN_SIZE);
     let new_brk = HEAP_END.add(extend_size);
     let result = sys_brk(new_brk as *mut c_void) as *mut u8;
 
@@ -67,86 +92,27 @@ unsafe fn extend_heap(min_size: usize) -> *mut BlockHeader {
     }
 
     let new_block = HEAP_END as *mut BlockHeader;
-    (*new_block).magic = BLOCK_MAGIC;
-    (*new_block).size = (extend_size - HEADER_SIZE) as u32;
-    (*new_block).is_free = 1;
-    (*new_block).next = FREE_LIST;
-    (*new_block).prev = ptr::null_mut();
-
-    if !FREE_LIST.is_null() {
-        (*FREE_LIST).prev = new_block;
-    }
-    FREE_LIST = new_block;
+    BlockHeader::init(new_block, (extend_size - HEADER_SIZE) as u32, MAGIC_FREE);
+    push_to_free_list(new_block);
     HEAP_END = new_brk;
 
     new_block
 }
 
-unsafe fn find_free_block(size: usize) -> *mut BlockHeader {
-    let mut current = FREE_LIST;
-    while !current.is_null() {
-        if (*current).is_free != 0 && (*current).size as usize >= size {
-            return current;
-        }
-        current = (*current).next;
+unsafe fn try_coalesce_forward(block: *mut BlockHeader) {
+    let block_end = BlockHeader::block_end(block);
+    if block_end >= HEAP_END {
+        return;
     }
-    ptr::null_mut()
-}
 
-unsafe fn split_block(block: *mut BlockHeader, size: usize) {
-    let block_size = (*block).size as usize;
-    let remaining = block_size - size;
-
-    if remaining >= HEADER_SIZE + MIN_ALLOC_SIZE {
-        let new_block = (block as *mut u8).add(HEADER_SIZE + size) as *mut BlockHeader;
-        (*new_block).magic = BLOCK_MAGIC;
-        (*new_block).size = (remaining - HEADER_SIZE) as u32;
-        (*new_block).is_free = 1;
-        (*new_block).next = (*block).next;
-        (*new_block).prev = block;
-
-        if !(*block).next.is_null() {
-            (*(*block).next).prev = new_block;
-        }
-        (*block).next = new_block;
-        (*block).size = size as u32;
+    let next = block_end as *mut BlockHeader;
+    if !(*next).is_valid() || !(*next).is_free() {
+        return;
     }
-}
 
-unsafe fn remove_from_free_list(block: *mut BlockHeader) {
-    if !(*block).prev.is_null() {
-        (*(*block).prev).next = (*block).next;
-    } else {
-        FREE_LIST = (*block).next;
-    }
-    if !(*block).next.is_null() {
-        (*(*block).next).prev = (*block).prev;
-    }
-}
-
-unsafe fn add_to_free_list(block: *mut BlockHeader) {
-    (*block).next = FREE_LIST;
-    (*block).prev = ptr::null_mut();
-    if !FREE_LIST.is_null() {
-        (*FREE_LIST).prev = block;
-    }
-    FREE_LIST = block;
-}
-
-unsafe fn coalesce(block: *mut BlockHeader) {
-    let block_end = (block as *mut u8).add(HEADER_SIZE + (*block).size as usize);
-
-    if !(*block).next.is_null() {
-        let next = (*block).next;
-        let next_start = next as *mut u8;
-        if block_end == next_start && (*next).is_free != 0 && (*next).magic == BLOCK_MAGIC {
-            (*block).size += HEADER_SIZE as u32 + (*next).size;
-            (*block).next = (*next).next;
-            if !(*next).next.is_null() {
-                (*(*next).next).prev = block;
-            }
-        }
-    }
+    remove_from_free_list(next);
+    (*block).size += HEADER_SIZE as u32 + (*next).size;
+    (*block).update_checksum();
 }
 
 pub fn alloc(size: usize) -> *mut c_void {
@@ -160,8 +126,8 @@ pub fn alloc(size: usize) -> *mut c_void {
             return ptr::null_mut();
         }
 
-        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_ALLOC_SIZE);
-        let mut block = find_free_block(aligned_size);
+        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_BLOCK_SIZE);
+        let mut block = find_first_fit(aligned_size);
 
         if block.is_null() {
             block = extend_heap(aligned_size);
@@ -170,11 +136,15 @@ pub fn alloc(size: usize) -> *mut c_void {
             }
         }
 
-        split_block(block, aligned_size);
-        (*block).is_free = 0;
         remove_from_free_list(block);
 
-        (block as *mut u8).add(HEADER_SIZE) as *mut c_void
+        let split_block = try_split_block(block, aligned_size, MIN_BLOCK_SIZE);
+        if !split_block.is_null() {
+            push_to_free_list(split_block);
+        }
+
+        (*block).mark_allocated();
+        BlockHeader::data_ptr(block) as *mut c_void
     }
 }
 
@@ -184,19 +154,14 @@ pub fn dealloc(ptr: *mut c_void) {
     }
 
     unsafe {
-        let block = (ptr as *mut u8).sub(HEADER_SIZE) as *mut BlockHeader;
+        let block = BlockHeader::from_data_ptr(ptr as *mut u8);
 
-        if (*block).magic != BLOCK_MAGIC {
+        if !(*block).is_valid() || !(*block).is_allocated() {
             return;
         }
 
-        if (*block).is_free != 0 {
-            return;
-        }
-
-        (*block).is_free = 1;
-        add_to_free_list(block);
-        coalesce(block);
+        push_to_free_list(block);
+        try_coalesce_forward(block);
     }
 }
 
@@ -211,14 +176,14 @@ pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     }
 
     unsafe {
-        let block = (ptr as *mut u8).sub(HEADER_SIZE) as *mut BlockHeader;
+        let block = BlockHeader::from_data_ptr(ptr as *mut u8);
 
-        if (*block).magic != BLOCK_MAGIC {
+        if !(*block).is_valid() {
             return ptr::null_mut();
         }
 
         let old_size = (*block).size as usize;
-        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_ALLOC_SIZE);
+        let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_BLOCK_SIZE);
 
         if old_size >= aligned_size {
             return ptr;
