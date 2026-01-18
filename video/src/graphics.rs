@@ -1,8 +1,8 @@
 use crate::framebuffer::{self, FbState};
-use slopos_abi::DrawTarget;
 use slopos_abi::draw_primitives;
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::video_traits::VideoError;
+use slopos_abi::{DrawTarget, PixelBuffer, pixel_ops};
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 
@@ -28,7 +28,7 @@ fn snapshot() -> GraphicsResult<FbState> {
     framebuffer::snapshot().ok_or(VideoError::NoFramebuffer)
 }
 
-impl DrawTarget for GraphicsContext {
+impl PixelBuffer for GraphicsContext {
     #[inline]
     fn width(&self) -> u32 {
         self.fb.width()
@@ -49,18 +49,15 @@ impl DrawTarget for GraphicsContext {
         self.fb.info.bytes_per_pixel()
     }
 
+    #[inline]
     fn pixel_format(&self) -> DrawPixelFormat {
         DrawPixelFormat::from_pixel_format(self.fb.info.format)
     }
 
     #[inline]
-    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
-        if x < 0 || y < 0 || x >= self.fb.width() as i32 || y >= self.fb.height() as i32 {
-            return;
-        }
-        let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
-        let offset = y as usize * self.fb.pitch() as usize + x as usize * bytes_pp;
-        let pixel_ptr = unsafe { self.fb.base_ptr().add(offset) };
+    fn write_pixel_at_offset(&mut self, byte_offset: usize, color: u32) {
+        let pixel_ptr = unsafe { self.fb.base_ptr().add(byte_offset) };
+        let bytes_pp = self.fb.info.bytes_per_pixel();
 
         unsafe {
             match bytes_pp {
@@ -78,75 +75,97 @@ impl DrawTarget for GraphicsContext {
         }
     }
 
-    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        if w <= 0 || h <= 0 {
+    #[inline]
+    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, color: u32) {
+        if row < 0 || row >= self.fb.height() as i32 {
             return;
         }
-
-        let mut x1 = x;
-        let mut y1 = y;
-        let mut x2 = x + w - 1;
-        let mut y2 = y + h - 1;
-
-        if x1 < 0 {
-            x1 = 0;
-        }
-        if y1 < 0 {
-            y1 = 0;
-        }
-        if x2 >= self.fb.width() as i32 {
-            x2 = self.fb.width() as i32 - 1;
-        }
-        if y2 >= self.fb.height() as i32 {
-            y2 = self.fb.height() as i32 - 1;
-        }
-
-        if x1 > x2 || y1 > y2 {
+        let w = self.fb.width() as i32;
+        let x0 = x0.max(0);
+        let x1 = x1.min(w - 1);
+        if x0 > x1 {
             return;
         }
 
         let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
-        let buffer = self.fb.base_ptr();
         let pitch = self.fb.pitch() as usize;
+        let buffer = self.fb.base_ptr();
+        let mut pixel_ptr = unsafe { buffer.add(row as usize * pitch + x0 as usize * bytes_pp) };
 
-        for row in y1..=y2 {
-            let mut pixel_ptr =
-                unsafe { buffer.add(row as usize * pitch + x1 as usize * bytes_pp) };
-            if bytes_pp == 4 {
-                let mut count = x2 - x1 + 1;
-                while count > 0 {
-                    unsafe {
-                        (pixel_ptr as *mut u32).write_volatile(color);
-                        pixel_ptr = pixel_ptr.add(bytes_pp);
-                    }
-                    count -= 1;
+        if bytes_pp == 4 {
+            for _ in x0..=x1 {
+                unsafe {
+                    (pixel_ptr as *mut u32).write_volatile(color);
+                    pixel_ptr = pixel_ptr.add(4);
                 }
-            } else {
-                for _ in x1..=x2 {
-                    unsafe {
-                        match bytes_pp {
-                            2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
-                            3 => {
-                                pixel_ptr.write_volatile((color & 0xFF) as u8);
-                                pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
-                                pixel_ptr
-                                    .add(2)
-                                    .write_volatile(((color >> 16) & 0xFF) as u8);
-                            }
-                            _ => {}
+            }
+        } else {
+            for _ in x0..=x1 {
+                unsafe {
+                    match bytes_pp {
+                        2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
+                        3 => {
+                            pixel_ptr.write_volatile((color & 0xFF) as u8);
+                            pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
+                            pixel_ptr
+                                .add(2)
+                                .write_volatile(((color >> 16) & 0xFF) as u8);
                         }
-                        pixel_ptr = pixel_ptr.add(bytes_pp);
+                        _ => {}
                     }
+                    pixel_ptr = pixel_ptr.add(bytes_pp);
                 }
             }
         }
     }
 }
 
+impl DrawTarget for GraphicsContext {
+    #[inline]
+    fn width(&self) -> u32 {
+        PixelBuffer::width(self)
+    }
+
+    #[inline]
+    fn height(&self) -> u32 {
+        PixelBuffer::height(self)
+    }
+
+    #[inline]
+    fn pitch(&self) -> usize {
+        PixelBuffer::pitch(self)
+    }
+
+    #[inline]
+    fn bytes_pp(&self) -> u8 {
+        PixelBuffer::bytes_pp(self)
+    }
+
+    #[inline]
+    fn pixel_format(&self) -> DrawPixelFormat {
+        PixelBuffer::pixel_format(self)
+    }
+
+    #[inline]
+    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
+        pixel_ops::draw_pixel_impl(self, x, y, color);
+    }
+
+    #[inline]
+    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        pixel_ops::fill_rect_impl(self, x, y, w, h, color);
+    }
+
+    #[inline]
+    fn clear(&mut self, color: u32) {
+        pixel_ops::clear_impl(self, color);
+    }
+}
+
 #[inline]
 pub fn draw_pixel(ctx: &mut GraphicsContext, x: i32, y: i32, color: u32) {
-    let raw = ctx.pixel_format().convert_color(color);
-    ctx.draw_pixel(x, y, raw);
+    let raw = PixelBuffer::pixel_format(ctx).convert_color(color);
+    DrawTarget::draw_pixel(ctx, x, y, raw);
 }
 
 #[inline]

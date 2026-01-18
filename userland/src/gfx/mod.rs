@@ -1,14 +1,10 @@
-//! Userland graphics library for SlopOS Wayland-like compositor
-//!
-//! This module provides 100% safe Rust drawing primitives that operate on
-//! shared memory buffers. No unsafe code - all drawing is pure slice operations.
-
 pub mod font;
 pub mod primitives;
 
-use slopos_abi::DrawTarget;
+pub use slopos_abi::DrawTarget;
 pub use slopos_abi::damage::{DamageRect, DamageTracker, MAX_DAMAGE_REGIONS};
 pub use slopos_abi::pixel::DrawPixelFormat;
+use slopos_abi::{PixelBuffer, pixel_ops};
 
 pub type PixelFormat = DrawPixelFormat;
 
@@ -104,33 +100,6 @@ impl<'a> DrawBuffer<'a> {
         }
     }
 
-    pub fn clear(&mut self, color: u32) {
-        let bytes_pp = self.bytes_pp as usize;
-
-        if color == 0 {
-            self.data.fill(0);
-        } else {
-            let bytes = color.to_le_bytes();
-            match bytes_pp {
-                4 => {
-                    for chunk in self.data.chunks_exact_mut(4) {
-                        chunk.copy_from_slice(&bytes);
-                    }
-                }
-                3 => {
-                    for chunk in self.data.chunks_exact_mut(3) {
-                        chunk[0] = bytes[0];
-                        chunk[1] = bytes[1];
-                        chunk[2] = bytes[2];
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        self.add_damage(0, 0, self.width as i32 - 1, self.height as i32 - 1);
-    }
-
     #[inline]
     fn pixel_offset(&self, x: u32, y: u32) -> usize {
         (y as usize) * self.pitch + (x as usize) * (self.bytes_pp as usize)
@@ -143,24 +112,7 @@ impl<'a> DrawBuffer<'a> {
 
         let converted = self.pixel_format.convert_color(color);
         let offset = self.pixel_offset(x as u32, y as u32);
-
-        match self.bytes_pp {
-            4 => {
-                if offset + 4 <= self.data.len() {
-                    let bytes = converted.to_le_bytes();
-                    self.data[offset..offset + 4].copy_from_slice(&bytes);
-                }
-            }
-            3 => {
-                if offset + 3 <= self.data.len() {
-                    let bytes = converted.to_le_bytes();
-                    self.data[offset] = bytes[0];
-                    self.data[offset + 1] = bytes[1];
-                    self.data[offset + 2] = bytes[2];
-                }
-            }
-            _ => {}
-        }
+        self.write_pixel_at_offset(offset, converted);
     }
 
     pub fn get_pixel(&self, x: i32, y: i32) -> u32 {
@@ -201,7 +153,7 @@ impl<'a> DrawBuffer<'a> {
     }
 }
 
-impl DrawTarget for DrawBuffer<'_> {
+impl PixelBuffer for DrawBuffer<'_> {
     #[inline]
     fn width(&self) -> u32 {
         self.width
@@ -227,52 +179,48 @@ impl DrawTarget for DrawBuffer<'_> {
         self.pixel_format
     }
 
-    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            return;
-        }
-        let offset = self.pixel_offset(x as u32, y as u32);
+    #[inline]
+    fn write_pixel_at_offset(&mut self, byte_offset: usize, color: u32) {
+        let bytes = color.to_le_bytes();
         match self.bytes_pp {
             4 => {
-                if offset + 4 <= self.data.len() {
-                    self.data[offset..offset + 4].copy_from_slice(&color.to_le_bytes());
+                if byte_offset + 4 <= self.data.len() {
+                    self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
                 }
             }
             3 => {
-                if offset + 3 <= self.data.len() {
-                    let bytes = color.to_le_bytes();
-                    self.data[offset] = bytes[0];
-                    self.data[offset + 1] = bytes[1];
-                    self.data[offset + 2] = bytes[2];
+                if byte_offset + 3 <= self.data.len() {
+                    self.data[byte_offset] = bytes[0];
+                    self.data[byte_offset + 1] = bytes[1];
+                    self.data[byte_offset + 2] = bytes[2];
                 }
             }
             _ => {}
         }
     }
 
-    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        if w <= 0 || h <= 0 {
+    #[inline]
+    fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, color: u32) {
+        if row < 0 || row >= self.height as i32 {
             return;
         }
-
-        let x0 = x.max(0);
-        let y0 = y.max(0);
-        let x1 = (x + w - 1).min(self.width as i32 - 1);
-        let y1 = (y + h - 1).min(self.height as i32 - 1);
-
-        if x0 > x1 || y0 > y1 {
+        let w = self.width as i32;
+        let x0 = x0.max(0);
+        let x1 = x1.min(w - 1);
+        if x0 > x1 {
             return;
         }
 
         let bytes_pp = self.bytes_pp as usize;
         let pitch = self.pitch;
         let span_w = (x1 - x0 + 1) as usize;
+        let row_off = (row as usize) * pitch + (x0 as usize) * bytes_pp;
 
-        for row in y0..=y1 {
-            let row_off = (row as usize) * pitch + (x0 as usize) * bytes_pp;
-            match bytes_pp {
-                4 => {
-                    let row_slice = &mut self.data[row_off..row_off + span_w * 4];
+        match bytes_pp {
+            4 => {
+                let end = row_off + span_w * 4;
+                if end <= self.data.len() {
+                    let row_slice = &mut self.data[row_off..end];
                     if color == 0 {
                         row_slice.fill(0);
                     } else {
@@ -282,23 +230,24 @@ impl DrawTarget for DrawBuffer<'_> {
                         }
                     }
                 }
-                3 => {
-                    let bytes = color.to_le_bytes();
-                    for col in 0..span_w {
-                        let off = row_off + col * 3;
-                        if off + 3 <= self.data.len() {
-                            self.data[off] = bytes[0];
-                            self.data[off + 1] = bytes[1];
-                            self.data[off + 2] = bytes[2];
-                        }
+            }
+            3 => {
+                let bytes = color.to_le_bytes();
+                for col in 0..span_w {
+                    let off = row_off + col * 3;
+                    if off + 3 <= self.data.len() {
+                        self.data[off] = bytes[0];
+                        self.data[off + 1] = bytes[1];
+                        self.data[off + 2] = bytes[2];
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 
-    fn clear(&mut self, color: u32) {
+    #[inline]
+    fn clear_buffer(&mut self, color: u32) {
         let bytes_pp = self.bytes_pp as usize;
 
         if color == 0 {
@@ -321,7 +270,48 @@ impl DrawTarget for DrawBuffer<'_> {
                 _ => {}
             }
         }
+    }
+}
 
+impl DrawTarget for DrawBuffer<'_> {
+    #[inline]
+    fn width(&self) -> u32 {
+        PixelBuffer::width(self)
+    }
+
+    #[inline]
+    fn height(&self) -> u32 {
+        PixelBuffer::height(self)
+    }
+
+    #[inline]
+    fn pitch(&self) -> usize {
+        PixelBuffer::pitch(self)
+    }
+
+    #[inline]
+    fn bytes_pp(&self) -> u8 {
+        PixelBuffer::bytes_pp(self)
+    }
+
+    #[inline]
+    fn pixel_format(&self) -> DrawPixelFormat {
+        PixelBuffer::pixel_format(self)
+    }
+
+    #[inline]
+    fn draw_pixel(&mut self, x: i32, y: i32, color: u32) {
+        pixel_ops::draw_pixel_impl(self, x, y, color);
+    }
+
+    #[inline]
+    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        pixel_ops::fill_rect_impl(self, x, y, w, h, color);
+    }
+
+    #[inline]
+    fn clear(&mut self, color: u32) {
+        pixel_ops::clear_impl(self, color);
         self.add_damage(0, 0, self.width as i32 - 1, self.height as i32 - 1);
     }
 }

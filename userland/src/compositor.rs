@@ -13,7 +13,7 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, PixelFormat, rgb};
+use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
 use crate::syscall::{
     CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
     sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
