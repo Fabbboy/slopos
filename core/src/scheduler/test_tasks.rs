@@ -15,6 +15,7 @@ use crate::platform;
 use super::ffi_boundary::simple_context_switch;
 
 use slopos_mm::kernel_heap::kmalloc;
+use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 
 use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
 
@@ -342,9 +343,9 @@ pub fn smoke_test_task_impl(ctx: *mut SmokeTestContext) {
         let stack_growth = ctx_ref
             .initial_stack_top
             .saturating_sub(ctx_ref.min_stack_pointer);
-        if stack_growth > 0x1000 {
+        if stack_growth > PAGE_SIZE_4KB {
             klog_info!(
-                "{}: ERROR - Stack growth exceeds 4KB: 0x{:x} bytes",
+                "{}: ERROR - Stack growth exceeds one page: 0x{:x} bytes",
                 name_str,
                 stack_growth
             );
@@ -427,12 +428,13 @@ pub fn run_context_switch_smoke_test() -> c_int {
     test_ctx.ss = 0x10;
     test_ctx.cr3 = 0;
 
-    let stack = kmalloc(4096) as *mut u64;
+    let stack = kmalloc(PAGE_SIZE_4KB as usize) as *mut u64;
     if stack.is_null() {
         klog_info!("Failed to allocate stack for test task");
         return -1;
     }
-    test_ctx.rsp = unsafe { stack.add(1024) } as u64;
+    let stack_slots = PAGE_SIZE_4KB as usize / core::mem::size_of::<u64>();
+    test_ctx.rsp = unsafe { stack.add(stack_slots) } as u64;
 
     klog_info!("Switching to test context...");
 

@@ -3,6 +3,8 @@
 //! This module defines the virtual and physical address space layout used
 //! by SlopOS, including kernel space, user space, and special regions.
 
+use super::paging::PAGE_SIZE_4KB;
+
 // =============================================================================
 // Boot-Time Memory
 // =============================================================================
@@ -92,14 +94,14 @@ pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_B000_0000;
 /// Stride between exception stacks (64 KB).
 pub const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x0001_0000;
 
-/// Guard page size for exception stacks (4 KB).
-pub const EXCEPTION_STACK_GUARD_SIZE: u64 = 0x1000;
+/// Guard page size for exception stacks (one 4 KB page).
+pub const EXCEPTION_STACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
 /// Number of pages per exception stack (8 pages = 32 KB).
 pub const EXCEPTION_STACK_PAGES: u64 = 8;
 
 /// Exception stack usable size (32 KB).
-pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * 0x1000;
+pub const EXCEPTION_STACK_SIZE: u64 = EXCEPTION_STACK_PAGES * PAGE_SIZE_4KB;
 
 /// Total exception stack size including guard page (36 KB).
 pub const EXCEPTION_STACK_TOTAL_SIZE: u64 = EXCEPTION_STACK_GUARD_SIZE + EXCEPTION_STACK_SIZE;

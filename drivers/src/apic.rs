@@ -6,6 +6,7 @@ use slopos_lib::{cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
+use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB_USIZE;
 use slopos_mm::mmio::MmioRegion;
 
 use slopos_abi::arch::x86_64::apic::*;
@@ -15,8 +16,7 @@ pub use slopos_abi::arch::x86_64::apic::{
     LAPIC_ICR_TRIGGER_EDGE,
 };
 
-/// APIC register region size (4KB page).
-const APIC_REGION_SIZE: usize = 0x1000;
+const APIC_REGION_SIZE: usize = PAGE_SIZE_4KB_USIZE;
 
 static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static X2APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);

@@ -2,7 +2,7 @@ use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_lib::IrqMutex;
 
 const MAX_INODES: usize = 64;
-const MAX_DATA_SIZE: usize = 4096;
+const RAMFS_MAX_FILE_SIZE: usize = 4096;
 const MAX_NAME_LEN: usize = 32;
 const MAX_DIR_ENTRIES: usize = 32;
 
@@ -28,7 +28,7 @@ impl DirEntry {
 struct RamInode {
     in_use: bool,
     file_type: FileType,
-    data: [u8; MAX_DATA_SIZE],
+    data: [u8; RAMFS_MAX_FILE_SIZE],
     data_len: usize,
     dir_entries: [DirEntry; MAX_DIR_ENTRIES],
     dir_entry_count: usize,
@@ -42,7 +42,7 @@ impl RamInode {
         Self {
             in_use: false,
             file_type: FileType::Regular,
-            data: [0; MAX_DATA_SIZE],
+            data: [0; RAMFS_MAX_FILE_SIZE],
             data_len: 0,
             dir_entries: [const { DirEntry::empty() }; MAX_DIR_ENTRIES],
             dir_entry_count: 0,
@@ -267,7 +267,7 @@ impl FileSystem for RamFs {
         let offset = offset as usize;
         let end = offset + buf.len();
 
-        if end > MAX_DATA_SIZE {
+        if end > RAMFS_MAX_FILE_SIZE {
             return Err(VfsError::NoSpace);
         }
 
@@ -393,7 +393,7 @@ impl FileSystem for RamFs {
             return Err(VfsError::IsDirectory);
         }
 
-        let new_size = (size as usize).min(MAX_DATA_SIZE);
+        let new_size = (size as usize).min(RAMFS_MAX_FILE_SIZE);
         if new_size < ram_inode.data_len {
             ram_inode.data[new_size..ram_inode.data_len].fill(0);
         }

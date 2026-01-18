@@ -22,6 +22,8 @@
 //! // map_page(phys, virt);  // Compile error!
 //! ```
 
+use crate::arch::x86_64::paging::PAGE_SIZE_4KB;
+
 /// A physical memory address.
 ///
 /// Physical addresses cannot be directly dereferenced - they must first be
@@ -129,16 +131,14 @@ impl PhysAddr {
         self.0 & (align - 1) == 0
     }
 
-    /// Returns the page-aligned base address (4KB pages).
     #[inline]
     pub const fn page_base(self) -> Self {
-        self.align_down(4096)
+        self.align_down(PAGE_SIZE_4KB)
     }
 
-    /// Returns the offset within a 4KB page.
     #[inline]
     pub const fn page_offset(self) -> u64 {
-        self.0 & 0xFFF
+        self.0 & (PAGE_SIZE_4KB - 1)
     }
 }
 
@@ -232,16 +232,14 @@ impl VirtAddr {
         self.0 & (align - 1) == 0
     }
 
-    /// Returns the page-aligned base address (4KB pages).
     #[inline]
     pub const fn page_base(self) -> Self {
-        self.align_down(4096)
+        self.align_down(PAGE_SIZE_4KB)
     }
 
-    /// Returns the offset within a 4KB page.
     #[inline]
     pub const fn page_offset(self) -> u64 {
-        self.0 & 0xFFF
+        self.0 & (PAGE_SIZE_4KB - 1)
     }
 
     /// Check if this address is in kernel space (higher half).

@@ -92,6 +92,9 @@ impl PageFlags {
 /// 4KB page size (standard).
 pub const PAGE_SIZE_4KB: u64 = 0x1000;
 
+/// 4KB page size as usize for array indexing and size calculations.
+pub const PAGE_SIZE_4KB_USIZE: usize = PAGE_SIZE_4KB as usize;
+
 /// 2MB page size (huge page via PDE).
 pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 

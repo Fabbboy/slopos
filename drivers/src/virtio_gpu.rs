@@ -21,7 +21,7 @@ use crate::virtio::{
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::mm_constants::PAGE_SIZE_4KB;
+use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE};
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
@@ -33,7 +33,7 @@ pub const VIRTIO_GPU_DEVICE_ID_TRANS: u16 = 0x1010;
 const VIRTIO_PCI_STATUS_OFFSET: u8 = 0x12;
 const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
 
-const VIRTIO_MMIO_DEFAULT_SIZE: usize = 0x1000;
+const VIRTIO_MMIO_DEFAULT_SIZE: usize = PAGE_SIZE_4KB_USIZE;
 const VIRTIO_GPU_QUEUE_CONTROL: u16 = 0;
 const GPU_CMD_TIMEOUT_SPINS: u32 = 1_000_000;
 

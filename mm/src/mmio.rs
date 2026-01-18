@@ -83,7 +83,7 @@ impl MmioRegion {
     }
 
     pub fn map_page(phys: PhysAddr) -> Option<Self> {
-        Self::map(phys, 4096)
+        Self::map(phys, PAGE_SIZE_4KB as usize)
     }
 
     pub fn map_1mb(phys: PhysAddr) -> Option<Self> {

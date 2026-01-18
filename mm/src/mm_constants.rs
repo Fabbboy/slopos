@@ -21,7 +21,7 @@ pub use slopos_abi::task::INVALID_PROCESS_ID;
 // Re-export paging constants from abi
 pub use slopos_abi::arch::x86_64::paging::{
     EFI_CONVENTIONAL_MEMORY, EFI_PAGE_SIZE, ENTRIES_PER_PAGE_TABLE, PAGE_ALIGN, PAGE_SIZE_1GB,
-    PAGE_SIZE_2MB, PAGE_SIZE_4KB, STACK_ALIGN,
+    PAGE_SIZE_2MB, PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE, STACK_ALIGN,
 };
 
 // Re-export PageFlags for type-safe flag manipulation

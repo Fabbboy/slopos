@@ -4,6 +4,10 @@ use core::mem;
 use crate::blockdev::BlockDevice;
 use slopos_lib::wl_currency;
 
+const EXT2_MIN_BLOCK_SIZE: u32 = 1024;
+const EXT2_MAX_BLOCK_SIZE: u32 = 4096;
+const EXT2_MAX_BLOCK_SIZE_USIZE: usize = EXT2_MAX_BLOCK_SIZE as usize;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Ext2Error {
     InvalidSuperblock,
@@ -183,10 +187,10 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::InvalidSuperblock);
         }
 
-        let block_size = 1024u32
+        let block_size = EXT2_MIN_BLOCK_SIZE
             .checked_shl(superblock.log_block_size)
             .ok_or(Ext2Error::UnsupportedBlockSize)?;
-        if block_size < 1024 || block_size > 4096 {
+        if block_size < EXT2_MIN_BLOCK_SIZE || block_size > EXT2_MAX_BLOCK_SIZE {
             return Err(Ext2Error::UnsupportedBlockSize);
         }
         let inode_size = if superblock.inode_size == 0 {
@@ -221,7 +225,7 @@ impl<'a> Ext2Fs<'a> {
             + (index_in_group as u64 * self.inode_size as u64);
         let block_offset = inode_offset / self.block_size as u64;
         let within = (inode_offset % self.block_size as u64) as usize;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block_offset as u32, block_slice)?;
         let inode_bytes = &block_slice[within..within + self.inode_size as usize];
@@ -246,7 +250,7 @@ impl<'a> Ext2Fs<'a> {
         let mut read_total = 0usize;
         let mut remaining = max_len;
         let mut file_offset = offset as usize;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         while remaining > 0 {
             let file_block = file_offset / self.block_size as usize;
             let block_offset = file_offset % self.block_size as usize;
@@ -271,7 +275,7 @@ impl<'a> Ext2Fs<'a> {
         if !inode.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let mut remaining = inode.size as usize;
         let mut offset = 0usize;
         while remaining > 0 {
@@ -395,7 +399,7 @@ impl<'a> Ext2Fs<'a> {
         let mut remaining = buffer.len();
         let mut file_offset = offset as usize;
         let mut allocated_blocks = 0u32;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
 
         while remaining > 0 {
             let file_block = file_offset / self.block_size as usize;
@@ -446,7 +450,7 @@ impl<'a> Ext2Fs<'a> {
         if !parent.is_directory() {
             return Err(Ext2Error::NotDirectory);
         }
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let mut block_index = 0u32;
         let mut offset = 0usize;
         while offset < parent.size as usize {
@@ -485,7 +489,7 @@ impl<'a> Ext2Fs<'a> {
             }
         }
         if inode.block[12] != 0 {
-            let mut block_buf = [0u8; 4096];
+            let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
             let block_slice = &mut block_buf[..self.block_size as usize];
             self.read_block(inode.block[12], block_slice)?;
             for idx in 0..(self.block_size as usize / 4) {
@@ -558,7 +562,7 @@ impl<'a> Ext2Fs<'a> {
         let desc_offset = table_start + (group as u64 * desc_size);
         let block = desc_offset / self.block_size as u64;
         let within = (desc_offset % self.block_size as u64) as usize;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block as u32, block_slice)?;
         let desc_bytes = &block_slice[within..within + desc_size as usize];
@@ -575,7 +579,7 @@ impl<'a> Ext2Fs<'a> {
         let desc_offset = table_start + (group as u64 * desc_size);
         let block = desc_offset / self.block_size as u64;
         let within = (desc_offset % self.block_size as u64) as usize;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block as u32, block_slice)?;
         let desc_bytes = &mut block_slice[within..within + desc_size as usize];
@@ -635,7 +639,7 @@ impl<'a> Ext2Fs<'a> {
             if ind_block == 0 {
                 return Err(Ext2Error::InvalidBlock);
             }
-            let mut block_buf = [0u8; 4096];
+            let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
             let block_slice = &mut block_buf[..self.block_size as usize];
             self.read_block(ind_block, block_slice)?;
             let idx = file_block - 12;
@@ -667,11 +671,11 @@ impl<'a> Ext2Fs<'a> {
             if inode.block[12] == 0 {
                 let ind_block = self.allocate_block()?;
                 inode.block[12] = ind_block;
-                let zero = [0u8; 4096];
+                let zero = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
                 let slice = &zero[..self.block_size as usize];
                 self.write_block(ind_block, slice)?;
             }
-            let mut block_buf = [0u8; 4096];
+            let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
             let block_slice = &mut block_buf[..self.block_size as usize];
             let ind_block = inode.block[12];
             self.read_block(ind_block, block_slice)?;
@@ -692,7 +696,7 @@ impl<'a> Ext2Fs<'a> {
     fn allocate_block(&mut self) -> Result<u32, Ext2Error> {
         let groups =
             (self.superblock.blocks_count + self.blocks_per_group - 1) / self.blocks_per_group;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         for group in 0..groups {
             let mut desc = self.read_group_desc(group)?;
             if desc.free_blocks_count == 0 {
@@ -724,7 +728,7 @@ impl<'a> Ext2Fs<'a> {
         let group = base / self.blocks_per_group;
         let bit = (base % self.blocks_per_group) as usize;
         let mut desc = self.read_group_desc(group)?;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(desc.block_bitmap, block_slice)?;
         clear_bit(block_slice, bit);
@@ -739,7 +743,7 @@ impl<'a> Ext2Fs<'a> {
     fn allocate_inode(&mut self) -> Result<u32, Ext2Error> {
         let groups =
             (self.superblock.inodes_count + self.inodes_per_group - 1) / self.inodes_per_group;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         for group in 0..groups {
             let mut desc = self.read_group_desc(group)?;
             if desc.free_inodes_count == 0 {
@@ -775,7 +779,7 @@ impl<'a> Ext2Fs<'a> {
         let group = inode_index / self.inodes_per_group;
         let bit = (inode_index % self.inodes_per_group) as usize;
         let mut desc = self.read_group_desc(group)?;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(desc.inode_bitmap, block_slice)?;
         clear_bit(block_slice, bit);
@@ -817,7 +821,7 @@ impl<'a> Ext2Fs<'a> {
             + (index_in_group as u64 * self.inode_size as u64);
         let block = inode_offset / self.block_size as u64;
         let within = (inode_offset % self.block_size as u64) as usize;
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(block as u32, block_slice)?;
         let inode_bytes = &mut block_slice[within..within + self.inode_size as usize];
@@ -838,7 +842,7 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::NotDirectory);
         }
         let entry_size = dir_entry_size(name.len());
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let mut offset = 0usize;
         let mut block_index = 0u32;
 
@@ -904,7 +908,7 @@ impl<'a> Ext2Fs<'a> {
         inode_num: u32,
         parent_inode: u32,
     ) -> Result<(), Ext2Error> {
-        let mut block_buf = [0u8; 4096];
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
         let block_slice = &mut block_buf[..self.block_size as usize];
         for byte in block_slice.iter_mut() {
             *byte = 0;
