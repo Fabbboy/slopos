@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
+use slopos_lib::{IrqMutex, align_down, align_up, klog_info};
 
 use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
@@ -60,7 +60,6 @@ impl ProcessVm {
     fn reset(&mut self) {
         self.process_id = INVALID_PROCESS_ID;
         self.page_dir = ptr::null_mut();
-        self.vma_tree.clear();
         self.code_start = 0;
         self.data_start = 0;
         self.heap_start = 0;
@@ -1050,7 +1049,6 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
             manager.active_process = ptr::null_mut();
         }
         (*process_ptr).process_id = INVALID_PROCESS_ID;
-        (*process_ptr).vma_tree.clear();
         (*process_ptr).next = ptr::null_mut();
         (*process_ptr).total_pages = 0;
         (*process_ptr).flags = 0;
@@ -1142,7 +1140,24 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     }
     0
 }
+fn collect_active_pids() -> [u32; MAX_PROCESSES] {
+    let manager = VM_MANAGER.lock();
+    let mut pids = [INVALID_PROCESS_ID; MAX_PROCESSES];
+    for (i, proc) in manager.processes.iter().enumerate() {
+        if proc.process_id != INVALID_PROCESS_ID {
+            pids[i] = proc.process_id;
+        }
+    }
+    pids
+}
+
 pub fn init_process_vm() -> c_int {
+    for pid in collect_active_pids() {
+        if pid != INVALID_PROCESS_ID {
+            destroy_process_vm(pid);
+        }
+    }
+
     let mut manager = VM_MANAGER.lock();
     manager.num_processes = 0;
     manager.next_process_id = 1;
@@ -1151,7 +1166,7 @@ pub fn init_process_vm() -> c_int {
     for i in 0..MAX_PROCESSES {
         manager.processes[i].reset();
     }
-    klog_debug!("Process VM manager initialized");
+    klog_info!("Process VM manager initialized");
 
     0
 }

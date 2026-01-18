@@ -8,9 +8,7 @@ use slopos_lib::{cpu, klog_debug, klog_info};
 
 use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
-use crate::mm_constants::{
-    KERNEL_PML4_INDEX, KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB,
-};
+use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
@@ -503,7 +501,9 @@ fn free_page_table_tree(page_dir: *mut ProcessPageDir) {
         if pml4.is_null() {
             return;
         }
-        for pml4_idx in 0..KERNEL_PML4_INDEX {
+        // Only free user space entries (0-255). Higher-half entries (256-511)
+        // are shared kernel mappings copied from KERNEL_PAGE_DIR.
+        for pml4_idx in 0..256 {
             let entry = (&mut *pml4).entry_mut(pml4_idx);
             if !entry.is_present() {
                 continue;
