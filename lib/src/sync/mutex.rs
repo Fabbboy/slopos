@@ -27,8 +27,7 @@ impl<L: Level, T> Mutex<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> MutexGuard<'a, L, T> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         let inner = self.inner.lock();
 
@@ -44,8 +43,7 @@ impl<L: Level, T> Mutex<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> Option<MutexGuard<'a, L, T>> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         match self.inner.try_lock() {
             Some(inner) => Some(MutexGuard {
@@ -54,9 +52,7 @@ impl<L: Level, T> Mutex<L, T> {
                 _token: LockToken::new(),
             }),
             None => {
-                if saved_flags & (1 << 9) != 0 {
-                    cpu::enable_interrupts();
-                }
+                cpu::restore_flags(saved_flags);
                 None
             }
         }
@@ -95,17 +91,6 @@ impl<'a, L: Level, T> DerefMut for MutexGuard<'a, L, T> {
 impl<'a, L: Level, T> Drop for MutexGuard<'a, L, T> {
     #[inline]
     fn drop(&mut self) {
-        if self.saved_flags & (1 << 9) != 0 {
-            cpu::enable_interrupts();
-        }
+        cpu::restore_flags(self.saved_flags);
     }
-}
-
-#[inline(always)]
-fn read_rflags() -> u64 {
-    let flags: u64;
-    unsafe {
-        core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
-    }
-    flags
 }

@@ -27,8 +27,7 @@ impl<L: Level, T> RwLock<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> RwLockReadGuard<'a, L, T> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         let inner = self.inner.read();
 
@@ -44,8 +43,7 @@ impl<L: Level, T> RwLock<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> Option<RwLockReadGuard<'a, L, T>> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         match self.inner.try_read() {
             Some(inner) => Some(RwLockReadGuard {
@@ -54,9 +52,7 @@ impl<L: Level, T> RwLock<L, T> {
                 _token: LockToken::new(),
             }),
             None => {
-                if saved_flags & (1 << 9) != 0 {
-                    cpu::enable_interrupts();
-                }
+                cpu::restore_flags(saved_flags);
                 None
             }
         }
@@ -67,8 +63,7 @@ impl<L: Level, T> RwLock<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> RwLockWriteGuard<'a, L, T> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         let inner = self.inner.write();
 
@@ -84,8 +79,7 @@ impl<L: Level, T> RwLock<L, T> {
         &'a self,
         _token: LockToken<'a, LP>,
     ) -> Option<RwLockWriteGuard<'a, L, T>> {
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         match self.inner.try_write() {
             Some(inner) => Some(RwLockWriteGuard {
@@ -94,9 +88,7 @@ impl<L: Level, T> RwLock<L, T> {
                 _token: LockToken::new(),
             }),
             None => {
-                if saved_flags & (1 << 9) != 0 {
-                    cpu::enable_interrupts();
-                }
+                cpu::restore_flags(saved_flags);
                 None
             }
         }
@@ -128,9 +120,7 @@ impl<'a, L: Level, T> Deref for RwLockReadGuard<'a, L, T> {
 impl<'a, L: Level, T> Drop for RwLockReadGuard<'a, L, T> {
     #[inline]
     fn drop(&mut self) {
-        if self.saved_flags & (1 << 9) != 0 {
-            cpu::enable_interrupts();
-        }
+        cpu::restore_flags(self.saved_flags);
     }
 }
 
@@ -166,17 +156,6 @@ impl<'a, L: Level, T> DerefMut for RwLockWriteGuard<'a, L, T> {
 impl<'a, L: Level, T> Drop for RwLockWriteGuard<'a, L, T> {
     #[inline]
     fn drop(&mut self) {
-        if self.saved_flags & (1 << 9) != 0 {
-            cpu::enable_interrupts();
-        }
+        cpu::restore_flags(self.saved_flags);
     }
-}
-
-#[inline(always)]
-fn read_rflags() -> u64 {
-    let flags: u64;
-    unsafe {
-        core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
-    }
-    flags
 }

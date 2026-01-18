@@ -60,6 +60,17 @@ pub mod cpu {
         }
     }
 
+    /// Read RFLAGS register without modifying interrupt state.
+    /// Use `save_flags_cli()` if you need to disable interrupts atomically.
+    #[inline(always)]
+    pub fn read_rflags() -> u64 {
+        let flags: u64;
+        unsafe {
+            asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+        }
+        flags
+    }
+
     #[inline(always)]
     pub fn halt_loop() -> ! {
         loop {

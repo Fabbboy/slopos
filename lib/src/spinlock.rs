@@ -1,4 +1,3 @@
-use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
@@ -41,8 +40,7 @@ impl<T> IrqMutex<T> {
     #[inline]
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
         let preempt = PreemptGuard::new();
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         while self
             .lock
@@ -62,8 +60,7 @@ impl<T> IrqMutex<T> {
     #[inline]
     pub fn try_lock(&self) -> Option<IrqMutexGuard<'_, T>> {
         let preempt = PreemptGuard::new();
-        let saved_flags = read_rflags();
-        cpu::disable_interrupts();
+        let saved_flags = cpu::save_flags_cli();
 
         if self
             .lock
@@ -76,9 +73,7 @@ impl<T> IrqMutex<T> {
                 _preempt: preempt,
             })
         } else {
-            if saved_flags & (1 << 9) != 0 {
-                cpu::enable_interrupts();
-            }
+            cpu::restore_flags(saved_flags);
             drop(preempt);
             None
         }
@@ -105,9 +100,7 @@ impl<'a, T> Drop for IrqMutexGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
         self.mutex.lock.store(false, Ordering::Release);
-        if self.saved_flags & (1 << 9) != 0 {
-            cpu::enable_interrupts();
-        }
+        cpu::restore_flags(self.saved_flags);
         // _preempt drops after this, potentially triggering deferred reschedule
     }
 }
@@ -143,8 +136,7 @@ impl Spinlock {
 
     #[inline(always)]
     pub fn lock_irqsave(&self) -> u64 {
-        let flags = read_rflags();
-        cpu::disable_interrupts();
+        let flags = cpu::save_flags_cli();
         while self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -158,17 +150,6 @@ impl Spinlock {
     #[inline(always)]
     pub fn unlock_irqrestore(&self, flags: u64) {
         self.locked.store(false, Ordering::Release);
-        if flags & (1 << 9) != 0 {
-            cpu::enable_interrupts();
-        }
+        cpu::restore_flags(flags);
     }
-}
-
-#[inline(always)]
-fn read_rflags() -> u64 {
-    let flags: u64;
-    unsafe {
-        asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
-    }
-    flags
 }
