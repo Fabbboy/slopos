@@ -104,6 +104,7 @@ impl RamInode {
 struct RamFsInner {
     inodes: [RamInode; MAX_INODES],
     next_inode: InodeId,
+    initialized: bool,
 }
 
 impl RamFsInner {
@@ -111,16 +112,23 @@ impl RamFsInner {
         Self {
             inodes: [const { RamInode::empty() }; MAX_INODES],
             next_inode: ROOT_INODE + 1,
+            initialized: false,
         }
     }
 
     fn new() -> Self {
-        let mut inner = Self {
-            inodes: [const { RamInode::empty() }; MAX_INODES],
-            next_inode: ROOT_INODE + 1,
-        };
+        let mut inner = Self::new_const();
+        inner.ensure_initialized();
+        inner
+    }
 
-        let root = &mut inner.inodes[ROOT_INODE as usize];
+    fn ensure_initialized(&mut self) {
+        if self.initialized {
+            return;
+        }
+        self.initialized = true;
+
+        let root = &mut self.inodes[ROOT_INODE as usize];
         root.in_use = true;
         root.file_type = FileType::Directory;
         root.mode = 0o755;
@@ -129,8 +137,6 @@ impl RamFsInner {
 
         root.add_dir_entry(b".", ROOT_INODE).ok();
         root.add_dir_entry(b"..", ROOT_INODE).ok();
-
-        inner
     }
 
     fn alloc_inode(&mut self) -> VfsResult<InodeId> {
@@ -188,6 +194,18 @@ impl RamFs {
             inner: IrqMutex::new(RamFsInner::new_const()),
         }
     }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&RamFsInner) -> R) -> R {
+        let mut inner = self.inner.lock();
+        inner.ensure_initialized();
+        f(&*inner)
+    }
+
+    fn with_inner_mut<R>(&self, f: impl FnOnce(&mut RamFsInner) -> R) -> R {
+        let mut inner = self.inner.lock();
+        inner.ensure_initialized();
+        f(&mut *inner)
+    }
 }
 
 impl Default for RamFs {
@@ -206,153 +224,157 @@ impl FileSystem for RamFs {
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        let inner = self.inner.lock();
-        let parent_inode = inner.get_inode(parent)?;
+        self.with_inner(|inner| {
+            let parent_inode = inner.get_inode(parent)?;
 
-        if parent_inode.file_type != FileType::Directory {
-            return Err(VfsError::NotDirectory);
-        }
+            if parent_inode.file_type != FileType::Directory {
+                return Err(VfsError::NotDirectory);
+            }
 
-        parent_inode.lookup(name)
+            parent_inode.lookup(name)
+        })
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        let inner = self.inner.lock();
-        let ram_inode = inner.get_inode(inode)?;
+        self.with_inner(|inner| {
+            let ram_inode = inner.get_inode(inode)?;
 
-        Ok(FileStat {
-            inode,
-            file_type: ram_inode.file_type,
-            size: ram_inode.data_len as u64,
-            mode: ram_inode.mode,
-            nlink: ram_inode.nlink,
-            uid: 0,
-            gid: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
-            dev_major: 0,
-            dev_minor: 0,
+            Ok(FileStat {
+                inode,
+                file_type: ram_inode.file_type,
+                size: ram_inode.data_len as u64,
+                mode: ram_inode.mode,
+                nlink: ram_inode.nlink,
+                uid: 0,
+                gid: 0,
+                atime: 0,
+                mtime: 0,
+                ctime: 0,
+                dev_major: 0,
+                dev_minor: 0,
+            })
         })
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        let inner = self.inner.lock();
-        let ram_inode = inner.get_inode(inode)?;
+        self.with_inner(|inner| {
+            let ram_inode = inner.get_inode(inode)?;
 
-        if ram_inode.file_type == FileType::Directory {
-            return Err(VfsError::IsDirectory);
-        }
+            if ram_inode.file_type == FileType::Directory {
+                return Err(VfsError::IsDirectory);
+            }
 
-        let offset = offset as usize;
-        if offset >= ram_inode.data_len {
-            return Ok(0);
-        }
+            let offset = offset as usize;
+            if offset >= ram_inode.data_len {
+                return Ok(0);
+            }
 
-        let available = ram_inode.data_len - offset;
-        let to_read = buf.len().min(available);
-        buf[..to_read].copy_from_slice(&ram_inode.data[offset..offset + to_read]);
+            let available = ram_inode.data_len - offset;
+            let to_read = buf.len().min(available);
+            buf[..to_read].copy_from_slice(&ram_inode.data[offset..offset + to_read]);
 
-        Ok(to_read)
+            Ok(to_read)
+        })
     }
 
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        let mut inner = self.inner.lock();
-        let ram_inode = inner.get_inode_mut(inode)?;
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
 
-        if ram_inode.file_type == FileType::Directory {
-            return Err(VfsError::IsDirectory);
-        }
+            if ram_inode.file_type == FileType::Directory {
+                return Err(VfsError::IsDirectory);
+            }
 
-        let offset = offset as usize;
-        let end = offset + buf.len();
+            let offset = offset as usize;
+            let end = offset + buf.len();
 
-        if end > RAMFS_MAX_FILE_SIZE {
-            return Err(VfsError::NoSpace);
-        }
+            if end > RAMFS_MAX_FILE_SIZE {
+                return Err(VfsError::NoSpace);
+            }
 
-        ram_inode.data[offset..end].copy_from_slice(buf);
-        if end > ram_inode.data_len {
-            ram_inode.data_len = end;
-        }
+            ram_inode.data[offset..end].copy_from_slice(buf);
+            if end > ram_inode.data_len {
+                ram_inode.data_len = end;
+            }
 
-        Ok(buf.len())
+            Ok(buf.len())
+        })
     }
 
     fn create(&self, parent: InodeId, name: &[u8], file_type: FileType) -> VfsResult<InodeId> {
-        let mut inner = self.inner.lock();
-
-        {
-            let parent_inode = inner.get_inode(parent)?;
-            if parent_inode.file_type != FileType::Directory {
-                return Err(VfsError::NotDirectory);
-            }
-            if parent_inode.lookup(name).is_ok() {
-                return Err(VfsError::AlreadyExists);
-            }
-        }
-
-        let new_id = inner.alloc_inode()?;
-
-        {
-            let new_inode = &mut inner.inodes[new_id as usize];
-            new_inode.in_use = true;
-            new_inode.file_type = file_type;
-            new_inode.data_len = 0;
-            new_inode.dir_entry_count = 0;
-            new_inode.parent = parent;
-
-            match file_type {
-                FileType::Directory => {
-                    new_inode.mode = 0o755;
-                    new_inode.nlink = 2;
-                    new_inode.add_dir_entry(b".", new_id)?;
-                    new_inode.add_dir_entry(b"..", parent)?;
+        self.with_inner_mut(|inner| {
+            {
+                let parent_inode = inner.get_inode(parent)?;
+                if parent_inode.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
                 }
-                _ => {
-                    new_inode.mode = 0o644;
-                    new_inode.nlink = 1;
+                if parent_inode.lookup(name).is_ok() {
+                    return Err(VfsError::AlreadyExists);
                 }
             }
-        }
 
-        inner.get_inode_mut(parent)?.add_dir_entry(name, new_id)?;
+            let new_id = inner.alloc_inode()?;
 
-        if file_type == FileType::Directory {
-            inner.get_inode_mut(parent)?.nlink += 1;
-        }
+            {
+                let new_inode = &mut inner.inodes[new_id as usize];
+                new_inode.in_use = true;
+                new_inode.file_type = file_type;
+                new_inode.data_len = 0;
+                new_inode.dir_entry_count = 0;
+                new_inode.parent = parent;
 
-        Ok(new_id)
+                match file_type {
+                    FileType::Directory => {
+                        new_inode.mode = 0o755;
+                        new_inode.nlink = 2;
+                        new_inode.add_dir_entry(b".", new_id)?;
+                        new_inode.add_dir_entry(b"..", parent)?;
+                    }
+                    _ => {
+                        new_inode.mode = 0o644;
+                        new_inode.nlink = 1;
+                    }
+                }
+            }
+
+            inner.get_inode_mut(parent)?.add_dir_entry(name, new_id)?;
+
+            if file_type == FileType::Directory {
+                inner.get_inode_mut(parent)?.nlink += 1;
+            }
+
+            Ok(new_id)
+        })
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
-        let mut inner = self.inner.lock();
+        self.with_inner_mut(|inner| {
+            let target_id = {
+                let parent_inode = inner.get_inode(parent)?;
+                if parent_inode.file_type != FileType::Directory {
+                    return Err(VfsError::NotDirectory);
+                }
+                parent_inode.lookup(name)?
+            };
 
-        let target_id = {
-            let parent_inode = inner.get_inode(parent)?;
-            if parent_inode.file_type != FileType::Directory {
-                return Err(VfsError::NotDirectory);
+            let is_dir = {
+                let target = inner.get_inode(target_id)?;
+                if target.file_type == FileType::Directory && target.dir_entry_count > 2 {
+                    return Err(VfsError::NotEmpty);
+                }
+                target.file_type == FileType::Directory
+            };
+
+            inner.get_inode_mut(parent)?.remove_dir_entry(name)?;
+
+            if is_dir {
+                inner.get_inode_mut(parent)?.nlink -= 1;
             }
-            parent_inode.lookup(name)?
-        };
 
-        let is_dir = {
-            let target = inner.get_inode(target_id)?;
-            if target.file_type == FileType::Directory && target.dir_entry_count > 2 {
-                return Err(VfsError::NotEmpty);
-            }
-            target.file_type == FileType::Directory
-        };
+            inner.inodes[target_id as usize] = RamInode::empty();
 
-        inner.get_inode_mut(parent)?.remove_dir_entry(name)?;
-
-        if is_dir {
-            inner.get_inode_mut(parent)?.nlink -= 1;
-        }
-
-        inner.inodes[target_id as usize] = RamInode::empty();
-
-        Ok(())
+            Ok(())
+        })
     }
 
     fn readdir(
@@ -361,45 +383,47 @@ impl FileSystem for RamFs {
         offset: usize,
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
-        let inner = self.inner.lock();
-        let ram_inode = inner.get_inode(inode)?;
+        self.with_inner(|inner| {
+            let ram_inode = inner.get_inode(inode)?;
 
-        if ram_inode.file_type != FileType::Directory {
-            return Err(VfsError::NotDirectory);
-        }
-
-        let mut count = 0;
-        for i in offset..ram_inode.dir_entry_count {
-            let entry = &ram_inode.dir_entries[i];
-            let entry_inode = match inner.get_inode(entry.inode) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let name = &entry.name[..entry.name_len];
-            if !callback(name, entry.inode, entry_inode.file_type) {
-                break;
+            if ram_inode.file_type != FileType::Directory {
+                return Err(VfsError::NotDirectory);
             }
-            count += 1;
-        }
 
-        Ok(count)
+            let mut count = 0;
+            for i in offset..ram_inode.dir_entry_count {
+                let entry = &ram_inode.dir_entries[i];
+                let entry_inode = match inner.get_inode(entry.inode) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let name = &entry.name[..entry.name_len];
+                if !callback(name, entry.inode, entry_inode.file_type) {
+                    break;
+                }
+                count += 1;
+            }
+
+            Ok(count)
+        })
     }
 
     fn truncate(&self, inode: InodeId, size: u64) -> VfsResult<()> {
-        let mut inner = self.inner.lock();
-        let ram_inode = inner.get_inode_mut(inode)?;
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
 
-        if ram_inode.file_type == FileType::Directory {
-            return Err(VfsError::IsDirectory);
-        }
+            if ram_inode.file_type == FileType::Directory {
+                return Err(VfsError::IsDirectory);
+            }
 
-        let new_size = (size as usize).min(RAMFS_MAX_FILE_SIZE);
-        if new_size < ram_inode.data_len {
-            ram_inode.data[new_size..ram_inode.data_len].fill(0);
-        }
-        ram_inode.data_len = new_size;
+            let new_size = (size as usize).min(RAMFS_MAX_FILE_SIZE);
+            if new_size < ram_inode.data_len {
+                ram_inode.data[new_size..ram_inode.data_len].fill(0);
+            }
+            ram_inode.data_len = new_size;
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn sync(&self) -> VfsResult<()> {

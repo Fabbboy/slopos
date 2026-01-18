@@ -8,7 +8,8 @@ use crate::vfs::mount::mount;
 
 static VFS_INIT: InitFlag = InitFlag::new();
 
-static RAMFS_STATIC: RamFs = RamFs::new_const();
+static RAMFS_ROOT_STATIC: RamFs = RamFs::new_const();
+static RAMFS_TMP_STATIC: RamFs = RamFs::new_const();
 static DEVFS_STATIC: DevFs = DevFs::new();
 
 pub fn vfs_init_builtin_filesystems() -> VfsResult<()> {
@@ -18,9 +19,11 @@ pub fn vfs_init_builtin_filesystems() -> VfsResult<()> {
 
     if ext2_vfs_is_initialized() {
         mount(b"/", &EXT2_VFS_STATIC, 0)?;
+    } else {
+        mount(b"/", &RAMFS_ROOT_STATIC, 0)?;
     }
 
-    mount(b"/tmp", &RAMFS_STATIC, 0)?;
+    mount(b"/tmp", &RAMFS_TMP_STATIC, 0)?;
     mount(b"/dev", &DEVFS_STATIC, 0)?;
 
     Ok(())

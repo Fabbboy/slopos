@@ -3,7 +3,10 @@ use core::ffi::c_int;
 use slopos_abi::fs::UserFsEntry;
 use slopos_lib::klog_info;
 
-use crate::vfs::{vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
+use crate::vfs::{
+    vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat,
+    vfs_unlink,
+};
 
 fn test_vfs_initialized() -> c_int {
     klog_info!("VFS_TEST: check initialized");
@@ -97,6 +100,14 @@ fn test_vfs_unlink() -> c_int {
 
 pub fn run_ext2_tests() -> c_int {
     klog_info!("VFS_TEST: running suite");
+
+    // Ensure VFS is initialized before running tests.
+    // This is necessary because tests may run before the services boot phase.
+    if let Err(_) = vfs_init_builtin_filesystems() {
+        klog_info!("VFS_TEST: failed to initialize VFS");
+        return 0;
+    }
+
     let mut passed = 0;
 
     if test_vfs_initialized() == 0 {
