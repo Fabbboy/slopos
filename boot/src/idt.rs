@@ -4,6 +4,7 @@
 use core::arch::{asm, global_asm};
 use core::ffi::{CStr, c_char, c_void};
 
+use slopos_lib::cpu;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
@@ -298,19 +299,16 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
         return;
     }
 
-    unsafe {
-        let cr2: u64;
-        asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags));
-        klog_debug!(
-            "EXCEPTION: vec={} rip=0x{:x} err=0x{:x} cs=0x{:x} ss=0x{:x} cr2=0x{:x}",
-            vector,
-            frame_ref.rip,
-            frame_ref.error_code,
-            frame_ref.cs,
-            frame_ref.ss,
-            cr2
-        );
-    }
+    let cr2 = cpu::read_cr2();
+    klog_debug!(
+        "EXCEPTION: vec={} rip=0x{:x} err=0x{:x} cs=0x{:x} ss=0x{:x} cr2=0x{:x}",
+        vector,
+        frame_ref.rip,
+        frame_ref.error_code,
+        frame_ref.cs,
+        frame_ref.ss,
+        cr2
+    );
 
     if vector >= 32 {
         klog_info!("EXCEPTION: Unknown vector {}", vector);
@@ -414,17 +412,8 @@ fn terminate_user_task(
         unsafe { (*task).task_id }
     };
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
-    let (cr2, rip, rsp, vec, err) = unsafe {
-        let cr2_val: u64;
-        asm!("mov {}, cr2", out(reg) cr2_val, options(nomem, nostack, preserves_flags));
-        (
-            cr2_val,
-            frame.rip,
-            frame.rsp,
-            frame.vector,
-            frame.error_code,
-        )
-    };
+    let cr2 = cpu::read_cr2();
+    let (rip, rsp, vec, err) = (frame.rip, frame.rsp, frame.vector, frame.error_code);
     let (entry_point, proc_id, flags, name_str) = if task.is_null() {
         (0, 0, 0, "<no task>")
     } else {
@@ -556,10 +545,7 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     panic_with_frame("General protection fault", frame);
 }
 pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
-    let fault_addr: u64;
-    unsafe {
-        asm!("mov {}, cr2", out(reg) fault_addr, options(nomem, nostack, preserves_flags));
-    }
+    let fault_addr = cpu::read_cr2();
 
     let mut stack_name: *const c_char = core::ptr::null();
     if ist_stacks::ist_guard_fault(fault_addr, &mut stack_name) != 0 {

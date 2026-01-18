@@ -4,7 +4,7 @@ use core::ptr;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::page_table::{PageTable, PageTableEntry, PageTableLevel};
 use slopos_abi::arch::x86_64::paging::PageFlags;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::{cpu, klog_debug, klog_info};
 
 use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
@@ -78,22 +78,12 @@ fn is_user_address(vaddr: VirtAddr) -> bool {
 
 #[inline(always)]
 fn get_cr3() -> PhysAddr {
-    let mut cr3: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
-    }
-    PhysAddr::new(cr3 & !0xFFF)
+    PhysAddr::new(cpu::read_cr3() & !0xFFF)
 }
 
 #[inline(always)]
 fn set_cr3(pml4_phys: PhysAddr) {
-    unsafe {
-        core::arch::asm!(
-            "mov cr3, {}",
-            in(reg) pml4_phys.as_u64(),
-            options(nostack, preserves_flags)
-        );
-    }
+    cpu::write_cr3(pml4_phys.as_u64());
 }
 
 pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {

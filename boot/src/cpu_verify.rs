@@ -1,49 +1,20 @@
+use slopos_lib::cpu;
 use slopos_mm::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 
-#[inline(always)]
-fn read_cr0() -> u64 {
-    let value: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
-#[inline(always)]
-fn read_cr4() -> u64 {
-    let value: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
-#[inline(always)]
-fn read_efer() -> u64 {
-    slopos_lib::cpu::read_msr(0xC000_0080)
-}
-
-#[inline(always)]
-fn get_stack_pointer() -> u64 {
-    let rsp: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
-    rsp
-}
+const MSR_EFER: u32 = 0xC000_0080;
 
 pub fn verify_cpu_state() {
-    let cr0 = read_cr0();
-    let cr4 = read_cr4();
-    let efer = read_efer();
+    let cr0 = cpu::read_cr0();
+    let cr4 = cpu::read_cr4();
+    let efer = cpu::read_msr(MSR_EFER);
 
-    if (cr0 & (1 << 31)) == 0 {
+    if (cr0 & cpu::CR0_PG) == 0 {
         panic!("Paging not enabled in CR0");
     }
-    if (cr0 & 1) == 0 {
+    if (cr0 & cpu::CR0_PE) == 0 {
         panic!("Protected mode not enabled in CR0");
     }
-    if (cr4 & (1 << 5)) == 0 {
+    if (cr4 & cpu::CR4_PAE) == 0 {
         panic!("PAE not enabled in CR4");
     }
     if (efer & (1 << 8)) == 0 {
@@ -72,7 +43,7 @@ pub fn verify_memory_layout() {
 }
 
 pub fn check_stack_health() {
-    let rsp = get_stack_pointer();
+    let rsp = cpu::read_rsp();
     if rsp == 0 {
         panic!("Stack pointer is null");
     }
@@ -90,7 +61,7 @@ pub fn check_stack_health() {
 }
 
 pub fn verify_cpu_features() {
-    let (_eax1, _ebx1, _ecx1, edx1) = slopos_lib::cpu::cpuid(1);
+    let (_, _, _, edx1) = cpu::cpuid(1);
     if (edx1 & (1 << 6)) == 0 {
         panic!("CPU does not support PAE");
     }
@@ -98,7 +69,7 @@ pub fn verify_cpu_features() {
         panic!("CPU does not support PGE");
     }
 
-    let (_eax2, _ebx2, _ecx2, edx2) = slopos_lib::cpu::cpuid(0x8000_0001);
+    let (_, _, _, edx2) = cpu::cpuid(0x8000_0001);
     if (edx2 & (1 << 29)) == 0 {
         panic!("CPU does not support long mode");
     }

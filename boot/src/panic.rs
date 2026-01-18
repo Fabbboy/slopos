@@ -42,51 +42,12 @@ fn take_panic_cpu_state() -> (Option<u64>, Option<u64>) {
     }
 }
 
-#[inline]
-fn read_rsp() -> u64 {
-    let rsp: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
-    rsp
-}
-
-#[inline]
-fn read_rbp() -> u64 {
-    cpu::read_rbp()
-}
-
-#[derive(Clone, Copy)]
-enum ControlRegister {
-    Cr0,
-    Cr3,
-    Cr4,
-}
-
-fn read_cr(reg: ControlRegister) -> u64 {
-    let value: u64;
-    unsafe {
-        match reg {
-            ControlRegister::Cr0 => {
-                core::arch::asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags))
-            }
-            ControlRegister::Cr3 => {
-                core::arch::asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags))
-            }
-            ControlRegister::Cr4 => {
-                core::arch::asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags))
-            }
-        }
-    }
-    value
-}
-
 fn panic_serial_write(s: &str) {
     serial::write_line(s);
 }
 
 fn panic_dump_backtrace() {
-    let rbp = read_rbp();
+    let rbp = cpu::read_rbp();
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
         frame_pointer: 0,
         return_address: 0,
@@ -126,10 +87,10 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     let (extra_rip, extra_rsp) = take_panic_cpu_state();
 
-    let current_rsp = read_rsp();
-    let cr0 = read_cr(ControlRegister::Cr0);
-    let cr3 = read_cr(ControlRegister::Cr3);
-    let cr4 = read_cr(ControlRegister::Cr4);
+    let current_rsp = cpu::read_rsp();
+    let cr0 = cpu::read_cr0();
+    let cr3 = cpu::read_cr3();
+    let cr4 = cpu::read_cr4();
 
     let display_rip = extra_rip;
     let display_rsp = extra_rsp.unwrap_or(current_rsp);

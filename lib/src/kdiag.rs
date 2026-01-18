@@ -1,5 +1,4 @@
 use crate::string::cstr_to_str;
-use core::arch::asm;
 use core::ffi::{c_char, c_int};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -72,62 +71,42 @@ pub fn kdiag_timestamp() -> u64 {
     MONOTONIC_TIME.load(Ordering::Relaxed)
 }
 pub fn kdiag_dump_cpu_state() {
-    let (rsp, rbp, rax, rbx, rcx, rdx, rsi, rdi): (u64, u64, u64, u64, u64, u64, u64, u64);
-    let (r8, r9, r10, r11, r12, r13, r14, r15): (u64, u64, u64, u64, u64, u64, u64, u64);
-    let (rflags, cr0, cr2, cr3, cr4): (u64, u64, u64, u64, u64);
+    let regs = cpu::snapshot_regs();
+    let rflags = cpu::read_rflags();
+    let cr0 = cpu::read_cr0();
+    let cr2 = cpu::read_cr2();
+    let cr3 = cpu::read_cr3();
+    let cr4 = cpu::read_cr4();
+
     let (cs, ds, es, fs, gs, ss): (u16, u16, u16, u16, u16, u16);
-
     unsafe {
-        asm!("mov {}, rsp", out(reg) rsp);
-        asm!("mov {}, rbp", out(reg) rbp);
-        asm!("mov {}, rax", out(reg) rax);
-        asm!("mov {}, rbx", out(reg) rbx);
-        asm!("mov {}, rcx", out(reg) rcx);
-        asm!("mov {}, rdx", out(reg) rdx);
-        asm!("mov {}, rsi", out(reg) rsi);
-        asm!("mov {}, rdi", out(reg) rdi);
-        asm!("mov {}, r8", out(reg) r8);
-        asm!("mov {}, r9", out(reg) r9);
-        asm!("mov {}, r10", out(reg) r10);
-        asm!("mov {}, r11", out(reg) r11);
-        asm!("mov {}, r12", out(reg) r12);
-        asm!("mov {}, r13", out(reg) r13);
-        asm!("mov {}, r14", out(reg) r14);
-        asm!("mov {}, r15", out(reg) r15);
-        asm!("pushfq; pop {}", out(reg) rflags);
-
-        asm!("mov {0:x}, cs", out(reg) cs);
-        asm!("mov {0:x}, ds", out(reg) ds);
-        asm!("mov {0:x}, es", out(reg) es);
-        asm!("mov {0:x}, fs", out(reg) fs);
-        asm!("mov {0:x}, gs", out(reg) gs);
-        asm!("mov {0:x}, ss", out(reg) ss);
-
-        asm!("mov {}, cr0", out(reg) cr0);
-        asm!("mov {}, cr2", out(reg) cr2);
-        asm!("mov {}, cr3", out(reg) cr3);
-        asm!("mov {}, cr4", out(reg) cr4);
+        core::arch::asm!("mov {0:x}, cs", out(reg) cs);
+        core::arch::asm!("mov {0:x}, ds", out(reg) ds);
+        core::arch::asm!("mov {0:x}, es", out(reg) es);
+        core::arch::asm!("mov {0:x}, fs", out(reg) fs);
+        core::arch::asm!("mov {0:x}, gs", out(reg) gs);
+        core::arch::asm!("mov {0:x}, ss", out(reg) ss);
     }
 
     crate::klog_info!("=== CPU STATE DUMP ===");
     crate::klog_info!(
         "General Purpose Registers:\n  RAX: 0x{:x}  RBX: 0x{:x}  RCX: 0x{:x}  RDX: 0x{:x}\n  RSI: 0x{:x}  RDI: 0x{:x}  RBP: 0x{:x}  RSP: 0x{:x}\n  R8 : 0x{:x}  R9 : 0x{:x}  R10: 0x{:x}  R11: 0x{:x}\n  R12: 0x{:x}  R13: 0x{:x}  R14: 0x{:x}  R15: 0x{:x}",
-        rax,
-        rbx,
-        rcx,
-        rdx,
-        rsi,
-        rdi,
-        rbp,
-        rsp,
-        r8,
-        r9,
-        r10,
-        r11,
-        r12,
-        r13,
-        r14,
-        r15
+        regs.rax,
+        regs.rbx,
+        regs.rcx,
+        regs.rdx,
+        regs.rsi,
+        regs.rdi,
+        regs.rbp,
+        regs.rsp,
+        regs.r8,
+        regs.r9,
+        regs.r10,
+        regs.r11,
+        regs.r12,
+        regs.r13,
+        regs.r14,
+        regs.r15
     );
     crate::klog_info!(
         "Flags Register:\n  RFLAGS: 0x{:x} [CF:{} PF:{} AF:{} ZF:{} SF:{} TF:{} IF:{} DF:{} OF:{}]",

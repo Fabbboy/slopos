@@ -88,6 +88,31 @@ pub mod cpu {
     }
 
     #[inline(always)]
+    pub fn read_cr0() -> u64 {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
+
+    #[inline(always)]
+    pub fn write_cr0(value: u64) {
+        unsafe {
+            asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags));
+        }
+    }
+
+    #[inline(always)]
+    pub fn read_cr2() -> u64 {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
+
+    #[inline(always)]
     pub fn read_cr3() -> u64 {
         let value: u64;
         unsafe {
@@ -95,6 +120,83 @@ pub mod cpu {
         }
         value
     }
+
+    #[inline(always)]
+    pub fn write_cr3(value: u64) {
+        unsafe {
+            asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags));
+        }
+    }
+
+    #[inline(always)]
+    pub fn read_cr4() -> u64 {
+        let value: u64;
+        unsafe {
+            asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
+
+    #[inline(always)]
+    pub fn write_cr4(value: u64) {
+        unsafe {
+            asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags));
+        }
+    }
+
+    #[inline(always)]
+    pub fn wbinvd() {
+        unsafe {
+            asm!("wbinvd", options(nostack, preserves_flags));
+        }
+    }
+
+    #[inline(always)]
+    pub fn flush_tlb_all() {
+        let cr3 = read_cr3();
+        write_cr3(cr3);
+    }
+
+    #[inline(always)]
+    pub fn invlpg(vaddr: u64) {
+        unsafe {
+            asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+        }
+    }
+
+    pub const CR0_PE: u64 = 1 << 0;
+    pub const CR0_MP: u64 = 1 << 1;
+    pub const CR0_EM: u64 = 1 << 2;
+    pub const CR0_TS: u64 = 1 << 3;
+    pub const CR0_ET: u64 = 1 << 4;
+    pub const CR0_NE: u64 = 1 << 5;
+    pub const CR0_WP: u64 = 1 << 16;
+    pub const CR0_AM: u64 = 1 << 18;
+    pub const CR0_NW: u64 = 1 << 29;
+    pub const CR0_CD: u64 = 1 << 30;
+    pub const CR0_PG: u64 = 1 << 31;
+
+    pub const CR4_VME: u64 = 1 << 0;
+    pub const CR4_PVI: u64 = 1 << 1;
+    pub const CR4_TSD: u64 = 1 << 2;
+    pub const CR4_DE: u64 = 1 << 3;
+    pub const CR4_PSE: u64 = 1 << 4;
+    pub const CR4_PAE: u64 = 1 << 5;
+    pub const CR4_MCE: u64 = 1 << 6;
+    pub const CR4_PGE: u64 = 1 << 7;
+    pub const CR4_PCE: u64 = 1 << 8;
+    pub const CR4_OSFXSR: u64 = 1 << 9;
+    pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
+    pub const CR4_UMIP: u64 = 1 << 11;
+    pub const CR4_LA57: u64 = 1 << 12;
+    pub const CR4_VMXE: u64 = 1 << 13;
+    pub const CR4_SMXE: u64 = 1 << 14;
+    pub const CR4_FSGSBASE: u64 = 1 << 16;
+    pub const CR4_PCIDE: u64 = 1 << 17;
+    pub const CR4_OSXSAVE: u64 = 1 << 18;
+    pub const CR4_SMEP: u64 = 1 << 20;
+    pub const CR4_SMAP: u64 = 1 << 21;
+    pub const CR4_PKE: u64 = 1 << 22;
 
     #[inline(always)]
     pub fn read_msr(msr: u32) -> u64 {

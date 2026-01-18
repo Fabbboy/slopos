@@ -217,31 +217,9 @@ impl TlbShootdownState {
 
 static TLB_STATE: TlbShootdownState = TlbShootdownState::new();
 
-// =============================================================================
-// Low-Level TLB Operations
-// =============================================================================
-
-/// Invalidate a single TLB entry for the given virtual address (local CPU only).
-#[inline(always)]
-fn invlpg(vaddr: VirtAddr) {
-    unsafe {
-        core::arch::asm!(
-            "invlpg [{}]",
-            in(reg) vaddr.as_u64(),
-            options(nostack, preserves_flags)
-        );
-    }
-}
-
-/// Flush entire TLB by reloading CR3 (local CPU only).
-/// This invalidates all non-global TLB entries.
 #[inline(always)]
 fn flush_tlb_local_full() {
-    unsafe {
-        let cr3: u64;
-        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
-        core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
-    }
+    cpu::flush_tlb_all();
 }
 
 /// INVPCID descriptor structure for the INVPCID instruction.
@@ -282,7 +260,7 @@ fn invpcid(invtype: InvpcidType, pcid: u64, addr: u64) {
 
 #[inline]
 fn flush_page_local(vaddr: VirtAddr) {
-    invlpg(vaddr);
+    cpu::invlpg(vaddr.as_u64());
 }
 
 /// Flush a range of pages on the local CPU.
@@ -303,7 +281,7 @@ fn flush_range_local(start: VirtAddr, end: VirtAddr) {
 
     let mut addr = start_addr;
     while addr < end_addr {
-        invlpg(VirtAddr::new(addr));
+        cpu::invlpg(addr);
         addr += PAGE_SIZE_4KB;
     }
 }
@@ -463,10 +441,7 @@ pub fn flush_all() {
 /// This is useful when destroying a process - we only need to flush
 /// entries associated with that process's page tables.
 pub fn flush_asid(asid: u64) {
-    let current_cr3: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nostack, preserves_flags));
-    }
+    let current_cr3 = cpu::read_cr3();
 
     if (current_cr3 & !0xFFF) == (asid & !0xFFF) {
         flush_tlb_local_full();
