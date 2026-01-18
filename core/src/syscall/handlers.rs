@@ -99,11 +99,11 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 }
 
 define_syscall!(syscall_surface_commit(ctx, args, task_id) requires task_id {
-    ctx.from_rc(video::surface_commit(task_id))
+    ctx.from_result(video::surface_commit(task_id))
 });
 
 define_syscall!(syscall_surface_frame(ctx, args, task_id) requires task_id {
-    ctx.from_rc(video::surface_request_frame_callback(task_id))
+    ctx.from_result(video::surface_request_frame_callback(task_id))
 });
 
 define_syscall!(syscall_poll_frame_done(ctx, args, task_id) requires task_id {
@@ -127,7 +127,7 @@ define_syscall!(syscall_surface_damage(ctx, args, task_id) requires task_id {
     let y = args.arg1_i32();
     let width = args.arg2_i32();
     let height = args.arg3_i32();
-    ctx.from_rc(video::surface_add_damage(task_id, x, y, width, height))
+    ctx.from_result(video::surface_add_damage(task_id, x, y, width, height))
 });
 
 define_syscall!(syscall_shm_create(ctx, args, process_id) requires process_id {
@@ -163,8 +163,9 @@ define_syscall!(syscall_surface_attach(ctx, args, task_id, process_id) requires 
     let height = args.arg2_u32();
     let result = slopos_mm::shared_memory::surface_attach(process_id, token, width, height);
     check_result!(ctx, result);
-    let video_result = video::register_surface(task_id, width, height, token);
-    check_result!(ctx, video_result);
+    if video::register_surface(task_id, width, height, token).is_err() {
+        return ctx.err();
+    }
     ctx.ok(0)
 });
 
@@ -177,21 +178,18 @@ define_syscall!(syscall_shm_create_with_format(ctx, args, task_id) requires task
 
 define_syscall!(syscall_surface_set_role(ctx, args, task_id) requires task_id {
     let role = args.arg0 as u8;
-    let result = video::surface_set_role(task_id, role);
-    ctx.ok(result as u64)
+    ctx.from_result(video::surface_set_role(task_id, role))
 });
 
 define_syscall!(syscall_surface_set_parent(ctx, args, task_id) requires task_id {
     let parent_task_id = args.arg0_u32();
-    let result = video::surface_set_parent(task_id, parent_task_id);
-    ctx.ok(result as u64)
+    ctx.from_result(video::surface_set_parent(task_id, parent_task_id))
 });
 
 define_syscall!(syscall_surface_set_rel_pos(ctx, args, task_id) requires task_id {
     let rel_x = args.arg0_i32();
     let rel_y = args.arg1_i32();
-    let result = video::surface_set_relative_position(task_id, rel_x, rel_y);
-    ctx.ok(result as u64)
+    ctx.from_result(video::surface_set_relative_position(task_id, rel_x, rel_y))
 });
 
 define_syscall!(syscall_surface_set_title(ctx, args, task_id) requires task_id {
@@ -199,12 +197,12 @@ define_syscall!(syscall_surface_set_title(ctx, args, task_id) requires task_id {
     let title_len = args.arg1_usize();
 
     if title_ptr.is_null() || title_len == 0 {
-        return ctx.ok((-1i64) as u64);
+        return ctx.err();
     }
 
     let copy_len = title_len.min(31);
     let title_slice = unsafe { core::slice::from_raw_parts(title_ptr, copy_len) };
-    ctx.ok(video::surface_set_title(task_id, title_slice) as u64)
+    ctx.from_result(video::surface_set_title(task_id, title_slice))
 });
 
 define_syscall!(syscall_input_poll(ctx, args, task_id) requires task_id {
@@ -297,18 +295,18 @@ define_syscall!(syscall_set_window_position(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let x = args.arg1_i32();
     let y = args.arg2_i32();
-    ctx.from_rc(video::surface_set_window_position(target_task_id, x, y))
+    ctx.from_result(video::surface_set_window_position(target_task_id, x, y))
 });
 
 define_syscall!(syscall_set_window_state(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
     let state = args.arg1 as u8;
-    ctx.from_rc(video::surface_set_window_state(target_task_id, state))
+    ctx.from_result(video::surface_set_window_state(target_task_id, state))
 });
 
 define_syscall!(syscall_raise_window(ctx, args) requires compositor {
     let target_task_id = args.arg0_u32();
-    ctx.from_rc(video::surface_raise_window(target_task_id))
+    ctx.from_result(video::surface_raise_window(target_task_id))
 });
 
 define_syscall!(syscall_fb_flip(ctx, args) requires compositor {

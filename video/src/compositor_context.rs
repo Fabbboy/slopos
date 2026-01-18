@@ -17,7 +17,6 @@
 use alloc::collections::{BTreeMap, VecDeque};
 
 use slopos_abi::damage::{DamageRect, InternalDamageTracker};
-use slopos_abi::video_traits::VideoResult;
 use slopos_abi::{
     CompositorError, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole, WINDOW_STATE_NORMAL,
     WindowDamageRect, WindowInfo,
@@ -255,7 +254,7 @@ static CONTEXT: IrqMutex<CompositorContext> = IrqMutex::new(CompositorContext::n
 ///
 /// Note: This is now zero-copy. The compositor reads directly from the client's
 /// shared memory buffer. Only damage tracking is transferred on commit.
-pub fn surface_commit(task_id: u32) -> VideoResult {
+pub fn surface_commit(task_id: u32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
     ctx.queue.push_back(ClientOp::Commit { task_id });
     Ok(())

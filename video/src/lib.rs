@@ -4,10 +4,10 @@
 extern crate alloc;
 
 use core::ffi::c_int;
-use slopos_abi::DisplayInfo;
+use slopos_abi::CompositorError;
 use slopos_abi::FramebufferData;
-use slopos_abi::WindowInfo;
 use slopos_abi::addr::PhysAddr;
+use slopos_abi::video_traits::VideoResult;
 use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 use slopos_drivers::{virtio_gpu, xe};
@@ -28,105 +28,21 @@ pub enum VideoBackend {
     Xe,
 }
 
-fn video_get_display_info() -> Option<DisplayInfo> {
-    framebuffer::get_display_info()
-}
-
-fn video_roulette_draw(fate: u32) -> c_int {
-    match roulette_core::roulette_draw_kernel(fate) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-fn video_surface_enumerate_windows(out: *mut WindowInfo, max: u32) -> u32 {
-    compositor_context::surface_enumerate_windows(out, max)
-}
-
-fn video_surface_set_window_position(task_id: u32, x: i32, y: i32) -> c_int {
-    compositor_context::surface_set_window_position(task_id, x, y)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_set_window_state(task_id: u32, state: u8) -> c_int {
-    compositor_context::surface_set_window_state(task_id, state)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_raise_window(task_id: u32) -> c_int {
-    compositor_context::surface_raise_window(task_id)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_commit(task_id: u32) -> c_int {
-    match compositor_context::surface_commit(task_id) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-fn video_register_surface(task_id: u32, width: u32, height: u32, shm_token: u32) -> c_int {
-    compositor_context::register_surface_for_task(task_id, width, height, shm_token)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_drain_queue() {
-    compositor_context::drain_queue();
-}
-
 fn video_fb_flip(shm_phys: PhysAddr, size: usize) -> c_int {
     framebuffer::fb_flip_from_shm(shm_phys, size)
 }
 
-fn video_surface_request_frame_callback(task_id: u32) -> c_int {
-    compositor_context::surface_request_frame_callback(task_id)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
+fn video_roulette_draw(fate: u32) -> VideoResult {
+    roulette_core::roulette_draw_kernel(fate)
 }
 
-fn video_surface_mark_frames_done(present_time_ms: u64) {
-    compositor_context::surface_mark_frames_done(present_time_ms);
-}
-
-fn video_surface_poll_frame_done(task_id: u32) -> u64 {
-    compositor_context::surface_poll_frame_done(task_id)
-}
-
-fn video_surface_add_damage(task_id: u32, x: i32, y: i32, width: i32, height: i32) -> c_int {
-    compositor_context::surface_add_damage(task_id, x, y, width, height)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_get_buffer_age(task_id: u32) -> u8 {
-    compositor_context::surface_get_buffer_age(task_id)
-}
-
-fn video_surface_set_role(task_id: u32, role: u8) -> c_int {
-    compositor_context::surface_set_role(task_id, role)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_set_parent(task_id: u32, parent_task_id: u32) -> c_int {
-    compositor_context::surface_set_parent(task_id, parent_task_id)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_set_relative_position(task_id: u32, rel_x: i32, rel_y: i32) -> c_int {
-    compositor_context::surface_set_relative_position(task_id, rel_x, rel_y)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
-}
-
-fn video_surface_set_title(task_id: u32, title_ptr: *const u8, title_len: usize) -> c_int {
+fn video_surface_set_title(
+    task_id: u32,
+    title_ptr: *const u8,
+    title_len: usize,
+) -> Result<(), CompositorError> {
     if title_ptr.is_null() {
-        return -1;
+        return Err(CompositorError::InvalidArgument);
     }
 
     let ptr_addr = title_ptr as u64;
@@ -134,42 +50,35 @@ fn video_surface_set_title(task_id: u32, title_ptr: *const u8, title_len: usize)
     let end_addr = ptr_addr.saturating_add(len as u64);
     use slopos_mm::mm_constants::USER_SPACE_END_VA;
     if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
-        return -1;
+        return Err(CompositorError::InvalidArgument);
     }
 
     let title = unsafe { core::slice::from_raw_parts(title_ptr, len) };
     compositor_context::surface_set_title(task_id, title)
-        .map(|()| 0)
-        .unwrap_or_else(|e| e.as_c_int())
 }
 
 static VIDEO_SERVICES: VideoServices = VideoServices {
-    get_display_info: video_get_display_info,
+    get_display_info: framebuffer::get_display_info,
     roulette_draw: video_roulette_draw,
-    surface_enumerate_windows: video_surface_enumerate_windows,
-    surface_set_window_position: video_surface_set_window_position,
-    surface_set_window_state: video_surface_set_window_state,
-    surface_raise_window: video_surface_raise_window,
-    surface_commit: video_surface_commit,
-    register_surface: video_register_surface,
-    drain_queue: video_drain_queue,
+    surface_enumerate_windows: compositor_context::surface_enumerate_windows,
+    surface_set_window_position: compositor_context::surface_set_window_position,
+    surface_set_window_state: compositor_context::surface_set_window_state,
+    surface_raise_window: compositor_context::surface_raise_window,
+    surface_commit: compositor_context::surface_commit,
+    register_surface: compositor_context::register_surface_for_task,
+    drain_queue: compositor_context::drain_queue,
     fb_flip: video_fb_flip,
-    surface_request_frame_callback: video_surface_request_frame_callback,
-    surface_mark_frames_done: video_surface_mark_frames_done,
-    surface_poll_frame_done: video_surface_poll_frame_done,
-    surface_add_damage: video_surface_add_damage,
-    surface_get_buffer_age: video_surface_get_buffer_age,
-    surface_set_role: video_surface_set_role,
-    surface_set_parent: video_surface_set_parent,
-    surface_set_relative_position: video_surface_set_relative_position,
+    surface_request_frame_callback: compositor_context::surface_request_frame_callback,
+    surface_mark_frames_done: compositor_context::surface_mark_frames_done,
+    surface_poll_frame_done: compositor_context::surface_poll_frame_done,
+    surface_add_damage: compositor_context::surface_add_damage,
+    surface_get_buffer_age: compositor_context::surface_get_buffer_age,
+    surface_set_role: compositor_context::surface_set_role,
+    surface_set_parent: compositor_context::surface_set_parent,
+    surface_set_relative_position: compositor_context::surface_set_relative_position,
     surface_set_title: video_surface_set_title,
 };
 
-// =============================================================================
-// Task cleanup callback
-// =============================================================================
-
-/// Called when a task terminates to clean up its surface resources.
 fn task_cleanup_callback(task_id: u32) {
     compositor_context::unregister_surface_for_task(task_id);
 }
