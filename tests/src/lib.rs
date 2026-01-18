@@ -392,18 +392,18 @@ mod suites {
         unsafe {
             core::arch::asm!(
                 "movdqa xmm1, {src}",
+                "movdqa {dst}, xmm1",
                 src = in(xmm_reg) pattern2,
-            );
-            core::arch::asm!(
-                "movdqa {dst}, xmm0",
                 dst = out(xmm_reg) readback2,
             );
         }
 
+        let mut expected2_bytes = [0u8; 16];
         unsafe {
             _mm_storeu_si128(result.as_mut_ptr() as *mut __m128i, readback2);
+            _mm_storeu_si128(expected2_bytes.as_mut_ptr() as *mut __m128i, pattern2);
         }
-        if result == expected_bytes {
+        if result == expected2_bytes {
             passed += 1;
         }
 

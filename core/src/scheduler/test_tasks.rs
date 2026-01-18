@@ -19,22 +19,6 @@ use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 
 use slopos_abi::arch::{GDT_USER_CODE_SELECTOR, GDT_USER_DATA_SELECTOR, SYSCALL_VECTOR};
 
-use spin::Once;
-
-static IDT_GATE_HOOK: Once<fn(u8, *mut c_void) -> c_int> = Once::new();
-
-pub fn register_idt_gate_hook(hook: fn(u8, *mut c_void) -> c_int) {
-    IDT_GATE_HOOK.call_once(|| hook);
-}
-
-fn idt_get_gate(vector: u8, entry: *mut c_void) -> c_int {
-    if let Some(hook) = IDT_GATE_HOOK.get() {
-        hook(vector, entry)
-    } else {
-        -1
-    }
-}
-
 /* ========================================================================
  * TEST TASK IMPLEMENTATIONS
  * ======================================================================== */
@@ -260,7 +244,7 @@ pub fn run_privilege_separation_invariant_test() -> c_int {
     };
 
     let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
-    if idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
+    if crate::platform::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
         klog_info!("PRIVSEP_TEST: cannot read syscall gate");
         failed = 1;
     } else {
