@@ -1,7 +1,20 @@
-//! Syscall number definitions (kernel-userland ABI)
+//! Syscall number definitions (kernel-userland ABI).
 //!
-//! Single source of truth for all syscall numbers. Both kernel and userland
-//! should import from this module to ensure ABI consistency.
+//! This module is the **single source of truth** for all syscall numbers.
+//! Both kernel and userland import from here to ensure ABI consistency.
+//!
+//! # Adding New Syscalls
+//!
+//! 1. Add the constant here with the next available number
+//! 2. Use the `SYSCALL_` prefix for consistency
+//! 3. Group with related syscalls under the appropriate section
+//! 4. Update the dispatch table in `core/src/syscall/handlers.rs`
+//!
+//! # Number Allocation
+//!
+//! Numbers are not required to be contiguous. Gaps exist from removed or
+//! reserved syscalls. New syscalls should use the next highest number
+//! to avoid ABI breakage with existing userland binaries.
 
 // =============================================================================
 // Core syscalls
