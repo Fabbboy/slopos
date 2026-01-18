@@ -299,6 +299,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
         return;
     }
 
+    if vector == EXCEPTION_PAGE_FAULT {
+        if try_handle_page_fault(frame) {
+            return;
+        }
+    }
+
     let cr2 = cpu::read_cr2();
     klog_debug!(
         "EXCEPTION: vec={} rip=0x{:x} err=0x{:x} cs=0x{:x} ss=0x{:x} cr2=0x{:x}",
@@ -544,6 +550,44 @@ pub fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
     kdiag_dump_interrupt_frame(frame);
     panic_with_frame("General protection fault", frame);
 }
+fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
+    let fault_addr = cpu::read_cr2();
+    let frame_ref = unsafe { &*frame };
+
+    if ist_stacks::ist_guard_fault(fault_addr, core::ptr::null_mut()) != 0 {
+        return false;
+    }
+
+    if !in_user(frame_ref) {
+        return false;
+    }
+
+    let task_ptr = scheduler_get_current_task() as *mut Task;
+    if task_ptr.is_null() {
+        return false;
+    }
+
+    let pid = unsafe { (*task_ptr).process_id };
+    let page_dir = process_vm::process_vm_get_page_dir(pid);
+    if page_dir.is_null() {
+        return false;
+    }
+
+    if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
+        if cow::handle_cow_fault(page_dir, fault_addr).is_ok() {
+            return true;
+        }
+    }
+
+    if demand::is_demand_fault(frame_ref.error_code, pid, fault_addr) {
+        if demand::handle_demand_fault(page_dir, pid, fault_addr, frame_ref.error_code).is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
     let fault_addr = cpu::read_cr2();
 
