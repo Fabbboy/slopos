@@ -33,7 +33,10 @@ pub mod video_traits;
 pub mod window;
 
 pub use addr::*;
-pub use damage::{DamageRect, DamageTracker, MAX_DAMAGE_REGIONS};
+pub use damage::{
+    DamageRect, DamageTracker, InternalDamageTracker, MAX_DAMAGE_REGIONS,
+    MAX_INTERNAL_DAMAGE_REGIONS,
+};
 pub use display::{DisplayInfo, FramebufferData};
 pub use draw::{DamageTracking, DrawTarget, PixelBuffer, pixel_ops};
 pub use error::*;

@@ -16,118 +16,20 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 
-use slopos_abi::damage::DamageRect;
+use slopos_abi::damage::{DamageRect, InternalDamageTracker};
 use slopos_abi::video_traits::VideoResult;
 use slopos_abi::{
-    CompositorError, MAX_CHILDREN, MAX_INTERNAL_DAMAGE_REGIONS, MAX_WINDOW_DAMAGE_REGIONS,
-    SurfaceRole, WINDOW_STATE_NORMAL, WindowDamageRect, WindowInfo,
+    CompositorError, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole, WINDOW_STATE_NORMAL,
+    WindowDamageRect, WindowInfo,
 };
 use slopos_lib::IrqMutex;
 
-/// Advanced damage tracker with 32 regions and automatic merging.
-struct DamageTracker {
-    regions: [DamageRect; MAX_INTERNAL_DAMAGE_REGIONS],
-    count: u8,
-    /// Set when damage exceeds capacity - means entire surface is dirty
-    full_damage: bool,
-}
+type DamageTracker = InternalDamageTracker;
 
-impl DamageTracker {
-    const fn new() -> Self {
-        Self {
-            regions: [DamageRect::invalid(); MAX_INTERNAL_DAMAGE_REGIONS],
-            count: 0,
-            full_damage: false,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.count = 0;
-        self.full_damage = false;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.count == 0 && !self.full_damage
-    }
-
-    fn set_full_damage(&mut self) {
-        self.full_damage = true;
-    }
-
-    fn add(&mut self, rect: DamageRect) {
-        if !rect.is_valid() {
-            return;
-        }
-
-        // If already full damage, nothing to do
-        if self.full_damage {
-            return;
-        }
-
-        // Try to merge with existing regions
-        for i in 0..(self.count as usize) {
-            if self.regions[i].intersects(&rect) {
-                self.regions[i] = self.regions[i].union(&rect);
-                self.merge_overlapping();
-                return;
-            }
-        }
-
-        // Add as new region if space available
-        if (self.count as usize) < MAX_INTERNAL_DAMAGE_REGIONS {
-            self.regions[self.count as usize] = rect;
-            self.count += 1;
-        } else {
-            // No space - mark full damage
-            self.full_damage = true;
-        }
-    }
-
-    /// Merge overlapping regions to reduce count
-    fn merge_overlapping(&mut self) {
-        if self.count <= 1 {
-            return;
-        }
-
-        let mut i = 0;
-        while i < self.count as usize {
-            let mut j = i + 1;
-            while j < self.count as usize {
-                if self.regions[i].intersects(&self.regions[j]) {
-                    self.regions[i] = self.regions[i].union(&self.regions[j]);
-                    // Remove region j by swapping with last
-                    self.count -= 1;
-                    self.regions[j] = self.regions[self.count as usize];
-                    // Don't increment j - check the swapped region
-                } else {
-                    j += 1;
-                }
-            }
-            i += 1;
-        }
-    }
-
-    /// Export to the smaller WindowInfo format (max 8 regions)
-    fn export_to_window_format(&self) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
-        let mut out = [DamageRect::invalid(); MAX_WINDOW_DAMAGE_REGIONS];
-
-        if self.full_damage {
-            // Return empty list with u8::MAX count to indicate full damage
-            return (out, u8::MAX);
-        }
-
-        let export_count = (self.count as usize).min(MAX_WINDOW_DAMAGE_REGIONS);
-        for i in 0..export_count {
-            out[i] = self.regions[i];
-        }
-
-        // If we had to truncate, indicate full damage
-        if (self.count as usize) > MAX_WINDOW_DAMAGE_REGIONS {
-            return (out, u8::MAX);
-        }
-
-        (out, export_count as u8)
-    }
+fn export_damage_to_window_format(
+    tracker: &DamageTracker,
+) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
+    tracker.export_to_array::<MAX_WINDOW_DAMAGE_REGIONS>()
 }
 
 // =============================================================================
@@ -277,9 +179,8 @@ impl SurfaceState {
         self.dirty = true;
     }
 
-    /// Add damage to pending state (called via syscall before commit)
     fn add_damage(&mut self, x: i32, y: i32, width: i32, height: i32) {
-        self.pending_damage.add(DamageRect {
+        self.pending_damage.add_merge_overlapping(DamageRect {
             x0: x,
             y0: y,
             x1: x.saturating_add(width).saturating_sub(1),
@@ -287,9 +188,8 @@ impl SurfaceState {
         });
     }
 
-    /// Export committed damage to WindowInfo format
     fn export_damage(&self) -> ([DamageRect; MAX_WINDOW_DAMAGE_REGIONS], u8) {
-        self.committed_damage.export_to_window_format()
+        export_damage_to_window_format(&self.committed_damage)
     }
 }
 

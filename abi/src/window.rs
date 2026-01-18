@@ -1,10 +1,8 @@
 //! Window and damage region types
 
-/// Maximum damage regions per window (ABI-stable)
-pub const MAX_WINDOW_DAMAGE_REGIONS: usize = 8;
-
-/// Maximum damage regions tracked internally (higher resolution)
-pub const MAX_INTERNAL_DAMAGE_REGIONS: usize = 32;
+pub use crate::damage::{
+    MAX_DAMAGE_REGIONS as MAX_WINDOW_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS,
+};
 
 /// Maximum buffer age before it's considered invalid (for damage accumulation)
 pub const MAX_BUFFER_AGE: u8 = 8;
