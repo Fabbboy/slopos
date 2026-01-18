@@ -2,10 +2,9 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::{c_int, c_void};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
-use slopos_lib::{align_up, klog_debug, klog_info};
+use slopos_lib::{InitFlag, align_up, klog_debug, klog_info};
 
 use crate::pci::{
     PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_write8, pci_register_driver,
@@ -889,8 +888,8 @@ static VIRTIO_GPU_PCI_DRIVER: PciDriver = PciDriver {
 };
 
 pub fn virtio_gpu_register_driver() {
-    static REGISTERED: AtomicBool = AtomicBool::new(false);
-    if REGISTERED.swap(true, Ordering::SeqCst) {
+    static REGISTERED: InitFlag = InitFlag::new();
+    if !REGISTERED.claim() {
         return;
     }
     if pci_register_driver(&VIRTIO_GPU_PCI_DRIVER) != 0 {

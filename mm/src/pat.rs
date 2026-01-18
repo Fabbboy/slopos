@@ -23,11 +23,9 @@
 //! This layout is Linux-compatible and places WC at index 1 (PWT=1, PCD=0, PAT=0),
 //! which corresponds to the `WRITE_THROUGH` page flag when PAT bit is clear.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use slopos_abi::arch::x86_64::cpuid::CPUID_FEAT_EDX_PAT;
 use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_lib::{cpu, klog_debug, klog_info, klog_warn};
+use slopos_lib::{InitFlag, cpu, klog_debug, klog_info, klog_warn};
 
 // =============================================================================
 // Memory Type Constants
@@ -88,23 +86,17 @@ const PAT_DEFAULT: u64 = (MEM_TYPE_WB as u64)
     | ((MEM_TYPE_UC_MINUS as u64) << 48)
     | ((MEM_TYPE_UC as u64) << 56);
 
-// =============================================================================
-// State Tracking
-// =============================================================================
+static PAT_INIT: InitFlag = InitFlag::new();
+static PAT_SUPPORTED: InitFlag = InitFlag::new();
 
-static PAT_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static PAT_SUPPORTED: AtomicBool = AtomicBool::new(false);
-
-/// Check if PAT has been initialized.
 #[inline]
 pub fn is_initialized() -> bool {
-    PAT_INITIALIZED.load(Ordering::Acquire)
+    PAT_INIT.is_set()
 }
 
-/// Check if PAT is supported by the CPU.
 #[inline]
 pub fn is_supported() -> bool {
-    PAT_SUPPORTED.load(Ordering::Acquire)
+    PAT_SUPPORTED.is_set()
 }
 
 // =============================================================================
@@ -148,20 +140,17 @@ pub fn pat_supported() -> bool {
 /// 9. Flush TLBs
 /// 10. Re-enable interrupts
 pub fn pat_init() {
-    // Don't initialize twice
-    if PAT_INITIALIZED.swap(true, Ordering::SeqCst) {
+    if !PAT_INIT.init_once() {
         klog_debug!("PAT: Already initialized, skipping");
         return;
     }
 
-    // Check CPU support
     if !pat_supported() {
         klog_warn!("PAT: Not supported by CPU, framebuffer performance may suffer");
-        PAT_SUPPORTED.store(false, Ordering::Release);
         return;
     }
 
-    PAT_SUPPORTED.store(true, Ordering::Release);
+    PAT_SUPPORTED.mark_set();
 
     klog_debug!("PAT: Initializing Page Attribute Table with WC support");
 

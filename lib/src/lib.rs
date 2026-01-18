@@ -402,6 +402,7 @@ pub mod tsc {
 
 pub mod alignment;
 pub mod free_list;
+pub mod init_flag;
 pub mod kdiag;
 pub mod klog;
 pub mod math;
@@ -439,3 +440,5 @@ pub use sync::{
     CleanLockToken, L0, L1, L2, L3, L4, L5, Level, LockToken, Lower, Mutex as OrderedMutex,
     MutexGuard as OrderedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
+
+pub use init_flag::{InitFlag, StateFlag};

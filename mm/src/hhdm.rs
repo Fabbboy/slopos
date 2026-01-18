@@ -27,46 +27,25 @@
 //! }
 //! ```
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-
-// =============================================================================
-// HHDM Storage (Single Source of Truth)
-// =============================================================================
+use slopos_lib::InitFlag;
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
-static HHDM_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static HHDM_INIT: InitFlag = InitFlag::new();
 
-/// Initialize HHDM with offset from bootloader.
-///
-/// This must be called **once** during early boot before any HHDM translations.
-///
-/// # Panics
-///
-/// Panics if called more than once. This catches double-init bugs at runtime.
-///
-/// # Memory Ordering
-///
-/// The offset is stored with Release ordering BEFORE setting the initialized flag.
-/// This ensures that any thread observing `is_available() == true` will also
-/// see the correct offset value (no race between flag and offset).
 pub fn init(offset: u64) {
-    // Store offset FIRST with Release ordering
     HHDM_OFFSET.store(offset, Ordering::Release);
 
-    // Then set the initialized flag - if already set, we have a double-init bug
-    if HHDM_INITIALIZED.swap(true, Ordering::SeqCst) {
+    if !HHDM_INIT.init_once() {
         panic!("HHDM already initialized - init() called twice!");
     }
 }
 
-/// Check if HHDM has been initialized.
-///
-/// Returns `true` after `init()` has been called.
 #[inline]
 pub fn is_available() -> bool {
-    HHDM_INITIALIZED.load(Ordering::Acquire)
+    HHDM_INIT.is_set()
 }
 
 /// Get the raw HHDM offset value.

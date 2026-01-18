@@ -1,9 +1,9 @@
 use core::cell::UnsafeCell;
 use core::mem;
 use core::ptr::read_unaligned;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::ioapic::*;
@@ -171,8 +171,8 @@ static IOAPIC_TABLE: IoapicTable = IoapicTable::new();
 static ISO_TABLE: IoapicIsoTable = IoapicIsoTable::new();
 static IOAPIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ISO_COUNT: AtomicUsize = AtomicUsize::new(0);
-static IOAPIC_READY: AtomicBool = AtomicBool::new(false);
-static IOAPIC_INIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static IOAPIC_READY: InitFlag = InitFlag::new();
+static IOAPIC_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 
 /// Map IOAPIC MMIO region, returning the virtual base address.
 /// Returns 0 if mapping fails (HHDM unavailable or invalid address).
@@ -477,21 +477,18 @@ fn ioapic_parse_madt(madt: *const AcpiMadt) {
 }
 
 pub fn init() -> i32 {
-    if IOAPIC_READY.load(Ordering::Acquire) {
+    if IOAPIC_READY.is_set() {
         return 0;
     }
-    if IOAPIC_INIT_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        while !IOAPIC_READY.load(Ordering::Acquire) {
+    if !IOAPIC_INIT_IN_PROGRESS.enter() {
+        while !IOAPIC_READY.is_set() {
             core::hint::spin_loop();
         }
         return 0;
     }
 
     let init_fail = || {
-        IOAPIC_INIT_IN_PROGRESS.store(false, Ordering::Release);
+        IOAPIC_INIT_IN_PROGRESS.leave();
         -1
     };
 
@@ -530,13 +527,13 @@ pub fn init() -> i32 {
     }
 
     klog_info!("IOAPIC: Discovery complete");
-    IOAPIC_READY.store(true, Ordering::Release);
-    IOAPIC_INIT_IN_PROGRESS.store(false, Ordering::Release);
+    IOAPIC_READY.mark_set();
+    IOAPIC_INIT_IN_PROGRESS.leave();
     0
 }
 
 pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
-    if !IOAPIC_READY.load(Ordering::Acquire) {
+    if !IOAPIC_READY.is_set() {
         klog_info!("IOAPIC: Driver not initialized");
         return -1;
     }
@@ -582,15 +579,11 @@ pub fn unmask_gsi(gsi: u32) -> i32 {
 }
 
 pub fn is_ready() -> i32 {
-    if IOAPIC_READY.load(Ordering::Acquire) {
-        1
-    } else {
-        0
-    }
+    if IOAPIC_READY.is_set() { 1 } else { 0 }
 }
 
 pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -> i32 {
-    if IOAPIC_READY.load(Ordering::Acquire) == false {
+    if !IOAPIC_READY.is_set() {
         klog_info!("IOAPIC: Legacy route query before initialization");
         return -1;
     }

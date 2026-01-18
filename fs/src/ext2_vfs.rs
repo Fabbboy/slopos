@@ -1,9 +1,7 @@
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use crate::blockdev::{BlockDevice, CallbackBlockDevice, CapacityFn, ReadFn, WriteFn};
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_lib::IrqMutex;
+use slopos_lib::{InitFlag, IrqMutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
 
@@ -23,7 +21,7 @@ impl GlobalExt2Vfs {
 }
 
 static GLOBAL_EXT2_VFS: IrqMutex<GlobalExt2Vfs> = IrqMutex::new(GlobalExt2Vfs::new());
-static EXT2_VFS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
 /// Static wrapper that implements FileSystem by delegating to the global ext2 state.
 /// This enables mounting ext2 at "/" through the VFS layer.
@@ -31,7 +29,7 @@ pub struct StaticExt2Vfs;
 
 impl StaticExt2Vfs {
     fn with_fs<R>(&self, f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
-        if !EXT2_VFS_INITIALIZED.load(Ordering::Acquire) {
+        if !EXT2_VFS_INIT.is_set() {
             return Err(VfsError::IoError);
         }
         let mut guard = GLOBAL_EXT2_VFS.lock();
@@ -243,8 +241,8 @@ pub fn ext2_vfs_init_with_callbacks(
     write_fn: WriteFn,
     capacity_fn: CapacityFn,
 ) -> VfsResult<()> {
-    if EXT2_VFS_INITIALIZED.swap(true, Ordering::AcqRel) {
-        return Ok(()); // Already initialized
+    if !EXT2_VFS_INIT.init_once() {
+        return Ok(());
     }
 
     let device = CallbackBlockDevice::new(read_fn, write_fn, capacity_fn);
@@ -261,9 +259,8 @@ pub fn ext2_vfs_init_with_callbacks(
     Ok(())
 }
 
-/// Check if the ext2 VFS adapter is initialized
 pub fn ext2_vfs_is_initialized() -> bool {
-    EXT2_VFS_INITIALIZED.load(Ordering::Acquire)
+    EXT2_VFS_INIT.is_set()
 }
 
 // ============================================================================

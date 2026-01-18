@@ -2,9 +2,8 @@
 
 use core::ffi::{c_int, c_void};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::{InitFlag, klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
@@ -65,7 +64,7 @@ impl VirtioBlkDevice {
     }
 }
 
-static DEVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
+static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static mut VIRTIO_BLK_DEVICE: VirtioBlkDevice = VirtioBlkDevice::new();
 static mut MMIO_CAPS: VirtioMmioCaps = VirtioMmioCaps::empty();
 
@@ -194,7 +193,7 @@ fn do_request(
 }
 
 fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
-    if DEVICE_CLAIMED.swap(true, Ordering::SeqCst) {
+    if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-blk: already claimed");
         return -1;
     }
@@ -223,14 +222,14 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
 
     if !caps.has_common_cfg() {
         klog_info!("virtio-blk: missing common cfg");
-        DEVICE_CLAIMED.store(false, Ordering::SeqCst);
+        DEVICE_CLAIMED.reset();
         return -1;
     }
 
     let feat_result = negotiate_features(&caps, virtio::VIRTIO_F_VERSION_1, 0);
     if !feat_result.success {
         klog_info!("virtio-blk: features negotiation failed");
-        DEVICE_CLAIMED.store(false, Ordering::SeqCst);
+        DEVICE_CLAIMED.reset();
         return -1;
     }
 
@@ -238,7 +237,7 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
         Some(q) => q,
         None => {
             klog_info!("virtio-blk: queue setup failed");
-            DEVICE_CLAIMED.store(false, Ordering::SeqCst);
+            DEVICE_CLAIMED.reset();
             return -1;
         }
     };

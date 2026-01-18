@@ -1,8 +1,8 @@
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Once;
 
-use slopos_lib::{cpu, klog_debug, klog_info};
+use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::arch::x86_64::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC};
@@ -18,9 +18,9 @@ pub use slopos_abi::arch::x86_64::apic::{
 
 const APIC_REGION_SIZE: usize = PAGE_SIZE_4KB_USIZE;
 
-static APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
-static X2APIC_AVAILABLE: AtomicBool = AtomicBool::new(false);
-static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
+static APIC_AVAILABLE: InitFlag = InitFlag::new();
+static X2APIC_AVAILABLE: InitFlag = InitFlag::new();
+static APIC_ENABLED: InitFlag = InitFlag::new();
 static APIC_BASE_PHYSICAL: AtomicU64 = AtomicU64::new(0);
 
 /// MMIO region for Local APIC registers.
@@ -33,13 +33,14 @@ pub fn detect() -> bool {
     let (_, _, ecx, edx) = cpu::cpuid(1);
     if edx & CPUID_FEAT_EDX_APIC == 0 {
         klog_debug!("APIC: Local APIC is not available");
-        APIC_AVAILABLE.store(false, Ordering::Relaxed);
+        APIC_AVAILABLE.reset();
         return false;
     }
 
-    APIC_AVAILABLE.store(true, Ordering::Relaxed);
-    let x2 = (ecx & CPUID_FEAT_ECX_X2APIC) != 0;
-    X2APIC_AVAILABLE.store(x2, Ordering::Relaxed);
+    APIC_AVAILABLE.mark_set();
+    if (ecx & CPUID_FEAT_ECX_X2APIC) != 0 {
+        X2APIC_AVAILABLE.mark_set();
+    }
 
     let apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
     let apic_phys = apic_base_msr & APIC_BASE_ADDR_MASK;
@@ -77,7 +78,7 @@ pub fn detect() -> bool {
         }
         None => {
             klog_info!("APIC: ERROR - Failed to map APIC registers");
-            APIC_AVAILABLE.store(false, Ordering::Relaxed);
+            APIC_AVAILABLE.reset();
             false
         }
     }
@@ -117,17 +118,17 @@ pub fn init() -> i32 {
     let apic_version = get_version();
     klog_debug!("APIC: ID: 0x{:x}, Version: 0x{:x}", apic_id, apic_version);
 
-    APIC_ENABLED.store(true, Ordering::Relaxed);
+    APIC_ENABLED.mark_set();
     klog_debug!("APIC: Initialization complete");
     0
 }
 
 pub fn is_available() -> bool {
-    APIC_AVAILABLE.load(Ordering::Relaxed)
+    APIC_AVAILABLE.is_set_relaxed()
 }
 
 pub fn is_x2apic_available() -> bool {
-    X2APIC_AVAILABLE.load(Ordering::Relaxed)
+    X2APIC_AVAILABLE.is_set_relaxed()
 }
 
 pub fn is_bsp() -> bool {
@@ -139,7 +140,7 @@ pub fn is_bsp() -> bool {
 }
 
 pub fn is_enabled() -> bool {
-    APIC_ENABLED.load(Ordering::Relaxed)
+    APIC_ENABLED.is_set_relaxed()
 }
 
 pub fn enable() {
@@ -150,7 +151,7 @@ pub fn enable() {
     spurious |= LAPIC_SPURIOUS_ENABLE;
     spurious |= 0xFF;
     write_register(LAPIC_SPURIOUS, spurious);
-    APIC_ENABLED.store(true, Ordering::Relaxed);
+    APIC_ENABLED.mark_set();
     klog_debug!("APIC: Local APIC enabled");
 }
 
@@ -161,7 +162,7 @@ pub fn disable() {
     let mut spurious = read_register(LAPIC_SPURIOUS);
     spurious &= !LAPIC_SPURIOUS_ENABLE;
     write_register(LAPIC_SPURIOUS, spurious);
-    APIC_ENABLED.store(false, Ordering::Relaxed);
+    APIC_ENABLED.reset();
     klog_debug!("APIC: Local APIC disabled");
 }
 

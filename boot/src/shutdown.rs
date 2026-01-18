@@ -1,16 +1,15 @@
 use core::arch::asm;
 use core::ffi::c_char;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_lib::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,
 };
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{cpu, klog_info};
+use slopos_lib::{StateFlag, cpu, klog_info};
 
-static SHUTDOWN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-static INTERRUPTS_QUIESCED: AtomicBool = AtomicBool::new(false);
-static SERIAL_DRAINED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
+static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();
+static SERIAL_DRAINED: StateFlag = StateFlag::new();
 
 use slopos_core::{scheduler_shutdown, task_shutdown_all};
 use slopos_drivers::apic::apic_is_available;
@@ -46,7 +45,7 @@ fn poweroff_hardware() {
 pub fn kernel_quiesce_interrupts() {
     ensure_kernel_page_dir();
     cpu::disable_interrupts();
-    if INTERRUPTS_QUIESCED.swap(true, Ordering::SeqCst) {
+    if !INTERRUPTS_QUIESCED.enter() {
         return;
     }
 
@@ -65,7 +64,7 @@ pub fn kernel_quiesce_interrupts() {
     }
 }
 pub fn kernel_drain_serial_output() {
-    if SERIAL_DRAINED.swap(true, Ordering::SeqCst) {
+    if !SERIAL_DRAINED.enter() {
         return;
     }
     klog_info!("Kernel shutdown: draining serial output");
@@ -75,7 +74,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_kernel_page_dir();
     cpu::disable_interrupts();
 
-    if SHUTDOWN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+    if !SHUTDOWN_IN_PROGRESS.enter() {
         kernel_quiesce_interrupts();
         kernel_drain_serial_output();
         halt();

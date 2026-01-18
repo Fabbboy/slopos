@@ -1,10 +1,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use slopos_abi::{FramebufferData, PhysAddr};
 use slopos_core::wl_currency::{award_loss, award_win};
-use slopos_lib::{klog_info, klog_warn};
+use slopos_lib::{InitFlag, klog_info, klog_warn};
 use slopos_mm::mmio::MmioRegion;
 
 use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
@@ -37,7 +35,7 @@ impl XeDevice {
 }
 
 static mut XE_DEVICE: XeDevice = XeDevice::empty();
-static XE_PROBED: AtomicBool = AtomicBool::new(false);
+static XE_PROBED: InitFlag = InitFlag::new();
 
 fn xe_primary_gpu() -> Option<&'static PciGpuInfo> {
     let gpu = pci_get_primary_gpu();
@@ -52,7 +50,7 @@ fn xe_primary_gpu() -> Option<&'static PciGpuInfo> {
 }
 
 pub fn xe_probe() -> bool {
-    if XE_PROBED.swap(true, Ordering::SeqCst) {
+    if !XE_PROBED.claim() {
         return xe_is_ready();
     }
 

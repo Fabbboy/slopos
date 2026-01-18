@@ -9,12 +9,12 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_abi::arch::x86_64::memory::{
     EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE,
 };
+use slopos_lib::InitFlag;
 use slopos_lib::spinlock::Spinlock;
 use slopos_lib::string::cstr_to_str;
 use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
@@ -103,7 +103,7 @@ impl IrqTables {
 
 // Static state
 static IRQ_TABLES: IrqTables = IrqTables::new();
-static IRQ_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static IRQ_SYSTEM_INIT: InitFlag = InitFlag::new();
 static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
 static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
@@ -238,13 +238,13 @@ pub fn init() {
         TIMER_TICK_COUNTER = 0;
         KEYBOARD_EVENT_COUNTER = 0;
     }
-    IRQ_SYSTEM_INITIALIZED.store(true, Ordering::Relaxed);
+    IRQ_SYSTEM_INIT.mark_set();
     klog_debug!("IRQ: Framework initialized");
 }
 
 /// Check if IRQ system is initialized.
 pub fn is_initialized() -> bool {
-    IRQ_SYSTEM_INITIALIZED.load(Ordering::Relaxed)
+    IRQ_SYSTEM_INIT.is_set_relaxed()
 }
 
 /// Set the IOAPIC route state for an IRQ line (called by drivers during setup).
@@ -353,7 +353,7 @@ pub fn irq_dispatch(frame: *mut InterruptFrame) {
     let expected_cs = frame_ref.cs;
     let expected_rip = frame_ref.rip;
 
-    if !IRQ_SYSTEM_INITIALIZED.load(Ordering::Relaxed) {
+    if !IRQ_SYSTEM_INIT.is_set_relaxed() {
         klog_info!("IRQ: Dispatch received before initialization");
         if vector >= IRQ_BASE_VECTOR {
             acknowledge_irq();

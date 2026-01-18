@@ -38,10 +38,10 @@
 
 use core::ffi::{c_int, c_void};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
@@ -107,7 +107,7 @@ static PER_CPU_CACHES: [PerCpuPageCache; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
-static PCP_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static PCP_INIT: InitFlag = InitFlag::new();
 
 #[derive(Default)]
 struct PageAllocator {
@@ -450,7 +450,7 @@ fn get_current_cpu() -> usize {
 }
 
 fn pcp_try_alloc(cpu: usize) -> u32 {
-    if cpu >= MAX_CPUS || !PCP_INITIALIZED.load(Ordering::Acquire) {
+    if cpu >= MAX_CPUS || !PCP_INIT.is_set() {
         return INVALID_PAGE_FRAME;
     }
 
@@ -495,7 +495,7 @@ fn pcp_try_alloc(cpu: usize) -> u32 {
 }
 
 fn pcp_try_free(cpu: usize, frame_num: u32) -> bool {
-    if cpu >= MAX_CPUS || !PCP_INITIALIZED.load(Ordering::Acquire) {
+    if cpu >= MAX_CPUS || !PCP_INIT.is_set() {
         return false;
     }
 
@@ -728,7 +728,7 @@ pub fn finalize_page_allocator() -> c_int {
 
     drop(alloc);
 
-    PCP_INITIALIZED.store(true, Ordering::Release);
+    PCP_INIT.mark_set();
 
     let alloc = PAGE_ALLOCATOR.lock();
     klog_info!(
@@ -754,7 +754,7 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
     let use_pcp = order == 0
         && (flags & ALLOC_FLAG_DMA) == 0
         && (flags & ALLOC_FLAG_NO_PCP) == 0
-        && PCP_INITIALIZED.load(Ordering::Acquire);
+        && PCP_INIT.is_set();
 
     let frame_num = if use_pcp {
         let cpu = get_current_cpu();
@@ -832,9 +832,7 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
         let is_alloc = PageAllocator::frame_state_is_allocated(frame.state);
         let ord = frame.order as u32;
 
-        let pcp_ok = ord == 0
-            && frame.state == PAGE_FRAME_ALLOCATED
-            && PCP_INITIALIZED.load(Ordering::Acquire);
+        let pcp_ok = ord == 0 && frame.state == PAGE_FRAME_ALLOCATED && PCP_INIT.is_set();
 
         if !is_alloc {
             return 0;

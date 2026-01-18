@@ -1,9 +1,8 @@
 use core::ffi::{c_char, c_int};
 use core::mem::{self, MaybeUninit};
 use core::slice;
-use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::IrqMutex;
+use slopos_lib::{InitFlag, IrqMutex};
 
 use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry};
 
@@ -86,7 +85,7 @@ impl FileioState {
 unsafe impl Send for FileioState {}
 
 static FILEIO_STATE: IrqMutex<FileioState> = IrqMutex::new(FileioState::uninitialized());
-static FILEIO_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static FILEIO_INIT: InitFlag = InitFlag::new();
 
 fn with_state<R>(f: impl FnOnce(&mut FileioState) -> R) -> R {
     let mut guard = FILEIO_STATE.lock();
@@ -166,7 +165,7 @@ fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
 }
 
 fn ensure_initialized(state: &mut FileioState) {
-    if FILEIO_INITIALIZED.swap(true, Ordering::AcqRel) {
+    if !FILEIO_INIT.init_once() {
         return;
     }
 

@@ -1,7 +1,8 @@
 use core::ffi::c_int;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
+use crate::init_flag::InitFlag;
 use crate::ports::COM1;
 
 #[repr(C)]
@@ -27,7 +28,7 @@ impl KlogLevel {
 }
 
 static CURRENT_LEVEL: AtomicU8 = AtomicU8::new(KlogLevel::Info as u8);
-static SERIAL_READY: AtomicBool = AtomicBool::new(false);
+static SERIAL_READY: InitFlag = InitFlag::new();
 
 #[inline(always)]
 fn is_enabled(level: KlogLevel) -> bool {
@@ -36,7 +37,7 @@ fn is_enabled(level: KlogLevel) -> bool {
 
 #[inline(always)]
 fn putc(byte: u8) {
-    let _ready = SERIAL_READY.load(Ordering::Relaxed);
+    let _ready = SERIAL_READY.is_set_relaxed();
     unsafe { COM1.write(byte) }
 }
 
@@ -74,10 +75,10 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
 }
 pub fn klog_init() {
     CURRENT_LEVEL.store(KlogLevel::Info as u8, Ordering::Relaxed);
-    SERIAL_READY.store(false, Ordering::Relaxed);
+    SERIAL_READY.reset();
 }
 pub fn klog_attach_serial() {
-    SERIAL_READY.store(true, Ordering::Relaxed);
+    SERIAL_READY.mark_set();
 }
 pub fn klog_set_level(level: KlogLevel) {
     CURRENT_LEVEL.store(level as u8, Ordering::Relaxed);

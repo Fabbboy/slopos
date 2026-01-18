@@ -1,26 +1,21 @@
-//! Unified kernel panic infrastructure.
-//!
-//! All panics flow through `panic_handler_impl()`. Exception handlers can
-//! enrich diagnostics by calling `set_panic_cpu_state()` before panicking.
-
 use core::ffi::c_int;
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_drivers::serial;
-use slopos_lib::cpu;
 use slopos_lib::stacktrace::{self, StacktraceEntry};
+use slopos_lib::{StateFlag, cpu};
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_video::panic_screen;
 
 use crate::shutdown::{execute_kernel, kernel_shutdown};
 
-static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static PANIC_IN_PROGRESS: StateFlag = StateFlag::new();
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
 static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
-static PANIC_HAS_CPU_STATE: AtomicBool = AtomicBool::new(false);
+static PANIC_HAS_CPU_STATE: StateFlag = StateFlag::new();
 const PANIC_BACKTRACE_MAX: usize = 16;
 
 /// Set CPU state from an interrupt frame to be included in panic diagnostics.
@@ -28,11 +23,11 @@ const PANIC_BACKTRACE_MAX: usize = 16;
 pub fn set_panic_cpu_state(rip: u64, rsp: u64) {
     PANIC_RIP.store(rip, Ordering::SeqCst);
     PANIC_RSP.store(rsp, Ordering::SeqCst);
-    PANIC_HAS_CPU_STATE.store(true, Ordering::SeqCst);
+    PANIC_HAS_CPU_STATE.set_active();
 }
 
 fn take_panic_cpu_state() -> (Option<u64>, Option<u64>) {
-    if PANIC_HAS_CPU_STATE.swap(false, Ordering::SeqCst) {
+    if PANIC_HAS_CPU_STATE.take() {
         (
             Some(PANIC_RIP.load(Ordering::SeqCst)),
             Some(PANIC_RSP.load(Ordering::SeqCst)),
@@ -80,7 +75,7 @@ fn panic_dump_backtrace() {
 pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     cpu::disable_interrupts();
 
-    if PANIC_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+    if !PANIC_IN_PROGRESS.enter() {
         panic_serial_write("\n!!! RECURSIVE PANIC DETECTED - HALTING !!!\n");
         cpu::halt_loop();
     }
