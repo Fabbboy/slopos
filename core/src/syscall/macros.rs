@@ -135,3 +135,41 @@ macro_rules! check_negative {
         }
     };
 }
+
+#[macro_export]
+macro_rules! require_nonnull {
+    ($ctx:expr, $ptr:expr) => {
+        if $ptr.is_null() || ($ptr as u64) == 0 {
+            return $ctx.err();
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! require_nonzero {
+    ($ctx:expr, $val:expr) => {
+        if $val == 0 {
+            return $ctx.err();
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! try_or_err {
+    ($ctx:expr, $result:expr) => {
+        match $result {
+            Ok(v) => v,
+            Err(_) => return $ctx.err(),
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! some_or_err {
+    ($ctx:expr, $option:expr) => {
+        match $option {
+            Some(v) => v,
+            None => return $ctx.err(),
+        }
+    };
+}

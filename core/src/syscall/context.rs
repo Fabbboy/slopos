@@ -182,6 +182,104 @@ impl SyscallContext {
     ) -> Result<T, SyscallDisposition> {
         result.map_err(|e| self.err_user_ptr(e))
     }
+
+    // =========================================================================
+    // Result conversion helpers - eliminate boilerplate patterns
+    // =========================================================================
+
+    /// Convert a signed return code to a disposition.
+    /// Returns `err()` if rc < 0, otherwise `ok(0)`.
+    ///
+    /// Replaces: `if rc < 0 { ctx.err() } else { ctx.ok(0) }`
+    #[inline]
+    pub fn from_rc(&self, rc: i32) -> SyscallDisposition {
+        if rc < 0 { self.err() } else { self.ok(0) }
+    }
+
+    /// Convert a signed return code to a disposition, returning the value on success.
+    /// Returns `err()` if rc < 0, otherwise `ok(rc as u64)`.
+    ///
+    /// Replaces: `if rc < 0 { ctx.err() } else { ctx.ok(rc as u64) }`
+    #[inline]
+    pub fn from_rc_value(&self, rc: i64) -> SyscallDisposition {
+        if rc < 0 {
+            self.err()
+        } else {
+            self.ok(rc as u64)
+        }
+    }
+
+    /// Convert a token/handle value to a disposition.
+    /// Returns `err()` if value == 0, otherwise `ok(value as u64)`.
+    ///
+    /// Replaces: `if token == 0 { ctx.err() } else { ctx.ok(token as u64) }`
+    #[inline]
+    pub fn from_token(&self, token: u32) -> SyscallDisposition {
+        if token == 0 {
+            self.err()
+        } else {
+            self.ok(token as u64)
+        }
+    }
+
+    /// Convert a u64 address/value to a disposition.
+    /// Returns `err()` if value == 0, otherwise `ok(value)`.
+    ///
+    /// Replaces: `if vaddr == 0 { ctx.err() } else { ctx.ok(vaddr) }`
+    #[inline]
+    pub fn from_nonzero(&self, value: u64) -> SyscallDisposition {
+        if value == 0 {
+            self.err()
+        } else {
+            self.ok(value)
+        }
+    }
+
+    /// Convert a Result<(), E> to a disposition.
+    /// Returns `err()` on Err, otherwise `ok(0)`.
+    #[inline]
+    pub fn from_result<E>(&self, result: Result<(), E>) -> SyscallDisposition {
+        match result {
+            Ok(()) => self.ok(0),
+            Err(_) => self.err(),
+        }
+    }
+
+    /// Convert a Result<T, E> to a disposition with a mapper for the success value.
+    /// Returns `err()` on Err, otherwise `ok(f(value))`.
+    #[inline]
+    pub fn from_result_map<T, E, F>(&self, result: Result<T, E>, f: F) -> SyscallDisposition
+    where
+        F: FnOnce(T) -> u64,
+    {
+        match result {
+            Ok(v) => self.ok(f(v)),
+            Err(_) => self.err(),
+        }
+    }
+
+    /// Convert a bool to a disposition.
+    /// Returns `err()` if false, otherwise `ok(0)`.
+    #[inline]
+    pub fn from_bool(&self, success: bool) -> SyscallDisposition {
+        if success { self.ok(0) } else { self.err() }
+    }
+
+    /// Convert a bool to a disposition with a custom success value.
+    /// Returns `err()` if false, otherwise `ok(value)`.
+    #[inline]
+    pub fn from_bool_value(&self, success: bool, value: u64) -> SyscallDisposition {
+        if success { self.ok(value) } else { self.err() }
+    }
+
+    /// Convert an i32 result where != 0 means failure (common for C-style APIs).
+    /// Returns `err()` if rc != 0, otherwise `ok(0)`.
+    ///
+    /// Replaces: `if rc != 0 { ctx.err() } else { ctx.ok(0) }`
+    #[inline]
+    pub fn from_zero_success(&self, rc: i32) -> SyscallDisposition {
+        if rc != 0 { self.err() } else { self.ok(0) }
+    }
 }
 
 impl SyscallArgs {
