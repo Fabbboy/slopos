@@ -8,7 +8,7 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use slopos_drivers::keyboard::keyboard_poll_wait_enter;
+use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_lib::cpu;
 use slopos_lib::stacktrace::{self, StacktraceEntry};
@@ -193,7 +193,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         cr4,
     ) {
         panic_serial_write("Press ENTER to shutdown...");
-        keyboard_poll_wait_enter();
+        poll_wait_enter();
     } else {
         panic_serial_write("System halted.");
     }

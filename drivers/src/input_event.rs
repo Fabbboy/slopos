@@ -7,7 +7,19 @@
 //!
 //! Events are routed to the focused task for each input type.
 
+use slopos_core::irq;
 use slopos_lib::IrqMutex;
+
+use crate::pit::pit_get_frequency;
+
+pub fn get_timestamp_ms() -> u64 {
+    let ticks = irq::get_timer_ticks();
+    let freq = pit_get_frequency();
+    if freq == 0 {
+        return 0;
+    }
+    (ticks * 1000) / freq as u64
+}
 
 // Re-export ABI types and constants for consumers
 pub use slopos_abi::{

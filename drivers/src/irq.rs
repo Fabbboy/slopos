@@ -9,10 +9,9 @@ use slopos_core::irq::{
     self, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, LEGACY_IRQ_TIMER,
 };
 use slopos_core::sched::scheduler_timer_tick;
-use slopos_lib::ports::{PS2_DATA, PS2_STATUS};
 use slopos_lib::{InterruptFrame, cpu, klog_debug, klog_info};
 
-use crate::{apic, ioapic, keyboard, mouse};
+use crate::{apic, ioapic, ps2};
 
 extern "C" fn timer_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
     irq::increment_timer_ticks();
@@ -24,28 +23,20 @@ extern "C" fn timer_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mu
 }
 
 extern "C" fn keyboard_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    unsafe {
-        let status = PS2_STATUS.read();
-        if status & 0x01 == 0 {
-            return;
-        }
-
-        let scancode = PS2_DATA.read();
-        irq::increment_keyboard_events();
-        keyboard::keyboard_handle_scancode(scancode);
+    if !ps2::has_data() {
+        return;
     }
+    let scancode = ps2::read_data_nowait();
+    irq::increment_keyboard_events();
+    ps2::keyboard::handle_scancode(scancode);
 }
 
 extern "C" fn mouse_irq_handler(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {
-    unsafe {
-        let status = PS2_STATUS.read();
-        if status & 0x20 == 0 {
-            return;
-        }
-
-        let data = PS2_DATA.read();
-        mouse::mouse_handle_irq(data);
+    if !ps2::is_mouse_data() {
+        return;
     }
+    let data = ps2::read_data_nowait();
+    ps2::mouse::handle_irq(data);
 }
 
 fn program_ioapic_route(irq_line: u8) {
@@ -118,8 +109,8 @@ pub fn init() {
     irq::init();
 
     setup_ioapic_routes();
-    keyboard::keyboard_init();
-    mouse::mouse_init();
+    ps2::keyboard::init();
+    ps2::mouse::init();
 
     let _ = irq::register_handler(
         LEGACY_IRQ_TIMER,

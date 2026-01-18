@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_lib::{IrqMutex, cpu, ports::COM1};
 
-use crate::keyboard;
+use crate::ps2::keyboard;
 use crate::serial;
 use slopos_abi::task::{TASK_STATE_BLOCKED, TASK_STATE_READY, Task};
 use slopos_core::sched::{
@@ -54,7 +54,7 @@ fn tty_service_serial_input() {
 
 fn tty_input_available() -> c_int {
     tty_service_serial_input();
-    if keyboard::keyboard_has_input() != 0 {
+    if keyboard::has_input() != 0 {
         return 1;
     }
     if serial_buffer_pending(COM1.address()) != 0 {
@@ -224,8 +224,8 @@ fn is_control_char(c: u8) -> bool {
 fn tty_dequeue_input_char(out_char: &mut u8) -> bool {
     tty_service_serial_input();
 
-    if keyboard::keyboard_has_input() != 0 {
-        *out_char = keyboard::keyboard_getchar();
+    if keyboard::has_input() != 0 {
+        *out_char = keyboard::getchar();
         return true;
     }
 
