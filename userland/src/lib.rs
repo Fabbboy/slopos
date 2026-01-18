@@ -15,6 +15,7 @@ pub mod roulette;
 pub mod runtime;
 pub mod shell;
 pub mod syscall;
+pub mod syscall_raw;
 pub mod theme;
 pub mod ui_utils;
 

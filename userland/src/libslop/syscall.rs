@@ -1,72 +1,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::arch::asm;
 use core::ffi::{c_char, c_int, c_void};
 
+use crate::syscall_raw::{syscall1, syscall2, syscall3};
 use slopos_abi::syscall::*;
-
-#[allow(dead_code)]
-#[inline(always)]
-pub(crate) unsafe fn syscall0(num: u64) -> u64 {
-    let ret: u64;
-    asm!(
-        "syscall",
-        in("rax") num,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack),
-    );
-    ret
-}
-
-#[inline(always)]
-pub(crate) unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
-    let ret: u64;
-    asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack),
-    );
-    ret
-}
-
-#[inline(always)]
-pub(crate) unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
-    let ret: u64;
-    asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack),
-    );
-    ret
-}
-
-#[inline(always)]
-pub(crate) unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let ret: u64;
-    asm!(
-        "syscall",
-        in("rax") num,
-        in("rdi") arg0,
-        in("rsi") arg1,
-        in("rdx") arg2,
-        lateout("rax") ret,
-        out("rcx") _,
-        out("r11") _,
-        options(nostack),
-    );
-    ret
-}
 
 pub fn sys_read(fd: c_int, buf: *mut c_void, count: usize) -> isize {
     unsafe { syscall3(SYSCALL_FS_READ, fd as u64, buf as u64, count as u64) as isize }

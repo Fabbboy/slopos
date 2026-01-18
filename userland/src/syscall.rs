@@ -1,22 +1,9 @@
-//! Userland syscall wrappers — the canonical implementation for user-mode code.
-//!
-//! This module provides the ONLY syscall wrapper implementation in SlopOS.
-//! All user-mode applications (shell, compositor, roulette, file_manager) use
-//! these wrappers to invoke kernel services via `int 0x80`.
-//!
-//! Architecture:
-//! - `abi/src/syscall.rs` — Syscall numbers and shared types (source of truth)
-//! - `userland/src/syscall.rs` — User-mode wrappers (this file)
-//! - `drivers/src/syscall_*.rs` — Kernel-side handlers
-//!
-//! All functions are placed in `.user_text` section for proper Ring 3 execution.
-
-use core::arch::asm;
 use core::ffi::{c_char, c_void};
 use core::num::NonZeroU32;
 use core::ptr::NonNull;
 
-// Re-export all ABI types from slopos_abi for userland consumers
+use crate::syscall_raw::{syscall0, syscall1, syscall2, syscall3, syscall4};
+
 pub use slopos_abi::{
     DisplayInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData,
     InputEventType, MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW,
@@ -24,121 +11,76 @@ pub use slopos_abi::{
     UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
 };
 
-// Re-export syscall numbers and data structures from canonical ABI source
 pub use slopos_abi::syscall::*;
 
-// Type aliases for backwards compatibility (use WindowInfo from slopos_abi)
 pub type UserWindowDamageRect = WindowDamageRect;
 pub type UserWindowInfo = WindowInfo;
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
-unsafe fn syscall_impl(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            lateout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
-unsafe fn syscall4_impl(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") num,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            in("r10") arg3,
-            lateout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-#[inline(always)]
-#[unsafe(link_section = ".user_text")]
 pub fn sys_yield() {
     unsafe {
-        syscall_impl(SYSCALL_YIELD, 0, 0, 0);
+        syscall0(SYSCALL_YIELD);
     }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_write(buf: &[u8]) -> i64 {
-    unsafe { syscall_impl(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_WRITE, buf.as_ptr() as u64, buf.len() as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_read(buf: &mut [u8]) -> i64 {
-    unsafe { syscall_impl(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_READ, buf.as_ptr() as u64, buf.len() as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_read_char() -> i64 {
-    unsafe { syscall_impl(SYSCALL_READ_CHAR, 0, 0, 0) as i64 }
+    unsafe { syscall0(SYSCALL_READ_CHAR) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sleep_ms(ms: u32) {
     unsafe {
-        syscall_impl(SYSCALL_SLEEP_MS, ms as u64, 0, 0);
+        syscall1(SYSCALL_SLEEP_MS, ms as u64);
     }
 }
 
-/// Returns the current time in milliseconds since boot.
-/// Used for frame pacing in the compositor (60Hz target).
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_get_time_ms() -> u64 {
-    unsafe { syscall_impl(SYSCALL_GET_TIME_MS, 0, 0, 0) }
+    unsafe { syscall0(SYSCALL_GET_TIME_MS) }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette() -> u64 {
-    unsafe { syscall_impl(SYSCALL_ROULETTE, 0, 0, 0) }
+    unsafe { syscall0(SYSCALL_ROULETTE) }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette_result(fate_packed: u64) {
     unsafe {
-        syscall_impl(SYSCALL_ROULETTE_RESULT, fate_packed, 0, 0);
+        syscall1(SYSCALL_ROULETTE_RESULT, fate_packed);
     }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_roulette_draw(fate: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_ROULETTE_DRAW, fate as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_ROULETTE_DRAW, fate as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_exit() -> ! {
     unsafe {
-        syscall_impl(SYSCALL_EXIT, 0, 0, 0);
+        syscall0(SYSCALL_EXIT);
     }
     loop {}
 }
@@ -146,84 +88,83 @@ pub fn sys_exit() -> ! {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_info(out: &mut DisplayInfo) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FB_INFO, out as *mut _ as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_FB_INFO, out as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_tty_set_focus(task_id: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_TTY_SET_FOCUS, task_id as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_TTY_SET_FOCUS, task_id as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_random_next() -> u32 {
-    unsafe { syscall_impl(SYSCALL_RANDOM_NEXT, 0, 0, 0) as u32 }
+    unsafe { syscall0(SYSCALL_RANDOM_NEXT) as u32 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_open(path: *const c_char, flags: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_OPEN, path as u64, flags as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fs_close(fd: i32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_CLOSE, fd as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_read(fd: i32, buf: *mut c_void, len: usize) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
+    unsafe { syscall3(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_write(fd: i32, buf: *const c_void, len: usize) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
+    unsafe { syscall3(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_stat(path: *const c_char, out_stat: &mut UserFsStat) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_FS_STAT, path as u64, out_stat as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_mkdir(path: *const c_char) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_MKDIR, path as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_FS_MKDIR, path as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_unlink(path: *const c_char) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_UNLINK, path as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_FS_UNLINK, path as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_fs_list(path: *const c_char, list: &mut UserFsList) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_FS_LIST, path as u64, list as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_sys_info(info: &mut UserSysInfo) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SYS_INFO, info as *mut _ as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SYS_INFO, info as *mut _ as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
     unsafe {
-        syscall_impl(
+        syscall2(
             SYSCALL_ENUMERATE_WINDOWS,
             windows.as_mut_ptr() as u64,
             windows.len() as u64,
-            0,
         )
     }
 }
@@ -232,7 +173,7 @@ pub fn sys_enumerate_windows(windows: &mut [UserWindowInfo]) -> u64 {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
     unsafe {
-        syscall_impl(
+        syscall3(
             SYSCALL_SET_WINDOW_POSITION,
             task_id as u64,
             x as u64,
@@ -244,126 +185,77 @@ pub fn sys_set_window_position(task_id: u32, x: i32, y: i32) -> i64 {
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_set_window_state(task_id: u32, state: u8) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_SET_WINDOW_STATE, task_id as u64, state as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_raise_window(task_id: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_RAISE_WINDOW, task_id as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_RAISE_WINDOW, task_id as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_halt() -> ! {
     unsafe {
-        syscall_impl(SYSCALL_HALT, 0, 0, 0);
+        syscall0(SYSCALL_HALT);
     }
     loop {}
 }
 
-/// Spawn a new userland task by name.
-/// The name must be a null-terminated byte string matching a known task name
-/// (e.g., b"file_manager\0").
-/// Returns task_id (> 0) on success, 0 on failure.
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_spawn_task(name: &[u8]) -> i32 {
-    unsafe {
-        syscall_impl(
-            SYSCALL_SPAWN_TASK,
-            name.as_ptr() as u64,
-            name.len() as u64,
-            0,
-        ) as i32
-    }
+    unsafe { syscall2(SYSCALL_SPAWN_TASK, name.as_ptr() as u64, name.len() as u64) as i32 }
 }
 
-/// Execute an ELF binary from the filesystem, replacing the current process.
-/// On success, this function does not return - the process image is replaced.
-/// On failure, returns a negative error code.
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_exec(path: &[u8]) -> i64 {
-    unsafe { syscall_impl(SYSCALL_EXEC, path.as_ptr() as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_EXEC, path.as_ptr() as u64) as i64 }
 }
 
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fork() -> i32 {
-    unsafe { syscall_impl(SYSCALL_FORK, 0, 0, 0) as i32 }
+    unsafe { syscall0(SYSCALL_FORK) as i32 }
 }
 
-/// Commit a surface's back buffer to front buffer (Wayland-style double buffering)
-/// Swaps buffer pointers atomically and transfers damage tracking
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_commit() -> i64 {
-    unsafe { syscall_impl(SYSCALL_SURFACE_COMMIT, 0, 0, 0) as i64 }
+    unsafe { syscall0(SYSCALL_SURFACE_COMMIT) as i64 }
 }
 
-// =============================================================================
-// Shared Memory Syscalls (Wayland-like compositor)
-// =============================================================================
-
-/// Create a shared memory buffer.
-/// Returns a token (> 0) on success, or 0 on failure.
-///
-/// # Arguments
-/// * `size` - Size of the buffer in bytes
-/// * `flags` - Reserved for future use (pass 0)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_create(size: u64, flags: u32) -> u32 {
-    unsafe { syscall_impl(SYSCALL_SHM_CREATE, size, flags as u64, 0) as u32 }
+    unsafe { syscall2(SYSCALL_SHM_CREATE, size, flags as u64) as u32 }
 }
 
-/// Map a shared memory buffer into the caller's address space.
-/// Returns virtual address on success, or 0 on failure.
-///
-/// # Arguments
-/// * `token` - Token from sys_shm_create
-/// * `access` - SHM_ACCESS_RO (0) or SHM_ACCESS_RW (1)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_map(token: u32, access: u32) -> u64 {
-    unsafe { syscall_impl(SYSCALL_SHM_MAP, token as u64, access as u64, 0) }
+    unsafe { syscall2(SYSCALL_SHM_MAP, token as u64, access as u64) }
 }
 
-/// Unmap a shared memory buffer from the caller's address space.
-/// Returns 0 on success, -1 on failure.
-///
-/// # Arguments
-/// * `virt_addr` - Virtual address from sys_shm_map
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub unsafe fn sys_shm_unmap(virt_addr: u64) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SHM_UNMAP, virt_addr, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SHM_UNMAP, virt_addr) as i64 }
 }
 
-/// Destroy a shared memory buffer (owner only).
-/// Returns 0 on success, -1 on failure.
-///
-/// # Arguments
-/// * `token` - Token from sys_shm_create
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_destroy(token: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SHM_DESTROY, token as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SHM_DESTROY, token as u64) as i64 }
 }
 
-/// Attach a shared memory buffer as a window surface.
-/// Returns 0 on success, -1 on failure.
-///
-/// # Arguments
-/// * `token` - Token from sys_shm_create
-/// * `width` - Surface width in pixels
-/// * `height` - Surface height in pixels
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
     unsafe {
-        syscall_impl(
+        syscall3(
             SYSCALL_SURFACE_ATTACH,
             token as u64,
             width as u64,
@@ -372,180 +264,75 @@ pub fn sys_surface_attach(token: u32, width: u32, height: u32) -> i64 {
     }
 }
 
-/// Copy a shared memory buffer to the framebuffer MMIO (compositor only).
-/// This is the "page flip" operation - presents the compositor's output buffer.
-/// Returns 0 on success, -1 on failure.
-///
-/// # Arguments
-/// * `token` - Token of the output buffer to present
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_fb_flip(token: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_FB_FLIP, token as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_FB_FLIP, token as u64) as i64 }
 }
 
-/// Drain the compositor queue (compositor only).
-/// Processes all pending client operations (commits, registers, unregisters).
-/// Must be called at the start of each compositor frame, before enumerate_windows.
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_drain_queue() {
     unsafe {
-        syscall_impl(SYSCALL_DRAIN_QUEUE, 0, 0, 0);
+        syscall0(SYSCALL_DRAIN_QUEUE);
     }
 }
 
-// =============================================================================
-// Buffer Reference Counting Syscalls (Wayland-style)
-// =============================================================================
-
-/// Acquire a buffer reference (compositor only).
-/// Increments refcount and clears the released flag.
-///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// 0 on success, -1 on failure
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_acquire(token: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SHM_ACQUIRE, token as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SHM_ACQUIRE, token as u64) as i64 }
 }
 
-/// Release a buffer reference (compositor only).
-/// Decrements refcount and sets the released flag.
-///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// 0 on success, -1 on failure
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_release(token: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SHM_RELEASE, token as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SHM_RELEASE, token as u64) as i64 }
 }
 
-/// Poll whether a buffer has been released by the compositor.
-///
-/// # Arguments
-/// * `token` - Buffer token
-///
-/// # Returns
-/// 1 if released (client can reuse), 0 if not released, -1 on error
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_poll_released(token: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SHM_POLL_RELEASED, token as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SHM_POLL_RELEASED, token as u64) as i64 }
 }
 
-// =============================================================================
-// Frame Callback Syscalls (Wayland wl_surface.frame)
-// =============================================================================
-
-/// Request a frame callback (Wayland wl_surface.frame).
-///
-/// Call this before surface_commit to request notification when the frame
-/// has been presented. After committing, poll with sys_poll_frame_done()
-/// to check when presentation occurred.
-///
-/// # Returns
-/// 0 on success, -1 on failure
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_frame() -> i64 {
-    unsafe { syscall_impl(SYSCALL_SURFACE_FRAME, 0, 0, 0) as i64 }
+    unsafe { syscall0(SYSCALL_SURFACE_FRAME) as i64 }
 }
 
-/// Poll for frame completion (Wayland frame callback done).
-///
-/// After calling sys_surface_frame() and sys_surface_commit(), use this
-/// to check if the frame has been presented to the display.
-///
-/// # Returns
-/// - Timestamp (ms since boot) when frame was presented, if done
-/// - 0 if frame is still pending (not yet presented)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_poll_frame_done() -> u64 {
-    unsafe { syscall_impl(SYSCALL_POLL_FRAME_DONE, 0, 0, 0) }
+    unsafe { syscall0(SYSCALL_POLL_FRAME_DONE) }
 }
 
-/// Mark all pending frame callbacks as done (compositor only).
-///
-/// Called by the compositor after presenting a frame to notify all
-/// clients that their frames have been displayed.
-///
-/// # Arguments
-/// * `present_time_ms` - The presentation timestamp (ms since boot)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_mark_frames_done(present_time_ms: u64) {
     unsafe {
-        syscall_impl(SYSCALL_MARK_FRAMES_DONE, present_time_ms, 0, 0);
+        syscall1(SYSCALL_MARK_FRAMES_DONE, present_time_ms);
     }
 }
 
-// =============================================================================
-// Pixel Format Negotiation Syscalls (Wayland wl_shm)
-// =============================================================================
-
-/// Get the bitmap of supported pixel formats.
-///
-/// Returns a bitmap where bit N is set if PixelFormat with value N is supported.
-/// Use this to negotiate formats with the compositor.
-///
-/// # Example
-/// ```
-/// let formats = sys_shm_get_formats();
-/// if formats & (1 << PixelFormat::Argb8888 as u32) != 0 {
-///     // ARGB8888 is supported
-/// }
-/// ```
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_get_formats() -> u32 {
-    unsafe { syscall_impl(SYSCALL_SHM_GET_FORMATS, 0, 0, 0) as u32 }
+    unsafe { syscall0(SYSCALL_SHM_GET_FORMATS) as u32 }
 }
 
-/// Create a shared memory buffer with a specific pixel format.
-///
-/// # Arguments
-/// * `size` - Size of the buffer in bytes
-/// * `format` - Pixel format for this buffer
-///
-/// # Returns
-/// Buffer token on success (> 0), 0 on failure
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_shm_create_with_format(size: u64, format: PixelFormat) -> u32 {
-    unsafe { syscall_impl(SYSCALL_SHM_CREATE_WITH_FORMAT, size, format as u64, 0) as u32 }
+    unsafe { syscall2(SYSCALL_SHM_CREATE_WITH_FORMAT, size, format as u64) as u32 }
 }
 
-// =============================================================================
-// Damage Tracking Syscalls (Wayland wl_surface.damage)
-// =============================================================================
-
-/// Add a damage region to the surface's back buffer.
-///
-/// This tells the compositor which region of the surface has been modified
-/// and needs to be redrawn. Multiple damage regions can be added before
-/// committing.
-///
-/// # Arguments
-/// * `x` - X coordinate of the damage region (surface-local)
-/// * `y` - Y coordinate of the damage region (surface-local)
-/// * `width` - Width of the damage region
-/// * `height` - Height of the damage region
-///
-/// # Returns
-/// 0 on success, -1 on failure
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
     unsafe {
-        syscall4_impl(
+        syscall4(
             SYSCALL_SURFACE_DAMAGE,
             x as u64,
             y as u64,
@@ -555,143 +342,81 @@ pub fn sys_surface_damage(x: i32, y: i32, width: i32, height: i32) -> i64 {
     }
 }
 
-/// Get the age of the back buffer for damage accumulation.
-///
-/// The buffer age indicates how many frames old the buffer content is:
-/// - 0: Buffer content is undefined (must redraw everything)
-/// - 1: Buffer contains the previous frame (only damaged regions need redraw)
-/// - N: Buffer contains content from N frames ago (accumulate damage from N frames)
-/// - 255 (u8::MAX): Buffer is too old for damage accumulation (redraw everything)
-///
-/// This allows efficient partial updates when using double or triple buffering.
-///
-/// # Returns
-/// Buffer age (see description above)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_buffer_age() -> u8 {
-    unsafe { syscall_impl(SYSCALL_BUFFER_AGE, 0, 0, 0) as u8 }
+    unsafe { syscall0(SYSCALL_BUFFER_AGE) as u8 }
 }
 
-// =============================================================================
-// Surface Role Syscalls (Wayland xdg_toplevel, xdg_popup, wl_subsurface)
-// =============================================================================
-
-/// Set the role of a surface.
-/// Role can only be set once per surface (Wayland semantics).
-/// Returns 0 on success, -1 if role already set or invalid.
 pub fn sys_surface_set_role(role: SurfaceRole) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SURFACE_SET_ROLE, role as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SURFACE_SET_ROLE, role as u64) as i64 }
 }
 
-/// Set the parent surface for a subsurface.
-/// Only valid for surfaces with role Subsurface.
-/// Returns 0 on success, -1 on failure.
 pub fn sys_surface_set_parent(parent_task_id: u32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SURFACE_SET_PARENT, parent_task_id as u64, 0, 0) as i64 }
+    unsafe { syscall1(SYSCALL_SURFACE_SET_PARENT, parent_task_id as u64) as i64 }
 }
 
-/// Set the relative position of a subsurface.
-/// Position is relative to the parent surface's top-left corner.
-/// Only valid for surfaces with role Subsurface.
 pub fn sys_surface_set_relative_position(rel_x: i32, rel_y: i32) -> i64 {
-    unsafe { syscall_impl(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64, 0) as i64 }
+    unsafe { syscall2(SYSCALL_SURFACE_SET_REL_POS, rel_x as u64, rel_y as u64) as i64 }
 }
 
-/// Set the window title.
-/// Title is UTF-8, max 31 characters (null-terminated in 32-byte buffer).
 pub fn sys_surface_set_title(title: &str) -> i64 {
     let bytes = title.as_bytes();
     unsafe {
-        syscall_impl(
+        syscall2(
             SYSCALL_SURFACE_SET_TITLE,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
-            0,
         ) as i64
     }
 }
 
-// =============================================================================
-// Input Event Protocol (Wayland-like per-task input queues)
-// =============================================================================
-
-/// Poll for an input event (non-blocking).
-/// Returns Some(event) if an event was available, None if queue is empty.
 pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
-    let result = unsafe {
-        syscall_impl(
-            SYSCALL_INPUT_POLL,
-            event_out as *mut InputEvent as u64,
-            0,
-            0,
-        )
-    };
+    let result = unsafe { syscall1(SYSCALL_INPUT_POLL, event_out as *mut InputEvent as u64) };
     if result == 1 { Some(*event_out) } else { None }
 }
 
-/// Poll for multiple input events at once (non-blocking batch operation).
-/// Much more efficient than calling sys_input_poll() in a loop - single syscall,
-/// single lock acquisition, avoiding lock ping-pong with IRQ handlers.
-///
-/// # Arguments
-/// * `events` - Mutable slice to receive events
-///
-/// # Returns
-/// Number of events actually written to the buffer (0 if queue was empty)
 #[inline(always)]
 #[unsafe(link_section = ".user_text")]
 pub fn sys_input_poll_batch(events: &mut [InputEvent]) -> u64 {
     unsafe {
-        syscall_impl(
+        syscall2(
             SYSCALL_INPUT_POLL_BATCH,
             events.as_mut_ptr() as u64,
             events.len() as u64,
-            0,
         )
     }
 }
 
-/// Check if the current task has pending input events.
-/// Returns the number of pending events.
 pub fn sys_input_has_events() -> u32 {
-    unsafe { syscall_impl(SYSCALL_INPUT_HAS_EVENTS, 0, 0, 0) as u32 }
+    unsafe { syscall0(SYSCALL_INPUT_HAS_EVENTS) as u32 }
 }
 
-/// Set keyboard or pointer focus to a task (compositor only).
-/// focus_type: 0 = keyboard, 1 = pointer
-/// Returns 0 on success, -1 on failure.
 pub fn sys_input_set_focus(target_task_id: u32, focus_type: u32) -> i64 {
     unsafe {
-        syscall_impl(
+        syscall2(
             SYSCALL_INPUT_SET_FOCUS,
             target_task_id as u64,
             focus_type as u64,
-            0,
         ) as i64
     }
 }
 
-/// Set keyboard focus to a task (compositor convenience function).
 pub fn sys_input_set_keyboard_focus(target_task_id: u32) -> i64 {
     sys_input_set_focus(target_task_id, INPUT_FOCUS_KEYBOARD)
 }
 
-/// Set pointer focus to a task (compositor convenience function).
 pub fn sys_input_set_pointer_focus(target_task_id: u32) -> i64 {
     sys_input_set_focus(target_task_id, INPUT_FOCUS_POINTER)
 }
 
-/// Set pointer focus to a task with window offset for coordinate translation.
-/// The offset is subtracted from screen coordinates to get window-local coordinates.
-/// For a window at screen position (100, 50), pass offset_x=100, offset_y=50.
 pub fn sys_input_set_pointer_focus_with_offset(
     target_task_id: u32,
     offset_x: i32,
     offset_y: i32,
 ) -> i64 {
     unsafe {
-        syscall_impl(
+        syscall3(
             SYSCALL_INPUT_SET_FOCUS_WITH_OFFSET,
             target_task_id as u64,
             offset_x as u64,
@@ -700,19 +425,15 @@ pub fn sys_input_set_pointer_focus_with_offset(
     }
 }
 
-/// Get the current global pointer position (compositor only).
-/// Returns (x, y) in screen coordinates.
 pub fn sys_input_get_pointer_pos() -> (i32, i32) {
-    let result = unsafe { syscall_impl(SYSCALL_INPUT_GET_POINTER_POS, 0, 0, 0) };
+    let result = unsafe { syscall0(SYSCALL_INPUT_GET_POINTER_POS) };
     let x = (result >> 32) as i32;
     let y = result as i32;
     (x, y)
 }
 
-/// Get the current global pointer button state (compositor only).
-/// Returns button state as u8 (bit 0 = left, bit 1 = right, bit 2 = middle).
 pub fn sys_input_get_button_state() -> u8 {
-    unsafe { syscall_impl(SYSCALL_INPUT_GET_BUTTON_STATE, 0, 0, 0) as u8 }
+    unsafe { syscall0(SYSCALL_INPUT_GET_BUTTON_STATE) as u8 }
 }
 
 pub use slopos_abi::ShmError;
