@@ -3,8 +3,8 @@ use core::ffi::{CStr, c_char};
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    INTERRUPT_SUITE_DESC, TestRunSummary, TestSuiteResult, tests_register_suite,
-    tests_register_system_suites, tests_reset_registry, tests_run_all,
+    TestRunSummary, TestSuiteResult, tests_register_system_suites, tests_request_shutdown,
+    tests_reset_registry, tests_run_all,
 };
 use slopos_video as video;
 
@@ -15,7 +15,6 @@ use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
 use slopos_drivers::{
     apic::{apic_detect, apic_init, send_ipi_all_excluding_self},
-    interrupt_test::interrupt_test_request_shutdown,
     interrupts::config_from_cmdline,
     ioapic::init,
     pci::{pci_get_primary_gpu, pci_init, pci_probe_drivers},
@@ -232,7 +231,6 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     }
 
     tests_reset_registry();
-    tests_register_suite(&INTERRUPT_SUITE_DESC);
     tests_register_system_suites();
 
     let mut summary = TestRunSummary {
@@ -259,14 +257,14 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     let rc = tests_run_all(&test_config, &mut summary);
 
     if test_config.shutdown {
-        klog_debug!("INTERRUPT_TEST: Auto shutdown enabled after harness");
-        interrupt_test_request_shutdown(summary.failed as i32);
+        klog_debug!("TESTS: Auto shutdown enabled after harness");
+        tests_request_shutdown(summary.failed as i32);
     }
 
     if summary.failed > 0 {
-        klog_info!("INTERRUPT_TEST: Failures detected");
+        klog_info!("TESTS: Failures detected");
     } else {
-        klog_info!("INTERRUPT_TEST: Completed successfully");
+        klog_info!("TESTS: Completed successfully");
     }
 
     rc

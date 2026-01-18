@@ -3,9 +3,9 @@
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_drivers::interrupt_test as intr;
+use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
+use slopos_drivers::interrupts::SUITE_SCHEDULER;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
-use slopos_drivers::interrupts::{SUITE_BASIC, SUITE_CONTROL, SUITE_MEMORY, SUITE_SCHEDULER};
 use slopos_lib::klog_info;
 
 pub const TESTS_MAX_SUITES: usize = 8;
@@ -145,13 +145,13 @@ fn fill_summary_from_result(summary: &mut TestRunSummary, res: &TestSuiteResult)
     }
 }
 
-fn award_wl_for_result(_res: &TestSuiteResult) {}
 pub fn tests_reset_registry() {
     unsafe {
         (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
         *registry_count_mut() = 0;
     }
 }
+
 pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     if desc.is_null() {
         return -1;
@@ -169,9 +169,11 @@ pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
     }
     0
 }
+
 pub fn tests_register_system_suites() {
     suites::register_system_suites();
 }
+
 pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSummary) -> i32 {
     if config.is_null() {
         return -1;
@@ -193,7 +195,7 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         return 0;
     }
 
-    klog_info!("TESTS: Starting orchestrated suites\n");
+    klog_info!("TESTS: Starting test suites\n");
 
     let mut desc_list: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] =
         [None; TESTS_MAX_SUITES];
@@ -219,7 +221,6 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         if let Some(run) = desc.run {
             let _ = run(cfg, &mut res);
         }
-        award_wl_for_result(&res);
 
         if summary.suite_count < TESTS_MAX_SUITES {
             summary.suites[summary.suite_count] = res;
@@ -227,15 +228,12 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         }
 
         klog_info!(
-            "SUITE{} total={} pass={} fail={} exc={} unexp={} elapsed={} timeout={}\n",
+            "SUITE{} total={} pass={} fail={} elapsed={}ms\n",
             idx as u32,
             res.total,
             res.passed,
             res.failed,
-            res.exceptions_caught,
-            res.unexpected_exceptions,
             res.elapsed_ms,
-            if res.timed_out != 0 { 1u32 } else { 0u32 },
         );
         fill_summary_from_result(summary, &res);
     }
@@ -246,89 +244,33 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
     }
 
     klog_info!(
-        "+----------------------+-------+-------+-------+-------+-------+---------+-----+\n"
-    );
-    klog_info!(
-        "TESTS SUMMARY: total={} passed={} failed={} exceptions={} unexpected={} elapsed_ms={} timed_out={}\n",
+        "TESTS SUMMARY: total={} passed={} failed={} elapsed_ms={}\n",
         summary.total_tests,
         summary.passed,
         summary.failed,
-        summary.exceptions_caught,
-        summary.unexpected_exceptions,
         summary.elapsed_ms,
-        if summary.timed_out != 0 { "yes" } else { "no" },
     );
 
     if summary.failed == 0 { 0 } else { -1 }
 }
 
+pub fn tests_request_shutdown(failed: i32) {
+    interrupt_test_request_shutdown(failed);
+}
+
 mod suites {
     use super::*;
 
-    const INTERRUPT_NAME: &[u8] = b"interrupt\0";
     const VM_NAME: &[u8] = b"vm\0";
     const HEAP_NAME: &[u8] = b"heap\0";
     const EXT2_NAME: &[u8] = b"ext2\0";
     const PRIVSEP_NAME: &[u8] = b"privsep\0";
-    const CTXSWITCH_NAME: &[u8] = b"ctxswitch_regs\0";
     const FPU_NAME: &[u8] = b"fpu_sse\0";
-    const ROULETTE_NAME: &[u8] = b"roulette\0";
-    const ROULETTE_EXEC_NAME: &[u8] = b"roulette_exec\0";
-    const VIRTIO_GPU_NAME: &[u8] = b"virtio_gpu\0";
-    pub static INTERRUPT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-        name: INTERRUPT_NAME.as_ptr() as *const c_char,
-        mask_bit: SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL,
-        run: Some(run_interrupt_suite),
-    };
 
-    fn run_interrupt_suite(config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        if config.is_null() {
-            return -1;
-        }
-
-        let mut scoped = unsafe { *config };
-        scoped.suite_mask &= SUITE_BASIC | SUITE_MEMORY | SUITE_CONTROL;
-
-        if scoped.suite_mask == 0 {
-            if let Some(out_ref) = unsafe { out.as_mut() } {
-                out_ref.name = INTERRUPT_NAME.as_ptr() as *const c_char;
-            }
-            return 0;
-        }
-
-        intr::interrupt_test_init(&scoped as *const _);
-        intr::run_all_interrupt_tests(&scoped as *const _);
-        let stats_ptr = intr::test_get_stats();
-        intr::interrupt_test_cleanup();
-
-        let stats = unsafe { stats_ptr.as_ref() };
-
-        if let Some(out_ref) = unsafe { out.as_mut() } {
-            out_ref.name = INTERRUPT_NAME.as_ptr() as *const c_char;
-            if let Some(s) = stats {
-                out_ref.total = s.total_cases;
-                out_ref.passed = s.passed_cases;
-                out_ref.failed = s.failed_cases;
-                out_ref.exceptions_caught = s.exceptions_caught;
-                out_ref.unexpected_exceptions = s.unexpected_exceptions;
-                out_ref.elapsed_ms = s.elapsed_ms;
-                out_ref.timed_out = s.timed_out;
-            }
-        }
-
-        match stats {
-            Some(s) if s.failed_cases == 0 && s.timed_out == 0 => 0,
-            Some(_) => -1,
-            None => -1,
-        }
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
         super::cycles_to_ms(end.wrapping_sub(start))
     }
 
-    #[cfg(feature = "builtin-tests")]
     fn fill_simple_result(
         out: *mut TestSuiteResult,
         name: &[u8],
@@ -348,70 +290,23 @@ mod suites {
         }
     }
 
-    #[cfg(not(feature = "builtin-tests"))]
-    fn fill_simple_result(
-        out: *mut TestSuiteResult,
-        name: &[u8],
-        _total: u32,
-        _passed: u32,
-        _elapsed_ms: u32,
-    ) {
-        if let Some(out_ref) = unsafe { out.as_mut() } {
-            *out_ref = TestSuiteResult {
-                name: name.as_ptr() as *const c_char,
-                ..TestSuiteResult::default()
-            };
-        }
-    }
-
-    #[cfg(feature = "builtin-tests")]
-    use slopos_mm::memory_layout::{mm_get_kernel_heap_start, mm_get_process_layout};
-    #[cfg(feature = "builtin-tests")]
-    use slopos_mm::paging::paging_is_user_accessible;
-    #[cfg(feature = "builtin-tests")]
-    use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, process_vm_get_page_dir};
-    #[cfg(feature = "builtin-tests")]
     use slopos_mm::tests::{
         test_heap_fragmentation_behind_head, test_heap_free_list_search,
         test_process_vm_counter_reset, test_process_vm_slot_reuse,
     };
 
-    #[cfg(feature = "builtin-tests")]
-    fn c_str_eq(a: *const c_char, b: *const c_char) -> bool {
-        if a.is_null() || b.is_null() {
-            return false;
-        }
-        let mut idx = 0;
-        unsafe {
-            loop {
-                let lhs = *a.add(idx);
-                let rhs = *b.add(idx);
-                if lhs != rhs {
-                    return false;
-                }
-                if lhs == 0 {
-                    return true;
-                }
-                idx += 1;
-            }
-        }
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let mut passed = 0u32;
         let mut total = 0u32;
 
-        unsafe {
-            total += 1;
-            if test_process_vm_slot_reuse() == 0 {
-                passed += 1;
-            }
-            total += 1;
-            if test_process_vm_counter_reset() == 0 {
-                passed += 1;
-            }
+        total += 1;
+        if test_process_vm_slot_reuse() == 0 {
+            passed += 1;
+        }
+        total += 1;
+        if test_process_vm_counter_reset() == 0 {
+            passed += 1;
         }
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
@@ -419,25 +314,16 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, VM_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let mut passed = 0u32;
         let total = 2u32;
 
-        unsafe {
-            if test_heap_free_list_search() == 0 {
-                passed += 1;
-            }
-            if test_heap_fragmentation_behind_head() == 0 {
-                passed += 1;
-            }
+        if test_heap_free_list_search() == 0 {
+            passed += 1;
+        }
+        if test_heap_fragmentation_behind_head() == 0 {
+            passed += 1;
         }
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
@@ -445,13 +331,6 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, HEAP_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let total = 5u32;
@@ -461,13 +340,6 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, EXT2_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let result = slopos_core::run_privilege_separation_invariant_test();
@@ -477,21 +349,6 @@ mod suites {
         if result == 0 { 0 } else { -1 }
     }
 
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, PRIVSEP_NAME, 0, 0, 0);
-        0
-    }
-
-    fn run_context_switch_regression(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        fill_simple_result(out, CTXSWITCH_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
     fn run_fpu_sse_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         use core::arch::x86_64::{__m128i, _mm_set_epi64x, _mm_storeu_si128};
 
@@ -499,12 +356,11 @@ mod suites {
         let total = 2u32;
         let mut passed = 0u32;
 
-        // Test 1: Write pattern to XMM0, verify it survives (no context switch)
         let pattern_lo: i64 = 0x_DEAD_BEEF_CAFE_BABE_u64 as i64;
         let pattern_hi: i64 = 0x_1234_5678_9ABC_DEF0_u64 as i64;
         let expected = unsafe { _mm_set_epi64x(pattern_hi, pattern_lo) };
 
-        let mut readback: __m128i;
+        let readback: __m128i;
         unsafe {
             core::arch::asm!(
                 "movdqa {tmp}, {src}",
@@ -528,11 +384,11 @@ mod suites {
             passed += 1;
         }
 
-        // Test 2: Write different pattern to XMM1, verify XMM0 unchanged
         let pattern2_lo: i64 = 0x_FFFF_0000_AAAA_5555_u64 as i64;
         let pattern2_hi: i64 = 0x_0123_4567_89AB_CDEF_u64 as i64;
         let pattern2 = unsafe { _mm_set_epi64x(pattern2_hi, pattern2_lo) };
 
+        let readback2: __m128i;
         unsafe {
             core::arch::asm!(
                 "movdqa xmm1, {src}",
@@ -540,12 +396,12 @@ mod suites {
             );
             core::arch::asm!(
                 "movdqa {dst}, xmm0",
-                dst = out(xmm_reg) readback,
+                dst = out(xmm_reg) readback2,
             );
         }
 
         unsafe {
-            _mm_storeu_si128(result.as_mut_ptr() as *mut __m128i, readback);
+            _mm_storeu_si128(result.as_mut_ptr() as *mut __m128i, readback2);
         }
         if result == expected_bytes {
             passed += 1;
@@ -554,139 +410,6 @@ mod suites {
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, FPU_NAME, total, passed, elapsed);
         if passed == total { 0 } else { -1 }
-    }
-
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_fpu_sse_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-        fill_simple_result(out, FPU_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
-    fn run_roulette_mapping_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        let start = slopos_lib::tsc::rdtsc();
-
-        let layout = unsafe { mm_get_process_layout() };
-        let stack_probe = if layout.is_null() {
-            0
-        } else {
-            unsafe { (*layout).stack_top }.saturating_sub(0x10)
-        };
-        let heap_probe = unsafe { mm_get_kernel_heap_start() };
-
-        let total = 3u32;
-        let mut passed = 0u32;
-
-        let pid = unsafe { create_process_vm() };
-        if pid != u32::MAX {
-            let dir = unsafe { process_vm_get_page_dir(pid) };
-            if !dir.is_null() {
-                let code_ok =
-                    unsafe { paging_is_user_accessible(dir, intr::run_all_interrupt_tests as u64) }
-                        != 0;
-                let stack_ok =
-                    layout.is_null() || unsafe { paging_is_user_accessible(dir, stack_probe) } != 0;
-                let heap_guard = unsafe { paging_is_user_accessible(dir, heap_probe) } == 0;
-                passed = (code_ok as u32) + (stack_ok as u32) + (heap_guard as u32);
-            }
-            unsafe {
-                let _ = destroy_process_vm(pid);
-            }
-        }
-
-        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
-        fill_simple_result(out, ROULETTE_NAME, total, passed, elapsed);
-        if passed == total { 0 } else { -1 }
-    }
-
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_roulette_mapping_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        fill_simple_result(out, ROULETTE_NAME, 0, 0, 0);
-        0
-    }
-
-    fn run_roulette_exec_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        fill_simple_result(out, ROULETTE_EXEC_NAME, 0, 0, 0);
-        0
-    }
-
-    #[cfg(feature = "builtin-tests")]
-    fn run_virtio_gpu_driver_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        use slopos_drivers::pci::{
-            pci_device_info_t, pci_get_registered_driver, pci_get_registered_driver_count,
-        };
-        use slopos_drivers::virtio_gpu::{
-            VIRTIO_GPU_DEVICE_ID_PRIMARY, VIRTIO_GPU_VENDOR_ID, virtio_gpu_register_driver,
-        };
-
-        let start = slopos_lib::tsc::rdtsc();
-
-        virtio_gpu_register_driver();
-
-        let mut total = 2u32;
-        let mut passed = 0u32;
-        let mut virtio_driver: *const slopos_drivers::pci::pci_driver_t = ptr::null();
-
-        let driver_count = pci_get_registered_driver_count();
-        for i in 0..driver_count {
-            let driver = unsafe { pci_get_registered_driver(i) };
-            if driver.is_null() {
-                continue;
-            }
-            if c_str_eq(
-                unsafe { (*driver).name as *const c_char },
-                b"virtio-gpu\0".as_ptr() as *const c_char,
-            ) {
-                virtio_driver = driver;
-                break;
-            }
-        }
-
-        if !virtio_driver.is_null() {
-            let mut good = pci_device_info_t::default();
-            good.vendor_id = VIRTIO_GPU_VENDOR_ID;
-            good.device_id = VIRTIO_GPU_DEVICE_ID_PRIMARY;
-            unsafe {
-                if let Some(m) = (*virtio_driver).match_fn {
-                    if m(&good as *const _, (*virtio_driver).context) {
-                        passed += 1;
-                    }
-                }
-                let mut bad = pci_device_info_t::default();
-                if let Some(m) = (*virtio_driver).match_fn {
-                    if !m(&bad as *const _, (*virtio_driver).context) {
-                        passed += 1;
-                    }
-                }
-            }
-        } else {
-            total = 0;
-        }
-
-        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
-        fill_simple_result(out, VIRTIO_GPU_NAME, total, passed, elapsed);
-        if total == 0 || passed == total { 0 } else { -1 }
-    }
-
-    #[cfg(not(feature = "builtin-tests"))]
-    fn run_virtio_gpu_driver_suite(
-        _config: *const InterruptTestConfig,
-        out: *mut TestSuiteResult,
-    ) -> i32 {
-        fill_simple_result(out, VIRTIO_GPU_NAME, 0, 0, 0);
-        0
     }
 
     pub fn register_system_suites() {
@@ -710,42 +433,16 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_privsep_suite),
         };
-        static CTX_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-            name: CTXSWITCH_NAME.as_ptr() as *const c_char,
-            mask_bit: SUITE_SCHEDULER,
-            run: Some(run_context_switch_regression),
-        };
         static FPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: FPU_NAME.as_ptr() as *const c_char,
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_fpu_sse_suite),
-        };
-        static ROULETTE_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-            name: ROULETTE_NAME.as_ptr() as *const c_char,
-            mask_bit: SUITE_SCHEDULER,
-            run: Some(run_roulette_mapping_suite),
-        };
-        static ROULETTE_EXEC_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-            name: ROULETTE_EXEC_NAME.as_ptr() as *const c_char,
-            mask_bit: SUITE_SCHEDULER,
-            run: Some(run_roulette_exec_suite),
-        };
-        static VIRTIO_GPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-            name: VIRTIO_GPU_NAME.as_ptr() as *const c_char,
-            mask_bit: SUITE_SCHEDULER,
-            run: Some(run_virtio_gpu_driver_suite),
         };
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
         let _ = tests_register_suite(&EXT2_SUITE_DESC);
         let _ = tests_register_suite(&PRIVSEP_SUITE_DESC);
-        let _ = tests_register_suite(&CTX_SUITE_DESC);
         let _ = tests_register_suite(&FPU_SUITE_DESC);
-        let _ = tests_register_suite(&ROULETTE_SUITE_DESC);
-        let _ = tests_register_suite(&ROULETTE_EXEC_SUITE_DESC);
-        let _ = tests_register_suite(&VIRTIO_GPU_SUITE_DESC);
     }
 }
-
-pub use suites::INTERRUPT_SUITE_DESC;

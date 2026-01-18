@@ -13,6 +13,11 @@ crate-type = ["rlib"]
 
 test = false
 doctest = false
+
+[features]
+default = []
+builtin-tests = ["slopos-tests/builtin-tests"]
+
 [dependencies]
 limine = { workspace = true }
 slopos-abi = { workspace = true }

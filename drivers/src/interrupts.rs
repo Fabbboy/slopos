@@ -1,9 +1,3 @@
-#[cfg(not(feature = "qemu-exit"))]
-use slopos_lib::klog_warn;
-#[cfg(feature = "qemu-exit")]
-use slopos_lib::ports::QEMU_DEBUG_EXIT;
-use slopos_lib::{cpu, klog_info};
-
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_SUITE: Suite = Suite::All;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
@@ -205,44 +199,4 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> InterruptTestConfig {
         }
     }
     cfg
-}
-
-pub fn run(config: &InterruptTestConfig) -> bool {
-    if !config.enabled {
-        klog_info!("Interrupt tests disabled (itests=off).");
-        return true;
-    }
-
-    klog_info!("Running interrupt tests");
-    klog_info!(
-        "  suite={} verbosity={} timeout={}ms shutdown={}",
-        config.suite(),
-        config.verbosity,
-        config.timeout_ms,
-        if config.shutdown { "on" } else { "off" }
-    );
-
-    // Placeholder harness: mark success.
-    klog_info!("Interrupt tests: 13 total, 13 passed, 0 failed, timeout=0");
-
-    if config.shutdown {
-        #[cfg(feature = "qemu-exit")]
-        {
-            qemu_exit(true);
-        }
-        #[cfg(not(feature = "qemu-exit"))]
-        {
-            klog_warn!("Shutdown requested but qemu-exit feature not enabled. Halting.");
-            cpu::halt_loop();
-        }
-    }
-
-    true
-}
-
-#[cfg(feature = "qemu-exit")]
-fn qemu_exit(success: bool) -> ! {
-    let code: u8 = if success { 0 } else { 1 };
-    unsafe { QEMU_DEBUG_EXIT.write(code) };
-    cpu::halt_loop();
 }

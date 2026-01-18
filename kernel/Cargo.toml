@@ -7,6 +7,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+builtin-tests = ["slopos-boot/builtin-tests"]
+
 [dependencies]
 slopos-boot = { workspace = true }
 slopos-core = { workspace = true }

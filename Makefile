@@ -215,7 +215,7 @@ iso-notests: build
 	@$(call build_iso,$(ISO_NO_TESTS),$(BOOT_CMDLINE_EFFECTIVE))
 
 iso-tests: fs-image
-	@$(call build_kernel,slopos-drivers/qemu-exit)
+	@$(call build_kernel,slopos-drivers/qemu-exit kernel/builtin-tests)
 	@$(call build_iso,$(ISO_TESTS),$(TEST_CMDLINE))
 
 fs-image: $(FS_IMAGE)
