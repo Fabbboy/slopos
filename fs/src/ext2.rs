@@ -694,100 +694,19 @@ impl<'a> Ext2Fs<'a> {
     }
 
     fn allocate_block(&mut self) -> Result<u32, Ext2Error> {
-        let groups =
-            (self.superblock.blocks_count + self.blocks_per_group - 1) / self.blocks_per_group;
-        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
-        for group in 0..groups {
-            let mut desc = self.read_group_desc(group)?;
-            if desc.free_blocks_count == 0 {
-                continue;
-            }
-            let block_slice = &mut block_buf[..self.block_size as usize];
-            self.read_block(desc.block_bitmap, block_slice)?;
-            if let Some(bit) = find_free_bit(block_slice) {
-                set_bit(block_slice, bit);
-                self.write_block(desc.block_bitmap, block_slice)?;
-                desc.free_blocks_count = desc.free_blocks_count.saturating_sub(1);
-                self.superblock.free_blocks_count =
-                    self.superblock.free_blocks_count.saturating_sub(1);
-                self.write_group_desc(group, desc)?;
-                self.write_superblock()?;
-                let block_num =
-                    group * self.blocks_per_group + bit as u32 + self.superblock.first_data_block;
-                return Ok(block_num);
-            }
-        }
-        Err(Ext2Error::InvalidBlock)
+        self.bitmap_allocate(BitmapKind::Block)
     }
 
     fn free_block(&mut self, block: u32) -> Result<(), Ext2Error> {
-        if block < self.superblock.first_data_block {
-            return Err(Ext2Error::InvalidBlock);
-        }
-        let base = block - self.superblock.first_data_block;
-        let group = base / self.blocks_per_group;
-        let bit = (base % self.blocks_per_group) as usize;
-        let mut desc = self.read_group_desc(group)?;
-        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
-        let block_slice = &mut block_buf[..self.block_size as usize];
-        self.read_block(desc.block_bitmap, block_slice)?;
-        clear_bit(block_slice, bit);
-        self.write_block(desc.block_bitmap, block_slice)?;
-        desc.free_blocks_count = desc.free_blocks_count.saturating_add(1);
-        self.superblock.free_blocks_count = self.superblock.free_blocks_count.saturating_add(1);
-        self.write_group_desc(group, desc)?;
-        self.write_superblock()?;
-        Ok(())
+        self.bitmap_free(BitmapKind::Block, block)
     }
 
     fn allocate_inode(&mut self) -> Result<u32, Ext2Error> {
-        let groups =
-            (self.superblock.inodes_count + self.inodes_per_group - 1) / self.inodes_per_group;
-        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
-        for group in 0..groups {
-            let mut desc = self.read_group_desc(group)?;
-            if desc.free_inodes_count == 0 {
-                continue;
-            }
-            let block_slice = &mut block_buf[..self.block_size as usize];
-            self.read_block(desc.inode_bitmap, block_slice)?;
-            let start_bit = if group == 0 && self.superblock.first_ino > 0 {
-                (self.superblock.first_ino - 1) as usize
-            } else {
-                0
-            };
-            if let Some(bit) = find_free_bit_from(block_slice, start_bit) {
-                set_bit(block_slice, bit);
-                self.write_block(desc.inode_bitmap, block_slice)?;
-                desc.free_inodes_count = desc.free_inodes_count.saturating_sub(1);
-                self.superblock.free_inodes_count =
-                    self.superblock.free_inodes_count.saturating_sub(1);
-                self.write_group_desc(group, desc)?;
-                self.write_superblock()?;
-                let inode_num = group * self.inodes_per_group + bit as u32 + 1;
-                return Ok(inode_num);
-            }
-        }
-        Err(Ext2Error::InvalidInode)
+        self.bitmap_allocate(BitmapKind::Inode)
     }
 
     fn free_inode(&mut self, inode_num: u32) -> Result<(), Ext2Error> {
-        if inode_num == 0 || inode_num > self.superblock.inodes_count {
-            return Err(Ext2Error::InvalidInode);
-        }
-        let inode_index = inode_num - 1;
-        let group = inode_index / self.inodes_per_group;
-        let bit = (inode_index % self.inodes_per_group) as usize;
-        let mut desc = self.read_group_desc(group)?;
-        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
-        let block_slice = &mut block_buf[..self.block_size as usize];
-        self.read_block(desc.inode_bitmap, block_slice)?;
-        clear_bit(block_slice, bit);
-        self.write_block(desc.inode_bitmap, block_slice)?;
-        desc.free_inodes_count = desc.free_inodes_count.saturating_add(1);
-        self.superblock.free_inodes_count = self.superblock.free_inodes_count.saturating_add(1);
-        self.write_group_desc(group, desc)?;
-        self.write_superblock()?;
+        self.bitmap_free(BitmapKind::Inode, inode_num)?;
         let empty = Ext2Inode {
             mode: 0,
             uid: 0,
@@ -802,8 +721,7 @@ impl<'a> Ext2Fs<'a> {
             flags: 0,
             block: [0u32; 15],
         };
-        self.write_inode(inode_num, empty)?;
-        Ok(())
+        self.write_inode(inode_num, empty)
     }
 
     fn write_inode(&mut self, inode_num: u32, inode: Ext2Inode) -> Result<(), Ext2Error> {
@@ -938,6 +856,182 @@ impl<'a> Ext2Fs<'a> {
         let mut desc = self.read_group_desc(group)?;
         desc.used_dirs_count = desc.used_dirs_count.saturating_add(1);
         self.write_group_desc(group, desc)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BitmapKind {
+    Block,
+    Inode,
+}
+
+impl<'a> Ext2Fs<'a> {
+    fn bitmap_counts(&self, kind: BitmapKind) -> (u32, u32) {
+        match kind {
+            BitmapKind::Block => (self.superblock.blocks_count, self.blocks_per_group),
+            BitmapKind::Inode => (self.superblock.inodes_count, self.inodes_per_group),
+        }
+    }
+
+    fn bitmap_block(desc: &Ext2GroupDesc, kind: BitmapKind) -> u32 {
+        match kind {
+            BitmapKind::Block => desc.block_bitmap,
+            BitmapKind::Inode => desc.inode_bitmap,
+        }
+    }
+
+    fn free_count(desc: &Ext2GroupDesc, kind: BitmapKind) -> u16 {
+        match kind {
+            BitmapKind::Block => desc.free_blocks_count,
+            BitmapKind::Inode => desc.free_inodes_count,
+        }
+    }
+
+    fn decrement_free_count(desc: &mut Ext2GroupDesc, kind: BitmapKind) {
+        match kind {
+            BitmapKind::Block => desc.free_blocks_count = desc.free_blocks_count.saturating_sub(1),
+            BitmapKind::Inode => desc.free_inodes_count = desc.free_inodes_count.saturating_sub(1),
+        }
+    }
+
+    fn increment_free_count(desc: &mut Ext2GroupDesc, kind: BitmapKind) {
+        match kind {
+            BitmapKind::Block => desc.free_blocks_count = desc.free_blocks_count.saturating_add(1),
+            BitmapKind::Inode => desc.free_inodes_count = desc.free_inodes_count.saturating_add(1),
+        }
+    }
+
+    fn decrement_superblock_free(&mut self, kind: BitmapKind) {
+        match kind {
+            BitmapKind::Block => {
+                self.superblock.free_blocks_count =
+                    self.superblock.free_blocks_count.saturating_sub(1)
+            }
+            BitmapKind::Inode => {
+                self.superblock.free_inodes_count =
+                    self.superblock.free_inodes_count.saturating_sub(1)
+            }
+        }
+    }
+
+    fn increment_superblock_free(&mut self, kind: BitmapKind) {
+        match kind {
+            BitmapKind::Block => {
+                self.superblock.free_blocks_count =
+                    self.superblock.free_blocks_count.saturating_add(1)
+            }
+            BitmapKind::Inode => {
+                self.superblock.free_inodes_count =
+                    self.superblock.free_inodes_count.saturating_add(1)
+            }
+        }
+    }
+
+    fn bitmap_index_to_id(&self, kind: BitmapKind, group: u32, bit: usize) -> u32 {
+        match kind {
+            BitmapKind::Block => {
+                group * self.blocks_per_group + bit as u32 + self.superblock.first_data_block
+            }
+            BitmapKind::Inode => group * self.inodes_per_group + bit as u32 + 1,
+        }
+    }
+
+    fn id_to_bitmap_index(&self, kind: BitmapKind, id: u32) -> Option<(u32, usize)> {
+        match kind {
+            BitmapKind::Block => {
+                if id < self.superblock.first_data_block {
+                    return None;
+                }
+                let base = id - self.superblock.first_data_block;
+                let group = base / self.blocks_per_group;
+                let bit = (base % self.blocks_per_group) as usize;
+                Some((group, bit))
+            }
+            BitmapKind::Inode => {
+                if id == 0 || id > self.superblock.inodes_count {
+                    return None;
+                }
+                let index = id - 1;
+                let group = index / self.inodes_per_group;
+                let bit = (index % self.inodes_per_group) as usize;
+                Some((group, bit))
+            }
+        }
+    }
+
+    fn bitmap_error(kind: BitmapKind) -> Ext2Error {
+        match kind {
+            BitmapKind::Block => Ext2Error::InvalidBlock,
+            BitmapKind::Inode => Ext2Error::InvalidInode,
+        }
+    }
+
+    fn alloc_start_bit(&self, kind: BitmapKind, group: u32) -> usize {
+        match kind {
+            BitmapKind::Block => 0,
+            BitmapKind::Inode => {
+                if group == 0 && self.superblock.first_ino > 0 {
+                    (self.superblock.first_ino - 1) as usize
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
+    fn bitmap_allocate(&mut self, kind: BitmapKind) -> Result<u32, Ext2Error> {
+        let (total_count, per_group) = self.bitmap_counts(kind);
+        let num_groups = (total_count + per_group - 1) / per_group;
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
+
+        for group in 0..num_groups {
+            let mut desc = self.read_group_desc(group)?;
+            if Self::free_count(&desc, kind) == 0 {
+                continue;
+            }
+
+            let bitmap_blk = Self::bitmap_block(&desc, kind);
+            let block_slice = &mut block_buf[..self.block_size as usize];
+            self.read_block(bitmap_blk, block_slice)?;
+
+            let start_bit = self.alloc_start_bit(kind, group);
+            if let Some(bit) = find_free_bit_from(block_slice, start_bit) {
+                set_bit(block_slice, bit);
+                self.write_block(bitmap_blk, block_slice)?;
+
+                Self::decrement_free_count(&mut desc, kind);
+                self.decrement_superblock_free(kind);
+                self.write_group_desc(group, desc)?;
+                self.write_superblock()?;
+
+                return Ok(self.bitmap_index_to_id(kind, group, bit));
+            }
+        }
+
+        Err(Self::bitmap_error(kind))
+    }
+
+    fn bitmap_free(&mut self, kind: BitmapKind, id: u32) -> Result<(), Ext2Error> {
+        let (group, bit) = self
+            .id_to_bitmap_index(kind, id)
+            .ok_or_else(|| Self::bitmap_error(kind))?;
+
+        let mut desc = self.read_group_desc(group)?;
+        let bitmap_blk = Self::bitmap_block(&desc, kind);
+
+        let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
+        let block_slice = &mut block_buf[..self.block_size as usize];
+        self.read_block(bitmap_blk, block_slice)?;
+
+        clear_bit(block_slice, bit);
+        self.write_block(bitmap_blk, block_slice)?;
+
+        Self::increment_free_count(&mut desc, kind);
+        self.increment_superblock_free(kind);
+        self.write_group_desc(group, desc)?;
+        self.write_superblock()?;
+
+        Ok(())
     }
 }
 
@@ -1077,10 +1171,6 @@ fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     }
     Some((parent, name))
-}
-
-fn find_free_bit(bitmap: &[u8]) -> Option<usize> {
-    find_free_bit_from(bitmap, 0)
 }
 
 fn find_free_bit_from(bitmap: &[u8], start_bit: usize) -> Option<usize> {
