@@ -8,7 +8,7 @@ use slopos_drivers::interrupts::SUITE_SCHEDULER;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
 use slopos_lib::klog_info;
 
-pub const TESTS_MAX_SUITES: usize = 8;
+pub const TESTS_MAX_SUITES: usize = 16;
 const TESTS_MAX_CYCLES_PER_MS: u64 = 3_000_000;
 
 #[repr(C)]
@@ -266,6 +266,14 @@ mod suites {
     const EXT2_NAME: &[u8] = b"ext2\0";
     const PRIVSEP_NAME: &[u8] = b"privsep\0";
     const FPU_NAME: &[u8] = b"fpu_sse\0";
+    const PAGE_ALLOC_NAME: &[u8] = b"page_alloc\0";
+    const HEAP_EXT_NAME: &[u8] = b"heap_ext\0";
+    const PAGING_NAME: &[u8] = b"paging\0";
+    const RING_BUF_NAME: &[u8] = b"ring_buf\0";
+    const SPINLOCK_NAME: &[u8] = b"spinlock\0";
+    const SHM_NAME: &[u8] = b"shm\0";
+    const RIGOROUS_NAME: &[u8] = b"rigorous\0";
+    const PROCESS_VM_NAME: &[u8] = b"process_vm\0";
 
     fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
         super::cycles_to_ms(end.wrapping_sub(start))
@@ -290,9 +298,37 @@ mod suites {
         }
     }
 
+    macro_rules! run_test {
+        ($passed:expr, $total:expr, $test_fn:expr) => {{
+            $total += 1;
+            if $test_fn() == 0 {
+                $passed += 1;
+            }
+        }};
+    }
+
     use slopos_mm::tests::{
-        test_heap_fragmentation_behind_head, test_heap_free_list_search,
-        test_process_vm_counter_reset, test_process_vm_slot_reuse,
+        test_cow_fault_handling, test_cow_page_isolation, test_heap_alloc_zero,
+        test_heap_boundary_write, test_heap_double_free_defensive,
+        test_heap_fragmentation_behind_head, test_heap_free_list_search, test_heap_kfree_null,
+        test_heap_kzalloc_zeroed, test_heap_large_alloc, test_heap_large_block_integrity,
+        test_heap_medium_alloc, test_heap_no_overlap, test_heap_small_alloc, test_heap_stats,
+        test_heap_stress_cycles, test_irqmutex_basic, test_irqmutex_mutation,
+        test_irqmutex_try_lock, test_multiple_process_vms, test_page_alloc_fragmentation,
+        test_page_alloc_free_cycle, test_page_alloc_free_null, test_page_alloc_multi_order,
+        test_page_alloc_multipage_integrity, test_page_alloc_no_stale_data,
+        test_page_alloc_refcount, test_page_alloc_single, test_page_alloc_stats,
+        test_page_alloc_write_verify, test_page_alloc_zero_full_page, test_page_alloc_zeroed,
+        test_paging_cow_kernel, test_paging_get_kernel_dir, test_paging_user_accessible_kernel,
+        test_paging_virt_to_phys, test_process_vm_alloc_and_access, test_process_vm_brk_expansion,
+        test_process_vm_counter_reset, test_process_vm_create_destroy_memory,
+        test_process_vm_slot_reuse, test_ring_buffer_basic, test_ring_buffer_capacity,
+        test_ring_buffer_empty_pop, test_ring_buffer_fifo, test_ring_buffer_full,
+        test_ring_buffer_overwrite, test_ring_buffer_reset, test_ring_buffer_wrap,
+        test_shm_create_destroy, test_shm_create_excessive_size, test_shm_create_zero_size,
+        test_shm_destroy_non_owner, test_shm_invalid_token, test_shm_refcount,
+        test_shm_surface_attach, test_shm_surface_attach_too_small, test_spinlock_basic,
+        test_spinlock_init, test_spinlock_irqsave, test_vma_flags_retrieval,
     };
 
     fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -300,14 +336,8 @@ mod suites {
         let mut passed = 0u32;
         let mut total = 0u32;
 
-        total += 1;
-        if test_process_vm_slot_reuse() == 0 {
-            passed += 1;
-        }
-        total += 1;
-        if test_process_vm_counter_reset() == 0 {
-            passed += 1;
-        }
+        run_test!(passed, total, test_process_vm_slot_reuse);
+        run_test!(passed, total, test_process_vm_counter_reset);
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, VM_NAME, total, passed, elapsed);
@@ -317,14 +347,10 @@ mod suites {
     fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
         let mut passed = 0u32;
-        let total = 2u32;
+        let mut total = 0u32;
 
-        if test_heap_free_list_search() == 0 {
-            passed += 1;
-        }
-        if test_heap_fragmentation_behind_head() == 0 {
-            passed += 1;
-        }
+        run_test!(passed, total, test_heap_free_list_search);
+        run_test!(passed, total, test_heap_fragmentation_behind_head);
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, HEAP_NAME, total, passed, elapsed);
@@ -412,6 +438,151 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    fn run_page_alloc_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_page_alloc_single);
+        run_test!(passed, total, test_page_alloc_multi_order);
+        run_test!(passed, total, test_page_alloc_free_cycle);
+        run_test!(passed, total, test_page_alloc_zeroed);
+        run_test!(passed, total, test_page_alloc_refcount);
+        run_test!(passed, total, test_page_alloc_stats);
+        run_test!(passed, total, test_page_alloc_free_null);
+        run_test!(passed, total, test_page_alloc_fragmentation);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, PAGE_ALLOC_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_heap_ext_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_heap_small_alloc);
+        run_test!(passed, total, test_heap_medium_alloc);
+        run_test!(passed, total, test_heap_large_alloc);
+        run_test!(passed, total, test_heap_kzalloc_zeroed);
+        run_test!(passed, total, test_heap_kfree_null);
+        run_test!(passed, total, test_heap_alloc_zero);
+        run_test!(passed, total, test_heap_stats);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, HEAP_EXT_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_paging_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_paging_virt_to_phys);
+        run_test!(passed, total, test_paging_get_kernel_dir);
+        run_test!(passed, total, test_paging_user_accessible_kernel);
+        run_test!(passed, total, test_paging_cow_kernel);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, PAGING_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_ring_buf_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_ring_buffer_basic);
+        run_test!(passed, total, test_ring_buffer_fifo);
+        run_test!(passed, total, test_ring_buffer_empty_pop);
+        run_test!(passed, total, test_ring_buffer_full);
+        run_test!(passed, total, test_ring_buffer_overwrite);
+        run_test!(passed, total, test_ring_buffer_wrap);
+        run_test!(passed, total, test_ring_buffer_reset);
+        run_test!(passed, total, test_ring_buffer_capacity);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, RING_BUF_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_spinlock_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_spinlock_basic);
+        run_test!(passed, total, test_spinlock_irqsave);
+        run_test!(passed, total, test_spinlock_init);
+        run_test!(passed, total, test_irqmutex_basic);
+        run_test!(passed, total, test_irqmutex_mutation);
+        run_test!(passed, total, test_irqmutex_try_lock);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, SPINLOCK_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_shm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_shm_create_destroy);
+        run_test!(passed, total, test_shm_create_zero_size);
+        run_test!(passed, total, test_shm_create_excessive_size);
+        run_test!(passed, total, test_shm_destroy_non_owner);
+        run_test!(passed, total, test_shm_refcount);
+        run_test!(passed, total, test_shm_invalid_token);
+        run_test!(passed, total, test_shm_surface_attach);
+        run_test!(passed, total, test_shm_surface_attach_too_small);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, SHM_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_rigorous_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_page_alloc_write_verify);
+        run_test!(passed, total, test_page_alloc_zero_full_page);
+        run_test!(passed, total, test_page_alloc_no_stale_data);
+        run_test!(passed, total, test_heap_boundary_write);
+        run_test!(passed, total, test_heap_no_overlap);
+        run_test!(passed, total, test_heap_double_free_defensive);
+        run_test!(passed, total, test_heap_large_block_integrity);
+        run_test!(passed, total, test_heap_stress_cycles);
+        run_test!(passed, total, test_page_alloc_multipage_integrity);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, RIGOROUS_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_process_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_process_vm_create_destroy_memory);
+        run_test!(passed, total, test_process_vm_alloc_and_access);
+        run_test!(passed, total, test_process_vm_brk_expansion);
+        run_test!(passed, total, test_cow_page_isolation);
+        run_test!(passed, total, test_cow_fault_handling);
+        run_test!(passed, total, test_multiple_process_vms);
+        run_test!(passed, total, test_vma_flags_retrieval);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, PROCESS_VM_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
     pub fn register_system_suites() {
         static VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VM_NAME.as_ptr() as *const c_char,
@@ -438,11 +609,59 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_fpu_sse_suite),
         };
+        static PAGE_ALLOC_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: PAGE_ALLOC_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_page_alloc_suite),
+        };
+        static HEAP_EXT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: HEAP_EXT_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_heap_ext_suite),
+        };
+        static PAGING_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: PAGING_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_paging_suite),
+        };
+        static RING_BUF_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: RING_BUF_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_ring_buf_suite),
+        };
+        static SPINLOCK_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: SPINLOCK_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_spinlock_suite),
+        };
+        static SHM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: SHM_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_shm_suite),
+        };
+        static RIGOROUS_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: RIGOROUS_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_rigorous_suite),
+        };
+        static PROCESS_VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: PROCESS_VM_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_process_vm_suite),
+        };
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
         let _ = tests_register_suite(&EXT2_SUITE_DESC);
         let _ = tests_register_suite(&PRIVSEP_SUITE_DESC);
         let _ = tests_register_suite(&FPU_SUITE_DESC);
+        let _ = tests_register_suite(&PAGE_ALLOC_SUITE_DESC);
+        let _ = tests_register_suite(&HEAP_EXT_SUITE_DESC);
+        let _ = tests_register_suite(&PAGING_SUITE_DESC);
+        let _ = tests_register_suite(&RING_BUF_SUITE_DESC);
+        let _ = tests_register_suite(&SPINLOCK_SUITE_DESC);
+        let _ = tests_register_suite(&SHM_SUITE_DESC);
+        let _ = tests_register_suite(&RIGOROUS_SUITE_DESC);
+        let _ = tests_register_suite(&PROCESS_VM_SUITE_DESC);
     }
 }
