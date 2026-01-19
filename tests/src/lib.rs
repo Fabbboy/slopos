@@ -2,11 +2,12 @@
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
 use slopos_drivers::interrupts::SUITE_SCHEDULER;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
-use slopos_lib::klog_info;
+use slopos_lib::{StateFlag, klog_info};
 
 pub mod exception_tests;
 
@@ -84,6 +85,8 @@ impl Default for TestRunSummary {
 static mut REGISTRY: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] = [None; TESTS_MAX_SUITES];
 static mut REGISTRY_COUNT: usize = 0;
 static mut CACHED_CYCLES_PER_MS: u64 = 0;
+static PANIC_SEEN: StateFlag = StateFlag::new();
+static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
 
 fn registry_mut() -> *mut [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] {
     &raw mut REGISTRY
@@ -152,6 +155,8 @@ pub fn tests_reset_registry() {
         (*registry_mut()).iter_mut().for_each(|slot| *slot = None);
         *registry_count_mut() = 0;
     }
+    PANIC_SEEN.set_inactive();
+    PANIC_REPORTED.store(false, Ordering::Relaxed);
 }
 
 pub fn tests_register_suite(desc: *const TestSuiteDesc) -> i32 {
@@ -211,17 +216,43 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
 
     let start_cycles = slopos_lib::tsc::rdtsc();
     for (idx, entry) in desc_list.iter().enumerate().take(desc_count) {
+        if PANIC_SEEN.is_active() {
+            summary.unexpected_exceptions = summary.unexpected_exceptions.saturating_add(1);
+            summary.failed = summary.failed.saturating_add(1);
+            if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                klog_info!("TESTS: panic flagged, stopping suite execution\n");
+            }
+            break;
+        }
+
         let Some(desc) = entry else { continue };
 
         if (cfg.suite_mask & desc.mask_bit) == 0 {
             continue;
         }
 
+        let suite_start = slopos_lib::tsc::rdtsc();
         let mut res = TestSuiteResult::default();
         res.name = desc.name;
 
         if let Some(run) = desc.run {
             let _ = run(cfg, &mut res);
+        }
+
+        if PANIC_SEEN.is_active() {
+            res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
+            res.failed = res.failed.saturating_add(1);
+        }
+
+        if cfg.timeout_ms != 0 {
+            let elapsed = cycles_to_ms(slopos_lib::tsc::rdtsc().wrapping_sub(suite_start));
+            if elapsed > cfg.timeout_ms {
+                res.timed_out = 1;
+                res.failed = res.failed.saturating_add(1);
+                if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                    klog_info!("TESTS: suite timeout exceeded\n");
+                }
+            }
         }
 
         if summary.suite_count < TESTS_MAX_SUITES {
@@ -258,6 +289,13 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
 
 pub fn tests_request_shutdown(failed: i32) {
     interrupt_test_request_shutdown(failed);
+}
+
+pub fn tests_mark_panic() {
+    PANIC_SEEN.set_active();
+    if !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+        klog_info!("TESTS: panic observed\n");
+    }
 }
 
 mod suites {
@@ -409,11 +447,11 @@ mod suites {
 
     fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
-        let total = 5u32;
-        let passed = slopos_fs::tests::run_ext2_tests().max(0) as u32;
+        let (passed, total) = slopos_fs::tests::run_ext2_tests_summary();
+        let passed = passed.max(0) as u32;
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, EXT2_NAME, total, passed, elapsed);
-        if passed == total { 0 } else { -1 }
+        if total != 0 && passed == total { 0 } else { -1 }
     }
 
     fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {

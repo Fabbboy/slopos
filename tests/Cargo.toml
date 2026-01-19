@@ -17,6 +17,12 @@ doctest = false
 default = []
 builtin-tests = []
 
+[dev-dependencies]
+
+[package.metadata.rust-analyzer]
+check.features = ["builtin-tests"]
+check.allTargets = false
+
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }

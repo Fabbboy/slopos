@@ -9,7 +9,7 @@ workspace = true
 
 [features]
 default = []
-builtin-tests = ["slopos-boot/builtin-tests"]
+builtin-tests = ["slopos-boot/builtin-tests", "slopos-tests"]
 
 [dependencies]
 slopos-boot = { workspace = true }
@@ -20,6 +20,7 @@ slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-userland = { workspace = true }
 slopos-video = { workspace = true }
+slopos-tests = { workspace = true, optional = true }
 
 [[bin]]
 name = "kernel"
