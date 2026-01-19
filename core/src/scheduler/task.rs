@@ -102,6 +102,11 @@ fn try_with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> Optio
 }
 
 pub fn task_find_by_id(task_id: u32) -> *mut Task {
+    // INVALID_TASK_ID is used for uninitialized/invalid task slots - never return those
+    if task_id == INVALID_TASK_ID {
+        return ptr::null_mut();
+    }
+
     with_task_manager(|mgr| {
         for task in mgr.tasks.iter_mut() {
             if task.task_id == task_id {
@@ -651,6 +656,7 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     let old_state = unsafe { (*task).state };
     if !task_state_transition_allowed(old_state, new_state) {
         klog_info!("task_set_state: invalid transition for task {}", task_id);
+        return -1;
     }
 
     unsafe { (*task).state = new_state };
