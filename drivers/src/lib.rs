@@ -7,6 +7,7 @@ pub mod input_event;
 pub mod interrupt_test;
 pub mod interrupts;
 pub mod ioapic;
+pub mod ioapic_tests;
 pub mod irq;
 pub mod pci;
 pub mod pic;

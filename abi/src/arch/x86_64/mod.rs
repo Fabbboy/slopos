@@ -1,5 +1,6 @@
 pub mod apic;
 pub mod cpuid;
+pub mod exception;
 pub mod gdt;
 pub mod idt;
 pub mod ioapic;

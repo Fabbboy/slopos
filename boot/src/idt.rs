@@ -261,7 +261,7 @@ pub fn exception_set_mode(mode: ExceptionMode) {
     }
 }
 pub fn exception_is_critical(vector: u8) -> i32 {
-    is_critical_exception_internal(vector) as i32
+    slopos_abi::arch::x86_64::exception::exception_is_critical(vector) as i32
 }
 pub fn idt_load() {
     unsafe {
@@ -340,26 +340,35 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     handler(frame);
 }
 pub fn get_exception_name(vector: u8) -> *const c_char {
+    get_exception_name_cstr(vector).as_ptr() as *const c_char
+}
+
+fn get_exception_name_cstr(vector: u8) -> &'static [u8] {
     match vector {
-        0 => b"Divide Error\0".as_ptr() as *const c_char,
-        1 => b"Debug\0".as_ptr() as *const c_char,
-        2 => b"Non-Maskable Interrupt\0".as_ptr() as *const c_char,
-        3 => b"Breakpoint\0".as_ptr() as *const c_char,
-        4 => b"Overflow\0".as_ptr() as *const c_char,
-        5 => b"Bound Range Exceeded\0".as_ptr() as *const c_char,
-        6 => b"Invalid Opcode\0".as_ptr() as *const c_char,
-        7 => b"Device Not Available\0".as_ptr() as *const c_char,
-        8 => b"Double Fault\0".as_ptr() as *const c_char,
-        10 => b"Invalid TSS\0".as_ptr() as *const c_char,
-        11 => b"Segment Not Present\0".as_ptr() as *const c_char,
-        12 => b"Stack Segment Fault\0".as_ptr() as *const c_char,
-        13 => b"General Protection Fault\0".as_ptr() as *const c_char,
-        14 => b"Page Fault\0".as_ptr() as *const c_char,
-        16 => b"x87 FPU Error\0".as_ptr() as *const c_char,
-        17 => b"Alignment Check\0".as_ptr() as *const c_char,
-        18 => b"Machine Check\0".as_ptr() as *const c_char,
-        19 => b"SIMD Floating-Point Exception\0".as_ptr() as *const c_char,
-        _ => b"Unknown\0".as_ptr() as *const c_char,
+        0 => b"Divide Error\0",
+        1 => b"Debug\0",
+        2 => b"Non-Maskable Interrupt\0",
+        3 => b"Breakpoint\0",
+        4 => b"Overflow\0",
+        5 => b"Bound Range Exceeded\0",
+        6 => b"Invalid Opcode\0",
+        7 => b"Device Not Available\0",
+        8 => b"Double Fault\0",
+        9 => b"Coprocessor Segment Overrun\0",
+        10 => b"Invalid TSS\0",
+        11 => b"Segment Not Present\0",
+        12 => b"Stack Segment Fault\0",
+        13 => b"General Protection Fault\0",
+        14 => b"Page Fault\0",
+        15 => b"Reserved\0",
+        16 => b"x87 FPU Error\0",
+        17 => b"Alignment Check\0",
+        18 => b"Machine Check\0",
+        19 => b"SIMD Floating-Point Exception\0",
+        20 => b"Virtualization Exception\0",
+        21 => b"Control Protection Exception\0",
+        22..=31 => b"Reserved\0",
+        _ => b"Unknown\0",
     }
 }
 
@@ -390,10 +399,7 @@ fn initialize_handler_tables() {
 }
 
 fn is_critical_exception_internal(vector: u8) -> bool {
-    matches!(
-        vector,
-        EXCEPTION_DOUBLE_FAULT | EXCEPTION_MACHINE_CHECK | EXCEPTION_NMI
-    )
+    slopos_abi::arch::x86_64::exception::exception_is_critical(vector)
 }
 
 fn in_user(frame: &slopos_lib::InterruptFrame) -> bool {

@@ -1,5 +1,7 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
+pub mod tests;
+
 use alloc::vec::Vec;
 
 use slopos_abi::addr::VirtAddr;
@@ -138,7 +140,7 @@ pub fn do_exec(
     Ok(())
 }
 
-fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
+pub fn translate_address(addr: u64, min_vaddr: u64, code_base: u64) -> u64 {
     const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
     if addr >= KERNEL_BASE {
         let offset = addr.wrapping_sub(KERNEL_BASE);

@@ -1,3 +1,4 @@
+pub mod context_tests;
 pub mod fate_api;
 pub mod ffi_boundary;
 pub mod kthread;

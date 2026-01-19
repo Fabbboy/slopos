@@ -18,6 +18,7 @@ default = []
 builtin-tests = []
 
 [dependencies]
+slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-core = { workspace = true }
 slopos-drivers = { workspace = true }

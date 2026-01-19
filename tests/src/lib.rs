@@ -8,7 +8,9 @@ use slopos_drivers::interrupts::SUITE_SCHEDULER;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
 use slopos_lib::klog_info;
 
-pub const TESTS_MAX_SUITES: usize = 24;
+pub mod exception_tests;
+
+pub const TESTS_MAX_SUITES: usize = 25;
 const TESTS_MAX_CYCLES_PER_MS: u64 = 3_000_000;
 
 #[repr(C)]
@@ -279,6 +281,11 @@ mod suites {
     const OOM_NAME: &[u8] = b"oom\0";
     const COW_EDGE_NAME: &[u8] = b"cow_edge\0";
     const SYSCALL_VALID_NAME: &[u8] = b"syscall_valid\0";
+    const EXCEPTION_NAME: &[u8] = b"exception\0";
+    const EXEC_NAME: &[u8] = b"exec\0";
+    const IRQ_NAME: &[u8] = b"irq\0";
+    const IOAPIC_NAME: &[u8] = b"ioapic\0";
+    const CONTEXT_NAME: &[u8] = b"context\0";
 
     fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
         super::cycles_to_ms(end.wrapping_sub(start))
@@ -367,7 +374,12 @@ mod suites {
         test_timer_tick_no_current_task, test_unschedule_not_in_queue,
     };
 
+    use crate::exception_tests::run_exception_tests;
+    use slopos_core::run_context_tests;
+    use slopos_core::run_exec_tests;
+    use slopos_core::run_irq_tests;
     use slopos_core::run_syscall_validation_tests;
+    use slopos_drivers::ioapic_tests::run_ioapic_tests;
 
     fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
         let start = slopos_lib::tsc::rdtsc();
@@ -754,6 +766,46 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    fn run_exception_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let (passed, total) = run_exception_tests();
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, EXCEPTION_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_exec_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let (passed, total) = run_exec_tests();
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, EXEC_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_irq_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let (passed, total) = run_irq_tests();
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, IRQ_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_ioapic_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let (passed, total) = run_ioapic_tests();
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, IOAPIC_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_context_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let (passed, total) = run_context_tests();
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, CONTEXT_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
     pub fn register_system_suites() {
         static VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VM_NAME.as_ptr() as *const c_char,
@@ -845,6 +897,31 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_syscall_valid_suite),
         };
+        static EXCEPTION_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: EXCEPTION_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_exception_suite),
+        };
+        static EXEC_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: EXEC_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_exec_suite),
+        };
+        static IRQ_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: IRQ_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_irq_suite),
+        };
+        static IOAPIC_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: IOAPIC_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_ioapic_suite),
+        };
+        static CONTEXT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: CONTEXT_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_context_suite),
+        };
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
@@ -864,5 +941,10 @@ mod suites {
         let _ = tests_register_suite(&OOM_SUITE_DESC);
         let _ = tests_register_suite(&COW_EDGE_SUITE_DESC);
         let _ = tests_register_suite(&SYSCALL_VALID_SUITE_DESC);
+        let _ = tests_register_suite(&EXCEPTION_SUITE_DESC);
+        let _ = tests_register_suite(&EXEC_SUITE_DESC);
+        let _ = tests_register_suite(&IRQ_SUITE_DESC);
+        let _ = tests_register_suite(&IOAPIC_SUITE_DESC);
+        let _ = tests_register_suite(&CONTEXT_SUITE_DESC);
     }
 }
