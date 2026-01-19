@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly-2025-12-09"
+channel = "nightly-2026-01-19"
 components = ["rust-src", "rustfmt", "clippy", "llvm-tools-preview", "rust-analyzer"]
 profile = "minimal"
 targets = ["x86_64-unknown-none"]

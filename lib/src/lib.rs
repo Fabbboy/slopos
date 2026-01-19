@@ -231,10 +231,8 @@ pub mod cpu {
 
     #[inline(always)]
     pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
-        unsafe {
-            let res = core::arch::x86_64::__cpuid(leaf);
-            (res.eax, res.ebx, res.ecx, res.edx)
-        }
+        let res = core::arch::x86_64::__cpuid(leaf);
+        (res.eax, res.ebx, res.ecx, res.edx)
     }
 
     #[inline(always)]
