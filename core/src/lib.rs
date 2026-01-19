@@ -18,12 +18,14 @@ pub use slopos_lib::wl_currency;
 pub use scheduler::fate_api;
 pub use scheduler::ffi_boundary;
 pub use scheduler::kthread;
+pub use scheduler::sched_tests;
 pub use scheduler::scheduler as sched;
 pub use scheduler::task;
 pub use scheduler::test_tasks;
 
 pub use scheduler::fate_api::*;
 pub use scheduler::kthread::*;
+pub use scheduler::sched_tests::*;
 pub use scheduler::scheduler::*;
 pub use scheduler::task::*;
 pub use scheduler::test_tasks::*;

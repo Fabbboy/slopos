@@ -274,6 +274,7 @@ mod suites {
     const SHM_NAME: &[u8] = b"shm\0";
     const RIGOROUS_NAME: &[u8] = b"rigorous\0";
     const PROCESS_VM_NAME: &[u8] = b"process_vm\0";
+    const SCHED_CORE_NAME: &[u8] = b"sched_core\0";
 
     fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
         super::cycles_to_ms(end.wrapping_sub(start))
@@ -329,6 +330,20 @@ mod suites {
         test_shm_destroy_non_owner, test_shm_invalid_token, test_shm_refcount,
         test_shm_surface_attach, test_shm_surface_attach_too_small, test_spinlock_basic,
         test_spinlock_init, test_spinlock_irqsave, test_vma_flags_retrieval,
+    };
+
+    use slopos_core::sched_tests::{
+        test_create_conflicting_flags, test_create_max_tasks, test_create_null_entry,
+        test_create_null_name, test_create_over_max_tasks, test_double_terminate,
+        test_find_invalid_id, test_get_info_null_output, test_idle_priority_last,
+        test_interleaved_operations, test_many_same_priority_tasks, test_priority_ordering,
+        test_rapid_create_destroy_cycle, test_schedule_duplicate_task, test_schedule_null_task,
+        test_schedule_to_empty_queue, test_schedule_while_disabled, test_scheduler_starts_disabled,
+        test_state_transition_invalid_blocked_to_running,
+        test_state_transition_invalid_terminated_to_running,
+        test_state_transition_ready_to_running, test_state_transition_running_to_blocked,
+        test_terminate_invalid_id, test_terminate_nonexistent_id, test_timer_tick_decrements_slice,
+        test_timer_tick_no_current_task, test_unschedule_not_in_queue,
     };
 
     fn run_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -583,6 +598,52 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    fn run_sched_core_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_state_transition_ready_to_running);
+        run_test!(passed, total, test_state_transition_running_to_blocked);
+        run_test!(
+            passed,
+            total,
+            test_state_transition_invalid_terminated_to_running
+        );
+        run_test!(
+            passed,
+            total,
+            test_state_transition_invalid_blocked_to_running
+        );
+        run_test!(passed, total, test_create_max_tasks);
+        run_test!(passed, total, test_create_over_max_tasks);
+        run_test!(passed, total, test_rapid_create_destroy_cycle);
+        run_test!(passed, total, test_schedule_to_empty_queue);
+        run_test!(passed, total, test_schedule_duplicate_task);
+        run_test!(passed, total, test_schedule_null_task);
+        run_test!(passed, total, test_unschedule_not_in_queue);
+        run_test!(passed, total, test_priority_ordering);
+        run_test!(passed, total, test_idle_priority_last);
+        run_test!(passed, total, test_timer_tick_no_current_task);
+        run_test!(passed, total, test_timer_tick_decrements_slice);
+        run_test!(passed, total, test_terminate_invalid_id);
+        run_test!(passed, total, test_terminate_nonexistent_id);
+        run_test!(passed, total, test_double_terminate);
+        run_test!(passed, total, test_find_invalid_id);
+        run_test!(passed, total, test_get_info_null_output);
+        run_test!(passed, total, test_create_null_entry);
+        run_test!(passed, total, test_create_conflicting_flags);
+        run_test!(passed, total, test_create_null_name);
+        run_test!(passed, total, test_scheduler_starts_disabled);
+        run_test!(passed, total, test_schedule_while_disabled);
+        run_test!(passed, total, test_many_same_priority_tasks);
+        run_test!(passed, total, test_interleaved_operations);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, SCHED_CORE_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
     pub fn register_system_suites() {
         static VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VM_NAME.as_ptr() as *const c_char,
@@ -649,6 +710,11 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_process_vm_suite),
         };
+        static SCHED_CORE_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: SCHED_CORE_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_sched_core_suite),
+        };
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
@@ -663,5 +729,6 @@ mod suites {
         let _ = tests_register_suite(&SHM_SUITE_DESC);
         let _ = tests_register_suite(&RIGOROUS_SUITE_DESC);
         let _ = tests_register_suite(&PROCESS_VM_SUITE_DESC);
+        let _ = tests_register_suite(&SCHED_CORE_SUITE_DESC);
     }
 }
