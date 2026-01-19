@@ -243,7 +243,7 @@ fn boot_step_interrupt_tests_fn() -> i32 {
             unexpected_exceptions: 0,
             elapsed_ms: 0,
             timed_out: 0,
-        }; 16],
+        }; slopos_tests::TESTS_MAX_SUITES],
         suite_count: 0,
         total_tests: 0,
         passed: 0,

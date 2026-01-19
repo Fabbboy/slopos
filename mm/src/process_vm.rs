@@ -1228,7 +1228,10 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
         return process.heap_end;
     }
 
-    let aligned_brk = (new_brk + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
+    let aligned_brk = match new_brk.checked_add(PAGE_SIZE_4KB - 1) {
+        Some(v) => v & !(PAGE_SIZE_4KB - 1),
+        None => return process.heap_end,
+    };
 
     if aligned_brk < process.heap_start {
         return process.heap_end;

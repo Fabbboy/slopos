@@ -29,3 +29,4 @@ pub use scheduler::sched_tests::*;
 pub use scheduler::scheduler::*;
 pub use scheduler::task::*;
 pub use scheduler::test_tasks::*;
+pub use syscall::run_syscall_validation_tests;
