@@ -1546,6 +1546,31 @@ use crate::cow::{handle_cow_fault, is_cow_fault};
 use crate::mm_constants::PageFlags;
 use crate::paging::{map_page_4kb_in_dir, paging_mark_cow, virt_to_phys_in_dir};
 
+pub use crate::tests_demand::{
+    test_demand_double_fault, test_demand_fault_no_vma, test_demand_fault_non_lazy_vma,
+    test_demand_fault_present_page, test_demand_fault_valid_lazy_vma, test_demand_handle_no_vma,
+    test_demand_handle_null_page_dir, test_demand_handle_page_boundary,
+    test_demand_handle_permission_denied, test_demand_handle_success,
+    test_demand_invalid_process_id, test_demand_multiple_faults, test_demand_permission_allow_read,
+    test_demand_permission_allow_write, test_demand_permission_deny_exec,
+    test_demand_permission_deny_user_kernel, test_demand_permission_deny_write_ro,
+};
+
+pub use crate::tests_oom::{
+    test_alloc_free_cycles_no_leak, test_dma_allocation_exhaustion, test_heap_alloc_pressure,
+    test_heap_expansion_under_pressure, test_kzalloc_zeroed_under_pressure,
+    test_multiorder_alloc_failure, test_page_alloc_fragmentation_oom, test_page_alloc_until_oom,
+    test_process_heap_expansion_oom, test_process_vm_creation_pressure, test_refcount_during_oom,
+    test_zero_flag_under_pressure,
+};
+
+pub use crate::tests_cow_edge::{
+    test_cow_clone_modify_both, test_cow_handle_invalid_address, test_cow_handle_not_cow_page,
+    test_cow_handle_null_pagedir, test_cow_multi_ref_copy, test_cow_multiple_clones,
+    test_cow_no_collateral_damage, test_cow_not_present_not_cow, test_cow_page_boundary,
+    test_cow_read_not_cow_fault, test_cow_single_ref_upgrade,
+};
+
 pub fn test_process_vm_create_destroy_memory() -> c_int {
     init_process_vm();
 

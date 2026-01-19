@@ -275,6 +275,9 @@ mod suites {
     const RIGOROUS_NAME: &[u8] = b"rigorous\0";
     const PROCESS_VM_NAME: &[u8] = b"process_vm\0";
     const SCHED_CORE_NAME: &[u8] = b"sched_core\0";
+    const DEMAND_PAGING_NAME: &[u8] = b"demand_paging\0";
+    const OOM_NAME: &[u8] = b"oom\0";
+    const COW_EDGE_NAME: &[u8] = b"cow_edge\0";
 
     fn measure_elapsed_ms(start: u64, end: u64) -> u32 {
         super::cycles_to_ms(end.wrapping_sub(start))
@@ -309,27 +312,44 @@ mod suites {
     }
 
     use slopos_mm::tests::{
-        test_cow_fault_handling, test_cow_page_isolation, test_heap_alloc_zero,
-        test_heap_boundary_write, test_heap_double_free_defensive,
+        test_alloc_free_cycles_no_leak, test_cow_clone_modify_both, test_cow_fault_handling,
+        test_cow_handle_invalid_address, test_cow_handle_not_cow_page,
+        test_cow_handle_null_pagedir, test_cow_multi_ref_copy, test_cow_multiple_clones,
+        test_cow_no_collateral_damage, test_cow_not_present_not_cow, test_cow_page_boundary,
+        test_cow_page_isolation, test_cow_read_not_cow_fault, test_cow_single_ref_upgrade,
+        test_demand_double_fault, test_demand_fault_no_vma, test_demand_fault_non_lazy_vma,
+        test_demand_fault_present_page, test_demand_fault_valid_lazy_vma,
+        test_demand_handle_no_vma, test_demand_handle_null_page_dir,
+        test_demand_handle_page_boundary, test_demand_handle_permission_denied,
+        test_demand_handle_success, test_demand_invalid_process_id, test_demand_multiple_faults,
+        test_demand_permission_allow_read, test_demand_permission_allow_write,
+        test_demand_permission_deny_exec, test_demand_permission_deny_user_kernel,
+        test_demand_permission_deny_write_ro, test_dma_allocation_exhaustion,
+        test_heap_alloc_pressure, test_heap_alloc_zero, test_heap_boundary_write,
+        test_heap_double_free_defensive, test_heap_expansion_under_pressure,
         test_heap_fragmentation_behind_head, test_heap_free_list_search, test_heap_kfree_null,
         test_heap_kzalloc_zeroed, test_heap_large_alloc, test_heap_large_block_integrity,
         test_heap_medium_alloc, test_heap_no_overlap, test_heap_small_alloc, test_heap_stats,
         test_heap_stress_cycles, test_irqmutex_basic, test_irqmutex_mutation,
-        test_irqmutex_try_lock, test_multiple_process_vms, test_page_alloc_fragmentation,
-        test_page_alloc_free_cycle, test_page_alloc_free_null, test_page_alloc_multi_order,
-        test_page_alloc_multipage_integrity, test_page_alloc_no_stale_data,
-        test_page_alloc_refcount, test_page_alloc_single, test_page_alloc_stats,
-        test_page_alloc_write_verify, test_page_alloc_zero_full_page, test_page_alloc_zeroed,
-        test_paging_cow_kernel, test_paging_get_kernel_dir, test_paging_user_accessible_kernel,
-        test_paging_virt_to_phys, test_process_vm_alloc_and_access, test_process_vm_brk_expansion,
-        test_process_vm_counter_reset, test_process_vm_create_destroy_memory,
-        test_process_vm_slot_reuse, test_ring_buffer_basic, test_ring_buffer_capacity,
-        test_ring_buffer_empty_pop, test_ring_buffer_fifo, test_ring_buffer_full,
-        test_ring_buffer_overwrite, test_ring_buffer_reset, test_ring_buffer_wrap,
-        test_shm_create_destroy, test_shm_create_excessive_size, test_shm_create_zero_size,
-        test_shm_destroy_non_owner, test_shm_invalid_token, test_shm_refcount,
-        test_shm_surface_attach, test_shm_surface_attach_too_small, test_spinlock_basic,
-        test_spinlock_init, test_spinlock_irqsave, test_vma_flags_retrieval,
+        test_irqmutex_try_lock, test_kzalloc_zeroed_under_pressure, test_multiorder_alloc_failure,
+        test_multiple_process_vms, test_page_alloc_fragmentation,
+        test_page_alloc_fragmentation_oom, test_page_alloc_free_cycle, test_page_alloc_free_null,
+        test_page_alloc_multi_order, test_page_alloc_multipage_integrity,
+        test_page_alloc_no_stale_data, test_page_alloc_refcount, test_page_alloc_single,
+        test_page_alloc_stats, test_page_alloc_until_oom, test_page_alloc_write_verify,
+        test_page_alloc_zero_full_page, test_page_alloc_zeroed, test_paging_cow_kernel,
+        test_paging_get_kernel_dir, test_paging_user_accessible_kernel, test_paging_virt_to_phys,
+        test_process_heap_expansion_oom, test_process_vm_alloc_and_access,
+        test_process_vm_brk_expansion, test_process_vm_counter_reset,
+        test_process_vm_create_destroy_memory, test_process_vm_creation_pressure,
+        test_process_vm_slot_reuse, test_refcount_during_oom, test_ring_buffer_basic,
+        test_ring_buffer_capacity, test_ring_buffer_empty_pop, test_ring_buffer_fifo,
+        test_ring_buffer_full, test_ring_buffer_overwrite, test_ring_buffer_reset,
+        test_ring_buffer_wrap, test_shm_create_destroy, test_shm_create_excessive_size,
+        test_shm_create_zero_size, test_shm_destroy_non_owner, test_shm_invalid_token,
+        test_shm_refcount, test_shm_surface_attach, test_shm_surface_attach_too_small,
+        test_spinlock_basic, test_spinlock_init, test_spinlock_irqsave, test_vma_flags_retrieval,
+        test_zero_flag_under_pressure,
     };
 
     use slopos_core::sched_tests::{
@@ -644,6 +664,82 @@ mod suites {
         if passed == total { 0 } else { -1 }
     }
 
+    fn run_demand_paging_suite(
+        _config: *const InterruptTestConfig,
+        out: *mut TestSuiteResult,
+    ) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_demand_fault_present_page);
+        run_test!(passed, total, test_demand_fault_no_vma);
+        run_test!(passed, total, test_demand_fault_non_lazy_vma);
+        run_test!(passed, total, test_demand_fault_valid_lazy_vma);
+        run_test!(passed, total, test_demand_permission_deny_write_ro);
+        run_test!(passed, total, test_demand_permission_deny_user_kernel);
+        run_test!(passed, total, test_demand_permission_deny_exec);
+        run_test!(passed, total, test_demand_permission_allow_read);
+        run_test!(passed, total, test_demand_permission_allow_write);
+        run_test!(passed, total, test_demand_handle_null_page_dir);
+        run_test!(passed, total, test_demand_handle_no_vma);
+        run_test!(passed, total, test_demand_handle_success);
+        run_test!(passed, total, test_demand_handle_permission_denied);
+        run_test!(passed, total, test_demand_handle_page_boundary);
+        run_test!(passed, total, test_demand_multiple_faults);
+        run_test!(passed, total, test_demand_double_fault);
+        run_test!(passed, total, test_demand_invalid_process_id);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, DEMAND_PAGING_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_oom_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_page_alloc_until_oom);
+        run_test!(passed, total, test_page_alloc_fragmentation_oom);
+        run_test!(passed, total, test_dma_allocation_exhaustion);
+        run_test!(passed, total, test_heap_alloc_pressure);
+        run_test!(passed, total, test_process_vm_creation_pressure);
+        run_test!(passed, total, test_heap_expansion_under_pressure);
+        run_test!(passed, total, test_zero_flag_under_pressure);
+        run_test!(passed, total, test_kzalloc_zeroed_under_pressure);
+        run_test!(passed, total, test_alloc_free_cycles_no_leak);
+        run_test!(passed, total, test_multiorder_alloc_failure);
+        run_test!(passed, total, test_process_heap_expansion_oom);
+        run_test!(passed, total, test_refcount_during_oom);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, OOM_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
+    fn run_cow_edge_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        run_test!(passed, total, test_cow_read_not_cow_fault);
+        run_test!(passed, total, test_cow_not_present_not_cow);
+        run_test!(passed, total, test_cow_handle_null_pagedir);
+        run_test!(passed, total, test_cow_handle_not_cow_page);
+        run_test!(passed, total, test_cow_single_ref_upgrade);
+        run_test!(passed, total, test_cow_multi_ref_copy);
+        run_test!(passed, total, test_cow_page_boundary);
+        run_test!(passed, total, test_cow_clone_modify_both);
+        run_test!(passed, total, test_cow_multiple_clones);
+        run_test!(passed, total, test_cow_no_collateral_damage);
+        run_test!(passed, total, test_cow_handle_invalid_address);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+        fill_simple_result(out, COW_EDGE_NAME, total, passed, elapsed);
+        if passed == total { 0 } else { -1 }
+    }
+
     pub fn register_system_suites() {
         static VM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
             name: VM_NAME.as_ptr() as *const c_char,
@@ -715,6 +811,21 @@ mod suites {
             mask_bit: SUITE_SCHEDULER,
             run: Some(run_sched_core_suite),
         };
+        static DEMAND_PAGING_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: DEMAND_PAGING_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_demand_paging_suite),
+        };
+        static OOM_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: OOM_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_oom_suite),
+        };
+        static COW_EDGE_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+            name: COW_EDGE_NAME.as_ptr() as *const c_char,
+            mask_bit: SUITE_SCHEDULER,
+            run: Some(run_cow_edge_suite),
+        };
 
         let _ = tests_register_suite(&VM_SUITE_DESC);
         let _ = tests_register_suite(&HEAP_SUITE_DESC);
@@ -730,5 +841,8 @@ mod suites {
         let _ = tests_register_suite(&RIGOROUS_SUITE_DESC);
         let _ = tests_register_suite(&PROCESS_VM_SUITE_DESC);
         let _ = tests_register_suite(&SCHED_CORE_SUITE_DESC);
+        let _ = tests_register_suite(&DEMAND_PAGING_SUITE_DESC);
+        let _ = tests_register_suite(&OOM_SUITE_DESC);
+        let _ = tests_register_suite(&COW_EDGE_SUITE_DESC);
     }
 }
