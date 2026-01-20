@@ -11,7 +11,7 @@ use slopos_lib::{StateFlag, klog_info};
 
 pub mod exception_tests;
 
-pub const TESTS_MAX_SUITES: usize = 25;
+pub const TESTS_MAX_SUITES: usize = 30;
 const TESTS_MAX_CYCLES_PER_MS: u64 = 3_000_000;
 
 #[repr(C)]
