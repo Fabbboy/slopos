@@ -25,13 +25,9 @@ pub use scheduler::scheduler as sched;
 pub use scheduler::task;
 pub use scheduler::test_tasks;
 
-pub use exec::tests::run_exec_tests;
-pub use irq_tests::run_irq_tests;
-pub use scheduler::context_tests::run_context_tests;
 pub use scheduler::fate_api::*;
 pub use scheduler::kthread::*;
 pub use scheduler::sched_tests::*;
 pub use scheduler::scheduler::*;
 pub use scheduler::task::*;
 pub use scheduler::test_tasks::*;
-pub use syscall::run_syscall_validation_tests;

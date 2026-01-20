@@ -11,7 +11,7 @@ use crate::vfs::{
     vfs_unlink,
 };
 
-fn test_vfs_initialized() -> c_int {
+pub fn test_vfs_initialized() -> c_int {
     klog_info!("VFS_TEST: check initialized");
     if !vfs_is_initialized() {
         return -1;
@@ -19,7 +19,7 @@ fn test_vfs_initialized() -> c_int {
     0
 }
 
-fn test_vfs_root_stat() -> c_int {
+pub fn test_vfs_root_stat() -> c_int {
     klog_info!("VFS_TEST: root stat");
     let (kind, _size) = match vfs_stat(b"/") {
         Ok(stat) => stat,
@@ -31,7 +31,7 @@ fn test_vfs_root_stat() -> c_int {
     0
 }
 
-fn test_vfs_file_roundtrip() -> c_int {
+pub fn test_vfs_file_roundtrip() -> c_int {
     klog_info!("VFS_TEST: file roundtrip");
     if vfs_mkdir(b"/vfs_test").is_err() {
         return -1;
@@ -59,7 +59,7 @@ fn test_vfs_file_roundtrip() -> c_int {
     0
 }
 
-fn test_vfs_list() -> c_int {
+pub fn test_vfs_list() -> c_int {
     klog_info!("VFS_TEST: list directory");
     let mut entries = [UserFsEntry::new(); 8];
     let count = match vfs_list(b"/vfs_test", &mut entries) {
@@ -81,7 +81,7 @@ fn test_vfs_list() -> c_int {
     0
 }
 
-fn test_vfs_unlink() -> c_int {
+pub fn test_vfs_unlink() -> c_int {
     klog_info!("VFS_TEST: unlink file");
     if vfs_unlink(b"/vfs_test/hello.txt").is_err() {
         return -1;
@@ -314,7 +314,7 @@ fn build_minimal_ext2_image(blocks: u32, inodes: u32) -> Option<MemoryBlockDevic
     })
 }
 
-fn test_ext2_invalid_superblock_magic() -> c_int {
+pub fn test_ext2_invalid_superblock_magic() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -332,7 +332,7 @@ fn test_ext2_invalid_superblock_magic() -> c_int {
     }
 }
 
-fn test_ext2_unsupported_block_size() -> c_int {
+pub fn test_ext2_unsupported_block_size() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -349,7 +349,7 @@ fn test_ext2_unsupported_block_size() -> c_int {
     }
 }
 
-fn test_ext2_directory_format_error() -> c_int {
+pub fn test_ext2_directory_format_error() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -372,7 +372,7 @@ fn test_ext2_directory_format_error() -> c_int {
     }
 }
 
-fn test_ext2_invalid_inode() -> c_int {
+pub fn test_ext2_invalid_inode() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -388,7 +388,7 @@ fn test_ext2_invalid_inode() -> c_int {
     }
 }
 
-fn test_ext2_read_file_not_regular() -> c_int {
+pub fn test_ext2_read_file_not_regular() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -405,7 +405,7 @@ fn test_ext2_read_file_not_regular() -> c_int {
     }
 }
 
-fn test_ext2_device_read_error() -> c_int {
+pub fn test_ext2_device_read_error() -> c_int {
     let mut device = FailingBlockDevice::new(4096).with_read_fail();
     let result = Ext2Fs::init_internal(&mut device);
     match result {
@@ -414,7 +414,7 @@ fn test_ext2_device_read_error() -> c_int {
     }
 }
 
-fn test_ext2_device_write_error_on_metadata() -> c_int {
+pub fn test_ext2_device_write_error_on_metadata() -> c_int {
     let Some(device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -439,7 +439,7 @@ fn test_ext2_device_write_error_on_metadata() -> c_int {
     }
 }
 
-fn test_ext2_read_block_out_of_bounds() -> c_int {
+pub fn test_ext2_read_block_out_of_bounds() -> c_int {
     let spec = Ext2ImageSpec {
         blocks: 64,
         inodes: 32,
@@ -467,7 +467,7 @@ fn test_ext2_read_block_out_of_bounds() -> c_int {
     }
 }
 
-fn test_ext2_read_file_data_roundtrip() -> c_int {
+pub fn test_ext2_read_file_data_roundtrip() -> c_int {
     let spec = Ext2ImageSpec {
         blocks: 64,
         inodes: 32,
@@ -500,7 +500,7 @@ fn test_ext2_read_file_data_roundtrip() -> c_int {
     0
 }
 
-fn test_ext2_path_resolution_not_found() -> c_int {
+pub fn test_ext2_path_resolution_not_found() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -516,7 +516,7 @@ fn test_ext2_path_resolution_not_found() -> c_int {
     }
 }
 
-fn test_ext2_remove_path_not_file() -> c_int {
+pub fn test_ext2_remove_path_not_file() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -532,7 +532,7 @@ fn test_ext2_remove_path_not_file() -> c_int {
     }
 }
 
-fn test_ext2_wl_currency_on_error() -> c_int {
+pub fn test_ext2_wl_currency_on_error() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -551,7 +551,7 @@ fn test_ext2_wl_currency_on_error() -> c_int {
     }
 }
 
-fn test_ext2_wl_currency_on_success() -> c_int {
+pub fn test_ext2_wl_currency_on_success() -> c_int {
     let Some(mut device) = build_minimal_ext2_image(64, 32) else {
         return 0;
     };
@@ -566,43 +566,11 @@ fn test_ext2_wl_currency_on_success() -> c_int {
     if result.is_ok() && balance > 0 { 0 } else { -1 }
 }
 
-pub fn run_ext2_tests() -> c_int {
-    run_ext2_tests_summary().0
-}
-
-pub fn run_ext2_tests_summary() -> (c_int, u32) {
-    klog_info!("VFS_TEST: running suite");
-
-    // Ensure VFS is initialized before running tests.
-    // This is necessary because tests may run before the services boot phase.
+/// Initialize VFS before running ext2 tests. Returns true if init succeeded.
+pub fn ext2_tests_init() -> bool {
     if let Err(_) = vfs_init_builtin_filesystems() {
         klog_info!("VFS_TEST: failed to initialize VFS");
-        return (0, 0);
+        return false;
     }
-
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    slopos_lib::run_test!(passed, total, test_vfs_initialized);
-    slopos_lib::run_test!(passed, total, test_vfs_root_stat);
-    slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
-    slopos_lib::run_test!(passed, total, test_vfs_list);
-    slopos_lib::run_test!(passed, total, test_vfs_unlink);
-
-    slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
-    slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
-    slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);
-    slopos_lib::run_test!(passed, total, test_ext2_invalid_inode);
-    slopos_lib::run_test!(passed, total, test_ext2_read_file_not_regular);
-    slopos_lib::run_test!(passed, total, test_ext2_device_read_error);
-    slopos_lib::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
-    slopos_lib::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
-    slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
-    slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
-    slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
-    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_error);
-    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_success);
-
-    klog_info!("VFS_TEST: {passed}/{total} passed");
-    (passed as c_int, total)
+    true
 }

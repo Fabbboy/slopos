@@ -433,29 +433,3 @@ pub fn test_task_flags_preserved() -> c_int {
     teardown_context_test_env();
     0
 }
-
-pub fn run_context_tests() -> (u32, u32) {
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    klog_info!("=== Context Switch Tests ===");
-
-    slopos_lib::run_test!(passed, total, test_task_context_initial_state);
-    slopos_lib::run_test!(passed, total, test_task_state_transitions_exhaustive);
-    slopos_lib::run_test!(passed, total, test_task_invalid_state_transition);
-    slopos_lib::run_test!(passed, total, test_fork_null_parent);
-    slopos_lib::run_test!(passed, total, test_fork_kernel_task);
-    slopos_lib::run_test!(passed, total, test_fork_terminated_parent);
-    slopos_lib::run_test!(passed, total, test_task_get_info_null_output);
-    slopos_lib::run_test!(passed, total, test_task_get_info_invalid_id);
-    slopos_lib::run_test!(passed, total, test_task_double_terminate);
-    slopos_lib::run_test!(passed, total, test_task_terminate_invalid_ids);
-    slopos_lib::run_test!(passed, total, test_task_find_after_terminate);
-    slopos_lib::run_test!(passed, total, test_task_rapid_create_terminate);
-    slopos_lib::run_test!(passed, total, test_task_max_concurrent);
-    slopos_lib::run_test!(passed, total, test_task_process_id_consistency);
-    slopos_lib::run_test!(passed, total, test_task_flags_preserved);
-
-    klog_info!("Context tests: {}/{} passed", passed, total);
-    (passed, total)
-}

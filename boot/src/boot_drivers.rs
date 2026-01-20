@@ -204,11 +204,109 @@ fn boot_step_pci_init_fn() {
 use slopos_drivers::interrupts::SUITE_SCHEDULER;
 use slopos_lib::{define_test_suite, register_test_suites};
 
-define_test_suite!(gdt, SUITE_SCHEDULER, crate::gdt_tests::run_gdt_tests);
+use crate::gdt_tests::{
+    test_current_cs_is_kernel, test_current_ss_is_kernel, test_data_segment_selectors,
+    test_double_fault_uses_ist, test_efer_sce_enabled, test_gdt_double_init,
+    test_gdt_entry_order_matches_selectors, test_gdt_loaded_valid_limit,
+    test_gdt_set_ist_index_overflow, test_gdt_set_ist_index_zero, test_gdt_set_ist_valid_indices,
+    test_gdt_set_kernel_rsp0_null, test_gdt_set_kernel_rsp0_user_address,
+    test_gdt_set_kernel_rsp0_valid, test_gp_fault_handler_valid, test_ist_stacks_have_guard_pages,
+    test_lstar_msr_valid, test_lstar_points_to_executable_code, test_page_fault_handler_valid,
+    test_sfmask_msr_valid, test_star_msr_valid, test_star_sysret_selector_calculation,
+    test_syscall_idt_entry, test_syscall_msr_double_init, test_tss_loaded,
+    test_tss_rsp0_value_valid,
+};
+
+use crate::shutdown_tests::{
+    test_acpi_pm1a_ports_defined, test_apic_availability_queryable, test_apic_enabled_queryable,
+    test_com1_lsr_offset, test_com1_port_defined, test_double_scheduler_shutdown,
+    test_kernel_page_directory_available, test_ps2_command_port_defined, test_qemu_debug_exit_port,
+    test_rapid_shutdown_cycles, test_scheduler_reinit_after_shutdown,
+    test_scheduler_shutdown_clears_state, test_scheduler_shutdown_disables,
+    test_scheduler_shutdown_idempotent, test_serial_flush_terminates, test_shutdown_e2e_full_flow,
+    test_shutdown_e2e_interrupt_state_preservation, test_shutdown_e2e_stress_with_allocation,
+    test_shutdown_from_clean_state, test_shutdown_many_tasks, test_shutdown_mixed_priorities,
+    test_shutdown_partial_init, test_shutdown_sequence_ordering, test_stateflag_concurrent_pattern,
+    test_stateflag_enter_first_call, test_stateflag_enter_idempotent, test_stateflag_independence,
+    test_stateflag_relaxed_access, test_stateflag_reset_and_reenter,
+    test_stateflag_starts_inactive, test_stateflag_take_consumption, test_task_shutdown_all_empty,
+    test_task_shutdown_all_idempotent, test_task_shutdown_all_terminates,
+    test_task_shutdown_skips_current,
+};
+
+define_test_suite!(
+    gdt,
+    SUITE_SCHEDULER,
+    [
+        test_gdt_loaded_valid_limit,
+        test_current_cs_is_kernel,
+        test_current_ss_is_kernel,
+        test_data_segment_selectors,
+        test_tss_loaded,
+        test_gdt_set_kernel_rsp0_valid,
+        test_gdt_set_kernel_rsp0_null,
+        test_gdt_set_kernel_rsp0_user_address,
+        test_gdt_set_ist_valid_indices,
+        test_gdt_set_ist_index_zero,
+        test_gdt_set_ist_index_overflow,
+        test_efer_sce_enabled,
+        test_star_msr_valid,
+        test_lstar_msr_valid,
+        test_sfmask_msr_valid,
+        test_double_fault_uses_ist,
+        test_page_fault_handler_valid,
+        test_gp_fault_handler_valid,
+        test_syscall_idt_entry,
+        test_gdt_double_init,
+        test_syscall_msr_double_init,
+        test_gdt_entry_order_matches_selectors,
+        test_star_sysret_selector_calculation,
+        test_tss_rsp0_value_valid,
+        test_ist_stacks_have_guard_pages,
+        test_lstar_points_to_executable_code,
+    ]
+);
+
 define_test_suite!(
     shutdown,
     SUITE_SCHEDULER,
-    crate::shutdown_tests::run_shutdown_tests
+    [
+        test_stateflag_starts_inactive,
+        test_stateflag_enter_first_call,
+        test_stateflag_enter_idempotent,
+        test_stateflag_reset_and_reenter,
+        test_stateflag_take_consumption,
+        test_stateflag_independence,
+        test_stateflag_relaxed_access,
+        test_stateflag_concurrent_pattern,
+        test_scheduler_shutdown_disables,
+        test_scheduler_shutdown_idempotent,
+        test_scheduler_shutdown_clears_state,
+        test_double_scheduler_shutdown,
+        test_scheduler_reinit_after_shutdown,
+        test_task_shutdown_all_terminates,
+        test_task_shutdown_all_empty,
+        test_task_shutdown_all_idempotent,
+        test_task_shutdown_skips_current,
+        test_kernel_page_directory_available,
+        test_apic_availability_queryable,
+        test_apic_enabled_queryable,
+        test_qemu_debug_exit_port,
+        test_acpi_pm1a_ports_defined,
+        test_ps2_command_port_defined,
+        test_com1_port_defined,
+        test_com1_lsr_offset,
+        test_serial_flush_terminates,
+        test_shutdown_sequence_ordering,
+        test_shutdown_from_clean_state,
+        test_shutdown_partial_init,
+        test_rapid_shutdown_cycles,
+        test_shutdown_many_tasks,
+        test_shutdown_mixed_priorities,
+        test_shutdown_e2e_full_flow,
+        test_shutdown_e2e_stress_with_allocation,
+        test_shutdown_e2e_interrupt_state_preservation,
+    ]
 );
 
 fn register_boot_test_suites() {

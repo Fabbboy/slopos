@@ -347,33 +347,3 @@ pub fn test_exec_max_size_boundary() -> c_int {
     }
     0
 }
-
-pub fn run_exec_tests() -> (u32, u32) {
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    klog_info!("=== exec() ELF Loader Tests ===");
-
-    slopos_lib::run_test!(passed, total, test_elf_invalid_magic);
-    slopos_lib::run_test!(passed, total, test_elf_wrong_class);
-    slopos_lib::run_test!(passed, total, test_elf_wrong_endian);
-    slopos_lib::run_test!(passed, total, test_elf_wrong_machine);
-    slopos_lib::run_test!(passed, total, test_elf_truncated_header);
-    slopos_lib::run_test!(passed, total, test_elf_empty_file);
-    slopos_lib::run_test!(passed, total, test_elf_no_load_segments);
-    slopos_lib::run_test!(passed, total, test_elf_segment_overflow_vaddr);
-    slopos_lib::run_test!(passed, total, test_elf_segment_filesz_greater_than_memsz);
-    slopos_lib::run_test!(passed, total, test_elf_segment_offset_overflow);
-    slopos_lib::run_test!(passed, total, test_elf_kernel_address_entry);
-    slopos_lib::run_test!(passed, total, test_path_too_long);
-    slopos_lib::run_test!(passed, total, test_path_empty);
-    slopos_lib::run_test!(passed, total, test_translate_address_kernel_to_user);
-    slopos_lib::run_test!(passed, total, test_translate_address_user_passthrough);
-    slopos_lib::run_test!(passed, total, test_process_vm_null_page_dir);
-    slopos_lib::run_test!(passed, total, test_elf_huge_segment_count);
-    slopos_lib::run_test!(passed, total, test_elf_phentsize_mismatch);
-    slopos_lib::run_test!(passed, total, test_exec_max_size_boundary);
-
-    klog_info!("exec() tests: {}/{} passed", passed, total);
-    (passed, total)
-}

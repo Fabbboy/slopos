@@ -259,25 +259,3 @@ pub fn test_known_exception_names() -> c_int {
 
     0
 }
-
-pub fn run_exception_tests() -> (u32, u32) {
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    klog_info!("=== Exception Metadata Tests ===");
-
-    slopos_lib::run_test!(passed, total, test_exception_names_valid);
-    slopos_lib::run_test!(passed, total, test_critical_exception_classification);
-    slopos_lib::run_test!(passed, total, test_page_fault_error_codes);
-    slopos_lib::run_test!(passed, total, test_frame_mode_detection);
-    slopos_lib::run_test!(passed, total, test_frame_invalid_cs);
-    slopos_lib::run_test!(passed, total, test_frame_noncanonical_addresses);
-    slopos_lib::run_test!(passed, total, test_exception_names_all_vectors);
-    slopos_lib::run_test!(passed, total, test_vector_boundaries);
-    slopos_lib::run_test!(passed, total, test_error_code_preservation);
-    slopos_lib::run_test!(passed, total, test_frame_integrity_patterns);
-    slopos_lib::run_test!(passed, total, test_known_exception_names);
-
-    klog_info!("Exception tests: {}/{} passed", passed, total);
-    (passed, total)
-}

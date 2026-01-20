@@ -225,30 +225,3 @@ pub fn test_ioapic_gsi_range() -> c_int {
     }
     0
 }
-
-pub fn run_ioapic_tests() -> (u32, u32) {
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    klog_info!("=== IOAPIC/APIC Tests ===");
-
-    slopos_lib::run_test!(passed, total, test_ioapic_ready_state);
-    slopos_lib::run_test!(passed, total, test_apic_enabled_state);
-    slopos_lib::run_test!(passed, total, test_apic_id_valid);
-    slopos_lib::run_test!(passed, total, test_ioapic_legacy_irq_info_invalid);
-    slopos_lib::run_test!(passed, total, test_ioapic_legacy_irq_info_valid);
-    slopos_lib::run_test!(passed, total, test_ioapic_mask_invalid_gsi);
-    slopos_lib::run_test!(passed, total, test_ioapic_unmask_invalid_gsi);
-    slopos_lib::run_test!(passed, total, test_ioapic_config_invalid_gsi);
-    slopos_lib::run_test!(passed, total, test_ioapic_config_boundary_vector);
-    slopos_lib::run_test!(passed, total, test_ioapic_flag_constants);
-    slopos_lib::run_test!(passed, total, test_ioapic_register_constants);
-    slopos_lib::run_test!(passed, total, test_apic_eoi_safe);
-    slopos_lib::run_test!(passed, total, test_ioapic_double_init);
-    slopos_lib::run_test!(passed, total, test_ioapic_all_legacy_irqs);
-    slopos_lib::run_test!(passed, total, test_apic_spurious_vector);
-    slopos_lib::run_test!(passed, total, test_ioapic_gsi_range);
-
-    klog_info!("IOAPIC tests: {}/{} passed", passed, total);
-    (passed, total)
-}

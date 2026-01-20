@@ -4,48 +4,19 @@ use core::ffi::c_char;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
-use slopos_drivers::interrupts::SUITE_SCHEDULER;
-pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
+pub use slopos_lib::testing::suite_masks::SUITE_SCHEDULER;
 pub use slopos_lib::testing::{
-    HARNESS_MAX_SUITES, TestSuiteDesc, TestSuiteResult, measure_elapsed_ms,
+    HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
+    measure_elapsed_ms,
 };
 use slopos_lib::{StateFlag, define_test_suite, klog_info, register_test_suites};
+
+pub type InterruptTestConfig = TestConfig;
+pub type InterruptTestVerbosity = Verbosity;
 
 pub mod exception_tests;
 
 pub const TESTS_MAX_SUITES: usize = HARNESS_MAX_SUITES;
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct TestRunSummary {
-    pub suites: [TestSuiteResult; TESTS_MAX_SUITES],
-    pub suite_count: usize,
-    pub total_tests: u32,
-    pub passed: u32,
-    pub failed: u32,
-    pub exceptions_caught: u32,
-    pub unexpected_exceptions: u32,
-    pub elapsed_ms: u32,
-    pub timed_out: core::ffi::c_int,
-}
-
-impl TestRunSummary {
-    fn add_suite_result(&mut self, result: &TestSuiteResult) {
-        self.total_tests = self.total_tests.saturating_add(result.total);
-        self.passed = self.passed.saturating_add(result.passed);
-        self.failed = self.failed.saturating_add(result.failed);
-        self.exceptions_caught = self
-            .exceptions_caught
-            .saturating_add(result.exceptions_caught);
-        self.unexpected_exceptions = self
-            .unexpected_exceptions
-            .saturating_add(result.unexpected_exceptions);
-        self.elapsed_ms = self.elapsed_ms.saturating_add(result.elapsed_ms);
-        if result.timed_out != 0 {
-            self.timed_out = 1;
-        }
-    }
-}
 
 static mut REGISTRY: [Option<&'static TestSuiteDesc>; TESTS_MAX_SUITES] = [None; TESTS_MAX_SUITES];
 static mut REGISTRY_COUNT: usize = 0;
@@ -265,6 +236,103 @@ mod suites {
         test_timer_tick_no_current_task, test_unschedule_not_in_queue,
     };
 
+    use slopos_drivers::ioapic_tests::{
+        test_apic_enabled_state, test_apic_eoi_safe, test_apic_id_valid, test_apic_spurious_vector,
+        test_ioapic_all_legacy_irqs, test_ioapic_config_boundary_vector,
+        test_ioapic_config_invalid_gsi, test_ioapic_double_init, test_ioapic_flag_constants,
+        test_ioapic_gsi_range, test_ioapic_legacy_irq_info_invalid,
+        test_ioapic_legacy_irq_info_valid, test_ioapic_mask_invalid_gsi, test_ioapic_ready_state,
+        test_ioapic_register_constants, test_ioapic_unmask_invalid_gsi,
+    };
+
+    use crate::exception_tests::{
+        test_critical_exception_classification, test_error_code_preservation,
+        test_exception_names_all_vectors, test_exception_names_valid,
+        test_frame_integrity_patterns, test_frame_invalid_cs, test_frame_mode_detection,
+        test_frame_noncanonical_addresses, test_known_exception_names, test_page_fault_error_codes,
+        test_vector_boundaries,
+    };
+
+    use slopos_mm::tlb_tests::{
+        test_batch_at_threshold, test_batch_double_finish, test_batch_drop_flushes,
+        test_batch_empty_finish, test_batch_multiple_pages, test_batch_overflow,
+        test_batch_scattered_addresses, test_batch_single_page, test_flush_all_basic,
+        test_flush_asid_kernel_cr3, test_flush_asid_zero, test_flush_page_high_kernel_address,
+        test_flush_page_kernel_address, test_flush_page_null_address,
+        test_flush_page_user_max_address, test_flush_range_empty, test_flush_range_inverted,
+        test_flush_range_large, test_flush_range_single_page, test_flush_range_threshold_boundary,
+        test_flush_type_from_invalid, test_flush_type_from_valid, test_get_active_cpu_count,
+        test_handle_shootdown_ipi_cpu_max_minus_one, test_handle_shootdown_ipi_cpu_overflow,
+        test_handle_shootdown_ipi_cpu_zero, test_has_invpcid_consistent, test_has_pcid_consistent,
+        test_interleaved_flush_operations, test_is_smp_active_initial, test_max_cpus_reasonable,
+        test_rapid_flush_all, test_rapid_flush_pages, test_set_bsp_apic_id,
+        test_tlb_shootdown_vector_valid,
+    };
+
+    use slopos_mm::mmio_tests::{
+        test_mmio_empty_region_invalid_reads, test_mmio_empty_region_state,
+        test_mmio_is_valid_offset_overflow, test_mmio_map_large_size,
+        test_mmio_map_near_phys_limit, test_mmio_map_null_addr, test_mmio_map_zero_size,
+        test_mmio_sub_region_overflow,
+    };
+
+    use slopos_core::irq_tests::{
+        test_irq_all_lines_mask_state, test_irq_context_pointer_preserved,
+        test_irq_double_register, test_irq_enable_disable_invalid, test_irq_handler_with_long_name,
+        test_irq_initialized_flag, test_irq_is_masked_boundary,
+        test_irq_keyboard_events_accessible, test_irq_mask_unmask_invalid,
+        test_irq_rapid_register_unregister, test_irq_register_invalid_line,
+        test_irq_register_null_handler, test_irq_route_invalid, test_irq_stats_invalid_line,
+        test_irq_stats_null_output, test_irq_stats_valid_line, test_irq_timer_ticks_accessible,
+        test_irq_unregister_never_registered, test_irq_vector_calculation,
+    };
+
+    use slopos_core::syscall::tests::{
+        test_brk_extreme_values, test_fork_at_task_limit, test_fork_blocked_parent,
+        test_fork_cleanup_on_failure, test_fork_kernel_task, test_fork_memory_pressure,
+        test_fork_null_parent, test_fork_terminated_parent, test_irq_double_registration,
+        test_irq_register_invalid_line as test_syscall_irq_register_invalid_line,
+        test_irq_stats_invalid, test_irq_unregister_nonexistent,
+        test_operations_on_terminated_task, test_shm_create_boundaries,
+        test_syscall_lookup_empty_slot, test_syscall_lookup_invalid_number,
+        test_syscall_lookup_valid, test_task_id_wraparound, test_terminate_already_terminated,
+        test_user_ptr_kernel_address, test_user_ptr_misaligned, test_user_ptr_null,
+        test_user_ptr_overflow_boundary,
+    };
+
+    use slopos_core::exec::tests::{
+        test_elf_empty_file, test_elf_huge_segment_count, test_elf_invalid_magic,
+        test_elf_kernel_address_entry, test_elf_no_load_segments, test_elf_phentsize_mismatch,
+        test_elf_segment_filesz_greater_than_memsz, test_elf_segment_offset_overflow,
+        test_elf_segment_overflow_vaddr, test_elf_truncated_header, test_elf_wrong_class,
+        test_elf_wrong_endian, test_elf_wrong_machine, test_exec_max_size_boundary,
+        test_path_empty, test_path_too_long, test_process_vm_null_page_dir,
+        test_translate_address_kernel_to_user, test_translate_address_user_passthrough,
+    };
+
+    use slopos_core::scheduler::context_tests::{
+        test_fork_kernel_task as test_context_fork_kernel_task,
+        test_fork_null_parent as test_context_fork_null_parent,
+        test_fork_terminated_parent as test_context_fork_terminated_parent,
+        test_task_context_initial_state, test_task_double_terminate,
+        test_task_find_after_terminate, test_task_flags_preserved, test_task_get_info_invalid_id,
+        test_task_get_info_null_output, test_task_invalid_state_transition,
+        test_task_max_concurrent, test_task_process_id_consistency,
+        test_task_rapid_create_terminate, test_task_state_transitions_exhaustive,
+        test_task_terminate_invalid_ids,
+    };
+
+    use slopos_fs::tests::{
+        ext2_tests_init, test_ext2_device_read_error, test_ext2_device_write_error_on_metadata,
+        test_ext2_directory_format_error, test_ext2_invalid_inode,
+        test_ext2_invalid_superblock_magic, test_ext2_path_resolution_not_found,
+        test_ext2_read_block_out_of_bounds, test_ext2_read_file_data_roundtrip,
+        test_ext2_read_file_not_regular, test_ext2_remove_path_not_file,
+        test_ext2_unsupported_block_size, test_ext2_wl_currency_on_error,
+        test_ext2_wl_currency_on_success, test_vfs_file_roundtrip, test_vfs_initialized,
+        test_vfs_list, test_vfs_root_stat, test_vfs_unlink,
+    };
+
     define_test_suite!(
         vm,
         SUITE_SCHEDULER,
@@ -280,11 +348,66 @@ mod suites {
         ]
     );
 
-    define_test_suite!(
-        ext2,
-        SUITE_SCHEDULER,
-        slopos_fs::tests::run_ext2_tests_summary
-    );
+    // ext2 suite requires custom runner for VFS initialization
+    const EXT2_NAME: &[u8] = b"ext2\0";
+
+    fn run_ext2_suite(_config: *const HarnessConfig, out: *mut TestSuiteResult) -> i32 {
+        let start = slopos_lib::tsc::rdtsc();
+
+        if !ext2_tests_init() {
+            if let Some(out_ref) = unsafe { out.as_mut() } {
+                out_ref.name = EXT2_NAME.as_ptr() as *const core::ffi::c_char;
+                out_ref.total = 0;
+                out_ref.passed = 0;
+                out_ref.failed = 0;
+                out_ref.elapsed_ms = 0;
+            }
+            return 0;
+        }
+
+        let mut passed = 0u32;
+        let mut total = 0u32;
+
+        slopos_lib::run_test!(passed, total, test_vfs_initialized);
+        slopos_lib::run_test!(passed, total, test_vfs_root_stat);
+        slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
+        slopos_lib::run_test!(passed, total, test_vfs_list);
+        slopos_lib::run_test!(passed, total, test_vfs_unlink);
+        slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
+        slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
+        slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);
+        slopos_lib::run_test!(passed, total, test_ext2_invalid_inode);
+        slopos_lib::run_test!(passed, total, test_ext2_read_file_not_regular);
+        slopos_lib::run_test!(passed, total, test_ext2_device_read_error);
+        slopos_lib::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
+        slopos_lib::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
+        slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
+        slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
+        slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
+        slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_error);
+        slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_success);
+
+        let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+
+        if let Some(out_ref) = unsafe { out.as_mut() } {
+            out_ref.name = EXT2_NAME.as_ptr() as *const core::ffi::c_char;
+            out_ref.total = total;
+            out_ref.passed = passed;
+            out_ref.failed = total.saturating_sub(passed);
+            out_ref.exceptions_caught = 0;
+            out_ref.unexpected_exceptions = 0;
+            out_ref.elapsed_ms = elapsed;
+            out_ref.timed_out = 0;
+        }
+
+        if passed == total { 0 } else { -1 }
+    }
+
+    pub static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
+        name: EXT2_NAME.as_ptr() as *const core::ffi::c_char,
+        mask_bit: SUITE_SCHEDULER,
+        run: Some(run_ext2_suite),
+    };
 
     define_test_suite!(
         privsep,
@@ -506,23 +629,197 @@ mod suites {
     define_test_suite!(
         syscall_valid,
         SUITE_SCHEDULER,
-        slopos_core::run_syscall_validation_tests
+        [
+            test_syscall_lookup_invalid_number,
+            test_syscall_lookup_empty_slot,
+            test_syscall_lookup_valid,
+            test_fork_null_parent,
+            test_fork_kernel_task,
+            test_fork_at_task_limit,
+            test_fork_terminated_parent,
+            test_fork_blocked_parent,
+            test_fork_cleanup_on_failure,
+            test_user_ptr_null,
+            test_user_ptr_kernel_address,
+            test_user_ptr_misaligned,
+            test_user_ptr_overflow_boundary,
+            test_brk_extreme_values,
+            test_shm_create_boundaries,
+            test_syscall_irq_register_invalid_line,
+            test_irq_double_registration,
+            test_irq_unregister_nonexistent,
+            test_irq_stats_invalid,
+            test_terminate_already_terminated,
+            test_operations_on_terminated_task,
+            test_fork_memory_pressure,
+            test_task_id_wraparound,
+        ]
     );
     define_test_suite!(
         exception,
         SUITE_SCHEDULER,
-        crate::exception_tests::run_exception_tests
+        [
+            test_exception_names_valid,
+            test_critical_exception_classification,
+            test_page_fault_error_codes,
+            test_frame_mode_detection,
+            test_frame_invalid_cs,
+            test_frame_noncanonical_addresses,
+            test_exception_names_all_vectors,
+            test_vector_boundaries,
+            test_error_code_preservation,
+            test_frame_integrity_patterns,
+            test_known_exception_names,
+        ]
     );
-    define_test_suite!(exec, SUITE_SCHEDULER, slopos_core::run_exec_tests);
-    define_test_suite!(irq, SUITE_SCHEDULER, slopos_core::run_irq_tests);
+    define_test_suite!(
+        exec,
+        SUITE_SCHEDULER,
+        [
+            test_elf_invalid_magic,
+            test_elf_wrong_class,
+            test_elf_wrong_endian,
+            test_elf_wrong_machine,
+            test_elf_truncated_header,
+            test_elf_empty_file,
+            test_elf_no_load_segments,
+            test_elf_segment_overflow_vaddr,
+            test_elf_segment_filesz_greater_than_memsz,
+            test_elf_segment_offset_overflow,
+            test_elf_kernel_address_entry,
+            test_path_too_long,
+            test_path_empty,
+            test_translate_address_kernel_to_user,
+            test_translate_address_user_passthrough,
+            test_process_vm_null_page_dir,
+            test_elf_huge_segment_count,
+            test_elf_phentsize_mismatch,
+            test_exec_max_size_boundary,
+        ]
+    );
+    define_test_suite!(
+        irq,
+        SUITE_SCHEDULER,
+        [
+            test_irq_register_invalid_line,
+            test_irq_register_null_handler,
+            test_irq_double_register,
+            test_irq_unregister_never_registered,
+            test_irq_stats_invalid_line,
+            test_irq_stats_null_output,
+            test_irq_mask_unmask_invalid,
+            test_irq_is_masked_boundary,
+            test_irq_route_invalid,
+            test_irq_enable_disable_invalid,
+            test_irq_initialized_flag,
+            test_irq_rapid_register_unregister,
+            test_irq_all_lines_mask_state,
+            test_irq_stats_valid_line,
+            test_irq_context_pointer_preserved,
+            test_irq_handler_with_long_name,
+            test_irq_timer_ticks_accessible,
+            test_irq_keyboard_events_accessible,
+            test_irq_vector_calculation,
+        ]
+    );
     define_test_suite!(
         ioapic,
         SUITE_SCHEDULER,
-        slopos_drivers::ioapic_tests::run_ioapic_tests
+        [
+            test_ioapic_ready_state,
+            test_apic_enabled_state,
+            test_apic_id_valid,
+            test_ioapic_legacy_irq_info_invalid,
+            test_ioapic_legacy_irq_info_valid,
+            test_ioapic_mask_invalid_gsi,
+            test_ioapic_unmask_invalid_gsi,
+            test_ioapic_config_invalid_gsi,
+            test_ioapic_config_boundary_vector,
+            test_ioapic_flag_constants,
+            test_ioapic_register_constants,
+            test_apic_eoi_safe,
+            test_ioapic_double_init,
+            test_ioapic_all_legacy_irqs,
+            test_apic_spurious_vector,
+            test_ioapic_gsi_range,
+        ]
     );
-    define_test_suite!(context, SUITE_SCHEDULER, slopos_core::run_context_tests);
-    define_test_suite!(tlb, SUITE_SCHEDULER, slopos_mm::tlb_tests::run_tlb_tests);
-    define_test_suite!(mmio, SUITE_SCHEDULER, slopos_mm::mmio_tests::run_mmio_tests);
+    define_test_suite!(
+        context,
+        SUITE_SCHEDULER,
+        [
+            test_task_context_initial_state,
+            test_task_state_transitions_exhaustive,
+            test_task_invalid_state_transition,
+            test_context_fork_null_parent,
+            test_context_fork_kernel_task,
+            test_context_fork_terminated_parent,
+            test_task_get_info_null_output,
+            test_task_get_info_invalid_id,
+            test_task_double_terminate,
+            test_task_terminate_invalid_ids,
+            test_task_find_after_terminate,
+            test_task_rapid_create_terminate,
+            test_task_max_concurrent,
+            test_task_process_id_consistency,
+            test_task_flags_preserved,
+        ]
+    );
+    define_test_suite!(
+        tlb,
+        SUITE_SCHEDULER,
+        [
+            test_flush_page_null_address,
+            test_flush_page_kernel_address,
+            test_flush_page_user_max_address,
+            test_flush_page_high_kernel_address,
+            test_flush_range_empty,
+            test_flush_range_inverted,
+            test_flush_range_single_page,
+            test_flush_range_large,
+            test_flush_range_threshold_boundary,
+            test_flush_all_basic,
+            test_flush_asid_kernel_cr3,
+            test_flush_asid_zero,
+            test_batch_empty_finish,
+            test_batch_single_page,
+            test_batch_multiple_pages,
+            test_batch_at_threshold,
+            test_batch_overflow,
+            test_batch_scattered_addresses,
+            test_batch_drop_flushes,
+            test_batch_double_finish,
+            test_is_smp_active_initial,
+            test_get_active_cpu_count,
+            test_set_bsp_apic_id,
+            test_handle_shootdown_ipi_cpu_zero,
+            test_handle_shootdown_ipi_cpu_max_minus_one,
+            test_handle_shootdown_ipi_cpu_overflow,
+            test_has_invpcid_consistent,
+            test_has_pcid_consistent,
+            test_tlb_shootdown_vector_valid,
+            test_max_cpus_reasonable,
+            test_flush_type_from_valid,
+            test_flush_type_from_invalid,
+            test_rapid_flush_pages,
+            test_rapid_flush_all,
+            test_interleaved_flush_operations,
+        ]
+    );
+    define_test_suite!(
+        mmio,
+        SUITE_SCHEDULER,
+        [
+            test_mmio_empty_region_state,
+            test_mmio_is_valid_offset_overflow,
+            test_mmio_sub_region_overflow,
+            test_mmio_empty_region_invalid_reads,
+            test_mmio_map_zero_size,
+            test_mmio_map_null_addr,
+            test_mmio_map_large_size,
+            test_mmio_map_near_phys_limit,
+        ]
+    );
 
     // FPU/SSE suite requires custom implementation due to inline assembly
     const FPU_NAME: &[u8] = b"fpu_sse\0";

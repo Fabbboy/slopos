@@ -132,19 +132,3 @@ pub fn test_mmio_map_near_phys_limit() -> c_int {
 
     0
 }
-
-pub fn run_mmio_tests() -> (u32, u32) {
-    let mut passed = 0u32;
-    let mut total = 0u32;
-
-    slopos_lib::run_test!(passed, total, test_mmio_empty_region_state);
-    slopos_lib::run_test!(passed, total, test_mmio_is_valid_offset_overflow);
-    slopos_lib::run_test!(passed, total, test_mmio_sub_region_overflow);
-    slopos_lib::run_test!(passed, total, test_mmio_empty_region_invalid_reads);
-    slopos_lib::run_test!(passed, total, test_mmio_map_zero_size);
-    slopos_lib::run_test!(passed, total, test_mmio_map_null_addr);
-    slopos_lib::run_test!(passed, total, test_mmio_map_large_size);
-    slopos_lib::run_test!(passed, total, test_mmio_map_near_phys_limit);
-
-    (passed, total)
-}
