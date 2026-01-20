@@ -217,6 +217,13 @@ impl TlbShootdownState {
 
 static TLB_STATE: TlbShootdownState = TlbShootdownState::new();
 
+const INVALID_CPU_IDX: u32 = u32::MAX;
+
+static APIC_ID_TO_CPU_IDX: [AtomicU32; MAX_CPUS] = {
+    const INIT: AtomicU32 = AtomicU32::new(INVALID_CPU_IDX);
+    [INIT; MAX_CPUS]
+};
+
 #[inline(always)]
 fn flush_tlb_local_full() {
     cpu::flush_tlb_all();
@@ -309,6 +316,9 @@ pub fn register_cpu(apic_id: u32) -> usize {
     let cpu_idx = count as usize;
 
     if cpu_idx < MAX_CPUS {
+        if apic_id < MAX_CPUS as u32 {
+            APIC_ID_TO_CPU_IDX[apic_id as usize].store(cpu_idx as u32, Ordering::Release);
+        }
         klog_debug!(
             "TLB: Registered CPU {} with APIC ID 0x{:x}",
             cpu_idx,
@@ -322,6 +332,21 @@ pub fn register_cpu(apic_id: u32) -> usize {
 /// Set the BSP's APIC ID (called during boot).
 pub fn set_bsp_apic_id(apic_id: u32) {
     TLB_STATE.bsp_apic_id.store(apic_id, Ordering::Release);
+    if apic_id < MAX_CPUS as u32 {
+        APIC_ID_TO_CPU_IDX[apic_id as usize].store(0, Ordering::Release);
+    }
+}
+
+pub fn cpu_index_from_apic_id(apic_id: u32) -> Option<usize> {
+    if apic_id >= MAX_CPUS as u32 {
+        return None;
+    }
+    let idx = APIC_ID_TO_CPU_IDX[apic_id as usize].load(Ordering::Acquire);
+    if idx == INVALID_CPU_IDX {
+        None
+    } else {
+        Some(idx as usize)
+    }
 }
 
 fn send_shootdown_ipi() {

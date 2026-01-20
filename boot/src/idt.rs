@@ -112,6 +112,8 @@ unsafe extern "C" {
     fn isr19();
     fn isr128();
     fn isr_tlb_shootdown();
+    fn isr_shutdown_ipi();
+    fn isr_spurious();
 
     fn irq0();
     fn irq1();
@@ -186,6 +188,8 @@ pub fn idt_init() {
         0x08,
         IDT_GATE_INTERRUPT,
     );
+    idt_set_gate(0xFE, handler_ptr(isr_shutdown_ipi), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(0xFF, handler_ptr(isr_spurious), 0x08, IDT_GATE_INTERRUPT);
 
     initialize_handler_tables();
 
@@ -273,7 +277,15 @@ pub fn idt_load() {
 }
 
 fn handle_tlb_shootdown_ipi() {
-    tlb::handle_shootdown_ipi(0);
+    let apic_id = slopos_drivers::apic::get_id();
+    if let Some(cpu_idx) = tlb::cpu_index_from_apic_id(apic_id) {
+        tlb::handle_shootdown_ipi(cpu_idx);
+    } else {
+        klog_debug!(
+            "TLB: Missing CPU index for APIC 0x{:x}; cannot ack shootdown",
+            apic_id
+        );
+    }
     send_eoi();
 }
 
@@ -292,6 +304,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     if vector == TLB_SHOOTDOWN_VECTOR {
         handle_tlb_shootdown_ipi();
         return;
+    }
+
+    if vector == 0xFE {
+        send_eoi();
+        cpu::disable_interrupts();
+        cpu::halt_loop();
     }
 
     if vector >= IRQ_BASE_VECTOR {

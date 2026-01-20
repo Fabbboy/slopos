@@ -238,6 +238,16 @@ irq15:
 isr_tlb_shootdown:
     INTERRUPT_HANDLER 253, 0
 
+# Shutdown IPI handler (vector 0xFE = 254)
+.global isr_shutdown_ipi
+isr_shutdown_ipi:
+    INTERRUPT_HANDLER 254, 0
+
+# APIC spurious interrupt handler (vector 0xFF = 255)
+.global isr_spurious
+isr_spurious:
+    INTERRUPT_HANDLER 255, 0
+
 # =============================================================================
 # SYSCALL Entry Point (modern fast syscall via SYSCALL instruction)
 # =============================================================================
