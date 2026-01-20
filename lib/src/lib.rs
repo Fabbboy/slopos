@@ -407,6 +407,7 @@ pub mod math;
 pub mod memory;
 pub mod numfmt;
 pub mod panic_recovery;
+pub mod percpu;
 pub mod preempt;
 pub mod ring_buffer;
 pub mod service_cell;
@@ -442,3 +443,9 @@ pub use sync::{
 };
 
 pub use init_flag::{InitFlag, StateFlag};
+pub use percpu::{
+    MAX_CPUS, PerCpuData, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id,
+    get_cpu_count, get_current_cpu, get_online_cpu_count, get_percpu_data, init_bsp,
+    init_percpu_for_cpu, is_bsp, is_cpu_online, mark_cpu_offline, mark_cpu_online,
+    register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu,
+};

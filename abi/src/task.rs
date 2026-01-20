@@ -245,6 +245,9 @@ pub struct Task {
     pub fate_token: u32,
     pub fate_value: u32,
     pub fate_pending: u8,
+    pub cpu_affinity: u32,
+    pub last_cpu: u8,
+    pub migration_count: u32,
     pub next_ready: *mut Task,
 }
 
@@ -283,6 +286,9 @@ impl Task {
             fate_token: 0,
             fate_value: 0,
             fate_pending: 0,
+            cpu_affinity: 0,
+            last_cpu: 0,
+            migration_count: 0,
             next_ready: ptr::null_mut(),
         }
     }

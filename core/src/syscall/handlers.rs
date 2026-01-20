@@ -560,6 +560,42 @@ define_syscall!(syscall_brk(ctx, args, process_id) requires process_id {
     ctx.ok(result)
 });
 
+define_syscall!(syscall_get_cpu_count(ctx, args) {
+    let _ = args;
+    ctx.ok(slopos_lib::get_cpu_count() as u64)
+});
+
+define_syscall!(syscall_get_current_cpu(ctx, args) {
+    let _ = args;
+    ctx.ok(slopos_lib::get_current_cpu() as u64)
+});
+
+define_syscall!(syscall_set_cpu_affinity(ctx, args, task_id) requires task_id {
+    let target_or_zero = args.arg0_u32();
+    let new_affinity = args.arg1_u32();
+    let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
+
+    let task_ptr = crate::scheduler::task::task_find_by_id(resolved_task_id);
+    if task_ptr.is_null() {
+        return ctx.err();
+    }
+
+    unsafe { (*task_ptr).cpu_affinity = new_affinity; }
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_get_cpu_affinity(ctx, args, task_id) requires task_id {
+    let target_or_zero = args.arg0_u32();
+    let resolved_task_id = if target_or_zero == 0 { task_id } else { target_or_zero };
+
+    let task_ptr = crate::scheduler::task::task_find_by_id(resolved_task_id);
+    if task_ptr.is_null() {
+        return ctx.err();
+    }
+
+    ctx.ok(unsafe { (*task_ptr).cpu_affinity } as u64)
+});
+
 pub fn syscall_fork(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisposition {
     let Some(ctx) = SyscallContext::new(task, frame) else {
         return syscall_return_err(frame, u64::MAX);
@@ -816,6 +852,22 @@ static SYSCALL_TABLE: [SyscallEntry; 128] = {
     table[SYSCALL_FORK as usize] = SyscallEntry {
         handler: Some(syscall_fork),
         name: b"fork\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GET_CPU_COUNT as usize] = SyscallEntry {
+        handler: Some(syscall_get_cpu_count),
+        name: b"get_cpu_count\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GET_CURRENT_CPU as usize] = SyscallEntry {
+        handler: Some(syscall_get_current_cpu),
+        name: b"get_current_cpu\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_SET_CPU_AFFINITY as usize] = SyscallEntry {
+        handler: Some(syscall_set_cpu_affinity),
+        name: b"set_cpu_affinity\0".as_ptr() as *const c_char,
+    };
+    table[SYSCALL_GET_CPU_AFFINITY as usize] = SyscallEntry {
+        handler: Some(syscall_get_cpu_affinity),
+        name: b"get_cpu_affinity\0".as_ptr() as *const c_char,
     };
     table
 };

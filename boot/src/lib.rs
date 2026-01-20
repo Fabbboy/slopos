@@ -14,8 +14,8 @@ pub mod idt;
 pub mod ist_stacks;
 pub mod limine_protocol;
 pub mod panic;
-pub mod smp;
 pub mod shutdown_tests;
+pub mod smp;
 pub mod safe_stack {
     pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_init, safe_stack_record_usage};
 }

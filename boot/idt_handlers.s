@@ -233,6 +233,11 @@ irq14:
 irq15:
     INTERRUPT_HANDLER 47, 0   # ATA Secondary
 
+# Reschedule IPI handler (vector 0xFC = 252)
+.global isr_reschedule_ipi
+isr_reschedule_ipi:
+    INTERRUPT_HANDLER 252, 0
+
 # TLB Shootdown IPI handler (vector 0xFD = 253)
 .global isr_tlb_shootdown
 isr_tlb_shootdown:

@@ -156,6 +156,15 @@ pub const SYSCALL_BRK: u64 = 71;
 pub const SYSCALL_FORK: u64 = 72;
 
 // =============================================================================
+// SMP / CPU Affinity
+// =============================================================================
+
+pub const SYSCALL_GET_CPU_COUNT: u64 = 80;
+pub const SYSCALL_GET_CURRENT_CPU: u64 = 81;
+pub const SYSCALL_SET_CPU_AFFINITY: u64 = 82;
+pub const SYSCALL_GET_CPU_AFFINITY: u64 = 83;
+
+// =============================================================================
 // Syscall data structures
 // =============================================================================
 

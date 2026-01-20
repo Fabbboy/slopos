@@ -103,6 +103,10 @@ pub const SYSCALL_VECTOR: u8 = 0x80;
 /// Used for cross-CPU TLB invalidation on SMP systems.
 pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 
+/// Reschedule IPI vector (0xFC).
+/// Used to wake a CPU from idle to run newly-queued tasks.
+pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
+
 // =============================================================================
 // IDT Size
 // =============================================================================

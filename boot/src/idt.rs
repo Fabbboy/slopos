@@ -21,7 +21,7 @@ pub use slopos_abi::arch::x86_64::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 // IdtEntry is now imported from abi
@@ -111,6 +111,7 @@ unsafe extern "C" {
     fn isr18();
     fn isr19();
     fn isr128();
+    fn isr_reschedule_ipi();
     fn isr_tlb_shootdown();
     fn isr_shutdown_ipi();
     fn isr_spurious();
@@ -183,12 +184,23 @@ pub fn idt_init() {
     idt_set_gate_priv(SYSCALL_VECTOR, handler_ptr(isr128), 0x08, IDT_GATE_TRAP, 3);
 
     idt_set_gate(
+        RESCHEDULE_IPI_VECTOR,
+        handler_ptr(isr_reschedule_ipi),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
+    idt_set_gate(
         TLB_SHOOTDOWN_VECTOR,
         handler_ptr(isr_tlb_shootdown),
         0x08,
         IDT_GATE_INTERRUPT,
     );
-    idt_set_gate(0xFE, handler_ptr(isr_shutdown_ipi), 0x08, IDT_GATE_INTERRUPT);
+    idt_set_gate(
+        0xFE,
+        handler_ptr(isr_shutdown_ipi),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
     idt_set_gate(0xFF, handler_ptr(isr_spurious), 0x08, IDT_GATE_INTERRUPT);
 
     initialize_handler_tables();
@@ -303,6 +315,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
 
     if vector == TLB_SHOOTDOWN_VECTOR {
         handle_tlb_shootdown_ipi();
+        return;
+    }
+
+    if vector == RESCHEDULE_IPI_VECTOR {
+        send_eoi();
+        scheduler_request_reschedule_from_interrupt();
         return;
     }
 

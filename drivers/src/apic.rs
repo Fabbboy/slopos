@@ -92,6 +92,9 @@ pub fn init() -> i32 {
 
     klog_debug!("APIC: Initializing Local APIC");
 
+    slopos_lib::register_lapic_id_fn(get_id);
+    slopos_lib::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
+
     let mut apic_base_msr = cpu::read_msr(MSR_APIC_BASE);
     if apic_base_msr & APIC_BASE_GLOBAL_ENABLE == 0 {
         apic_base_msr |= APIC_BASE_GLOBAL_ENABLE;
@@ -426,8 +429,6 @@ pub fn apic_send_ipi_halt_all() {
     send_ipi_halt_all();
 }
 
-/// Send IPI to all CPUs except self with the given vector.
-/// Used as callback for TLB shootdown.
 pub fn send_ipi_all_excluding_self(vector: u8) {
     if !is_available() || !is_enabled() {
         return;
@@ -449,6 +450,34 @@ pub fn send_ipi_all_excluding_self(vector: u8) {
         | LAPIC_ICR_LEVEL_ASSERT
         | LAPIC_ICR_TRIGGER_EDGE
         | ICR_DEST_ALL_EXCLUDING_SELF;
+
+    write_register(LAPIC_ICR_LOW, icr_low);
+
+    timeout = 10000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
+}
+
+pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
+    if !is_available() || !is_enabled() {
+        return;
+    }
+
+    let mut timeout = 10000;
+    while (read_register(LAPIC_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) != 0 && timeout > 0 {
+        cpu::pause();
+        timeout -= 1;
+    }
+
+    write_register(LAPIC_ICR_HIGH, target_apic_id << 24);
+
+    let icr_low = (vector as u32)
+        | LAPIC_ICR_DELIVERY_FIXED
+        | LAPIC_ICR_DEST_PHYSICAL
+        | LAPIC_ICR_LEVEL_ASSERT
+        | LAPIC_ICR_TRIGGER_EDGE;
 
     write_register(LAPIC_ICR_LOW, icr_low);
 

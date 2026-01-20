@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::page_table::{
-    PageTable, PageTableEntry, PageTableLevel, PAGE_TABLE_ENTRIES,
+    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel,
 };
 use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::{cpu, klog_debug, klog_info};
@@ -279,10 +279,10 @@ fn map_page_in_directory(
                 };
                 ptr
             } else {
-            if user_mapping && !pdpt_entry.is_user() {
-                pdpt_entry.add_flags(PageFlags::USER);
-            }
-            phys_to_table(pdpt_entry.address())
+                if user_mapping && !pdpt_entry.is_user() {
+                    pdpt_entry.add_flags(PageFlags::USER);
+                }
+                phys_to_table(pdpt_entry.address())
             }
         };
 
@@ -314,10 +314,10 @@ fn map_page_in_directory(
                 };
                 ptr
             } else {
-            if user_mapping && !pd_entry.is_user() {
-                pd_entry.add_flags(PageFlags::USER);
-            }
-            phys_to_table(pd_entry.address())
+                if user_mapping && !pd_entry.is_user() {
+                    pd_entry.add_flags(PageFlags::USER);
+                }
+                phys_to_table(pd_entry.address())
             }
         };
 

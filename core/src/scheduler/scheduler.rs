@@ -1,5 +1,6 @@
 use core::ffi::{c_int, c_void};
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_lib::IrqMutex;
 use slopos_lib::preempt::PreemptGuard;
@@ -11,6 +12,7 @@ use slopos_lib::klog_info;
 use crate::platform;
 use crate::wl_currency;
 
+use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
@@ -647,7 +649,8 @@ pub fn init_scheduler() -> c_int {
     });
     user_copy::register_current_task_provider(current_task_process_id);
 
-    // SAFETY: Called during early boot before interrupts enabled
+    per_cpu::init_all_percpu_schedulers();
+
     unsafe {
         slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
     }
@@ -655,6 +658,10 @@ pub fn init_scheduler() -> c_int {
 }
 
 pub fn create_idle_task() -> c_int {
+    create_idle_task_for_cpu(0)
+}
+
+pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     let idle_task_id = unsafe {
         crate::task::task_create(
             b"idle\0".as_ptr() as *const i8,
@@ -671,9 +678,22 @@ pub fn create_idle_task() -> c_int {
     if task_get_info(idle_task_id, &mut idle_task) != 0 {
         return -1;
     }
-    with_scheduler(|sched| {
-        sched.idle_task = idle_task;
+
+    unsafe {
+        (*idle_task).cpu_affinity = 1 << cpu_id;
+        (*idle_task).last_cpu = cpu_id as u8;
+    }
+
+    if cpu_id == 0 {
+        with_scheduler(|sched| {
+            sched.idle_task = idle_task;
+        });
+    }
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_idle_task(idle_task);
     });
+
     0
 }
 
@@ -860,4 +880,73 @@ pub fn boot_step_scheduler_init() -> c_int {
 
 pub fn boot_step_idle_task() -> c_int {
     create_idle_task()
+}
+
+pub fn init_scheduler_for_ap(cpu_id: usize) {
+    per_cpu::init_percpu_scheduler(cpu_id);
+}
+
+pub fn scheduler_run_ap(cpu_id: usize) -> ! {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.enable();
+    });
+
+    slopos_lib::mark_cpu_online(cpu_id);
+    klog_info!("SCHED: CPU {} scheduler online", cpu_id);
+
+    loop {
+        let has_work = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            let task = sched.dequeue_highest_priority();
+            if !task.is_null() {
+                sched.enqueue_local(task);
+                true
+            } else {
+                sched.increment_idle_time();
+                false
+            }
+        })
+        .unwrap_or(false);
+
+        if !has_work {
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+            }
+        }
+    }
+}
+
+pub fn get_percpu_scheduler_stats(
+    cpu_id: usize,
+    switches: *mut u64,
+    preemptions: *mut u64,
+    ready_tasks: *mut u32,
+) {
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        if !switches.is_null() {
+            unsafe { *switches = sched.total_switches.load(Ordering::Relaxed) };
+        }
+        if !preemptions.is_null() {
+            unsafe { *preemptions = sched.total_preemptions.load(Ordering::Relaxed) };
+        }
+        if !ready_tasks.is_null() {
+            unsafe { *ready_tasks = sched.total_ready_count() };
+        }
+    });
+}
+
+pub fn get_total_ready_tasks_all_cpus() -> u32 {
+    per_cpu::get_total_ready_tasks()
+}
+
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    use slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR;
+
+    let current_cpu = slopos_lib::get_current_cpu();
+    if target_cpu == current_cpu {
+        return;
+    }
+
+    if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(target_cpu) {
+        slopos_lib::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
+    }
 }

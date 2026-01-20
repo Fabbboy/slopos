@@ -45,8 +45,8 @@ use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, k
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{
-    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count,
-    mm_region_get, mm_reservations_count, mm_reservations_get,
+    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count, mm_region_get,
+    mm_reservations_count, mm_reservations_get,
 };
 use crate::mm_constants::PAGE_SIZE_4KB;
 
@@ -494,7 +494,7 @@ const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
 #[inline]
 fn get_current_cpu() -> usize {
-    0
+    slopos_lib::get_current_cpu()
 }
 
 fn pcp_try_alloc(cpu: usize) -> u32 {

@@ -3,7 +3,7 @@
 use core::arch::asm;
 
 use slopos_abi::arch::x86_64::msr::Msr;
-use slopos_lib::klog_debug;
+use slopos_lib::{MAX_CPUS, get_current_cpu, klog_debug};
 
 const GDT_CODE_SELECTOR: u16 = 0x08;
 const GDT_DATA_SELECTOR: u16 = 0x10;
@@ -152,7 +152,7 @@ struct GdtDescriptor {
     base: u64,
 }
 
-static mut GDT_TABLE: GdtLayout = GdtLayout {
+const EMPTY_GDT_LAYOUT: GdtLayout = GdtLayout {
     entries: [0; 5],
     tss_entry: GdtTssEntry {
         limit_low: 0,
@@ -166,7 +166,7 @@ static mut GDT_TABLE: GdtLayout = GdtLayout {
     },
 };
 
-static mut KERNEL_TSS: Tss64 = Tss64 {
+const EMPTY_TSS: Tss64 = Tss64 {
     reserved0: 0,
     rsp0: 0,
     rsp1: 0,
@@ -178,10 +178,14 @@ static mut KERNEL_TSS: Tss64 = Tss64 {
     iomap_base: 0,
 };
 
-static mut SYSCALL_CPU_DATA: PerCpuSyscallData = PerCpuSyscallData {
+const EMPTY_SYSCALL_DATA: PerCpuSyscallData = PerCpuSyscallData {
     user_rsp_scratch: 0,
     kernel_rsp: 0,
 };
+
+static mut PER_CPU_GDT: [GdtLayout; MAX_CPUS] = [EMPTY_GDT_LAYOUT; MAX_CPUS];
+static mut PER_CPU_TSS: [Tss64; MAX_CPUS] = [EMPTY_TSS; MAX_CPUS];
+static mut PER_CPU_SYSCALL_DATA: [PerCpuSyscallData; MAX_CPUS] = [EMPTY_SYSCALL_DATA; MAX_CPUS];
 
 #[unsafe(no_mangle)]
 static mut SYSCALL_CPU_DATA_PTR: u64 = 0;
@@ -221,10 +225,18 @@ unsafe fn load_tss() {
     unsafe { asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags)) };
 }
 pub fn gdt_init() {
-    klog_debug!("GDT: Initializing descriptor tables");
+    gdt_init_for_cpu(0);
+}
+
+pub fn gdt_init_for_cpu(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+
+    klog_debug!("GDT: Initializing descriptor tables for CPU {}", cpu_id);
 
     unsafe {
-        GDT_TABLE.entries = [
+        PER_CPU_GDT[cpu_id].entries = [
             GDT_NULL_DESCRIPTOR,
             GDT_CODE_DESCRIPTOR_64,
             GDT_DATA_DESCRIPTOR_64,
@@ -232,45 +244,61 @@ pub fn gdt_init() {
             GDT_USER_CODE_DESCRIPTOR_64,
         ];
 
-        let tss_base = &KERNEL_TSS as *const _ as u64;
+        let tss_base = &PER_CPU_TSS[cpu_id] as *const _ as u64;
         let tss_limit = core::mem::size_of::<Tss64>() as u16 - 1;
 
-        let tss_entry = &mut GDT_TABLE.tss_entry;
+        let tss_entry = &mut PER_CPU_GDT[cpu_id].tss_entry;
         tss_entry.limit_low = tss_limit & 0xFFFF;
         tss_entry.base_low = (tss_base & 0xFFFF) as u16;
         tss_entry.base_mid = ((tss_base >> 16) & 0xFF) as u8;
-        tss_entry.access = 0x89; // Present | type=64-bit available TSS
+        tss_entry.access = 0x89;
         tss_entry.granularity = (((tss_limit as u32) >> 16) & 0x0F) as u8;
         tss_entry.base_high = ((tss_base >> 24) & 0xFF) as u8;
         tss_entry.base_upper = (tss_base >> 32) as u32;
         tss_entry.reserved = 0;
 
-        KERNEL_TSS.iomap_base = core::mem::size_of::<Tss64>() as u16;
-        KERNEL_TSS.rsp0 = (&kernel_stack_top as *const u8) as u64;
+        PER_CPU_TSS[cpu_id].iomap_base = core::mem::size_of::<Tss64>() as u16;
+        if cpu_id == 0 {
+            PER_CPU_TSS[cpu_id].rsp0 = (&kernel_stack_top as *const u8) as u64;
+        }
 
         let descriptor = GdtDescriptor {
             limit: (core::mem::size_of::<GdtLayout>() - 1) as u16,
-            base: &GDT_TABLE as *const _ as u64,
+            base: &PER_CPU_GDT[cpu_id] as *const _ as u64,
         };
 
         load_gdt(&descriptor);
         load_tss();
     }
 
-    klog_debug!("GDT: Initialized with TSS loaded");
+    klog_debug!("GDT: Initialized with TSS loaded for CPU {}", cpu_id);
 }
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
-    unsafe {
-        KERNEL_TSS.rsp0 = rsp0;
-        SYSCALL_CPU_DATA.kernel_rsp = rsp0;
-    }
+    let cpu_id = get_current_cpu();
+    gdt_set_kernel_rsp0_for_cpu(cpu_id, rsp0);
 }
-pub fn gdt_set_ist(index: u8, stack_top: u64) {
-    if index == 0 || index > 7 {
+
+pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
+    if cpu_id >= MAX_CPUS {
         return;
     }
     unsafe {
-        KERNEL_TSS.ist[(index - 1) as usize] = stack_top;
+        PER_CPU_TSS[cpu_id].rsp0 = rsp0;
+        PER_CPU_SYSCALL_DATA[cpu_id].kernel_rsp = rsp0;
+    }
+}
+
+pub fn gdt_set_ist(index: u8, stack_top: u64) {
+    let cpu_id = get_current_cpu();
+    gdt_set_ist_for_cpu(cpu_id, index, stack_top);
+}
+
+pub fn gdt_set_ist_for_cpu(cpu_id: usize, index: u8, stack_top: u64) {
+    if cpu_id >= MAX_CPUS || index == 0 || index > 7 {
+        return;
+    }
+    unsafe {
+        PER_CPU_TSS[cpu_id].ist[(index - 1) as usize] = stack_top;
     }
 }
 
@@ -341,20 +369,39 @@ pub fn syscall_msr_init() {
 }
 
 fn syscall_gs_base_init() {
-    unsafe {
-        SYSCALL_CPU_DATA.kernel_rsp = KERNEL_TSS.rsp0;
-        SYSCALL_CPU_DATA_PTR = &SYSCALL_CPU_DATA as *const _ as u64;
+    let cpu_id = get_current_cpu();
+    syscall_gs_base_init_for_cpu(cpu_id);
+}
+
+fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
     }
-    let cpu_data_ptr = unsafe { SYSCALL_CPU_DATA_PTR };
-    wrmsr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
-    klog_debug!(
-        "SYSCALL: KERNEL_GS_BASE=0x{:016x} (per-CPU syscall data)",
-        cpu_data_ptr
-    );
+    unsafe {
+        PER_CPU_SYSCALL_DATA[cpu_id].kernel_rsp = PER_CPU_TSS[cpu_id].rsp0;
+        let cpu_data_ptr = &PER_CPU_SYSCALL_DATA[cpu_id] as *const _ as u64;
+        if cpu_id == 0 {
+            SYSCALL_CPU_DATA_PTR = cpu_data_ptr;
+        }
+        wrmsr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
+        klog_debug!(
+            "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
+            cpu_id,
+            cpu_data_ptr
+        );
+    }
 }
 
 pub fn syscall_update_kernel_rsp(rsp: u64) {
+    let cpu_id = get_current_cpu();
+    syscall_update_kernel_rsp_for_cpu(cpu_id, rsp);
+}
+
+pub fn syscall_update_kernel_rsp_for_cpu(cpu_id: usize, rsp: u64) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
     unsafe {
-        SYSCALL_CPU_DATA.kernel_rsp = rsp;
+        PER_CPU_SYSCALL_DATA[cpu_id].kernel_rsp = rsp;
     }
 }
