@@ -27,6 +27,9 @@
 > **You need:** QEMU, xorriso, mkfs.ext2, and mass skill issue tolerance
 
 ```bash
+# macOS
+brew install qemu xorriso e2fsprogs
+
 # Debian/Ubuntu
 sudo apt install qemu-system-x86 xorriso e2fsprogs
 
@@ -37,6 +40,8 @@ sudo pacman -S qemu-full xorriso e2fsprogs
 make setup          # installs rust nightly
 make boot VIDEO=1   # spins the wheel
 ```
+
+> **macOS Note:** The Cocoa display backend is automatically detected and used. If you see display errors, run `qemu-system-x86_64 -display help` to check available backends.
 
 <br/>
 
@@ -51,11 +56,13 @@ make boot VIDEO=1   # spins the wheel
 <summary><b>Advanced Options</b></summary>
 
 ```bash
-VIRGL=1 VIDEO=1 make boot         # GPU acceleration
-QEMU_DISPLAY=gtk make boot VIDEO=1    # Force GTK
-QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL
+VIRGL=1 VIDEO=1 make boot             # GPU acceleration (not supported on macOS Cocoa)
+QEMU_DISPLAY=cocoa make boot VIDEO=1  # Force Cocoa (macOS default)
+QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL (if installed)
 DEBUG=1 make boot VIDEO=1             # Debug logging
 ```
+
+**Note:** On macOS, GTK is not available. The Makefile automatically uses Cocoa display.
 
 </details>
 

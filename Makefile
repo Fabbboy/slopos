@@ -34,7 +34,12 @@ BOOT_CMDLINE ?= itests=off
 TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on
 VIDEO ?= 0
 VIRGL ?= 0
+# On macOS, prefer cocoa; otherwise let the logic decide
+ifeq ($(UNAME_S),Darwin)
+QEMU_DISPLAY ?= cocoa
+else
 QEMU_DISPLAY ?= auto
+endif
 
 DEBUG ?= 0
 DEBUG_CMDLINE :=
@@ -265,10 +270,10 @@ boot: iso-notests
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$'; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q 'sdl'; then \
 		HAS_SDL=1; \
 	fi; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q 'cocoa'; then \
 		HAS_COCOA=1; \
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
@@ -347,10 +352,10 @@ boot-log: iso-notests
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
 	HAS_COCOA=0; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$'; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q 'sdl'; then \
 		HAS_SDL=1; \
 	fi; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q 'cocoa'; then \
 		HAS_COCOA=1; \
 	fi; \
 	if [ "$${VIDEO:-0}" != "0" ]; then \
