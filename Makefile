@@ -2,6 +2,16 @@
 
 .PHONY: setup build build-userland fs-image iso iso-notests iso-tests boot boot-log test clean distclean
 
+# macOS support: detect OS and set paths accordingly
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS: add e2fsprogs and cargo to PATH
+    BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
+    E2FSPROGS_PATH := $(BREW_PREFIX)/opt/e2fsprogs/sbin
+    CARGO_BIN_PATH := $(HOME)/.cargo/bin
+    export PATH := $(E2FSPROGS_PATH):$(CARGO_BIN_PATH):$(PATH)
+endif
+
 BUILD_DIR ?= builddir
 CARGO ?= cargo
 RUST_TOOLCHAIN_FILE ?= rust-toolchain.toml
@@ -254,27 +264,41 @@ boot: iso-notests
 	DISPLAY_ARGS="-display none -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$$'; then \
+	HAS_COCOA=0; \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$'; then \
 		HAS_SDL=1; \
 	fi; \
-	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
+		HAS_COCOA=1; \
+	fi; \
+	if [ "${VIDEO:-0}" != "0" ]; then \
+		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
-		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
-		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		elif [ "$HAS_COCOA" = "1" ]; then \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
-	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+	if [ "${QEMU_VIRGL:-0}" != "0" ]; then \
+		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		elif [ "$HAS_COCOA" = "1" ]; then \
+			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
 		fi; \
@@ -322,15 +346,23 @@ boot-log: iso-notests
 	DISPLAY_ARGS="-display none -vga std"; \
 	USB_ARGS="-usb -device usb-tablet"; \
 	HAS_SDL=0; \
-	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$$'; then \
+	HAS_COCOA=0; \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^sdl$'; then \
 		HAS_SDL=1; \
 	fi; \
-	if [ "$${VIDEO:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
+		HAS_COCOA=1; \
+	fi; \
+	if [ "${VIDEO:-0}" != "0" ]; then \
+		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
-		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
-		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
+		elif [ "$HAS_COCOA" = "1" ]; then \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
