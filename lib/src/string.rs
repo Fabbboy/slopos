@@ -1,4 +1,4 @@
-use core::ffi::{CStr, c_char, c_int};
+use core::ffi::{c_char, c_int, CStr};
 use core::ptr;
 
 #[inline(always)]
@@ -8,7 +8,11 @@ fn to_u8(c: c_char) -> u8 {
 
 #[inline(always)]
 fn from_bool(val: bool) -> c_int {
-    if val { 1 } else { 0 }
+    if val {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn isspace(byte: u8) -> bool {

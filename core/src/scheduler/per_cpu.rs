@@ -3,11 +3,15 @@
 //! Each CPU has its own scheduler instance with local run queues.
 //! This minimizes lock contention and improves cache locality.
 
+use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use slopos_abi::task::{TASK_STATE_READY, Task};
-use slopos_lib::{MAX_CPUS, klog_debug};
+use slopos_abi::task::{
+    Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
+};
+use slopos_lib::{klog_debug, klog_info, MAX_CPUS};
+use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
@@ -152,6 +156,7 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 pub struct PerCpuScheduler {
     pub cpu_id: usize,
     ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
+    queue_lock: Mutex<()>,
     pub current_task: *mut Task,
     pub idle_task: *mut Task,
     pub enabled: AtomicBool,
@@ -161,6 +166,7 @@ pub struct PerCpuScheduler {
     pub total_ticks: AtomicU64,
     pub idle_time: AtomicU64,
     initialized: AtomicBool,
+    pub return_context: TaskContext,
 }
 
 unsafe impl Send for PerCpuScheduler {}
@@ -171,6 +177,7 @@ impl PerCpuScheduler {
         Self {
             cpu_id: 0,
             ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
+            queue_lock: Mutex::new(()),
             current_task: ptr::null_mut(),
             idle_task: ptr::null_mut(),
             enabled: AtomicBool::new(false),
@@ -180,6 +187,7 @@ impl PerCpuScheduler {
             total_ticks: AtomicU64::new(0),
             idle_time: AtomicU64::new(0),
             initialized: AtomicBool::new(false),
+            return_context: TaskContext::zero(),
         }
     }
 
@@ -189,7 +197,11 @@ impl PerCpuScheduler {
             queue.init();
         }
         self.current_task = ptr::null_mut();
-        self.idle_task = ptr::null_mut();
+        // Preserve idle_task if already set (AP scheduler may already be running)
+        // Only clear it if this is the first initialization
+        if !self.is_initialized() {
+            self.idle_task = ptr::null_mut();
+        }
         self.enabled.store(false, Ordering::Relaxed);
         self.time_slice = 10;
         self.total_switches.store(0, Ordering::Relaxed);
@@ -214,10 +226,12 @@ impl PerCpuScheduler {
             (*task).last_cpu = self.cpu_id as u8;
         }
 
+        let _guard = self.queue_lock.lock();
         self.ready_queues[idx].enqueue(task)
     }
 
     pub fn dequeue_highest_priority(&mut self) -> *mut Task {
+        let _guard = self.queue_lock.lock();
         for queue in self.ready_queues.iter_mut() {
             let task = queue.dequeue();
             if !task.is_null() {
@@ -233,15 +247,18 @@ impl PerCpuScheduler {
         }
         let priority = unsafe { (*task).priority as usize };
         let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
+        let _guard = self.queue_lock.lock();
         self.ready_queues[idx].remove(task)
     }
 
     pub fn total_ready_count(&self) -> u32 {
+        let _guard = self.queue_lock.lock();
         self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
     #[allow(dead_code)]
     pub fn steal_task(&mut self) -> Option<*mut Task> {
+        let _guard = self.queue_lock.lock();
         for queue in self.ready_queues.iter_mut().rev() {
             if let Some(task) = queue.steal_from_tail() {
                 return Some(task);
@@ -425,4 +442,150 @@ fn find_least_loaded_cpu(affinity: u32) -> usize {
     }
 
     best_cpu
+}
+
+// =============================================================================
+// Per-CPU Idle Task Creation for SMP
+// =============================================================================
+
+/// Idle loop function for AP idle tasks.
+/// This is the entry point for each AP's idle task.
+fn ap_idle_loop(_: *mut c_void) {
+    loop {
+        // Increment idle time counter
+        let cpu_id = slopos_lib::get_current_cpu();
+        with_cpu_scheduler(cpu_id, |sched| {
+            sched.increment_idle_time();
+        });
+        // Wait for interrupt (reschedule IPI or timer). The sti; hlt sequence
+        // atomically enables interrupts and halts until the next interrupt.
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
+    }
+}
+
+/// Create an idle task specifically for an Application Processor.
+/// Returns the task pointer on success, null on failure.
+///
+/// This creates a minimal kernel task that will serve as the "from" context
+/// when the AP picks up real work from its queue.
+pub fn create_ap_idle_task(cpu_id: usize) -> *mut Task {
+    use crate::task::{task_create, task_get_info};
+
+    if cpu_id == 0 {
+        klog_info!("SCHED: CPU 0 should use create_idle_task(), not create_ap_idle_task()");
+        return ptr::null_mut();
+    }
+
+    if cpu_id >= MAX_CPUS {
+        klog_info!("SCHED: Invalid CPU ID {} for AP idle task", cpu_id);
+        return ptr::null_mut();
+    }
+
+    // Create a unique name for this CPU's idle task
+    let mut name = [0u8; 16];
+    let prefix = b"ap_idle_";
+    name[..prefix.len()].copy_from_slice(prefix);
+    // Add CPU number (simple digit conversion for cpu_id < 10)
+    if cpu_id < 10 {
+        name[prefix.len()] = b'0' + cpu_id as u8;
+        name[prefix.len() + 1] = 0;
+    } else {
+        name[prefix.len()] = b'0' + (cpu_id / 10) as u8;
+        name[prefix.len() + 1] = b'0' + (cpu_id % 10) as u8;
+        name[prefix.len() + 2] = 0;
+    }
+
+    let task_id = unsafe {
+        task_create(
+            name.as_ptr() as *const i8,
+            core::mem::transmute(ap_idle_loop as *const ()),
+            ptr::null_mut(),
+            TASK_PRIORITY_IDLE,
+            TASK_FLAG_KERNEL_MODE,
+        )
+    };
+
+    if task_id == INVALID_TASK_ID {
+        klog_info!("SCHED: Failed to create idle task for CPU {}", cpu_id);
+        return ptr::null_mut();
+    }
+
+    let mut idle_task: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut idle_task) != 0 || idle_task.is_null() {
+        klog_info!("SCHED: Failed to get idle task info for CPU {}", cpu_id);
+        return ptr::null_mut();
+    }
+
+    // Set CPU affinity to only run on this specific CPU
+    unsafe {
+        (*idle_task).cpu_affinity = 1 << cpu_id;
+        (*idle_task).last_cpu = cpu_id as u8;
+    }
+
+    // Register with per-CPU scheduler
+    with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_idle_task(idle_task);
+    });
+
+    klog_debug!("SCHED: Created idle task {} for CPU {}", task_id, cpu_id);
+
+    idle_task
+}
+
+/// Get the return context for an AP to use when no tasks are available.
+/// This is stored in the per-CPU scheduler and initialized during AP startup.
+pub fn get_ap_return_context(cpu_id: usize) -> *mut TaskContext {
+    unsafe {
+        if cpu_id >= MAX_CPUS {
+            return ptr::null_mut();
+        }
+        &raw mut CPU_SCHEDULERS[cpu_id].return_context
+    }
+}
+
+/// Check if the given task is the idle task for any CPU
+pub fn is_idle_task(task: *const Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+
+    // First check: pointer comparison with registered idle tasks
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if let Some(is_idle) =
+            with_cpu_scheduler(cpu_id, |sched| sched.idle_task == task as *mut Task)
+        {
+            if is_idle {
+                return true;
+            }
+        }
+    }
+
+    // Fallback check: idle tasks have names "idle" or "ap_idle_N"
+    // This catches cases where the per-CPU scheduler check might fail
+    // (e.g., during test reinitialization or race conditions)
+    unsafe {
+        let name = &(*task).name;
+        // Check for "idle\0" (BSP idle task)
+        if name[0] == b'i' && name[1] == b'd' && name[2] == b'l' && name[3] == b'e' && name[4] == 0
+        {
+            return true;
+        }
+        // Check for "ap_idle_" prefix (AP idle tasks)
+        if name[0] == b'a'
+            && name[1] == b'p'
+            && name[2] == b'_'
+            && name[3] == b'i'
+            && name[4] == b'd'
+            && name[5] == b'l'
+            && name[6] == b'e'
+            && name[7] == b'_'
+        {
+            return true;
+        }
+    }
+
+    false
 }

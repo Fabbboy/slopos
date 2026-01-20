@@ -5,7 +5,7 @@ use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 use slopos_core::wl_currency::{award_loss, award_win};
 use slopos_core::{init_scheduler_for_ap, scheduler_run_ap};
 use slopos_drivers::apic;
-use slopos_lib::{cpu, init_bsp, init_percpu_for_cpu, klog_info};
+use slopos_lib::{cpu, init_bsp, init_percpu_for_cpu, is_cpu_online, klog_info};
 use slopos_mm::tlb;
 
 use crate::gdt::{gdt_init_for_cpu, syscall_msr_init};
@@ -18,6 +18,9 @@ const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
 
 unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     cpu::disable_interrupts();
+
+    cpu::enable_sse();
+
     apic::enable();
 
     let apic_id = apic::get_id();
@@ -98,6 +101,8 @@ pub fn smp_init() {
         return;
     }
 
+    let mut started_count = 0usize;
+
     for cpu in cpus {
         if cpu.lapic_id == bsp_lapic {
             continue;
@@ -110,13 +115,23 @@ pub fn smp_init() {
         }
 
         if cpu.extra.load(Ordering::Acquire) == AP_STARTED_MAGIC {
-            // A started AP is a win in the wheel's ledger.
             award_win();
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
+            started_count += 1;
         } else {
-            // A missing AP is a recoverable loss in the ledger.
             award_loss();
             klog_info!("MP: CPU 0x{:x} did not respond", cpu.lapic_id);
+        }
+    }
+
+    for cpu_idx in 1..=started_count {
+        let mut spins = 5_000_000u32;
+        while !is_cpu_online(cpu_idx) && spins > 0 {
+            cpu::pause();
+            spins -= 1;
+        }
+        if !is_cpu_online(cpu_idx) {
+            klog_info!("MP: Warning - CPU {} scheduler not fully online", cpu_idx);
         }
     }
 }

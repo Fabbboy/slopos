@@ -1,10 +1,10 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::{c_char, CStr};
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    TestRunSummary, TestSuiteResult, tests_register_suite, tests_register_system_suites,
-    tests_request_shutdown, tests_reset_registry, tests_run_all,
+    tests_register_suite, tests_register_system_suites, tests_request_shutdown,
+    tests_reset_registry, tests_run_all, TestRunSummary, TestSuiteResult,
 };
 use slopos_video as video;
 

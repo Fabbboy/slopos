@@ -6,11 +6,11 @@ pub mod harness;
 mod runner;
 pub mod suite_masks;
 
-pub use config::{Suite, TestConfig, Verbosity, config_from_cmdline};
+pub use config::{config_from_cmdline, Suite, TestConfig, Verbosity};
 pub use fixture::{FixtureKind, NoFixture, TestFixture};
 pub use harness::{
-    HARNESS_MAX_SUITES, HarnessConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult,
-    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms,
+    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms, HarnessConfig, TestRunSummary,
+    TestSuiteDesc, TestSuiteResult, HARNESS_MAX_SUITES,
 };
 pub use runner::run_single_test;
 pub use suite_masks::*;
@@ -44,7 +44,11 @@ impl TestResult {
     /// Convert from C-style return code (0 = pass, non-zero = fail).
     #[inline]
     pub fn from_c_int(val: c_int) -> Self {
-        if val == 0 { Self::Pass } else { Self::Fail }
+        if val == 0 {
+            Self::Pass
+        } else {
+            Self::Fail
+        }
     }
 
     /// Convert to C-style return code (0 = pass, -1 = fail).

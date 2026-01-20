@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::page_table::{
-    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel,
+    PageTable, PageTableEntry, PageTableLevel, PAGE_TABLE_ENTRIES,
 };
 use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::{cpu, klog_debug, klog_info};
@@ -12,7 +12,7 @@ use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
+    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
 };
 use crate::tlb;
 
@@ -323,7 +323,8 @@ fn map_page_in_directory(
 
         let pt_entry = (&mut *pt).entry_mut(pt_idx);
 
-        if pt_entry.is_present() {
+        let was_present = pt_entry.is_present();
+        if was_present {
             let old_phys = pt_entry.address();
             if !old_phys.is_null() && page_frame_can_free(old_phys) != 0 {
                 free_page_frame(old_phys);
@@ -331,7 +332,10 @@ fn map_page_in_directory(
         }
 
         pt_entry.set(paddr, flags | PageFlags::PRESENT);
-        tlb::flush_page(vaddr);
+
+        if was_present {
+            tlb::flush_page(vaddr);
+        }
     }
     0
 }

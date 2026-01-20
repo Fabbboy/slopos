@@ -219,29 +219,23 @@ context_switch_user:
     # GS selector is NOT restored - SWAPGS manages GS_BASE MSR state
     # Writing to GS selector would not affect the MSR anyway in 64-bit mode
 
-    # Set up MSRs for SYSCALL compatibility before returning to user mode
-    # This is deterministic regardless of prior SWAPGS state
-    #
-    # 1. Set IA32_GS_BASE (0xC0000101) = 0 (user GS base)
-    # 2. Set IA32_KERNEL_GS_BASE (0xC0000102) = SYSCALL_CPU_DATA_PTR
+    # Set up GS_BASE for SYSCALL compatibility before returning to user mode.
+    # KERNEL_GS_BASE was set per-CPU during syscall_msr_init() and does NOT
+    # change per-task - all tasks on the same CPU share the same per-CPU data.
+    # We only need to set GS_BASE=0 for user mode; KERNEL_GS_BASE stays as-is.
     #
     # After IRETQ, user runs with GS_BASE=0. When user does SYSCALL,
     # SWAPGS will swap GS_BASE(0) <-> KERNEL_GS_BASE(per-cpu), which is correct.
 
-    # Set GS_BASE = 0
+    # Set GS_BASE = 0 (user mode sees GS_BASE=0)
     movl $0xC0000101, %ecx
     xorl %eax, %eax
     xorl %edx, %edx
     wrmsr
 
-    # Set KERNEL_GS_BASE = SYSCALL_CPU_DATA_PTR
-    movl $0xC0000102, %ecx
-    movq SYSCALL_CPU_DATA_PTR(%rip), %rax
-    movq %rax, %rdx
-    shrq $32, %rdx
-    wrmsr
+    # KERNEL_GS_BASE is already correct per-CPU from syscall_msr_init() - don't touch it
 
-    # GPRs (restore after MSR writes since we clobbered eax/ecx/edx)
+    # GPRs (restore after MSR write since we clobbered eax/ecx/edx)
     movq    0x00(%r15), %rax
     movq    0x08(%r15), %rbx
     movq    0x10(%r15), %rcx

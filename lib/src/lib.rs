@@ -198,6 +198,19 @@ pub mod cpu {
     pub const CR4_SMAP: u64 = 1 << 21;
     pub const CR4_PKE: u64 = 1 << 22;
 
+    pub fn enable_sse() {
+        let mut cr0 = read_cr0();
+        cr0 &= !CR0_EM;
+        cr0 &= !CR0_TS;
+        cr0 |= CR0_MP;
+        write_cr0(cr0);
+
+        let mut cr4 = read_cr4();
+        cr4 |= CR4_OSFXSR;
+        cr4 |= CR4_OSXMMEXCPT;
+        write_cr4(cr4);
+    }
+
     #[inline(always)]
     pub fn read_msr(msr: u32) -> u64 {
         let low: u32;
@@ -425,27 +438,28 @@ pub use paste;
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
 pub use kdiag::kdiag_dump_interrupt_frame;
-pub use kdiag::{InterruptFrame, KDIAG_STACK_TRACE_DEPTH, kdiag_timestamp};
+pub use kdiag::{kdiag_timestamp, InterruptFrame, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
-    KlogLevel, klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline,
-    klog_set_level,
+    klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_set_level,
+    KlogLevel,
 };
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ports::COM1;
-pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};
+pub use preempt::{is_preemption_disabled, preempt_count, IrqPreemptGuard, PreemptGuard};
 pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
 pub use spinlock::{IrqMutex, IrqMutexGuard, Spinlock};
 pub use stacktrace::StacktraceEntry;
 pub use sync::{
-    CleanLockToken, L0, L1, L2, L3, L4, L5, Level, LockToken, Lower, Mutex as OrderedMutex,
-    MutexGuard as OrderedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    CleanLockToken, Level, LockToken, Lower, Mutex as OrderedMutex,
+    MutexGuard as OrderedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, L0, L1, L2, L3, L4,
+    L5,
 };
 
 pub use init_flag::{InitFlag, StateFlag};
 pub use percpu::{
-    MAX_CPUS, PerCpuData, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id,
-    get_cpu_count, get_current_cpu, get_online_cpu_count, get_percpu_data, init_bsp,
-    init_percpu_for_cpu, is_bsp, is_cpu_online, mark_cpu_offline, mark_cpu_online,
-    register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu,
+    apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
+    get_current_cpu, get_online_cpu_count, get_percpu_data, init_bsp, init_percpu_for_cpu, is_bsp,
+    is_cpu_online, mark_cpu_offline, mark_cpu_online, register_lapic_id_fn,
+    register_send_ipi_to_cpu_fn, send_ipi_to_cpu, PerCpuData, MAX_CPUS,
 };

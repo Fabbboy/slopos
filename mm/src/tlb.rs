@@ -424,10 +424,11 @@ pub fn flush_page(vaddr: VirtAddr) {
     flush_page_local(vaddr);
 
     if is_smp_active() {
+        let initiator = slopos_lib::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
         send_shootdown_ipi();
-        wait_for_acks(0);
+        wait_for_acks(initiator);
     }
 }
 
@@ -439,10 +440,11 @@ pub fn flush_range(start: VirtAddr, end: VirtAddr) {
     flush_range_local(start, end);
 
     if is_smp_active() {
+        let initiator = slopos_lib::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi();
-        wait_for_acks(0);
+        wait_for_acks(initiator);
     }
 }
 
@@ -454,10 +456,11 @@ pub fn flush_all() {
     flush_tlb_local_full();
 
     if is_smp_active() {
+        let initiator = slopos_lib::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi();
-        wait_for_acks(0);
+        wait_for_acks(initiator);
     }
 }
 
@@ -473,10 +476,11 @@ pub fn flush_asid(asid: u64) {
     }
 
     if is_smp_active() {
+        let initiator = slopos_lib::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, asid);
         send_shootdown_ipi();
-        wait_for_acks(0);
+        wait_for_acks(initiator);
     }
 }
 

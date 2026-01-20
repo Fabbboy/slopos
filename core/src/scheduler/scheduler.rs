@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::IrqMutex;
 use slopos_lib::preempt::PreemptGuard;
+use slopos_lib::IrqMutex;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -14,11 +14,11 @@ use crate::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
+    task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
+    TASK_STATE_READY, TASK_STATE_RUNNING,
 };
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
@@ -310,18 +310,42 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         if unsafe { (*task).time_slice_remaining } == 0 {
             reset_task_quantum(sched, task);
         }
-        if sched.enqueue_task(task) != 0 {
-            klog_info!("schedule_task: ready queue full, request rejected");
-            return -1;
+    });
+
+    let target_cpu = per_cpu::select_target_cpu(task);
+    let current_cpu = slopos_lib::get_current_cpu();
+
+    let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
+
+    if result != Some(0) {
+        with_scheduler(|sched| {
+            if sched.enqueue_task(task) != 0 {
+                klog_info!("schedule_task: all queues full, request rejected");
+                return -1;
+            }
+            0
+        })
+    } else {
+        if target_cpu != current_cpu && slopos_lib::is_cpu_online(target_cpu) {
+            send_reschedule_ipi(target_cpu);
         }
         0
-    })
+    }
 }
 
 pub fn unschedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
+
+    let last_cpu = unsafe { (*task).last_cpu as usize };
+    per_cpu::with_cpu_scheduler(last_cpu, |sched| {
+        sched.remove_task(task);
+        if sched.current_task == task {
+            sched.current_task = ptr::null_mut();
+        }
+    });
+
     with_scheduler(|sched| {
         sched.remove_task(task);
         if sched.current_task == task {
@@ -332,7 +356,14 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
 }
 
 fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
-    let mut next = sched.dequeue_highest_priority();
+    let cpu_id = slopos_lib::get_current_cpu();
+    let mut next = per_cpu::with_cpu_scheduler(cpu_id, |local| local.dequeue_highest_priority())
+        .unwrap_or(ptr::null_mut());
+
+    if next.is_null() {
+        next = sched.dequeue_highest_priority();
+    }
+
     if next.is_null() && !sched.idle_task.is_null() && !task_is_terminated(sched.idle_task) {
         next = sched.idle_task;
     }
@@ -771,13 +802,16 @@ pub fn get_scheduler_stats(
         if !yields.is_null() {
             unsafe { *yields = sched.total_yields };
         }
-        if !ready_tasks.is_null() {
-            unsafe { *ready_tasks = sched.total_ready_count() };
-        }
         if !schedule_calls.is_null() {
             unsafe { *schedule_calls = sched.schedule_calls };
         }
     });
+
+    if !ready_tasks.is_null() {
+        let global_count = with_scheduler(|sched| sched.total_ready_count());
+        let percpu_count = per_cpu::get_total_ready_tasks();
+        unsafe { *ready_tasks = global_count + percpu_count };
+    }
 }
 
 pub fn scheduler_is_enabled() -> c_int {
@@ -785,6 +819,14 @@ pub fn scheduler_is_enabled() -> c_int {
 }
 
 pub fn scheduler_get_current_task() -> *mut Task {
+    let cpu_id = slopos_lib::get_current_cpu();
+    let percpu_current =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task).unwrap_or(ptr::null_mut());
+
+    if !percpu_current.is_null() {
+        return percpu_current;
+    }
+
     try_with_scheduler(|sched| sched.current_task).unwrap_or(ptr::null_mut())
 }
 
@@ -890,6 +932,18 @@ pub fn boot_step_idle_task() -> c_int {
 
 pub fn init_scheduler_for_ap(cpu_id: usize) {
     per_cpu::init_percpu_scheduler(cpu_id);
+
+    // Create idle task for this AP. At this point BSP has already initialized
+    // the task manager and heap, so it's safe to allocate.
+    if cpu_id != 0 {
+        let idle = per_cpu::create_ap_idle_task(cpu_id);
+        if idle.is_null() {
+            klog_info!(
+                "SCHED: Warning - failed to create idle task for CPU {}",
+                cpu_id
+            );
+        }
+    }
 }
 
 pub fn scheduler_run_ap(cpu_id: usize) -> ! {
@@ -900,23 +954,111 @@ pub fn scheduler_run_ap(cpu_id: usize) -> ! {
     slopos_lib::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
-    // AP scheduler loop: Currently APs cannot do full context switching because
-    // they lack FPU context initialization and other per-CPU state. For now,
-    // the AP just idles and waits for IPIs. Tasks remain on CPU 0 where they
-    // can actually execute.
-    //
-    // TODO: Implement full AP task execution with:
-    // - FPU/SSE context save/restore per CPU
-    // - Proper context switch from AP idle to task
-    // - IPI-triggered schedule() calls
+    let idle_task = per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task).unwrap_or(ptr::null_mut());
+
+    if idle_task.is_null() {
+        klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
+        loop {
+            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+        }
+    }
+
+    unsafe {
+        let return_ctx = per_cpu::get_ap_return_context(cpu_id);
+        if !return_ctx.is_null() {
+            crate::ffi_boundary::init_kernel_context(return_ctx);
+        }
+    }
+
+    ap_scheduler_loop(cpu_id, idle_task);
+}
+
+fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
+    use super::work_steal::try_work_steal;
+
     loop {
+        let next_task =
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
+                .unwrap_or(ptr::null_mut());
+
+        if !next_task.is_null() {
+            if task_is_terminated(next_task) || !task_is_ready(next_task) {
+                continue;
+            }
+            ap_execute_task(cpu_id, idle_task, next_task);
+            continue;
+        }
+
+        if try_work_steal() {
+            continue;
+        }
+
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
-        // Wait for interrupt (reschedule IPI or other). The sti; hlt sequence
-        // atomically enables interrupts and halts until the next interrupt.
+
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
+    }
+}
+
+fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(idle_task, next_task, timestamp);
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.current_task = next_task;
+        sched.increment_switches();
+    });
+
+    task_set_current(next_task);
+
+    unsafe {
+        let is_user_mode = (*next_task).flags & TASK_FLAG_USER_MODE != 0;
+        let kernel_rsp = if is_user_mode && (*next_task).kernel_stack_top != 0 {
+            (*next_task).kernel_stack_top
+        } else {
+            kernel_stack_top() as u64
+        };
+
+        platform::gdt_set_kernel_rsp0(kernel_rsp);
+
+        if (*next_task).process_id != INVALID_TASK_ID {
+            let page_dir = process_vm_get_page_dir((*next_task).process_id);
+            if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
+                (*next_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
+                paging_set_current_directory(page_dir);
+            }
+        } else {
+            paging_set_current_directory(paging_get_kernel_directory());
+        }
+
+        let idle_ctx = &raw mut (*idle_task).context;
+
+        if is_user_mode {
+            context_switch_user(idle_ctx, &(*next_task).context);
+        } else {
+            context_switch(idle_ctx, &(*next_task).context);
+        }
+    }
+
+    let timestamp = kdiag_timestamp();
+    task_record_context_switch(next_task, idle_task, timestamp);
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.current_task = idle_task;
+    });
+
+    task_set_current(idle_task);
+
+    unsafe {
+        if !task_is_terminated(next_task) && task_is_running(next_task) {
+            if task_set_state((*next_task).task_id, TASK_STATE_READY) == 0 {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.enqueue_local(next_task);
+                });
+            }
         }
     }
 }

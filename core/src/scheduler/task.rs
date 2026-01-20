@@ -12,15 +12,16 @@ use slopos_lib::{klog_debug, klog_info};
 use super::scheduler;
 
 pub use slopos_abi::task::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    FpuState, IdtEntry, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
     TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
-    TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    TASK_STATE_TERMINATED,
 };
 
-use slopos_mm::mm_constants::{PROCESS_CODE_START_VA, PageFlags};
+use slopos_mm::mm_constants::{PageFlags, PROCESS_CODE_START_VA};
 
 use spin::Once;
 
@@ -168,7 +169,11 @@ fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<us
     }
     let start = mgr.tasks.as_ptr() as usize;
     let idx = (task as usize - start) / mem::size_of::<Task>();
-    if idx < MAX_TASKS { Some(idx) } else { None }
+    if idx < MAX_TASKS {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 fn record_task_exit(
@@ -262,18 +267,34 @@ unsafe fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
 }
 pub fn init_task_manager() -> c_int {
     with_task_manager(|mgr| {
-        mgr.num_tasks = 0;
-        mgr.next_task_id = 1;
         mgr.total_context_switches = 0;
         mgr.total_yields = 0;
         mgr.tasks_created = 0;
         mgr.tasks_terminated = 0;
+
+        let mut preserved_count = 0u32;
+        let mut max_task_id = 0u32;
         for task in mgr.tasks.iter_mut() {
+            let task_ptr = task as *mut Task;
+            if crate::per_cpu::is_idle_task(task_ptr) {
+                preserved_count += 1;
+                if task.task_id > max_task_id {
+                    max_task_id = task.task_id;
+                }
+                klog_debug!(
+                    "init_task_manager: preserving idle task {} ('{}')",
+                    task.task_id,
+                    unsafe { cstr_to_str(task.name.as_ptr() as *const c_char) }
+                );
+                continue;
+            }
             *task = Task::invalid();
         }
         for rec in mgr.exit_records.iter_mut() {
             *rec = TaskExitRecord::empty();
         }
+        mgr.num_tasks = preserved_count;
+        mgr.next_task_id = max_task_id + 1;
         mgr.initialized = true;
     });
     0
@@ -567,6 +588,9 @@ pub fn task_shutdown_all() -> c_int {
             if task_ptr == current {
                 continue;
             }
+            if crate::per_cpu::is_idle_task(task_ptr) {
+                continue;
+            }
             if task.task_id == INVALID_TASK_ID {
                 continue;
             }
@@ -584,7 +608,13 @@ pub fn task_shutdown_all() -> c_int {
     }
 
     with_task_manager(|mgr| {
-        mgr.num_tasks = 0;
+        let mut preserved = 0u32;
+        for task in mgr.tasks.iter() {
+            if task.state != TASK_STATE_INVALID && task.state != TASK_STATE_TERMINATED {
+                preserved += 1;
+            }
+        }
+        mgr.num_tasks = preserved;
     });
     result
 }
@@ -761,7 +791,12 @@ pub fn task_set_current(task: *mut Task) {
     }
     unsafe {
         if (*task).state != TASK_STATE_READY && (*task).state != TASK_STATE_RUNNING {
-            klog_info!("task_set_current: unexpected state transition");
+            klog_info!(
+                "task_set_current: unexpected state {} for task {} ('{}')",
+                (*task).state as u32,
+                (*task).task_id,
+                cstr_to_str((*task).name.as_ptr() as *const c_char)
+            );
         }
         (*task).state = TASK_STATE_RUNNING;
     }
