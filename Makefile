@@ -271,32 +271,32 @@ boot: iso-notests
 	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
 		HAS_COCOA=1; \
 	fi; \
-	if [ "${VIDEO:-0}" != "0" ]; then \
-		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+	if [ "$${VIDEO:-0}" != "0" ]; then \
+		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
-		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
-		elif [ "$HAS_COCOA" = "1" ]; then \
+		elif [ "$$HAS_COCOA" = "1" ]; then \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
-	if [ "${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
+		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
 			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$HAS_COCOA" = "1" ]; then \
+		elif [ "$$HAS_COCOA" = "1" ]; then \
 			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
 		else \
@@ -353,28 +353,34 @@ boot-log: iso-notests
 	if $(QEMU_BIN) -display help 2>/dev/null | grep -q '^cocoa$'; then \
 		HAS_COCOA=1; \
 	fi; \
-	if [ "${VIDEO:-0}" != "0" ]; then \
-		if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then \
+	if [ "$${VIDEO:-0}" != "0" ]; then \
+		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "$QEMU_DISPLAY" = "sdl" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
-		elif [ "$QEMU_DISPLAY" = "gtk" ]; then \
+		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
-		elif [ "$HAS_COCOA" = "1" ]; then \
+		elif [ "$$HAS_COCOA" = "1" ]; then \
 			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$HAS_SDL" = "1" ]; then \
+		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,grab-mod=lctrl-lalt -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
 	fi; \
 	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "sdl" ]; then \
+		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
+			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
+		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
 		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
 		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
 			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
+		elif [ "$$HAS_COCOA" = "1" ]; then \
+			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
+			DISPLAY_ARGS="-display cocoa -vga std"; \
 		else \
 			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
 		fi; \
