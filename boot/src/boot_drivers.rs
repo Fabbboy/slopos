@@ -3,8 +3,8 @@ use core::ffi::{CStr, c_char};
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    InterruptTestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, tests_register_suite,
-    tests_register_system_suites, tests_request_shutdown, tests_reset_registry, tests_run_all,
+    TestRunSummary, TestSuiteResult, tests_register_suite, tests_register_system_suites,
+    tests_request_shutdown, tests_reset_registry, tests_run_all,
 };
 use slopos_video as video;
 
@@ -202,72 +202,17 @@ fn boot_step_pci_init_fn() {
 }
 
 use slopos_drivers::interrupts::SUITE_SCHEDULER;
+use slopos_lib::{define_test_suite, register_test_suites};
 
-const GDT_SUITE_NAME: &[u8] = b"gdt\0";
-const SHUTDOWN_SUITE_NAME: &[u8] = b"shutdown\0";
-
-fn run_gdt_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-    let start = slopos_lib::tsc::rdtsc();
-    let (passed, total) = crate::gdt_tests::run_gdt_tests();
-    let elapsed_ms = {
-        let cycles_per_ms = 3_000_000u64;
-        let end = slopos_lib::tsc::rdtsc();
-        let cycles = end.wrapping_sub(start);
-        (cycles / cycles_per_ms) as u32
-    };
-
-    if let Some(out_ref) = unsafe { out.as_mut() } {
-        out_ref.name = GDT_SUITE_NAME.as_ptr() as *const c_char;
-        out_ref.total = total;
-        out_ref.passed = passed;
-        out_ref.failed = total.saturating_sub(passed);
-        out_ref.exceptions_caught = 0;
-        out_ref.unexpected_exceptions = 0;
-        out_ref.elapsed_ms = elapsed_ms;
-        out_ref.timed_out = 0;
-    }
-
-    if passed == total { 0 } else { -1 }
-}
-
-fn run_shutdown_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
-    let start = slopos_lib::tsc::rdtsc();
-    let (passed, total) = crate::shutdown_tests::run_shutdown_tests();
-    let elapsed_ms = {
-        let cycles_per_ms = 3_000_000u64;
-        let end = slopos_lib::tsc::rdtsc();
-        let cycles = end.wrapping_sub(start);
-        (cycles / cycles_per_ms) as u32
-    };
-
-    if let Some(out_ref) = unsafe { out.as_mut() } {
-        out_ref.name = SHUTDOWN_SUITE_NAME.as_ptr() as *const c_char;
-        out_ref.total = total;
-        out_ref.passed = passed;
-        out_ref.failed = total.saturating_sub(passed);
-        out_ref.exceptions_caught = 0;
-        out_ref.unexpected_exceptions = 0;
-        out_ref.elapsed_ms = elapsed_ms;
-        out_ref.timed_out = 0;
-    }
-
-    if passed == total { 0 } else { -1 }
-}
+define_test_suite!(gdt, SUITE_SCHEDULER, crate::gdt_tests::run_gdt_tests);
+define_test_suite!(
+    shutdown,
+    SUITE_SCHEDULER,
+    crate::shutdown_tests::run_shutdown_tests
+);
 
 fn register_boot_test_suites() {
-    static GDT_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-        name: GDT_SUITE_NAME.as_ptr() as *const c_char,
-        mask_bit: SUITE_SCHEDULER,
-        run: Some(run_gdt_suite),
-    };
-    static SHUTDOWN_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
-        name: SHUTDOWN_SUITE_NAME.as_ptr() as *const c_char,
-        mask_bit: SUITE_SCHEDULER,
-        run: Some(run_shutdown_suite),
-    };
-
-    let _ = tests_register_suite(&GDT_SUITE_DESC);
-    let _ = tests_register_suite(&SHUTDOWN_SUITE_DESC);
+    register_test_suites!(tests_register_suite, GDT_SUITE_DESC, SHUTDOWN_SUITE_DESC,);
 }
 
 fn boot_step_interrupt_tests_fn() -> i32 {

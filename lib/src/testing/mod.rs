@@ -1,31 +1,17 @@
-//! Unified test framework for SlopOS kernel tests.
-//!
-//! This module provides a consistent, DRY approach to writing kernel tests:
-//! - Single `TestResult` type for all test outcomes
-//! - RAII-based test fixtures for automatic setup/teardown
-//! - Unified `run_test!` macro with panic catching
-//! - `test_suite!` macro for declarative suite definition
-//!
-//! # Example
-//!
-//! ```ignore
-//! use slopos_lib::testing::{TestResult, pass, fail};
-//!
-//! pub fn test_something() -> TestResult {
-//!     if some_condition {
-//!         return fail!("Condition not met");
-//!     }
-//!     pass!()
-//! }
-//! ```
-
 use core::ffi::c_int;
 
 mod fixture;
+pub mod harness;
 mod runner;
+pub mod suite_masks;
 
 pub use fixture::{FixtureKind, NoFixture, TestFixture};
+pub use harness::{
+    HARNESS_MAX_SUITES, HarnessConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult,
+    cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms,
+};
 pub use runner::{SuiteResults, run_single_test, run_suite};
+pub use suite_masks::*;
 
 /// Result of a single test execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,25 +204,8 @@ macro_rules! run_test {
 }
 
 /// Declare a test suite with automatic result collection.
-///
-/// # Example
-///
-/// ```ignore
-/// test_suite!(page_alloc_suite, [
-///     test_page_alloc_single,
-///     test_page_alloc_multi_order,
-///     test_page_alloc_free_cycle,
-/// ]);
-///
-/// // With fixture for all tests
-/// test_suite!(scheduler_suite, SchedFixture, [
-///     test_create_task,
-///     test_schedule_task,
-/// ]);
-/// ```
 #[macro_export]
 macro_rules! test_suite {
-    // No fixture variant
     ($name:ident, [$($test:ident),* $(,)?]) => {
         pub fn $name() -> $crate::testing::SuiteResults {
             let tests: &[$crate::testing::TestCase] = &[
@@ -252,7 +221,6 @@ macro_rules! test_suite {
         }
     };
 
-    // With fixture variant
     ($name:ident, $fixture:ty, [$($test:ident),* $(,)?]) => {
         pub fn $name() -> $crate::testing::SuiteResults {
             let tests: &[$crate::testing::TestCase] = &[
@@ -266,5 +234,152 @@ macro_rules! test_suite {
             ];
             $crate::testing::run_suite(stringify!($name), tests)
         }
+    };
+}
+
+/// Define a test suite for the kernel test harness with automatic registration.
+///
+/// Generates:
+/// - A runner function compatible with `TestSuiteDesc`
+/// - A static `TestSuiteDesc` for registration
+/// - A registration function to add the suite to the harness
+///
+/// # Variants
+///
+/// 1. **Inline tests**: List individual test functions
+/// ```ignore
+/// define_test_suite!(page_alloc, SUITE_MEMORY, [
+///     test_page_alloc_single,
+///     test_page_alloc_multi,
+/// ]);
+/// ```
+///
+/// 2. **External runner**: Delegate to existing `fn() -> (u32, u32)`
+/// ```ignore
+/// define_test_suite!(gdt, SUITE_SCHEDULER, run_gdt_tests);
+/// ```
+#[macro_export]
+macro_rules! define_test_suite {
+    // Variant 1: Inline test list
+    ($suite_name:ident, $mask:expr, [$($test_fn:path),* $(,)?]) => {
+        $crate::paste::paste! {
+            const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
+
+            fn [<run_ $suite_name _suite>](
+                _config: *const $crate::testing::HarnessConfig,
+                out: *mut $crate::testing::TestSuiteResult,
+            ) -> i32 {
+                let start = $crate::tsc::rdtsc();
+                let mut passed = 0u32;
+                let mut total = 0u32;
+
+                $(
+                    $crate::run_test!(passed, total, $test_fn);
+                )*
+
+                let elapsed = $crate::testing::measure_elapsed_ms(start, $crate::tsc::rdtsc());
+
+                if let Some(out_ref) = unsafe { out.as_mut() } {
+                    out_ref.name = [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char;
+                    out_ref.total = total;
+                    out_ref.passed = passed;
+                    out_ref.failed = total.saturating_sub(passed);
+                    out_ref.exceptions_caught = 0;
+                    out_ref.unexpected_exceptions = 0;
+                    out_ref.elapsed_ms = elapsed;
+                    out_ref.timed_out = 0;
+                }
+
+                if passed == total { 0 } else { -1 }
+            }
+
+            pub static [<$suite_name:upper _SUITE_DESC>]: $crate::testing::TestSuiteDesc = $crate::testing::TestSuiteDesc {
+                name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
+                mask_bit: $mask,
+                run: Some([<run_ $suite_name _suite>]),
+            };
+        }
+    };
+
+    // Variant 2: External runner function that returns (passed, total) tuple
+    ($suite_name:ident, $mask:expr, $runner_fn:path) => {
+        $crate::paste::paste! {
+            const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
+
+            fn [<run_ $suite_name _suite>](
+                _config: *const $crate::testing::HarnessConfig,
+                out: *mut $crate::testing::TestSuiteResult,
+            ) -> i32 {
+                let start = $crate::tsc::rdtsc();
+                let (passed, total) = $runner_fn();
+                let passed = (passed as i64).max(0) as u32;
+                let elapsed = $crate::testing::measure_elapsed_ms(start, $crate::tsc::rdtsc());
+
+                if let Some(out_ref) = unsafe { out.as_mut() } {
+                    out_ref.name = [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char;
+                    out_ref.total = total;
+                    out_ref.passed = passed;
+                    out_ref.failed = total.saturating_sub(passed);
+                    out_ref.exceptions_caught = 0;
+                    out_ref.unexpected_exceptions = 0;
+                    out_ref.elapsed_ms = elapsed;
+                    out_ref.timed_out = 0;
+                }
+
+                if total != 0 && passed == total { 0 } else { -1 }
+            }
+
+            pub static [<$suite_name:upper _SUITE_DESC>]: $crate::testing::TestSuiteDesc = $crate::testing::TestSuiteDesc {
+                name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
+                mask_bit: $mask,
+                run: Some([<run_ $suite_name _suite>]),
+            };
+        }
+    };
+
+    // Variant 3: External runner returning c_int (for privilege separation test style)
+    ($suite_name:ident, $mask:expr, $runner_fn:path, single) => {
+        $crate::paste::paste! {
+            const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
+
+            fn [<run_ $suite_name _suite>](
+                _config: *const $crate::testing::HarnessConfig,
+                out: *mut $crate::testing::TestSuiteResult,
+            ) -> i32 {
+                let start = $crate::tsc::rdtsc();
+                let result = $runner_fn();
+                let passed = if result == 0 { 1u32 } else { 0u32 };
+                let elapsed = $crate::testing::measure_elapsed_ms(start, $crate::tsc::rdtsc());
+
+                if let Some(out_ref) = unsafe { out.as_mut() } {
+                    out_ref.name = [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char;
+                    out_ref.total = 1;
+                    out_ref.passed = passed;
+                    out_ref.failed = 1 - passed;
+                    out_ref.exceptions_caught = 0;
+                    out_ref.unexpected_exceptions = 0;
+                    out_ref.elapsed_ms = elapsed;
+                    out_ref.timed_out = 0;
+                }
+
+                if result == 0 { 0 } else { -1 }
+            }
+
+            pub static [<$suite_name:upper _SUITE_DESC>]: $crate::testing::TestSuiteDesc = $crate::testing::TestSuiteDesc {
+                name: [<$suite_name:upper _NAME>].as_ptr() as *const core::ffi::c_char,
+                mask_bit: $mask,
+                run: Some([<run_ $suite_name _suite>]),
+            };
+        }
+    };
+}
+
+/// Register multiple test suites with the harness in one call.
+#[macro_export]
+macro_rules! register_test_suites {
+    ($register_fn:path, $($suite_desc:expr),* $(,)?) => {
+        $(
+            let _ = $register_fn(&$suite_desc);
+        )*
     };
 }
