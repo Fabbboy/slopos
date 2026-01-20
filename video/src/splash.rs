@@ -6,7 +6,6 @@ use crate::font;
 use crate::framebuffer;
 use crate::graphics::{self, GraphicsContext, GraphicsResult};
 use slopos_abi::video_traits::VideoError;
-use slopos_drivers::pit;
 
 const SPLASH_BG_COLOR: u32 = 0x0000_0000;
 const SPLASH_TEXT_COLOR: u32 = 0xE6E6_E6FF;
@@ -264,22 +263,6 @@ pub fn splash_report_progress(progress: i32, message: *const c_char) -> Graphics
 
     state.progress = progress.min(100);
     splash_update_progress(state.progress, message)?;
-
-    let delay_ms = if state.progress <= 20 {
-        300
-    } else if state.progress <= 40 {
-        250
-    } else if state.progress <= 60 {
-        280
-    } else if state.progress <= 80 {
-        320
-    } else if state.progress <= 95 {
-        280
-    } else {
-        250
-    };
-
-    pit::pit_poll_delay_ms(delay_ms as u32);
     Ok(())
 }
 
@@ -287,7 +270,6 @@ pub fn splash_finish() -> GraphicsResult<()> {
     let mut state = STATE.lock();
     if state.active {
         splash_report_progress(100, b"Boot complete\0".as_ptr() as *const c_char)?;
-        pit::pit_poll_delay_ms(250);
         state.active = false;
     }
     Ok(())
