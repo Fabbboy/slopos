@@ -415,6 +415,7 @@ pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
 pub mod sync;
+pub mod testing;
 pub mod wl_currency;
 
 #[doc(hidden)]

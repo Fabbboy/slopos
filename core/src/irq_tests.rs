@@ -281,60 +281,27 @@ pub fn run_irq_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("IRQ_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== IRQ Dispatch Tests ===");
 
-    run_test!("irq_register_invalid_line", test_irq_register_invalid_line);
-    run_test!("irq_register_null_handler", test_irq_register_null_handler);
-    run_test!("irq_double_register", test_irq_double_register);
-    run_test!(
-        "irq_unregister_never_registered",
-        test_irq_unregister_never_registered
-    );
-    run_test!("irq_stats_invalid_line", test_irq_stats_invalid_line);
-    run_test!("irq_stats_null_output", test_irq_stats_null_output);
-    run_test!("irq_mask_unmask_invalid", test_irq_mask_unmask_invalid);
-    run_test!("irq_is_masked_boundary", test_irq_is_masked_boundary);
-    run_test!("irq_route_invalid", test_irq_route_invalid);
-    run_test!(
-        "irq_enable_disable_invalid",
-        test_irq_enable_disable_invalid
-    );
-    run_test!("irq_initialized_flag", test_irq_initialized_flag);
-    run_test!(
-        "irq_rapid_register_unregister",
-        test_irq_rapid_register_unregister
-    );
-    run_test!("irq_all_lines_mask_state", test_irq_all_lines_mask_state);
-    run_test!("irq_stats_valid_line", test_irq_stats_valid_line);
-    run_test!(
-        "irq_context_pointer_preserved",
-        test_irq_context_pointer_preserved
-    );
-    run_test!(
-        "irq_handler_with_long_name",
-        test_irq_handler_with_long_name
-    );
-    run_test!(
-        "irq_timer_ticks_accessible",
-        test_irq_timer_ticks_accessible
-    );
-    run_test!(
-        "irq_keyboard_events_accessible",
-        test_irq_keyboard_events_accessible
-    );
-    run_test!("irq_vector_calculation", test_irq_vector_calculation);
+    slopos_lib::run_test!(passed, total, test_irq_register_invalid_line);
+    slopos_lib::run_test!(passed, total, test_irq_register_null_handler);
+    slopos_lib::run_test!(passed, total, test_irq_double_register);
+    slopos_lib::run_test!(passed, total, test_irq_unregister_never_registered);
+    slopos_lib::run_test!(passed, total, test_irq_stats_invalid_line);
+    slopos_lib::run_test!(passed, total, test_irq_stats_null_output);
+    slopos_lib::run_test!(passed, total, test_irq_mask_unmask_invalid);
+    slopos_lib::run_test!(passed, total, test_irq_is_masked_boundary);
+    slopos_lib::run_test!(passed, total, test_irq_route_invalid);
+    slopos_lib::run_test!(passed, total, test_irq_enable_disable_invalid);
+    slopos_lib::run_test!(passed, total, test_irq_initialized_flag);
+    slopos_lib::run_test!(passed, total, test_irq_rapid_register_unregister);
+    slopos_lib::run_test!(passed, total, test_irq_all_lines_mask_state);
+    slopos_lib::run_test!(passed, total, test_irq_stats_valid_line);
+    slopos_lib::run_test!(passed, total, test_irq_context_pointer_preserved);
+    slopos_lib::run_test!(passed, total, test_irq_handler_with_long_name);
+    slopos_lib::run_test!(passed, total, test_irq_timer_ticks_accessible);
+    slopos_lib::run_test!(passed, total, test_irq_keyboard_events_accessible);
+    slopos_lib::run_test!(passed, total, test_irq_vector_calculation);
 
     klog_info!("IRQ tests: {}/{} passed", passed, total);
     (passed, total)

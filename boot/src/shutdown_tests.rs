@@ -1333,222 +1333,64 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> c_int {
 // TEST RUNNER
 // =============================================================================
 
-macro_rules! run_test {
-    ($name:expr, $test_fn:expr) => {{
-        klog_info!("SHUTDOWN_TEST: Running {}", $name);
-        let result = slopos_lib::catch_panic!({ $test_fn() });
-        if result == 0 {
-            klog_info!("SHUTDOWN_TEST: {} PASSED", $name);
-            (1, 1)
-        } else {
-            klog_info!("SHUTDOWN_TEST: {} FAILED", $name);
-            (0, 1)
-        }
-    }};
-}
-
 pub fn run_shutdown_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
     // StateFlag tests
-    let (p, t) = run_test!("stateflag_starts_inactive", test_stateflag_starts_inactive);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "stateflag_enter_first_call",
-        test_stateflag_enter_first_call
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "stateflag_enter_idempotent",
-        test_stateflag_enter_idempotent
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "stateflag_reset_and_reenter",
-        test_stateflag_reset_and_reenter
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "stateflag_take_consumption",
-        test_stateflag_take_consumption
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("stateflag_independence", test_stateflag_independence);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("stateflag_relaxed_access", test_stateflag_relaxed_access);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "stateflag_concurrent_pattern",
-        test_stateflag_concurrent_pattern
-    );
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_stateflag_starts_inactive);
+    slopos_lib::run_test!(passed, total, test_stateflag_enter_first_call);
+    slopos_lib::run_test!(passed, total, test_stateflag_enter_idempotent);
+    slopos_lib::run_test!(passed, total, test_stateflag_reset_and_reenter);
+    slopos_lib::run_test!(passed, total, test_stateflag_take_consumption);
+    slopos_lib::run_test!(passed, total, test_stateflag_independence);
+    slopos_lib::run_test!(passed, total, test_stateflag_relaxed_access);
+    slopos_lib::run_test!(passed, total, test_stateflag_concurrent_pattern);
 
     // Scheduler shutdown tests
-    let (p, t) = run_test!(
-        "scheduler_shutdown_disables",
-        test_scheduler_shutdown_disables
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "scheduler_shutdown_idempotent",
-        test_scheduler_shutdown_idempotent
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "scheduler_shutdown_clears_state",
-        test_scheduler_shutdown_clears_state
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("double_scheduler_shutdown", test_double_scheduler_shutdown);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "scheduler_reinit_after_shutdown",
-        test_scheduler_reinit_after_shutdown
-    );
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_scheduler_shutdown_disables);
+    slopos_lib::run_test!(passed, total, test_scheduler_shutdown_idempotent);
+    slopos_lib::run_test!(passed, total, test_scheduler_shutdown_clears_state);
+    slopos_lib::run_test!(passed, total, test_double_scheduler_shutdown);
+    slopos_lib::run_test!(passed, total, test_scheduler_reinit_after_shutdown);
 
     // Task shutdown tests
-    let (p, t) = run_test!(
-        "task_shutdown_all_terminates",
-        test_task_shutdown_all_terminates
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("task_shutdown_all_empty", test_task_shutdown_all_empty);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "task_shutdown_all_idempotent",
-        test_task_shutdown_all_idempotent
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "task_shutdown_skips_current",
-        test_task_shutdown_skips_current
-    );
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_task_shutdown_all_terminates);
+    slopos_lib::run_test!(passed, total, test_task_shutdown_all_empty);
+    slopos_lib::run_test!(passed, total, test_task_shutdown_all_idempotent);
+    slopos_lib::run_test!(passed, total, test_task_shutdown_skips_current);
 
     // System state tests
-    let (p, t) = run_test!(
-        "kernel_page_directory_available",
-        test_kernel_page_directory_available
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "apic_availability_queryable",
-        test_apic_availability_queryable
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("apic_enabled_queryable", test_apic_enabled_queryable);
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_kernel_page_directory_available);
+    slopos_lib::run_test!(passed, total, test_apic_availability_queryable);
+    slopos_lib::run_test!(passed, total, test_apic_enabled_queryable);
 
     // Port constant tests
-    let (p, t) = run_test!("qemu_debug_exit_port", test_qemu_debug_exit_port);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("acpi_pm1a_ports_defined", test_acpi_pm1a_ports_defined);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("ps2_command_port_defined", test_ps2_command_port_defined);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("com1_port_defined", test_com1_port_defined);
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_qemu_debug_exit_port);
+    slopos_lib::run_test!(passed, total, test_acpi_pm1a_ports_defined);
+    slopos_lib::run_test!(passed, total, test_ps2_command_port_defined);
+    slopos_lib::run_test!(passed, total, test_com1_port_defined);
 
     // Serial drain tests
-    let (p, t) = run_test!("com1_lsr_offset", test_com1_lsr_offset);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("serial_flush_terminates", test_serial_flush_terminates);
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_com1_lsr_offset);
+    slopos_lib::run_test!(passed, total, test_serial_flush_terminates);
 
     // Sequence tests
-    let (p, t) = run_test!(
-        "shutdown_sequence_ordering",
-        test_shutdown_sequence_ordering
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("shutdown_from_clean_state", test_shutdown_from_clean_state);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("shutdown_partial_init", test_shutdown_partial_init);
-    passed += p;
-    total += t;
+    slopos_lib::run_test!(passed, total, test_shutdown_sequence_ordering);
+    slopos_lib::run_test!(passed, total, test_shutdown_from_clean_state);
+    slopos_lib::run_test!(passed, total, test_shutdown_partial_init);
 
     // Stress/edge case tests
-    let (p, t) = run_test!("rapid_shutdown_cycles", test_rapid_shutdown_cycles);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("shutdown_many_tasks", test_shutdown_many_tasks);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("shutdown_mixed_priorities", test_shutdown_mixed_priorities);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!("e2e_full_flow", test_shutdown_e2e_full_flow);
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "e2e_stress_with_allocation",
-        test_shutdown_e2e_stress_with_allocation
-    );
-    passed += p;
-    total += t;
-
-    let (p, t) = run_test!(
-        "e2e_interrupt_state_preservation",
+    slopos_lib::run_test!(passed, total, test_rapid_shutdown_cycles);
+    slopos_lib::run_test!(passed, total, test_shutdown_many_tasks);
+    slopos_lib::run_test!(passed, total, test_shutdown_mixed_priorities);
+    slopos_lib::run_test!(passed, total, test_shutdown_e2e_full_flow);
+    slopos_lib::run_test!(passed, total, test_shutdown_e2e_stress_with_allocation);
+    slopos_lib::run_test!(
+        passed,
+        total,
         test_shutdown_e2e_interrupt_state_preservation
     );
-    passed += p;
-    total += t;
 
     klog_info!("SHUTDOWN_TEST: Summary - {}/{} tests passed", passed, total);
 

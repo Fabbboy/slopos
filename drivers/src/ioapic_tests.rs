@@ -230,45 +230,24 @@ pub fn run_ioapic_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("IOAPIC_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== IOAPIC/APIC Tests ===");
 
-    run_test!("ioapic_ready_state", test_ioapic_ready_state);
-    run_test!("apic_enabled_state", test_apic_enabled_state);
-    run_test!("apic_id_valid", test_apic_id_valid);
-    run_test!(
-        "ioapic_legacy_irq_info_invalid",
-        test_ioapic_legacy_irq_info_invalid
-    );
-    run_test!(
-        "ioapic_legacy_irq_info_valid",
-        test_ioapic_legacy_irq_info_valid
-    );
-    run_test!("ioapic_mask_invalid_gsi", test_ioapic_mask_invalid_gsi);
-    run_test!("ioapic_unmask_invalid_gsi", test_ioapic_unmask_invalid_gsi);
-    run_test!("ioapic_config_invalid_gsi", test_ioapic_config_invalid_gsi);
-    run_test!(
-        "ioapic_config_boundary_vector",
-        test_ioapic_config_boundary_vector
-    );
-    run_test!("ioapic_flag_constants", test_ioapic_flag_constants);
-    run_test!("ioapic_register_constants", test_ioapic_register_constants);
-    run_test!("apic_eoi_safe", test_apic_eoi_safe);
-    run_test!("ioapic_double_init", test_ioapic_double_init);
-    run_test!("ioapic_all_legacy_irqs", test_ioapic_all_legacy_irqs);
-    run_test!("apic_spurious_vector", test_apic_spurious_vector);
-    run_test!("ioapic_gsi_range", test_ioapic_gsi_range);
+    slopos_lib::run_test!(passed, total, test_ioapic_ready_state);
+    slopos_lib::run_test!(passed, total, test_apic_enabled_state);
+    slopos_lib::run_test!(passed, total, test_apic_id_valid);
+    slopos_lib::run_test!(passed, total, test_ioapic_legacy_irq_info_invalid);
+    slopos_lib::run_test!(passed, total, test_ioapic_legacy_irq_info_valid);
+    slopos_lib::run_test!(passed, total, test_ioapic_mask_invalid_gsi);
+    slopos_lib::run_test!(passed, total, test_ioapic_unmask_invalid_gsi);
+    slopos_lib::run_test!(passed, total, test_ioapic_config_invalid_gsi);
+    slopos_lib::run_test!(passed, total, test_ioapic_config_boundary_vector);
+    slopos_lib::run_test!(passed, total, test_ioapic_flag_constants);
+    slopos_lib::run_test!(passed, total, test_ioapic_register_constants);
+    slopos_lib::run_test!(passed, total, test_apic_eoi_safe);
+    slopos_lib::run_test!(passed, total, test_ioapic_double_init);
+    slopos_lib::run_test!(passed, total, test_ioapic_all_legacy_irqs);
+    slopos_lib::run_test!(passed, total, test_apic_spurious_vector);
+    slopos_lib::run_test!(passed, total, test_ioapic_gsi_range);
 
     klog_info!("IOAPIC tests: {}/{} passed", passed, total);
     (passed, total)

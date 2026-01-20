@@ -388,94 +388,50 @@ pub fn run_tlb_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("TLB_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== TLB Shootdown Tests ===");
 
-    // Basic flush operations
-    run_test!("flush_page_null_address", test_flush_page_null_address);
-    run_test!("flush_page_kernel_address", test_flush_page_kernel_address);
-    run_test!(
-        "flush_page_user_max_address",
-        test_flush_page_user_max_address
-    );
-    run_test!(
-        "flush_page_high_kernel_address",
-        test_flush_page_high_kernel_address
-    );
-    run_test!("flush_range_empty", test_flush_range_empty);
-    run_test!("flush_range_inverted", test_flush_range_inverted);
-    run_test!("flush_range_single_page", test_flush_range_single_page);
-    run_test!("flush_range_large", test_flush_range_large);
-    run_test!(
-        "flush_range_threshold_boundary",
-        test_flush_range_threshold_boundary
-    );
-    run_test!("flush_all_basic", test_flush_all_basic);
-    run_test!("flush_asid_kernel_cr3", test_flush_asid_kernel_cr3);
-    run_test!("flush_asid_zero", test_flush_asid_zero);
+    slopos_lib::run_test!(passed, total, test_flush_page_null_address);
+    slopos_lib::run_test!(passed, total, test_flush_page_kernel_address);
+    slopos_lib::run_test!(passed, total, test_flush_page_user_max_address);
+    slopos_lib::run_test!(passed, total, test_flush_page_high_kernel_address);
+    slopos_lib::run_test!(passed, total, test_flush_range_empty);
+    slopos_lib::run_test!(passed, total, test_flush_range_inverted);
+    slopos_lib::run_test!(passed, total, test_flush_range_single_page);
+    slopos_lib::run_test!(passed, total, test_flush_range_large);
+    slopos_lib::run_test!(passed, total, test_flush_range_threshold_boundary);
+    slopos_lib::run_test!(passed, total, test_flush_all_basic);
+    slopos_lib::run_test!(passed, total, test_flush_asid_kernel_cr3);
+    slopos_lib::run_test!(passed, total, test_flush_asid_zero);
 
-    // Batch tests
-    run_test!("batch_empty_finish", test_batch_empty_finish);
-    run_test!("batch_single_page", test_batch_single_page);
-    run_test!("batch_multiple_pages", test_batch_multiple_pages);
-    run_test!("batch_at_threshold", test_batch_at_threshold);
-    run_test!("batch_overflow", test_batch_overflow);
-    run_test!("batch_scattered_addresses", test_batch_scattered_addresses);
-    run_test!("batch_drop_flushes", test_batch_drop_flushes);
-    run_test!("batch_double_finish", test_batch_double_finish);
+    slopos_lib::run_test!(passed, total, test_batch_empty_finish);
+    slopos_lib::run_test!(passed, total, test_batch_single_page);
+    slopos_lib::run_test!(passed, total, test_batch_multiple_pages);
+    slopos_lib::run_test!(passed, total, test_batch_at_threshold);
+    slopos_lib::run_test!(passed, total, test_batch_overflow);
+    slopos_lib::run_test!(passed, total, test_batch_scattered_addresses);
+    slopos_lib::run_test!(passed, total, test_batch_drop_flushes);
+    slopos_lib::run_test!(passed, total, test_batch_double_finish);
 
-    // SMP state tests
-    run_test!("is_smp_active_initial", test_is_smp_active_initial);
-    run_test!("get_active_cpu_count", test_get_active_cpu_count);
-    run_test!("set_bsp_apic_id", test_set_bsp_apic_id);
+    slopos_lib::run_test!(passed, total, test_is_smp_active_initial);
+    slopos_lib::run_test!(passed, total, test_get_active_cpu_count);
+    slopos_lib::run_test!(passed, total, test_set_bsp_apic_id);
 
-    // Handle shootdown IPI tests
-    run_test!(
-        "handle_shootdown_ipi_cpu_zero",
-        test_handle_shootdown_ipi_cpu_zero
-    );
-    run_test!(
-        "handle_shootdown_ipi_cpu_max_minus_one",
-        test_handle_shootdown_ipi_cpu_max_minus_one
-    );
-    run_test!(
-        "handle_shootdown_ipi_cpu_overflow",
-        test_handle_shootdown_ipi_cpu_overflow
-    );
+    slopos_lib::run_test!(passed, total, test_handle_shootdown_ipi_cpu_zero);
+    slopos_lib::run_test!(passed, total, test_handle_shootdown_ipi_cpu_max_minus_one);
+    slopos_lib::run_test!(passed, total, test_handle_shootdown_ipi_cpu_overflow);
 
-    // Feature detection tests
-    run_test!("has_invpcid_consistent", test_has_invpcid_consistent);
-    run_test!("has_pcid_consistent", test_has_pcid_consistent);
+    slopos_lib::run_test!(passed, total, test_has_invpcid_consistent);
+    slopos_lib::run_test!(passed, total, test_has_pcid_consistent);
 
-    // Constants validation
-    run_test!(
-        "tlb_shootdown_vector_valid",
-        test_tlb_shootdown_vector_valid
-    );
-    run_test!("max_cpus_reasonable", test_max_cpus_reasonable);
+    slopos_lib::run_test!(passed, total, test_tlb_shootdown_vector_valid);
+    slopos_lib::run_test!(passed, total, test_max_cpus_reasonable);
 
-    // Flush type tests
-    run_test!("flush_type_from_valid", test_flush_type_from_valid);
-    run_test!("flush_type_from_invalid", test_flush_type_from_invalid);
+    slopos_lib::run_test!(passed, total, test_flush_type_from_valid);
+    slopos_lib::run_test!(passed, total, test_flush_type_from_invalid);
 
-    // Stress tests
-    run_test!("rapid_flush_pages", test_rapid_flush_pages);
-    run_test!("rapid_flush_all", test_rapid_flush_all);
-    run_test!(
-        "interleaved_flush_operations",
-        test_interleaved_flush_operations
-    );
+    slopos_lib::run_test!(passed, total, test_rapid_flush_pages);
+    slopos_lib::run_test!(passed, total, test_rapid_flush_all);
+    slopos_lib::run_test!(passed, total, test_interleaved_flush_operations);
 
     klog_info!("TLB tests: {}/{} passed", passed, total);
     (passed, total)

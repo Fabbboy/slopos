@@ -917,77 +917,47 @@ pub fn run_gdt_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("GDT_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== GDT/TSS/Segment Tests ===");
 
     // GDT state tests
-    run_test!("gdt_loaded_valid_limit", test_gdt_loaded_valid_limit);
-    run_test!("current_cs_is_kernel", test_current_cs_is_kernel);
-    run_test!("current_ss_is_kernel", test_current_ss_is_kernel);
-    run_test!("data_segment_selectors", test_data_segment_selectors);
+    slopos_lib::run_test!(passed, total, test_gdt_loaded_valid_limit);
+    slopos_lib::run_test!(passed, total, test_current_cs_is_kernel);
+    slopos_lib::run_test!(passed, total, test_current_ss_is_kernel);
+    slopos_lib::run_test!(passed, total, test_data_segment_selectors);
 
     // TSS tests
-    run_test!("tss_loaded", test_tss_loaded);
-    run_test!("gdt_set_kernel_rsp0_valid", test_gdt_set_kernel_rsp0_valid);
-    run_test!("gdt_set_kernel_rsp0_null", test_gdt_set_kernel_rsp0_null);
-    run_test!(
-        "gdt_set_kernel_rsp0_user_address",
-        test_gdt_set_kernel_rsp0_user_address
-    );
+    slopos_lib::run_test!(passed, total, test_tss_loaded);
+    slopos_lib::run_test!(passed, total, test_gdt_set_kernel_rsp0_valid);
+    slopos_lib::run_test!(passed, total, test_gdt_set_kernel_rsp0_null);
+    slopos_lib::run_test!(passed, total, test_gdt_set_kernel_rsp0_user_address);
 
     // IST tests
-    run_test!("gdt_set_ist_valid_indices", test_gdt_set_ist_valid_indices);
-    run_test!("gdt_set_ist_index_zero", test_gdt_set_ist_index_zero);
-    run_test!(
-        "gdt_set_ist_index_overflow",
-        test_gdt_set_ist_index_overflow
-    );
+    slopos_lib::run_test!(passed, total, test_gdt_set_ist_valid_indices);
+    slopos_lib::run_test!(passed, total, test_gdt_set_ist_index_zero);
+    slopos_lib::run_test!(passed, total, test_gdt_set_ist_index_overflow);
 
     // SYSCALL MSR tests
-    run_test!("efer_sce_enabled", test_efer_sce_enabled);
-    run_test!("star_msr_valid", test_star_msr_valid);
-    run_test!("lstar_msr_valid", test_lstar_msr_valid);
-    run_test!("sfmask_msr_valid", test_sfmask_msr_valid);
+    slopos_lib::run_test!(passed, total, test_efer_sce_enabled);
+    slopos_lib::run_test!(passed, total, test_star_msr_valid);
+    slopos_lib::run_test!(passed, total, test_lstar_msr_valid);
+    slopos_lib::run_test!(passed, total, test_sfmask_msr_valid);
 
     // IDT/IST consistency tests
-    run_test!("double_fault_uses_ist", test_double_fault_uses_ist);
-    run_test!("page_fault_handler_valid", test_page_fault_handler_valid);
-    run_test!("gp_fault_handler_valid", test_gp_fault_handler_valid);
-    run_test!("syscall_idt_entry", test_syscall_idt_entry);
+    slopos_lib::run_test!(passed, total, test_double_fault_uses_ist);
+    slopos_lib::run_test!(passed, total, test_page_fault_handler_valid);
+    slopos_lib::run_test!(passed, total, test_gp_fault_handler_valid);
+    slopos_lib::run_test!(passed, total, test_syscall_idt_entry);
 
     // Reinitialization tests
-    run_test!("gdt_double_init", test_gdt_double_init);
-    run_test!("syscall_msr_double_init", test_syscall_msr_double_init);
+    slopos_lib::run_test!(passed, total, test_gdt_double_init);
+    slopos_lib::run_test!(passed, total, test_syscall_msr_double_init);
 
     // Bug hunting tests - actual value verification
-    run_test!(
-        "gdt_entry_order_matches_selectors",
-        test_gdt_entry_order_matches_selectors
-    );
-    run_test!(
-        "star_sysret_selector_calculation",
-        test_star_sysret_selector_calculation
-    );
-    run_test!("tss_rsp0_value_valid", test_tss_rsp0_value_valid);
-    run_test!(
-        "ist_stacks_have_guard_pages",
-        test_ist_stacks_have_guard_pages
-    );
-    run_test!(
-        "lstar_points_to_executable_code",
-        test_lstar_points_to_executable_code
-    );
+    slopos_lib::run_test!(passed, total, test_gdt_entry_order_matches_selectors);
+    slopos_lib::run_test!(passed, total, test_star_sysret_selector_calculation);
+    slopos_lib::run_test!(passed, total, test_tss_rsp0_value_valid);
+    slopos_lib::run_test!(passed, total, test_ist_stacks_have_guard_pages);
+    slopos_lib::run_test!(passed, total, test_lstar_points_to_executable_code);
 
     klog_info!("GDT tests: {}/{} passed", passed, total);
     (passed, total)

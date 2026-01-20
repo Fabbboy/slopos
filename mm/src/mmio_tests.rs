@@ -137,24 +137,14 @@ pub fn run_mmio_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($test_fn:expr) => {{
-            total += 1;
-            let result = slopos_lib::catch_panic!({ $test_fn() });
-            if result == 0 {
-                passed += 1;
-            }
-        }};
-    }
-
-    run_test!(test_mmio_empty_region_state);
-    run_test!(test_mmio_is_valid_offset_overflow);
-    run_test!(test_mmio_sub_region_overflow);
-    run_test!(test_mmio_empty_region_invalid_reads);
-    run_test!(test_mmio_map_zero_size);
-    run_test!(test_mmio_map_null_addr);
-    run_test!(test_mmio_map_large_size);
-    run_test!(test_mmio_map_near_phys_limit);
+    slopos_lib::run_test!(passed, total, test_mmio_empty_region_state);
+    slopos_lib::run_test!(passed, total, test_mmio_is_valid_offset_overflow);
+    slopos_lib::run_test!(passed, total, test_mmio_sub_region_overflow);
+    slopos_lib::run_test!(passed, total, test_mmio_empty_region_invalid_reads);
+    slopos_lib::run_test!(passed, total, test_mmio_map_zero_size);
+    slopos_lib::run_test!(passed, total, test_mmio_map_null_addr);
+    slopos_lib::run_test!(passed, total, test_mmio_map_large_size);
+    slopos_lib::run_test!(passed, total, test_mmio_map_near_phys_limit);
 
     (passed, total)
 }

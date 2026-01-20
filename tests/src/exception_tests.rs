@@ -264,40 +264,19 @@ pub fn run_exception_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("EXCEPTION_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== Exception Metadata Tests ===");
 
-    run_test!("exception_names_valid", test_exception_names_valid);
-    run_test!(
-        "critical_exception_classification",
-        test_critical_exception_classification
-    );
-    run_test!("page_fault_error_codes", test_page_fault_error_codes);
-    run_test!("frame_mode_detection", test_frame_mode_detection);
-    run_test!("frame_invalid_cs", test_frame_invalid_cs);
-    run_test!(
-        "frame_noncanonical_addresses",
-        test_frame_noncanonical_addresses
-    );
-    run_test!(
-        "exception_names_all_vectors",
-        test_exception_names_all_vectors
-    );
-    run_test!("vector_boundaries", test_vector_boundaries);
-    run_test!("error_code_preservation", test_error_code_preservation);
-    run_test!("frame_integrity_patterns", test_frame_integrity_patterns);
-    run_test!("known_exception_names", test_known_exception_names);
+    slopos_lib::run_test!(passed, total, test_exception_names_valid);
+    slopos_lib::run_test!(passed, total, test_critical_exception_classification);
+    slopos_lib::run_test!(passed, total, test_page_fault_error_codes);
+    slopos_lib::run_test!(passed, total, test_frame_mode_detection);
+    slopos_lib::run_test!(passed, total, test_frame_invalid_cs);
+    slopos_lib::run_test!(passed, total, test_frame_noncanonical_addresses);
+    slopos_lib::run_test!(passed, total, test_exception_names_all_vectors);
+    slopos_lib::run_test!(passed, total, test_vector_boundaries);
+    slopos_lib::run_test!(passed, total, test_error_code_preservation);
+    slopos_lib::run_test!(passed, total, test_frame_integrity_patterns);
+    slopos_lib::run_test!(passed, total, test_known_exception_names);
 
     klog_info!("Exception tests: {}/{} passed", passed, total);
     (passed, total)

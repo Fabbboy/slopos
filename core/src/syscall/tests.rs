@@ -879,58 +879,40 @@ pub fn test_task_id_wraparound() -> c_int {
 // PUBLIC TEST ENTRY POINTS
 // =============================================================================
 
-/// Run all syscall validation tests
 pub fn run_syscall_validation_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($test_fn:expr) => {{
-            total += 1;
-            if $test_fn() == 0 {
-                passed += 1;
-            }
-        }};
-    }
+    slopos_lib::run_test!(passed, total, test_syscall_lookup_invalid_number);
+    slopos_lib::run_test!(passed, total, test_syscall_lookup_empty_slot);
+    slopos_lib::run_test!(passed, total, test_syscall_lookup_valid);
 
-    // Syscall dispatch tests
-    run_test!(test_syscall_lookup_invalid_number);
-    run_test!(test_syscall_lookup_empty_slot);
-    run_test!(test_syscall_lookup_valid);
+    slopos_lib::run_test!(passed, total, test_fork_null_parent);
+    slopos_lib::run_test!(passed, total, test_fork_kernel_task);
+    slopos_lib::run_test!(passed, total, test_fork_at_task_limit);
+    slopos_lib::run_test!(passed, total, test_fork_terminated_parent);
+    slopos_lib::run_test!(passed, total, test_fork_blocked_parent);
+    slopos_lib::run_test!(passed, total, test_fork_cleanup_on_failure);
 
-    // Fork edge cases
-    run_test!(test_fork_null_parent);
-    run_test!(test_fork_kernel_task);
-    run_test!(test_fork_at_task_limit);
-    run_test!(test_fork_terminated_parent);
-    run_test!(test_fork_blocked_parent);
-    run_test!(test_fork_cleanup_on_failure);
+    slopos_lib::run_test!(passed, total, test_user_ptr_null);
+    slopos_lib::run_test!(passed, total, test_user_ptr_kernel_address);
+    slopos_lib::run_test!(passed, total, test_user_ptr_misaligned);
+    slopos_lib::run_test!(passed, total, test_user_ptr_overflow_boundary);
 
-    // Pointer validation
-    run_test!(test_user_ptr_null);
-    run_test!(test_user_ptr_kernel_address);
-    run_test!(test_user_ptr_misaligned);
-    run_test!(test_user_ptr_overflow_boundary);
+    slopos_lib::run_test!(passed, total, test_brk_extreme_values);
+    slopos_lib::run_test!(passed, total, test_shm_create_boundaries);
 
-    // Syscall argument boundaries
-    run_test!(test_brk_extreme_values);
-    run_test!(test_shm_create_boundaries);
+    slopos_lib::run_test!(passed, total, test_irq_register_invalid_line);
+    slopos_lib::run_test!(passed, total, test_irq_double_registration);
+    slopos_lib::run_test!(passed, total, test_irq_unregister_nonexistent);
+    slopos_lib::run_test!(passed, total, test_irq_stats_invalid);
 
-    // IRQ handler tests
-    run_test!(test_irq_register_invalid_line);
-    run_test!(test_irq_double_registration);
-    run_test!(test_irq_unregister_nonexistent);
-    run_test!(test_irq_stats_invalid);
+    slopos_lib::run_test!(passed, total, test_terminate_already_terminated);
+    slopos_lib::run_test!(passed, total, test_operations_on_terminated_task);
 
-    // Task state tests
-    run_test!(test_terminate_already_terminated);
-    run_test!(test_operations_on_terminated_task);
+    slopos_lib::run_test!(passed, total, test_fork_memory_pressure);
 
-    // Memory pressure tests
-    run_test!(test_fork_memory_pressure);
-
-    // Concurrent operation tests
-    run_test!(test_task_id_wraparound);
+    slopos_lib::run_test!(passed, total, test_task_id_wraparound);
 
     (passed, total)
 }

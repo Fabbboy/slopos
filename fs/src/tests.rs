@@ -583,34 +583,25 @@ pub fn run_ext2_tests_summary() -> (c_int, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($test_fn:expr) => {{
-            total += 1;
-            if $test_fn() == 0 {
-                passed += 1;
-            }
-        }};
-    }
+    slopos_lib::run_test!(passed, total, test_vfs_initialized);
+    slopos_lib::run_test!(passed, total, test_vfs_root_stat);
+    slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
+    slopos_lib::run_test!(passed, total, test_vfs_list);
+    slopos_lib::run_test!(passed, total, test_vfs_unlink);
 
-    run_test!(test_vfs_initialized);
-    run_test!(test_vfs_root_stat);
-    run_test!(test_vfs_file_roundtrip);
-    run_test!(test_vfs_list);
-    run_test!(test_vfs_unlink);
-
-    run_test!(test_ext2_invalid_superblock_magic);
-    run_test!(test_ext2_unsupported_block_size);
-    run_test!(test_ext2_directory_format_error);
-    run_test!(test_ext2_invalid_inode);
-    run_test!(test_ext2_read_file_not_regular);
-    run_test!(test_ext2_device_read_error);
-    run_test!(test_ext2_device_write_error_on_metadata);
-    run_test!(test_ext2_read_block_out_of_bounds);
-    run_test!(test_ext2_read_file_data_roundtrip);
-    run_test!(test_ext2_path_resolution_not_found);
-    run_test!(test_ext2_remove_path_not_file);
-    run_test!(test_ext2_wl_currency_on_error);
-    run_test!(test_ext2_wl_currency_on_success);
+    slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
+    slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
+    slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);
+    slopos_lib::run_test!(passed, total, test_ext2_invalid_inode);
+    slopos_lib::run_test!(passed, total, test_ext2_read_file_not_regular);
+    slopos_lib::run_test!(passed, total, test_ext2_device_read_error);
+    slopos_lib::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
+    slopos_lib::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
+    slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
+    slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
+    slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
+    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_error);
+    slopos_lib::run_test!(passed, total, test_ext2_wl_currency_on_success);
 
     klog_info!("VFS_TEST: {passed}/{total} passed");
     (passed as c_int, total)

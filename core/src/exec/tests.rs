@@ -352,54 +352,27 @@ pub fn run_exec_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("EXEC_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== exec() ELF Loader Tests ===");
 
-    run_test!("elf_invalid_magic", test_elf_invalid_magic);
-    run_test!("elf_wrong_class", test_elf_wrong_class);
-    run_test!("elf_wrong_endian", test_elf_wrong_endian);
-    run_test!("elf_wrong_machine", test_elf_wrong_machine);
-    run_test!("elf_truncated_header", test_elf_truncated_header);
-    run_test!("elf_empty_file", test_elf_empty_file);
-    run_test!("elf_no_load_segments", test_elf_no_load_segments);
-    run_test!(
-        "elf_segment_overflow_vaddr",
-        test_elf_segment_overflow_vaddr
-    );
-    run_test!(
-        "elf_segment_filesz_greater_than_memsz",
-        test_elf_segment_filesz_greater_than_memsz
-    );
-    run_test!(
-        "elf_segment_offset_overflow",
-        test_elf_segment_offset_overflow
-    );
-    run_test!("elf_kernel_address_entry", test_elf_kernel_address_entry);
-    run_test!("path_too_long", test_path_too_long);
-    run_test!("path_empty", test_path_empty);
-    run_test!(
-        "translate_address_kernel_to_user",
-        test_translate_address_kernel_to_user
-    );
-    run_test!(
-        "translate_address_user_passthrough",
-        test_translate_address_user_passthrough
-    );
-    run_test!("process_vm_null_page_dir", test_process_vm_null_page_dir);
-    run_test!("elf_huge_segment_count", test_elf_huge_segment_count);
-    run_test!("elf_phentsize_mismatch", test_elf_phentsize_mismatch);
-    run_test!("exec_max_size_boundary", test_exec_max_size_boundary);
+    slopos_lib::run_test!(passed, total, test_elf_invalid_magic);
+    slopos_lib::run_test!(passed, total, test_elf_wrong_class);
+    slopos_lib::run_test!(passed, total, test_elf_wrong_endian);
+    slopos_lib::run_test!(passed, total, test_elf_wrong_machine);
+    slopos_lib::run_test!(passed, total, test_elf_truncated_header);
+    slopos_lib::run_test!(passed, total, test_elf_empty_file);
+    slopos_lib::run_test!(passed, total, test_elf_no_load_segments);
+    slopos_lib::run_test!(passed, total, test_elf_segment_overflow_vaddr);
+    slopos_lib::run_test!(passed, total, test_elf_segment_filesz_greater_than_memsz);
+    slopos_lib::run_test!(passed, total, test_elf_segment_offset_overflow);
+    slopos_lib::run_test!(passed, total, test_elf_kernel_address_entry);
+    slopos_lib::run_test!(passed, total, test_path_too_long);
+    slopos_lib::run_test!(passed, total, test_path_empty);
+    slopos_lib::run_test!(passed, total, test_translate_address_kernel_to_user);
+    slopos_lib::run_test!(passed, total, test_translate_address_user_passthrough);
+    slopos_lib::run_test!(passed, total, test_process_vm_null_page_dir);
+    slopos_lib::run_test!(passed, total, test_elf_huge_segment_count);
+    slopos_lib::run_test!(passed, total, test_elf_phentsize_mismatch);
+    slopos_lib::run_test!(passed, total, test_exec_max_size_boundary);
 
     klog_info!("exec() tests: {}/{} passed", passed, total);
     (passed, total)

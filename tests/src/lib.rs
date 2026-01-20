@@ -350,15 +350,7 @@ mod suites {
         }
     }
 
-    macro_rules! run_test {
-        ($passed:expr, $total:expr, $test_fn:expr) => {{
-            $total += 1;
-            let result = slopos_lib::catch_panic!({ $test_fn() });
-            if result == 0 {
-                $passed += 1;
-            }
-        }};
-    }
+    use slopos_lib::run_test;
 
     use slopos_mm::tests::{
         test_alloc_free_cycles_no_leak, test_cow_clone_modify_both, test_cow_fault_handling,

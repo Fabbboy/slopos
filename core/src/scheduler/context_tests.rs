@@ -438,53 +438,23 @@ pub fn run_context_tests() -> (u32, u32) {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    macro_rules! run_test {
-        ($name:expr, $test_fn:expr) => {{
-            total += 1;
-            let result = $test_fn();
-            if result == 0 {
-                passed += 1;
-            } else {
-                klog_info!("CONTEXT_TEST FAILED: {}", $name);
-            }
-        }};
-    }
-
     klog_info!("=== Context Switch Tests ===");
 
-    run_test!(
-        "task_context_initial_state",
-        test_task_context_initial_state
-    );
-    run_test!(
-        "task_state_transitions_exhaustive",
-        test_task_state_transitions_exhaustive
-    );
-    run_test!(
-        "task_invalid_state_transition",
-        test_task_invalid_state_transition
-    );
-    run_test!("fork_null_parent", test_fork_null_parent);
-    run_test!("fork_kernel_task", test_fork_kernel_task);
-    run_test!("fork_terminated_parent", test_fork_terminated_parent);
-    run_test!("task_get_info_null_output", test_task_get_info_null_output);
-    run_test!("task_get_info_invalid_id", test_task_get_info_invalid_id);
-    run_test!("task_double_terminate", test_task_double_terminate);
-    run_test!(
-        "task_terminate_invalid_ids",
-        test_task_terminate_invalid_ids
-    );
-    run_test!("task_find_after_terminate", test_task_find_after_terminate);
-    run_test!(
-        "task_rapid_create_terminate",
-        test_task_rapid_create_terminate
-    );
-    run_test!("task_max_concurrent", test_task_max_concurrent);
-    run_test!(
-        "task_process_id_consistency",
-        test_task_process_id_consistency
-    );
-    run_test!("task_flags_preserved", test_task_flags_preserved);
+    slopos_lib::run_test!(passed, total, test_task_context_initial_state);
+    slopos_lib::run_test!(passed, total, test_task_state_transitions_exhaustive);
+    slopos_lib::run_test!(passed, total, test_task_invalid_state_transition);
+    slopos_lib::run_test!(passed, total, test_fork_null_parent);
+    slopos_lib::run_test!(passed, total, test_fork_kernel_task);
+    slopos_lib::run_test!(passed, total, test_fork_terminated_parent);
+    slopos_lib::run_test!(passed, total, test_task_get_info_null_output);
+    slopos_lib::run_test!(passed, total, test_task_get_info_invalid_id);
+    slopos_lib::run_test!(passed, total, test_task_double_terminate);
+    slopos_lib::run_test!(passed, total, test_task_terminate_invalid_ids);
+    slopos_lib::run_test!(passed, total, test_task_find_after_terminate);
+    slopos_lib::run_test!(passed, total, test_task_rapid_create_terminate);
+    slopos_lib::run_test!(passed, total, test_task_max_concurrent);
+    slopos_lib::run_test!(passed, total, test_task_process_id_consistency);
+    slopos_lib::run_test!(passed, total, test_task_flags_preserved);
 
     klog_info!("Context tests: {}/{} passed", passed, total);
     (passed, total)
