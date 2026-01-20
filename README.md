@@ -2,6 +2,7 @@
   <img src="https://img.shields.io/badge/status-it%20boots%20(sometimes)-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/vibes-immaculate-blueviolet?style=for-the-badge" />
   <img src="https://img.shields.io/badge/stability-the%20wheel%20decides-orange?style=for-the-badge" />
+  <img src="https://sloc.xyz/github/Fabbboy/slopos?category=code" />
 </p>
 
 <h1 align="center">SlopOS</h1>
@@ -42,49 +43,6 @@ make boot VIDEO=1   # spins the wheel
 ```
 
 > **macOS Note:** The Cocoa display backend is automatically detected and used. If you see display errors, run `qemu-system-x86_64 -display help` to check available backends.
-
-<br/>
-
-## Line Count (scc)
-
-You can install scc by using the standard Go toolchain (Go >= 1.25).
-
-```bash
-go install github.com/boyter/scc/v3@latest
-```
-
-<!-- scc-table-start -->
-```text
-───────────────────────────────────────────────────────────────────────────────
-Language            Files       Lines    Blanks  Comments       Code Complexity
-───────────────────────────────────────────────────────────────────────────────
-Rust                  225      61,383     8,257     5,679     47,447      7,372
-C Header              138       9,516     1,990     1,089      6,437        217
-C++                   114      21,791     3,381     1,362     17,048      2,834
-Markdown               22       5,503     1,396         0      4,107          0
-TOML                   14         362        56         1        305          1
-JSON                    5         621         2         0        619          0
-Assembly                3         904       154         0        750         21
-JavaScript              2         215        18         2        195         10
-Meson                   2          73         9         0         64          0
-Python                  2         311        56        14        241         41
-Shell                   2          93        18         4         71          9
-INI                     1          18         4         0         14          0
-License                 1         674       121         0        553          0
-Makefile                1         492        28         4        460         67
-Plain Text              1           4         0         0          4          0
-YAML                    1          90        18         0         72          0
-───────────────────────────────────────────────────────────────────────────────
-Total                 534     102,050    15,508     8,155     78,387     10,572
-───────────────────────────────────────────────────────────────────────────────
-Estimated Cost to Develop (organic) $2,633,610
-Estimated Schedule Effort (organic) 19.87 months
-Estimated People Required (organic) 11.77
-───────────────────────────────────────────────────────────────────────────────
-Processed 3232124 bytes, 3.232 megabytes (SI)
-───────────────────────────────────────────────────────────────────────────────
-```
-<!-- scc-table-end -->
 
 <br/>
 
