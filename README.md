@@ -58,30 +58,30 @@ go install github.com/boyter/scc/v3@latest
 ───────────────────────────────────────────────────────────────────────────────
 Language            Files       Lines    Blanks  Comments       Code Complexity
 ───────────────────────────────────────────────────────────────────────────────
-Rust                  221      59,928     8,042     5,542     46,344      7,190
+Rust                  225      61,383     8,257     5,679     47,447      7,372
 C Header              138       9,516     1,990     1,089      6,437        217
 C++                   114      21,791     3,381     1,362     17,048      2,834
-Markdown               22       5,496     1,393         0      4,103          0
+Markdown               22       5,503     1,396         0      4,107          0
 TOML                   14         362        56         1        305          1
 JSON                    5         621         2         0        619          0
-Assembly                3         899       153         0        746         21
+Assembly                3         904       154         0        750         21
 JavaScript              2         215        18         2        195         10
 Meson                   2          73         9         0         64          0
 Python                  2         311        56        14        241         41
 Shell                   2          93        18         4         71          9
 INI                     1          18         4         0         14          0
 License                 1         674       121         0        553          0
-Makefile                1         449        27         1        421         60
+Makefile                1         492        28         4        460         67
 Plain Text              1           4         0         0          4          0
 YAML                    1          90        18         0         72          0
 ───────────────────────────────────────────────────────────────────────────────
-Total                 530     100,540    15,288     8,015     77,237     10,383
+Total                 534     102,050    15,508     8,155     78,387     10,572
 ───────────────────────────────────────────────────────────────────────────────
-Estimated Cost to Develop (organic) $2,593,056
-Estimated Schedule Effort (organic) 19.75 months
-Estimated People Required (organic) 11.66
+Estimated Cost to Develop (organic) $2,633,610
+Estimated Schedule Effort (organic) 19.87 months
+Estimated People Required (organic) 11.77
 ───────────────────────────────────────────────────────────────────────────────
-Processed 3189444 bytes, 3.189 megabytes (SI)
+Processed 3232124 bytes, 3.232 megabytes (SI)
 ───────────────────────────────────────────────────────────────────────────────
 ```
 <!-- scc-table-end -->
