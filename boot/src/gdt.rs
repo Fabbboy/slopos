@@ -16,7 +16,7 @@ const GDT_ACCESS_PRESENT: u8 = 1 << 7;
 // Bits 45-46: Descriptor Privilege Level (DPL)
 const GDT_ACCESS_DPL_KERNEL: u8 = 0 << 5; // Ring 0
 const GDT_ACCESS_DPL_USER: u8 = 3 << 5; // Ring 3
-// Bit 44: Segment type (S) - 1 for code/data segment
+                                        // Bit 44: Segment type (S) - 1 for code/data segment
 const GDT_ACCESS_SEGMENT: u8 = 1 << 4;
 // Bits 43-40: Type field
 // Code segment: executable (1), readable (1), conforming (0), accessed (0) = 1010

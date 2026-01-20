@@ -9,6 +9,7 @@ pub mod early_init;
 pub mod ffi_boundary;
 pub mod gdt;
 pub use gdt::{gdt_set_kernel_rsp0, syscall_msr_init, syscall_update_kernel_rsp};
+pub mod gdt_tests;
 pub mod idt;
 pub mod ist_stacks;
 pub mod limine_protocol;
@@ -25,8 +26,8 @@ pub use early_init::{
 };
 pub use ffi_boundary::kernel_main;
 pub use limine_protocol::{
-    BootFramebuffer, BootInfo, MemmapEntry, MemoryRegion, MemoryRegionKind, boot_info,
-    ensure_base_revision, memmap_entry_count, memory_regions,
+    boot_info, ensure_base_revision, memmap_entry_count, memory_regions, BootFramebuffer, BootInfo,
+    MemmapEntry, MemoryRegion, MemoryRegionKind,
 };
 pub use panic::{panic_handler_impl, set_panic_cpu_state};
 pub use shutdown::{

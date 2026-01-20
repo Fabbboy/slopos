@@ -1,16 +1,16 @@
 use crate::kernel_heap::init_kernel_heap;
 use crate::memory_layout::{get_kernel_memory_layout, init_kernel_memory_layout};
 use crate::memory_reservations::{
-    MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-    MM_RESERVATION_FLAG_MMIO, MmRegion, MmRegionKind, MmReservationType, mm_region_add_usable,
-    mm_region_count, mm_region_get, mm_region_highest_usable_frame, mm_region_map_configure,
-    mm_region_map_reset, mm_region_reserve, mm_region_total_bytes, mm_reservation_type_name,
-    mm_reservations_capacity, mm_reservations_count, mm_reservations_get,
-    mm_reservations_overflow_count, mm_reservations_total_bytes,
+    mm_region_add_usable, mm_region_count, mm_region_get, mm_region_highest_usable_frame,
+    mm_region_map_configure, mm_region_map_reset, mm_region_reserve, mm_region_total_bytes,
+    mm_reservation_type_name, mm_reservations_capacity, mm_reservations_count, mm_reservations_get,
+    mm_reservations_overflow_count, mm_reservations_total_bytes, MmRegion, MmRegionKind,
+    MmReservationType, MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
+    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MM_RESERVATION_FLAG_MMIO,
 };
 use crate::mm_constants::{
-    BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
-    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB, PageFlags,
+    PageFlags, BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PDPT_PHYS_ADDR, EARLY_PD_PHYS_ADDR,
+    EARLY_PML4_PHYS_ADDR, HHDM_VIRT_BASE, KERNEL_VIRTUAL_BASE, PAGE_SIZE_4KB,
 };
 use crate::page_alloc::{
     finalize_page_allocator, init_page_allocator, page_allocator_descriptor_size,
@@ -21,8 +21,8 @@ use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::string::cstr_to_str;
 
-use slopos_abi::DisplayInfo;
 use slopos_abi::boot::LimineMemmapResponse;
+use slopos_abi::DisplayInfo;
 use slopos_lib::{align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;

@@ -5,8 +5,8 @@ use slopos_abi::arch::x86_64::paging::PageFlags;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::mm_constants::PAGE_SIZE_4KB;
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_get_ref};
-use crate::paging::{ProcessPageDir, map_page_4kb_in_dir, paging_is_cow, virt_to_phys_in_dir};
+use crate::page_alloc::{alloc_page_frame, free_page_frame, page_frame_get_ref, ALLOC_FLAG_ZERO};
+use crate::paging::{map_page_4kb_in_dir, paging_is_cow, virt_to_phys_in_dir, ProcessPageDir};
 use crate::tlb;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

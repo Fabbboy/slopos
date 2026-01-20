@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use super::level::{L0, Level, Lower};
+use super::level::{Level, Lower, L0};
 
 pub struct LockToken<'a, L: Level>(PhantomData<&'a mut L>);
 

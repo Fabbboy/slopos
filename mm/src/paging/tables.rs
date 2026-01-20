@@ -10,7 +10,7 @@ use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
+    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
 };
 use crate::tlb;
 

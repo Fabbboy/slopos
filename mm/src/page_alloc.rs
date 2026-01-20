@@ -41,10 +41,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info, InitFlag, IrqMutex};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
+use crate::memory_reservations::{mm_region_count, mm_region_get, MmRegion, MmRegionKind};
 use crate::mm_constants::PAGE_SIZE_4KB;
 
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;

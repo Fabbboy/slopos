@@ -5,8 +5,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_drivers::serial;
+use slopos_lib::panic_recovery;
 use slopos_lib::stacktrace::{self, StacktraceEntry};
-use slopos_lib::{StateFlag, cpu};
+use slopos_lib::{cpu, StateFlag};
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_video::panic_screen;
 
@@ -74,6 +75,28 @@ fn panic_dump_backtrace() {
 /// Core panic implementation. Called by the kernel's `#[panic_handler]`.
 pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     cpu::disable_interrupts();
+
+    if panic_recovery::recovery_is_active() {
+        panic_serial_write("\n[PANIC CAUGHT BY TEST HARNESS]");
+
+        if let Some(location) = info.location() {
+            let mut buf = MessageBuffer::new();
+            let _ = write!(
+                buf,
+                "  at {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            );
+            panic_serial_write(buf.as_str());
+        }
+
+        panic_recovery::recovery_set_active(false);
+
+        unsafe {
+            panic_recovery::test_longjmp(panic_recovery::get_recovery_buf(), 1);
+        }
+    }
 
     if !PANIC_IN_PROGRESS.enter() {
         panic_serial_write("\n!!! RECURSIVE PANIC DETECTED - HALTING !!!\n");

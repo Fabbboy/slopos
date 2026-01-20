@@ -11,8 +11,8 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
-    get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
+    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats,
+    page_frame_get_ref, page_frame_inc_ref, ALLOC_FLAG_ZERO,
 };
 use crate::paging::{
     get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
@@ -1185,11 +1185,74 @@ pub fn test_shm_surface_attach_too_small() -> c_int {
     0
 }
 
+/// Test 9: Map shared buffer more than MAX_MAPPINGS_PER_BUFFER times
+/// BUG FINDER: shm_map uses unwrap() on mapping slot search - will panic!
+pub fn test_shm_mapping_overflow() -> c_int {
+    use crate::shared_memory::{shm_map, ShmAccess};
+
+    let owner = 1u32;
+    let size = 4096u64;
+
+    let token = shm_create(owner, size, 0);
+    if token == 0 {
+        return -1;
+    }
+
+    // MAX_MAPPINGS_PER_BUFFER is 8 - try to map 10 times using different process IDs
+    // This SHOULD fail gracefully but currently panics due to unwrap()
+    let mut mapped_count = 0u32;
+    for process_id in 1..=10u32 {
+        let vaddr = shm_map(process_id, token, ShmAccess::ReadOnly);
+        if vaddr != 0 {
+            mapped_count += 1;
+        }
+    }
+
+    shm_destroy(owner, token);
+
+    if mapped_count > 8 {
+        klog_info!(
+            "SHM_TEST: BUG - mapped {} times, max should be 8",
+            mapped_count
+        );
+        return -1;
+    }
+
+    0
+}
+
+pub fn test_shm_surface_attach_overflow() -> c_int {
+    let owner = 1u32;
+    let token = shm_create(owner, 64 * 1024 * 1024, 0);
+    if token == 0 {
+        klog_info!("SHM_TEST: Failed to create large buffer for overflow test");
+        return -1;
+    }
+
+    let result = surface_attach(owner, token, 0xFFFF, 0xFFFF);
+
+    if result == 0 {
+        klog_info!("SHM_TEST: BUG - surface_attach accepted 0xFFFF x 0xFFFF (potential overflow)");
+        shm_destroy(owner, token);
+        return -1;
+    }
+
+    let result2 = surface_attach(owner, token, 0x8000_0000, 2);
+
+    if result2 == 0 {
+        klog_info!("SHM_TEST: BUG - surface_attach accepted 0x80000000 x 2 (32-bit overflow)");
+        shm_destroy(owner, token);
+        return -1;
+    }
+
+    shm_destroy(owner, token);
+    0
+}
+
 // ============================================================================
 // RIGOROUS MEMORY TESTS - Actually verify memory contents
 // ============================================================================
 
-/// Test: Allocate page, write pattern, verify pattern, free
 pub fn test_page_alloc_write_verify() -> c_int {
     let phys = alloc_page_frame(ALLOC_FLAG_ZERO);
     if phys.is_null() {

@@ -9,9 +9,9 @@ use core::ffi::c_int;
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::klog_info;
 
-use crate::demand::{DemandError, can_satisfy_fault, handle_demand_fault, is_demand_fault};
-use crate::mm_constants::{INVALID_PROCESS_ID, PAGE_SIZE_4KB, PageFlags};
-use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use crate::demand::{can_satisfy_fault, handle_demand_fault, is_demand_fault, DemandError};
+use crate::mm_constants::{PageFlags, INVALID_PROCESS_ID, PAGE_SIZE_4KB};
+use crate::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_ZERO};
 use crate::paging::{map_page_4kb_in_dir, virt_to_phys_in_dir};
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc,
