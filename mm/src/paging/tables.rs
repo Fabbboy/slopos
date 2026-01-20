@@ -2,7 +2,9 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_abi::arch::x86_64::page_table::{PageTable, PageTableEntry, PageTableLevel};
+use slopos_abi::arch::x86_64::page_table::{
+    PageTable, PageTableEntry, PageTableLevel, PAGE_TABLE_ENTRIES,
+};
 use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::{cpu, klog_debug, klog_info};
 
@@ -62,6 +64,64 @@ fn intermediate_flags(user_mapping: bool) -> PageFlags {
     } else {
         base
     }
+}
+
+fn table_flags_from_leaf(leaf_flags: PageFlags) -> PageFlags {
+    let mut flags = PageFlags::PRESENT;
+    if leaf_flags.contains(PageFlags::WRITABLE) {
+        flags |= PageFlags::WRITABLE;
+    }
+    if leaf_flags.contains(PageFlags::USER) {
+        flags |= PageFlags::USER;
+    }
+    flags
+}
+
+fn split_pdpt_huge(pdpt_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
+    if !pdpt_entry.is_present() || !pdpt_entry.is_huge() {
+        return Some(phys_to_table(pdpt_entry.address()));
+    }
+
+    let huge_phys = pdpt_entry.address();
+    let huge_flags = pdpt_entry.flags();
+    let Some((pd_phys, pd_ptr)) = alloc_page_table() else {
+        return None;
+    };
+
+    unsafe {
+        for i in 0..PAGE_TABLE_ENTRIES {
+            let phys = huge_phys.offset(i as u64 * PAGE_SIZE_2MB);
+            let entry = (*pd_ptr).entry_mut(i);
+            entry.set(phys, huge_flags | PageFlags::HUGE);
+        }
+    }
+
+    pdpt_entry.set(pd_phys, table_flags_from_leaf(huge_flags));
+    Some(pd_ptr)
+}
+
+fn split_pd_huge(pd_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
+    if !pd_entry.is_present() || !pd_entry.is_huge() {
+        return Some(phys_to_table(pd_entry.address()));
+    }
+
+    let huge_phys = pd_entry.address();
+    let mut huge_flags = pd_entry.flags();
+    huge_flags.remove(PageFlags::HUGE);
+    let Some((pt_phys, pt_ptr)) = alloc_page_table() else {
+        return None;
+    };
+
+    unsafe {
+        for i in 0..PAGE_TABLE_ENTRIES {
+            let phys = huge_phys.offset(i as u64 * PAGE_SIZE_4KB);
+            let entry = (*pt_ptr).entry_mut(i);
+            entry.set(phys, huge_flags);
+        }
+    }
+
+    pd_entry.set(pt_phys, table_flags_from_leaf(huge_flags));
+    Some(pt_ptr)
 }
 
 #[inline]
@@ -173,6 +233,10 @@ fn map_page_in_directory(
         let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
         let pdpt = if !pml4_entry.is_present() {
             let Some((phys, ptr)) = alloc_page_table() else {
+                klog_info!(
+                    "Paging: Failed to allocate PDPT for vaddr 0x{:x}",
+                    vaddr.as_u64()
+                );
                 return -1;
             };
             pml4_entry.set(phys, inter_flags);
@@ -200,18 +264,26 @@ fn map_page_in_directory(
 
         let pd = if !pdpt_entry.is_present() {
             let Some((phys, ptr)) = alloc_page_table() else {
+                klog_info!(
+                    "Paging: Failed to allocate PD for vaddr 0x{:x}",
+                    vaddr.as_u64()
+                );
                 return -1;
             };
             pdpt_entry.set(phys, inter_flags);
             ptr
         } else {
             if pdpt_entry.is_huge() {
-                return -1;
-            }
+                let Some(ptr) = split_pdpt_huge(pdpt_entry) else {
+                    return -1;
+                };
+                ptr
+            } else {
             if user_mapping && !pdpt_entry.is_user() {
                 pdpt_entry.add_flags(PageFlags::USER);
             }
             phys_to_table(pdpt_entry.address())
+            }
         };
 
         let pd_entry = (&mut *pd).entry_mut(pd_idx);
@@ -227,18 +299,26 @@ fn map_page_in_directory(
 
         let pt = if !pd_entry.is_present() {
             let Some((phys, ptr)) = alloc_page_table() else {
+                klog_info!(
+                    "Paging: Failed to allocate PT for vaddr 0x{:x}",
+                    vaddr.as_u64()
+                );
                 return -1;
             };
             pd_entry.set(phys, inter_flags);
             ptr
         } else {
             if pd_entry.is_huge() {
-                return -1;
-            }
+                let Some(ptr) = split_pd_huge(pd_entry) else {
+                    return -1;
+                };
+                ptr
+            } else {
             if user_mapping && !pd_entry.is_user() {
                 pd_entry.add_flags(PageFlags::USER);
             }
             phys_to_table(pd_entry.address())
+            }
         };
 
         let pt_entry = (&mut *pt).entry_mut(pt_idx);

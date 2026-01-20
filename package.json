@@ -1,0 +1,88 @@
+{
+  "name": "@slopos/kernel",
+  "version": "0.1.0",
+  "description": "Three kernel wizards shipwrecked on Sloptopia, building an OS that boots when the Wheel of Fate allows it",
+  "keywords": [
+    "operating-system",
+    "kernel",
+    "rust",
+    "osdev",
+    "x86-64",
+    "qemu",
+    "uefi",
+    "slopos",
+    "wheel-of-fate"
+  ],
+  "homepage": "https://github.com/Fabbboy/slopos#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fabbboy/slopos.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Fabbboy/slopos/issues"
+  },
+  "license": "GPL-3.0-only",
+  "author": "Fabrice Schaub <fabrice@schaub-dev.xyz>",
+  "contributors": [
+    "Leon Liechti <37051290+Lon60@users.noreply.github.com>",
+    "Luis <info@ienjir.dev>"
+  ],
+  "packageManager": "pnpm@10.28.1",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "bin": {
+    "slopos": "./bin/slopos.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "Makefile",
+    "rust-toolchain.toml",
+    "link.ld",
+    "limine.conf",
+    "targets/",
+    "boot/",
+    "core/",
+    "mm/",
+    "drivers/",
+    "video/",
+    "fs/",
+    "userland/",
+    "kernel/",
+    "abi/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "lore/",
+    "README.md",
+    "LICENSE",
+    "CLAUDE.md"
+  ],
+  "scripts": {
+    "preinstall": "node -e \"console.log('\\n🎰 Installing SlopOS - The Wheel of Fate is spinning...\\n')\"",
+    "postinstall": "node bin/postinstall.js",
+    "setup": "make setup",
+    "build": "make build",
+    "iso": "make iso",
+    "boot": "make boot",
+    "boot:video": "VIDEO=1 make boot",
+    "boot:log": "make boot-log",
+    "test": "make test",
+    "clean": "make clean",
+    "distclean": "make distclean"
+  },
+  "devDependencies": {},
+  "peerDependencies": {},
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

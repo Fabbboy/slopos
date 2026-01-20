@@ -8,8 +8,9 @@ use limine::{
     BaseRevision,
     request::{
         BootloaderInfoRequest, ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest,
-        HhdmRequest, MemoryMapRequest, RsdpRequest,
+        HhdmRequest, MemoryMapRequest, MpRequest, RsdpRequest,
     },
+    response::MpResponse,
 };
 
 use slopos_abi::DisplayInfo;
@@ -55,6 +56,10 @@ static BOOTLOADER_INFO_REQUEST: BootloaderInfoRequest = BootloaderInfoRequest::n
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static MP_REQUEST: MpRequest = MpRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end_marker")]
@@ -195,6 +200,10 @@ pub fn ensure_base_revision() {
     if !BASE_REVISION.is_supported() {
         panic!("Limine base revision not supported");
     }
+}
+
+pub fn mp_response() -> Option<&'static MpResponse> {
+    MP_REQUEST.get_response()
 }
 
 pub fn init_limine_protocol() -> i32 {

@@ -44,7 +44,10 @@ use slopos_abi::addr::PhysAddr;
 use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::memory_reservations::{MmRegion, MmRegionKind, mm_region_count, mm_region_get};
+use crate::memory_reservations::{
+    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count,
+    mm_region_get, mm_reservations_count, mm_reservations_get,
+};
 use crate::mm_constants::PAGE_SIZE_4KB;
 
 pub const ALLOC_FLAG_ZERO: u32 = 0x01;
@@ -388,14 +391,59 @@ impl PageAllocator {
             return;
         }
 
-        let aligned_start = align_up_u64(region.phys_base, PAGE_SIZE_4KB);
+        let mut aligned_start = align_up_u64(region.phys_base, PAGE_SIZE_4KB);
+        if aligned_start == 0 {
+            aligned_start = PAGE_SIZE_4KB;
+        }
         let aligned_end = align_down_u64(region.phys_base + region.length, PAGE_SIZE_4KB);
         if aligned_end <= aligned_start {
             return;
         }
 
-        let start_frame = self.phys_to_frame(PhysAddr::new(aligned_start));
-        let mut end_frame = self.phys_to_frame(PhysAddr::new(aligned_end));
+        let mut cursor = aligned_start;
+        while cursor < aligned_end {
+            let mut next = aligned_end;
+            let mut skip_end = 0u64;
+
+            let res_count = mm_reservations_count();
+            for idx in 0..res_count {
+                let res_ptr = mm_reservations_get(idx);
+                if res_ptr.is_null() {
+                    continue;
+                }
+                let res = unsafe { &*res_ptr };
+                if res.flags & MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS == 0 {
+                    continue;
+                }
+                let res_start = align_down_u64(res.phys_base, PAGE_SIZE_4KB);
+                let res_end = align_up_u64(res.phys_base + res.length, PAGE_SIZE_4KB);
+                if res_end <= cursor || res_start >= aligned_end {
+                    continue;
+                }
+                if res_start <= cursor && res_end > cursor {
+                    if res_end > skip_end {
+                        skip_end = res_end;
+                    }
+                } else if res_start > cursor && res_start < next {
+                    next = res_start;
+                }
+            }
+
+            if skip_end > cursor {
+                cursor = skip_end;
+                continue;
+            }
+
+            if next > cursor {
+                self.seed_range(cursor, next, region_id);
+            }
+            cursor = next;
+        }
+    }
+
+    fn seed_range(&mut self, start: u64, end: u64, region_id: u16) {
+        let start_frame = self.phys_to_frame(PhysAddr::new(start));
+        let mut end_frame = self.phys_to_frame(PhysAddr::new(end));
         if start_frame >= self.total_frames {
             return;
         }
@@ -756,59 +804,75 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
         && (flags & ALLOC_FLAG_NO_PCP) == 0
         && PCP_INIT.is_set();
 
-    let frame_num = if use_pcp {
-        let cpu = get_current_cpu();
+    let mut attempts = 0u32;
+    loop {
+        let frame_num = if use_pcp {
+            let cpu = get_current_cpu();
 
-        let mut frame = pcp_try_alloc(cpu);
+            let mut frame = pcp_try_alloc(cpu);
 
-        if frame == INVALID_PAGE_FRAME {
-            pcp_refill(cpu, flags);
-            frame = pcp_try_alloc(cpu);
-        }
+            if frame == INVALID_PAGE_FRAME {
+                pcp_refill(cpu, flags);
+                frame = pcp_try_alloc(cpu);
+            }
 
-        if frame == INVALID_PAGE_FRAME {
+            if frame == INVALID_PAGE_FRAME {
+                let mut alloc = PAGE_ALLOCATOR.lock();
+                let flag_order = alloc.flags_to_order(flags);
+                let actual_order = flag_order.max(order);
+                frame = alloc.allocate_block(actual_order, flags);
+            }
+
+            frame
+        } else {
             let mut alloc = PAGE_ALLOCATOR.lock();
             let flag_order = alloc.flags_to_order(flags);
-            let actual_order = flag_order.max(order);
-            frame = alloc.allocate_block(actual_order, flags);
-        }
-
-        frame
-    } else {
-        let mut alloc = PAGE_ALLOCATOR.lock();
-        let flag_order = alloc.flags_to_order(flags);
-        if flag_order > order {
-            order = flag_order;
-        }
-        alloc.allocate_block(order, flags)
-    };
-
-    if frame_num == INVALID_PAGE_FRAME {
-        klog_info!("alloc_page_frames: No suitable block available");
-        return PhysAddr::NULL;
-    }
-
-    let phys_addr = {
-        let alloc = PAGE_ALLOCATOR.lock();
-        alloc.frame_to_phys(frame_num)
-    };
-
-    if flags & ALLOC_FLAG_ZERO != 0 {
-        let span_pages = if use_pcp {
-            1
-        } else {
-            PageAllocator::order_block_pages(order)
+            if flag_order > order {
+                order = flag_order;
+            }
+            alloc.allocate_block(order, flags)
         };
-        for i in 0..span_pages {
-            let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
-            if zero_physical_page(page_phys) != 0 {
-                free_page_frame(phys_addr);
-                return PhysAddr::NULL;
+
+        if frame_num == INVALID_PAGE_FRAME {
+            klog_info!("alloc_page_frames: No suitable block available");
+            return PhysAddr::NULL;
+        }
+
+        let phys_addr = {
+            let alloc = PAGE_ALLOCATOR.lock();
+            alloc.frame_to_phys(frame_num)
+        };
+
+        if flags & ALLOC_FLAG_ZERO != 0 {
+            let span_pages = if use_pcp {
+                1
+            } else {
+                PageAllocator::order_block_pages(order)
+            };
+            let mut ok = true;
+            for i in 0..span_pages {
+                let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
+                if zero_physical_page(page_phys) != 0 {
+                    klog_info!(
+                        "alloc_page_frames: Failed to zero page at phys 0x{:x}",
+                        page_phys.as_u64()
+                    );
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                // Keep the frame allocated to avoid reuse of bad pages.
+                attempts += 1;
+                if attempts > 64 {
+                    return PhysAddr::NULL;
+                }
+                continue;
             }
         }
-    }
 
-    phys_addr
+        return phys_addr;
+    }
 }
 
 pub fn alloc_page_frame(flags: u32) -> PhysAddr {

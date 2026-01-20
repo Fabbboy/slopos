@@ -9,6 +9,7 @@ RUST_CHANNEL ?= $(shell sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p
 RUST_TARGET_JSON ?= targets/x86_64-slos.json
 CARGO_TARGET_DIR ?= $(BUILD_DIR)/target
 QEMU_BIN ?= qemu-system-x86_64
+QEMU_SMP ?= 2
 
 ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
@@ -83,6 +84,17 @@ define ensure_ovmf
 			fi; \
 			curl -L --fail --progress-bar "$(OVMF_VARS_URL)" -o "$(OVMF_VARS)"; \
 		fi; \
+	fi;
+endef
+
+define ensure_smp_power_of_two
+	if [ $(QEMU_SMP) -lt 1 ]; then \
+		echo "QEMU_SMP must be >= 1" >&2; \
+		exit 1; \
+	fi; \
+	if [ $$(( $(QEMU_SMP) & ($(QEMU_SMP) - 1) )) -ne 0 ]; then \
+		echo "QEMU_SMP must be a power of 2 (got $(QEMU_SMP))" >&2; \
+		exit 1; \
 	fi;
 endef
 
@@ -235,6 +247,7 @@ $(FS_IMAGE):
 boot: iso-notests
 	@set -e; \
 	$(call ensure_ovmf) \
+	$(call ensure_smp_power_of_two) \
 	ISO="$(ISO_NO_TESTS)"; \
 	if [ ! -f "$$ISO" ]; then \
 		echo "ISO not found at $$ISO" >&2; \
@@ -283,6 +296,7 @@ boot: iso-notests
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
 		$(QEMU_BIN) \
 	  -machine q35,accel=tcg \
+	  -smp $(QEMU_SMP) \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 	  -drive if=pflash,format=raw,file="$$OVMF_VARS_RUNTIME" \
@@ -303,6 +317,7 @@ boot: iso-notests
 boot-log: iso-notests
 	@set -e; \
 	$(call ensure_ovmf) \
+	$(call ensure_smp_power_of_two) \
 	ISO="$(ISO_NO_TESTS)"; \
 	if [ ! -f "$$ISO" ]; then \
 		echo "ISO not found at $$ISO" >&2; \
@@ -352,6 +367,7 @@ boot-log: iso-notests
 	set +e; \
 	timeout "$(BOOT_LOG_TIMEOUT)s" $(QEMU_BIN) \
 	  -machine q35,accel=tcg \
+	  -smp $(QEMU_SMP) \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 	  -drive if=pflash,format=raw,file="$$OVMF_VARS_RUNTIME" \
@@ -381,6 +397,7 @@ boot-log: iso-notests
 test: iso-tests
 	@set -e; \
 	$(call ensure_ovmf) \
+	$(call ensure_smp_power_of_two) \
 	ISO="$(ISO_TESTS)"; \
 	if [ ! -f "$$ISO" ]; then \
 		echo "ISO not found at $$ISO" >&2; \
@@ -394,6 +411,7 @@ test: iso-tests
 	set +e; \
 	$(QEMU_BIN) \
 	  -machine q35,accel=tcg \
+	  -smp $(QEMU_SMP) \
 	  -m 512M \
 	  -drive if=pflash,format=raw,readonly=on,file="$(OVMF_CODE)" \
 	  -drive if=pflash,format=raw,file="$$OVMF_VARS_RUNTIME" \

@@ -89,7 +89,7 @@ pub const PROCESS_STACK_SIZE_BYTES: u64 = 0x0000_0000_0010_0000;
 // =============================================================================
 
 /// Exception stack region base virtual address.
-pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_B000_0000;
+pub const EXCEPTION_STACK_REGION_BASE: u64 = 0xFFFF_FFFF_C000_0000;
 
 /// Stride between exception stacks (64 KB).
 pub const EXCEPTION_STACK_REGION_STRIDE: u64 = 0x0001_0000;

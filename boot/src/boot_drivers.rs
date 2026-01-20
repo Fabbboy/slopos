@@ -13,6 +13,7 @@ use crate::gdt::gdt_init;
 use crate::idt::{idt_init, idt_load};
 use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
+use crate::smp::smp_init;
 use slopos_drivers::{
     apic::{apic_detect, apic_init, send_ipi_all_excluding_self},
     interrupts::config_from_cmdline,
@@ -137,6 +138,11 @@ fn boot_step_apic_setup_fn() {
     tlb::init();
 
     klog_debug!("Local APIC initialized (legacy PIC path removed).");
+}
+
+fn boot_step_smp_setup_fn() {
+    klog_debug!("Discovering CPUs and starting APs...");
+    smp_init();
 }
 
 fn boot_step_ioapic_setup_fn() {
@@ -410,6 +416,13 @@ crate::boot_init_step_with_flags_unit!(
     b"apic\0",
     boot_step_apic_setup_fn,
     boot_init_priority(40)
+);
+crate::boot_init_step_with_flags_unit!(
+    BOOT_STEP_SMP_SETUP,
+    drivers,
+    b"smp\0",
+    boot_step_smp_setup_fn,
+    boot_init_priority(45)
 );
 crate::boot_init_step_with_flags_unit!(
     BOOT_STEP_IOAPIC_SETUP,

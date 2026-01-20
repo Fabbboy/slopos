@@ -66,7 +66,7 @@ use slopos_mm::mm_constants::{
     EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_SIZE_4KB, PageFlags,
 };
 use slopos_mm::page_alloc::alloc_page_frame;
-use slopos_mm::paging::map_page_4kb;
+use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 
 use crate::gdt::gdt_set_ist;
 use crate::idt::idt_set_ist;
@@ -356,6 +356,16 @@ fn map_stack_pages(stack: &IstStackConfig) {
             PageFlags::KERNEL_RW.bits(),
         ) != 0
         {
+            let vaddr = VirtAddr::new(virt_addr);
+            let mapped_phys = virt_to_phys(vaddr);
+            let page_size = get_page_size(vaddr);
+            klog_info!(
+                "IST: map failure {} vaddr=0x{:x} mapped_phys=0x{:x} page_size=0x{:x}",
+                stack.name_str(),
+                virt_addr,
+                mapped_phys.as_u64(),
+                page_size
+            );
             panic!(
                 "ist_stacks_init: Failed to map page for {} stack",
                 stack.name_str()
