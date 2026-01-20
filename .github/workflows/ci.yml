@@ -41,6 +41,16 @@ jobs:
           go install github.com/boyter/scc/v3@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
+      - name: Update scc table
+        run: scripts/update_scc_table.sh
+
+      - name: Commit updated scc table
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: refresh scc table"
+          file_pattern: README.md
+
       - name: Setup Rust toolchain
         run: make setup
 

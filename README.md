@@ -48,6 +48,9 @@ You can install scc by using the standard Go toolchain (Go >= 1.25).
 go install github.com/boyter/scc/v3@latest
 ```
 
+<!-- scc-table-start -->
+<!-- scc-table-end -->
+
 <br/>
 
 |  | Command | What it does |
