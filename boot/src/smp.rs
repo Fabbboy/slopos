@@ -8,6 +8,7 @@ use slopos_lib::{cpu, klog_info};
 use slopos_mm::tlb;
 
 use crate::idt::idt_load;
+use crate::gdt::{gdt_init, syscall_msr_init};
 use crate::limine_protocol;
 
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
@@ -16,11 +17,13 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     cpu::disable_interrupts();
     apic::enable();
 
+    gdt_init();
+    idt_load();
+    syscall_msr_init();
+    cpu::enable_interrupts();
+
     let apic_id = apic::get_id();
     let cpu_idx = tlb::register_cpu(apic_id);
-
-    idt_load();
-    cpu::enable_interrupts();
 
     cpu_info.extra.store(AP_STARTED_MAGIC, Ordering::Release);
     klog_info!(

@@ -9,7 +9,7 @@ RUST_CHANNEL ?= $(shell sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p
 RUST_TARGET_JSON ?= targets/x86_64-slos.json
 CARGO_TARGET_DIR ?= $(BUILD_DIR)/target
 QEMU_BIN ?= qemu-system-x86_64
-QEMU_SMP ?= 1
+QEMU_SMP ?= 2
 
 ISO := $(BUILD_DIR)/slop.iso
 ISO_NO_TESTS := $(BUILD_DIR)/slop-notests.iso
