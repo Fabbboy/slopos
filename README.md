@@ -56,7 +56,7 @@ Language            Files       Lines    Blanks  Comments       Code Complexity
 Rust                  221      59,928     8,042     5,542     46,344      7,190
 C Header              138       9,516     1,990     1,089      6,437        217
 C++                   114      21,791     3,381     1,362     17,048      2,834
-Markdown               21       4,652     1,216         0      3,436          0
+Markdown               22       5,496     1,393         0      4,103          0
 TOML                   14         362        56         1        305          1
 JSON                    5         621         2         0        619          0
 Assembly                3         899       153         0        746         21
@@ -70,13 +70,13 @@ Makefile                1         449        27         1        421         60
 Plain Text              1           4         0         0          4          0
 YAML                    1          90        18         0         72          0
 ───────────────────────────────────────────────────────────────────────────────
-Total                 529      99,696    15,111     8,015     76,570     10,383
+Total                 530     100,540    15,288     8,015     77,237     10,383
 ───────────────────────────────────────────────────────────────────────────────
-Estimated Cost to Develop (organic) $2,569,549
-Estimated Schedule Effort (organic) 19.69 months
-Estimated People Required (organic) 11.60
+Estimated Cost to Develop (organic) $2,593,056
+Estimated Schedule Effort (organic) 19.75 months
+Estimated People Required (organic) 11.66
 ───────────────────────────────────────────────────────────────────────────────
-Processed 3166012 bytes, 3.166 megabytes (SI)
+Processed 3189444 bytes, 3.189 megabytes (SI)
 ───────────────────────────────────────────────────────────────────────────────
 ```
 <!-- scc-table-end -->
