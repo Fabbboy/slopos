@@ -305,6 +305,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         }
         return -1;
     }
+
     with_scheduler(|sched| {
         if unsafe { (*task).time_slice_remaining } == 0 {
             reset_task_quantum(sched, task);
@@ -445,7 +446,12 @@ pub fn schedule() {
         sched.schedule_calls = sched.schedule_calls.saturating_add(1);
 
         let current = sched.current_task;
-        if !current.is_null() && current != sched.idle_task {
+        let cpu_id = slopos_lib::get_current_cpu();
+        let is_idle = per_cpu::with_cpu_scheduler(cpu_id, |local| local.idle_task == current)
+            .unwrap_or(false)
+            || current == sched.idle_task;
+
+        if !current.is_null() && !is_idle {
             if task_is_running(current) {
                 if task_set_state(unsafe { (*current).task_id }, TASK_STATE_READY) != 0 {
                     klog_info!("schedule: failed to mark task ready");
@@ -894,23 +900,23 @@ pub fn scheduler_run_ap(cpu_id: usize) -> ! {
     slopos_lib::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
+    // AP scheduler loop: Currently APs cannot do full context switching because
+    // they lack FPU context initialization and other per-CPU state. For now,
+    // the AP just idles and waits for IPIs. Tasks remain on CPU 0 where they
+    // can actually execute.
+    //
+    // TODO: Implement full AP task execution with:
+    // - FPU/SSE context save/restore per CPU
+    // - Proper context switch from AP idle to task
+    // - IPI-triggered schedule() calls
     loop {
-        let has_work = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let task = sched.dequeue_highest_priority();
-            if !task.is_null() {
-                sched.enqueue_local(task);
-                true
-            } else {
-                sched.increment_idle_time();
-                false
-            }
-        })
-        .unwrap_or(false);
-
-        if !has_work {
-            unsafe {
-                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-            }
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.increment_idle_time();
+        });
+        // Wait for interrupt (reschedule IPI or other). The sti; hlt sequence
+        // atomically enables interrupts and halts until the next interrupt.
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
         }
     }
 }
@@ -938,6 +944,7 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
     per_cpu::get_total_ready_tasks()
 }
 
+#[allow(dead_code)]
 pub fn send_reschedule_ipi(target_cpu: usize) {
     use slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR;
 
