@@ -55,7 +55,10 @@ impl MmioRegion {
             return None;
         }
 
-        phys.as_u64().checked_add(size as u64)?;
+        let end_phys = phys.as_u64().checked_add(size as u64)?;
+        if end_phys > PhysAddr::MAX.as_u64() {
+            return None;
+        }
 
         let aligned_phys = phys.as_u64() & !(PAGE_SIZE_4KB - 1);
         let offset_in_page = phys.as_u64() - aligned_phys;
