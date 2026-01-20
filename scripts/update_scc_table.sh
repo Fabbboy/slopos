@@ -18,10 +18,12 @@ scc --format=markdown > "$table_file"
 awk -v start="$start" -v end="$end" -v table_file="$table_file" '
   $0 == start {
     print $0
+    print "```text"
     while ((getline line < table_file) > 0) {
       print line
     }
     close(table_file)
+    print "```"
     in_block = 1
     next
   }
