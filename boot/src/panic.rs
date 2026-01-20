@@ -7,7 +7,7 @@ use slopos_drivers::keyboard::poll_wait_enter;
 use slopos_drivers::serial;
 use slopos_lib::panic_recovery;
 use slopos_lib::stacktrace::{self, StacktraceEntry};
-use slopos_lib::{cpu, StateFlag};
+use slopos_lib::{StateFlag, cpu};
 use slopos_mm::memory_init::is_memory_system_initialized;
 use slopos_video::panic_screen;
 

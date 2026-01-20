@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 
 use slopos_abi::arch::x86_64::exception::{exception_is_critical, get_exception_name};
-use slopos_lib::{klog_info, InterruptFrame};
+use slopos_lib::{InterruptFrame, klog_info};
 
 fn create_test_frame(vector: u8, from_user: bool) -> InterruptFrame {
     InterruptFrame {

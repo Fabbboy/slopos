@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
 use slopos_drivers::interrupts::SUITE_SCHEDULER;
 pub use slopos_drivers::interrupts::{InterruptTestConfig, Verbosity as InterruptTestVerbosity};
-use slopos_lib::{klog_info, StateFlag};
+use slopos_lib::{StateFlag, klog_info};
 
 pub mod exception_tests;
 
@@ -284,11 +284,7 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         summary.elapsed_ms,
     );
 
-    if summary.failed == 0 {
-        0
-    } else {
-        -1
-    }
+    if summary.failed == 0 { 0 } else { -1 }
 }
 
 pub fn tests_request_shutdown(failed: i32) {
@@ -439,11 +435,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, VM_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_heap_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -456,11 +448,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, HEAP_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_ext2_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -469,11 +457,7 @@ mod suites {
         let passed = passed.max(0) as u32;
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, EXT2_NAME, total, passed, elapsed);
-        if total != 0 && passed == total {
-            0
-        } else {
-            -1
-        }
+        if total != 0 && passed == total { 0 } else { -1 }
     }
 
     fn run_privsep_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -482,11 +466,7 @@ mod suites {
         let passed = if result == 0 { 1 } else { 0 };
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, PRIVSEP_NAME, 1, passed, elapsed);
-        if result == 0 {
-            0
-        } else {
-            -1
-        }
+        if result == 0 { 0 } else { -1 }
     }
 
     fn run_fpu_sse_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -549,11 +529,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, FPU_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_page_alloc_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -572,11 +548,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, PAGE_ALLOC_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_heap_ext_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -594,11 +566,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, HEAP_EXT_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_paging_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -613,11 +581,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, PAGING_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_ring_buf_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -636,11 +600,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, RING_BUF_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_spinlock_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -657,11 +617,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, SPINLOCK_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_shm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -682,11 +638,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, SHM_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_rigorous_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -706,11 +658,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, RIGOROUS_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_process_vm_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -728,11 +676,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, PROCESS_VM_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_sched_core_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -778,11 +722,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, SCHED_CORE_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_demand_paging_suite(
@@ -813,11 +753,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, DEMAND_PAGING_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_oom_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -840,11 +776,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, OOM_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_cow_edge_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -866,11 +798,7 @@ mod suites {
 
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, COW_EDGE_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_syscall_valid_suite(
@@ -881,11 +809,7 @@ mod suites {
         let (passed, total) = run_syscall_validation_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, SYSCALL_VALID_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_exception_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -893,11 +817,7 @@ mod suites {
         let (passed, total) = run_exception_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, EXCEPTION_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_exec_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -905,11 +825,7 @@ mod suites {
         let (passed, total) = run_exec_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, EXEC_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_irq_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -917,11 +833,7 @@ mod suites {
         let (passed, total) = run_irq_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, IRQ_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_ioapic_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -929,11 +841,7 @@ mod suites {
         let (passed, total) = run_ioapic_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, IOAPIC_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_context_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -941,11 +849,7 @@ mod suites {
         let (passed, total) = run_context_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, CONTEXT_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_tlb_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -953,11 +857,7 @@ mod suites {
         let (passed, total) = run_tlb_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, TLB_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     fn run_mmio_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult) -> i32 {
@@ -965,11 +865,7 @@ mod suites {
         let (passed, total) = run_mmio_tests();
         let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
         fill_simple_result(out, MMIO_NAME, total, passed, elapsed);
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     pub fn register_system_suites() {

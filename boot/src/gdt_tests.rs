@@ -14,7 +14,7 @@ use core::ffi::c_int;
 use slopos_lib::klog_info;
 
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
-use crate::idt::{idt_get_gate, IdtEntry};
+use crate::idt::{IdtEntry, idt_get_gate};
 
 // =============================================================================
 // GDT DESCRIPTOR FIELD TESTS

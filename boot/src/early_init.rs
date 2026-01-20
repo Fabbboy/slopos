@@ -1,6 +1,6 @@
 use core::{
     cell::UnsafeCell,
-    ffi::{c_char, CStr},
+    ffi::{CStr, c_char},
     ptr,
 };
 
@@ -418,11 +418,7 @@ pub fn is_kernel_initialized() -> i32 {
 }
 
 pub fn get_initialization_progress() -> i32 {
-    if boot_state().initialized {
-        100
-    } else {
-        50
-    }
+    if boot_state().initialized { 100 } else { 50 }
 }
 
 pub fn report_kernel_status() {

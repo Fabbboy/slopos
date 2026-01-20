@@ -1,11 +1,10 @@
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    tests_register_suite, tests_register_system_suites, tests_request_shutdown,
-    tests_reset_registry, tests_run_all, InterruptTestConfig, TestRunSummary, TestSuiteDesc,
-    TestSuiteResult,
+    InterruptTestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, tests_register_suite,
+    tests_register_system_suites, tests_request_shutdown, tests_reset_registry, tests_run_all,
 };
 use slopos_video as video;
 
@@ -227,11 +226,7 @@ fn run_gdt_suite(_config: *const InterruptTestConfig, out: *mut TestSuiteResult)
         out_ref.timed_out = 0;
     }
 
-    if passed == total {
-        0
-    } else {
-        -1
-    }
+    if passed == total { 0 } else { -1 }
 }
 
 fn register_boot_test_suites() {

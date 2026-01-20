@@ -5,7 +5,7 @@ use slopos_lib::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,
 };
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{cpu, klog_info, StateFlag};
+use slopos_lib::{StateFlag, cpu, klog_info};
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();

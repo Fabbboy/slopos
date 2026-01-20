@@ -11,8 +11,8 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{
-    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats,
-    page_frame_get_ref, page_frame_inc_ref, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
+    get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
 };
 use crate::paging::{
     get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
@@ -1188,7 +1188,7 @@ pub fn test_shm_surface_attach_too_small() -> c_int {
 /// Test 9: Map shared buffer more than MAX_MAPPINGS_PER_BUFFER times
 /// BUG FINDER: shm_map uses unwrap() on mapping slot search - will panic!
 pub fn test_shm_mapping_overflow() -> c_int {
-    use crate::shared_memory::{shm_map, ShmAccess};
+    use crate::shared_memory::{ShmAccess, shm_map};
 
     let owner = 1u32;
     let size = 4096u64;

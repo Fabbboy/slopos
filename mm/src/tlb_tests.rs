@@ -13,9 +13,9 @@ use slopos_abi::addr::VirtAddr;
 use slopos_lib::klog_info;
 
 use crate::tlb::{
-    flush_all, flush_asid, flush_page, flush_range, get_active_cpu_count, handle_shootdown_ipi,
-    has_invpcid, has_pcid, is_smp_active, set_bsp_apic_id, FlushType, TlbFlushBatch, MAX_CPUS,
-    TLB_SHOOTDOWN_VECTOR,
+    FlushType, MAX_CPUS, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, flush_all, flush_asid, flush_page,
+    flush_range, get_active_cpu_count, handle_shootdown_ipi, has_invpcid, has_pcid, is_smp_active,
+    set_bsp_apic_id,
 };
 
 // =============================================================================

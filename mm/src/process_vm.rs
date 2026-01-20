@@ -2,21 +2,21 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{align_down, align_up, klog_info, IrqMutex};
+use slopos_lib::{IrqMutex, align_down, align_up, klog_info};
 
 use crate::aslr;
-use crate::elf::{ElfError, ElfValidator, ValidatedSegment, MAX_LOAD_SEGMENTS, PF_W};
+use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
-use crate::mm_constants::{PageFlags, INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB};
+use crate::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{
-    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
 };
 use crate::paging::{
-    map_page_4kb_in_dir, paging_copy_kernel_mappings, paging_free_user_space, paging_get_pte_flags,
-    paging_mark_cow, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir, PageTable,
-    ProcessPageDir,
+    PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
+    paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
+    unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};

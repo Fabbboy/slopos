@@ -26,8 +26,8 @@ pub use early_init::{
 };
 pub use ffi_boundary::kernel_main;
 pub use limine_protocol::{
-    boot_info, ensure_base_revision, memmap_entry_count, memory_regions, BootFramebuffer, BootInfo,
-    MemmapEntry, MemoryRegion, MemoryRegionKind,
+    BootFramebuffer, BootInfo, MemmapEntry, MemoryRegion, MemoryRegionKind, boot_info,
+    ensure_base_revision, memmap_entry_count, memory_regions,
 };
 pub use panic::{panic_handler_impl, set_panic_cpu_state};
 pub use shutdown::{

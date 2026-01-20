@@ -5,11 +5,11 @@ use core::{
 };
 
 use limine::{
+    BaseRevision,
     request::{
         BootloaderInfoRequest, ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest,
         HhdmRequest, MemoryMapRequest, RsdpRequest,
     },
-    BaseRevision,
 };
 
 use slopos_abi::DisplayInfo;

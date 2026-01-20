@@ -12,39 +12,23 @@ pub const fn abs_i32(x: i32) -> i32 {
 /// Minimum of two 32-bit integers.
 #[inline(always)]
 pub const fn min_i32(a: i32, b: i32) -> i32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 /// Maximum of two 32-bit integers.
 #[inline(always)]
 pub const fn max_i32(a: i32, b: i32) -> i32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 /// Minimum of two unsigned 32-bit integers.
 #[inline(always)]
 pub const fn min_u32(a: u32, b: u32) -> u32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 /// Maximum of two unsigned 32-bit integers.
 #[inline(always)]
 pub const fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }

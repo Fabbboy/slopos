@@ -50,7 +50,7 @@
 //!
 //! Stacks are spaced 64 KB apart in virtual address space.
 
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -62,8 +62,8 @@ use slopos_abi::arch::x86_64::idt::{
 use slopos_lib::{klog_debug, klog_info};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{
-    PageFlags, EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
-    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_SIZE_4KB,
+    EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
+    EXCEPTION_STACK_REGION_STRIDE, EXCEPTION_STACK_SIZE, PAGE_SIZE_4KB, PageFlags,
 };
 use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::map_page_4kb;

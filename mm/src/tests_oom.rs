@@ -11,10 +11,10 @@ use slopos_lib::klog_info;
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
-use crate::mm_constants::{PageFlags, INVALID_PROCESS_ID, PAGE_SIZE_4KB};
+use crate::mm_constants::{INVALID_PROCESS_ID, PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{
-    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats, ALLOC_FLAG_DMA,
-    ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_DMA, ALLOC_FLAG_NO_PCP, ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames,
+    free_page_frame, get_page_allocator_stats,
 };
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
 

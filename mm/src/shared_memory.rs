@@ -6,13 +6,13 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::{CleanLockToken, RwLock, L2};
+use slopos_lib::{CleanLockToken, L2, RwLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
 
-use crate::mm_constants::{PageFlags, PAGE_SIZE_4KB};
-use crate::page_alloc::{alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO};
+use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
+use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
 use crate::process_vm::process_vm_get_page_dir;
 use slopos_lib::{align_up, klog_debug, klog_info};

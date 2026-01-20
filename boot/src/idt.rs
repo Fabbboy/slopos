@@ -2,7 +2,7 @@
 #![allow(bad_asm_style)]
 
 use core::arch::{asm, global_asm};
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 
 use slopos_lib::cpu;
 use slopos_lib::string::cstr_to_str;
@@ -89,7 +89,7 @@ use slopos_core::{
 };
 
 // Task and related types are now imported from abi
-use slopos_abi::task::{Task, TaskExitReason, TaskFaultReason, INVALID_TASK_ID};
+use slopos_abi::task::{INVALID_TASK_ID, Task, TaskExitReason, TaskFaultReason};
 
 unsafe extern "C" {
     fn isr0();
