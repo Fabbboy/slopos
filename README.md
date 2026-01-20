@@ -40,6 +40,16 @@ make boot VIDEO=1   # spins the wheel
 
 <br/>
 
+## Line Count (scc)
+
+You can install scc by using the standard Go toolchain (Go >= 1.25).
+
+```bash
+go install github.com/boyter/scc/v3@latest
+```
+
+<br/>
+
 |  | Command | What it does |
 |:--:|---------|--------------|
 | | `make boot VIDEO=1` | Boot with display window |
