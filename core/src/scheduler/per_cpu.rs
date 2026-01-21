@@ -5,7 +5,7 @@
 
 use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::{
     Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
@@ -157,8 +157,8 @@ pub struct PerCpuScheduler {
     pub cpu_id: usize,
     ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
     queue_lock: Mutex<()>,
-    pub current_task: *mut Task,
-    pub idle_task: *mut Task,
+    current_task_atomic: AtomicPtr<Task>,
+    idle_task_atomic: AtomicPtr<Task>,
     pub enabled: AtomicBool,
     pub time_slice: u16,
     pub total_switches: AtomicU64,
@@ -178,8 +178,8 @@ impl PerCpuScheduler {
             cpu_id: 0,
             ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
             queue_lock: Mutex::new(()),
-            current_task: ptr::null_mut(),
-            idle_task: ptr::null_mut(),
+            current_task_atomic: AtomicPtr::new(ptr::null_mut()),
+            idle_task_atomic: AtomicPtr::new(ptr::null_mut()),
             enabled: AtomicBool::new(false),
             time_slice: 10,
             total_switches: AtomicU64::new(0),
@@ -191,16 +191,36 @@ impl PerCpuScheduler {
         }
     }
 
+    #[inline]
+    pub fn current_task(&self) -> *mut Task {
+        self.current_task_atomic.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_current_task(&self, task: *mut Task) {
+        self.current_task_atomic.store(task, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn idle_task(&self) -> *mut Task {
+        self.idle_task_atomic.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_idle_task_atomic(&self, task: *mut Task) {
+        self.idle_task_atomic.store(task, Ordering::Release);
+    }
+
     pub fn init(&mut self, cpu_id: usize) {
         self.cpu_id = cpu_id;
         for queue in self.ready_queues.iter_mut() {
             queue.init();
         }
-        self.current_task = ptr::null_mut();
-        // Preserve idle_task if already set (AP scheduler may already be running)
-        // Only clear it if this is the first initialization
+        self.current_task_atomic
+            .store(ptr::null_mut(), Ordering::Release);
         if !self.is_initialized() {
-            self.idle_task = ptr::null_mut();
+            self.idle_task_atomic
+                .store(ptr::null_mut(), Ordering::Release);
         }
         self.enabled.store(false, Ordering::Relaxed);
         self.time_slice = 10;
@@ -268,7 +288,7 @@ impl PerCpuScheduler {
     }
 
     pub fn set_idle_task(&mut self, task: *mut Task) {
-        self.idle_task = task;
+        self.idle_task_atomic.store(task, Ordering::Release);
     }
 
     pub fn enable(&self) {
@@ -551,11 +571,10 @@ pub fn is_idle_task(task: *const Task) -> bool {
         return false;
     }
 
-    // First check: pointer comparison with registered idle tasks
     let cpu_count = slopos_lib::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(is_idle) =
-            with_cpu_scheduler(cpu_id, |sched| sched.idle_task == task as *mut Task)
+            with_cpu_scheduler(cpu_id, |sched| sched.idle_task() == task as *mut Task)
         {
             if is_idle {
                 return true;
@@ -563,29 +582,62 @@ pub fn is_idle_task(task: *const Task) -> bool {
         }
     }
 
-    // Fallback check: idle tasks have names "idle" or "ap_idle_N"
-    // This catches cases where the per-CPU scheduler check might fail
-    // (e.g., during test reinitialization or race conditions)
-    unsafe {
-        let name = &(*task).name;
-        // Check for "idle\0" (BSP idle task)
-        if name[0] == b'i' && name[1] == b'd' && name[2] == b'l' && name[3] == b'e' && name[4] == 0
-        {
-            return true;
-        }
-        // Check for "ap_idle_" prefix (AP idle tasks)
-        if name[0] == b'a'
-            && name[1] == b'p'
-            && name[2] == b'_'
-            && name[3] == b'i'
-            && name[4] == b'd'
-            && name[5] == b'l'
-            && name[6] == b'e'
-            && name[7] == b'_'
-        {
-            return true;
-        }
-    }
-
     false
+}
+
+// =============================================================================
+// AP Pause Mechanism for Test Reinitialization
+// =============================================================================
+
+/// Global flag to pause all AP scheduler loops during test reinitialization.
+/// When set, APs will spin-wait instead of processing tasks.
+static AP_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Pause all AP scheduler loops. Call this before clearing queues/reinitializing.
+pub fn pause_all_aps() {
+    AP_PAUSED.store(true, Ordering::SeqCst);
+    // Memory barrier to ensure the flag is visible to all CPUs
+    core::sync::atomic::fence(Ordering::SeqCst);
+    // Give APs time to notice the pause and stop processing
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Resume all AP scheduler loops after reinitialization is complete.
+pub fn resume_all_aps() {
+    core::sync::atomic::fence(Ordering::SeqCst);
+    AP_PAUSED.store(false, Ordering::SeqCst);
+}
+
+/// Check if APs should be paused.
+#[inline]
+pub fn are_aps_paused() -> bool {
+    AP_PAUSED.load(Ordering::Acquire)
+}
+
+/// Clear all ready queues for a specific CPU. Used during test reinitialization.
+pub fn clear_cpu_queues(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+    unsafe {
+        let sched = &mut CPU_SCHEDULERS[cpu_id];
+        let _guard = sched.queue_lock.lock();
+        for queue in sched.ready_queues.iter_mut() {
+            queue.init();
+        }
+        // Clear current task but preserve idle task
+        sched
+            .current_task_atomic
+            .store(ptr::null_mut(), Ordering::Release);
+    }
+}
+
+/// Clear all per-CPU ready queues across all CPUs. Used during scheduler shutdown.
+pub fn clear_all_cpu_queues() {
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        clear_cpu_queues(cpu_id);
+    }
 }

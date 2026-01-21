@@ -1,18 +1,18 @@
 use core::ffi::c_char;
 use core::ptr;
 
+use slopos_abi::fate::FateResult;
+use slopos_abi::syscall::*;
 use slopos_abi::DisplayInfo;
 use slopos_abi::InputEvent;
 use slopos_abi::WindowInfo;
-use slopos_abi::fate::FateResult;
-use slopos_abi::syscall::*;
 
 use crate::exec;
 
 use crate::platform;
 use crate::syscall::common::{
-    SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
-    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
+    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
+    syscall_return_err, SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
@@ -21,13 +21,14 @@ use crate::syscall::fs::{
 };
 use crate::syscall_services::{fate as fate_svc, input, tty, video};
 use crate::{
-    fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending, get_scheduler_stats,
-    get_task_stats, schedule, scheduler_is_preemption_enabled, task_terminate, yield_,
+    clear_scheduler_current_task, fate_apply_outcome, fate_set_pending, fate_spin,
+    fate_take_pending, get_scheduler_stats, get_task_stats, schedule,
+    scheduler_is_preemption_enabled, task_terminate, yield_,
 };
 
 use slopos_abi::task::{Task, TaskExitReason, TaskFaultReason};
-use slopos_lib::InterruptFrame;
 use slopos_lib::klog_debug;
+use slopos_lib::InterruptFrame;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::copy_to_user;
@@ -89,7 +90,7 @@ pub fn syscall_exit(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     }
     klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
     task_terminate(task_id);
-    klog_debug!("SYSCALL_EXIT: task {} calling schedule", task_id);
+    clear_scheduler_current_task();
     schedule();
     klog_debug!(
         "SYSCALL_EXIT: task {} schedule returned (should not happen)",

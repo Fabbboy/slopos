@@ -291,6 +291,13 @@ fn reset_task_quantum(sched: &SchedulerInner, task: *mut Task) {
     }
 }
 
+pub fn clear_scheduler_current_task() {
+    with_scheduler(|sched| {
+        sched.current_task = ptr::null_mut();
+    });
+    task_set_current(ptr::null_mut());
+}
+
 pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -341,8 +348,8 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
     let last_cpu = unsafe { (*task).last_cpu as usize };
     per_cpu::with_cpu_scheduler(last_cpu, |sched| {
         sched.remove_task(task);
-        if sched.current_task == task {
-            sched.current_task = ptr::null_mut();
+        if sched.current_task() == task {
+            sched.set_current_task(ptr::null_mut());
         }
     });
 
@@ -478,7 +485,7 @@ pub fn schedule() {
 
         let current = sched.current_task;
         let cpu_id = slopos_lib::get_current_cpu();
-        let is_idle = per_cpu::with_cpu_scheduler(cpu_id, |local| local.idle_task == current)
+        let is_idle = per_cpu::with_cpu_scheduler(cpu_id, |local| local.idle_task() == current)
             .unwrap_or(false)
             || current == sched.idle_task;
 
@@ -820,8 +827,8 @@ pub fn scheduler_is_enabled() -> c_int {
 
 pub fn scheduler_get_current_task() -> *mut Task {
     let cpu_id = slopos_lib::get_current_cpu();
-    let percpu_current =
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task).unwrap_or(ptr::null_mut());
+    let percpu_current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
+        .unwrap_or(ptr::null_mut());
 
     if !percpu_current.is_null() {
         return percpu_current;
@@ -954,7 +961,8 @@ pub fn scheduler_run_ap(cpu_id: usize) -> ! {
     slopos_lib::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
-    let idle_task = per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task).unwrap_or(ptr::null_mut());
+    let idle_task =
+        per_cpu::with_cpu_scheduler(cpu_id, |s| s.idle_task()).unwrap_or(ptr::null_mut());
 
     if idle_task.is_null() {
         klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
@@ -1008,7 +1016,7 @@ fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
     task_record_context_switch(idle_task, next_task, timestamp);
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.current_task = next_task;
+        sched.set_current_task(next_task);
         sched.increment_switches();
     });
 
@@ -1047,7 +1055,7 @@ fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
     task_record_context_switch(next_task, idle_task, timestamp);
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.current_task = idle_task;
+        sched.set_current_task(idle_task);
     });
 
     task_set_current(idle_task);

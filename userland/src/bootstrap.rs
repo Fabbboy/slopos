@@ -2,13 +2,13 @@ use core::ffi::c_char;
 use core::ptr;
 use slopos_lib::string::cstr_to_str;
 
-use slopos_boot::early_init::{BootInitStep, boot_init_priority};
+use slopos_boot::early_init::{boot_init_priority, BootInitStep};
 use slopos_core::syscall::register_spawn_task_callback;
 use slopos_core::{
-    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, Task,
-    TaskEntry, schedule_task, task_get_info, task_set_state, task_terminate,
+    schedule_task, task_get_info, task_set_state, task_terminate, Task, TaskEntry, INVALID_TASK_ID,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED,
 };
-use slopos_lib::klog_info;
+use slopos_lib::{klog_debug, klog_info};
 use slopos_mm::process_vm::process_vm_load_elf;
 
 use crate::loader::user_spawn_program_with_flags;
@@ -117,6 +117,14 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         (*task_info).entry_point = new_entry;
         // TaskContext is packed; use unaligned stores/loads when touching it directly.
         ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), new_entry);
+
+        // Debug: verify the write took effect
+        let verify_rip = ptr::read_unaligned(ptr::addr_of!((*task_info).context.rip));
+        klog_debug!(
+            "USERLAND: Updated context.rip to 0x{:x} (verify read: 0x{:x})\n",
+            new_entry,
+            verify_rip
+        );
     }
 
     task_id as i32

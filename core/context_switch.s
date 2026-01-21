@@ -185,7 +185,15 @@ context_switch_user:
 .Lctx_user_load:
     movq    %rsi, %r15
 
-    # Build IRET frame
+    # Switch CR3 FIRST (before using any stack that might not be mapped in new address space)
+    movq    0xC0(%r15), %rax
+    movq    %cr3, %rdx
+    cmpq    %rax, %rdx
+    je      .Lctx_user_cr3_done
+    movq    %rax, %cr3
+.Lctx_user_cr3_done:
+
+    # Now build IRET frame (stack is guaranteed mapped since TSS RSP0 was set to new task's kernel stack)
     movq    0xB8(%r15), %rax
     pushq   %rax
     movq    0x38(%r15), %rax
@@ -196,14 +204,6 @@ context_switch_user:
     pushq   %rax
     movq    0x80(%r15), %rax
     pushq   %rax
-
-    # Switch CR3
-    movq    0xC0(%r15), %rax
-    movq    %cr3, %rdx
-    cmpq    %rax, %rdx
-    je      .Lctx_user_cr3_done
-    movq    %rax, %cr3
-.Lctx_user_cr3_done:
 
     # Restore FPU/SSE state
     leaq    FPU_STATE_OFFSET(%r15), %rax
@@ -220,20 +220,30 @@ context_switch_user:
     # Writing to GS selector would not affect the MSR anyway in 64-bit mode
 
     # Set up GS_BASE for SYSCALL compatibility before returning to user mode.
-    # KERNEL_GS_BASE was set per-CPU during syscall_msr_init() and does NOT
-    # change per-task - all tasks on the same CPU share the same per-CPU data.
-    # We only need to set GS_BASE=0 for user mode; KERNEL_GS_BASE stays as-is.
+    #
+    # CRITICAL: KERNEL_GS_BASE may have been zeroed if the previous task did a
+    # SYSCALL and we're switching from within that syscall handler. When a user
+    # task does SYSCALL, SWAPGS swaps GS_BASE <-> KERNEL_GS_BASE. If the syscall
+    # handler then calls schedule() -> context_switch_user, KERNEL_GS_BASE is
+    # still 0 from that SWAPGS. We MUST restore it before returning to user mode.
     #
     # After IRETQ, user runs with GS_BASE=0. When user does SYSCALL,
     # SWAPGS will swap GS_BASE(0) <-> KERNEL_GS_BASE(per-cpu), which is correct.
 
-    # Set GS_BASE = 0 (user mode sees GS_BASE=0)
+    # First: Restore KERNEL_GS_BASE to the per-CPU data pointer
+    # MSR 0xC0000102 = IA32_KERNEL_GS_BASE
+    movl $0xC0000102, %ecx
+    movq SYSCALL_CPU_DATA_PTR(%rip), %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
+    wrmsr
+
+    # Second: Set GS_BASE = 0 (user mode sees GS_BASE=0)
+    # MSR 0xC0000101 = IA32_GS_BASE
     movl $0xC0000101, %ecx
     xorl %eax, %eax
     xorl %edx, %edx
     wrmsr
-
-    # KERNEL_GS_BASE is already correct per-CPU from syscall_msr_init() - don't touch it
 
     # GPRs (restore after MSR write since we clobbered eax/ecx/edx)
     movq    0x00(%r15), %rax

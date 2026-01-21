@@ -21,7 +21,7 @@ pub use slopos_abi::task::{
     TASK_STATE_TERMINATED,
 };
 
-use slopos_mm::mm_constants::{PageFlags, PROCESS_CODE_START_VA};
+use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
 
 use spin::Once;
 
@@ -80,8 +80,8 @@ use slopos_fs::fileio::{
 };
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::process_vm::{
-    create_process_vm, destroy_process_vm, process_vm_alloc, process_vm_clone_cow,
-    process_vm_get_page_dir,
+    create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_page_dir,
+    process_vm_get_stack_top,
 };
 use slopos_mm::shared_memory::shm_cleanup_task;
 use slopos_mm::symbols;
@@ -139,11 +139,14 @@ fn release_task_dependents(completed_task_id: u32) {
     for dep_opt in dependents.iter() {
         if let Some(dep) = dep_opt {
             let dep_id = unsafe { (*(*dep)).task_id };
+            klog_debug!("task_terminate: Unblocking dependent task {}", dep_id);
             if scheduler::unblock_task(*dep) != 0 {
-                klog_info!(
+                klog_debug!(
                     "task_terminate: Failed to unblock dependent task {}",
                     dep_id
                 );
+            } else {
+                klog_debug!("task_terminate: Successfully unblocked task {}", dep_id);
             }
         }
     }
@@ -376,17 +379,13 @@ pub fn task_create(
             return INVALID_TASK_ID;
         }
 
-        stack_base = process_vm_alloc(
-            process_id,
-            TASK_STACK_SIZE,
-            PageFlags::USER_RW.bits() as u32,
-        );
-
-        if stack_base == 0 {
-            klog_info!("task_create: Failed to allocate stack");
+        let stack_top = process_vm_get_stack_top(process_id);
+        if stack_top == 0 {
+            klog_info!("task_create: Failed to get process stack");
             destroy_process_vm(process_id);
             return INVALID_TASK_ID;
         }
+        stack_base = stack_top - TASK_STACK_SIZE;
 
         let kstack = kmalloc(TASK_KERNEL_STACK_SIZE as usize);
         if kstack.is_null() {
@@ -543,7 +542,12 @@ pub fn task_terminate(task_id: u32) -> c_int {
         (*task_ptr).fate_pending = 0;
     }
 
+    // Pause APs while unblocking dependents to prevent races during task cleanup.
+    // The AP might try to context switch to a newly-unblocked task while we're still
+    // in the middle of cleanup, potentially causing issues with scheduler state.
+    crate::per_cpu::pause_all_aps();
     release_task_dependents(resolved_id);
+    crate::per_cpu::resume_all_aps();
 
     if !is_current {
         unsafe {
@@ -575,6 +579,8 @@ pub fn task_terminate(task_id: u32) -> c_int {
 }
 
 pub fn task_shutdown_all() -> c_int {
+    crate::per_cpu::pause_all_aps();
+
     let mut result = 0;
     let current = scheduler::scheduler_get_current_task();
 
@@ -607,6 +613,8 @@ pub fn task_shutdown_all() -> c_int {
         }
     }
 
+    crate::per_cpu::clear_all_cpu_queues();
+
     with_task_manager(|mgr| {
         let mut preserved = 0u32;
         for task in mgr.tasks.iter() {
@@ -616,6 +624,8 @@ pub fn task_shutdown_all() -> c_int {
         }
         mgr.num_tasks = preserved;
     });
+
+    crate::per_cpu::resume_all_aps();
     result
 }
 

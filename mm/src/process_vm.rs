@@ -2,21 +2,21 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down, align_up, klog_info};
+use slopos_lib::{align_down, align_up, klog_info, IrqMutex};
 
 use crate::aslr;
-use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
+use crate::elf::{ElfError, ElfValidator, ValidatedSegment, MAX_LOAD_SEGMENTS, PF_W};
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout::mm_get_process_layout;
-use crate::mm_constants::{INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB, PageFlags};
+use crate::mm_constants::{PageFlags, INVALID_PROCESS_ID, MAX_PROCESSES, PAGE_SIZE_4KB};
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
+    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref, ALLOC_FLAG_ZERO,
 };
 use crate::paging::{
-    PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
-    paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
-    unmap_page_in_dir, virt_to_phys_in_dir,
+    map_page_4kb_in_dir, paging_copy_kernel_mappings, paging_free_user_space, paging_get_pte_flags,
+    paging_mark_cow, paging_mark_range_user, unmap_page_in_dir, virt_to_phys_in_dir, PageTable,
+    ProcessPageDir,
 };
 use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
@@ -1214,6 +1214,14 @@ pub fn process_vm_increment_pages(process_id: u32, count: u32) {
     unsafe {
         (*process_ptr).total_pages = (*process_ptr).total_pages.saturating_add(count);
     }
+}
+
+pub fn process_vm_get_stack_top(process_id: u32) -> u64 {
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*process_ptr).stack_end }
 }
 
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
