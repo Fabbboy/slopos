@@ -6,12 +6,38 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 
 | Document | Description |
 |----------|-------------|
-| [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS, with detailed analysis of current state and future directions |
-| [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | **NEW** Detailed implementation plan for the retained-mode widget toolkit |
+| [RUST_NATIVE_SMP_SAFETY.md](./RUST_NATIVE_SMP_SAFETY.md) | **PRIORITY** Comprehensive plan to leverage Rust's type system for SMP-safe task scheduling, inspired by Redox OS |
+| [BOOT_STABILITY_FIXES.md](./BOOT_STABILITY_FIXES.md) | Current state of boot stability issues and the WIN path crash analysis |
+| [SMP_FULL_MIGRATION.md](./SMP_FULL_MIGRATION.md) | Infrastructure plan for full SMP task execution on Application Processors |
+| [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
+| [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 
 ---
 
-## Current Focus: UI Toolkit
+## Current Focus: SMP Safety & Boot Stability
+
+**BLOCKING ISSUE**: The kernel crashes on boot when the roulette game results in a WIN. This is caused by race conditions in the SMP scheduler - tasks are scheduled to APs before their context is visible across CPUs.
+
+### Priority: Rust-Native SMP Safety
+
+**See [RUST_NATIVE_SMP_SAFETY.md](./RUST_NATIVE_SMP_SAFETY.md) for the complete implementation plan.**
+
+The solution leverages Rust's type system to enforce synchronization at compile time, inspired by Redox OS:
+
+| Phase | Description |
+|-------|-------------|
+| Phase 1 | TaskLock wrapper (`Arc<IrqRwLock<Task>>`) |
+| Phase 2 | Status enum (replace `u8` state) |
+| Phase 3 | Type-safe state transitions |
+| Phase 4 | Atomic unblock-and-schedule |
+| Phase 5 | Context switch holds guards |
+| Cleanup | Remove deprecated code |
+
+**Key insight**: If you need a lock to access data, the type system should require you to hold that lock.
+
+---
+
+## Completed: Kernel Foundation
 
 The kernel foundation is complete. All critical systems are implemented:
 - VFS Layer with ext2, ramfs, devfs
@@ -25,9 +51,9 @@ The kernel foundation is complete. All critical systems are implemented:
 - Priority-based scheduling
 - TLB shootdown, FPU state save
 
-### Remaining Work: UI Toolkit
+### Next: UI Toolkit
 
-No dependencies on kernel work. Can proceed immediately.
+After SMP stability is resolved, UI toolkit work can proceed.
 
 **See [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) for complete implementation details.**
 
