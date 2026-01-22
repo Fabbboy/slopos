@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::preempt::PreemptGuard;
 use slopos_lib::IrqMutex;
+use slopos_lib::preempt::PreemptGuard;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -14,11 +14,11 @@ use crate::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
+    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
+    TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
-    TASK_STATE_READY, TASK_STATE_RUNNING,
+    task_set_state,
 };
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
@@ -460,7 +460,6 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
             context_switch(ptr::null_mut(), &(*info.new_task).context);
         }
     }
-    // PreemptGuard is dropped here after context_switch returns to new task
 }
 
 pub fn schedule() {
@@ -985,11 +984,23 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     use super::work_steal::try_work_steal;
 
     loop {
+        if per_cpu::are_aps_paused() {
+            core::hint::spin_loop();
+            continue;
+        }
+
         let next_task =
             per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
                 .unwrap_or(ptr::null_mut());
 
         if !next_task.is_null() {
+            if per_cpu::are_aps_paused() {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.enqueue_local(next_task);
+                });
+                core::hint::spin_loop();
+                continue;
+            }
             if task_is_terminated(next_task) || !task_is_ready(next_task) {
                 continue;
             }
@@ -997,7 +1008,7 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             continue;
         }
 
-        if try_work_steal() {
+        if !per_cpu::are_aps_paused() && try_work_steal() {
             continue;
         }
 
@@ -1012,6 +1023,10 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 }
 
 fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
+    if task_is_terminated(next_task) || !task_is_ready(next_task) {
+        return;
+    }
+
     let timestamp = kdiag_timestamp();
     task_record_context_switch(idle_task, next_task, timestamp);
 

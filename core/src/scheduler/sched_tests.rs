@@ -12,6 +12,7 @@ use core::ptr;
 
 use slopos_lib::klog_info;
 
+use super::per_cpu::{pause_all_aps, resume_all_aps};
 use super::scheduler::{
     self, get_scheduler_stats, init_scheduler, schedule, schedule_task, scheduler_is_enabled,
     scheduler_shutdown, scheduler_timer_tick, unschedule_task,
@@ -28,24 +29,38 @@ use super::task::{
 // =============================================================================
 
 fn setup_test_environment() -> i32 {
+    // Pause APs first to prevent them from picking up stale tasks during reinitialization
+    pause_all_aps();
+
     // Clean slate
     task_shutdown_all();
     scheduler_shutdown();
 
     if init_task_manager() != 0 {
         klog_info!("SCHED_TEST: Failed to init task manager");
+        resume_all_aps();
         return -1;
     }
     if init_scheduler() != 0 {
         klog_info!("SCHED_TEST: Failed to init scheduler");
+        resume_all_aps();
         return -1;
     }
+
+    // Resume APs now that reinitialization is complete
+    resume_all_aps();
     0
 }
 
 fn teardown_test_environment() {
+    // Pause APs before cleanup to prevent race conditions
+    pause_all_aps();
+
     task_shutdown_all();
     scheduler_shutdown();
+
+    // Resume APs after cleanup
+    resume_all_aps();
 }
 
 fn dummy_task_fn(_arg: *mut c_void) {

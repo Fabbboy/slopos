@@ -164,6 +164,9 @@ impl PageAllocator {
     }
 
     fn order_block_pages(order: u32) -> u32 {
+        if order >= 32 {
+            panic!("order_block_pages: invalid order {} >= 32", order);
+        }
         1u32 << order
     }
 
