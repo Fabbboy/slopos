@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::IrqMutex;
 use slopos_lib::preempt::PreemptGuard;
+use slopos_lib::IrqMutex;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -14,11 +14,11 @@ use crate::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
-    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
+    task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
+    TASK_STATE_READY, TASK_STATE_RUNNING,
 };
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
@@ -705,7 +705,17 @@ pub fn init_scheduler() -> c_int {
     unsafe {
         slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
     }
+
+    slopos_lib::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
+
     0
+}
+
+fn sched_panic_cleanup() {
+    unsafe {
+        scheduler_force_unlock();
+        crate::task::task_manager_force_unlock();
+    }
 }
 
 pub fn create_idle_task() -> c_int {
@@ -993,7 +1003,9 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
     loop {
         if per_cpu::are_aps_paused() {
-            core::hint::spin_loop();
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+            }
             continue;
         }
 
@@ -1002,14 +1014,22 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
                 .unwrap_or(ptr::null_mut());
 
         if !next_task.is_null() {
+            per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                sched.set_executing_task(true);
+            });
+
             if per_cpu::are_aps_paused() {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                     sched.enqueue_local(next_task);
+                    sched.set_executing_task(false);
                 });
                 core::hint::spin_loop();
                 continue;
             }
             if task_is_terminated(next_task) || !task_is_ready(next_task) {
+                per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+                    sched.set_executing_task(false);
+                });
                 continue;
             }
             ap_execute_task(cpu_id, idle_task, next_task);
@@ -1032,6 +1052,9 @@ fn ap_scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
 fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
     if task_is_terminated(next_task) || !task_is_ready(next_task) {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            sched.set_executing_task(false);
+        });
         return;
     }
 
@@ -1092,6 +1115,10 @@ fn ap_execute_task(cpu_id: usize, idle_task: *mut Task, next_task: *mut Task) {
             }
         }
     }
+
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_executing_task(false);
+    });
 }
 
 pub fn get_percpu_scheduler_stats(
@@ -1128,5 +1155,11 @@ pub fn send_reschedule_ipi(target_cpu: usize) {
 
     if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(target_cpu) {
         slopos_lib::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
+    }
+}
+
+pub unsafe fn scheduler_force_unlock() {
+    if let Some(mutex) = SCHEDULER.get() {
+        unsafe { mutex.force_unlock() };
     }
 }

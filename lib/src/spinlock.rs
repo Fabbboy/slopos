@@ -37,6 +37,26 @@ impl<T> IrqMutex<T> {
         }
     }
 
+    /// Force unlock the mutex without proper guard handling.
+    ///
+    /// # Safety
+    /// This is ONLY safe to call after a panic recovery via longjmp, when we know
+    /// the lock might be held but the guard was lost. The caller must ensure:
+    /// 1. No code is currently executing with this lock held
+    /// 2. The data protected by the lock is in a consistent state (or will be reinitialized)
+    ///
+    /// This is a last-resort mechanism for panic recovery scenarios.
+    #[inline]
+    pub unsafe fn force_unlock(&self) {
+        self.lock.store(false, Ordering::Release);
+    }
+
+    /// Check if the lock is currently held.
+    #[inline]
+    pub fn is_locked(&self) -> bool {
+        self.lock.load(Ordering::Relaxed)
+    }
+
     #[inline]
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
         let preempt = PreemptGuard::new();

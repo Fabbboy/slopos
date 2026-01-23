@@ -469,7 +469,8 @@ test: iso-tests
 	  -nographic \
 	  -vga std \
 	  -usb -device usb-tablet \
-	  -device isa-debug-exit,iobase=0xf4,iosize=0x01; \
+	  -device isa-debug-exit,iobase=0xf4,iosize=0x01 \
+	  -no-reboot; \
 	status=$$?; \
 	set -e; \
 	trap - EXIT INT TERM; \

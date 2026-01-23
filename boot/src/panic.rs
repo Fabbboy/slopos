@@ -74,9 +74,12 @@ fn panic_dump_backtrace() {
 
 /// Core panic implementation. Called by the kernel's `#[panic_handler]`.
 pub fn panic_handler_impl(info: &PanicInfo) -> ! {
-    cpu::disable_interrupts();
-
+    // Check test recovery BEFORE disabling interrupts so we can restore state properly
     if panic_recovery::recovery_is_active() {
+        // Disable interrupts only temporarily for the message
+        let interrupts_were_enabled = cpu::are_interrupts_enabled();
+        cpu::disable_interrupts();
+
         panic_serial_write("\n[PANIC CAUGHT BY TEST HARNESS]");
 
         if let Some(location) = info.location() {
@@ -93,10 +96,18 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
         panic_recovery::recovery_set_active(false);
 
+        // Re-enable interrupts if they were enabled before panic
+        // This is critical: longjmp will restore registers but NOT interrupt flag
+        if interrupts_were_enabled {
+            cpu::enable_interrupts();
+        }
+
         unsafe {
             panic_recovery::test_longjmp(panic_recovery::get_recovery_buf(), 1);
         }
     }
+
+    cpu::disable_interrupts();
 
     if !PANIC_IN_PROGRESS.enter() {
         panic_serial_write("\n!!! RECURSIVE PANIC DETECTED - HALTING !!!\n");

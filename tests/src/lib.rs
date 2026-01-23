@@ -114,7 +114,15 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
 
         if let Some(run) = desc.run {
             let config_ptr = config as *const ();
-            let _ = run(config_ptr, &mut res);
+            let suite_result = slopos_lib::catch_panic!({
+                run(config_ptr, &mut res);
+                0
+            });
+            if suite_result != 0 {
+                res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
+                res.failed = res.failed.saturating_add(1);
+                klog_info!("TESTS: suite panic caught, continuing\n");
+            }
         }
 
         if PANIC_SEEN.is_active() {

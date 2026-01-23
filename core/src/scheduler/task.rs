@@ -12,12 +12,13 @@ use slopos_lib::{klog_debug, klog_info};
 use super::scheduler;
 
 pub use slopos_abi::task::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    FpuState, IdtEntry, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
     TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
-    TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    TASK_STATE_TERMINATED,
 };
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
@@ -177,7 +178,11 @@ fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<us
     }
     let start = mgr.tasks.as_ptr() as usize;
     let idx = (task as usize - start) / mem::size_of::<Task>();
-    if idx < MAX_TASKS { Some(idx) } else { None }
+    if idx < MAX_TASKS {
+        Some(idx)
+    } else {
+        None
+    }
 }
 
 fn record_task_exit(
@@ -543,12 +548,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
         (*task_ptr).fate_pending = 0;
     }
 
-    // Pause APs while unblocking dependents to prevent races during task cleanup.
-    // The AP might try to context switch to a newly-unblocked task while we're still
-    // in the middle of cleanup, potentially causing issues with scheduler state.
-    crate::per_cpu::pause_all_aps();
+    let was_paused = crate::per_cpu::pause_all_aps();
     release_task_dependents(resolved_id);
-    crate::per_cpu::resume_all_aps();
+    crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
 
     if !is_current {
         unsafe {
@@ -580,7 +582,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
 }
 
 pub fn task_shutdown_all() -> c_int {
-    crate::per_cpu::pause_all_aps();
+    let was_paused = crate::per_cpu::pause_all_aps();
 
     let mut result = 0;
     let current = scheduler::scheduler_get_current_task();
@@ -626,7 +628,7 @@ pub fn task_shutdown_all() -> c_int {
         mgr.num_tasks = preserved;
     });
 
-    crate::per_cpu::resume_all_aps();
+    crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
     result
 }
 
@@ -951,6 +953,10 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
     );
 
     child_task_id
+}
+
+pub unsafe fn task_manager_force_unlock() {
+    unsafe { TASK_MANAGER.force_unlock() };
 }
 
 use super::ffi_boundary::task_entry_wrapper;

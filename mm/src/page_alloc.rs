@@ -41,12 +41,12 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
+use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info, InitFlag, IrqMutex};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{
-    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count, mm_region_get,
-    mm_reservations_count, mm_reservations_get,
+    mm_region_count, mm_region_get, mm_reservations_count, mm_reservations_get, MmRegion,
+    MmRegionKind, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
 };
 use crate::mm_constants::PAGE_SIZE_4KB;
 
@@ -1060,4 +1060,8 @@ fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
         }
         None => -1,
     }
+}
+
+pub unsafe fn page_allocator_force_unlock() {
+    PAGE_ALLOCATOR.force_unlock();
 }

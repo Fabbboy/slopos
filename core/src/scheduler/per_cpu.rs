@@ -8,9 +8,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
+    Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
 };
-use slopos_lib::{MAX_CPUS, klog_debug, klog_info};
+use slopos_lib::{klog_debug, klog_info, MAX_CPUS};
 use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -167,6 +167,7 @@ pub struct PerCpuScheduler {
     pub idle_time: AtomicU64,
     initialized: AtomicBool,
     pub return_context: TaskContext,
+    executing_task: AtomicBool,
 }
 
 unsafe impl Send for PerCpuScheduler {}
@@ -188,7 +189,16 @@ impl PerCpuScheduler {
             idle_time: AtomicU64::new(0),
             initialized: AtomicBool::new(false),
             return_context: TaskContext::zero(),
+            executing_task: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_executing_task(&self, executing: bool) {
+        self.executing_task.store(executing, Ordering::SeqCst);
+    }
+
+    pub fn is_executing_task(&self) -> bool {
+        self.executing_task.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -611,20 +621,47 @@ pub fn is_idle_task(task: *const Task) -> bool {
 static AP_PAUSED: AtomicBool = AtomicBool::new(false);
 
 /// Pause all AP scheduler loops. Call this before clearing queues/reinitializing.
-pub fn pause_all_aps() {
-    AP_PAUSED.store(true, Ordering::SeqCst);
-    // Memory barrier to ensure the flag is visible to all CPUs
-    core::sync::atomic::fence(Ordering::SeqCst);
-    // Give APs time to notice the pause and stop processing
-    for _ in 0..1000 {
-        core::hint::spin_loop();
+/// Returns true if APs were already paused (caller should NOT resume in that case).
+pub fn pause_all_aps() -> bool {
+    let was_paused = AP_PAUSED.swap(true, Ordering::SeqCst);
+    if !was_paused {
+        core::sync::atomic::fence(Ordering::SeqCst);
+        let cpu_count = slopos_lib::get_cpu_count();
+        let max_wait_iterations = 100_000;
+        for iteration in 0..max_wait_iterations {
+            let mut all_idle = true;
+            for cpu_id in 1..cpu_count {
+                if let Some(executing) =
+                    with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task())
+                {
+                    if executing {
+                        all_idle = false;
+                        break;
+                    }
+                }
+            }
+            if all_idle {
+                break;
+            }
+            if iteration < 1000 {
+                core::hint::spin_loop();
+            }
+        }
     }
+    was_paused
 }
 
 /// Resume all AP scheduler loops after reinitialization is complete.
 pub fn resume_all_aps() {
     core::sync::atomic::fence(Ordering::SeqCst);
     AP_PAUSED.store(false, Ordering::SeqCst);
+}
+
+/// Conditionally resume APs only if they weren't already paused before our pause call.
+pub fn resume_all_aps_if_not_nested(was_already_paused: bool) {
+    if !was_already_paused {
+        resume_all_aps();
+    }
 }
 
 /// Check if APs should be paused.

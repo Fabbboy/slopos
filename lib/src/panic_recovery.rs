@@ -1,5 +1,7 @@
 use core::arch::naked_asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+
+use crate::percpu::get_current_cpu;
 
 #[repr(C, align(16))]
 pub struct JumpBuf {
@@ -29,7 +31,43 @@ impl JumpBuf {
 }
 
 static RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RECOVERY_CPU: AtomicUsize = AtomicUsize::new(0);
 static mut RECOVERY_BUF: JumpBuf = JumpBuf::zeroed();
+
+pub type PanicCleanupFn = fn();
+
+const MAX_PANIC_CLEANUP_HANDLERS: usize = 8;
+static PANIC_CLEANUP_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PANIC_CLEANUP_HANDLERS: [AtomicPtr<()>; MAX_PANIC_CLEANUP_HANDLERS] = [
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+];
+
+pub fn register_panic_cleanup(handler: PanicCleanupFn) {
+    let idx = PANIC_CLEANUP_COUNT.fetch_add(1, Ordering::SeqCst);
+    if idx < MAX_PANIC_CLEANUP_HANDLERS {
+        PANIC_CLEANUP_HANDLERS[idx].store(handler as *mut (), Ordering::SeqCst);
+    }
+}
+
+pub fn call_panic_cleanup() {
+    let count = PANIC_CLEANUP_COUNT
+        .load(Ordering::SeqCst)
+        .min(MAX_PANIC_CLEANUP_HANDLERS);
+    for i in 0..count {
+        let handler = PANIC_CLEANUP_HANDLERS[i].load(Ordering::SeqCst);
+        if !handler.is_null() {
+            let func: PanicCleanupFn = unsafe { core::mem::transmute(handler) };
+            func();
+        }
+    }
+}
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn test_setjmp(buf: *mut JumpBuf) -> i32 {
@@ -69,10 +107,16 @@ pub unsafe extern "C" fn test_longjmp(buf: *const JumpBuf, val: i32) -> ! {
 }
 
 pub fn recovery_is_active() -> bool {
-    RECOVERY_ACTIVE.load(Ordering::SeqCst)
+    if !RECOVERY_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    get_current_cpu() == RECOVERY_CPU.load(Ordering::SeqCst)
 }
 
 pub fn recovery_set_active(active: bool) {
+    if active {
+        RECOVERY_CPU.store(get_current_cpu(), Ordering::SeqCst);
+    }
     RECOVERY_ACTIVE.store(active, Ordering::SeqCst);
 }
 
@@ -83,7 +127,9 @@ pub fn get_recovery_buf() -> *mut JumpBuf {
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{
-        use $crate::panic_recovery::{get_recovery_buf, recovery_set_active, test_setjmp};
+        use $crate::panic_recovery::{
+            call_panic_cleanup, get_recovery_buf, recovery_set_active, test_setjmp,
+        };
 
         let result = unsafe { test_setjmp(get_recovery_buf()) };
 
@@ -93,6 +139,7 @@ macro_rules! catch_panic {
             recovery_set_active(false);
             ret
         } else {
+            call_panic_cleanup();
             -1
         }
     }};

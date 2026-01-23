@@ -258,7 +258,7 @@ macro_rules! define_test_suite {
         }
     };
 
-    // Variant 2: Single test function returning c_int
+    // Variant 2: Single test function returning c_int (with panic catching)
     ($suite_name:ident, $mask:expr, $runner_fn:path, single) => {
         $crate::paste::paste! {
             const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
@@ -268,7 +268,7 @@ macro_rules! define_test_suite {
                 out: *mut $crate::testing::TestSuiteResult,
             ) -> i32 {
                 let start = $crate::tsc::rdtsc();
-                let result = $runner_fn();
+                let result = $crate::catch_panic!({ $runner_fn() });
                 let passed = if result == 0 { 1u32 } else { 0u32 };
                 let elapsed = $crate::testing::measure_elapsed_ms(start, $crate::tsc::rdtsc());
 

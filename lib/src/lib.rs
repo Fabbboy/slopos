@@ -72,6 +72,11 @@ pub mod cpu {
     }
 
     #[inline(always)]
+    pub fn are_interrupts_enabled() -> bool {
+        (read_rflags() & (1 << 9)) != 0
+    }
+
+    #[inline(always)]
     pub fn halt_loop() -> ! {
         loop {
             hlt();
