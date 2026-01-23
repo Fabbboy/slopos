@@ -333,6 +333,10 @@ pub fn schedule_task(task: *mut Task) -> c_int {
             0
         })
     } else {
+        // Memory barrier before potentially sending IPI to another CPU.
+        // Ensures task state changes are visible to the target CPU.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
         if target_cpu != current_cpu && slopos_lib::is_cpu_online(target_cpu) {
             send_reschedule_ipi(target_cpu);
         }
@@ -603,7 +607,11 @@ pub fn unblock_task(task: *mut Task) -> c_int {
                 (*task).task_id
             );
         }
+        return -1;
     }
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
     schedule_task(task)
 }
 

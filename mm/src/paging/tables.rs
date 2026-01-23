@@ -3,7 +3,7 @@ use core::ptr;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::page_table::{
-    PageTable, PageTableEntry, PageTableLevel, PAGE_TABLE_ENTRIES,
+    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel,
 };
 use slopos_abi::arch::x86_64::paging::PageFlags;
 use slopos_lib::{cpu, klog_debug, klog_info};
@@ -12,7 +12,7 @@ use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::mm_constants::{KERNEL_VIRTUAL_BASE, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::page_alloc::{
-    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
 use crate::tlb;
 

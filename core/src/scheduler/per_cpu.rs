@@ -8,9 +8,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::{
-    Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
 };
-use slopos_lib::{klog_debug, klog_info, MAX_CPUS};
+use slopos_lib::{MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -239,6 +239,14 @@ impl PerCpuScheduler {
         if task.is_null() {
             return -1;
         }
+        let self_addr = self as *const _ as usize;
+        if self_addr < 0xffffffff80000000 {
+            klog_info!(
+                "SCHED: BUG - enqueue_local called with invalid self=0x{:x}",
+                self_addr
+            );
+            return -1;
+        }
         let priority = unsafe { (*task).priority as usize };
         let idx = priority.min(NUM_PRIORITY_LEVELS - 1);
 
@@ -251,6 +259,15 @@ impl PerCpuScheduler {
     }
 
     pub fn dequeue_highest_priority(&mut self) -> *mut Task {
+        // Sanity check: ensure self pointer is in valid kernel space
+        let self_addr = self as *const _ as usize;
+        if self_addr < 0xffffffff80000000 {
+            klog_info!(
+                "SCHED: BUG - dequeue_highest_priority called with invalid self=0x{:x}",
+                self_addr
+            );
+            return ptr::null_mut();
+        }
         let _guard = self.queue_lock.lock();
         for queue in self.ready_queues.iter_mut() {
             let task = queue.dequeue();

@@ -1,18 +1,18 @@
 use core::ffi::c_char;
 use core::ptr;
 
-use slopos_abi::fate::FateResult;
-use slopos_abi::syscall::*;
 use slopos_abi::DisplayInfo;
 use slopos_abi::InputEvent;
 use slopos_abi::WindowInfo;
+use slopos_abi::fate::FateResult;
+use slopos_abi::syscall::*;
 
 use crate::exec;
 
 use crate::platform;
 use crate::syscall::common::{
-    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
-    syscall_return_err, SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES,
+    SyscallDisposition, SyscallEntry, USER_IO_MAX_BYTES, syscall_bounded_from_user,
+    syscall_copy_to_user_bounded, syscall_copy_user_str, syscall_return_err,
 };
 use crate::syscall::context::SyscallContext;
 use crate::syscall::fs::{
@@ -27,8 +27,8 @@ use crate::{
 };
 
 use slopos_abi::task::{Task, TaskExitReason, TaskFaultReason};
-use slopos_lib::klog_debug;
 use slopos_lib::InterruptFrame;
+use slopos_lib::klog_debug;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::paging;
 use slopos_mm::user_copy::copy_to_user;

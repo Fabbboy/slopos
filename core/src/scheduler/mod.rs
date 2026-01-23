@@ -7,5 +7,6 @@ pub mod per_cpu;
 pub mod sched_tests;
 pub mod scheduler;
 pub mod task;
+pub mod task_lock;
 pub mod test_tasks;
 pub mod work_steal;
