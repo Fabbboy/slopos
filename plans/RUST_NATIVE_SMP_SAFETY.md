@@ -1120,6 +1120,176 @@ with_task_manager(|mgr| { ... }); // DEADLOCK RISK!
 
 ---
 
+## Failed Attempt: Lessons Learned (January 2026)
+
+> **CRITICAL**: This section documents a failed implementation attempt. Read before starting work.
+
+### What Was Attempted
+
+We tried to implement Phases 1-5 in a single pass:
+1. Created `lib/src/irq_rwlock.rs` - New IRQ-safe read-write lock
+2. Created `core/src/scheduler/task_lock.rs` - TaskRef = Arc<IrqRwLock<Task>>
+3. Added `TaskStatus` enum and `BlockReason` enum to `abi/src/task.rs`
+4. Added state transition methods (`mark_ready()`, `mark_running()`, etc.)
+5. Added `unblock_and_schedule_safe()` function
+6. Added RIP validation in `prepare_switch()`
+
+### What Went Wrong
+
+| Mistake | Why It Broke Everything |
+|---------|------------------------|
+| Changed `TaskManagerInner.tasks` from `[Task; MAX_TASKS]` to `[Option<TaskRef>; MAX_TASKS]` | Fundamentally changed the data structure, broke the entire task system |
+| Added `block_reason` field in the MIDDLE of `#[repr(C)]` Task struct | Broke memory layout, caused silent corruption |
+| Did not verify tests actually passed | Saw "SUITE" output and assumed success, but test harness was hitting PANIC before printing final summary |
+| Made changes across multiple phases simultaneously | No way to isolate which change caused the failure |
+
+### Symptoms of Failure
+
+- Test harness hit PANIC in `mm/src/page_alloc.rs:957`
+- QEMU had to be killed by timeout (no clean exit)
+- No final `TESTS SUMMARY: total=X passed=X failed=0` line was ever printed
+- Tests appeared to run but were crashing mid-execution
+
+### The Correct Approach (MANDATORY for next attempt)
+
+#### Rule 1: NEVER Change `#[repr(C)]` Struct Layouts
+
+The `Task` struct is used across the kernel and potentially in assembly. Memory layout must be preserved.
+
+```rust
+// WRONG: Adding field in the middle
+#[repr(C)]
+pub struct Task {
+    pub task_id: u32,
+    pub name: [u8; TASK_NAME_MAX_LEN],
+    pub block_reason: Option<BlockReason>,  // <- BREAKS EVERYTHING
+    pub state: u8,
+    // ...
+}
+
+// CORRECT: Add new fields at the END only
+#[repr(C)]
+pub struct Task {
+    pub task_id: u32,
+    pub name: [u8; TASK_NAME_MAX_LEN],
+    pub state: u8,
+    // ... existing fields unchanged ...
+    pub block_reason: Option<BlockReason>,  // <- At the END
+}
+```
+
+#### Rule 2: NEVER Replace Core Data Structures
+
+Keep `[Task; MAX_TASKS]` unchanged. Provide NEW functions that work alongside:
+
+```rust
+// WRONG: Replace the storage
+struct TaskManagerInner {
+    tasks: [Option<TaskRef>; MAX_TASKS],  // Changed storage type
+}
+
+// CORRECT: Add new accessor, keep storage unchanged
+struct TaskManagerInner {
+    tasks: [Task; MAX_TASKS],  // UNCHANGED
+}
+
+// Add NEW function alongside old one
+pub fn task_find_by_id_ref(task_id: u32) -> Option<TaskRef> {
+    // Create TaskRef wrapper around existing task slot
+    // WITHOUT changing how tasks are stored
+}
+```
+
+#### Rule 3: Test After EVERY Micro-Change
+
+```bash
+# After EVERY edit, run:
+timeout 60 make test 2>&1 | grep "TESTS SUMMARY"
+
+# MUST see this exact pattern:
+# TESTS SUMMARY: total=358 passed=358 failed=0 elapsed_ms=XXXX
+
+# If you see:
+# - Nothing (timeout killed QEMU) → BROKEN
+# - SUITE output but no SUMMARY → BROKEN
+# - failed=N where N > 0 → BROKEN
+```
+
+#### Rule 4: One Phase at a Time, One Change at a Time
+
+```
+Phase 1 breakdown:
+  1a. Add IrqRwLock to lib → TEST
+  1b. Add TaskRef type alias → TEST
+  1c. Add task_find_by_id_ref() as NEW function → TEST
+  1d. Add #[deprecated] to old function → TEST
+  ... etc
+
+If ANY step breaks tests, REVERT immediately and debug.
+```
+
+### Revised Phase 1 Plan (Corrected)
+
+**Goal**: Add new types and accessors WITHOUT changing existing storage or struct layouts.
+
+```rust
+// Step 1a: Add IrqRwLock to lib (if not present)
+// File: lib/src/irq_rwlock.rs
+// TEST after this step
+
+// Step 1b: Add type aliases (no actual usage yet)
+// File: core/src/scheduler/task_lock.rs
+pub type TaskLock = IrqRwLock<Task>;
+pub type TaskRef = Arc<TaskLock>;
+// TEST after this step
+
+// Step 1c: Add NEW accessor function (old one stays)
+// File: core/src/scheduler/task.rs
+pub fn task_find_by_id_ref(task_id: u32) -> Option<TaskRef> {
+    // Get raw pointer from existing function
+    let ptr = task_find_by_id(task_id);
+    if ptr.is_null() {
+        return None;
+    }
+    // Create a TaskRef that wraps the existing task
+    // This is temporary scaffolding for migration
+    // ...
+}
+// TEST after this step
+
+// Step 1d: Mark old function deprecated (but keep it working!)
+#[deprecated(note = "Use task_find_by_id_ref instead")]
+pub fn task_find_by_id(task_id: u32) -> *mut Task {
+    // UNCHANGED implementation
+}
+// TEST after this step
+```
+
+### Test Verification Command
+
+```bash
+# The ONLY way to know tests pass:
+make test 2>&1 | tail -5
+
+# Expected output (last line matters):
+# ...
+# TESTS SUMMARY: total=358 passed=358 failed=0 elapsed_ms=1234
+# QEMU exited cleanly
+
+# If test harness panics or hangs, you'll see:
+# - Timeout killed QEMU
+# - No TESTS SUMMARY line
+# - Or TESTS SUMMARY with failed > 0
+```
+
+### Summary: The Three Commandments
+
+1. **Thou shalt not modify `#[repr(C)]` struct field order**
+2. **Thou shalt not replace core data structures**
+3. **Thou shalt verify `TESTS SUMMARY: passed=358 failed=0` after every change**
+
+---
+
 ## References
 
 - [Redox OS kernel/src/context](https://gitlab.redox-os.org/redox-os/kernel/-/tree/master/src/context) - Rust-native context switching
