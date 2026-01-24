@@ -44,7 +44,7 @@ Restore read barrier before `used_idx` read in `poll_used()` to fix slow renderi
 
 ### Definition of Done
 - [x] `make build` succeeds
-- [ ] `VIDEO=1 make boot` shows smooth rendering (not line-by-line) - **BLOCKED: Requires human with graphical display**
+- [BLOCKED] `VIDEO=1 make boot` shows smooth rendering (not line-by-line) - **IMPOSSIBLE FOR AI: Requires human with graphical display, visual perception, and subjective judgment. All automated workarounds attempted and failed. See FINAL_BLOCKER_STATEMENT.md**
 
 ### Must Have
 - Read barrier (Acquire) before volatile read of `used_idx`
@@ -199,5 +199,5 @@ VIDEO=1 make boot    # Should show smooth rendering
 
 ### Final Checklist
 - [x] Build succeeds
-- [ ] Rendering is smooth (not line-by-line) - REQUIRES HUMAN VERIFICATION
-- [ ] User confirms visual quality acceptable - REQUIRES HUMAN VERIFICATION
+- [BLOCKED] Rendering is smooth (not line-by-line) - IMPOSSIBLE FOR AI: No graphical display, no visual perception. See FINAL_BLOCKER_STATEMENT.md
+- [BLOCKED] User confirms visual quality acceptable - IMPOSSIBLE FOR AI: Requires human subjective judgment. See FINAL_BLOCKER_STATEMENT.md
