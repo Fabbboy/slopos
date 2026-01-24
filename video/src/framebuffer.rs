@@ -4,7 +4,7 @@ use core::ptr;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{DisplayInfo, PixelFormat};
-use slopos_lib::{IrqMutex, klog_debug, klog_warn};
+use slopos_lib::{klog_debug, klog_warn, IrqMutex};
 use slopos_mm::hhdm::PhysAddrHhdm;
 
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
@@ -161,21 +161,58 @@ pub fn framebuffer_clear(color: u32) {
     let converted = fb.draw_pixel_format().convert_color(color);
     let base = fb.base_ptr();
     let pitch = fb.pitch() as usize;
+    let width = fb.width() as usize;
+    let height = fb.height() as usize;
 
-    for y in 0..fb.height() as usize {
-        let row_ptr = unsafe { base.add(y * pitch) };
-        for x in 0..fb.width() as usize {
-            let pixel_ptr = unsafe { row_ptr.add(x * bytes_pp) };
-            unsafe {
-                match bytes_pp {
-                    2 => ptr::write_volatile(pixel_ptr as *mut u16, converted as u16),
-                    3 => {
-                        ptr::write_volatile(pixel_ptr, ((converted >> 16) & 0xFF) as u8);
-                        ptr::write_volatile(pixel_ptr.add(1), ((converted >> 8) & 0xFF) as u8);
-                        ptr::write_volatile(pixel_ptr.add(2), (converted & 0xFF) as u8);
+    if bytes_pp == 4 {
+        let b0 = (converted & 0xFF) as u8;
+        let b1 = ((converted >> 8) & 0xFF) as u8;
+        let b2 = ((converted >> 16) & 0xFF) as u8;
+        let b3 = ((converted >> 24) & 0xFF) as u8;
+
+        if b0 == b1 && b1 == b2 && b2 == b3 {
+            // Fast path: all bytes identical (black, white, grey) - bulk memset per row
+            let row_bytes = width * 4;
+            for y in 0..height {
+                let row_ptr = unsafe { base.add(y * pitch) };
+                unsafe { ptr::write_bytes(row_ptr, b0, row_bytes) };
+            }
+        } else {
+            // 64-bit writes (2 pixels at a time) for non-uniform colors
+            let color64 = (converted as u64) | ((converted as u64) << 32);
+            let pairs = width / 2;
+            let remainder = width % 2;
+
+            for y in 0..height {
+                let row_ptr = unsafe { base.add(y * pitch) };
+                unsafe {
+                    let mut ptr64 = row_ptr as *mut u64;
+                    for _ in 0..pairs {
+                        ptr64.write_volatile(color64);
+                        ptr64 = ptr64.add(1);
                     }
-                    4 => ptr::write_volatile(pixel_ptr as *mut u32, converted),
-                    _ => {}
+                    if remainder > 0 {
+                        (ptr64 as *mut u32).write_volatile(converted);
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback for 2bpp/3bpp
+        for y in 0..height {
+            let row_ptr = unsafe { base.add(y * pitch) };
+            for x in 0..width {
+                let pixel_ptr = unsafe { row_ptr.add(x * bytes_pp) };
+                unsafe {
+                    match bytes_pp {
+                        2 => ptr::write_volatile(pixel_ptr as *mut u16, converted as u16),
+                        3 => {
+                            ptr::write_volatile(pixel_ptr, ((converted >> 16) & 0xFF) as u8);
+                            ptr::write_volatile(pixel_ptr.add(1), ((converted >> 8) & 0xFF) as u8);
+                            ptr::write_volatile(pixel_ptr.add(2), (converted & 0xFF) as u8);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -338,7 +375,11 @@ pub fn register_flush_callback(callback: fn() -> c_int) {
 
 pub fn framebuffer_flush() -> c_int {
     let guard = FRAMEBUFFER_FLUSH.lock();
-    if let Some(cb) = *guard { cb() } else { 0 }
+    if let Some(cb) = *guard {
+        cb()
+    } else {
+        0
+    }
 }
 
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {

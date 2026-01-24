@@ -2,7 +2,7 @@ use crate::framebuffer::{self, FbState};
 use slopos_abi::draw_primitives;
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::video_traits::VideoError;
-use slopos_abi::{DrawTarget, PixelBuffer, pixel_ops};
+use slopos_abi::{pixel_ops, DrawTarget, PixelBuffer};
 
 pub type GraphicsResult<T = ()> = Result<T, VideoError>;
 
@@ -90,30 +90,53 @@ impl PixelBuffer for GraphicsContext {
         let bytes_pp = self.fb.info.bytes_per_pixel() as usize;
         let pitch = self.fb.pitch() as usize;
         let buffer = self.fb.base_ptr();
-        let mut pixel_ptr = unsafe { buffer.add(row as usize * pitch + x0 as usize * bytes_pp) };
+        let pixel_ptr = unsafe { buffer.add(row as usize * pitch + x0 as usize * bytes_pp) };
+        let pixel_count = (x1 - x0 + 1) as usize;
 
         if bytes_pp == 4 {
-            for _ in x0..=x1 {
+            // Fast path: check if all bytes of color are the same (e.g., 0x00000000 or 0xFFFFFFFF)
+            let b0 = (color & 0xFF) as u8;
+            let b1 = ((color >> 8) & 0xFF) as u8;
+            let b2 = ((color >> 16) & 0xFF) as u8;
+            let b3 = ((color >> 24) & 0xFF) as u8;
+
+            if b0 == b1 && b1 == b2 && b2 == b3 {
+                // All bytes identical - use fast bulk write (common for black/white)
                 unsafe {
-                    (pixel_ptr as *mut u32).write_volatile(color);
-                    pixel_ptr = pixel_ptr.add(4);
+                    core::ptr::write_bytes(pixel_ptr, b0, pixel_count * 4);
+                }
+            } else {
+                // Use 64-bit writes for better throughput (2 pixels at a time)
+                let color64 = (color as u64) | ((color as u64) << 32);
+                let pairs = pixel_count / 2;
+                let remainder = pixel_count % 2;
+
+                unsafe {
+                    let mut ptr64 = pixel_ptr as *mut u64;
+                    for _ in 0..pairs {
+                        ptr64.write_volatile(color64);
+                        ptr64 = ptr64.add(1);
+                    }
+                    if remainder > 0 {
+                        (ptr64 as *mut u32).write_volatile(color);
+                    }
                 }
             }
         } else {
+            // Fallback for 2bpp/3bpp - per-pixel writes
+            let mut ptr = pixel_ptr;
             for _ in x0..=x1 {
                 unsafe {
                     match bytes_pp {
-                        2 => (pixel_ptr as *mut u16).write_volatile(color as u16),
+                        2 => (ptr as *mut u16).write_volatile(color as u16),
                         3 => {
-                            pixel_ptr.write_volatile((color & 0xFF) as u8);
-                            pixel_ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
-                            pixel_ptr
-                                .add(2)
-                                .write_volatile(((color >> 16) & 0xFF) as u8);
+                            ptr.write_volatile((color & 0xFF) as u8);
+                            ptr.add(1).write_volatile(((color >> 8) & 0xFF) as u8);
+                            ptr.add(2).write_volatile(((color >> 16) & 0xFF) as u8);
                         }
                         _ => {}
                     }
-                    pixel_ptr = pixel_ptr.add(bytes_pp);
+                    ptr = ptr.add(bytes_pp);
                 }
             }
         }
