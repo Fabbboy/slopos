@@ -162,10 +162,12 @@ impl Virtqueue {
     pub fn poll_used(&mut self, timeout_spins: u32) -> bool {
         let mut spins = 0u32;
         loop {
-            VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
-            fence(Ordering::SeqCst);
+            // NO FENCE HERE - only volatile read
             let used_idx = self.read_used_idx();
             if used_idx != self.last_used_idx {
+                // Acquire barrier ONLY when progress detected (VirtIO spec 2.7.13)
+                VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
+                fence(Ordering::Acquire);
                 VIRTIO_COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.last_used_idx = used_idx;
                 return true;

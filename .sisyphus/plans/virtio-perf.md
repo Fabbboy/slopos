@@ -247,7 +247,7 @@ Phase 2: Preemption (race analysis + per-CPU storage)
 
 ### Phase 1b: VirtIO Barrier Optimization
 
-- [ ] 2. Optimize `poll_used()` barrier placement
+- [x] 2. Optimize `poll_used()` barrier placement
 
   **What to do**:
   - Move `fence(Ordering::SeqCst)` from before the read to after detecting change
