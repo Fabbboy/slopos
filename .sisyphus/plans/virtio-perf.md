@@ -528,7 +528,7 @@ Phase 2: Preemption (race analysis + per-CPU storage)
 
 ---
 
-- [ ] 6. Implement per-CPU preemption counter
+- [x] 6. Implement per-CPU preemption counter
 
   **What to do**:
   - Modify `PreemptGuard` to use existing `PerCpuData.preempt_count` instead of global `PREEMPT_COUNT`
