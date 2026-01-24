@@ -15,8 +15,11 @@
 //! let data = get_percpu_data();
 //! ```
 
+use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+
+const IA32_GS_BASE: u32 = 0xC000_0101;
 
 /// Maximum number of CPUs supported.
 /// Must match MAX_CPUS in mm/src/tlb.rs and mm/src/page_alloc.rs.
@@ -159,38 +162,61 @@ pub fn init_percpu_for_cpu(cpu_id: usize, apic_id: u32) {
     }
 }
 
+#[inline(always)]
+fn write_gs_base(value: u64) {
+    let low = value as u32;
+    let high = (value >> 32) as u32;
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") IA32_GS_BASE,
+            in("eax") low,
+            in("edx") high,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+pub fn activate_gs_base_for_cpu(cpu_id: usize) {
+    if cpu_id >= MAX_CPUS {
+        return;
+    }
+    unsafe {
+        let data = &PER_CPU_DATA[cpu_id];
+        let addr = data as *const PerCpuData as u64;
+        write_gs_base(addr);
+
+        // Verify GS-based read works immediately after setting
+        let test_cpu_id: u32;
+        asm!(
+            "mov {:e}, gs:[0]",
+            out(reg) test_cpu_id,
+            options(nostack, preserves_flags, readonly)
+        );
+        crate::klog_info!(
+            "PERCPU: CPU {} GS_BASE=0x{:016x} verify_read={}",
+            cpu_id,
+            addr,
+            test_cpu_id
+        );
+    }
+}
+
 /// Initialize the BSP's per-CPU data.
-///
-/// # Arguments
-/// * `apic_id` - The BSP's LAPIC ID
-///
-/// # Safety
-/// Must be called exactly once during early boot, before APs are started.
 pub fn init_bsp(apic_id: u32) {
     BSP_APIC_ID.store(apic_id, Ordering::Release);
     init_percpu_for_cpu(0, apic_id);
+    activate_gs_base_for_cpu(0);
     PERCPU_INITIALIZED.store(true, Ordering::Release);
 }
 
-/// Get the current CPU index.
-///
-/// This function determines which CPU is executing by reading the LAPIC ID
-/// and looking up the corresponding CPU index.
-///
-/// # Returns
-/// The CPU index (0 for BSP, 1+ for APs), or 0 if per-CPU data is not initialized.
 #[inline]
 pub fn get_current_cpu() -> usize {
-    // Fast path: if not initialized, return 0 (BSP)
     if !PERCPU_INITIALIZED.load(Ordering::Acquire) {
         return 0;
     }
 
-    // Read LAPIC ID from the APIC
-    // This requires the APIC to be available
     let apic_id = read_lapic_id();
-
-    // Look up CPU index from APIC ID
     cpu_index_from_apic_id(apic_id).unwrap_or(0)
 }
 
@@ -346,11 +372,6 @@ pub fn register_lapic_id_fn(f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
 
-/// Read the LAPIC ID from the Local APIC registers.
-///
-/// Uses the registered APIC driver callback if available, otherwise falls back
-/// to reading the initial APIC ID from CPUID.
-#[inline]
 fn read_lapic_id() -> u32 {
     let fn_ptr = LAPIC_ID_FN.load(Ordering::Acquire);
     if !fn_ptr.is_null() {

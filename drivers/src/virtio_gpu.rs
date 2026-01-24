@@ -4,18 +4,18 @@
 use core::ffi::{c_int, c_void};
 
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
-use slopos_lib::{align_up, klog_debug, klog_info, InitFlag};
+use slopos_lib::{InitFlag, align_up, klog_debug, klog_info};
 
 use crate::pci::{
-    pci_config_read8, pci_config_write8, pci_register_driver, PciBarInfo, PciDeviceInfo, PciDriver,
+    PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_write8, pci_register_driver,
 };
 use crate::virtio::{
+    VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
+    VirtioMmioCaps,
     pci::{
-        enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok, VIRTIO_VENDOR_ID,
+        VIRTIO_VENDOR_ID, enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok,
     },
-    queue::{self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE},
-    VirtioMmioCaps, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTQ_DESC_F_NEXT,
-    VIRTQ_DESC_F_WRITE,
+    queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 
 use slopos_abi::addr::PhysAddr;
@@ -23,7 +23,7 @@ use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE};
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{
-    alloc_page_frame, alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
 };
 
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;

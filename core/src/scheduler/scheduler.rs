@@ -466,7 +466,6 @@ fn do_context_switch(info: SwitchInfo, _preempt_guard: PreemptGuard) {
 }
 
 pub fn schedule() {
-    // Acquire preempt guard FIRST - this prevents concurrent context switches
     let preempt_guard = PreemptGuard::new();
 
     enum ScheduleResult {

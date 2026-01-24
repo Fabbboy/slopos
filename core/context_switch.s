@@ -87,15 +87,14 @@ context_switch:
     leaq    FPU_STATE_OFFSET(%r15), %rax
     fxrstor64 (%rax)
 
-    # Segments
+    # Segments - restore DS, ES, FS, SS but NOT GS
+    # Writing to GS selector zeros IA32_GS_BASE MSR in long mode, breaking per-CPU access
     movq    0x98(%r15), %rax
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
     movw    %ax, %es
     movq    0xA8(%r15), %rax
     movw    %ax, %fs
-    movq    0xB0(%r15), %rax
-    movw    %ax, %gs
     movq    0xB8(%r15), %rax
     movw    %ax, %ss
 

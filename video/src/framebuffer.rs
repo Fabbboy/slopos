@@ -4,7 +4,7 @@ use core::ptr;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::pixel::DrawPixelFormat;
 use slopos_abi::{DisplayInfo, PixelFormat};
-use slopos_lib::{klog_debug, klog_warn, IrqMutex};
+use slopos_lib::{IrqMutex, klog_debug, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
 
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
@@ -375,11 +375,7 @@ pub fn register_flush_callback(callback: fn() -> c_int) {
 
 pub fn framebuffer_flush() -> c_int {
     let guard = FRAMEBUFFER_FLUSH.lock();
-    if let Some(cb) = *guard {
-        cb()
-    } else {
-        0
-    }
+    if let Some(cb) = *guard { cb() } else { 0 }
 }
 
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
