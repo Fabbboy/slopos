@@ -24,7 +24,7 @@ Remove the per-frame logging from `virtio_gpu_flush_full()` to fix line-by-line 
 
 ### Definition of Done
 - [x] `make build` succeeds
-- [ ] `VIDEO=1 make boot` shows smooth rendering (not line-by-line) - REQUIRES HUMAN VERIFICATION
+- [BLOCKED] `VIDEO=1 make boot` shows smooth rendering (not line-by-line) - IMPOSSIBLE FOR AI: Requires human with graphical display and visual perception. See notepads/virtio-logging-fix/blocker.md
 
 ---
 
