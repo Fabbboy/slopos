@@ -18,7 +18,7 @@ pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
 // =============================================================================
-// Task State Constants
+// Task State Constants (deprecated - use TaskStatus enum instead)
 // =============================================================================
 
 pub const TASK_STATE_INVALID: u8 = 0;
@@ -26,6 +26,122 @@ pub const TASK_STATE_READY: u8 = 1;
 pub const TASK_STATE_RUNNING: u8 = 2;
 pub const TASK_STATE_BLOCKED: u8 = 3;
 pub const TASK_STATE_TERMINATED: u8 = 4;
+
+// =============================================================================
+// TaskStatus - Type-safe task state enum
+// =============================================================================
+
+/// Type-safe task status with explicit state machine semantics.
+/// Uses `#[repr(u8)]` to maintain binary compatibility with legacy u8 state.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TaskStatus {
+    /// Task slot is not in use
+    #[default]
+    Invalid = 0,
+    /// Task is ready to run, waiting in a run queue
+    Ready = 1,
+    /// Task is currently executing on a CPU
+    Running = 2,
+    /// Task is blocked waiting for some event
+    Blocked = 3,
+    /// Task has terminated and is awaiting cleanup
+    Terminated = 4,
+}
+
+impl TaskStatus {
+    /// Convert from legacy u8 state constant.
+    #[inline]
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Invalid,
+            1 => Self::Ready,
+            2 => Self::Running,
+            3 => Self::Blocked,
+            4 => Self::Terminated,
+            _ => Self::Invalid,
+        }
+    }
+
+    /// Convert to legacy u8 state constant.
+    #[inline]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Check if this state can transition to the target state.
+    #[inline]
+    pub const fn can_transition_to(self, target: Self) -> bool {
+        match self {
+            Self::Invalid => matches!(target, Self::Ready),
+            Self::Ready => matches!(target, Self::Running | Self::Terminated),
+            Self::Running => matches!(target, Self::Ready | Self::Blocked | Self::Terminated),
+            Self::Blocked => matches!(target, Self::Ready | Self::Terminated),
+            Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
+        }
+    }
+
+    /// Returns true if task is in a runnable state (Ready or Running).
+    #[inline]
+    pub const fn is_runnable(self) -> bool {
+        matches!(self, Self::Ready | Self::Running)
+    }
+
+    /// Returns true if task can be scheduled.
+    #[inline]
+    pub const fn is_schedulable(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+// =============================================================================
+// BlockReason - Why a task is blocked
+// =============================================================================
+
+/// Reason why a task is in the Blocked state.
+/// Helps with debugging and enables targeted wakeups.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlockReason {
+    #[default]
+    None = 0,
+    /// Waiting for another task to terminate (task ID stored separately)
+    WaitingOnTask = 1,
+    /// Sleeping for a specified duration
+    Sleep = 2,
+    /// Waiting for I/O completion
+    IoWait = 3,
+    /// Waiting for a mutex/lock
+    MutexWait = 4,
+    /// Waiting for keyboard input
+    KeyboardWait = 5,
+    /// Waiting for IPC message
+    IpcWait = 6,
+    /// Generic blocked state (legacy compatibility)
+    Generic = 7,
+}
+
+impl BlockReason {
+    #[inline]
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::WaitingOnTask,
+            2 => Self::Sleep,
+            3 => Self::IoWait,
+            4 => Self::MutexWait,
+            5 => Self::KeyboardWait,
+            6 => Self::IpcWait,
+            7 => Self::Generic,
+            _ => Self::None,
+        }
+    }
+
+    #[inline]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
 
 // =============================================================================
 // Task Priority Constants
@@ -274,6 +390,8 @@ pub struct Task {
     pub state: u8,
     pub priority: u8,
     pub flags: u16,
+    pub block_reason: BlockReason,
+    _pad0: [u8; 3],
     pub process_id: u32,
     pub stack_base: u64,
     pub stack_size: u64,
@@ -308,7 +426,6 @@ pub struct Task {
 }
 
 impl Task {
-    /// Create an invalid (uninitialized) task.
     pub const fn invalid() -> Self {
         Self {
             task_id: INVALID_TASK_ID,
@@ -316,6 +433,8 @@ impl Task {
             state: TASK_STATE_INVALID,
             priority: TASK_PRIORITY_NORMAL,
             flags: 0,
+            block_reason: BlockReason::None,
+            _pad0: [0; 3],
             process_id: INVALID_PROCESS_ID,
             stack_base: 0,
             stack_size: 0,
@@ -348,6 +467,76 @@ impl Task {
             switch_ctx: SwitchContext::zero(),
             next_ready: ptr::null_mut(),
         }
+    }
+
+    #[inline]
+    pub fn status(&self) -> TaskStatus {
+        TaskStatus::from_u8(self.state)
+    }
+
+    #[inline]
+    pub fn set_status(&mut self, status: TaskStatus) {
+        self.state = status.as_u8();
+    }
+
+    #[inline]
+    pub fn try_transition_to(&mut self, target: TaskStatus) -> bool {
+        if self.status().can_transition_to(target) {
+            self.set_status(target);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn mark_ready(&mut self) -> bool {
+        if self.try_transition_to(TaskStatus::Ready) {
+            self.block_reason = BlockReason::None;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn mark_running(&mut self) -> bool {
+        self.try_transition_to(TaskStatus::Running)
+    }
+
+    #[inline]
+    pub fn block(&mut self, reason: BlockReason) -> bool {
+        if self.try_transition_to(TaskStatus::Blocked) {
+            self.block_reason = reason;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn terminate(&mut self) -> bool {
+        self.try_transition_to(TaskStatus::Terminated)
+    }
+
+    #[inline]
+    pub fn is_blocked(&self) -> bool {
+        self.status() == TaskStatus::Blocked
+    }
+
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.status() == TaskStatus::Ready
+    }
+
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.status() == TaskStatus::Running
+    }
+
+    #[inline]
+    pub fn is_terminated(&self) -> bool {
+        self.status() == TaskStatus::Terminated
     }
 }
 

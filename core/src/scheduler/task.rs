@@ -12,12 +12,13 @@ use slopos_lib::{klog_debug, klog_info};
 use super::scheduler;
 
 pub use slopos_abi::task::{
-    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
-    TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
-    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
-    TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
-    TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
+    BlockReason, FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
+    TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN,
+    TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL,
+    TASK_STACK_SIZE, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
     TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
+    TaskStatus,
 };
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
@@ -661,30 +662,11 @@ fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
     if old_state == new_state {
         return true;
     }
-    match old_state {
-        TASK_STATE_INVALID => new_state == TASK_STATE_READY || new_state == TASK_STATE_INVALID,
-        TASK_STATE_READY => {
-            new_state == TASK_STATE_RUNNING
-                || new_state == TASK_STATE_BLOCKED
-                || new_state == TASK_STATE_TERMINATED
-                || new_state == TASK_STATE_READY
-        }
-        TASK_STATE_RUNNING => {
-            new_state == TASK_STATE_READY
-                || new_state == TASK_STATE_BLOCKED
-                || new_state == TASK_STATE_TERMINATED
-        }
-        TASK_STATE_BLOCKED => {
-            new_state == TASK_STATE_READY
-                || new_state == TASK_STATE_TERMINATED
-                || new_state == TASK_STATE_BLOCKED
-        }
-        TASK_STATE_TERMINATED => {
-            new_state == TASK_STATE_INVALID || new_state == TASK_STATE_TERMINATED
-        }
-        _ => false,
-    }
+    let old_status = TaskStatus::from_u8(old_state);
+    let new_status = TaskStatus::from_u8(new_state);
+    old_status.can_transition_to(new_status)
 }
+
 pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     let task = task_find_by_id(task_id);
     if task.is_null() || unsafe { (*task).state } == TASK_STATE_INVALID {
@@ -700,6 +682,54 @@ pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     unsafe { (*task).state = new_state };
 
     0
+}
+
+pub fn task_set_state_with_reason(
+    task_id: u32,
+    new_status: TaskStatus,
+    reason: BlockReason,
+) -> c_int {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+
+    let task_ref = unsafe { &mut *task };
+    if task_ref.status() == TaskStatus::Invalid {
+        return -1;
+    }
+
+    match new_status {
+        TaskStatus::Ready => {
+            if task_ref.mark_ready() {
+                0
+            } else {
+                -1
+            }
+        }
+        TaskStatus::Running => {
+            if task_ref.mark_running() {
+                0
+            } else {
+                -1
+            }
+        }
+        TaskStatus::Blocked => {
+            if task_ref.block(reason) {
+                0
+            } else {
+                -1
+            }
+        }
+        TaskStatus::Terminated => {
+            if task_ref.terminate() {
+                0
+            } else {
+                -1
+            }
+        }
+        TaskStatus::Invalid => -1,
+    }
 }
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
     with_task_manager(|mgr| {
