@@ -405,7 +405,7 @@ Phase 2: Preemption (race analysis + per-CPU storage)
 
 ---
 
-- [ ] 4. Create `virtio_wmb()`/`virtio_rmb()` abstraction
+- [x] 4. Create `virtio_wmb()`/`virtio_rmb()` abstraction
 
   **What to do**:
   - Create inline functions in `drivers/src/virtio/mod.rs`
