@@ -3,7 +3,7 @@
 //! Generic split virtqueue that can be reused by all VirtIO drivers.
 
 use core::ptr;
-use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -154,7 +154,7 @@ impl Virtqueue {
         unsafe {
             let avail_idx = ptr::read_volatile(self.avail_idx_ptr());
             ptr::write_volatile(self.avail_ring_ptr(avail_idx), head);
-            compiler_fence(Ordering::Release);
+            fence(Ordering::Release);
             ptr::write_volatile(self.avail_idx_ptr(), avail_idx.wrapping_add(1));
         }
     }
