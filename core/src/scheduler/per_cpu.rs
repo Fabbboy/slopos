@@ -453,6 +453,12 @@ pub fn select_target_cpu(task: *mut Task) -> usize {
         return slopos_lib::get_current_cpu();
     }
 
+    // WORKAROUND: Force all user-mode tasks to CPU 0 until AP user-mode context switch is fixed
+    let is_user_mode = unsafe { (*task).flags & slopos_abi::task::TASK_FLAG_USER_MODE != 0 };
+    if is_user_mode {
+        return 0;
+    }
+
     let affinity = unsafe { (*task).cpu_affinity };
     let last_cpu = unsafe { (*task).last_cpu as usize };
     let cpu_count = slopos_lib::get_cpu_count();
@@ -620,8 +626,6 @@ pub fn is_idle_task(task: *const Task) -> bool {
 /// When set, APs will spin-wait instead of processing tasks.
 static AP_PAUSED: AtomicBool = AtomicBool::new(false);
 
-/// Pause all AP scheduler loops. Call this before clearing queues/reinitializing.
-/// Returns true if APs were already paused (caller should NOT resume in that case).
 pub fn pause_all_aps() -> bool {
     let was_paused = AP_PAUSED.swap(true, Ordering::SeqCst);
     if !was_paused {
@@ -651,13 +655,25 @@ pub fn pause_all_aps() -> bool {
     was_paused
 }
 
-/// Resume all AP scheduler loops after reinitialization is complete.
 pub fn resume_all_aps() {
     core::sync::atomic::fence(Ordering::SeqCst);
     AP_PAUSED.store(false, Ordering::SeqCst);
+
+    let cpu_count = slopos_lib::get_cpu_count();
+    for cpu_id in 1..cpu_count {
+        if let Some(count) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
+            if count > 0 {
+                if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(cpu_id) {
+                    slopos_lib::send_ipi_to_cpu(
+                        apic_id,
+                        slopos_abi::arch::x86_64::idt::RESCHEDULE_IPI_VECTOR,
+                    );
+                }
+            }
+        }
+    }
 }
 
-/// Conditionally resume APs only if they weren't already paused before our pause call.
 pub fn resume_all_aps_if_not_nested(was_already_paused: bool) {
     if !was_already_paused {
         resume_all_aps();

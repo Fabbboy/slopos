@@ -1148,22 +1148,18 @@ pub fn compositor_user_main(_arg: *mut c_void) {
         wm.refresh_windows();
         wm.handle_mouse_events(fb_info.height as i32);
 
-        // === RENDERING PHASE ===
         if wm.needs_redraw() {
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
                 wm.render(&mut buf);
             }
 
-            // Present to framebuffer
             output.present();
 
-            // Notify clients that their frames have been presented (Wayland wl_surface.frame)
             let present_time = sys_get_time_ms();
             sys_mark_frames_done(present_time);
         }
 
-        // === FRAME PACING ===
         let frame_end_ms = sys_get_time_ms();
         let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
         if frame_time < TARGET_FRAME_MS {

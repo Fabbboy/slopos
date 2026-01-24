@@ -16,7 +16,7 @@ use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
+    TaskContext, task_get_info, task_is_blocked, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
     task_set_state,
 };
@@ -303,13 +303,6 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         return -1;
     }
     if !task_is_ready(task) {
-        unsafe {
-            klog_info!(
-                "schedule_task: task {} not ready (state {})",
-                (*task).task_id,
-                task_get_state(task) as u32
-            );
-        }
         return -1;
     }
 
@@ -327,14 +320,11 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     if result != Some(0) {
         with_scheduler(|sched| {
             if sched.enqueue_task(task) != 0 {
-                klog_info!("schedule_task: all queues full, request rejected");
                 return -1;
             }
             0
         })
     } else {
-        // Memory barrier before potentially sending IPI to another CPU.
-        // Ensures task state changes are visible to the target CPU.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         if target_cpu != current_cpu && slopos_lib::is_cpu_online(target_cpu) {
@@ -368,6 +358,7 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
 
 fn select_next_task(sched: &mut SchedulerInner) -> *mut Task {
     let cpu_id = slopos_lib::get_current_cpu();
+
     let mut next = per_cpu::with_cpu_scheduler(cpu_id, |local| local.dequeue_highest_priority())
         .unwrap_or(ptr::null_mut());
 
