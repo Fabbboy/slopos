@@ -2,20 +2,24 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::{c_int, c_void};
+use core::sync::atomic::Ordering;
 
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
-use slopos_lib::{InitFlag, align_up, klog_debug, klog_info};
+use slopos_lib::{align_up, klog_debug, klog_info, InitFlag};
 
 use crate::pci::{
-    PciBarInfo, PciDeviceInfo, PciDriver, pci_config_read8, pci_config_write8, pci_register_driver,
+    pci_config_read8, pci_config_write8, pci_register_driver, PciBarInfo, PciDeviceInfo, PciDriver,
 };
 use crate::virtio::{
-    VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
-    VirtioMmioCaps,
     pci::{
-        VIRTIO_VENDOR_ID, enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok,
+        enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok, VIRTIO_VENDOR_ID,
     },
-    queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
+    queue::{
+        self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE, VIRTIO_COMPLETION_COUNT,
+        VIRTIO_FENCE_COUNT, VIRTIO_SPIN_COUNT,
+    },
+    VirtioMmioCaps, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTQ_DESC_F_NEXT,
+    VIRTQ_DESC_F_WRITE,
 };
 
 use slopos_abi::addr::PhysAddr;
@@ -23,7 +27,7 @@ use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::{PAGE_SIZE_4KB, PAGE_SIZE_4KB_USIZE};
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
+    alloc_page_frame, alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO,
 };
 
 pub const VIRTIO_GPU_DEVICE_ID_PRIMARY: u16 = 0x1050;
@@ -1021,6 +1025,16 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferData> {
 
 pub fn virtio_gpu_flush_full() -> c_int {
     unsafe {
+        let fences = VIRTIO_FENCE_COUNT.swap(0, Ordering::Relaxed);
+        let spins = VIRTIO_SPIN_COUNT.swap(0, Ordering::Relaxed);
+        let completions = VIRTIO_COMPLETION_COUNT.swap(0, Ordering::Relaxed);
+        klog_info!(
+            "[VIRTIO PERF] fences={} spins={} completions={}",
+            fences,
+            spins,
+            completions
+        );
+
         if VIRTIO_GPU_DEVICE.fb_ready == 0 {
             return -1;
         }

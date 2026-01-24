@@ -3,12 +3,12 @@
 //! Generic split virtqueue that can be reused by all VirtIO drivers.
 
 use core::ptr;
-use core::sync::atomic::{Ordering, compiler_fence, fence};
+use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_ZERO};
 
 use super::{
     COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
@@ -17,6 +17,11 @@ use super::{
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
+
+/// Performance instrumentation counters for VirtIO queue polling
+pub static VIRTIO_FENCE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static VIRTIO_SPIN_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static VIRTIO_COMPLETION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -157,14 +162,17 @@ impl Virtqueue {
     pub fn poll_used(&mut self, timeout_spins: u32) -> bool {
         let mut spins = 0u32;
         loop {
+            VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
             fence(Ordering::SeqCst);
             let used_idx = self.read_used_idx();
             if used_idx != self.last_used_idx {
+                VIRTIO_COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.last_used_idx = used_idx;
                 return true;
             }
             spins += 1;
             if spins > timeout_spins {
+                VIRTIO_SPIN_COUNT.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             core::hint::spin_loop();
