@@ -2,7 +2,6 @@
 #![allow(static_mut_refs)]
 
 use core::ffi::{c_int, c_void};
-use core::sync::atomic::Ordering;
 
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
 use slopos_lib::{align_up, klog_debug, klog_info, InitFlag};
@@ -14,10 +13,7 @@ use crate::virtio::{
     pci::{
         enable_bus_master, negotiate_features, parse_capabilities, set_driver_ok, VIRTIO_VENDOR_ID,
     },
-    queue::{
-        self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE, VIRTIO_COMPLETION_COUNT,
-        VIRTIO_FENCE_COUNT, VIRTIO_SPIN_COUNT,
-    },
+    queue::{self, VirtqDesc, Virtqueue, DEFAULT_QUEUE_SIZE},
     VirtioMmioCaps, VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTQ_DESC_F_NEXT,
     VIRTQ_DESC_F_WRITE,
 };
@@ -1025,13 +1021,6 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferData> {
 
 pub fn virtio_gpu_flush_full() -> c_int {
     unsafe {
-        // Performance counters - reset but don't log (serial too slow for per-frame output)
-        let _fences = VIRTIO_FENCE_COUNT.swap(0, Ordering::Relaxed);
-        let _spins = VIRTIO_SPIN_COUNT.swap(0, Ordering::Relaxed);
-        let _completions = VIRTIO_COMPLETION_COUNT.swap(0, Ordering::Relaxed);
-        // NOTE: Logging removed - serial output on every frame caused line-by-line rendering
-        // To debug performance, use klog_debug! with boot.debug=on (but expect slowdown)
-
         if VIRTIO_GPU_DEVICE.fb_ready == 0 {
             return -1;
         }

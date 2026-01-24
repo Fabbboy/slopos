@@ -3,7 +3,7 @@
 //! Generic split virtqueue that can be reused by all VirtIO drivers.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -163,21 +163,16 @@ impl Virtqueue {
         let mut spins = 0u32;
         loop {
             // Acquire barrier BEFORE reading used_idx to ensure we see device's write.
-            // This is necessary because volatile alone doesn't guarantee cache coherency
-            // on all architectures - we need to invalidate our cache line view.
             // Per VirtIO spec 2.7.13: read barrier before reading used ring.
             virtio_rmb();
-            VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
 
             let used_idx = self.read_used_idx();
             if used_idx != self.last_used_idx {
-                VIRTIO_COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.last_used_idx = used_idx;
                 return true;
             }
             spins += 1;
             if spins > timeout_spins {
-                VIRTIO_SPIN_COUNT.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             core::hint::spin_loop();
