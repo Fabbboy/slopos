@@ -162,12 +162,15 @@ impl Virtqueue {
     pub fn poll_used(&mut self, timeout_spins: u32) -> bool {
         let mut spins = 0u32;
         loop {
-            // NO FENCE HERE - only volatile read
+            // Acquire barrier BEFORE reading used_idx to ensure we see device's write.
+            // This is necessary because volatile alone doesn't guarantee cache coherency
+            // on all architectures - we need to invalidate our cache line view.
+            // Per VirtIO spec 2.7.13: read barrier before reading used ring.
+            virtio_rmb();
+            VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
+
             let used_idx = self.read_used_idx();
             if used_idx != self.last_used_idx {
-                // Acquire barrier ONLY when progress detected (VirtIO spec 2.7.13)
-                VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
-                virtio_rmb();
                 VIRTIO_COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.last_used_idx = used_idx;
                 return true;
