@@ -169,7 +169,7 @@ fn try_with_scheduler<R>(f: impl FnOnce(&mut SchedulerInner) -> R) -> Option<R> 
 }
 
 use slopos_mm::paging::{paging_get_kernel_directory, paging_set_current_directory};
-use slopos_mm::process_vm::process_vm_get_page_dir;
+use slopos_mm::process_vm::{process_vm_get_page_dir, process_vm_sync_kernel_mappings};
 use slopos_mm::user_copy;
 
 use super::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
@@ -408,9 +408,16 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
     reset_task_quantum(sched, new_task);
     sched.total_switches += 1;
 
+    let is_user_mode = unsafe { (*new_task).flags & TASK_FLAG_USER_MODE != 0 };
+
+    // Determine whether to save old task context:
+    // - If switching TO user mode, don't save kernel context because context_switch_user
+    //   uses iretq and never returns. The user task returns via syscall/interrupt.
+    //   Saving would corrupt idle's RIP from task_entry_wrapper to our return address.
+    // - If switching TO kernel mode, save context so we can resume later.
     let mut old_ctx_ptr: *mut TaskContext = ptr::null_mut();
     unsafe {
-        if !old_task.is_null() && (*old_task).context_from_user == 0 {
+        if !old_task.is_null() && !is_user_mode && (*old_task).context_from_user == 0 {
             old_ctx_ptr = &raw mut (*old_task).context;
         } else if !old_task.is_null() {
             (*old_task).context_from_user = 0;
@@ -419,6 +426,9 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
 
     unsafe {
         if (*new_task).process_id != INVALID_TASK_ID {
+            if is_user_mode {
+                process_vm_sync_kernel_mappings((*new_task).process_id);
+            }
             let page_dir = process_vm_get_page_dir((*new_task).process_id);
             if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
                 (*new_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
@@ -428,8 +438,6 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
             paging_set_current_directory(paging_get_kernel_directory());
         }
     }
-
-    let is_user_mode = unsafe { (*new_task).flags & TASK_FLAG_USER_MODE != 0 };
     let rsp0 = if is_user_mode {
         unsafe {
             if (*new_task).kernel_stack_top != 0 {

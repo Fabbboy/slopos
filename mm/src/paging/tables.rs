@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::arch::x86_64::page_table::{
@@ -16,6 +17,8 @@ use crate::page_alloc::{
 };
 use crate::tlb;
 
+static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
+
 #[repr(C)]
 pub struct ProcessPageDir {
     pub pml4: *mut PageTable,
@@ -23,6 +26,7 @@ pub struct ProcessPageDir {
     pub ref_count: u32,
     pub process_id: u32,
     pub next: *mut ProcessPageDir,
+    pub kernel_mapping_gen: u64,
 }
 
 pub static mut EARLY_PML4: PageTable = PageTable::EMPTY;
@@ -35,6 +39,7 @@ static mut KERNEL_PAGE_DIR: ProcessPageDir = ProcessPageDir {
     ref_count: 1,
     process_id: 0,
     next: ptr::null_mut(),
+    kernel_mapping_gen: 0,
 };
 
 static mut CURRENT_PAGE_DIR: *mut ProcessPageDir = unsafe { &mut KERNEL_PAGE_DIR };
@@ -160,6 +165,30 @@ pub fn paging_copy_kernel_mappings(dest_pml4: *mut PageTable) {
             *(&mut *dest_pml4).entry_mut(i) = PageTableEntry::EMPTY;
         }
     }
+}
+
+pub fn paging_sync_kernel_mappings(page_dir: *mut ProcessPageDir) {
+    if page_dir.is_null() {
+        return;
+    }
+    let current_gen = KERNEL_MAPPING_GEN.load(Ordering::Acquire);
+    unsafe {
+        if (*page_dir).kernel_mapping_gen == current_gen {
+            return;
+        }
+        let dest_pml4 = (*page_dir).pml4;
+        if dest_pml4.is_null() || KERNEL_PAGE_DIR.pml4.is_null() {
+            return;
+        }
+        for i in 256..512 {
+            *(&mut *dest_pml4).entry_mut(i) = *(&*KERNEL_PAGE_DIR.pml4).entry(i);
+        }
+        (*page_dir).kernel_mapping_gen = current_gen;
+    }
+}
+
+pub fn paging_bump_kernel_mapping_gen() {
+    KERNEL_MAPPING_GEN.fetch_add(1, Ordering::Release);
 }
 
 fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {

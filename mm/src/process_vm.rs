@@ -16,7 +16,7 @@ use crate::page_alloc::{
 use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
     paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
-    unmap_page_in_dir, virt_to_phys_in_dir,
+    paging_sync_kernel_mappings, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
@@ -205,6 +205,14 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
         return ptr::null_mut();
     }
     unsafe { (*process_ptr).page_dir }
+}
+
+pub fn process_vm_sync_kernel_mappings(process_id: u32) {
+    let page_dir = process_vm_get_page_dir(process_id);
+    if page_dir.is_null() {
+        return;
+    }
+    paging_sync_kernel_mappings(page_dir);
 }
 
 fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: VmaFlags) -> c_int {
@@ -904,6 +912,7 @@ pub fn create_process_vm() -> u32 {
         (*page_dir_ptr).ref_count = 1;
         (*page_dir_ptr).process_id = process_id;
         (*page_dir_ptr).next = ptr::null_mut();
+        (*page_dir_ptr).kernel_mapping_gen = 0;
     }
 
     unsafe {
@@ -1347,6 +1356,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         (*child_page_dir).ref_count = 1;
         (*child_page_dir).process_id = child_id;
         (*child_page_dir).next = ptr::null_mut();
+        (*child_page_dir).kernel_mapping_gen = 0;
     }
 
     unsafe {

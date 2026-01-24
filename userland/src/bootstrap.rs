@@ -5,8 +5,9 @@ use slopos_lib::string::cstr_to_str;
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_core::syscall::register_spawn_task_callback;
 use slopos_core::{
-    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, Task,
-    TaskEntry, schedule_task, task_get_info, task_set_state, task_terminate,
+    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED,
+    TASK_STATE_RUNNING, Task, TaskEntry, schedule_task, task_get_info, task_set_state,
+    task_terminate,
 };
 use slopos_lib::{klog_debug, klog_info};
 use slopos_mm::process_vm::process_vm_load_elf;
@@ -177,6 +178,11 @@ fn block_task_on(task_id: u32, task_info: *mut Task, wait_on: u32) -> i32 {
     }
     unsafe {
         (*task_info).waiting_on_task_id = wait_on;
+    }
+    // State machine requires Ready -> Running -> Blocked transition
+    // Tasks are created in Ready state, so we must go through Running first
+    if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
+        return -1;
     }
     if task_set_state(task_id, TASK_STATE_BLOCKED) != 0 {
         return -1;

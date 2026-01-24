@@ -11,7 +11,7 @@ use slopos_lib::{IrqMutex, klog_debug, klog_info};
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
 use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
-use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
+use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page, virt_to_phys};
 
 const NUM_SIZE_CLASSES: usize = 16;
 const MAX_ALLOC_SIZE: u32 = 0x100000;
@@ -160,6 +160,8 @@ fn expand_heap(heap: &mut KernelHeap, min_size: u32) -> c_int {
     heap.stats.total_size += total_bytes;
     heap.stats.free_size += new_block_size as u64;
     heap.add_to_free_list(new_block);
+
+    paging_bump_kernel_mapping_gen();
     0
 }
 
