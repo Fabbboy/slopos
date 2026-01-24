@@ -43,8 +43,8 @@ Restore read barrier before `used_idx` read in `poll_used()` to fix slow renderi
 - Fixed `drivers/src/virtio/queue.rs` with correct barrier placement
 
 ### Definition of Done
-- [ ] `make build` succeeds
-- [ ] `VIDEO=1 make boot` shows smooth rendering (not line-by-line)
+- [x] `make build` succeeds
+- [ ] `VIDEO=1 make boot` shows smooth rendering (not line-by-line) - **BLOCKED: Requires human with graphical display**
 
 ### Must Have
 - Read barrier (Acquire) before volatile read of `used_idx`
