@@ -44,7 +44,7 @@ Optimize memory barrier usage in VirtIO-GPU driver and preemption subsystem to a
 
 ### Definition of Done
 - [ ] `VIRGL=1 VIDEO=1 make boot` shows roulette wheel at visually smooth frame rate
-- [ ] `make test` passes without regressions (verifies VirtIO-blk not broken)
+- [x] `make test` passes without regressions (verifies VirtIO-blk not broken)
 - [ ] No visual artifacts or corruption in framebuffer
 - [ ] **Fences per frame reduced by >90%** (measured via Task 1 instrumentation)
   - Baseline: ~2M fences/frame (SeqCst per spin iteration)
@@ -52,7 +52,7 @@ Optimize memory barrier usage in VirtIO-GPU driver and preemption subsystem to a
 - [ ] No `virtio-blk: request timeout` messages in serial log (from `drivers/src/virtio_blk.rs:176`)
   - Note: VirtIO-GPU does not log timeouts today; failure is silent (`virtio_gpu_flush_full()` returns `-1`)
   - GPU success is implied by visible roulette animation + absence of hangs
-- [ ] Code compiles without new warnings
+- [x] Code compiles without new warnings
 
 ### Must Have
 - Barrier placement that satisfies VirtIO spec 2.7.7 and 2.7.13
@@ -697,16 +697,16 @@ VIRGL=1 VIDEO=1 make boot  # Expected: Visually smooth roulette animation
 ```
 
 ### Final Checklist
-- [ ] All "Must Have" present:
-  - [ ] Barrier placement satisfies VirtIO spec
-  - [ ] Release before `avail_idx`, Acquire after `used_idx`
-  - [ ] Per-CPU preemption counter implemented
-- [ ] All "Must NOT Have" absent:
-  - [ ] No fences removed entirely
-  - [ ] No VirtIO-blk changes
-  - [ ] No interrupt-driven completion
-  - [ ] No scheduler fence changes
-- [ ] All tests pass (`make test`)
+- [x] All "Must Have" present:
+  - [x] Barrier placement satisfies VirtIO spec
+  - [x] Release before `avail_idx`, Acquire after `used_idx`
+  - [x] Per-CPU preemption counter implemented
+- [x] All "Must NOT Have" absent:
+  - [x] No fences removed entirely
+  - [x] No VirtIO-blk changes
+  - [x] No interrupt-driven completion
+  - [x] No scheduler fence changes
+- [x] All tests pass (`make test`)
 - [ ] Roulette runs at acceptable frame rate (minimum 10 FPS, target 30+ FPS)
 - [ ] No visual corruption in framebuffer
 - [ ] Boot with `VIRGL=1 VIDEO=1 make boot` succeeds
