@@ -3,7 +3,7 @@
 //! Generic split virtqueue that can be reused by all VirtIO drivers.
 
 use core::ptr;
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -11,7 +11,7 @@ use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_ZERO};
 
 use super::{
-    COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
+    virtio_rmb, virtio_wmb, COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
     COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT, COMMON_CFG_QUEUE_SIZE,
     COMMON_CFG_QUEUE_USED, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
 };
@@ -154,7 +154,7 @@ impl Virtqueue {
         unsafe {
             let avail_idx = ptr::read_volatile(self.avail_idx_ptr());
             ptr::write_volatile(self.avail_ring_ptr(avail_idx), head);
-            fence(Ordering::Release);
+            virtio_wmb();
             ptr::write_volatile(self.avail_idx_ptr(), avail_idx.wrapping_add(1));
         }
     }
@@ -167,7 +167,7 @@ impl Virtqueue {
             if used_idx != self.last_used_idx {
                 // Acquire barrier ONLY when progress detected (VirtIO spec 2.7.13)
                 VIRTIO_FENCE_COUNT.fetch_add(1, Ordering::Relaxed);
-                fence(Ordering::Acquire);
+                virtio_rmb();
                 VIRTIO_COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.last_used_idx = used_idx;
                 return true;

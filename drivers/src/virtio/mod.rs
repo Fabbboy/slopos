@@ -170,3 +170,25 @@ pub fn get_device_status(cfg: &MmioRegion) -> u8 {
 pub fn reset_device(cfg: &MmioRegion) {
     set_device_status(cfg, 0);
 }
+
+// =============================================================================
+// VirtIO Memory Barrier Abstractions
+// =============================================================================
+
+/// VirtIO write memory barrier.
+///
+/// Per VirtIO spec 2.7.7: "A write memory barrier before updating avail idx"
+/// Ensures descriptor writes are visible before publishing availability.
+#[inline(always)]
+pub fn virtio_wmb() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+}
+
+/// VirtIO read memory barrier.
+///
+/// Per VirtIO spec 2.7.13: "A read memory barrier before reading used buffers"
+/// Ensures used_idx observation happens-before reading completion data.
+#[inline(always)]
+pub fn virtio_rmb() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+}
