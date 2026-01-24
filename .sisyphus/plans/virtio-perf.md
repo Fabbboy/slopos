@@ -481,7 +481,7 @@ Phase 2: Preemption (race analysis + per-CPU storage)
 
 ### Phase 2: Preemption Subsystem
 
-- [ ] 5. Analyze `PreemptGuard::drop()` race condition
+- [x] 5. Analyze `PreemptGuard::drop()` race condition
 
   **What to do**:
   - Study the interaction between `PREEMPT_COUNT` and `RESCHEDULE_PENDING`
