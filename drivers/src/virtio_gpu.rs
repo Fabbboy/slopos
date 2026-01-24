@@ -1025,15 +1025,12 @@ pub fn virtio_gpu_framebuffer_init() -> Option<FramebufferData> {
 
 pub fn virtio_gpu_flush_full() -> c_int {
     unsafe {
-        let fences = VIRTIO_FENCE_COUNT.swap(0, Ordering::Relaxed);
-        let spins = VIRTIO_SPIN_COUNT.swap(0, Ordering::Relaxed);
-        let completions = VIRTIO_COMPLETION_COUNT.swap(0, Ordering::Relaxed);
-        klog_info!(
-            "[VIRTIO PERF] fences={} spins={} completions={}",
-            fences,
-            spins,
-            completions
-        );
+        // Performance counters - reset but don't log (serial too slow for per-frame output)
+        let _fences = VIRTIO_FENCE_COUNT.swap(0, Ordering::Relaxed);
+        let _spins = VIRTIO_SPIN_COUNT.swap(0, Ordering::Relaxed);
+        let _completions = VIRTIO_COMPLETION_COUNT.swap(0, Ordering::Relaxed);
+        // NOTE: Logging removed - serial output on every frame caused line-by-line rendering
+        // To debug performance, use klog_debug! with boot.debug=on (but expect slowdown)
 
         if VIRTIO_GPU_DEVICE.fb_ready == 0 {
             return -1;
