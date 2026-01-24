@@ -7,8 +7,8 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cpu;
+use crate::percpu::get_percpu_data;
 
-static PREEMPT_COUNT: AtomicU32 = AtomicU32::new(0);
 static RESCHEDULE_PENDING: AtomicU32 = AtomicU32::new(0);
 static mut RESCHEDULE_CALLBACK: Option<fn()> = None;
 
@@ -23,7 +23,8 @@ pub struct PreemptGuard {
 impl PreemptGuard {
     #[inline]
     pub fn new() -> Self {
-        PREEMPT_COUNT.fetch_add(1, Ordering::SeqCst);
+        let percpu = get_percpu_data();
+        percpu.preempt_count.fetch_add(1, Ordering::Relaxed);
         Self {
             _marker: PhantomData,
         }
@@ -31,12 +32,12 @@ impl PreemptGuard {
 
     #[inline]
     pub fn is_active() -> bool {
-        PREEMPT_COUNT.load(Ordering::SeqCst) > 0
+        get_percpu_data().preempt_count.load(Ordering::Relaxed) > 0
     }
 
     #[inline]
     pub fn count() -> u32 {
-        PREEMPT_COUNT.load(Ordering::SeqCst)
+        get_percpu_data().preempt_count.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -64,7 +65,8 @@ impl Default for PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        let prev = PREEMPT_COUNT.fetch_sub(1, Ordering::SeqCst);
+        let percpu = get_percpu_data();
+        let prev = percpu.preempt_count.fetch_sub(1, Ordering::Release);
         debug_assert!(prev > 0, "preempt_count underflow");
 
         if prev == 1 && RESCHEDULE_PENDING.swap(0, Ordering::SeqCst) != 0 {
