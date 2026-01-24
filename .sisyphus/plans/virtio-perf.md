@@ -338,7 +338,7 @@ Phase 2: Preemption (race analysis + per-CPU storage)
 
 ---
 
-- [ ] 3. Upgrade `submit()` barrier for ARM portability
+- [x] 3. Upgrade `submit()` barrier for ARM portability
 
   **What to do**:
   - Change `compiler_fence(Ordering::Release)` to `fence(Ordering::Release)`
