@@ -49,7 +49,7 @@ Optimize memory barrier usage in VirtIO-GPU driver and preemption subsystem to a
 - [ ] **Fences per frame reduced by >90%** (measured via Task 1 instrumentation)
   - Baseline: ~2M fences/frame (SeqCst per spin iteration)
   - Target: ~2 fences/frame (one Acquire per completion)
-- [ ] No `virtio-blk: request timeout` messages in serial log (from `drivers/src/virtio_blk.rs:176`)
+- [x] No `virtio-blk: request timeout` messages in serial log (from `drivers/src/virtio_blk.rs:176`)
   - Note: VirtIO-GPU does not log timeouts today; failure is silent (`virtio_gpu_flush_full()` returns `-1`)
   - GPU success is implied by visible roulette animation + absence of hangs
 - [x] Code compiles without new warnings
