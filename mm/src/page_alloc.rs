@@ -41,12 +41,12 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{align_down_u64, align_up_u64, klog_debug, klog_info, InitFlag, IrqMutex};
+use slopos_lib::{InitFlag, IrqMutex, align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{
-    mm_region_count, mm_region_get, mm_reservations_count, mm_reservations_get, MmRegion,
-    MmRegionKind, MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
+    MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS, MmRegion, MmRegionKind, mm_region_count, mm_region_get,
+    mm_reservations_count, mm_reservations_get,
 };
 use crate::mm_constants::PAGE_SIZE_4KB;
 
@@ -954,7 +954,8 @@ pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut
 
     let mut pcp_count = 0u32;
     for cpu in 0..MAX_CPUS {
-        pcp_count += PER_CPU_CACHES[cpu].count.load(Ordering::Relaxed);
+        let val = PER_CPU_CACHES[cpu].count.load(Ordering::Relaxed);
+        pcp_count = pcp_count.saturating_add(val);
     }
     let _ = pcp_count;
 

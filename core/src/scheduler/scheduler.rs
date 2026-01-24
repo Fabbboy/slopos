@@ -2,8 +2,8 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::preempt::PreemptGuard;
 use slopos_lib::IrqMutex;
+use slopos_lib::preempt::PreemptGuard;
 use spin::Once;
 
 use slopos_lib::kdiag_timestamp;
@@ -14,11 +14,11 @@ use crate::wl_currency;
 
 use super::per_cpu;
 use super::task::{
-    task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
+    TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
+    TaskContext, task_get_info, task_get_state, task_is_blocked, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state, Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED,
-    TASK_STATE_READY, TASK_STATE_RUNNING,
+    task_set_state,
 };
 
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;

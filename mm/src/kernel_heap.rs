@@ -3,13 +3,13 @@ use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_lib::free_list::{
-    round_up_pow2, size_class, try_split_block, BlockHeader, FreeList, HEADER_SIZE, MAGIC_FREE,
-    MIN_BLOCK_SIZE,
+    BlockHeader, FreeList, HEADER_SIZE, MAGIC_FREE, MIN_BLOCK_SIZE, round_up_pow2, size_class,
+    try_split_block,
 };
-use slopos_lib::{klog_debug, klog_info, IrqMutex};
+use slopos_lib::{IrqMutex, klog_debug, klog_info};
 
 use crate::memory_layout::{mm_get_kernel_heap_end, mm_get_kernel_heap_start};
-use crate::mm_constants::{PageFlags, PAGE_SIZE_4KB};
+use crate::mm_constants::{PAGE_SIZE_4KB, PageFlags};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, unmap_page, virt_to_phys};
 

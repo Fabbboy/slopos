@@ -12,13 +12,12 @@ use slopos_lib::{klog_debug, klog_info};
 use super::scheduler;
 
 pub use slopos_abi::task::{
-    FpuState, IdtEntry, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
-    INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_COMPOSITOR,
+    FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_COMPOSITOR,
     TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_PRIORITY_HIGH,
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE,
     TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_READY, TASK_STATE_RUNNING,
-    TASK_STATE_TERMINATED,
+    TASK_STATE_TERMINATED, Task, TaskContext, TaskExitReason, TaskExitRecord, TaskFaultReason,
 };
 
 use slopos_mm::mm_constants::PROCESS_CODE_START_VA;
@@ -178,11 +177,7 @@ fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<us
     }
     let start = mgr.tasks.as_ptr() as usize;
     let idx = (task as usize - start) / mem::size_of::<Task>();
-    if idx < MAX_TASKS {
-        Some(idx)
-    } else {
-        None
-    }
+    if idx < MAX_TASKS { Some(idx) } else { None }
 }
 
 fn record_task_exit(

@@ -433,3 +433,141 @@ pub fn test_task_flags_preserved() -> c_int {
     teardown_context_test_env();
     0
 }
+
+pub fn test_switch_context_struct_size() -> c_int {
+    use core::mem::size_of;
+    use slopos_abi::task::SwitchContext;
+
+    let size = size_of::<SwitchContext>();
+    if size != 72 {
+        klog_info!(
+            "CONTEXT_TEST: SwitchContext size wrong: {} (expected 72)",
+            size
+        );
+        return -1;
+    }
+    0
+}
+
+pub fn test_switch_context_offsets() -> c_int {
+    use slopos_abi::task::{
+        SWITCH_CTX_OFF_R12, SWITCH_CTX_OFF_R13, SWITCH_CTX_OFF_R14, SWITCH_CTX_OFF_R15,
+        SWITCH_CTX_OFF_RBP, SWITCH_CTX_OFF_RBX, SWITCH_CTX_OFF_RFLAGS, SWITCH_CTX_OFF_RIP,
+        SWITCH_CTX_OFF_RSP,
+    };
+
+    if SWITCH_CTX_OFF_RBX != 0 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_R12 != 8 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_R13 != 16 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_R14 != 24 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_R15 != 32 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_RBP != 40 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_RSP != 48 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_RFLAGS != 56 {
+        return -1;
+    }
+    if SWITCH_CTX_OFF_RIP != 64 {
+        return -1;
+    }
+    0
+}
+
+pub fn test_switch_context_zero_init() -> c_int {
+    use slopos_abi::task::SwitchContext;
+
+    let ctx = SwitchContext::zero();
+    if ctx.rbx != 0 || ctx.r12 != 0 || ctx.r13 != 0 || ctx.r14 != 0 || ctx.r15 != 0 {
+        return -1;
+    }
+    if ctx.rbp != 0 || ctx.rsp != 0 || ctx.rip != 0 {
+        return -1;
+    }
+    if ctx.rflags != 0x202 {
+        klog_info!(
+            "CONTEXT_TEST: SwitchContext::zero() rflags wrong: {:#x}",
+            ctx.rflags
+        );
+        return -1;
+    }
+    0
+}
+
+pub fn test_switch_context_setup_initial() -> c_int {
+    use slopos_abi::task::SwitchContext;
+
+    let mut ctx = SwitchContext::zero();
+    let stack_top: u64 = 0x1000;
+    let entry: u64 = 0xDEADBEEF;
+    let arg: u64 = 0xCAFEBABE;
+
+    ctx.setup_initial(stack_top, entry, arg);
+
+    if ctx.rsp != stack_top - 8 {
+        klog_info!("CONTEXT_TEST: setup_initial rsp wrong: {:#x}", ctx.rsp);
+        return -1;
+    }
+    if ctx.rip != entry {
+        klog_info!("CONTEXT_TEST: setup_initial rip wrong: {:#x}", ctx.rip);
+        return -1;
+    }
+    if ctx.r12 != entry {
+        klog_info!("CONTEXT_TEST: setup_initial r12 wrong: {:#x}", ctx.r12);
+        return -1;
+    }
+    if ctx.r13 != arg {
+        klog_info!("CONTEXT_TEST: setup_initial r13 wrong: {:#x}", ctx.r13);
+        return -1;
+    }
+    if ctx.rflags != 0x202 {
+        return -1;
+    }
+    0
+}
+
+pub fn test_task_has_switch_ctx() -> c_int {
+    if setup_context_test_env() != 0 {
+        return -1;
+    }
+
+    let task_id = create_test_task(b"SwitchTest\0", TASK_FLAG_KERNEL_MODE);
+    if task_id == INVALID_TASK_ID {
+        teardown_context_test_env();
+        return -1;
+    }
+
+    let task_ptr = task_find_by_id(task_id);
+    if task_ptr.is_null() {
+        task_terminate(task_id);
+        teardown_context_test_env();
+        return -1;
+    }
+
+    let switch_ctx = unsafe { &(*task_ptr).switch_ctx };
+    if switch_ctx.rflags != 0x202 {
+        klog_info!(
+            "CONTEXT_TEST: Task switch_ctx rflags not initialized: {:#x}",
+            switch_ctx.rflags
+        );
+        task_terminate(task_id);
+        teardown_context_test_env();
+        return -1;
+    }
+
+    task_terminate(task_id);
+    teardown_context_test_env();
+    0
+}

@@ -85,7 +85,6 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    /// Create a zeroed TaskContext.
     pub const fn zero() -> Self {
         Self {
             rax: 0,
@@ -116,6 +115,62 @@ impl TaskContext {
         }
     }
 }
+
+use core::mem::offset_of;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SwitchContext {
+    pub rbx: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub rip: u64,
+}
+
+impl SwitchContext {
+    pub const fn zero() -> Self {
+        Self {
+            rbx: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rbp: 0,
+            rsp: 0,
+            rflags: 0x202,
+            rip: 0,
+        }
+    }
+
+    pub fn setup_initial(&mut self, stack_top: u64, entry_point: u64, arg: u64) {
+        self.rsp = stack_top - 8;
+        self.rbp = 0;
+        self.rip = entry_point;
+        self.rflags = 0x202;
+        self.r12 = entry_point;
+        self.r13 = arg;
+        self.rbx = 0;
+        self.r14 = 0;
+        self.r15 = 0;
+    }
+}
+
+pub const SWITCH_CTX_OFF_RBX: usize = offset_of!(SwitchContext, rbx);
+pub const SWITCH_CTX_OFF_R12: usize = offset_of!(SwitchContext, r12);
+pub const SWITCH_CTX_OFF_R13: usize = offset_of!(SwitchContext, r13);
+pub const SWITCH_CTX_OFF_R14: usize = offset_of!(SwitchContext, r14);
+pub const SWITCH_CTX_OFF_R15: usize = offset_of!(SwitchContext, r15);
+pub const SWITCH_CTX_OFF_RBP: usize = offset_of!(SwitchContext, rbp);
+pub const SWITCH_CTX_OFF_RSP: usize = offset_of!(SwitchContext, rsp);
+pub const SWITCH_CTX_OFF_RFLAGS: usize = offset_of!(SwitchContext, rflags);
+pub const SWITCH_CTX_OFF_RIP: usize = offset_of!(SwitchContext, rip);
+
+const _: () = assert!(core::mem::size_of::<SwitchContext>() == 72);
 
 // =============================================================================
 // FpuState - FPU/SSE register state for context switching
@@ -248,6 +303,7 @@ pub struct Task {
     pub cpu_affinity: u32,
     pub last_cpu: u8,
     pub migration_count: u32,
+    pub switch_ctx: SwitchContext,
     pub next_ready: *mut Task,
 }
 
@@ -289,6 +345,7 @@ impl Task {
             cpu_affinity: 0,
             last_cpu: 0,
             migration_count: 0,
+            switch_ctx: SwitchContext::zero(),
             next_ready: ptr::null_mut(),
         }
     }

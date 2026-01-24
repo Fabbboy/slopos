@@ -322,12 +322,14 @@ mod suites {
         test_fork_kernel_task as test_context_fork_kernel_task,
         test_fork_null_parent as test_context_fork_null_parent,
         test_fork_terminated_parent as test_context_fork_terminated_parent,
+        test_switch_context_offsets, test_switch_context_setup_initial,
+        test_switch_context_struct_size, test_switch_context_zero_init,
         test_task_context_initial_state, test_task_double_terminate,
         test_task_find_after_terminate, test_task_flags_preserved, test_task_get_info_invalid_id,
-        test_task_get_info_null_output, test_task_invalid_state_transition,
-        test_task_max_concurrent, test_task_process_id_consistency,
-        test_task_rapid_create_terminate, test_task_state_transitions_exhaustive,
-        test_task_terminate_invalid_ids,
+        test_task_get_info_null_output, test_task_has_switch_ctx,
+        test_task_invalid_state_transition, test_task_max_concurrent,
+        test_task_process_id_consistency, test_task_rapid_create_terminate,
+        test_task_state_transitions_exhaustive, test_task_terminate_invalid_ids,
     };
 
     use slopos_fs::tests::{
@@ -771,6 +773,11 @@ mod suites {
             test_task_max_concurrent,
             test_task_process_id_consistency,
             test_task_flags_preserved,
+            test_switch_context_struct_size,
+            test_switch_context_offsets,
+            test_switch_context_zero_init,
+            test_switch_context_setup_initial,
+            test_task_has_switch_ctx,
         ]
     );
     define_test_suite!(

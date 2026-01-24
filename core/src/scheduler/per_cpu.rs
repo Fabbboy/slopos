@@ -8,9 +8,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::{
-    Task, TaskContext, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
 };
-use slopos_lib::{klog_debug, klog_info, MAX_CPUS};
+use slopos_lib::{MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
