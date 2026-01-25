@@ -5,7 +5,9 @@
   <img src="https://sloc.xyz/github/Fabbboy/slopos?category=code" />
 </p>
 
-<h1 align="center">SlopOS</h1>
+<p align="center">
+  <img src="assets/logo.png" alt="SlopOS" width="500" />
+</p>
 
 <p align="center">
   <i>Three kernel wizards shipwrecked on the island of Sloptopia.<br/>
