@@ -1,6 +1,7 @@
 #![allow(static_mut_refs)]
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_int;
+use core::mem::size_of;
 use core::ptr;
 
 use slopos_lib::{InitFlag, klog_debug, klog_info};
@@ -14,8 +15,7 @@ use crate::virtio::{
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 
-use slopos_mm::hhdm::PhysAddrHhdm;
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
+use slopos_mm::page_alloc::OwnedPageFrame;
 
 pub const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001;
 pub const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042;
@@ -37,38 +37,47 @@ struct VirtioBlkReqHeader {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct VirtioBlkDevice {
-    bus: u8,
-    device: u8,
-    function: u8,
-    vendor_id: u16,
-    device_id: u16,
     queue: Virtqueue,
     capacity_sectors: u64,
-    modern: bool,
     ready: bool,
 }
 
 impl VirtioBlkDevice {
     const fn new() -> Self {
         Self {
-            bus: 0,
-            device: 0,
-            function: 0,
-            vendor_id: 0,
-            device_id: 0,
             queue: Virtqueue::new(),
             capacity_sectors: 0,
-            modern: false,
             ready: false,
         }
     }
 }
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
+
+// SAFETY: Access is synchronized via DEVICE_CLAIMED flag and single-request semantics.
 static mut VIRTIO_BLK_DEVICE: VirtioBlkDevice = VirtioBlkDevice::new();
 static mut MMIO_CAPS: VirtioMmioCaps = VirtioMmioCaps::empty();
 
-fn virtio_blk_match(info: *const PciDeviceInfo, _context: *mut c_void) -> bool {
+struct RequestBuffers {
+    req_page: OwnedPageFrame,
+    bounce_page: OwnedPageFrame,
+}
+
+impl RequestBuffers {
+    fn allocate() -> Option<Self> {
+        let req_page = OwnedPageFrame::alloc_zeroed()?;
+        let bounce_page = OwnedPageFrame::alloc_zeroed()?;
+        Some(Self {
+            req_page,
+            bounce_page,
+        })
+    }
+}
+
+fn virtio_blk_match(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> bool {
+    if info.is_null() {
+        return false;
+    }
     let info = unsafe { &*info };
     if info.vendor_id != VIRTIO_VENDOR_ID {
         return false;
@@ -97,30 +106,24 @@ fn do_request(
         return false;
     }
 
-    let req_page = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if req_page.is_null() {
-        return false;
-    }
+    let buffers = match RequestBuffers::allocate() {
+        Some(b) => b,
+        None => return false,
+    };
 
-    let bounce_page = alloc_page_frame(ALLOC_FLAG_ZERO);
-    if bounce_page.is_null() {
-        // TODO: free req_page when we have proper page frame deallocation
-        return false;
-    }
-
-    let req_virt = req_page.to_virt().as_mut_ptr::<u8>();
-    let req_phys = req_page.as_u64();
+    let req_virt = buffers.req_page.as_mut_ptr::<u8>();
+    let req_phys = buffers.req_page.phys_u64();
     let header = req_virt as *mut VirtioBlkReqHeader;
-    let status_offset = core::mem::size_of::<VirtioBlkReqHeader>();
+    let status_offset = size_of::<VirtioBlkReqHeader>();
     let status_ptr = unsafe { req_virt.add(status_offset) };
     let status_phys = req_phys + status_offset as u64;
 
-    let bounce_virt = bounce_page.to_virt().as_mut_ptr::<u8>();
-    let bounce_phys = bounce_page.as_u64();
+    let bounce_virt = buffers.bounce_page.as_mut_ptr::<u8>();
+    let bounce_phys = buffers.bounce_page.phys_u64();
 
     if write {
         unsafe {
-            core::ptr::copy_nonoverlapping(buffer, bounce_virt, len);
+            ptr::copy_nonoverlapping(buffer, bounce_virt, len);
         }
     }
 
@@ -138,8 +141,8 @@ fn do_request(
     dev.queue.write_desc(
         0,
         VirtqDesc {
-            addr: req_page.as_u64(),
-            len: core::mem::size_of::<VirtioBlkReqHeader>() as u32,
+            addr: req_phys,
+            len: size_of::<VirtioBlkReqHeader>() as u32,
             flags: VIRTQ_DESC_F_NEXT,
             next: 1,
         },
@@ -174,7 +177,6 @@ fn do_request(
 
     if !dev.queue.poll_used(REQUEST_TIMEOUT_SPINS) {
         klog_info!("virtio-blk: request timeout");
-        // TODO: free pages
         return false;
     }
 
@@ -183,16 +185,14 @@ fn do_request(
 
     if success && !write {
         unsafe {
-            core::ptr::copy_nonoverlapping(bounce_virt, buffer, len);
+            ptr::copy_nonoverlapping(bounce_virt, buffer, len);
         }
     }
-
-    // TODO: free req_page and bounce_page
 
     success
 }
 
-fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int {
+fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void) -> c_int {
     if !DEVICE_CLAIMED.claim() {
         klog_debug!("virtio-blk: already claimed");
         return -1;
@@ -245,17 +245,10 @@ fn virtio_blk_probe(info: *const PciDeviceInfo, _context: *mut c_void) -> c_int 
     set_driver_ok(&caps);
 
     let capacity_sectors = read_capacity(&caps);
-    let is_modern = (feat_result.driver_features & virtio::VIRTIO_F_VERSION_1) != 0;
 
     let dev = VirtioBlkDevice {
-        bus: info.bus,
-        device: info.device,
-        function: info.function,
-        vendor_id: info.vendor_id,
-        device_id: info.device_id,
         queue,
         capacity_sectors,
-        modern: is_modern,
         ready: true,
     };
 

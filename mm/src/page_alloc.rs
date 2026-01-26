@@ -1066,3 +1066,170 @@ fn zero_physical_page(phys_addr: PhysAddr) -> c_int {
 pub unsafe fn page_allocator_force_unlock() {
     PAGE_ALLOCATOR.force_unlock();
 }
+
+// =============================================================================
+// OwnedPageFrame - RAII wrapper for automatic page deallocation
+// =============================================================================
+
+/// An owned page frame that automatically frees its physical memory when dropped.
+///
+/// This type provides compile-time safety for page frame management by leveraging
+/// Rust's ownership system. When an `OwnedPageFrame` goes out of scope, its
+/// underlying physical page is automatically returned to the allocator.
+///
+/// # Example
+///
+/// ```ignore
+/// // Allocate a zeroed page - automatically freed when `page` goes out of scope
+/// let page = OwnedPageFrame::alloc_zeroed()?;
+///
+/// // Access the page's virtual address
+/// let virt = page.virt_addr();
+/// unsafe { virt.as_mut_ptr::<u8>().write(0x42); }
+///
+/// // Page is automatically freed here when `page` is dropped
+/// ```
+///
+/// # Safety
+///
+/// This type is safe to use as long as:
+/// - The page allocator has been properly initialized
+/// - The page is not accessed after the `OwnedPageFrame` is dropped
+/// - The physical address is not leaked to code that outlives the `OwnedPageFrame`
+pub struct OwnedPageFrame {
+    phys: PhysAddr,
+}
+
+impl OwnedPageFrame {
+    /// Allocate a new page frame with the given flags.
+    ///
+    /// Returns `None` if allocation fails (out of memory).
+    #[inline]
+    pub fn alloc(flags: u32) -> Option<Self> {
+        let phys = alloc_page_frame(flags);
+        if phys.is_null() {
+            None
+        } else {
+            Some(Self { phys })
+        }
+    }
+
+    /// Allocate a zeroed page frame.
+    ///
+    /// This is the most common allocation pattern for DMA buffers and
+    /// data structures that need to start in a known state.
+    #[inline]
+    pub fn alloc_zeroed() -> Option<Self> {
+        Self::alloc(ALLOC_FLAG_ZERO)
+    }
+
+    /// Allocate a page frame suitable for DMA (below 16MB, zeroed).
+    #[inline]
+    pub fn alloc_dma() -> Option<Self> {
+        Self::alloc(ALLOC_FLAG_ZERO | ALLOC_FLAG_DMA)
+    }
+
+    /// Returns the physical address of this page frame.
+    ///
+    /// The returned address is valid for the lifetime of this `OwnedPageFrame`.
+    #[inline]
+    pub fn phys_addr(&self) -> PhysAddr {
+        self.phys
+    }
+
+    /// Returns the physical address as a raw u64.
+    ///
+    /// Useful for writing to hardware registers that expect raw addresses.
+    #[inline]
+    pub fn phys_u64(&self) -> u64 {
+        self.phys.as_u64()
+    }
+
+    /// Returns the virtual address of this page via HHDM translation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HHDM is not initialized.
+    #[inline]
+    pub fn virt_addr(&self) -> slopos_abi::addr::VirtAddr {
+        self.phys.to_virt()
+    }
+
+    /// Returns the virtual address as a typed mutable pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `T` has appropriate alignment for the page (generally not an issue for page-aligned allocations)
+    /// - The pointer is not used after this `OwnedPageFrame` is dropped
+    /// - Proper synchronization if the memory is shared
+    #[inline]
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        self.virt_addr().as_mut_ptr()
+    }
+
+    /// Returns the virtual address as a typed const pointer.
+    #[inline]
+    pub fn as_ptr<T>(&self) -> *const T {
+        self.virt_addr().as_ptr()
+    }
+
+    /// Consume this `OwnedPageFrame` and return the physical address without freeing.
+    ///
+    /// This transfers ownership of the page to the caller, who becomes responsible
+    /// for eventually calling `free_page_frame()`.
+    ///
+    /// # Use Cases
+    ///
+    /// This is useful when:
+    /// - Passing page ownership to hardware (e.g., virtqueue descriptors)
+    /// - Transferring pages between subsystems with different lifetime requirements
+    #[inline]
+    pub fn into_phys(self) -> PhysAddr {
+        let phys = self.phys;
+        core::mem::forget(self);
+        phys
+    }
+
+    /// Create an `OwnedPageFrame` from a raw physical address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - The physical address was obtained from `alloc_page_frame()` or equivalent
+    /// - The page has not already been freed
+    /// - No other `OwnedPageFrame` or code will free this page
+    #[inline]
+    pub unsafe fn from_phys(phys: PhysAddr) -> Self {
+        debug_assert!(
+            !phys.is_null(),
+            "Cannot create OwnedPageFrame from null address"
+        );
+        Self { phys }
+    }
+}
+
+impl Drop for OwnedPageFrame {
+    fn drop(&mut self) {
+        // Only free if not null (shouldn't happen, but defensive)
+        if !self.phys.is_null() {
+            free_page_frame(self.phys);
+        }
+    }
+}
+
+// OwnedPageFrame is Send because physical pages can be passed between threads.
+// The page allocator uses proper synchronization internally.
+unsafe impl Send for OwnedPageFrame {}
+
+// OwnedPageFrame is NOT Sync because concurrent access to the same page
+// requires external synchronization (e.g., a mutex or atomic operations).
+// Users must ensure proper synchronization when sharing pages.
+
+impl core::fmt::Debug for OwnedPageFrame {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OwnedPageFrame")
+            .field("phys", &format_args!("{:#x}", self.phys.as_u64()))
+            .finish()
+    }
+}

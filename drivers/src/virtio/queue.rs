@@ -1,9 +1,4 @@
-//! VirtIO virtqueue implementation
-//!
-//! Generic split virtqueue that can be reused by all VirtIO drivers.
-
 use core::ptr;
-use core::sync::atomic::AtomicU64;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::hhdm::PhysAddrHhdm;
@@ -13,15 +8,10 @@ use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame};
 use super::{
     COMMON_CFG_QUEUE_AVAIL, COMMON_CFG_QUEUE_DESC, COMMON_CFG_QUEUE_ENABLE,
     COMMON_CFG_QUEUE_NOTIFY_OFF, COMMON_CFG_QUEUE_SELECT, COMMON_CFG_QUEUE_SIZE,
-    COMMON_CFG_QUEUE_USED, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, virtio_rmb, virtio_wmb,
+    COMMON_CFG_QUEUE_USED, virtio_rmb, virtio_wmb,
 };
 
 pub const DEFAULT_QUEUE_SIZE: u16 = 64;
-
-/// Performance instrumentation counters for VirtIO queue polling
-pub static VIRTIO_FENCE_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static VIRTIO_SPIN_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static VIRTIO_COMPLETION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -81,6 +71,11 @@ impl Clone for Virtqueue {
 
 impl Copy for Virtqueue {}
 
+// Virtqueue contains raw pointers to page-frame-allocated memory that persists
+// for the device lifetime. The memory is kernel-owned and accessible from any
+// CPU context, making it safe to transfer ownership between threads.
+unsafe impl Send for Virtqueue {}
+
 impl Virtqueue {
     pub const fn new() -> Self {
         Self {
@@ -101,12 +96,6 @@ impl Virtqueue {
         self.ready
     }
 
-    // Avail ring layout: flags (u16) | idx (u16) | ring[size] (u16 each)
-    #[allow(dead_code)]
-    fn avail_flags_ptr(&self) -> *mut u16 {
-        self.avail_virt as *mut u16
-    }
-
     fn avail_idx_ptr(&self) -> *mut u16 {
         unsafe { (self.avail_virt as *mut u16).add(1) }
     }
@@ -115,23 +104,8 @@ impl Virtqueue {
         unsafe { (self.avail_virt as *mut u16).add(2 + (idx % self.size) as usize) }
     }
 
-    // Used ring layout: flags (u16) | idx (u16) | ring[size] (VirtqUsedElem each)
-    #[allow(dead_code)]
-    fn used_flags_ptr(&self) -> *const u16 {
-        self.used_virt as *const u16
-    }
-
     fn used_idx_ptr(&self) -> *const u16 {
         unsafe { (self.used_virt as *const u16).add(1) }
-    }
-
-    #[allow(dead_code)]
-    fn used_ring_ptr(&self, idx: u16) -> *const VirtqUsedElem {
-        // Offset: 4 bytes for flags+idx, then ring
-        unsafe {
-            let base = self.used_virt.add(4);
-            (base as *const VirtqUsedElem).add((idx % self.size) as usize)
-        }
     }
 
     pub fn read_used_idx(&self) -> u16 {
@@ -245,122 +219,4 @@ pub fn notify_queue(
 ) {
     let offset = (queue.notify_off as u32) * notify_off_multiplier;
     notify_cfg.write_u16(offset as usize, queue_index);
-}
-
-pub struct DescriptorChain<'a> {
-    queue: &'a Virtqueue,
-    head: u16,
-    current: u16,
-    count: u16,
-}
-
-impl<'a> DescriptorChain<'a> {
-    pub fn new(queue: &'a Virtqueue, head: u16) -> Self {
-        Self {
-            queue,
-            head,
-            current: head,
-            count: 0,
-        }
-    }
-
-    pub fn head(&self) -> u16 {
-        self.head
-    }
-
-    pub fn add_readable(&mut self, addr: u64, len: u32) -> &mut Self {
-        self.add_desc(addr, len, false)
-    }
-
-    pub fn add_writable(&mut self, addr: u64, len: u32) -> &mut Self {
-        self.add_desc(addr, len, true)
-    }
-
-    fn add_desc(&mut self, addr: u64, len: u32, writable: bool) -> &mut Self {
-        let idx = self.current;
-        let next_idx = idx.wrapping_add(1) % self.queue.size;
-
-        let mut flags = 0u16;
-        if writable {
-            flags |= VIRTQ_DESC_F_WRITE;
-        }
-        // Will set NEXT flag in finalize for all but last
-
-        self.queue.write_desc(
-            idx,
-            VirtqDesc {
-                addr,
-                len,
-                flags,
-                next: next_idx,
-            },
-        );
-
-        self.current = next_idx;
-        self.count += 1;
-        self
-    }
-
-    pub fn finalize(&self) {
-        if self.count == 0 {
-            return;
-        }
-
-        // Go back and set NEXT flags for all descriptors except the last
-        for i in 0..self.count {
-            let idx = (self.head + i) % self.queue.size;
-            if i < self.count - 1 {
-                // Read current flags, add NEXT
-                unsafe {
-                    let desc_ptr = self.queue.desc_virt.add(idx as usize);
-                    let mut desc = ptr::read_volatile(desc_ptr);
-                    desc.flags |= VIRTQ_DESC_F_NEXT;
-                    desc.next = (self.head + i + 1) % self.queue.size;
-                    ptr::write_volatile(desc_ptr, desc);
-                }
-            }
-        }
-    }
-}
-
-pub fn send_command(
-    queue: &mut Virtqueue,
-    notify_cfg: &MmioRegion,
-    notify_off_multiplier: u32,
-    queue_index: u16,
-    cmd_phys: u64,
-    cmd_len: usize,
-    resp_phys: u64,
-    resp_len: usize,
-    timeout_spins: u32,
-) -> bool {
-    if !queue.is_ready() || !notify_cfg.is_mapped() {
-        return false;
-    }
-
-    // Descriptor 0: command (device reads)
-    queue.write_desc(
-        0,
-        VirtqDesc {
-            addr: cmd_phys,
-            len: cmd_len as u32,
-            flags: VIRTQ_DESC_F_NEXT,
-            next: 1,
-        },
-    );
-
-    // Descriptor 1: response (device writes)
-    queue.write_desc(
-        1,
-        VirtqDesc {
-            addr: resp_phys,
-            len: resp_len as u32,
-            flags: VIRTQ_DESC_F_WRITE,
-            next: 0,
-        },
-    );
-
-    queue.submit(0);
-    notify_queue(notify_cfg, notify_off_multiplier, queue, queue_index);
-    queue.poll_used(timeout_spins)
 }
