@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/logo.png" alt="SlopOS" width="500" />
+  <img src="assets/logo.png" alt="SlopOS" width="600" />
 </p>
 
 <p align="center">
