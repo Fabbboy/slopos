@@ -263,16 +263,55 @@ impl SwitchContext {
         }
     }
 
-    pub fn setup_initial(&mut self, stack_top: u64, entry_point: u64, arg: u64) {
-        self.rsp = stack_top - 8;
-        self.rbp = 0;
-        self.rip = entry_point;
-        self.rflags = 0x202;
-        self.r12 = entry_point;
-        self.r13 = arg;
-        self.rbx = 0;
-        self.r14 = 0;
-        self.r15 = 0;
+    pub const fn builder() -> SwitchContextBuilder {
+        SwitchContextBuilder::new()
+    }
+}
+
+#[must_use]
+pub struct SwitchContextBuilder {
+    ctx: SwitchContext,
+    stack_configured: bool,
+}
+
+impl SwitchContextBuilder {
+    pub const fn new() -> Self {
+        Self {
+            ctx: SwitchContext {
+                rbx: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rbp: 0,
+                rsp: 0,
+                rflags: 0x202,
+                rip: 0,
+            },
+            stack_configured: false,
+        }
+    }
+
+    pub const fn with_entry(mut self, entry_point: u64, arg: u64) -> Self {
+        self.ctx.r12 = entry_point;
+        self.ctx.r13 = arg;
+        self
+    }
+
+    pub const fn with_stack(mut self, stack_top: u64, trampoline: u64) -> Self {
+        self.ctx.rsp = stack_top - 8;
+        self.ctx.rip = trampoline;
+        self.stack_configured = true;
+        self
+    }
+
+    pub fn build(self) -> SwitchContext {
+        assert!(self.stack_configured, "SwitchContext stack not configured");
+        self.ctx
+    }
+
+    pub const fn build_unconfigured(self) -> SwitchContext {
+        self.ctx
     }
 }
 
@@ -287,6 +326,18 @@ pub const SWITCH_CTX_OFF_RFLAGS: usize = offset_of!(SwitchContext, rflags);
 pub const SWITCH_CTX_OFF_RIP: usize = offset_of!(SwitchContext, rip);
 
 const _: () = assert!(core::mem::size_of::<SwitchContext>() == 72);
+
+const _: () = {
+    assert!(offset_of!(SwitchContext, rbx) == 0);
+    assert!(offset_of!(SwitchContext, r12) == 8);
+    assert!(offset_of!(SwitchContext, r13) == 16);
+    assert!(offset_of!(SwitchContext, r14) == 24);
+    assert!(offset_of!(SwitchContext, r15) == 32);
+    assert!(offset_of!(SwitchContext, rbp) == 40);
+    assert!(offset_of!(SwitchContext, rsp) == 48);
+    assert!(offset_of!(SwitchContext, rflags) == 56);
+    assert!(offset_of!(SwitchContext, rip) == 64);
+};
 
 // =============================================================================
 // FpuState - FPU/SSE register state for context switching

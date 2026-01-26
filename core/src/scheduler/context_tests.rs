@@ -4,15 +4,15 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
-    TASK_STATE_RUNNING, TASK_STATE_TERMINATED, Task,
+    Task, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
+    TASK_STATE_RUNNING, TASK_STATE_TERMINATED,
 };
 use slopos_lib::klog_info;
 
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{
-    MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_fork, task_get_info,
-    task_set_state, task_shutdown_all, task_terminate,
+    init_task_manager, task_create, task_find_by_id, task_fork, task_get_info, task_set_state,
+    task_shutdown_all, task_terminate, MAX_TASKS,
 };
 
 fn setup_context_test_env() -> i32 {
@@ -509,27 +509,30 @@ pub fn test_switch_context_zero_init() -> c_int {
 pub fn test_switch_context_setup_initial() -> c_int {
     use slopos_abi::task::SwitchContext;
 
-    let mut ctx = SwitchContext::zero();
     let stack_top: u64 = 0x1000;
     let entry: u64 = 0xDEADBEEF;
     let arg: u64 = 0xCAFEBABE;
+    let trampoline: u64 = 0x12345678;
 
-    ctx.setup_initial(stack_top, entry, arg);
+    let ctx = SwitchContext::builder()
+        .with_entry(entry, arg)
+        .with_stack(stack_top, trampoline)
+        .build();
 
     if ctx.rsp != stack_top - 8 {
-        klog_info!("CONTEXT_TEST: setup_initial rsp wrong: {:#x}", ctx.rsp);
+        klog_info!("CONTEXT_TEST: builder rsp wrong: {:#x}", ctx.rsp);
         return -1;
     }
-    if ctx.rip != entry {
-        klog_info!("CONTEXT_TEST: setup_initial rip wrong: {:#x}", ctx.rip);
+    if ctx.rip != trampoline {
+        klog_info!("CONTEXT_TEST: builder rip wrong: {:#x}", ctx.rip);
         return -1;
     }
     if ctx.r12 != entry {
-        klog_info!("CONTEXT_TEST: setup_initial r12 wrong: {:#x}", ctx.r12);
+        klog_info!("CONTEXT_TEST: builder r12 wrong: {:#x}", ctx.r12);
         return -1;
     }
     if ctx.r13 != arg {
-        klog_info!("CONTEXT_TEST: setup_initial r13 wrong: {:#x}", ctx.r13);
+        klog_info!("CONTEXT_TEST: builder r13 wrong: {:#x}", ctx.r13);
         return -1;
     }
     if ctx.rflags != 0x202 {

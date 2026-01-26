@@ -82,12 +82,12 @@ pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const S
 /// Entry trampoline for new kernel tasks.
 ///
 /// When a new task is created, its stack is set up to "return" to this function.
-/// The task's entry point is in r12, argument in r13 (set by setup_initial).
+/// The task's entry point is in r12, argument in r13 (set by SwitchContextBuilder).
 #[unsafe(naked)]
 pub extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(
-        // r12 = entry point function pointer (set by setup_initial)
-        // r13 = argument to pass (set by setup_initial)
+        // r12 = entry point function pointer (set by SwitchContextBuilder)
+        // r13 = argument to pass (set by SwitchContextBuilder)
 
         // Move argument to first parameter register (rdi)
         "mov rdi, r13",
@@ -103,35 +103,6 @@ pub extern "sysv64" fn task_entry_trampoline() {
 
         task_exit = sym super::scheduler::scheduler_task_exit_impl,
     );
-}
-
-/// Initialize a SwitchContext for a new task that will use the trampoline.
-///
-/// Sets up the context so that when switch_registers loads it,
-/// the CPU will "return" to task_entry_trampoline with:
-/// - r12 = entry_point
-/// - r13 = arg
-pub fn setup_new_task_context(ctx: &mut SwitchContext, stack_top: u64, entry_point: u64, arg: u64) {
-    ctx.rbx = 0;
-    ctx.r12 = entry_point;
-    ctx.r13 = arg;
-    ctx.r14 = 0;
-    ctx.r15 = 0;
-    ctx.rbp = 0;
-    ctx.rflags = 0x202;
-
-    // Set up the stack with the trampoline as "return address"
-    // Stack layout: [return_address] at rsp
-    let trampoline_addr = task_entry_trampoline as *const () as u64;
-
-    // Write the return address to the top of the stack
-    unsafe {
-        let return_addr_slot = (stack_top - 8) as *mut u64;
-        core::ptr::write_volatile(return_addr_slot, trampoline_addr);
-    }
-
-    ctx.rsp = stack_top - 8;
-    ctx.rip = trampoline_addr;
 }
 
 /// Initialize context from current CPU state (for boot/kernel context).
