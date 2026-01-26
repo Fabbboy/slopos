@@ -6,10 +6,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::cpu;
 use crate::preempt::PreemptGuard;
 
-pub struct Spinlock {
-    locked: AtomicBool,
-}
-
 /// Mutex that disables interrupts AND preemption while held.
 /// Essential for kernel code accessed from both normal and interrupt contexts.
 pub struct IrqMutex<T> {
@@ -309,58 +305,5 @@ impl<'a, T> Drop for IrqRwLockWriteGuard<'a, T> {
         self.lock.state.store(0, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this
-    }
-}
-
-// =============================================================================
-// Spinlock - Basic spinlock without RAII guard
-// =============================================================================
-
-impl Spinlock {
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self {
-            locked: AtomicBool::new(false),
-        }
-    }
-
-    #[inline(always)]
-    pub fn init(&self) {
-        self.locked.store(false, Ordering::Relaxed);
-    }
-
-    #[inline(always)]
-    pub fn lock(&self) {
-        while self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            spin_loop();
-        }
-    }
-
-    #[inline(always)]
-    pub fn unlock(&self) {
-        self.locked.store(false, Ordering::Release);
-    }
-
-    #[inline(always)]
-    pub fn lock_irqsave(&self) -> u64 {
-        let flags = cpu::save_flags_cli();
-        while self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            spin_loop();
-        }
-        flags
-    }
-
-    #[inline(always)]
-    pub fn unlock_irqrestore(&self, flags: u64) {
-        self.locked.store(false, Ordering::Release);
-        cpu::restore_flags(flags);
     }
 }

@@ -6,10 +6,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
 pub use slopos_lib::testing::suite_masks::SUITE_SCHEDULER;
 pub use slopos_lib::testing::{
-    HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
-    measure_elapsed_ms,
+    measure_elapsed_ms, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
+    HARNESS_MAX_SUITES,
 };
-use slopos_lib::{StateFlag, define_test_suite, klog_info, register_test_suites};
+use slopos_lib::{define_test_suite, klog_info, register_test_suites, StateFlag};
 
 pub type InterruptTestConfig = TestConfig;
 pub type InterruptTestVerbosity = Verbosity;
@@ -170,7 +170,11 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         summary.elapsed_ms,
     );
 
-    if summary.failed == 0 { 0 } else { -1 }
+    if summary.failed == 0 {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn tests_request_shutdown(failed: i32) {
@@ -225,9 +229,8 @@ mod suites {
         test_ring_buffer_wrap, test_shm_create_destroy, test_shm_create_excessive_size,
         test_shm_create_zero_size, test_shm_destroy_non_owner, test_shm_invalid_token,
         test_shm_mapping_overflow, test_shm_refcount, test_shm_surface_attach,
-        test_shm_surface_attach_overflow, test_shm_surface_attach_too_small, test_spinlock_basic,
-        test_spinlock_init, test_spinlock_irqsave, test_vma_flags_retrieval,
-        test_zero_flag_under_pressure,
+        test_shm_surface_attach_overflow, test_shm_surface_attach_too_small,
+        test_vma_flags_retrieval, test_zero_flag_under_pressure,
     };
 
     use slopos_core::sched_tests::{
@@ -410,7 +413,11 @@ mod suites {
             out_ref.timed_out = 0;
         }
 
-        if passed == total { 0 } else { -1 }
+        if passed == total {
+            0
+        } else {
+            -1
+        }
     }
 
     pub static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
@@ -482,12 +489,9 @@ mod suites {
     );
 
     define_test_suite!(
-        spinlock,
+        irqmutex,
         SUITE_SCHEDULER,
         [
-            test_spinlock_basic,
-            test_spinlock_irqsave,
-            test_spinlock_init,
             test_irqmutex_basic,
             test_irqmutex_mutation,
             test_irqmutex_try_lock,
@@ -905,7 +909,11 @@ mod suites {
             out_ref.failed = total.saturating_sub(passed);
             out_ref.elapsed_ms = elapsed;
         }
-        if passed == total { 0 } else { -1 }
+        if passed == total {
+            0
+        } else {
+            -1
+        }
     }
 
     pub static FPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
@@ -926,7 +934,7 @@ mod suites {
             HEAP_EXT_SUITE_DESC,
             PAGING_SUITE_DESC,
             RING_BUF_SUITE_DESC,
-            SPINLOCK_SUITE_DESC,
+            IRQMUTEX_SUITE_DESC,
             SHM_SUITE_DESC,
             RIGOROUS_SUITE_DESC,
             PROCESS_VM_SUITE_DESC,

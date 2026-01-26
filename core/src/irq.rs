@@ -10,14 +10,14 @@
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 
-use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_abi::arch::x86_64::memory::{
     EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE,
 };
-use slopos_lib::InitFlag;
-use slopos_lib::spinlock::Spinlock;
+use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InterruptFrame, cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
+use slopos_lib::InitFlag;
+use slopos_lib::IrqMutex;
+use slopos_lib::{cpu, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc, InterruptFrame};
 
 use crate::platform;
 use crate::scheduler::scheduler::scheduler_handle_post_irq;
@@ -106,22 +106,20 @@ static IRQ_TABLES: IrqTables = IrqTables::new();
 static IRQ_SYSTEM_INIT: InitFlag = InitFlag::new();
 static mut TIMER_TICK_COUNTER: u64 = 0;
 static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
-static IRQ_TABLE_LOCK: Spinlock = Spinlock::new();
+static IRQ_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
 
 /// Access IRQ tables under lock.
 #[inline]
 fn with_irq_tables<R>(
     f: impl FnOnce(&mut [IrqEntry; IRQ_LINES], &mut [IrqRouteState; IRQ_LINES]) -> R,
 ) -> R {
-    let flags = IRQ_TABLE_LOCK.lock_irqsave();
-    let res = unsafe {
+    let _guard = IRQ_TABLE_LOCK.lock();
+    unsafe {
         f(
             &mut *IRQ_TABLES.entries_mut(),
             &mut *IRQ_TABLES.routes_mut(),
         )
-    };
-    IRQ_TABLE_LOCK.unlock_irqrestore(flags);
-    res
+    }
 }
 
 /// Send EOI to acknowledge interrupt.

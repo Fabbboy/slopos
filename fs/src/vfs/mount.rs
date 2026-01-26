@@ -1,5 +1,5 @@
 use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
-use slopos_lib::{CleanLockToken, L1, RwLock};
+use slopos_lib::IrqRwLock;
 
 const MAX_MOUNTS: usize = 16;
 const MAX_PATH_LEN: usize = 256;
@@ -136,27 +136,23 @@ impl MountTable {
     }
 }
 
-static MOUNT_TABLE: RwLock<L1, MountTable> = RwLock::new(MountTable::new());
+static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(MountTable::new());
 
 pub fn mount(path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
-    let mut token = unsafe { CleanLockToken::new() };
-    MOUNT_TABLE.write(token.token()).mount(path, fs, flags)
+    MOUNT_TABLE.write().mount(path, fs, flags)
 }
 
 pub fn unmount(path: &[u8]) -> VfsResult<()> {
-    let mut token = unsafe { CleanLockToken::new() };
-    MOUNT_TABLE.write(token.token()).unmount(path)
+    MOUNT_TABLE.write().unmount(path)
 }
 
 pub fn with_mount_table<R>(f: impl FnOnce(&MountTable) -> R) -> R {
-    let mut token = unsafe { CleanLockToken::new() };
-    let guard = MOUNT_TABLE.read(token.token());
+    let guard = MOUNT_TABLE.read();
     f(&guard)
 }
 
 pub fn resolve_mount(path: &[u8]) -> VfsResult<(&'static dyn FileSystem, &'static [u8])> {
-    let mut token = unsafe { CleanLockToken::new() };
-    let guard = MOUNT_TABLE.read(token.token());
+    let guard = MOUNT_TABLE.read();
     let (fs, relative) = guard.resolve(path)?;
     let relative_static: &'static [u8] =
         unsafe { core::slice::from_raw_parts(relative.as_ptr(), relative.len()) };

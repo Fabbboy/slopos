@@ -11,8 +11,8 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{get_heap_stats, kfree, kmalloc, kzalloc};
 use crate::mm_constants::PAGE_SIZE_4KB;
 use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, alloc_page_frames, free_page_frame,
-    get_page_allocator_stats, page_frame_get_ref, page_frame_inc_ref,
+    alloc_page_frame, alloc_page_frames, free_page_frame, get_page_allocator_stats,
+    page_frame_get_ref, page_frame_inc_ref, ALLOC_FLAG_ZERO,
 };
 use crate::paging::{
     get_current_page_directory, paging_get_kernel_directory, paging_is_cow,
@@ -879,80 +879,19 @@ pub fn test_ring_buffer_capacity() -> c_int {
 }
 
 // ============================================================================
-// SPINLOCK/IRQMUTEX TESTS - 6 tests
+// IRQMUTEX TESTS - 3 tests
 // ============================================================================
 
-/// Test 1: Basic Spinlock lock/unlock
-pub fn test_spinlock_basic() -> c_int {
-    use slopos_lib::spinlock::Spinlock;
-
-    let lock = Spinlock::new();
-
-    // Lock should succeed
-    lock.lock();
-
-    // Unlock should succeed
-    lock.unlock();
-
-    // Should be able to lock again after unlock
-    lock.lock();
-    lock.unlock();
-
-    0
-}
-
-/// Test 2: Spinlock with IRQ save/restore
-pub fn test_spinlock_irqsave() -> c_int {
-    use slopos_lib::spinlock::Spinlock;
-
-    let lock = Spinlock::new();
-
-    // Lock with IRQ save
-    let flags = lock.lock_irqsave();
-
-    // Should have valid flags (non-zero typically)
-    // Just verify we can use them
-
-    // Unlock with IRQ restore
-    lock.unlock_irqrestore(flags);
-
-    // Lock again to verify it works after restore
-    let flags2 = lock.lock_irqsave();
-    lock.unlock_irqrestore(flags2);
-
-    0
-}
-
-/// Test 3: Spinlock init function
-pub fn test_spinlock_init() -> c_int {
-    use slopos_lib::spinlock::Spinlock;
-
-    let lock = Spinlock::new();
-
-    // Lock it first
-    lock.lock();
-    lock.unlock();
-
-    // Re-initialize
-    lock.init();
-
-    // Should be able to lock after init
-    lock.lock();
-    lock.unlock();
-
-    0
-}
-
-/// Test 4: IrqMutex basic lock/unlock with guard
+/// Test 1: IrqMutex basic lock/unlock with guard
 pub fn test_irqmutex_basic() -> c_int {
-    use slopos_lib::spinlock::IrqMutex;
+    use slopos_lib::IrqMutex;
 
     let mutex: IrqMutex<u32> = IrqMutex::new(42);
 
     {
         let guard = mutex.lock();
         if *guard != 42 {
-            klog_info!("SPINLOCK_TEST: IrqMutex value should be 42");
+            klog_info!("IRQMUTEX_TEST: IrqMutex value should be 42");
             return -1;
         }
     } // Guard drops here, unlocking
@@ -968,9 +907,9 @@ pub fn test_irqmutex_basic() -> c_int {
     0
 }
 
-/// Test 5: IrqMutex mutation through guard
+/// Test 2: IrqMutex mutation through guard
 pub fn test_irqmutex_mutation() -> c_int {
-    use slopos_lib::spinlock::IrqMutex;
+    use slopos_lib::IrqMutex;
 
     let mutex: IrqMutex<u32> = IrqMutex::new(0);
 
@@ -984,7 +923,7 @@ pub fn test_irqmutex_mutation() -> c_int {
     {
         let guard = mutex.lock();
         if *guard != 100 {
-            klog_info!("SPINLOCK_TEST: IrqMutex mutation failed, got {}", *guard);
+            klog_info!("IRQMUTEX_TEST: IrqMutex mutation failed, got {}", *guard);
             return -1;
         }
     }
@@ -992,9 +931,9 @@ pub fn test_irqmutex_mutation() -> c_int {
     0
 }
 
-/// Test 6: IrqMutex try_lock
+/// Test 3: IrqMutex try_lock
 pub fn test_irqmutex_try_lock() -> c_int {
-    use slopos_lib::spinlock::IrqMutex;
+    use slopos_lib::IrqMutex;
 
     let mutex: IrqMutex<u32> = IrqMutex::new(55);
 
@@ -1002,7 +941,7 @@ pub fn test_irqmutex_try_lock() -> c_int {
     {
         let maybe_guard = mutex.try_lock();
         if maybe_guard.is_none() {
-            klog_info!("SPINLOCK_TEST: try_lock on unlocked mutex should succeed");
+            klog_info!("IRQMUTEX_TEST: try_lock on unlocked mutex should succeed");
             return -1;
         }
         let guard = maybe_guard.unwrap();
@@ -1188,7 +1127,7 @@ pub fn test_shm_surface_attach_too_small() -> c_int {
 /// Test 9: Map shared buffer more than MAX_MAPPINGS_PER_BUFFER times
 /// BUG FINDER: shm_map uses unwrap() on mapping slot search - will panic!
 pub fn test_shm_mapping_overflow() -> c_int {
-    use crate::shared_memory::{ShmAccess, shm_map};
+    use crate::shared_memory::{shm_map, ShmAccess};
 
     let owner = 1u32;
     let size = 4096u64;

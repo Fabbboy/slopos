@@ -87,7 +87,11 @@ pub fn klog_get_level() -> KlogLevel {
     KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
 }
 pub fn klog_is_enabled(level: KlogLevel) -> c_int {
-    if is_enabled(level) { 1 } else { 0 }
+    if is_enabled(level) {
+        1
+    } else {
+        0
+    }
 }
 pub fn klog_newline() {
     putc(b'\n');

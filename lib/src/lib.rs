@@ -434,7 +434,6 @@ pub mod service_macro;
 pub mod spinlock;
 pub mod stacktrace;
 pub mod string;
-pub mod sync;
 pub mod testing;
 pub mod wl_currency;
 
@@ -444,29 +443,23 @@ pub use paste;
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
 pub use kdiag::kdiag_dump_interrupt_frame;
-pub use kdiag::{InterruptFrame, KDIAG_STACK_TRACE_DEPTH, kdiag_timestamp};
+pub use kdiag::{kdiag_timestamp, InterruptFrame, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
-    KlogLevel, klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline,
-    klog_set_level,
+    klog_attach_serial, klog_get_level, klog_init, klog_is_enabled, klog_newline, klog_set_level,
+    KlogLevel,
 };
 pub use math::{abs_i32, max_i32, max_u32, min_i32, min_u32};
 pub use ports::COM1;
-pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};
+pub use preempt::{is_preemption_disabled, preempt_count, IrqPreemptGuard, PreemptGuard};
 pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
-pub use spinlock::{
-    IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, Spinlock,
-};
+pub use spinlock::{IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
 pub use stacktrace::StacktraceEntry;
-pub use sync::{
-    CleanLockToken, L0, L1, L2, L3, L4, L5, Level, LockToken, Lower, Mutex as OrderedMutex,
-    MutexGuard as OrderedMutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
 
 pub use init_flag::{InitFlag, StateFlag};
 pub use percpu::{
-    MAX_CPUS, PerCpuData, activate_gs_base_for_cpu, apic_id_from_cpu_index, cpu_index_from_apic_id,
-    get_bsp_apic_id, get_cpu_count, get_current_cpu, get_online_cpu_count, get_percpu_data,
-    init_bsp, init_percpu_for_cpu, is_bsp, is_cpu_online, mark_cpu_offline, mark_cpu_online,
-    register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu,
+    activate_gs_base_for_cpu, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id,
+    get_cpu_count, get_current_cpu, get_online_cpu_count, get_percpu_data, init_bsp,
+    init_percpu_for_cpu, is_bsp, is_cpu_online, mark_cpu_offline, mark_cpu_online,
+    register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu, PerCpuData, MAX_CPUS,
 };
