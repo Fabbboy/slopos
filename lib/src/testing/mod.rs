@@ -1,13 +1,12 @@
 use core::ffi::c_int;
 
 pub mod config;
-mod fixture;
 pub mod harness;
 mod runner;
 pub mod suite_masks;
 
+mod assertions;
 pub use config::{Suite, TestConfig, Verbosity, config_from_cmdline};
-pub use fixture::{FixtureKind, NoFixture, TestFixture};
 pub use harness::{
     HARNESS_MAX_SUITES, HarnessConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult,
     cycles_to_ms, estimate_cycles_per_ms, measure_elapsed_ms,
@@ -15,39 +14,30 @@ pub use harness::{
 pub use runner::run_single_test;
 pub use suite_masks::*;
 
-/// Result of a single test execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestResult {
-    /// Test passed successfully
     Pass,
-    /// Test failed (assertion or explicit failure)
     Fail,
-    /// Test panicked unexpectedly
     Panic,
-    /// Test was skipped (e.g., fixture setup failed)
     Skipped,
 }
 
 impl TestResult {
-    /// Returns true if the test passed.
     #[inline]
     pub fn is_pass(&self) -> bool {
         matches!(self, Self::Pass)
     }
 
-    /// Returns true if the test failed or panicked.
     #[inline]
     pub fn is_failure(&self) -> bool {
         matches!(self, Self::Fail | Self::Panic)
     }
 
-    /// Convert from C-style return code (0 = pass, non-zero = fail).
     #[inline]
     pub fn from_c_int(val: c_int) -> Self {
         if val == 0 { Self::Pass } else { Self::Fail }
     }
 
-    /// Convert to C-style return code (0 = pass, -1 = fail).
     #[inline]
     pub fn to_c_int(self) -> c_int {
         match self {
@@ -69,14 +59,6 @@ impl From<TestResult> for c_int {
     }
 }
 
-/// Return a passing test result.
-///
-/// # Example
-/// ```ignore
-/// if condition_met {
-///     return pass!();
-/// }
-/// ```
 #[macro_export]
 macro_rules! pass {
     () => {
@@ -84,14 +66,6 @@ macro_rules! pass {
     };
 }
 
-/// Return a failing test result with optional message.
-///
-/// # Example
-/// ```ignore
-/// if !condition {
-///     return fail!("Expected condition to be true");
-/// }
-/// ```
 #[macro_export]
 macro_rules! fail {
     () => {
@@ -107,117 +81,24 @@ macro_rules! fail {
     }};
 }
 
-/// Run a single test with optional fixture and panic catching.
-///
-/// # Usage variants
-///
-/// ```ignore
-/// // Basic: just function name (no fixture)
-/// run_test!(test_function)
-///
-/// // With custom name (no fixture)
-/// run_test!("custom name", test_function)
-///
-/// // With fixture type
-/// run_test!(test_function, SchedFixture)
-///
-/// // With custom name and fixture
-/// run_test!("custom name", test_function, SchedFixture)
-///
-/// // Accumulating results (for suite runners)
-/// run_test!(passed, total, test_function)
-/// run_test!(passed, total, test_function, SchedFixture)
-/// ```
 #[macro_export]
 macro_rules! run_test {
-    // Accumulating variant: (passed, total, test_fn)
     ($passed:expr, $total:expr, $test_fn:expr) => {{
         $total += 1;
-        let result = $crate::testing::run_single_test(
-            stringify!($test_fn),
-            || $test_fn().into(),
-            $crate::testing::FixtureKind::None,
-        );
+        let result = $crate::testing::run_single_test(stringify!($test_fn), || $test_fn().into());
         if result.is_pass() {
             $passed += 1;
         }
         result
     }};
 
-    // Accumulating variant with fixture: (passed, total, test_fn, Fixture)
-    ($passed:expr, $total:expr, $test_fn:expr, $fixture:ty) => {{
-        $total += 1;
-        let result = $crate::testing::run_single_test(
-            stringify!($test_fn),
-            || $test_fn().into(),
-            <$fixture as $crate::testing::TestFixture>::KIND,
-        );
-        if result.is_pass() {
-            $passed += 1;
-        }
-        result
-    }};
+    ($test_fn:expr) => {{ $crate::testing::run_single_test(stringify!($test_fn), || $test_fn().into()) }};
 
-    // Simple variant: just function
-    ($test_fn:expr) => {{
-        $crate::testing::run_single_test(
-            stringify!($test_fn),
-            || $test_fn().into(),
-            $crate::testing::FixtureKind::None,
-        )
-    }};
-
-    // With fixture type
-    ($test_fn:expr, $fixture:ty) => {{
-        $crate::testing::run_single_test(
-            stringify!($test_fn),
-            || $test_fn().into(),
-            <$fixture as $crate::testing::TestFixture>::KIND,
-        )
-    }};
-
-    // Custom name, no fixture
-    ($name:expr, $test_fn:expr) => {{
-        $crate::testing::run_single_test(
-            $name,
-            || $test_fn().into(),
-            $crate::testing::FixtureKind::None,
-        )
-    }};
-
-    // Custom name with fixture
-    ($name:expr, $test_fn:expr, $fixture:ty) => {{
-        $crate::testing::run_single_test(
-            $name,
-            || $test_fn().into(),
-            <$fixture as $crate::testing::TestFixture>::KIND,
-        )
-    }};
+    ($name:expr, $test_fn:expr) => {{ $crate::testing::run_single_test($name, || $test_fn().into()) }};
 }
 
-/// Define a test suite for the kernel test harness with automatic registration.
-///
-/// Generates:
-/// - A runner function compatible with `TestSuiteDesc`
-/// - A static `TestSuiteDesc` for registration
-///
-/// # Variants
-///
-/// 1. **Inline tests**: List individual test functions (preferred)
-/// ```ignore
-/// define_test_suite!(page_alloc, SUITE_MEMORY, [
-///     test_page_alloc_single,
-///     test_page_alloc_multi,
-/// ]);
-/// ```
-///
-/// 2. **Single test**: Wrap a single `fn() -> c_int` function
-/// ```ignore
-/// define_test_suite!(privsep, SUITE_SCHEDULER, run_privilege_test, single);
-/// ```
 #[macro_export]
 macro_rules! define_test_suite {
-    // Variant 1: Inline test list
     ($suite_name:ident, $mask:expr, [$($test_fn:path),* $(,)?]) => {
         $crate::paste::paste! {
             const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
@@ -258,7 +139,6 @@ macro_rules! define_test_suite {
         }
     };
 
-    // Variant 2: Single test function returning c_int (with panic catching)
     ($suite_name:ident, $mask:expr, $runner_fn:path, single) => {
         $crate::paste::paste! {
             const [<$suite_name:upper _NAME>]: &[u8] = concat!(stringify!($suite_name), "\0").as_bytes();
@@ -295,7 +175,6 @@ macro_rules! define_test_suite {
     };
 }
 
-/// Register multiple test suites with the harness in one call.
 #[macro_export]
 macro_rules! register_test_suites {
     ($register_fn:path, $($suite_desc:expr),* $(,)?) => {

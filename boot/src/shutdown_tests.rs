@@ -13,7 +13,6 @@
 //! without actually shutting down. These tests focus on the setup, guards,
 //! and partial execution paths that can be safely verified.
 
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_is_enabled, scheduler_shutdown};
@@ -25,7 +24,7 @@ use slopos_drivers::apic::{apic_is_available, apic_is_enabled};
 use slopos_lib::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND, QEMU_DEBUG_EXIT,
 };
-use slopos_lib::{StateFlag, klog_info};
+use slopos_lib::{StateFlag, klog_info, testing::TestResult};
 use slopos_mm::paging::paging_get_kernel_directory;
 
 use core::ffi::{c_char, c_void};
@@ -35,25 +34,27 @@ use core::ptr;
 // Test Helper Functions
 // =============================================================================
 
-fn setup_shutdown_test_env() -> i32 {
-    // Clean slate
-    task_shutdown_all();
-    scheduler_shutdown();
+struct ShutdownFixture;
 
-    if init_task_manager() != 0 {
-        klog_info!("SHUTDOWN_TEST: Failed to init task manager");
-        return -1;
+impl ShutdownFixture {
+    fn new() -> Self {
+        task_shutdown_all();
+        scheduler_shutdown();
+        if init_task_manager() != 0 {
+            klog_info!("SHUTDOWN_TEST: Failed to init task manager");
+        }
+        if init_scheduler() != 0 {
+            klog_info!("SHUTDOWN_TEST: Failed to init scheduler");
+        }
+        Self
     }
-    if init_scheduler() != 0 {
-        klog_info!("SHUTDOWN_TEST: Failed to init scheduler");
-        return -1;
-    }
-    0
 }
 
-fn teardown_shutdown_test_env() {
-    task_shutdown_all();
-    scheduler_shutdown();
+impl Drop for ShutdownFixture {
+    fn drop(&mut self) {
+        task_shutdown_all();
+        scheduler_shutdown();
+    }
 }
 
 fn dummy_task_fn(_arg: *mut c_void) {
@@ -66,37 +67,37 @@ fn dummy_task_fn(_arg: *mut c_void) {
 // =============================================================================
 
 /// Test: StateFlag starts inactive
-pub fn test_stateflag_starts_inactive() -> c_int {
+pub fn test_stateflag_starts_inactive() -> TestResult {
     let flag = StateFlag::new();
 
     if flag.is_active() {
         klog_info!("SHUTDOWN_TEST: StateFlag should start inactive!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag enter() returns true on first call
-pub fn test_stateflag_enter_first_call() -> c_int {
+pub fn test_stateflag_enter_first_call() -> TestResult {
     let flag = StateFlag::new();
 
     let first_result = flag.enter();
     if !first_result {
         klog_info!("SHUTDOWN_TEST: First enter() should return true!");
-        return -1;
+        return TestResult::Fail;
     }
 
     if !flag.is_active() {
         klog_info!("SHUTDOWN_TEST: Flag should be active after enter()!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag enter() returns false on second call (idempotent)
-pub fn test_stateflag_enter_idempotent() -> c_int {
+pub fn test_stateflag_enter_idempotent() -> TestResult {
     let flag = StateFlag::new();
 
     let first_result = flag.enter();
@@ -104,54 +105,54 @@ pub fn test_stateflag_enter_idempotent() -> c_int {
 
     if !first_result {
         klog_info!("SHUTDOWN_TEST: First enter() should return true!");
-        return -1;
+        return TestResult::Fail;
     }
 
     if second_result {
         klog_info!("SHUTDOWN_TEST: Second enter() should return false (already active)!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag can be reset and re-entered
-pub fn test_stateflag_reset_and_reenter() -> c_int {
+pub fn test_stateflag_reset_and_reenter() -> TestResult {
     let flag = StateFlag::new();
 
     // Enter
     flag.enter();
     if !flag.is_active() {
         klog_info!("SHUTDOWN_TEST: Flag should be active after enter()!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Reset
     flag.leave();
     if flag.is_active() {
         klog_info!("SHUTDOWN_TEST: Flag should be inactive after leave()!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Re-enter
     let reenter_result = flag.enter();
     if !reenter_result {
         klog_info!("SHUTDOWN_TEST: Re-enter after leave() should return true!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag take() consumes and returns previous state
-pub fn test_stateflag_take_consumption() -> c_int {
+pub fn test_stateflag_take_consumption() -> TestResult {
     let flag = StateFlag::new();
 
     // Take on inactive flag
     let take_inactive = flag.take();
     if take_inactive {
         klog_info!("SHUTDOWN_TEST: take() on inactive flag should return false!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Set active and take
@@ -159,20 +160,20 @@ pub fn test_stateflag_take_consumption() -> c_int {
     let take_active = flag.take();
     if !take_active {
         klog_info!("SHUTDOWN_TEST: take() on active flag should return true!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Should be inactive after take
     if flag.is_active() {
         klog_info!("SHUTDOWN_TEST: Flag should be inactive after take()!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Multiple StateFlags are independent
-pub fn test_stateflag_independence() -> c_int {
+pub fn test_stateflag_independence() -> TestResult {
     let flag1 = StateFlag::new();
     let flag2 = StateFlag::new();
 
@@ -180,15 +181,15 @@ pub fn test_stateflag_independence() -> c_int {
 
     if !flag1.is_active() {
         klog_info!("SHUTDOWN_TEST: flag1 should be active!");
-        return -1;
+        return TestResult::Fail;
     }
 
     if flag2.is_active() {
         klog_info!("SHUTDOWN_TEST: flag2 should still be inactive!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -197,10 +198,8 @@ pub fn test_stateflag_independence() -> c_int {
 // =============================================================================
 
 /// Test: scheduler_shutdown disables the scheduler
-pub fn test_scheduler_shutdown_disables() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_scheduler_shutdown_disables() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Scheduler should start disabled after init
     let initial_state = scheduler_is_enabled();
@@ -209,8 +208,7 @@ pub fn test_scheduler_shutdown_disables() -> c_int {
             "SHUTDOWN_TEST: Scheduler should start disabled, got {}",
             initial_state
         );
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Shutdown should keep it disabled
@@ -222,19 +220,15 @@ pub fn test_scheduler_shutdown_disables() -> c_int {
             "SHUTDOWN_TEST: Scheduler should be disabled after shutdown, got {}",
             after_shutdown
         );
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: scheduler_shutdown is idempotent (can be called multiple times)
-pub fn test_scheduler_shutdown_idempotent() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_scheduler_shutdown_idempotent() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Call shutdown multiple times - should not crash
     scheduler_shutdown();
@@ -244,19 +238,15 @@ pub fn test_scheduler_shutdown_idempotent() -> c_int {
     let enabled = scheduler_is_enabled();
     if enabled != 0 {
         klog_info!("SHUTDOWN_TEST: Scheduler should remain disabled after multiple shutdowns");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: scheduler_shutdown clears current task
-pub fn test_scheduler_shutdown_clears_state() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_scheduler_shutdown_clears_state() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Create some tasks
     let task_id = task_create(
@@ -269,16 +259,14 @@ pub fn test_scheduler_shutdown_clears_state() -> c_int {
 
     if task_id == INVALID_TASK_ID {
         klog_info!("SHUTDOWN_TEST: Failed to create test task");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Verify task exists
     let task_ptr = task_find_by_id(task_id);
     if task_ptr.is_null() {
         klog_info!("SHUTDOWN_TEST: Created task should be findable");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Shutdown should clear queues
@@ -286,8 +274,7 @@ pub fn test_scheduler_shutdown_clears_state() -> c_int {
 
     // Note: task_find_by_id may still return the task (slot not cleared),
     // but scheduler state should be reset
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -296,10 +283,8 @@ pub fn test_scheduler_shutdown_clears_state() -> c_int {
 // =============================================================================
 
 /// Test: task_shutdown_all terminates all tasks
-pub fn test_task_shutdown_all_terminates() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_task_shutdown_all_terminates() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Create multiple tasks
     let mut created_count = 0;
@@ -322,8 +307,7 @@ pub fn test_task_shutdown_all_terminates() -> c_int {
 
     if created_count == 0 {
         klog_info!("SHUTDOWN_TEST: Failed to create any test tasks");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Shutdown all tasks
@@ -336,15 +320,12 @@ pub fn test_task_shutdown_all_terminates() -> c_int {
         created_count
     );
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_shutdown_all on empty task list
-pub fn test_task_shutdown_all_empty() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_task_shutdown_all_empty() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Don't create any tasks, just call shutdown
     let result = task_shutdown_all();
@@ -357,15 +338,12 @@ pub fn test_task_shutdown_all_empty() -> c_int {
         // This might be acceptable behavior, don't fail
     }
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_shutdown_all is idempotent
-pub fn test_task_shutdown_all_idempotent() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_task_shutdown_all_idempotent() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Create a task
     let task_id = task_create(
@@ -378,8 +356,7 @@ pub fn test_task_shutdown_all_idempotent() -> c_int {
 
     if task_id == INVALID_TASK_ID {
         klog_info!("SHUTDOWN_TEST: Failed to create test task");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Call shutdown multiple times
@@ -388,8 +365,7 @@ pub fn test_task_shutdown_all_idempotent() -> c_int {
     let _result3 = task_shutdown_all();
 
     // Should not crash
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -398,15 +374,15 @@ pub fn test_task_shutdown_all_idempotent() -> c_int {
 // =============================================================================
 
 /// Test: Kernel page directory is available for shutdown
-pub fn test_kernel_page_directory_available() -> c_int {
+pub fn test_kernel_page_directory_available() -> TestResult {
     let kernel_dir = paging_get_kernel_directory();
 
     if kernel_dir.is_null() {
         klog_info!("SHUTDOWN_TEST: Kernel page directory should be available!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -415,7 +391,7 @@ pub fn test_kernel_page_directory_available() -> c_int {
 // =============================================================================
 
 /// Test: APIC availability can be queried
-pub fn test_apic_availability_queryable() -> c_int {
+pub fn test_apic_availability_queryable() -> TestResult {
     // This should not crash regardless of APIC state
     let available = apic_is_available();
 
@@ -423,23 +399,23 @@ pub fn test_apic_availability_queryable() -> c_int {
 
     // On QEMU/q35 with IOAPIC, APIC should be available
     // But we don't fail if it's not - the test is about queryability
-    0
+    TestResult::Pass
 }
 
 /// Test: APIC enabled state can be queried
-pub fn test_apic_enabled_queryable() -> c_int {
+pub fn test_apic_enabled_queryable() -> TestResult {
     let available = apic_is_available();
     if available == 0 {
         // APIC not available, skip this test
         klog_info!("SHUTDOWN_TEST: APIC not available, skipping enabled check");
-        return 0;
+        return TestResult::Pass;
     }
 
     // This should not crash
     let enabled = apic_is_enabled();
 
     klog_info!("SHUTDOWN_TEST: APIC enabled = {}", enabled);
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -448,7 +424,7 @@ pub fn test_apic_enabled_queryable() -> c_int {
 // =============================================================================
 
 /// Test: QEMU debug exit port is correct (0xF4)
-pub fn test_qemu_debug_exit_port() -> c_int {
+pub fn test_qemu_debug_exit_port() -> TestResult {
     // We can't actually write to this port in a test (would exit QEMU!)
     // But we can verify the constant is correct
 
@@ -460,34 +436,34 @@ pub fn test_qemu_debug_exit_port() -> c_int {
     let _port = QEMU_DEBUG_EXIT;
 
     klog_info!("SHUTDOWN_TEST: QEMU debug exit port constant verified");
-    0
+    TestResult::Pass
 }
 
 /// Test: ACPI PM1A control port constants exist
-pub fn test_acpi_pm1a_ports_defined() -> c_int {
+pub fn test_acpi_pm1a_ports_defined() -> TestResult {
     // Verify all three variants exist
     let _standard = ACPI_PM1A_CNT; // 0x604
     let _bochs = ACPI_PM1A_CNT_BOCHS; // 0xB004
     let _vbox = ACPI_PM1A_CNT_VBOX; // 0x4004
 
     klog_info!("SHUTDOWN_TEST: ACPI PM1A control ports defined");
-    0
+    TestResult::Pass
 }
 
 /// Test: PS2 command port for reboot exists
-pub fn test_ps2_command_port_defined() -> c_int {
+pub fn test_ps2_command_port_defined() -> TestResult {
     let _port = PS2_COMMAND; // 0x64
 
     klog_info!("SHUTDOWN_TEST: PS2 command port defined");
-    0
+    TestResult::Pass
 }
 
 /// Test: COM1 port for serial drain exists
-pub fn test_com1_port_defined() -> c_int {
+pub fn test_com1_port_defined() -> TestResult {
     let _port = COM1; // 0x3F8
 
     klog_info!("SHUTDOWN_TEST: COM1 port defined for serial drain");
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -496,7 +472,7 @@ pub fn test_com1_port_defined() -> c_int {
 // =============================================================================
 
 /// Test: COM1 LSR port offset is correct
-pub fn test_com1_lsr_offset() -> c_int {
+pub fn test_com1_lsr_offset() -> TestResult {
     // LSR (Line Status Register) is at COM1 + 5
     let lsr_port = COM1.offset(5);
 
@@ -509,11 +485,11 @@ pub fn test_com1_lsr_offset() -> c_int {
 
     // If serial is initialized, we expect TX to be ready most of the time
     // But don't fail if it's not - hardware may vary
-    0
+    TestResult::Pass
 }
 
 /// Test: Serial flush loop terminates
-pub fn test_serial_flush_terminates() -> c_int {
+pub fn test_serial_flush_terminates() -> TestResult {
     let lsr_port = COM1.offset(5);
 
     // Simulate the serial flush loop from shutdown.rs
@@ -539,7 +515,7 @@ pub fn test_serial_flush_terminates() -> c_int {
         // Don't fail - serial may be busy
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -548,10 +524,8 @@ pub fn test_serial_flush_terminates() -> c_int {
 // =============================================================================
 
 /// Test: Shutdown components can be called in correct order
-pub fn test_shutdown_sequence_ordering() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_shutdown_sequence_ordering() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Create some state to clean up
     let task_id = task_create(
@@ -564,8 +538,7 @@ pub fn test_shutdown_sequence_ordering() -> c_int {
 
     if task_id == INVALID_TASK_ID {
         klog_info!("SHUTDOWN_TEST: Failed to create test task for sequence test");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Execute shutdown sequence components (without actual halt)
@@ -576,15 +549,12 @@ pub fn test_shutdown_sequence_ordering() -> c_int {
     let _task_result = task_shutdown_all();
 
     // All steps completed without crash
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: Shutdown handles pre-shutdown state correctly
-pub fn test_shutdown_from_clean_state() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_shutdown_from_clean_state() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Immediately shutdown without creating any tasks
     scheduler_shutdown();
@@ -592,8 +562,7 @@ pub fn test_shutdown_from_clean_state() -> c_int {
 
     klog_info!("SHUTDOWN_TEST: Clean state shutdown result = {}", result);
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -602,10 +571,8 @@ pub fn test_shutdown_from_clean_state() -> c_int {
 // =============================================================================
 
 /// Test: Double scheduler shutdown is safe
-pub fn test_double_scheduler_shutdown() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_double_scheduler_shutdown() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     scheduler_shutdown();
     scheduler_shutdown();
@@ -614,22 +581,20 @@ pub fn test_double_scheduler_shutdown() -> c_int {
     let enabled = scheduler_is_enabled();
     if enabled != 0 {
         klog_info!("SHUTDOWN_TEST: Double shutdown should leave scheduler disabled");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: Shutdown after partial initialization
-pub fn test_shutdown_partial_init() -> c_int {
+pub fn test_shutdown_partial_init() -> TestResult {
     // Only init task manager, not scheduler
     task_shutdown_all(); // Clean any existing state
 
     if init_task_manager() != 0 {
         klog_info!("SHUTDOWN_TEST: Failed to init task manager");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Don't init scheduler - partial init state
@@ -638,18 +603,15 @@ pub fn test_shutdown_partial_init() -> c_int {
     scheduler_shutdown();
     task_shutdown_all();
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Rapid shutdown cycles
-pub fn test_rapid_shutdown_cycles() -> c_int {
+pub fn test_rapid_shutdown_cycles() -> TestResult {
     const CYCLES: usize = 20;
 
     for i in 0..CYCLES {
-        if setup_shutdown_test_env() != 0 {
-            klog_info!("SHUTDOWN_TEST: Cycle {} setup failed", i);
-            return -1;
-        }
+        let _fixture = ShutdownFixture::new();
 
         // Create a task
         let task_id = task_create(
@@ -662,23 +624,19 @@ pub fn test_rapid_shutdown_cycles() -> c_int {
 
         if task_id == INVALID_TASK_ID {
             klog_info!("SHUTDOWN_TEST: Cycle {} task creation failed", i);
-            teardown_shutdown_test_env();
-            return -1;
+            return TestResult::Fail;
         }
 
-        // Shutdown
-        teardown_shutdown_test_env();
+        // Shutdown happens automatically when _fixture is dropped
     }
 
     klog_info!("SHUTDOWN_TEST: Completed {} shutdown cycles", CYCLES);
-    0
+    TestResult::Pass
 }
 
 /// Test: Shutdown with many tasks
-pub fn test_shutdown_many_tasks() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_shutdown_many_tasks() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     const TASK_COUNT: usize = 50;
     let mut created = 0;
@@ -695,7 +653,7 @@ pub fn test_shutdown_many_tasks() -> c_int {
         if task_id != INVALID_TASK_ID {
             created += 1;
         } else {
-            break; // Hit task limit
+            break;
         }
     }
 
@@ -706,14 +664,13 @@ pub fn test_shutdown_many_tasks() -> c_int {
 
     klog_info!("SHUTDOWN_TEST: Bulk shutdown result = {}", result);
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag concurrent access simulation
 /// NOTE: In a real multi-core scenario, this would need actual concurrent threads.
 /// This test simulates the pattern used in shutdown code.
-pub fn test_stateflag_concurrent_pattern() -> c_int {
+pub fn test_stateflag_concurrent_pattern() -> TestResult {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     let flag = StateFlag::new();
@@ -734,7 +691,7 @@ pub fn test_stateflag_concurrent_pattern() -> c_int {
             "SHUTDOWN_TEST: Expected exactly 1 successful enter, got {}",
             successful_enters
         );
-        return -1;
+        return TestResult::Fail;
     }
 
     let count = COUNTER.load(Ordering::SeqCst);
@@ -743,19 +700,17 @@ pub fn test_stateflag_concurrent_pattern() -> c_int {
             "SHUTDOWN_TEST: Counter should be 1, got {} (possible race)",
             count
         );
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Shutdown with mixed task priorities
-pub fn test_shutdown_mixed_priorities() -> c_int {
+pub fn test_shutdown_mixed_priorities() -> TestResult {
     use slopos_core::scheduler::task::{TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW};
 
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+    let _fixture = ShutdownFixture::new();
 
     let priorities = [
         TASK_PRIORITY_HIGH,
@@ -778,8 +733,7 @@ pub fn test_shutdown_mixed_priorities() -> c_int {
                 "SHUTDOWN_TEST: Failed to create task with priority {}",
                 priority
             );
-            teardown_shutdown_test_env();
-            return -1;
+            return TestResult::Fail;
         }
     }
 
@@ -788,8 +742,7 @@ pub fn test_shutdown_mixed_priorities() -> c_int {
 
     klog_info!("SHUTDOWN_TEST: Mixed priority shutdown result = {}", result);
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -800,10 +753,8 @@ pub fn test_shutdown_mixed_priorities() -> c_int {
 /// Test: Verify task_shutdown_all doesn't skip the current task
 /// BUG FINDER: The implementation explicitly skips the current task.
 /// This is correct behavior, but let's verify it's intentional.
-pub fn test_task_shutdown_skips_current() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_task_shutdown_skips_current() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Create multiple tasks
     let mut task_ids = [INVALID_TASK_ID; 5];
@@ -828,16 +779,13 @@ pub fn test_task_shutdown_skips_current() -> c_int {
         result
     );
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: Verify scheduler init after shutdown works
 /// BUG FINDER: Tests that shutdown truly resets state
-pub fn test_scheduler_reinit_after_shutdown() -> c_int {
-    if setup_shutdown_test_env() != 0 {
-        return -1;
-    }
+pub fn test_scheduler_reinit_after_shutdown() -> TestResult {
+    let _fixture = ShutdownFixture::new();
 
     // Shutdown
     scheduler_shutdown();
@@ -846,13 +794,12 @@ pub fn test_scheduler_reinit_after_shutdown() -> c_int {
     // Re-initialize
     if init_task_manager() != 0 {
         klog_info!("SHUTDOWN_TEST: Failed to reinit task manager after shutdown");
-        return -1;
+        return TestResult::Fail;
     }
 
     if init_scheduler() != 0 {
         klog_info!("SHUTDOWN_TEST: Failed to reinit scheduler after shutdown");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Create a new task - should work
@@ -866,23 +813,21 @@ pub fn test_scheduler_reinit_after_shutdown() -> c_int {
 
     if task_id == INVALID_TASK_ID {
         klog_info!("SHUTDOWN_TEST: Failed to create task after reinit");
-        teardown_shutdown_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_shutdown_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: StateFlag relaxed ordering access
-pub fn test_stateflag_relaxed_access() -> c_int {
+pub fn test_stateflag_relaxed_access() -> TestResult {
     let flag = StateFlag::new();
 
     // Test relaxed read on inactive flag
     let relaxed_inactive = flag.is_active_relaxed();
     if relaxed_inactive {
         klog_info!("SHUTDOWN_TEST: Relaxed read should show inactive!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Set active and test relaxed read
@@ -890,10 +835,10 @@ pub fn test_stateflag_relaxed_access() -> c_int {
     let relaxed_active = flag.is_active_relaxed();
     if !relaxed_active {
         klog_info!("SHUTDOWN_TEST: Relaxed read should show active!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -943,7 +888,7 @@ impl ShutdownPhaseTracker {
     }
 }
 
-pub fn test_shutdown_e2e_full_flow() -> c_int {
+pub fn test_shutdown_e2e_full_flow() -> TestResult {
     use slopos_core::scheduler::scheduler::{
         get_scheduler_stats, init_scheduler, scheduler_is_enabled, scheduler_shutdown,
     };
@@ -966,11 +911,11 @@ pub fn test_shutdown_e2e_full_flow() -> c_int {
 
     if init_task_manager() != 0 {
         klog_info!("E2E_SHUTDOWN: Failed to init task manager");
-        return -1;
+        return TestResult::Fail;
     }
     if init_scheduler() != 0 {
         klog_info!("E2E_SHUTDOWN: Failed to init scheduler");
-        return -1;
+        return TestResult::Fail;
     }
 
     // PHASE 1: Create realistic workload - multiple tasks with different priorities
@@ -1001,7 +946,7 @@ pub fn test_shutdown_e2e_full_flow() -> c_int {
 
     if created_tasks == 0 {
         klog_info!("E2E_SHUTDOWN: Failed to create any tasks");
-        return -1;
+        return TestResult::Fail;
     }
 
     tracker.task_count_before = created_tasks;
@@ -1176,14 +1121,14 @@ pub fn test_shutdown_e2e_full_flow() -> c_int {
 
     if errors > 0 {
         klog_info!("E2E_SHUTDOWN: FAILED with {} errors", errors);
-        return -1;
+        return TestResult::Fail;
     }
 
     klog_info!("E2E_SHUTDOWN: Full shutdown flow simulation PASSED");
-    0
+    TestResult::Pass
 }
 
-pub fn test_shutdown_e2e_stress_with_allocation() -> c_int {
+pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
     use core::ffi::c_void;
     use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
     use slopos_core::scheduler::task::{
@@ -1205,7 +1150,7 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> c_int {
     for cycle in 0..CYCLES {
         if init_task_manager() != 0 || init_scheduler() != 0 {
             klog_info!("E2E_SHUTDOWN_STRESS: Cycle {} init failed", cycle);
-            return -1;
+            return TestResult::Fail;
         }
 
         let mut task_ids = [INVALID_TASK_ID; TASKS_PER_CYCLE];
@@ -1258,10 +1203,10 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> c_int {
         "E2E_SHUTDOWN_STRESS: Completed {} cycles successfully",
         CYCLES
     );
-    0
+    TestResult::Pass
 }
 
-pub fn test_shutdown_e2e_interrupt_state_preservation() -> c_int {
+pub fn test_shutdown_e2e_interrupt_state_preservation() -> TestResult {
     use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
     use slopos_core::scheduler::task::{init_task_manager, task_shutdown_all};
     use slopos_drivers::apic::{apic_is_available, apic_is_enabled};
@@ -1273,7 +1218,7 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> c_int {
     scheduler_shutdown();
 
     if init_task_manager() != 0 || init_scheduler() != 0 {
-        return -1;
+        return TestResult::Fail;
     }
 
     let initial_flags = cpu::read_rflags();
@@ -1301,7 +1246,7 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> c_int {
         cpu::enable_interrupts();
         task_shutdown_all();
         scheduler_shutdown();
-        return -1;
+        return TestResult::Fail;
     }
 
     scheduler_shutdown();
@@ -1316,15 +1261,15 @@ pub fn test_shutdown_e2e_interrupt_state_preservation() -> c_int {
 
     if !still_disabled {
         klog_info!("E2E_SHUTDOWN_IRQ: ERROR - Interrupts were re-enabled unexpectedly");
-        return -1;
+        return TestResult::Fail;
     }
 
     let final_apic_available = apic_is_available() != 0;
     if initial_apic_available != final_apic_available {
         klog_info!("E2E_SHUTDOWN_IRQ: ERROR - APIC availability changed");
-        return -1;
+        return TestResult::Fail;
     }
 
     klog_info!("E2E_SHUTDOWN_IRQ: Interrupt state preserved correctly");
-    0
+    TestResult::Pass
 }

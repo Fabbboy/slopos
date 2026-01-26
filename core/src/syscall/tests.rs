@@ -10,14 +10,14 @@
 //! IMPORTANT: Some of these tests are EXPECTED to fail initially.
 //! That's the point - they find real bugs in untested code paths.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 use core::ptr;
 
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
     TASK_STATE_TERMINATED, Task,
 };
-use slopos_lib::{InterruptFrame, klog_info};
+use slopos_lib::{InterruptFrame, klog_info, testing::TestResult};
 
 use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
 use crate::scheduler::task::{
@@ -29,24 +29,27 @@ use crate::syscall::handlers::syscall_lookup;
 // TEST HELPERS
 // =============================================================================
 
-fn setup_syscall_test_env() -> i32 {
-    task_shutdown_all();
-    scheduler_shutdown();
+struct SyscallFixture;
 
-    if init_task_manager() != 0 {
-        klog_info!("SYSCALL_TEST: Failed to init task manager");
-        return -1;
+impl SyscallFixture {
+    fn new() -> Self {
+        task_shutdown_all();
+        scheduler_shutdown();
+        if init_task_manager() != 0 {
+            klog_info!("SYSCALL_TEST: Failed to init task manager");
+        }
+        if init_scheduler() != 0 {
+            klog_info!("SYSCALL_TEST: Failed to init scheduler");
+        }
+        Self
     }
-    if init_scheduler() != 0 {
-        klog_info!("SYSCALL_TEST: Failed to init scheduler");
-        return -1;
-    }
-    0
 }
 
-fn teardown_syscall_test_env() {
-    task_shutdown_all();
-    scheduler_shutdown();
+impl Drop for SyscallFixture {
+    fn drop(&mut self) {
+        task_shutdown_all();
+        scheduler_shutdown();
+    }
 }
 
 fn dummy_task_entry(_arg: *mut c_void) {}
@@ -68,34 +71,34 @@ fn create_test_kernel_task() -> u32 {
 
 /// Test: syscall_lookup with invalid syscall number (out of bounds)
 /// BUG FINDER: Should return null, not crash or access out of bounds
-pub fn test_syscall_lookup_invalid_number() -> c_int {
+pub fn test_syscall_lookup_invalid_number() -> TestResult {
     // Test with syscall number beyond table size
     let entry = syscall_lookup(0xFFFF);
     if !entry.is_null() {
         klog_info!("SYSCALL_TEST: BUG - syscall_lookup returned non-null for invalid syscall!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test with syscall number at boundary
     let entry2 = syscall_lookup(128);
     if !entry2.is_null() {
         klog_info!("SYSCALL_TEST: BUG - syscall_lookup returned non-null for boundary syscall!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test with u64::MAX
     let entry3 = syscall_lookup(u64::MAX);
     if !entry3.is_null() {
         klog_info!("SYSCALL_TEST: BUG - syscall_lookup returned non-null for u64::MAX!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: syscall_lookup with unimplemented but valid slot
 /// BUG FINDER: Should return null for empty table slots
-pub fn test_syscall_lookup_empty_slot() -> c_int {
+pub fn test_syscall_lookup_empty_slot() -> TestResult {
     // Find an unimplemented syscall slot (they exist in the gaps)
     // Syscall 9 is unused based on the table
     let entry = syscall_lookup(9);
@@ -104,32 +107,32 @@ pub fn test_syscall_lookup_empty_slot() -> c_int {
         let entry_ref = unsafe { &*entry };
         if entry_ref.handler.is_some() {
             klog_info!("SYSCALL_TEST: Unexpected handler for syscall 9");
-            return -1;
+            return TestResult::Fail;
         }
         // Actually, if entry is non-null but handler is None, that's still wrong
         // because syscall_lookup should return null for None handlers
         klog_info!("SYSCALL_TEST: BUG - syscall_lookup returned non-null for empty slot!");
-        return -1;
+        return TestResult::Fail;
     }
-    0
+    TestResult::Pass
 }
 
 /// Test: Valid syscall lookup returns correct entry
-pub fn test_syscall_lookup_valid() -> c_int {
+pub fn test_syscall_lookup_valid() -> TestResult {
     // SYSCALL_EXIT = 1 should be implemented
     let entry = syscall_lookup(1);
     if entry.is_null() {
         klog_info!("SYSCALL_TEST: syscall_lookup returned null for SYSCALL_EXIT");
-        return -1;
+        return TestResult::Fail;
     }
 
     let entry_ref = unsafe { &*entry };
     if entry_ref.handler.is_none() {
         klog_info!("SYSCALL_TEST: SYSCALL_EXIT has no handler");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -138,10 +141,8 @@ pub fn test_syscall_lookup_valid() -> c_int {
 
 /// Test: task_fork with null parent task
 /// BUG FINDER: Must handle gracefully, not crash
-pub fn test_fork_null_parent() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_null_parent() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     use crate::scheduler::task::task_fork;
     let child_id = task_fork(ptr::null_mut());
@@ -149,31 +150,25 @@ pub fn test_fork_null_parent() -> c_int {
     if child_id != INVALID_TASK_ID {
         klog_info!("SYSCALL_TEST: BUG - task_fork succeeded with null parent!");
         task_terminate(child_id);
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_fork of a kernel-mode task (should fail)
 /// BUG FINDER: Kernel tasks should not be forkable from userspace
-pub fn test_fork_kernel_task() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_kernel_task() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     let kernel_task_id = create_test_kernel_task();
     if kernel_task_id == INVALID_TASK_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     let kernel_task = task_find_by_id(kernel_task_id);
     if kernel_task.is_null() {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     use crate::scheduler::task::task_fork;
@@ -183,21 +178,17 @@ pub fn test_fork_kernel_task() -> c_int {
         klog_info!("SYSCALL_TEST: BUG - task_fork succeeded for kernel task!");
         task_terminate(child_id);
         task_terminate(kernel_task_id);
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     task_terminate(kernel_task_id);
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_fork when at MAX_TASKS limit
 /// BUG FINDER: Should fail gracefully and clean up any partial state
-pub fn test_fork_at_task_limit() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_at_task_limit() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     use crate::scheduler::task::MAX_TASKS;
 
@@ -237,28 +228,23 @@ pub fn test_fork_at_task_limit() -> c_int {
         task_terminate(created_ids[i]);
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_fork of a terminated parent
-pub fn test_fork_terminated_parent() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_terminated_parent() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     use crate::scheduler::task::task_fork;
 
     let task_id = create_test_kernel_task();
     if task_id == INVALID_TASK_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     let task_ptr = task_find_by_id(task_id);
     if task_ptr.is_null() {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     task_terminate(task_id);
@@ -271,35 +257,29 @@ pub fn test_fork_terminated_parent() -> c_int {
             if child_id != INVALID_TASK_ID {
                 klog_info!("SYSCALL_TEST: BUG - task_fork succeeded for terminated task!");
                 task_terminate(child_id);
-                teardown_syscall_test_env();
-                return -1;
+                return TestResult::Fail;
             }
         }
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: task_fork of a blocked parent
-pub fn test_fork_blocked_parent() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_blocked_parent() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     use crate::scheduler::task::{task_fork, task_set_state};
 
     let task_id = create_test_kernel_task();
     if task_id == INVALID_TASK_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     let task_ptr = task_find_by_id(task_id);
     if task_ptr.is_null() {
         task_terminate(task_id);
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     task_set_state(task_id, TASK_STATE_BLOCKED);
@@ -311,15 +291,12 @@ pub fn test_fork_blocked_parent() -> c_int {
         task_terminate(child_id);
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: Verify fork properly cleans up on partial failure
-pub fn test_fork_cleanup_on_failure() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_cleanup_on_failure() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     slopos_mm::process_vm::init_process_vm();
 
@@ -332,8 +309,7 @@ pub fn test_fork_cleanup_on_failure() -> c_int {
 
     let parent_pid = slopos_mm::process_vm::create_process_vm();
     if parent_pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     for _ in 0..5 {
@@ -371,12 +347,10 @@ pub fn test_fork_cleanup_on_failure() -> c_int {
             "SYSCALL_TEST: Memory leak after fork cleanup test! Leak: {} pages",
             leak
         );
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -384,21 +358,21 @@ pub fn test_fork_cleanup_on_failure() -> c_int {
 // =============================================================================
 
 /// Test: User pointer validation with null pointer
-pub fn test_user_ptr_null() -> c_int {
+pub fn test_user_ptr_null() -> TestResult {
     use slopos_mm::user_ptr::UserPtr;
 
     let result = UserPtr::<u64>::try_new(0);
     if result.is_ok() {
         klog_info!("SYSCALL_TEST: BUG - UserPtr accepted null address!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: User pointer validation with kernel address
 /// BUG FINDER: CRITICAL - userspace must not access kernel memory
-pub fn test_user_ptr_kernel_address() -> c_int {
+pub fn test_user_ptr_kernel_address() -> TestResult {
     use slopos_mm::user_ptr::UserPtr;
 
     // Kernel addresses are typically high (0xFFFF8000_00000000+)
@@ -407,14 +381,14 @@ pub fn test_user_ptr_kernel_address() -> c_int {
     let result = UserPtr::<u64>::try_new(kernel_addr);
     if result.is_ok() {
         klog_info!("SYSCALL_TEST: BUG - UserPtr accepted kernel address!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: User pointer validation with misaligned address
-pub fn test_user_ptr_misaligned() -> c_int {
+pub fn test_user_ptr_misaligned() -> TestResult {
     use slopos_mm::user_ptr::UserPtr;
 
     // Try to create a pointer to u64 at odd address
@@ -423,11 +397,11 @@ pub fn test_user_ptr_misaligned() -> c_int {
     let result = UserPtr::<u64>::try_new(misaligned_addr);
     let _ = result;
 
-    0
+    TestResult::Pass
 }
 
 /// Test: User pointer with address near overflow
-pub fn test_user_ptr_overflow_boundary() -> c_int {
+pub fn test_user_ptr_overflow_boundary() -> TestResult {
     use slopos_mm::user_ptr::UserPtr;
 
     // Address that would overflow when adding size
@@ -436,10 +410,10 @@ pub fn test_user_ptr_overflow_boundary() -> c_int {
     let result = UserPtr::<u64>::try_new(near_max);
     if result.is_ok() {
         klog_info!("SYSCALL_TEST: BUG - UserPtr accepted overflow-prone address!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -447,18 +421,15 @@ pub fn test_user_ptr_overflow_boundary() -> c_int {
 // =============================================================================
 
 /// Test: brk syscall with extreme values
-pub fn test_brk_extreme_values() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_brk_extreme_values() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     // Create a process VM to test brk
     slopos_mm::process_vm::init_process_vm();
     let pid = slopos_mm::process_vm::create_process_vm();
 
     if pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test brk with 0 (should return current brk)
@@ -473,8 +444,7 @@ pub fn test_brk_extreme_values() -> c_int {
     if max_brk == u64::MAX {
         klog_info!("SYSCALL_TEST: BUG - brk accepted u64::MAX!");
         slopos_mm::process_vm::destroy_process_vm(pid);
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test brk with kernel address range
@@ -482,23 +452,21 @@ pub fn test_brk_extreme_values() -> c_int {
     if kernel_brk == 0xFFFF_8000_0000_0000 {
         klog_info!("SYSCALL_TEST: BUG - brk accepted kernel address!");
         slopos_mm::process_vm::destroy_process_vm(pid);
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     slopos_mm::process_vm::destroy_process_vm(pid);
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: shm_create with boundary sizes
-pub fn test_shm_create_boundaries() -> c_int {
+pub fn test_shm_create_boundaries() -> TestResult {
     // Test with size 0
     let token_zero = slopos_mm::shared_memory::shm_create(1, 0, 0);
     if token_zero != 0 {
         klog_info!("SYSCALL_TEST: BUG - shm_create accepted size 0!");
         slopos_mm::shared_memory::shm_destroy(1, token_zero);
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test with size 1 (edge case)
@@ -512,7 +480,7 @@ pub fn test_shm_create_boundaries() -> c_int {
     let token_max = slopos_mm::shared_memory::shm_create(1, u64::MAX, 0);
     if token_max != 0 {
         klog_info!("SYSCALL_TEST: BUG - shm_create accepted u64::MAX size!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Test with size just over limit (64MB + 1)
@@ -520,10 +488,10 @@ pub fn test_shm_create_boundaries() -> c_int {
     let token_over = slopos_mm::shared_memory::shm_create(1, over_limit, 0);
     if token_over != 0 {
         klog_info!("SYSCALL_TEST: BUG - shm_create accepted size over limit!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -531,7 +499,7 @@ pub fn test_shm_create_boundaries() -> c_int {
 // =============================================================================
 
 /// Test: Register handler for invalid IRQ line
-pub fn test_irq_register_invalid_line() -> c_int {
+pub fn test_irq_register_invalid_line() -> TestResult {
     use crate::irq;
 
     // IRQ 255 is way beyond IRQ_LINES (16)
@@ -541,15 +509,15 @@ pub fn test_irq_register_invalid_line() -> c_int {
 
     if result == 0 {
         klog_info!("SYSCALL_TEST: BUG - register_handler accepted invalid IRQ line!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Double registration for same IRQ
 /// BUG FINDER: Should either fail or properly replace handler
-pub fn test_irq_double_registration() -> c_int {
+pub fn test_irq_double_registration() -> TestResult {
     use crate::irq;
 
     extern "C" fn handler1(_irq: u8, _frame: *mut InterruptFrame, _ctx: *mut c_void) {}
@@ -582,11 +550,11 @@ pub fn test_irq_double_registration() -> c_int {
     // Cleanup
     irq::unregister_handler(5);
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Unregister handler that was never registered
-pub fn test_irq_unregister_nonexistent() -> c_int {
+pub fn test_irq_unregister_nonexistent() -> TestResult {
     use crate::irq;
 
     if !irq::is_initialized() {
@@ -596,11 +564,11 @@ pub fn test_irq_unregister_nonexistent() -> c_int {
     // This should be a no-op, not crash
     irq::unregister_handler(15);
 
-    0
+    TestResult::Pass
 }
 
 /// Test: Get stats for invalid IRQ
-pub fn test_irq_stats_invalid() -> c_int {
+pub fn test_irq_stats_invalid() -> TestResult {
     use crate::irq::{IrqStats, get_stats};
 
     let mut stats = IrqStats {
@@ -612,17 +580,17 @@ pub fn test_irq_stats_invalid() -> c_int {
     let result = get_stats(255, &mut stats as *mut IrqStats);
     if result == 0 {
         klog_info!("SYSCALL_TEST: BUG - get_stats succeeded for invalid IRQ!");
-        return -1;
+        return TestResult::Fail;
     }
 
     // Null output pointer
     let result2 = get_stats(0, ptr::null_mut());
     if result2 == 0 {
         klog_info!("SYSCALL_TEST: BUG - get_stats succeeded with null output!");
-        return -1;
+        return TestResult::Fail;
     }
 
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -631,10 +599,8 @@ pub fn test_irq_stats_invalid() -> c_int {
 
 /// Test: Terminate already terminated task
 /// BUG FINDER: Double termination should not corrupt state
-pub fn test_terminate_already_terminated() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_terminate_already_terminated() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     let task_id = task_create(
         b"TermTest\0".as_ptr() as *const c_char,
@@ -645,16 +611,14 @@ pub fn test_terminate_already_terminated() -> c_int {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // First termination
     let r1 = task_terminate(task_id);
     if r1 != 0 {
         klog_info!("SYSCALL_TEST: First termination failed");
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Second termination - should not crash
@@ -669,21 +633,17 @@ pub fn test_terminate_already_terminated() -> c_int {
         // If still found, should be in terminated/invalid state
         if state == TASK_STATE_READY {
             klog_info!("SYSCALL_TEST: BUG - Terminated task still in READY state!");
-            teardown_syscall_test_env();
-            return -1;
+            return TestResult::Fail;
         }
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 /// Test: Operations on terminated task
 /// BUG FINDER: Should fail gracefully
-pub fn test_operations_on_terminated_task() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_operations_on_terminated_task() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     let task_id = task_create(
         b"OpTest\0".as_ptr() as *const c_char,
@@ -694,8 +654,7 @@ pub fn test_operations_on_terminated_task() -> c_int {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Terminate it
@@ -716,14 +675,12 @@ pub fn test_operations_on_terminated_task() -> c_int {
             let current_state = unsafe { (*task).state };
             if current_state == TASK_STATE_READY {
                 klog_info!("SYSCALL_TEST: BUG - Revived terminated task!");
-                teardown_syscall_test_env();
-                return -1;
+                return TestResult::Fail;
             }
         }
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -732,18 +689,15 @@ pub fn test_operations_on_terminated_task() -> c_int {
 
 /// Test: Fork under memory pressure
 /// BUG FINDER: Partial fork should clean up properly
-pub fn test_fork_memory_pressure() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_fork_memory_pressure() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     slopos_mm::process_vm::init_process_vm();
 
     // Create parent process
     let parent_pid = slopos_mm::process_vm::create_process_vm();
     if parent_pid == slopos_mm::mm_constants::INVALID_PROCESS_ID {
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Allocate a bunch of memory in parent to make fork expensive
@@ -814,12 +768,10 @@ pub fn test_fork_memory_pressure() -> c_int {
             "SYSCALL_TEST: Possible memory leak after fork under pressure! Leak: {} pages",
             leak
         );
-        teardown_syscall_test_env();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -827,10 +779,8 @@ pub fn test_fork_memory_pressure() -> c_int {
 // =============================================================================
 
 /// Test: Rapid task create/destroy while checking for ID reuse bugs
-pub fn test_task_id_wraparound() -> c_int {
-    if setup_syscall_test_env() != 0 {
-        return -1;
-    }
+pub fn test_task_id_wraparound() -> TestResult {
+    let _fixture = SyscallFixture::new();
 
     let mut ids_seen: [u32; 256] = [INVALID_TASK_ID; 256];
     let mut seen_count = 0usize;
@@ -858,8 +808,7 @@ pub fn test_task_id_wraparound() -> c_int {
                     i
                 );
                 task_terminate(id);
-                teardown_syscall_test_env();
-                return -1;
+                return TestResult::Fail;
             }
         }
 
@@ -871,8 +820,7 @@ pub fn test_task_id_wraparound() -> c_int {
         task_terminate(id);
     }
 
-    teardown_syscall_test_env();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================

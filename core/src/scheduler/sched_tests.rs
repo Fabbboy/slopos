@@ -11,6 +11,7 @@ use core::ffi::{c_char, c_void};
 use core::ptr;
 
 use slopos_lib::klog_info;
+use slopos_lib::testing::TestResult;
 
 use super::per_cpu::{pause_all_aps, resume_all_aps_if_not_nested};
 use super::scheduler::{
@@ -25,38 +26,49 @@ use super::task::{
 };
 
 // =============================================================================
-// Test Helper Functions
+// RAII Fixture for Scheduler Tests
 // =============================================================================
 
-fn setup_test_environment() -> i32 {
-    let was_paused = pause_all_aps();
-
-    task_shutdown_all();
-    scheduler_shutdown();
-
-    if init_task_manager() != 0 {
-        klog_info!("SCHED_TEST: Failed to init task manager");
-        resume_all_aps_if_not_nested(was_paused);
-        return -1;
-    }
-    if init_scheduler() != 0 {
-        klog_info!("SCHED_TEST: Failed to init scheduler");
-        resume_all_aps_if_not_nested(was_paused);
-        return -1;
-    }
-
-    resume_all_aps_if_not_nested(was_paused);
-    0
+/// RAII fixture that sets up and tears down the scheduler test environment.
+/// Setup happens on creation, teardown happens on Drop.
+pub struct SchedFixture {
+    aps_paused: bool,
 }
 
-fn teardown_test_environment() {
-    let was_paused = pause_all_aps();
+impl SchedFixture {
+    /// Create and initialize the fixture
+    pub fn new() -> Self {
+        let aps_paused = pause_all_aps();
 
-    task_shutdown_all();
-    scheduler_shutdown();
+        task_shutdown_all();
+        scheduler_shutdown();
 
-    resume_all_aps_if_not_nested(was_paused);
+        if init_task_manager() != 0 {
+            klog_info!("SCHED_TEST: Failed to init task manager");
+            resume_all_aps_if_not_nested(aps_paused);
+            // Continue anyway - tests will fail if needed
+        }
+        if init_scheduler() != 0 {
+            klog_info!("SCHED_TEST: Failed to init scheduler");
+            resume_all_aps_if_not_nested(aps_paused);
+            // Continue anyway - tests will fail if needed
+        }
+
+        Self { aps_paused }
+    }
 }
+
+impl Drop for SchedFixture {
+    fn drop(&mut self) {
+        task_shutdown_all();
+        scheduler_shutdown();
+        resume_all_aps_if_not_nested(self.aps_paused);
+    }
+}
+
+// =============================================================================
+// Test Helper Functions
+// =============================================================================
 
 fn dummy_task_fn(_arg: *mut c_void) {
     // Minimal task that does nothing - for structural tests
@@ -69,10 +81,8 @@ fn dummy_task_fn(_arg: *mut c_void) {
 // =============================================================================
 
 /// Test: Valid state transition READY -> RUNNING
-pub fn test_state_transition_ready_to_running() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_state_transition_ready_to_running() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"StateTest\0".as_ptr() as *const c_char,
@@ -83,29 +93,25 @@ pub fn test_state_transition_ready_to_running() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let task = task_find_by_id(task_id);
     if task.is_null() {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Task starts in READY state
     let initial_state = unsafe { (*task).state };
     if initial_state != TASK_STATE_READY {
         klog_info!("SCHED_TEST: Expected READY state, got {}", initial_state);
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Transition to RUNNING
     if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
         klog_info!("SCHED_TEST: Failed to set RUNNING state");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let new_state = unsafe { (*task).state };
@@ -114,19 +120,15 @@ pub fn test_state_transition_ready_to_running() -> i32 {
             "SCHED_TEST: Expected RUNNING state after transition, got {}",
             new_state
         );
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Valid state transition RUNNING -> BLOCKED
-pub fn test_state_transition_running_to_blocked() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_state_transition_running_to_blocked() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"BlockTest\0".as_ptr() as *const c_char,
@@ -137,8 +139,7 @@ pub fn test_state_transition_running_to_blocked() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Set to RUNNING first
@@ -147,28 +148,23 @@ pub fn test_state_transition_running_to_blocked() -> i32 {
     // Then transition to BLOCKED
     if task_set_state(task_id, TASK_STATE_BLOCKED) != 0 {
         klog_info!("SCHED_TEST: Failed to set BLOCKED state");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let task = task_find_by_id(task_id);
     let state = unsafe { (*task).state };
     if state != TASK_STATE_BLOCKED {
         klog_info!("SCHED_TEST: Expected BLOCKED, got {}", state);
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: INVALID state transition TERMINATED -> RUNNING should be rejected
 /// BUG FINDER: The current implementation logs but doesn't reject!
-pub fn test_state_transition_invalid_terminated_to_running() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"InvalidTransition\0".as_ptr() as *const c_char,
@@ -179,8 +175,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Terminate the task
@@ -195,20 +190,16 @@ pub fn test_state_transition_invalid_terminated_to_running() -> i32 {
 
         if new_state == TASK_STATE_RUNNING {
             klog_info!("SCHED_TEST: BUG - Invalid transition TERMINATED->RUNNING was allowed!");
-            teardown_test_environment();
-            return -1;
+            return TestResult::Fail;
         }
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: INVALID state transition BLOCKED -> RUNNING (should go through READY first)
-pub fn test_state_transition_invalid_blocked_to_running() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"BlockedRunning\0".as_ptr() as *const c_char,
@@ -219,8 +210,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     task_set_state(task_id, TASK_STATE_RUNNING);
@@ -233,12 +223,10 @@ pub fn test_state_transition_invalid_blocked_to_running() -> i32 {
 
     if state == TASK_STATE_RUNNING {
         klog_info!("SCHED_TEST: BUG - Invalid transition BLOCKED->RUNNING was allowed!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -247,10 +235,8 @@ pub fn test_state_transition_invalid_blocked_to_running() -> i32 {
 // =============================================================================
 
 /// Test: Create exactly MAX_TASKS tasks
-pub fn test_create_max_tasks() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_create_max_tasks() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let mut created_ids: [u32; MAX_TASKS] = [INVALID_TASK_ID; MAX_TASKS];
     let mut success_count = 0usize;
@@ -292,20 +278,16 @@ pub fn test_create_max_tasks() -> i32 {
             success_count,
             min_expected
         );
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Try to create MAX_TASKS + 1 - should fail gracefully
 /// BUG FINDER: Ensure we don't overflow or corrupt memory
-pub fn test_create_over_max_tasks() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_create_over_max_tasks() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Fill up all slots
     for _ in 0..MAX_TASKS {
@@ -332,19 +314,15 @@ pub fn test_create_over_max_tasks() -> i32 {
             "SCHED_TEST: BUG - Created task beyond MAX_TASKS! ID={}",
             overflow_id
         );
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Rapid create/destroy cycle - stress test slot reuse
-pub fn test_rapid_create_destroy_cycle() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_rapid_create_destroy_cycle() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     const CYCLES: usize = 100;
     let mut last_id = INVALID_TASK_ID;
@@ -360,15 +338,13 @@ pub fn test_rapid_create_destroy_cycle() -> i32 {
 
         if task_id == INVALID_TASK_ID {
             klog_info!("SCHED_TEST: Cycle {} failed to create task", i);
-            teardown_test_environment();
-            return -1;
+            return TestResult::Fail;
         }
 
         // Immediately terminate
         if task_terminate(task_id) != 0 {
             klog_info!("SCHED_TEST: Cycle {} failed to terminate task", i);
-            teardown_test_environment();
-            return -1;
+            return TestResult::Fail;
         }
 
         last_id = task_id;
@@ -380,8 +356,7 @@ pub fn test_rapid_create_destroy_cycle() -> i32 {
         last_id
     );
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -390,10 +365,8 @@ pub fn test_rapid_create_destroy_cycle() -> i32 {
 // =============================================================================
 
 /// Test: Schedule task to empty queue
-pub fn test_schedule_to_empty_queue() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_schedule_to_empty_queue() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"EmptyQueue\0".as_ptr() as *const c_char,
@@ -404,21 +377,18 @@ pub fn test_schedule_to_empty_queue() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Schedule to empty queue
     if schedule_task(task_ptr) != 0 {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Verify task is in queue by checking stats
@@ -432,19 +402,15 @@ pub fn test_schedule_to_empty_queue() -> i32 {
 
     if ready_count == 0 {
         klog_info!("SCHED_TEST: Task scheduled but ready count is 0");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Schedule same task twice - should not duplicate
-pub fn test_schedule_duplicate_task() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_schedule_duplicate_task() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"Duplicate\0".as_ptr() as *const c_char,
@@ -455,8 +421,7 @@ pub fn test_schedule_duplicate_task() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut task_ptr: *mut Task = ptr::null_mut();
@@ -494,33 +459,26 @@ pub fn test_schedule_duplicate_task() -> i32 {
         // but let's verify the count didn't change
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Schedule null task pointer
-pub fn test_schedule_null_task() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_schedule_null_task() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let result = schedule_task(ptr::null_mut());
 
     if result == 0 {
         klog_info!("SCHED_TEST: BUG - Scheduling null task succeeded!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Unschedule task not in queue
-pub fn test_unschedule_not_in_queue() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_unschedule_not_in_queue() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"NotQueued\0".as_ptr() as *const c_char,
@@ -531,8 +489,7 @@ pub fn test_unschedule_not_in_queue() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut task_ptr: *mut Task = ptr::null_mut();
@@ -540,8 +497,7 @@ pub fn test_unschedule_not_in_queue() -> i32 {
 
     let _result = unschedule_task(task_ptr);
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -550,10 +506,8 @@ pub fn test_unschedule_not_in_queue() -> i32 {
 // =============================================================================
 
 /// Test: Higher priority task should be selected first
-pub fn test_priority_ordering() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_priority_ordering() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Create tasks with different priorities
     // Priority 0 = highest, Priority 3 = lowest (IDLE)
@@ -582,8 +536,7 @@ pub fn test_priority_ordering() -> i32 {
     );
 
     if low_id == INVALID_TASK_ID || normal_id == INVALID_TASK_ID || high_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Schedule in reverse priority order (low first)
@@ -599,15 +552,12 @@ pub fn test_priority_ordering() -> i32 {
     schedule_task(normal_ptr);
     schedule_task(high_ptr);
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: IDLE priority task should be selected last
-pub fn test_idle_priority_last() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_idle_priority_last() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let idle_id = task_create(
         b"IdlePri\0".as_ptr() as *const c_char,
@@ -626,8 +576,7 @@ pub fn test_idle_priority_last() -> i32 {
     );
 
     if idle_id == INVALID_TASK_ID || normal_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut idle_ptr: *mut Task = ptr::null_mut();
@@ -643,8 +592,7 @@ pub fn test_idle_priority_last() -> i32 {
     // The scheduler should pick normal before idle due to priority
     // We can't directly verify this without running, but we verify no crash
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -652,28 +600,22 @@ pub fn test_idle_priority_last() -> i32 {
 // =============================================================================
 
 /// Test: Timer tick with no current task
-pub fn test_timer_tick_no_current_task() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_timer_tick_no_current_task() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Just call timer tick - should not crash even with no current task
     scheduler_timer_tick();
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Timer tick should decrement time slice
-pub fn test_timer_tick_decrements_slice() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_timer_tick_decrements_slice() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Create idle task so scheduler can start
     if scheduler::create_idle_task() != 0 {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let task_id = task_create(
@@ -685,16 +627,14 @@ pub fn test_timer_tick_decrements_slice() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let mut task_ptr: *mut Task = ptr::null_mut();
     task_get_info(task_id, &mut task_ptr);
     schedule_task(task_ptr);
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -702,47 +642,37 @@ pub fn test_timer_tick_decrements_slice() -> i32 {
 // =============================================================================
 
 /// Test: Terminate task with invalid ID
-pub fn test_terminate_invalid_id() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_terminate_invalid_id() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let result = task_terminate(INVALID_TASK_ID);
 
     if result == 0 {
         klog_info!("SCHED_TEST: BUG - Terminating INVALID_TASK_ID succeeded!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Terminate non-existent task ID
-pub fn test_terminate_nonexistent_id() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_terminate_nonexistent_id() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Use a very high ID that definitely doesn't exist
     let result = task_terminate(0xDEADBEEF);
 
     if result == 0 {
         klog_info!("SCHED_TEST: BUG - Terminating nonexistent task succeeded!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Double terminate same task
-pub fn test_double_terminate() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_double_terminate() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"DoubleTerm\0".as_ptr() as *const c_char,
@@ -753,22 +683,19 @@ pub fn test_double_terminate() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // First terminate
     let first_result = task_terminate(task_id);
     if first_result != 0 {
         klog_info!("SCHED_TEST: First terminate failed");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     let _second_result = task_terminate(task_id);
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -776,28 +703,22 @@ pub fn test_double_terminate() -> i32 {
 // =============================================================================
 
 /// Test: Find task by invalid ID
-pub fn test_find_invalid_id() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_find_invalid_id() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task = task_find_by_id(INVALID_TASK_ID);
 
     if !task.is_null() {
         klog_info!("SCHED_TEST: BUG - Found task with INVALID_TASK_ID!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Get info with null output pointer
-pub fn test_get_info_null_output() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_get_info_null_output() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         b"NullOutput\0".as_ptr() as *const c_char,
@@ -808,8 +729,7 @@ pub fn test_get_info_null_output() -> i32 {
     );
 
     if task_id == INVALID_TASK_ID {
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
     // Call with null output pointer
@@ -817,12 +737,10 @@ pub fn test_get_info_null_output() -> i32 {
 
     if result == 0 {
         klog_info!("SCHED_TEST: BUG - task_get_info with null output succeeded!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -831,22 +749,17 @@ pub fn test_get_info_null_output() -> i32 {
 
 /// Test: Create task with null entry point
 #[allow(unused_variables)]
-pub fn test_create_null_entry() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_create_null_entry() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let _null_fn_ptr: Option<fn(*mut c_void)> = None;
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Create task with conflicting mode flags
-pub fn test_create_conflicting_flags() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_create_conflicting_flags() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Both kernel and user mode flags
     let bad_flags = TASK_FLAG_KERNEL_MODE | super::task::TASK_FLAG_USER_MODE;
@@ -862,19 +775,15 @@ pub fn test_create_conflicting_flags() -> i32 {
     if task_id != INVALID_TASK_ID {
         klog_info!("SCHED_TEST: BUG - Created task with conflicting flags!");
         task_terminate(task_id);
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Create task with null name (should still work)
-pub fn test_create_null_name() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_create_null_name() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let task_id = task_create(
         ptr::null(),
@@ -890,8 +799,7 @@ pub fn test_create_null_name() -> i32 {
         // This is actually acceptable behavior
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -899,36 +807,29 @@ pub fn test_create_null_name() -> i32 {
 // =============================================================================
 
 /// Test: Scheduler starts disabled
-pub fn test_scheduler_starts_disabled() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_scheduler_starts_disabled() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     let enabled = scheduler_is_enabled();
 
     if enabled != 0 {
         klog_info!("SCHED_TEST: Scheduler should start disabled!");
-        teardown_test_environment();
-        return -1;
+        return TestResult::Fail;
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Schedule call when scheduler disabled
-pub fn test_schedule_while_disabled() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_schedule_while_disabled() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     // Scheduler is disabled by default after init
     // Calling schedule() should be a no-op
     schedule();
 
     // Should not crash, no-op when disabled
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -936,10 +837,8 @@ pub fn test_schedule_while_disabled() -> i32 {
 // =============================================================================
 
 /// Test: Create many tasks with same priority
-pub fn test_many_same_priority_tasks() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_many_same_priority_tasks() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     const COUNT: usize = 32;
     let mut ids = [INVALID_TASK_ID; COUNT];
@@ -979,15 +878,12 @@ pub fn test_many_same_priority_tasks() -> i32 {
 
     klog_info!("SCHED_TEST: Scheduled {} tasks of same priority", ready);
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
 
 /// Test: Interleaved create/schedule/terminate
-pub fn test_interleaved_operations() -> i32 {
-    if setup_test_environment() != 0 {
-        return -1;
-    }
+pub fn test_interleaved_operations() -> TestResult {
+    let _fixture = SchedFixture::new();
 
     for i in 0..50 {
         // Create
@@ -1009,8 +905,7 @@ pub fn test_interleaved_operations() -> i32 {
 
         if id1 == INVALID_TASK_ID || id2 == INVALID_TASK_ID {
             klog_info!("SCHED_TEST: Interleaved creation failed at iteration {}", i);
-            teardown_test_environment();
-            return -1;
+            return TestResult::Fail;
         }
 
         // Schedule first
@@ -1034,6 +929,5 @@ pub fn test_interleaved_operations() -> i32 {
         task_terminate(id2);
     }
 
-    teardown_test_environment();
-    0
+    TestResult::Pass
 }
