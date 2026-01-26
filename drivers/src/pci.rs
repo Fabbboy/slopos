@@ -4,9 +4,9 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_abi::PhysAddr;
-use slopos_lib::klog_info;
 use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
+use slopos_lib::{InitFlag, klog_info};
 use slopos_mm::mmio::MmioRegion;
 
 pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
@@ -58,7 +58,7 @@ unsafe impl Sync for PciDriver {}
 static mut BUS_VISITED: [u8; PCI_MAX_BUSES] = [0; PCI_MAX_BUSES];
 static mut DEVICES: [PciDeviceInfo; PCI_MAX_DEVICES] = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
 static mut DEVICE_COUNT: usize = 0;
-static mut PCI_INITIALIZED: c_int = 0;
+static PCI_INIT: InitFlag = InitFlag::new();
 static mut PRIMARY_GPU: PciGpuInfo = PciGpuInfo::zeroed();
 static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] =
     [ptr::null(); PCI_DRIVER_MAX];
@@ -328,11 +328,12 @@ fn pci_scan_bus(bus: u8) {
 }
 
 pub fn pci_init() {
+    if !PCI_INIT.init_once() {
+        return;
+    }
+
+    // SAFETY: Single-threaded initialization during boot, protected by InitFlag
     unsafe {
-        if PCI_INITIALIZED != 0 {
-            return;
-        }
-        PCI_INITIALIZED = 1;
         DEVICE_COUNT = 0;
         BUS_VISITED = [0; PCI_MAX_BUSES];
         PRIMARY_GPU = PciGpuInfo::zeroed();

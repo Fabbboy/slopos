@@ -6,10 +6,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
 pub use slopos_lib::testing::suite_masks::SUITE_SCHEDULER;
 pub use slopos_lib::testing::{
-    measure_elapsed_ms, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
-    HARNESS_MAX_SUITES,
+    HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
+    measure_elapsed_ms,
 };
-use slopos_lib::{define_test_suite, klog_info, register_test_suites, StateFlag};
+use slopos_lib::{StateFlag, define_test_suite, klog_info, register_test_suites};
 
 pub type InterruptTestConfig = TestConfig;
 pub type InterruptTestVerbosity = Verbosity;
@@ -170,11 +170,7 @@ pub fn tests_run_all(config: *const InterruptTestConfig, summary: *mut TestRunSu
         summary.elapsed_ms,
     );
 
-    if summary.failed == 0 {
-        0
-    } else {
-        -1
-    }
+    if summary.failed == 0 { 0 } else { -1 }
 }
 
 pub fn tests_request_shutdown(failed: i32) {
@@ -413,11 +409,7 @@ mod suites {
             out_ref.timed_out = 0;
         }
 
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     pub static EXT2_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {
@@ -909,11 +901,7 @@ mod suites {
             out_ref.failed = total.saturating_sub(passed);
             out_ref.elapsed_ms = elapsed;
         }
-        if passed == total {
-            0
-        } else {
-            -1
-        }
+        if passed == total { 0 } else { -1 }
     }
 
     pub static FPU_SUITE_DESC: TestSuiteDesc = TestSuiteDesc {

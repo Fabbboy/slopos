@@ -4,15 +4,15 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use slopos_abi::task::{
-    Task, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
-    TASK_STATE_RUNNING, TASK_STATE_TERMINATED,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_STATE_BLOCKED, TASK_STATE_READY,
+    TASK_STATE_RUNNING, TASK_STATE_TERMINATED, Task,
 };
 use slopos_lib::klog_info;
 
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{
-    init_task_manager, task_create, task_find_by_id, task_fork, task_get_info, task_set_state,
-    task_shutdown_all, task_terminate, MAX_TASKS,
+    MAX_TASKS, init_task_manager, task_create, task_find_by_id, task_fork, task_get_info,
+    task_set_state, task_shutdown_all, task_terminate,
 };
 
 fn setup_context_test_env() -> i32 {

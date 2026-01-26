@@ -23,7 +23,7 @@ use slopos_lib::string::cstr_to_str;
 
 use slopos_abi::DisplayInfo;
 use slopos_abi::boot::LimineMemmapResponse;
-use slopos_lib::{align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
+use slopos_lib::{InitFlag, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
 
 const CPUID_FEAT_EDX_APIC: u32 = 1 << 9;
 const MSR_APIC_BASE: u32 = 0x1B;
@@ -71,8 +71,8 @@ static mut INIT_STATS: MemoryInitStats = MemoryInitStats {
     tracked_page_frames: 0,
     allocator_metadata_bytes: 0,
 };
-static mut EARLY_PAGING_OK: bool = false;
-static mut MEMORY_SYSTEM_INITIALIZED: bool = false;
+static EARLY_PAGING_INIT: InitFlag = InitFlag::new();
+static MEMORY_SYSTEM_INIT: InitFlag = InitFlag::new();
 #[derive(Clone, Copy)]
 struct FramebufferReservation {
     address: u64,
@@ -522,7 +522,11 @@ fn log_reserved_regions() {
 fn display_memory_summary() {
     unsafe {
         klog_info!("\n========== SlopOS Memory System Initialized ==========");
-        let early_paging_str = if EARLY_PAGING_OK { "OK" } else { "SKIPPED" };
+        let early_paging_str = if EARLY_PAGING_INIT.is_set() {
+            "OK"
+        } else {
+            "SKIPPED"
+        };
         klog_info!("Early Paging:          {}", early_paging_str);
         klog_info!(
             "Reserved Regions:      {}",
@@ -600,7 +604,7 @@ pub fn init_memory_system(
         compute_memory_stats(memmap, hhdm_offset);
         finalize_reserved_regions();
 
-        EARLY_PAGING_OK = true;
+        EARLY_PAGING_INIT.mark_set();
 
         if init_page_allocator(
             allocator_plan.buffer as *mut _,
@@ -629,7 +633,7 @@ pub fn init_memory_system(
             panic!("MM: Process VM initialization failed");
         }
 
-        MEMORY_SYSTEM_INITIALIZED = true;
+        MEMORY_SYSTEM_INIT.mark_set();
         display_memory_summary();
 
         klog_info!("MM: Complete memory system initialization successful!");
@@ -638,7 +642,7 @@ pub fn init_memory_system(
     0
 }
 pub fn is_memory_system_initialized() -> c_int {
-    unsafe { MEMORY_SYSTEM_INITIALIZED as c_int }
+    MEMORY_SYSTEM_INIT.is_set() as c_int
 }
 pub fn get_memory_statistics(
     total_memory_out: *mut u64,

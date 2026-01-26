@@ -19,6 +19,8 @@ use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+use crate::InitFlag;
+
 const IA32_GS_BASE: u32 = 0xC000_0101;
 
 /// Maximum number of CPUs supported.
@@ -118,8 +120,7 @@ static CPU_COUNT: AtomicU32 = AtomicU32::new(0);
 /// BSP's APIC ID (set during init).
 static BSP_APIC_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Flag indicating per-CPU subsystem is initialized.
-static PERCPU_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static PERCPU_INIT: InitFlag = InitFlag::new();
 
 /// Initialize per-CPU data for a specific CPU.
 ///
@@ -202,17 +203,18 @@ pub fn activate_gs_base_for_cpu(cpu_id: usize) {
     }
 }
 
-/// Initialize the BSP's per-CPU data.
 pub fn init_bsp(apic_id: u32) {
+    if !PERCPU_INIT.init_once() {
+        return;
+    }
     BSP_APIC_ID.store(apic_id, Ordering::Release);
     init_percpu_for_cpu(0, apic_id);
     activate_gs_base_for_cpu(0);
-    PERCPU_INITIALIZED.store(true, Ordering::Release);
 }
 
 #[inline]
 pub fn get_current_cpu() -> usize {
-    if !PERCPU_INITIALIZED.load(Ordering::Acquire) {
+    if !PERCPU_INIT.is_set() {
         return 0;
     }
 

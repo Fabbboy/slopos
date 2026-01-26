@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, TASK_STATE_READY, Task, TaskContext,
 };
-use slopos_lib::{MAX_CPUS, klog_debug, klog_info};
+use slopos_lib::{InitFlag, MAX_CPUS, klog_debug, klog_info};
 use spin::Mutex;
 
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -352,7 +352,7 @@ static mut CPU_SCHEDULERS: [PerCpuScheduler; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
-static SCHEDULERS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static SCHEDULERS_INIT: InitFlag = InitFlag::new();
 
 pub fn init_percpu_scheduler(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
@@ -365,12 +365,15 @@ pub fn init_percpu_scheduler(cpu_id: usize) {
 }
 
 pub fn init_all_percpu_schedulers() {
+    if !SCHEDULERS_INIT.init_once() {
+        return;
+    }
+
     for cpu_id in 0..MAX_CPUS {
         unsafe {
             CPU_SCHEDULERS[cpu_id].init(cpu_id);
         }
     }
-    SCHEDULERS_INITIALIZED.store(true, Ordering::Release);
 }
 
 pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {

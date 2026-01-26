@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use slopos_lib::klog_debug;
+use slopos_lib::{InitFlag, klog_debug};
 
 use crate::mm_constants::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, KERNEL_HEAP_SIZE, KERNEL_HEAP_VBASE,
@@ -53,7 +53,8 @@ static mut KERNEL_LAYOUT: KernelMemoryLayout = KernelMemoryLayout {
     user_space_start: 0,
     user_space_end: 0,
 };
-static mut LAYOUT_INITIALIZED: bool = false;
+
+static LAYOUT_INIT: InitFlag = InitFlag::new();
 
 static PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     code_start: PROCESS_CODE_START_VA,
@@ -70,6 +71,11 @@ fn ptr_as_u64(p: *const c_void) -> u64 {
     p as usize as u64
 }
 pub fn init_kernel_memory_layout() {
+    if !LAYOUT_INIT.init_once() {
+        return;
+    }
+
+    // SAFETY: Single-threaded initialization during boot, protected by InitFlag
     unsafe {
         let (start, end) = symbols::kernel_bounds();
         let start_phys = ptr_as_u64(start.cast());
@@ -90,19 +96,16 @@ pub fn init_kernel_memory_layout() {
         KERNEL_LAYOUT.identity_map_end = PAGE_SIZE_1GB;
         KERNEL_LAYOUT.user_space_start = USER_SPACE_START_VA;
         KERNEL_LAYOUT.user_space_end = USER_SPACE_END_VA;
-
-        LAYOUT_INITIALIZED = true;
-
-        klog_debug!("SlopOS: Kernel memory layout initialized");
     }
+
+    klog_debug!("SlopOS: Kernel memory layout initialized");
 }
 pub fn get_kernel_memory_layout() -> *const KernelMemoryLayout {
-    unsafe {
-        if LAYOUT_INITIALIZED {
-            &KERNEL_LAYOUT as *const KernelMemoryLayout
-        } else {
-            ptr::null()
-        }
+    if LAYOUT_INIT.is_set() {
+        // SAFETY: Layout is immutable after initialization, protected by InitFlag
+        unsafe { &KERNEL_LAYOUT as *const KernelMemoryLayout }
+    } else {
+        ptr::null()
     }
 }
 pub fn mm_get_kernel_heap_start() -> u64 {
