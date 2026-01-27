@@ -4,11 +4,11 @@
 extern crate alloc;
 
 use core::ffi::c_int;
-use slopos_abi::addr::PhysAddr;
-use slopos_abi::video_traits::VideoResult;
 use slopos_abi::CompositorError;
 use slopos_abi::FramebufferData;
-use slopos_core::syscall_services::{register_video_services, VideoServices};
+use slopos_abi::addr::PhysAddr;
+use slopos_abi::video_traits::VideoResult;
+use slopos_core::syscall_services::{VideoServices, register_video_services};
 use slopos_core::task::register_video_cleanup_hook;
 use slopos_drivers::xe;
 use slopos_lib::{klog_info, klog_warn};

@@ -37,10 +37,10 @@ unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink,
-    sys_fs_write, sys_halt, sys_read_char, sys_spawn_task, sys_surface_commit,
-    sys_surface_set_title, sys_sys_info, sys_write, DisplayInfo, ShmBuffer, UserFsEntry,
-    UserFsList, UserSysInfo, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
+    DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
+    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
+    sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_spawn_task,
+    sys_surface_commit, sys_surface_set_title, sys_sys_info, sys_write,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;

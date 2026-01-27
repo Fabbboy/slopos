@@ -13,13 +13,13 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat};
+use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
 use crate::syscall::{
-    sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
-    sys_input_get_button_state, sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset,
-    sys_mark_frames_done, sys_raise_window, sys_set_window_position, sys_set_window_state,
-    sys_shm_unmap, sys_sleep_ms, sys_spawn_task, sys_tty_set_focus, sys_yield, CachedShmMapping,
-    DisplayInfo, ShmBuffer, UserWindowInfo,
+    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
+    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
+    sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
+    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
+    sys_spawn_task, sys_tty_set_focus, sys_yield,
 };
 use crate::ui_utils;
 

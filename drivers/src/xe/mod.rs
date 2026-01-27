@@ -2,13 +2,13 @@
 
 use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
 use slopos_core::wl_currency::{award_loss, award_win};
-use slopos_lib::{align_up_u64, klog_info, klog_warn, InitFlag};
+use slopos_lib::{InitFlag, align_up_u64, klog_info, klog_warn};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::mmio::MmioRegion;
-use slopos_mm::page_alloc::{alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO};
+use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 
-use crate::pci::{pci_get_primary_gpu, PciDeviceInfo, PciGpuInfo};
+use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
 
 mod display;
 mod forcewake;

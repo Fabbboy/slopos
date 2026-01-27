@@ -4,8 +4,8 @@ use slopos_abi::arch::x86_64::paging::PAGE_SIZE_4KB;
 
 use crate::gfx::{self, DrawBuffer, PixelFormat};
 use crate::syscall::{
-    sys_fb_info, sys_get_cpu_count, sys_get_current_cpu, sys_surface_commit, sys_surface_set_title,
-    sys_sys_info, sys_write, sys_yield, DisplayInfo, ShmBuffer, UserSysInfo,
+    DisplayInfo, ShmBuffer, UserSysInfo, sys_fb_info, sys_get_cpu_count, sys_get_current_cpu,
+    sys_surface_commit, sys_surface_set_title, sys_sys_info, sys_write, sys_yield,
 };
 use crate::theme::{COLOR_BACKGROUND, COLOR_TEXT};
 
