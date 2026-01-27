@@ -85,7 +85,8 @@ use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
 
 use slopos_core::{
-    scheduler_get_current_task, scheduler_request_reschedule_from_interrupt, task_terminate,
+    schedule, scheduler_get_current_task, scheduler_request_reschedule_from_interrupt,
+    task_terminate,
 };
 
 // Task and related types are now imported from abi
@@ -497,7 +498,11 @@ fn terminate_user_task(
             (*task).fault_reason = reason;
             (*task).exit_code = 1;
             task_terminate(tid);
-            scheduler_request_reschedule_from_interrupt();
+            // CRITICAL: Call schedule() directly instead of just setting pending flag.
+            // If we return from this exception handler, iretq will try to resume the
+            // faulting instruction, causing an infinite loop of faults.
+            // schedule() will switch to another task and never return here.
+            schedule();
         }
     }
     let _ = frame;

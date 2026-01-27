@@ -1,6 +1,5 @@
 use core::ffi::c_char;
 use core::ptr;
-use slopos_lib::string::cstr_to_str;
 
 use slopos_boot::early_init::{BootInitStep, boot_init_priority};
 use slopos_core::syscall::register_spawn_task_callback;
@@ -9,7 +8,7 @@ use slopos_core::{
     TASK_STATE_RUNNING, Task, TaskEntry, schedule_task, task_get_info, task_set_state,
     task_terminate,
 };
-use slopos_lib::{klog_debug, klog_info};
+use slopos_lib::klog_info;
 use slopos_mm::process_vm::process_vm_load_elf;
 
 use crate::loader::user_spawn_program_with_flags;
@@ -20,15 +19,7 @@ fn log_info(msg: &str) {
 }
 
 #[unsafe(link_section = ".user_text")]
-fn with_task_name(name: *const c_char, f: impl FnOnce(&str)) {
-    let task_name = unsafe { cstr_to_str(name) };
-    f(task_name);
-}
-
-#[unsafe(link_section = ".user_text")]
 fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
-    // Create task with dummy entry point - will be replaced by ELF loader
-    // Use a dummy function pointer that points to 0x400000 (user code base)
     let dummy_entry: TaskEntry = unsafe { core::mem::transmute(0x400000usize) };
     let task_id = user_spawn_program_with_flags(
         name.as_ptr() as *const c_char,
@@ -38,25 +29,17 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         flags,
     );
     if task_id == INVALID_TASK_ID {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to create task '{}'\n", task_name);
-        });
         return -1;
     }
 
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to fetch task info for '{}'\n", task_name);
-        });
         return -1;
     }
 
-    // Load user program ELF into the new process address space and repoint entry.
-    let mut new_entry: u64 = 0;
     let pid = unsafe { (*task_info).process_id };
+    let mut new_entry: u64 = 0;
 
-    // Determine which ELF binary to load based on task name
     let elf_data: &[u8] = if name == b"roulette\0" {
         const ROULETTE_ELF: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -88,12 +71,7 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
         ));
         SYSINFO_ELF
     } else {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!(
-                "USERLAND: Unknown task name '{}', cannot load ELF\n",
-                task_name
-            );
-        });
+        log_info("USERLAND: Unknown task name, cannot load ELF\n");
         task_terminate(task_id);
         return -1;
     };
@@ -101,75 +79,33 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
     if process_vm_load_elf(pid, elf_data.as_ptr(), elf_data.len(), &mut new_entry) != 0
         || new_entry == 0
     {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!(
-                "USERLAND: Failed to load ELF for '{}' (new_entry=0x{:x})\n",
-                task_name,
-                new_entry
-            );
-        });
+        log_info("USERLAND: ELF load failed\n");
         task_terminate(task_id);
         return -1;
     }
 
-    with_task_name(name.as_ptr() as *const c_char, |task_name| {
-        klog_info!(
-            "USERLAND: Loaded ELF for '{}', entry point=0x{:x}\n",
-            task_name,
-            new_entry
-        );
-    });
-
     unsafe {
         (*task_info).entry_point = new_entry;
-        // TaskContext is packed; use unaligned stores/loads when touching it directly.
         ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), new_entry);
-
-        // Debug: verify the write took effect
-        let verify_rip = ptr::read_unaligned(ptr::addr_of!((*task_info).context.rip));
-        klog_debug!(
-            "USERLAND: Updated context.rip to 0x{:x} (verify read: 0x{:x})\n",
-            new_entry,
-            verify_rip
-        );
     }
 
     task_id as i32
 }
 
-/// Spawn a new userland task by name at runtime.
-/// This is the public API for the syscall handler to use.
-///
-/// # Arguments
-/// * `name` - Null-terminated task name (e.g., b"file_manager\0")
-///
-/// # Returns
-/// Task ID (> 0) on success, -1 on failure.
 #[unsafe(link_section = ".user_text")]
 pub fn spawn_task_by_name(name: &[u8]) -> i32 {
-    // Spawn with default priority (5) and no special flags
     let task_id = userland_spawn_with_flags(name, 5, 0);
     if task_id <= 0 {
         return task_id;
     }
 
-    // For runtime spawning, schedule the task immediately
     let mut task_info: *mut Task = ptr::null_mut();
     if task_get_info(task_id as u32, &mut task_info) != 0 || task_info.is_null() {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!(
-                "USERLAND: Failed to fetch task info for scheduling '{}'\n",
-                task_name
-            );
-        });
         task_terminate(task_id as u32);
         return -1;
     }
 
     if schedule_task(task_info) != 0 {
-        with_task_name(name.as_ptr() as *const c_char, |task_name| {
-            klog_info!("USERLAND: Failed to schedule task '{}'\n", task_name);
-        });
         task_terminate(task_id as u32);
         return -1;
     }
@@ -185,8 +121,6 @@ fn block_task_on(task_id: u32, task_info: *mut Task, wait_on: u32) -> i32 {
     unsafe {
         (*task_info).waiting_on_task_id = wait_on;
     }
-    // State machine requires Ready -> Running -> Blocked transition
-    // Tasks are created in Ready state, so we must go through Running first
     if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
         return -1;
     }
@@ -198,7 +132,6 @@ fn block_task_on(task_id: u32, task_info: *mut Task, wait_on: u32) -> i32 {
 
 #[unsafe(link_section = ".user_text")]
 fn boot_step_userland_preinit() -> i32 {
-    // Register the spawn callback so syscall handler can spawn tasks at runtime
     register_spawn_task_callback(spawn_task_by_name);
 
     let shell_id = userland_spawn_with_flags(b"shell\0", 5, 0);
