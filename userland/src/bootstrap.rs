@@ -2,12 +2,11 @@ use core::ffi::c_char;
 use core::ptr;
 use slopos_lib::string::cstr_to_str;
 
-use slopos_boot::early_init::{BootInitStep, boot_init_priority};
+use slopos_boot::early_init::{boot_init_priority, BootInitStep};
 use slopos_core::syscall::register_spawn_task_callback;
 use slopos_core::{
-    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED,
-    TASK_STATE_RUNNING, Task, TaskEntry, schedule_task, task_get_info, task_set_state,
-    task_terminate,
+    schedule_task, task_get_info, task_set_state, task_terminate, Task, TaskEntry, INVALID_TASK_ID,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_STATE_BLOCKED, TASK_STATE_RUNNING,
 };
 use slopos_lib::{klog_debug, klog_info};
 use slopos_mm::process_vm::process_vm_load_elf;
@@ -81,6 +80,12 @@ fn userland_spawn_with_flags(name: &[u8], priority: u8, flags: u16) -> i32 {
             "/../builddir/file_manager.elf"
         ));
         FILE_MANAGER_ELF
+    } else if name == b"sysinfo\0" {
+        const SYSINFO_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../builddir/sysinfo.elf"
+        ));
+        SYSINFO_ELF
     } else {
         with_task_name(name.as_ptr() as *const c_char, |task_name| {
             klog_info!(

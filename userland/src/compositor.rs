@@ -13,13 +13,13 @@
 
 use core::ffi::c_void;
 
-use crate::gfx::{self, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat, rgb};
+use crate::gfx::{self, rgb, DamageRect, DamageTracker, DrawBuffer, DrawTarget, PixelFormat};
 use crate::syscall::{
-    CachedShmMapping, DisplayInfo, ShmBuffer, UserWindowInfo, sys_drain_queue,
-    sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms, sys_input_get_button_state,
-    sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset, sys_mark_frames_done,
-    sys_raise_window, sys_set_window_position, sys_set_window_state, sys_shm_unmap, sys_sleep_ms,
-    sys_spawn_task, sys_tty_set_focus, sys_yield,
+    sys_drain_queue, sys_enumerate_windows, sys_fb_flip, sys_fb_info, sys_get_time_ms,
+    sys_input_get_button_state, sys_input_get_pointer_pos, sys_input_set_pointer_focus_with_offset,
+    sys_mark_frames_done, sys_raise_window, sys_set_window_position, sys_set_window_state,
+    sys_shm_unmap, sys_sleep_ms, sys_spawn_task, sys_tty_set_focus, sys_yield, CachedShmMapping,
+    DisplayInfo, ShmBuffer, UserWindowInfo,
 };
 use crate::ui_utils;
 
@@ -714,7 +714,20 @@ impl WindowManager {
             return;
         }
 
-        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let sysinfo_btn_x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        if self.mouse_x >= sysinfo_btn_x && self.mouse_x < sysinfo_btn_x + SYSINFO_BUTTON_WIDTH {
+            if let Some(task_id) = self.find_window_by_title(b"Sysinfo") {
+                sys_raise_window(task_id);
+                sys_tty_set_focus(task_id);
+                self.focused_task = task_id;
+            } else {
+                sys_spawn_task(b"sysinfo\0");
+            }
+            self.needs_full_redraw = true;
+            return;
+        }
+
+        let mut x = sysinfo_btn_x + SYSINFO_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let button_width = TASKBAR_BUTTON_WIDTH;
@@ -850,8 +863,39 @@ impl WindowManager {
             files_color,
         );
 
+        // Draw Sysinfo button
+        let sysinfo_btn_x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let sysinfo_hover = self.mouse_x >= sysinfo_btn_x
+            && self.mouse_x < sysinfo_btn_x + SYSINFO_BUTTON_WIDTH
+            && self.mouse_y >= btn_y
+            && self.mouse_y < btn_y + btn_height;
+
+        let sysinfo_running = self.find_window_by_title(b"Sysinfo").is_some();
+        let sysinfo_color = if sysinfo_running || sysinfo_hover {
+            COLOR_BUTTON_HOVER
+        } else {
+            COLOR_BUTTON
+        };
+
+        gfx::fill_rect(
+            buf,
+            sysinfo_btn_x,
+            btn_y,
+            SYSINFO_BUTTON_WIDTH,
+            btn_height,
+            sysinfo_color,
+        );
+        gfx::font::draw_string(
+            buf,
+            sysinfo_btn_x + 4,
+            btn_y + 4,
+            "Info",
+            COLOR_TEXT,
+            sysinfo_color,
+        );
+
         // Draw app buttons
-        let mut x = TASKBAR_BUTTON_PADDING + FM_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+        let mut x = sysinfo_btn_x + SYSINFO_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
         for i in 0..self.window_count as usize {
             let window = &self.windows[i];
             let focused = window.task_id == self.focused_task;

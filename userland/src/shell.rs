@@ -37,10 +37,10 @@ unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 use crate::gfx::{self, DrawBuffer};
 use crate::runtime;
 use crate::syscall::{
-    DisplayInfo, ShmBuffer, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserSysInfo, sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open,
-    sys_fs_read, sys_fs_unlink, sys_fs_write, sys_halt, sys_read_char, sys_surface_commit,
-    sys_surface_set_title, sys_sys_info, sys_write,
+    sys_fb_info, sys_fs_close, sys_fs_list, sys_fs_mkdir, sys_fs_open, sys_fs_read, sys_fs_unlink,
+    sys_fs_write, sys_halt, sys_read_char, sys_spawn_task, sys_surface_commit,
+    sys_surface_set_title, sys_sys_info, sys_write, DisplayInfo, ShmBuffer, UserFsEntry,
+    UserFsList, UserSysInfo, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
 };
 
 const SHELL_MAX_TOKENS: usize = 16;
@@ -949,6 +949,11 @@ static BUILTINS: &[BuiltinEntry] = &[
         desc: b"Show kernel memory and scheduler stats",
     },
     BuiltinEntry {
+        name: b"sysinfo",
+        func: cmd_sysinfo,
+        desc: b"Launch the sysinfo program",
+    },
+    BuiltinEntry {
         name: b"ls",
         func: cmd_ls,
         desc: b"List directory contents",
@@ -1198,6 +1203,16 @@ fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     print_kv(b"", info.ready_tasks as u64);
     shell_write(b"  schedule() calls=");
     print_kv(b"", info.schedule_calls as u64);
+    0
+}
+
+#[unsafe(link_section = ".user_text")]
+fn cmd_sysinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
+    let rc = sys_spawn_task(b"sysinfo\0");
+    if rc <= 0 {
+        shell_write(b"sysinfo: failed to spawn\n");
+        return 1;
+    }
     0
 }
 

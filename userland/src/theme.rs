@@ -30,3 +30,4 @@ pub const FM_COLOR_BG: u32 = rgb(0x25, 0x25, 0x26);
 pub const FM_COLOR_FG: u32 = rgb(0xE0, 0xE0, 0xE0);
 pub const FM_COLOR_HL: u32 = rgb(0x3E, 0x3E, 0x42);
 pub const FM_BUTTON_WIDTH: i32 = 40;
+pub const SYSINFO_BUTTON_WIDTH: i32 = 48;

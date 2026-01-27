@@ -1,13 +1,18 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use slopos_abi::{FramebufferData, PhysAddr};
+use slopos_abi::{DisplayInfo, FramebufferData, PhysAddr, PixelFormat};
 use slopos_core::wl_currency::{award_loss, award_win};
-use slopos_lib::{InitFlag, klog_info, klog_warn};
+use slopos_lib::{align_up_u64, klog_info, klog_warn, InitFlag};
+use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_mm::mm_constants::PAGE_SIZE_4KB;
 use slopos_mm::mmio::MmioRegion;
+use slopos_mm::page_alloc::{alloc_page_frames, free_page_frame, ALLOC_FLAG_ZERO};
 
-use crate::pci::{PciDeviceInfo, PciGpuInfo, pci_get_primary_gpu};
+use crate::pci::{pci_get_primary_gpu, PciDeviceInfo, PciGpuInfo};
 
+mod display;
 mod forcewake;
+mod ggtt;
 mod mmio;
 mod regs;
 
@@ -21,6 +26,10 @@ struct XeDevice {
     device: PciDeviceInfo,
     mmio: MmioRegion,
     mmio_size: u64,
+    gmd_id: u32,
+    ggtt: ggtt::XeGgtt,
+    ggtt_ready: bool,
+    fb: XeFramebuffer,
 }
 
 impl XeDevice {
@@ -30,6 +39,40 @@ impl XeDevice {
             device: PciDeviceInfo::zeroed(),
             mmio: MmioRegion::empty(),
             mmio_size: 0,
+            gmd_id: 0,
+            ggtt: ggtt::XeGgtt::empty(),
+            ggtt_ready: false,
+            fb: XeFramebuffer::empty(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[allow(dead_code)]
+struct XeFramebuffer {
+    ready: bool,
+    phys: PhysAddr,
+    virt: *mut u8,
+    ggtt_addr: u64,
+    size: u64,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    format: PixelFormat,
+}
+
+impl XeFramebuffer {
+    const fn empty() -> Self {
+        Self {
+            ready: false,
+            phys: PhysAddr::NULL,
+            virt: core::ptr::null_mut(),
+            ggtt_addr: 0,
+            size: 0,
+            width: 0,
+            height: 0,
+            pitch: 0,
+            format: PixelFormat::Argb8888,
         }
     }
 }
@@ -112,6 +155,10 @@ pub fn xe_probe() -> bool {
             device: gpu.device,
             mmio: mmio_region,
             mmio_size: gpu.mmio_size,
+            gmd_id,
+            ggtt: ggtt::XeGgtt::empty(),
+            ggtt_ready: false,
+            fb: XeFramebuffer::empty(),
         };
     }
 
@@ -147,12 +194,112 @@ pub fn xe_framebuffer_init(boot_fb: Option<FramebufferData>) -> Option<Framebuff
         return boot_fb;
     }
 
-    // XE display output not yet implemented - continue using boot-provided framebuffer.
-    klog_info!("XE: Using boot framebuffer until XE scanout is wired");
-    boot_fb
+    let boot = boot_fb.unwrap();
+    let width = boot.info.width;
+    let height = boot.info.height;
+    if width == 0 || height == 0 {
+        klog_warn!("XE: Invalid boot framebuffer dimensions");
+        award_loss();
+        return Some(boot);
+    }
+
+    let pitch = align_up_u64(width as u64 * 4, regs::PLANE_STRIDE_ALIGN as u64) as u32;
+    let size = pitch as u64 * height as u64;
+    let size_aligned = align_up_u64(size, PAGE_SIZE_4KB);
+    let pages = (size_aligned / PAGE_SIZE_4KB) as u32;
+    if pages == 0 {
+        klog_warn!("XE: Framebuffer size invalid for allocation");
+        award_loss();
+        return Some(boot);
+    }
+
+    let phys = alloc_page_frames(pages, ALLOC_FLAG_ZERO);
+    if phys.is_null() {
+        klog_warn!("XE: Failed to allocate framebuffer pages");
+        award_loss();
+        return Some(boot);
+    }
+    let Some(virt) = phys.to_virt_checked() else {
+        klog_warn!("XE: Failed to map framebuffer pages into HHDM");
+        let _ = free_page_frame(phys);
+        award_loss();
+        return Some(boot);
+    };
+
+    let mmio = unsafe { XE_DEVICE.mmio };
+    let ggtt_addr = unsafe {
+        if !XE_DEVICE.ggtt_ready {
+            let Some(ggtt) = ggtt::xe_ggtt_init(&mmio) else {
+                klog_warn!("XE: GGTT init failed");
+                let _ = free_page_frame(phys);
+                award_loss();
+                return Some(boot);
+            };
+            core::ptr::addr_of_mut!(XE_DEVICE.ggtt).write(ggtt);
+            XE_DEVICE.ggtt_ready = true;
+        }
+
+        let ggtt_ptr = core::ptr::addr_of_mut!(XE_DEVICE.ggtt);
+        let Some(start_entry) = ggtt::xe_ggtt_alloc(&mut *ggtt_ptr, pages, 16) else {
+            klog_warn!("XE: GGTT allocation failed");
+            let _ = free_page_frame(phys);
+            award_loss();
+            return Some(boot);
+        };
+
+        if !ggtt::xe_ggtt_map(&*ggtt_ptr, start_entry, phys, pages) {
+            klog_warn!("XE: GGTT mapping failed");
+            let _ = free_page_frame(phys);
+            award_loss();
+            return Some(boot);
+        }
+
+        start_entry as u64 * PAGE_SIZE_4KB
+    };
+
+    if !display::xe_display_program_primary(&mmio, ggtt_addr, width, height, pitch) {
+        klog_warn!("XE: Display plane programming failed");
+        let _ = free_page_frame(phys);
+        award_loss();
+        return Some(boot);
+    }
+
+    unsafe {
+        XE_DEVICE.fb = XeFramebuffer {
+            ready: true,
+            phys,
+            virt: virt.as_mut_ptr::<u8>(),
+            ggtt_addr,
+            size,
+            width,
+            height,
+            pitch,
+            format: PixelFormat::Xrgb8888,
+        };
+    }
+
+    award_win();
+    Some(FramebufferData {
+        address: virt.as_mut_ptr::<u8>(),
+        info: DisplayInfo::new(width, height, pitch, PixelFormat::Xrgb8888),
+    })
 }
 
 pub fn xe_flush() -> i32 {
-    // No-op until XE scanout/submit path is implemented.
-    0
+    let (present, ready, mmio, ggtt_addr) = unsafe {
+        (
+            XE_DEVICE.present,
+            XE_DEVICE.fb.ready,
+            XE_DEVICE.mmio,
+            XE_DEVICE.fb.ggtt_addr,
+        )
+    };
+    if !present || !ready {
+        return -1;
+    }
+    if display::xe_display_flush(&mmio, ggtt_addr) {
+        0
+    } else {
+        -1
+    }
 }

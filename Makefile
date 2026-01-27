@@ -215,6 +215,7 @@ build-userland:
 	  --bin compositor \
 	  --bin shell \
 	  --bin file_manager \
+	  --bin sysinfo \
 	  --features standalone-bin \
 	  --no-default-features \
 	  --release; \
@@ -230,7 +231,10 @@ build-userland:
 	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/file_manager ]; then \
 		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/file_manager" "$(BUILD_DIR)/file_manager.elf"; \
 	fi; \
-	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf"
+	if [ -f $(CARGO_TARGET_DIR)/x86_64-slos-userland/release/sysinfo ]; then \
+		cp "$(CARGO_TARGET_DIR)/x86_64-slos-userland/release/sysinfo" "$(BUILD_DIR)/sysinfo.elf"; \
+	fi; \
+	echo "Userland binaries built: $(BUILD_DIR)/roulette.elf $(BUILD_DIR)/compositor.elf $(BUILD_DIR)/shell.elf $(BUILD_DIR)/file_manager.elf $(BUILD_DIR)/sysinfo.elf"
 
 build: fs-image build-userland
 	@$(call build_kernel)

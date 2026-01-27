@@ -5,10 +5,10 @@ use core::ptr::NonNull;
 use crate::syscall_raw::{syscall0, syscall1, syscall2, syscall3, syscall4};
 
 pub use slopos_abi::{
-    DisplayInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData,
-    InputEventType, MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW,
-    SurfaceRole, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
-    UserFsEntry, UserFsList, UserFsStat, WindowDamageRect, WindowInfo,
+    DisplayInfo, InputEvent, InputEventData, InputEventType, PixelFormat, SurfaceRole, UserFsEntry,
+    UserFsList, UserFsStat, WindowDamageRect, WindowInfo, INPUT_FOCUS_KEYBOARD,
+    INPUT_FOCUS_POINTER, MAX_WINDOW_DAMAGE_REGIONS, SHM_ACCESS_RO, SHM_ACCESS_RW,
+    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE,
 };
 
 pub use slopos_abi::syscall::*;
@@ -54,6 +54,18 @@ pub fn sys_sleep_ms(ms: u32) {
 #[unsafe(link_section = ".user_text")]
 pub fn sys_get_time_ms() -> u64 {
     unsafe { syscall0(SYSCALL_GET_TIME_MS) }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_get_cpu_count() -> u32 {
+    unsafe { syscall0(SYSCALL_GET_CPU_COUNT) as u32 }
+}
+
+#[inline(always)]
+#[unsafe(link_section = ".user_text")]
+pub fn sys_get_current_cpu() -> u32 {
+    unsafe { syscall0(SYSCALL_GET_CURRENT_CPU) as u32 }
 }
 
 #[inline(always)]
@@ -373,7 +385,11 @@ pub fn sys_surface_set_title(title: &str) -> i64 {
 
 pub fn sys_input_poll(event_out: &mut InputEvent) -> Option<InputEvent> {
     let result = unsafe { syscall1(SYSCALL_INPUT_POLL, event_out as *mut InputEvent as u64) };
-    if result == 1 { Some(*event_out) } else { None }
+    if result == 1 {
+        Some(*event_out)
+    } else {
+        None
+    }
 }
 
 #[inline(always)]

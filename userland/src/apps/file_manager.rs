@@ -6,10 +6,10 @@
 use core::ffi::c_void;
 use core::str;
 
-use crate::gfx::{self, DrawBuffer, PixelFormat, rgb};
+use crate::gfx::{self, rgb, DrawBuffer, PixelFormat};
 use crate::syscall::{
-    DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList, sys_fb_info,
-    sys_fs_list, sys_input_poll_batch, sys_surface_commit, sys_surface_set_title, sys_yield,
+    sys_fb_info, sys_fs_list, sys_input_poll_batch, sys_surface_commit, sys_surface_set_title,
+    sys_yield, DisplayInfo, InputEvent, InputEventType, ShmBuffer, UserFsEntry, UserFsList,
 };
 use crate::theme::*;
 
