@@ -67,9 +67,9 @@ This ensures all changes are framed within the epic lore of SlopOS.
 
 ## Latest Book
 
-**Current**: `THE_COOKED.md` (Book III) — The Inland Quest (IN PROGRESS)
+**Current**: `THE_FORGE.md` (Book IV) — The Refactor Crusade (IN PROGRESS)
 
-The wizards have tamed memory, learned to listen through keyboards, birthed the shell, painted the boot screen in divine colors, and inscribed the Wheel of Fate itself into the kernel's heart. Book III (`THE_COOKED.md`) is underway and awaits new chapters as future commits unfold.
+The wizards entered the Forge Years: unifying runes, deepening memory, hardening syscalls and userland, building a tribunal of tests, multiplying across CPUs, and silencing old relics. Book IV (`THE_FORGE.md`) now carries the latest arc.
 
 ⚠️ **CRITICAL**: The lore is **never finished**. The tension continues. Each new commit, each new feature, each new challenge weaves itself into the ongoing saga. The wizards' journey is perpetual. Books end, but the story never does.
 
