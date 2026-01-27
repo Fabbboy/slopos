@@ -151,12 +151,6 @@ pub const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
 /// VirtIO vendor ID (Red Hat).
 pub const PCI_VENDOR_ID_VIRTIO: u16 = 0x1AF4;
 
-/// VirtIO GPU device ID (modern).
-pub const PCI_DEVICE_ID_VIRTIO_GPU: u16 = 0x1050;
-
-/// VirtIO GPU device ID (transitional).
-pub const PCI_DEVICE_ID_VIRTIO_GPU_TRANS: u16 = 0x1010;
-
 /// Invalid vendor ID (no device present).
 pub const PCI_VENDOR_ID_INVALID: u16 = 0xFFFF;
 

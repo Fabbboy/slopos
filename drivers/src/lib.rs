@@ -20,7 +20,6 @@ pub mod syscall_services_init;
 pub mod tty;
 pub mod virtio;
 pub mod virtio_blk;
-pub mod virtio_gpu;
 pub mod xe;
 
 pub use ps2::keyboard;

@@ -4,13 +4,13 @@
 extern crate alloc;
 
 use core::ffi::c_int;
-use slopos_abi::CompositorError;
-use slopos_abi::FramebufferData;
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::video_traits::VideoResult;
-use slopos_core::syscall_services::{VideoServices, register_video_services};
+use slopos_abi::CompositorError;
+use slopos_abi::FramebufferData;
+use slopos_core::syscall_services::{register_video_services, VideoServices};
 use slopos_core::task::register_video_cleanup_hook;
-use slopos_drivers::{virtio_gpu, xe};
+use slopos_drivers::xe;
 use slopos_lib::{klog_info, klog_warn};
 
 pub mod compositor_context;
@@ -24,7 +24,6 @@ pub mod splash;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VideoBackend {
     Framebuffer,
-    Virgl,
     Xe,
 }
 
@@ -90,24 +89,11 @@ fn task_cleanup_callback(task_id: u32) {
 pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
     register_video_cleanup_hook(task_cleanup_callback);
 
-    let mut virgl_fb: Option<FramebufferData> = None;
-    if backend == VideoBackend::Virgl {
-        virgl_fb = try_init_virgl_backend();
-        if virgl_fb.is_none() {
-            klog_info!("Video: virgl backend unavailable; falling back to framebuffer");
-        } else {
-            framebuffer::register_flush_callback(virtio_gpu::virtio_gpu_flush_full);
-        }
-    }
     if backend == VideoBackend::Xe {
         framebuffer::register_flush_callback(xe::xe_flush);
     }
 
-    let fb_to_use = if virgl_fb.is_some() {
-        virgl_fb
-    } else {
-        framebuffer
-    };
+    let fb_to_use = framebuffer;
 
     if let Some(fb) = fb_to_use {
         klog_info!(
@@ -135,40 +121,6 @@ pub fn init(framebuffer: Option<FramebufferData>, backend: VideoBackend) {
         framebuffer::framebuffer_flush();
     } else {
         klog_warn!("No framebuffer provided; skipping video init.");
-    }
-}
-
-fn try_init_virgl_backend() -> Option<FramebufferData> {
-    let device = virtio_gpu::virtio_gpu_get_device();
-    if device.is_null() {
-        klog_info!("Video: virgl requested but no virtio-gpu device is present");
-        return None;
-    }
-
-    if !virtio_gpu::virtio_gpu_has_modern_caps() {
-        klog_info!("Video: virgl requested; virtio-gpu lacks modern capabilities");
-        return None;
-    }
-
-    if !virtio_gpu::virtio_gpu_supports_virgl() {
-        klog_info!("Video: virgl requested; device does not advertise virgl support");
-        return None;
-    }
-
-    if !virtio_gpu::virtio_gpu_is_virgl_ready() {
-        klog_info!("Video: virgl requested; virtio-gpu context not ready");
-        return None;
-    }
-
-    match virtio_gpu::virtio_gpu_framebuffer_init() {
-        Some(fb) => {
-            klog_info!("Video: virgl requested; virtio-gpu framebuffer online");
-            Some(fb)
-        }
-        None => {
-            klog_info!("Video: virgl requested; virtio-gpu framebuffer init failed");
-            None
-        }
     }
 }
 

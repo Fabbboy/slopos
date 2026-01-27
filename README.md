@@ -59,7 +59,6 @@ make boot VIDEO=1   # spins the wheel
 <summary><b>Advanced Options</b></summary>
 
 ```bash
-VIRGL=1 VIDEO=1 make boot             # GPU acceleration (not supported on macOS Cocoa)
 QEMU_DISPLAY=cocoa make boot VIDEO=1  # Force Cocoa (macOS default)
 QEMU_DISPLAY=sdl make boot VIDEO=1    # Force SDL (if installed)
 DEBUG=1 make boot VIDEO=1             # Debug logging

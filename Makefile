@@ -34,7 +34,6 @@ BOOT_LOG_TIMEOUT ?= 15
 BOOT_CMDLINE ?= itests=off
 TEST_CMDLINE ?= itests=on itests.shutdown=on itests.verbosity=summary boot.debug=on
 VIDEO ?= 0
-VIRGL ?= 0
 # On macOS, prefer cocoa; otherwise let the logic decide
 ifeq ($(UNAME_S),Darwin)
 QEMU_DISPLAY ?= cocoa
@@ -277,8 +276,6 @@ boot: iso-notests
 	trap cleanup EXIT INT TERM; \
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
-	VIRGL_ARGS=""; \
-	QEMU_VIRGL=$${QEMU_VIRGL:-$(VIRGL)}; \
 	QEMU_DISPLAY=$${QEMU_DISPLAY:-$(QEMU_DISPLAY)}; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
@@ -307,24 +304,6 @@ boot: iso-notests
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
-	fi; \
-	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
-			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
-			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
-			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
-			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$$HAS_COCOA" = "1" ]; then \
-			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
-		else \
-			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		fi; \
-		VIRGL_ARGS=" -device virtio-gpu-gl-pci,multifunction=on"; \
 	fi; \
 	echo "Starting QEMU in interactive mode (Ctrl+C to exit)..."; \
 		$(QEMU_BIN) \
@@ -344,7 +323,6 @@ boot: iso-notests
 	  $$DISPLAY_ARGS \
 	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
-	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-}
 
 boot-log: iso-notests
@@ -361,8 +339,6 @@ boot-log: iso-notests
 	trap cleanup EXIT INT TERM; \
 	cp "$(OVMF_VARS)" "$$OVMF_VARS_RUNTIME"; \
 	EXTRA_ARGS=""; \
-	VIRGL_ARGS=""; \
-	QEMU_VIRGL=$${QEMU_VIRGL:-$(VIRGL)}; \
 	QEMU_DISPLAY=$${QEMU_DISPLAY:-$(QEMU_DISPLAY)}; \
 	if [ "$${QEMU_ENABLE_ISA_EXIT:-0}" != "0" ]; then \
 		EXTRA_ARGS=" -device isa-debug-exit,iobase=0xf4,iosize=0x01"; \
@@ -391,24 +367,6 @@ boot-log: iso-notests
 		else \
 			DISPLAY_ARGS="-display gtk,grab-on-hover=on,zoom-to-fit=on -vga std"; \
 		fi; \
-	fi; \
-	if [ "$${QEMU_VIRGL:-0}" != "0" ]; then \
-		if [ "$$QEMU_DISPLAY" = "cocoa" ] && [ "$$HAS_COCOA" = "1" ]; then \
-			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
-		elif [ "$$QEMU_DISPLAY" = "sdl" ]; then \
-			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$$QEMU_DISPLAY" = "gtk" ]; then \
-			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		elif [ "$${XDG_SESSION_TYPE:-x11}" = "wayland" ] && [ "$$HAS_SDL" = "1" ]; then \
-			DISPLAY_ARGS="-display sdl,gl=on,grab-mod=lctrl-lalt -vga none"; \
-		elif [ "$$HAS_COCOA" = "1" ]; then \
-			echo "Warning: VirGL not supported with Cocoa display, using standard VGA" >&2; \
-			DISPLAY_ARGS="-display cocoa -vga std"; \
-		else \
-			DISPLAY_ARGS="-display gtk,gl=on,grab-on-hover=on,zoom-to-fit=on -vga none"; \
-		fi; \
-		VIRGL_ARGS=" -device virtio-gpu-pci,virgl=on"; \
 	fi; \
 	echo "Starting QEMU with $(BOOT_LOG_TIMEOUT)s timeout (logging to $(LOG_FILE))..."; \
 	set +e; \
@@ -429,7 +387,6 @@ boot-log: iso-notests
 	  $$DISPLAY_ARGS \
 	  $$USB_ARGS \
 	  $$EXTRA_ARGS \
-	  $$VIRGL_ARGS \
 	  $${QEMU_PCI_DEVICES:-} \
 	  2>&1 | tee "$(LOG_FILE)"; \
 	status=$$?; \

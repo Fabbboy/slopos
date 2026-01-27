@@ -1,10 +1,10 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::{c_char, CStr};
 
 use slopos_lib::klog::{self, KlogLevel};
 use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
-    TestRunSummary, TestSuiteResult, tests_register_suite, tests_register_system_suites,
-    tests_request_shutdown, tests_reset_registry, tests_run_all,
+    tests_register_suite, tests_register_system_suites, tests_request_shutdown,
+    tests_reset_registry, tests_run_all, TestRunSummary, TestSuiteResult,
 };
 use slopos_video as video;
 
@@ -22,7 +22,6 @@ use slopos_drivers::{
     pic::pic_quiesce_disable,
     pit::{pit_init, pit_poll_delay_ms},
     virtio_blk::virtio_blk_register_driver,
-    virtio_gpu::virtio_gpu_register_driver,
     xe,
 };
 use slopos_mm::tlb;
@@ -53,8 +52,6 @@ fn boot_video_backend() -> video::VideoBackend {
     let cmdline = boot_get_cmdline();
     if cmdline_contains(cmdline, "video=xe") {
         video::VideoBackend::Xe
-    } else if cmdline_contains(cmdline, "video=virgl") {
-        video::VideoBackend::Virgl
     } else {
         video::VideoBackend::Framebuffer
     }
@@ -110,7 +107,7 @@ fn boot_step_timer_setup_fn() {
         );
     }
     let backend = boot_video_backend();
-    if backend == video::VideoBackend::Virgl || backend == video::VideoBackend::Xe {
+    if backend == video::VideoBackend::Xe {
         klog_info!("BOOT: deferring video init until PCI for GPU backend");
         return;
     }
@@ -156,7 +153,6 @@ fn boot_step_ioapic_setup_fn() {
 fn boot_step_pci_init_fn() {
     klog_debug!("Enumerating PCI devices...");
     virtio_blk_register_driver();
-    virtio_gpu_register_driver();
     pci_init();
     pci_probe_drivers();
     if boot_video_backend() == video::VideoBackend::Xe {
@@ -189,14 +185,7 @@ fn boot_step_pci_init_fn() {
     }
 
     let backend = boot_video_backend();
-    if backend == video::VideoBackend::Virgl {
-        let boot_fb = limine_protocol::boot_info().framebuffer;
-        let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
-            address: bf.address,
-            info: bf.info,
-        });
-        video::init(fb, backend);
-    } else if backend == video::VideoBackend::Xe {
+    if backend == video::VideoBackend::Xe {
         let boot_fb = limine_protocol::boot_info().framebuffer;
         let fb = boot_fb.map(|bf| slopos_abi::FramebufferData {
             address: bf.address,

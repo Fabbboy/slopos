@@ -3,9 +3,6 @@
 ## Scheduling Enhancements
 - [ ] Calibrate/use LAPIC timer for preemption (PIT-based preemption exists).
 
-## Graphics
-- [ ] Add a virgl (virtio-gpu) driver path to transition from software rendering; integrate W/L awards for success/failure.
-
 ## Async Coordination
 - [ ] Extend join/wait primitives with timeout and cancellation support.
 - [ ] Provide a lightweight async completion primitive for cross-task signaling.

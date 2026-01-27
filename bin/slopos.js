@@ -56,7 +56,6 @@ Commands:
 
 Environment Variables:
   VIDEO=1       Enable graphical display
-  VIRGL=1       Enable GPU acceleration
   DEBUG=1       Enable debug logging
   QEMU_SMP=N    Number of CPU cores (must be power of 2, default: 2)
 
@@ -66,7 +65,6 @@ Examples:
   slopos build              # Build kernel and ISO
   slopos boot-video         # Boot with display
   DEBUG=1 slopos boot       # Boot with debug output
-  VIRGL=1 VIDEO=1 slopos boot  # Boot with GPU acceleration
 
 Quick Start:
   npx @slopos/kernel install && npx @slopos/kernel boot-video

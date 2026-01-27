@@ -82,9 +82,6 @@ slopos help         # Show help
 ## Quick Examples
 
 ```bash
-# Boot with GPU acceleration
-VIRGL=1 VIDEO=1 slopos boot
-
 # Boot with debug output
 DEBUG=1 slopos boot-video
 

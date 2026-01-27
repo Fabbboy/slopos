@@ -1,7 +1,7 @@
 //! VirtIO common infrastructure
 //!
 //! This module provides shared types, constants, and utilities for VirtIO device drivers.
-//! It eliminates code duplication between virtio-blk, virtio-gpu, and future virtio drivers.
+//! It eliminates code duplication between virtio-blk and future virtio drivers.
 
 pub mod pci;
 pub mod queue;
