@@ -68,14 +68,12 @@ fn tty_input_available_cb() -> c_int {
 }
 
 fn tty_register_idle_callback() {
-    static mut REGISTERED: bool = false;
-    unsafe {
-        if REGISTERED {
-            return;
-        }
-        scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
-        REGISTERED = true;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.swap(true, Ordering::AcqRel) {
+        return;
     }
+    scheduler_register_idle_wakeup_callback(Some(tty_input_available_cb));
 }
 
 fn tty_wait_queue_pop() -> *mut Task {

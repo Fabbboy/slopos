@@ -34,7 +34,9 @@ pub fn try_work_steal() -> bool {
 }
 
 fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
-    let sched = get_cpu_scheduler(victim)?;
+    // SAFETY: Work stealing is single-threaded from the thief's perspective,
+    // and the victim's scheduler uses internal locking for queue operations.
+    let sched = unsafe { get_cpu_scheduler(victim)? };
 
     if sched.total_ready_count() <= 1 {
         return None;

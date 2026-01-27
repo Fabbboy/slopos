@@ -1,6 +1,8 @@
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_abi::addr::VirtAddr;
+use slopos_lib::percpu::get_percpu_data;
 use slopos_lib::{InitFlag, IrqMutex};
 
 use crate::memory_layout::mm_get_kernel_heap_start;
@@ -11,20 +13,19 @@ use crate::user_ptr::{UserBytes, UserPtr, UserPtrError, UserVirtAddr};
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
 static CURRENT_TASK_PROVIDER: IrqMutex<Option<fn() -> u32>> = IrqMutex::new(None);
 
-static mut SYSCALL_CURRENT_PID: u32 = crate::mm_constants::INVALID_PROCESS_ID;
-
+/// Reads the syscall PID from per-CPU storage (SMP-safe).
 fn syscall_process_id_provider() -> u32 {
-    unsafe { SYSCALL_CURRENT_PID }
+    get_percpu_data().syscall_pid.load(Ordering::Acquire)
 }
 
 pub fn register_current_task_provider(provider: fn() -> u32) {
     *CURRENT_TASK_PROVIDER.lock() = Some(provider);
 }
 
+/// Sets the syscall PID in per-CPU storage (SMP-safe).
+/// Returns the previous task provider so it can be restored after the syscall.
 pub fn set_syscall_process_id(pid: u32) -> Option<fn() -> u32> {
-    unsafe {
-        SYSCALL_CURRENT_PID = pid;
-    }
+    get_percpu_data().syscall_pid.store(pid, Ordering::Release);
     let mut guard = CURRENT_TASK_PROVIDER.lock();
     let original = *guard;
     *guard = Some(syscall_process_id_provider);

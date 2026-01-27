@@ -37,30 +37,18 @@ const PERCPU_INIT_MAGIC: u64 = 0x5350_4350_5543_5055; // "SPCPCPU\0"
 /// we migrate to that approach later.
 #[repr(C, align(64))]
 pub struct PerCpuData {
-    /// CPU index (0 = BSP, 1+ = APs).
     pub cpu_id: u32,
-    /// LAPIC ID for this CPU.
     pub apic_id: u32,
-    /// Magic value for initialization check.
     pub init_magic: u64,
-    /// Pointer to the currently running task on this CPU.
     pub current_task: AtomicPtr<()>,
-    /// Top of the kernel stack for this CPU.
     pub kernel_stack_top: AtomicU64,
-    /// Preemption disable count (>0 means preemption disabled).
     pub preempt_count: AtomicU32,
-    /// True if currently in interrupt context.
     pub in_interrupt: AtomicBool,
-    /// Per-CPU scheduler instance (set by scheduler init).
     pub scheduler: AtomicPtr<()>,
-    /// CPU is online and ready to run tasks.
     pub online: AtomicBool,
-    /// Number of context switches on this CPU.
     pub context_switches: AtomicU64,
-    /// Number of interrupts handled on this CPU.
     pub interrupt_count: AtomicU64,
-    /// Padding to fill cache line.
-    _pad: [u8; 4],
+    pub syscall_pid: AtomicU32,
 }
 
 impl PerCpuData {
@@ -78,7 +66,7 @@ impl PerCpuData {
             online: AtomicBool::new(false),
             context_switches: AtomicU64::new(0),
             interrupt_count: AtomicU64::new(0),
-            _pad: [0; 4],
+            syscall_pid: AtomicU32::new(u32::MAX),
         }
     }
 

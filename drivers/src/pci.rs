@@ -1,12 +1,11 @@
-#![allow(static_mut_refs)]
-
 use core::ffi::{c_char, c_int};
 use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_abi::PhysAddr;
 use slopos_lib::ports::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
 use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InitFlag, klog_info};
+use slopos_lib::{InitFlag, IrqMutex, klog_info};
 use slopos_mm::mmio::MmioRegion;
 
 pub use slopos_abi::arch::x86_64::pci::{PciBarInfo, PciDeviceInfo, *};
@@ -55,14 +54,45 @@ pub struct PciDriver {
 
 unsafe impl Sync for PciDriver {}
 
-static mut BUS_VISITED: [u8; PCI_MAX_BUSES] = [0; PCI_MAX_BUSES];
-static mut DEVICES: [PciDeviceInfo; PCI_MAX_DEVICES] = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
-static mut DEVICE_COUNT: usize = 0;
+struct PciEnumState {
+    bus_visited: [u8; PCI_MAX_BUSES],
+    devices: [PciDeviceInfo; PCI_MAX_DEVICES],
+    device_count: usize,
+    primary_gpu: PciGpuInfo,
+}
+
+impl PciEnumState {
+    const fn new() -> Self {
+        Self {
+            bus_visited: [0; PCI_MAX_BUSES],
+            devices: [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES],
+            device_count: 0,
+            primary_gpu: PciGpuInfo::zeroed(),
+        }
+    }
+}
+
+struct PciDriverRegistry {
+    drivers: [*const PciDriver; PCI_DRIVER_MAX],
+    count: usize,
+}
+
+impl PciDriverRegistry {
+    const fn new() -> Self {
+        Self {
+            drivers: [ptr::null(); PCI_DRIVER_MAX],
+            count: 0,
+        }
+    }
+}
+
+// SAFETY: PciDriverRegistry only stores pointers to 'static PciDrivers
+unsafe impl Send for PciDriverRegistry {}
+
 static PCI_INIT: InitFlag = InitFlag::new();
-static mut PRIMARY_GPU: PciGpuInfo = PciGpuInfo::zeroed();
-static mut PCI_REGISTERED_DRIVERS: [*const PciDriver; PCI_DRIVER_MAX] =
-    [ptr::null(); PCI_DRIVER_MAX];
-static mut PCI_REGISTERED_DRIVER_COUNT: usize = 0;
+static ENUM_STATE: IrqMutex<PciEnumState> = IrqMutex::new(PciEnumState::new());
+static DRIVER_REGISTRY: IrqMutex<PciDriverRegistry> = IrqMutex::new(PciDriverRegistry::new());
+static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
 fn cstr_or_placeholder(ptr: *const u8) -> &'static str {
     unsafe { cstr_to_str(ptr as *const c_char) }
@@ -177,7 +207,7 @@ fn pci_probe_bar(bus: u8, device: u8, function: u8, bar_idx: u8) -> PciBarInfo {
     }
 }
 
-fn pci_probe_device(bus: u8, device: u8, function: u8) {
+fn pci_probe_device(state: &mut PciEnumState, bus: u8, device: u8, function: u8) {
     let vendor = pci_read_vendor_id(bus, device, function);
     if vendor == 0xFFFF {
         return;
@@ -226,11 +256,9 @@ fn pci_probe_device(bus: u8, device: u8, function: u8) {
         bars,
     };
 
-    unsafe {
-        if DEVICE_COUNT < PCI_MAX_DEVICES {
-            DEVICES[DEVICE_COUNT] = info;
-            DEVICE_COUNT += 1;
-        }
+    if state.device_count < PCI_MAX_DEVICES {
+        state.devices[state.device_count] = info;
+        state.device_count += 1;
     }
 
     klog_info!(
@@ -272,23 +300,21 @@ fn pci_probe_device(bus: u8, device: u8, function: u8) {
     if class == 0x03 && subclass == 0x00 {
         for bar in &bars {
             if bar.is_io == 0 && bar.base != 0 && bar.size != 0 {
-                unsafe {
-                    if PRIMARY_GPU.present == 0 {
-                        PRIMARY_GPU.present = 1;
-                        PRIMARY_GPU.device = info;
-                        PRIMARY_GPU.mmio_phys_base = bar.base;
-                        PRIMARY_GPU.mmio_size = bar.size;
+                if state.primary_gpu.present == 0 {
+                    state.primary_gpu.present = 1;
+                    state.primary_gpu.device = info;
+                    state.primary_gpu.mmio_phys_base = bar.base;
+                    state.primary_gpu.mmio_size = bar.size;
 
-                        let phys = PhysAddr::new(bar.base);
-                        PRIMARY_GPU.mmio_region = MmioRegion::map(phys, bar.size as usize)
-                            .unwrap_or_else(MmioRegion::empty);
-                        klog_info!(
-                            "PCI: Selected display-class GPU candidate at MMIO phys=0x{:x} size=0x{:x} virt=0x{:x}",
-                            bar.base,
-                            bar.size,
-                            PRIMARY_GPU.mmio_region.virt_base()
-                        );
-                    }
+                    let phys = PhysAddr::new(bar.base);
+                    state.primary_gpu.mmio_region =
+                        MmioRegion::map(phys, bar.size as usize).unwrap_or_else(MmioRegion::empty);
+                    klog_info!(
+                        "PCI: Selected display-class GPU candidate at MMIO phys=0x{:x} size=0x{:x} virt=0x{:x}",
+                        bar.base,
+                        bar.size,
+                        state.primary_gpu.mmio_region.virt_base()
+                    );
                 }
                 break;
             }
@@ -297,17 +323,15 @@ fn pci_probe_device(bus: u8, device: u8, function: u8) {
 
     if header_type == 1 {
         let secondary = pci_get_secondary_bus(bus, device, function);
-        pci_scan_bus(secondary);
+        pci_scan_bus_inner(state, secondary);
     }
 }
 
-fn pci_scan_bus(bus: u8) {
-    unsafe {
-        if BUS_VISITED[bus as usize] != 0 {
-            return;
-        }
-        BUS_VISITED[bus as usize] = 1;
+fn pci_scan_bus_inner(state: &mut PciEnumState, bus: u8) {
+    if state.bus_visited[bus as usize] != 0 {
+        return;
     }
+    state.bus_visited[bus as usize] = 1;
 
     for device in 0..32u8 {
         let vendor = pci_read_vendor_id(bus, device, 0);
@@ -315,12 +339,12 @@ fn pci_scan_bus(bus: u8) {
             continue;
         }
 
-        pci_probe_device(bus, device, 0);
+        pci_probe_device(state, bus, device, 0);
 
         if pci_is_multifunction(bus, device) {
             for function in 1..8u8 {
                 if pci_read_vendor_id(bus, device, function) != 0xFFFF {
-                    pci_probe_device(bus, device, function);
+                    pci_probe_device(state, bus, device, function);
                 }
             }
         }
@@ -332,71 +356,72 @@ pub fn pci_init() {
         return;
     }
 
-    // SAFETY: Single-threaded initialization during boot, protected by InitFlag
-    unsafe {
-        DEVICE_COUNT = 0;
-        BUS_VISITED = [0; PCI_MAX_BUSES];
-        PRIMARY_GPU = PciGpuInfo::zeroed();
-    }
-
     klog_info!("PCI: Initializing PCI subsystem");
-    pci_scan_bus(0);
+
+    let mut state = ENUM_STATE.lock();
+    state.device_count = 0;
+    state.bus_visited = [0; PCI_MAX_BUSES];
+    state.primary_gpu = PciGpuInfo::zeroed();
+
+    pci_scan_bus_inner(&mut state, 0);
 
     let header_type = pci_read_header_type(0, 0, 0);
     if (header_type & 0x80) != 0 {
         for function in 1..8u8 {
             if pci_read_vendor_id(0, 0, function) != 0xFFFF {
-                pci_scan_bus(function);
+                pci_scan_bus_inner(&mut state, function);
             }
         }
     }
 
-    let count = unsafe { DEVICE_COUNT };
+    let count = state.device_count;
+    DEVICE_COUNT_CACHE.store(count, Ordering::Release);
     klog_info!("PCI: Enumeration complete. Devices discovered: {}", count);
 }
 
 pub fn pci_get_device_count() -> usize {
-    unsafe { DEVICE_COUNT }
+    DEVICE_COUNT_CACHE.load(Ordering::Acquire)
 }
 
-pub fn pci_get_device(index: usize) -> Option<&'static PciDeviceInfo> {
-    unsafe {
-        if index < DEVICE_COUNT {
-            Some(&DEVICES[index])
-        } else {
-            None
-        }
+pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
+    let state = ENUM_STATE.lock();
+    if index < state.device_count {
+        Some(state.devices[index])
+    } else {
+        None
     }
 }
 
-pub fn pci_get_primary_gpu() -> *const PciGpuInfo {
-    unsafe { &PRIMARY_GPU }
+pub fn pci_get_primary_gpu() -> PciGpuInfo {
+    ENUM_STATE.lock().primary_gpu
 }
 
 pub fn pci_register_driver(driver: &'static PciDriver) -> c_int {
-    unsafe {
-        if PCI_REGISTERED_DRIVER_COUNT >= PCI_DRIVER_MAX {
-            return -1;
-        }
-        let name = cstr_or_placeholder(driver.name);
-        klog_info!("PCI: Registered driver {}", name);
-        PCI_REGISTERED_DRIVERS[PCI_REGISTERED_DRIVER_COUNT] = driver;
-        PCI_REGISTERED_DRIVER_COUNT += 1;
-        0
+    let mut registry = DRIVER_REGISTRY.lock();
+    let idx = registry.count;
+    if idx >= PCI_DRIVER_MAX {
+        return -1;
     }
+    let name = cstr_or_placeholder(driver.name);
+    klog_info!("PCI: Registered driver {}", name);
+    registry.drivers[idx] = driver;
+    registry.count = idx + 1;
+    0
 }
 
 pub fn pci_probe_drivers() {
-    unsafe {
-        for drv_idx in 0..PCI_REGISTERED_DRIVER_COUNT {
-            let drv = &*PCI_REGISTERED_DRIVERS[drv_idx];
-            for dev_idx in 0..DEVICE_COUNT {
-                let dev = &DEVICES[dev_idx];
-                if let Some(mf) = drv.match_fn {
-                    if mf(dev, drv.context) {
-                        if let Some(probe) = drv.probe {
-                            let _ = probe(dev, drv.context);
-                        }
+    let registry = DRIVER_REGISTRY.lock();
+    let state = ENUM_STATE.lock();
+
+    for drv_idx in 0..registry.count {
+        // SAFETY: pci_register_driver only accepts 'static PciDriver references
+        let drv = unsafe { &*registry.drivers[drv_idx] };
+        for dev_idx in 0..state.device_count {
+            let dev = &state.devices[dev_idx];
+            if let Some(mf) = drv.match_fn {
+                if mf(dev, drv.context) {
+                    if let Some(probe) = drv.probe {
+                        let _ = probe(dev, drv.context);
                     }
                 }
             }

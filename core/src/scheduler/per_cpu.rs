@@ -407,22 +407,26 @@ pub fn with_cpu_scheduler<R>(
     }
 }
 
-pub fn get_local_scheduler() -> &'static mut PerCpuScheduler {
+/// # Safety
+/// Caller must ensure they are on the CPU they intend to access and that
+/// no concurrent mutable access occurs. Prefer `with_local_scheduler()` when possible.
+pub unsafe fn get_local_scheduler() -> &'static mut PerCpuScheduler {
     let cpu_id = slopos_lib::get_current_cpu();
     unsafe { &mut CPU_SCHEDULERS[cpu_id] }
 }
 
-pub fn get_cpu_scheduler(cpu_id: usize) -> Option<&'static mut PerCpuScheduler> {
+/// # Safety
+/// Caller must ensure no concurrent mutable access to the same scheduler occurs.
+/// Prefer `with_cpu_scheduler()` when possible.
+pub unsafe fn get_cpu_scheduler(cpu_id: usize) -> Option<&'static mut PerCpuScheduler> {
     if cpu_id >= MAX_CPUS {
         return None;
     }
-    unsafe {
-        let sched = &mut CPU_SCHEDULERS[cpu_id];
-        if sched.is_initialized() {
-            Some(sched)
-        } else {
-            None
-        }
+    let sched = unsafe { &mut CPU_SCHEDULERS[cpu_id] };
+    if sched.is_initialized() {
+        Some(sched)
+    } else {
+        None
     }
 }
 

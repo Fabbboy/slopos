@@ -1,4 +1,4 @@
-use slopos_lib::{RingBuffer, cpu, klog_debug};
+use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
 
 use crate::input_event::{self, get_timestamp_ms};
 use crate::ps2;
@@ -27,12 +27,38 @@ impl ModifierState {
             caps_lock: false,
         }
     }
+
+    fn is_shift(&self) -> bool {
+        self.shift_left || self.shift_right
+    }
 }
 
-static mut MODIFIERS: ModifierState = ModifierState::new();
-static mut CHAR_BUFFER: Buffer = Buffer::new_with(0);
-static mut SCANCODE_BUFFER: Buffer = Buffer::new_with(0);
-static mut EXTENDED_CODE: bool = false;
+struct KeyboardState {
+    modifiers: ModifierState,
+    char_buffer: Buffer,
+    scancode_buffer: Buffer,
+    extended_code: bool,
+}
+
+impl KeyboardState {
+    const fn new() -> Self {
+        Self {
+            modifiers: ModifierState::new(),
+            char_buffer: Buffer::new_with(0),
+            scancode_buffer: Buffer::new_with(0),
+            extended_code: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.modifiers = ModifierState::new();
+        self.char_buffer = Buffer::new_with(0);
+        self.scancode_buffer = Buffer::new_with(0);
+        self.extended_code = false;
+    }
+}
+
+static STATE: IrqMutex<KeyboardState> = IrqMutex::new(KeyboardState::new());
 
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
@@ -60,29 +86,6 @@ const SCANCODE_SHIFTED: [u8; 0x80] = [
 ];
 
 #[inline(always)]
-unsafe fn buffer_push(buf: *mut Buffer, byte: u8) {
-    unsafe { &mut *buf }.push_overwrite(byte);
-}
-
-#[inline(always)]
-unsafe fn buffer_pop(buf: *mut Buffer) -> Option<u8> {
-    let buf = unsafe { &mut *buf };
-    let flags = cpu::save_flags_cli();
-    let out = buf.try_pop();
-    cpu::restore_flags(flags);
-    out
-}
-
-#[inline(always)]
-unsafe fn buffer_has_data(buf: *const Buffer) -> bool {
-    let buf = unsafe { &*buf };
-    let flags = cpu::save_flags_cli();
-    let has_data = !buf.is_empty();
-    cpu::restore_flags(flags);
-    has_data
-}
-
-#[inline(always)]
 fn is_break_code(scancode: u8) -> bool {
     scancode & 0x80 != 0
 }
@@ -92,11 +95,9 @@ fn get_make_code(scancode: u8) -> u8 {
     scancode & 0x7F
 }
 
-fn translate_letter(make_code: u8) -> u8 {
-    let (shift, caps) = unsafe {
-        let mods = &raw const MODIFIERS;
-        ((*mods).shift_left || (*mods).shift_right, (*mods).caps_lock)
-    };
+fn translate_letter(make_code: u8, modifiers: &ModifierState) -> u8 {
+    let shift = modifiers.is_shift();
+    let caps = modifiers.caps_lock;
 
     if shift && (make_code as usize) < SCANCODE_SHIFTED.len() {
         let shifted = SCANCODE_SHIFTED[make_code as usize];
@@ -120,7 +121,7 @@ fn translate_letter(make_code: u8) -> u8 {
     0
 }
 
-fn translate_scancode(scancode: u8) -> u8 {
+fn translate_scancode(scancode: u8, modifiers: &ModifierState) -> u8 {
     let make_code = get_make_code(scancode);
     match make_code {
         0x1C => b'\n',
@@ -128,40 +129,36 @@ fn translate_scancode(scancode: u8) -> u8 {
         0x39 => b' ',
         0x0F => b'\t',
         0x01 => 0x1B,
-        _ => translate_letter(make_code),
+        _ => translate_letter(make_code, modifiers),
     }
 }
 
-fn handle_modifier(make_code: u8, is_press: bool) {
-    unsafe {
-        match make_code {
-            0x2A => MODIFIERS.shift_left = is_press,
-            0x36 => MODIFIERS.shift_right = is_press,
-            0x1D => MODIFIERS.ctrl_left = is_press,
-            0x38 => MODIFIERS.alt_left = is_press,
-            0x3A => {
-                if is_press {
-                    MODIFIERS.caps_lock = !MODIFIERS.caps_lock;
-                }
+fn handle_modifier(modifiers: &mut ModifierState, make_code: u8, is_press: bool) {
+    match make_code {
+        0x2A => modifiers.shift_left = is_press,
+        0x36 => modifiers.shift_right = is_press,
+        0x1D => modifiers.ctrl_left = is_press,
+        0x38 => modifiers.alt_left = is_press,
+        0x3A => {
+            if is_press {
+                modifiers.caps_lock = !modifiers.caps_lock;
             }
-            _ => {}
         }
+        _ => {}
     }
 }
 
 pub fn init() {
-    unsafe {
-        MODIFIERS = ModifierState::new();
-        CHAR_BUFFER = Buffer::new_with(0);
-        SCANCODE_BUFFER = Buffer::new_with(0);
-    }
+    STATE.lock().reset();
 }
 
 pub fn handle_scancode(scancode: u8) {
     klog_debug!("[KBD] Scancode: 0x{:02x}\n", scancode);
 
+    let mut state = STATE.lock();
+
     if scancode == 0xE0 {
-        unsafe { EXTENDED_CODE = true };
+        state.extended_code = true;
         return;
     }
 
@@ -174,19 +171,22 @@ pub fn handle_scancode(scancode: u8) {
         is_press as u32
     );
 
-    unsafe { buffer_push(&raw mut SCANCODE_BUFFER, scancode) };
+    state.scancode_buffer.push_overwrite(scancode);
 
-    let ascii = translate_scancode(scancode);
+    let ascii = translate_scancode(scancode, &state.modifiers);
     let timestamp_ms = get_timestamp_ms();
+
+    drop(state);
     input_event::input_route_key_event(make_code, ascii, is_press, timestamp_ms);
+    let mut state = STATE.lock();
 
     if matches!(make_code, 0x2A | 0x36 | 0x1D | 0x38 | 0x3A) {
-        handle_modifier(make_code, is_press);
+        handle_modifier(&mut state.modifiers, make_code, is_press);
         return;
     }
 
-    if unsafe { EXTENDED_CODE } {
-        unsafe { EXTENDED_CODE = false };
+    if state.extended_code {
+        state.extended_code = false;
         if !is_press {
             return;
         }
@@ -196,7 +196,8 @@ pub fn handle_scancode(scancode: u8) {
             _ => 0,
         };
         if extended_key != 0 {
-            unsafe { buffer_push(&raw mut CHAR_BUFFER, extended_key) };
+            state.char_buffer.push_overwrite(extended_key);
+            drop(state);
             tty_notify_input_ready();
             scheduler_request_reschedule_from_interrupt();
         }
@@ -210,27 +211,32 @@ pub fn handle_scancode(scancode: u8) {
     klog_debug!("[KBD] ASCII: 0x{:02x}\n", ascii);
 
     if ascii != 0 {
-        unsafe { buffer_push(&raw mut CHAR_BUFFER, ascii) };
+        state.char_buffer.push_overwrite(ascii);
         klog_debug!("[KBD] Adding to buffer");
+        drop(state);
         tty_notify_input_ready();
         scheduler_request_reschedule_from_interrupt();
     }
 }
 
 pub fn getchar() -> u8 {
-    unsafe { buffer_pop(&raw mut CHAR_BUFFER).unwrap_or(0) }
+    STATE.lock().char_buffer.try_pop().unwrap_or(0)
 }
 
 pub fn has_input() -> i32 {
-    let has_data = unsafe { buffer_has_data(&raw const CHAR_BUFFER) };
-    if has_data { 1 } else { 0 }
+    if STATE.lock().char_buffer.is_empty() {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn get_scancode() -> u8 {
-    unsafe { buffer_pop(&raw mut SCANCODE_BUFFER).unwrap_or(0) }
+    STATE.lock().scancode_buffer.try_pop().unwrap_or(0)
 }
 
 pub fn poll_wait_enter() {
+    use slopos_lib::cpu;
     const ENTER_MAKE_CODE: u8 = 0x1C;
 
     loop {

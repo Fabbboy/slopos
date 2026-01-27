@@ -9,6 +9,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::arch::IRQ_BASE_VECTOR;
 use slopos_abi::arch::x86_64::memory::{
@@ -104,8 +105,12 @@ impl IrqTables {
 // Static state
 static IRQ_TABLES: IrqTables = IrqTables::new();
 static IRQ_SYSTEM_INIT: InitFlag = InitFlag::new();
-static mut TIMER_TICK_COUNTER: u64 = 0;
-static mut KEYBOARD_EVENT_COUNTER: u64 = 0;
+/// Global timer tick counter. Incremented atomically by the timer IRQ handler.
+/// Uses Relaxed ordering since we only need eventual consistency for statistics.
+static TIMER_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Global keyboard event counter. Incremented atomically by the keyboard IRQ handler.
+/// Uses Relaxed ordering since we only need eventual consistency for statistics.
+static KEYBOARD_EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 static IRQ_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
 
 /// Access IRQ tables under lock.
@@ -200,28 +205,24 @@ fn log_unhandled_irq(irq: u8, vector: u8) {
     );
 }
 
-/// Get timer tick counter.
+#[inline]
 pub fn get_timer_ticks() -> u64 {
-    unsafe { TIMER_TICK_COUNTER }
+    TIMER_TICK_COUNTER.load(Ordering::Relaxed)
 }
 
-/// Increment timer tick counter.
+#[inline]
 pub fn increment_timer_ticks() {
-    unsafe {
-        TIMER_TICK_COUNTER = TIMER_TICK_COUNTER.wrapping_add(1);
-    }
+    TIMER_TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Get keyboard event counter.
+#[inline]
 pub fn get_keyboard_event_counter() -> u64 {
-    unsafe { KEYBOARD_EVENT_COUNTER }
+    KEYBOARD_EVENT_COUNTER.load(Ordering::Relaxed)
 }
 
-/// Increment keyboard event counter.
+#[inline]
 pub fn increment_keyboard_events() {
-    unsafe {
-        KEYBOARD_EVENT_COUNTER = KEYBOARD_EVENT_COUNTER.wrapping_add(1);
-    }
+    KEYBOARD_EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Initialize the IRQ framework (call early, before handler registration).
@@ -232,10 +233,8 @@ pub fn init() {
             routes[i] = IrqRouteState::new();
         }
     });
-    unsafe {
-        TIMER_TICK_COUNTER = 0;
-        KEYBOARD_EVENT_COUNTER = 0;
-    }
+    TIMER_TICK_COUNTER.store(0, Ordering::Relaxed);
+    KEYBOARD_EVENT_COUNTER.store(0, Ordering::Relaxed);
     IRQ_SYSTEM_INIT.mark_set();
     klog_debug!("IRQ: Framework initialized");
 }

@@ -4,13 +4,14 @@
 //! Inspired by Linux's preempt_disable/enable and the kernel_guard crate.
 
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use crate::cpu;
 use crate::percpu::get_percpu_data;
 
 static RESCHEDULE_PENDING: AtomicU32 = AtomicU32::new(0);
-static mut RESCHEDULE_CALLBACK: Option<fn()> = None;
+static RESCHEDULE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// RAII guard that disables preemption while held.
 /// Guards are nestable - preemption re-enables only when all guards drop.
@@ -70,8 +71,10 @@ impl Drop for PreemptGuard {
         debug_assert!(prev > 0, "preempt_count underflow");
 
         if prev == 1 && RESCHEDULE_PENDING.swap(0, Ordering::SeqCst) != 0 {
-            // SAFETY: Only modified during early boot before interrupts enabled
-            if let Some(callback) = unsafe { RESCHEDULE_CALLBACK } {
+            let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
+            if !fn_ptr.is_null() {
+                // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn()
+                let callback: fn() = unsafe { core::mem::transmute(fn_ptr) };
                 callback();
             }
         }
@@ -117,10 +120,8 @@ impl Drop for IrqPreemptGuard {
     }
 }
 
-/// # Safety
-/// Must only be called during early boot, before interrupts are enabled.
-pub unsafe fn register_reschedule_callback(callback: fn()) {
-    RESCHEDULE_CALLBACK = Some(callback);
+pub fn register_reschedule_callback(callback: fn()) {
+    RESCHEDULE_CALLBACK.store(callback as *mut (), Ordering::Release);
 }
 
 #[inline]

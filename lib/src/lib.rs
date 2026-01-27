@@ -418,6 +418,7 @@ pub mod tsc {
 }
 
 pub mod alignment;
+pub mod cpu_local;
 pub mod free_list;
 pub mod init_flag;
 pub mod kdiag;
@@ -456,6 +457,7 @@ pub use service_cell::ServiceCell;
 pub use spinlock::{IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
 pub use stacktrace::StacktraceEntry;
 
+pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
 pub use percpu::{
     MAX_CPUS, PerCpuData, activate_gs_base_for_cpu, apic_id_from_cpu_index, cpu_index_from_apic_id,

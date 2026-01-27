@@ -80,16 +80,12 @@ impl XeFramebuffer {
 static mut XE_DEVICE: XeDevice = XeDevice::empty();
 static XE_PROBED: InitFlag = InitFlag::new();
 
-fn xe_primary_gpu() -> Option<&'static PciGpuInfo> {
+fn xe_primary_gpu() -> Option<PciGpuInfo> {
     let gpu = pci_get_primary_gpu();
-    if gpu.is_null() {
+    if gpu.present == 0 {
         return None;
     }
-    let info = unsafe { &*gpu };
-    if info.present == 0 {
-        return None;
-    }
-    Some(info)
+    Some(gpu)
 }
 
 pub fn xe_probe() -> bool {

@@ -700,9 +700,7 @@ pub fn init_scheduler() -> c_int {
 
     per_cpu::init_all_percpu_schedulers();
 
-    unsafe {
-        slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
-    }
+    slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
 
     slopos_lib::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
 

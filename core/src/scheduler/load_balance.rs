@@ -59,8 +59,9 @@ pub fn periodic_load_balance(current_time_ms: u64) {
 }
 
 fn migrate_task_between_cpus(from_cpu: usize, to_cpu: usize) -> bool {
+    // SAFETY: Load balancing runs on a single CPU and schedulers use internal locking.
     let task = {
-        let sched = match get_cpu_scheduler(from_cpu) {
+        let sched = match unsafe { get_cpu_scheduler(from_cpu) } {
             Some(s) => s,
             None => return false,
         };
@@ -77,7 +78,8 @@ fn migrate_task_between_cpus(from_cpu: usize, to_cpu: usize) -> bool {
 
     let affinity = unsafe { (*task).cpu_affinity };
     if affinity != 0 && (affinity & (1 << to_cpu)) == 0 {
-        if let Some(sched) = get_cpu_scheduler(from_cpu) {
+        // SAFETY: Same as above - re-enqueue to original CPU.
+        if let Some(sched) = unsafe { get_cpu_scheduler(from_cpu) } {
             sched.enqueue_local(task);
         }
         return false;
