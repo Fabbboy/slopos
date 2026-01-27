@@ -182,7 +182,7 @@ pub fn tty_notify_input_ready() {
     let task = tty_wait_queue_pop();
 
     if !task.is_null() {
-        let state = unsafe { (*task).state };
+        let state = unsafe { (*task).state() };
         if state == TASK_STATE_BLOCKED || state == TASK_STATE_READY {
             unblock_task(task);
         }

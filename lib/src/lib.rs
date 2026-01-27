@@ -427,6 +427,7 @@ pub mod math;
 pub mod memory;
 pub mod numfmt;
 pub mod panic_recovery;
+pub mod pcr;
 pub mod percpu;
 pub mod preempt;
 pub mod ring_buffer;

@@ -16,7 +16,7 @@ use super::per_cpu;
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE,
     TASK_PRIORITY_IDLE, TASK_STATE_BLOCKED, TASK_STATE_READY, TASK_STATE_RUNNING, Task,
-    TaskContext, task_get_info, task_is_blocked, task_is_ready, task_is_running,
+    TaskContext, task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
     task_is_terminated, task_record_context_switch, task_record_yield, task_set_current,
     task_set_state,
 };
@@ -395,6 +395,10 @@ fn prepare_switch(sched: &mut SchedulerInner, new_task: *mut Task) -> Option<Swi
     task_record_context_switch(old_task, new_task, timestamp);
 
     sched.current_task = new_task;
+    let cpu_id = slopos_lib::get_current_cpu();
+    per_cpu::with_cpu_scheduler(cpu_id, |local| {
+        local.set_current_task(new_task);
+    });
     task_set_current(new_task);
     reset_task_quantum(sched, new_task);
     sched.total_switches += 1;
@@ -563,19 +567,22 @@ pub fn yield_() {
 }
 
 pub fn block_current_task() {
-    let current = with_scheduler(|sched| sched.current_task);
+    let current = scheduler_get_current_task();
     if current.is_null() {
         return;
     }
+    if task_is_blocked(current) {
+        return;
+    }
     if task_set_state(unsafe { (*current).task_id }, TASK_STATE_BLOCKED) != 0 {
-        klog_info!("block_current_task: invalid state transition");
+        return;
     }
     unschedule_task(current);
     schedule();
 }
 
 pub fn task_wait_for(task_id: u32) -> c_int {
-    let current = with_scheduler(|sched| sched.current_task);
+    let current = scheduler_get_current_task();
     if current.is_null() {
         return -1;
     }
@@ -598,14 +605,21 @@ pub fn unblock_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
+
+    // Only unblock if actually blocked - if task is already ready/running,
+    // that's success (idempotent unblock for SMP safety)
+    if !task_is_blocked(task) {
+        return 0;
+    }
+
     if task_set_state(unsafe { (*task).task_id }, TASK_STATE_READY) != 0 {
-        unsafe {
-            klog_info!(
-                "unblock_task: invalid state transition for task {}",
-                (*task).task_id
-            );
+        // CAS failed - another CPU already changed the state, which is fine
+        // under SMP. Only fail if task is in a bad state.
+        if task_is_terminated(task) || task_is_invalid(task) {
+            return -1;
         }
-        return -1;
+        // Task is ready or running - that's success for unblock
+        return 0;
     }
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -614,7 +628,7 @@ pub fn unblock_task(task: *mut Task) -> c_int {
 }
 
 pub fn scheduler_task_exit_impl() -> ! {
-    let current = with_scheduler(|sched| sched.current_task);
+    let current = scheduler_get_current_task();
     if current.is_null() {
         klog_info!("scheduler_task_exit: No current task");
         schedule();
@@ -630,9 +644,15 @@ pub fn scheduler_task_exit_impl() -> ! {
         klog_info!("scheduler_task_exit: Failed to terminate current task");
     }
 
-    with_scheduler(|sched| {
-        sched.current_task = ptr::null_mut();
+    let cpu_id = slopos_lib::get_current_cpu();
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(ptr::null_mut());
     });
+    if cpu_id == 0 {
+        with_scheduler(|sched| {
+            sched.current_task = ptr::null_mut();
+        });
+    }
     task_set_current(ptr::null_mut());
     schedule();
 
@@ -781,6 +801,10 @@ pub fn start_scheduler() -> c_int {
     if current_null && !idle_task.is_null() {
         with_scheduler(|sched| {
             sched.current_task = sched.idle_task;
+            let cpu_id = slopos_lib::get_current_cpu();
+            per_cpu::with_cpu_scheduler(cpu_id, |local| {
+                local.set_current_task(sched.idle_task);
+            });
             task_set_current(sched.idle_task);
             reset_task_quantum(sched, sched.idle_task);
         });

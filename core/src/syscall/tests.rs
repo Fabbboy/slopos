@@ -251,7 +251,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
 
     let task_ptr_after = task_find_by_id(task_id);
     if !task_ptr_after.is_null() {
-        let state = unsafe { (*task_ptr_after).state };
+        let state = unsafe { (*task_ptr_after).state() };
         if state == TASK_STATE_TERMINATED {
             let child_id = task_fork(task_ptr_after);
             if child_id != INVALID_TASK_ID {
@@ -626,11 +626,9 @@ pub fn test_terminate_already_terminated() -> TestResult {
     // _r2 might be 0 or error, either is acceptable
     // The important thing is no crash or corruption
 
-    // Verify task is properly cleaned up - find should fail or return terminated
     let task_ptr = task_find_by_id(task_id);
     if !task_ptr.is_null() {
-        let state = unsafe { (*task_ptr).state };
-        // If still found, should be in terminated/invalid state
+        let state = unsafe { (*task_ptr).state() };
         if state == TASK_STATE_READY {
             klog_info!("SYSCALL_TEST: BUG - Terminated task still in READY state!");
             return TestResult::Fail;
@@ -665,14 +663,12 @@ pub fn test_operations_on_terminated_task() -> TestResult {
     let mut task_ptr: *mut Task = ptr::null_mut();
     let _info_result = task_get_info(task_id, &mut task_ptr);
 
-    // Try to set state
     use crate::scheduler::task::task_set_state;
     let state_result = task_set_state(task_id, TASK_STATE_READY);
     if state_result == 0 {
-        // Check if it actually changed state (it shouldn't)
         let task = task_find_by_id(task_id);
         if !task.is_null() {
-            let current_state = unsafe { (*task).state };
+            let current_state = unsafe { (*task).state() };
             if current_state == TASK_STATE_READY {
                 klog_info!("SYSCALL_TEST: BUG - Revived terminated task!");
                 return TestResult::Fail;

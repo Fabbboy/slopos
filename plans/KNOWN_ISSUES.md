@@ -1,71 +1,50 @@
 # SlopOS Known Issues
 
-Last updated: 2025-01-24
+Last updated: 2026-01-27
 
 ---
 
-## Critical: AP (Application Processor) User-Mode Context Switch Failure
+## Fixed: AP (Application Processor) User-Mode Context Switch Failure
 
-**Status**: Open - Workaround in place  
+**Status**: Fixed (2026-01-27)  
 **Severity**: High  
-**Component**: `core/src/scheduler`
+**Component**: `lib/src/pcr.rs`, `boot/src/smp.rs`, `core/context_switch.s`
 
 ### Description
 
-CPU 1 (and other APs) cannot safely execute user-mode tasks. When `ap_execute_task()` attempts to context switch to a user-mode task, a page fault occurs.
+CPU 1 (and other APs) could not safely execute user-mode tasks. When `ap_execute_task()` attempted to context switch to a user-mode task, a page fault occurred.
 
-### Symptoms
+### Root Cause
 
-```
-AP_LOOP: CPU 1 dequeued task 3 (queue_had=1)
-EXCEPTION: Vector 14 (Page Fault)
-Fault address: 0xffffffff8016f38a
-Error code: 0x11 (Page present) (Read) (Supervisor)
-```
+Two critical bugs in the per-CPU infrastructure:
 
-The fault happens in kernel space (address 0xffffffff...) during the context switch to user mode.
+1. **AP TSS.rsp0 = 0**: APs never had their kernel stack pointer initialized in the TSS, so when interrupts/exceptions occurred in user mode, the CPU loaded RSP0=0 from TSS, causing page faults.
 
-### Current Workaround
+2. **Wrong KERNEL_GS_BASE for APs**: The `SYSCALL_CPU_DATA_PTR` global only contained CPU 0's per-CPU data pointer. When `context_switch_user` set up KERNEL_GS_BASE for SWAPGS, APs got the wrong pointer.
 
-All user-mode tasks are forced to run on CPU 0. See `core/src/scheduler/per_cpu.rs`:
+### Fix Applied
 
-```rust
-pub fn select_target_cpu(task: *mut Task) -> usize {
-    // WORKAROUND: Force all user-mode tasks to CPU 0 until AP user-mode context switch is fixed
-    let is_user_mode = unsafe { (*task).flags & slopos_abi::task::TASK_FLAG_USER_MODE != 0 };
-    if is_user_mode {
-        return 0;
-    }
-    // ... rest of load balancing logic
-}
-```
+Implemented a Unified Processor Control Region (PCR) following Redox OS patterns:
 
-### Impact
+1. Created `lib/src/pcr.rs` with `ProcessorControlRegion` struct containing embedded GDT, TSS, and per-CPU kernel stack
+2. Updated BSP boot (`boot/src/early_init.rs`) to use PCR instead of old global arrays
+3. Updated AP boot (`boot/src/smp.rs`) to allocate and initialize PCR per-AP
+4. Updated SYSCALL assembly (`boot/idt_handlers.s`) to use new PCR offsets (8, 16 instead of 0, 8)
+5. Updated `context_switch_user` (`core/context_switch.s`) to read KERNEL_GS_BASE from `gs:[0]` (PCR self_ref) instead of global
+6. Removed the workaround in `select_target_cpu()` that forced user-mode tasks to CPU 0
 
-- SMP is effectively disabled for userland workloads
-- All user tasks run on CPU 0, reducing parallelism
-- Kernel tasks can still use multiple CPUs
+### Verification
 
-### Investigation Notes
-
-The issue occurs in `ap_execute_task()` at `core/src/scheduler/scheduler.rs:1107+`. Key differences between BSP (CPU 0) and AP context switching:
-
-1. BSP uses `schedule()` → `prepare_switch()` → `do_context_switch()`
-2. APs use `ap_scheduler_loop()` → `ap_execute_task()` with direct context switch
-
-Potential causes to investigate:
-- GDT/TSS not properly initialized for APs
-- Page tables not synchronized for user-mode on APs
-- Kernel stack setup differences between BSP and APs
-- SYSCALL MSRs not configured on APs
-- Missing CR3 switch or incorrect page directory
+All 360 tests pass with user-mode tasks now running on any CPU.
 
 ### Related Files
 
-- `core/src/scheduler/scheduler.rs` - `ap_scheduler_loop()`, `ap_execute_task()`
-- `core/src/scheduler/per_cpu.rs` - `select_target_cpu()` workaround
-- `boot/src/smp.rs` - AP initialization
-- `boot/src/gdt.rs` - GDT/TSS setup
+- `lib/src/pcr.rs` - Unified ProcessorControlRegion structure
+- `boot/src/smp.rs` - AP initialization using PCR
+- `boot/src/early_init.rs` - BSP initialization using PCR
+- `boot/idt_handlers.s` - SYSCALL entry/exit assembly
+- `core/context_switch.s` - Context switch to user mode
+- `core/src/scheduler/per_cpu.rs` - Removed user-mode workaround
 
 ---
 
@@ -118,32 +97,19 @@ pub fn resume_all_aps() {
 
 ---
 
-## Performance: Single-Core Userland Bottleneck
+## Fixed: Single-Core Userland Bottleneck
 
-**Status**: Open - Blocked by AP user-mode issue  
+**Status**: Fixed (2026-01-27)  
 **Severity**: Medium  
 **Component**: `core/src/scheduler`
 
 ### Description
 
-Due to the AP user-mode context switch failure (see above), all userland tasks are forced to run on CPU 0. This creates a single-core bottleneck for user applications.
+Due to the AP user-mode context switch failure, all userland tasks were forced to run on CPU 0, creating a single-core bottleneck for user applications.
 
-### Impact
+### Fix Applied
 
-- Compositor, shell, and all user applications share CPU 0
-- CPU 1+ sit idle for user workloads (only handle kernel tasks)
-- No parallel execution of user processes
-- Context switch overhead increases as more user tasks compete for CPU 0
-
-### Metrics
-
-With the current workaround:
-- CPU 0: 100% of user task execution
-- CPU 1+: ~0% user task execution (idle or kernel-only)
-
-### Resolution
-
-Fix the AP user-mode context switch issue. Once fixed, remove the workaround in `select_target_cpu()` and the scheduler will automatically distribute tasks using `find_least_loaded_cpu()`.
+The AP user-mode context switch issue is now fixed (see above). User-mode tasks can now run on any CPU. The scheduler automatically distributes tasks across CPUs using `find_least_loaded_cpu()`.
 
 ---
 
@@ -237,15 +203,13 @@ CPU_SCHEDULERS[MAX_CPUS] (per-CPU)
 
 ## Notes for Future Development
 
-### Testing AP User-Mode Tasks
+### SMP Architecture
 
-To test when attempting to fix the AP user-mode issue:
+The kernel now uses a unified Processor Control Region (PCR) per CPU, following Redox OS patterns:
 
-1. Remove the workaround in `select_target_cpu()`
-2. Boot with `make boot-log`
-3. Observe the page fault details
-4. Use `addr2line` or similar to map RIP addresses to source locations
+- Each CPU has its own `ProcessorControlRegion` containing embedded GDT, TSS, and kernel stack
+- `GS_BASE` always points to the current CPU's PCR in kernel mode
+- Fast per-CPU access via `gs:[offset]` (~1-3 cycles vs ~100 cycles for LAPIC MMIO)
+- `get_current_cpu()` uses `gs:[24]` for instant CPU ID lookup
 
-### SMP Task Distribution
-
-Once the AP user-mode issue is fixed, the scheduler will naturally distribute tasks across CPUs using `find_least_loaded_cpu()`. No additional changes needed.
+See `lib/src/pcr.rs` and `plans/UNIFIED_PCR_IMPLEMENTATION.md` for architecture details.

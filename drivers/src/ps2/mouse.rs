@@ -56,17 +56,16 @@ pub fn init() {
         klog_info!("Mouse enable reporting NAK: 0x{:02x}", ack);
     }
 
-    {
+    let (x, y) = {
         let mut state = STATE.lock();
         state.x = state.max_x / 2;
         state.y = state.max_y / 2;
         state.packet_byte = 0;
-    }
-
-    let (x, y) = {
-        let state = STATE.lock();
         (state.x, state.y)
     };
+
+    input_event::input_route_pointer_motion(x, y, 0);
+
     klog_info!("PS/2 mouse initialized at ({}, {})", x, y);
 }
 

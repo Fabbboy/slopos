@@ -398,11 +398,9 @@ impl WindowManager {
 
     /// Refresh window list from kernel and accumulate damage
     fn refresh_windows(&mut self) {
-        // Save previous state
         self.prev_windows = self.windows;
         self.prev_window_count = self.window_count;
 
-        // Get current windows
         self.window_count = sys_enumerate_windows(&mut self.windows) as u32;
 
         // Clean up stale surface mappings

@@ -59,7 +59,7 @@ unsafe impl Send for TaskManagerInner {}
 impl TaskManagerInner {
     const fn new() -> Self {
         Self {
-            tasks: [Task::invalid(); MAX_TASKS],
+            tasks: [const { Task::invalid() }; MAX_TASKS],
             num_tasks: 0,
             next_task_id: 1,
             total_context_switches: 0,
@@ -141,7 +141,7 @@ fn release_task_dependents(completed_task_id: u32) {
             let dep_ptr = *dep;
             let dep_id = unsafe { (*dep_ptr).task_id };
             let dep_rip = unsafe { (*dep_ptr).context.rip };
-            let dep_state = unsafe { (*dep_ptr).state };
+            let dep_state = unsafe { (*dep_ptr).state() };
             klog_info!(
                 "release_task_dependents: task {} ptr=0x{:x} rip=0x{:x} state={}",
                 dep_id,
@@ -334,7 +334,7 @@ pub fn task_create(
         let task = {
             let mut found = ptr::null_mut();
             for t in mgr.tasks.iter_mut() {
-                if t.state == TASK_STATE_INVALID {
+                if t.state() == TASK_STATE_INVALID {
                     found = t as *mut Task;
                     break;
                 }
@@ -409,7 +409,7 @@ pub fn task_create(
     let task_ref = unsafe { &mut *task };
     task_ref.task_id = task_id;
     unsafe { copy_name(&mut task_ref.name, name) };
-    task_ref.state = TASK_STATE_READY;
+    task_ref.set_state(TASK_STATE_READY);
     task_ref.priority = priority;
     task_ref.flags = flags;
     task_ref.process_id = process_id;
@@ -508,7 +508,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
         task_ptr = task_find_by_id(task_id);
     }
 
-    if task_ptr.is_null() || unsafe { (*task_ptr).state } == TASK_STATE_INVALID {
+    if task_ptr.is_null() || unsafe { (*task_ptr).state() } == TASK_STATE_INVALID {
         klog_info!("task_terminate: Task not found");
         return -1;
     }
@@ -538,7 +538,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
             (*task_ptr).fault_reason,
             (*task_ptr).exit_code,
         );
-        (*task_ptr).state = TASK_STATE_TERMINATED;
+        (*task_ptr).set_state(TASK_STATE_TERMINATED);
         (*task_ptr).fate_token = 0;
         (*task_ptr).fate_value = 0;
         (*task_ptr).fate_pending = 0;
@@ -586,7 +586,7 @@ pub fn task_shutdown_all() -> c_int {
     let tasks_to_terminate: [Option<u32>; MAX_TASKS] = with_task_manager(|mgr| {
         let mut ids = [None; MAX_TASKS];
         for (i, task) in mgr.tasks.iter().enumerate() {
-            if task.state == TASK_STATE_INVALID {
+            if task.state() == TASK_STATE_INVALID {
                 continue;
             }
             let task_ptr = &mgr.tasks[i] as *const Task as *mut Task;
@@ -617,7 +617,8 @@ pub fn task_shutdown_all() -> c_int {
     with_task_manager(|mgr| {
         let mut preserved = 0u32;
         for task in mgr.tasks.iter() {
-            if task.state != TASK_STATE_INVALID && task.state != TASK_STATE_TERMINATED {
+            let s = task.state();
+            if s != TASK_STATE_INVALID && s != TASK_STATE_TERMINATED {
                 preserved += 1;
             }
         }
@@ -634,7 +635,7 @@ pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     }
     let task = task_find_by_id(task_id);
     unsafe {
-        if task.is_null() || (*task).state == TASK_STATE_INVALID {
+        if task.is_null() || (*task).state() == TASK_STATE_INVALID {
             *task_info = ptr::null_mut();
             return -1;
         }
@@ -658,30 +659,23 @@ pub fn task_get_exit_record(task_id: u32, record_out: *mut TaskExitRecord) -> c_
     })
 }
 
-fn task_state_transition_allowed(old_state: u8, new_state: u8) -> bool {
-    if old_state == new_state {
-        return true;
-    }
-    let old_status = TaskStatus::from_u8(old_state);
-    let new_status = TaskStatus::from_u8(new_state);
-    old_status.can_transition_to(new_status)
-}
-
 pub fn task_set_state(task_id: u32, new_state: u8) -> c_int {
     let task = task_find_by_id(task_id);
-    if task.is_null() || unsafe { (*task).state } == TASK_STATE_INVALID {
+    if task.is_null() {
         return -1;
     }
 
-    let old_state = unsafe { (*task).state };
-    if !task_state_transition_allowed(old_state, new_state) {
-        klog_info!("task_set_state: invalid transition for task {}", task_id);
+    let task_ref = unsafe { &*task };
+    if task_ref.state() == TASK_STATE_INVALID {
         return -1;
     }
 
-    unsafe { (*task).state = new_state };
-
-    0
+    let new_status = TaskStatus::from_u8(new_state);
+    if task_ref.try_transition_to(new_status) {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn task_set_state_with_reason(
@@ -799,7 +793,7 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
     let task_ptrs: [Option<*mut Task>; MAX_TASKS] = with_task_manager(|mgr| {
         let mut ptrs = [None; MAX_TASKS];
         for (i, task) in mgr.tasks.iter_mut().enumerate() {
-            if task.state != TASK_STATE_INVALID && task.task_id != INVALID_TASK_ID {
+            if task.state() != TASK_STATE_INVALID && task.task_id != INVALID_TASK_ID {
                 ptrs[i] = Some(task as *mut Task);
             }
         }
@@ -828,22 +822,23 @@ pub fn task_set_current(task: *mut Task) {
         return;
     }
     unsafe {
-        if (*task).state != TASK_STATE_READY && (*task).state != TASK_STATE_RUNNING {
+        let current_state = (*task).state();
+        if current_state != TASK_STATE_READY && current_state != TASK_STATE_RUNNING {
             klog_info!(
                 "task_set_current: unexpected state {} for task {} ('{}')",
-                (*task).state as u32,
+                current_state as u32,
                 (*task).task_id,
                 cstr_to_str((*task).name.as_ptr() as *const c_char)
             );
         }
-        (*task).state = TASK_STATE_RUNNING;
+        (*task).set_state(TASK_STATE_RUNNING);
     }
 }
 pub fn task_get_state(task: *const Task) -> u8 {
     if task.is_null() {
         return TASK_STATE_INVALID;
     }
-    unsafe { (*task).state }
+    unsafe { (*task).state() }
 }
 pub fn task_is_ready(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_READY
@@ -856,6 +851,9 @@ pub fn task_is_blocked(task: *const Task) -> bool {
 }
 pub fn task_is_terminated(task: *const Task) -> bool {
     task_get_state(task) == TASK_STATE_TERMINATED
+}
+pub fn task_is_invalid(task: *const Task) -> bool {
+    task_get_state(task) == TASK_STATE_INVALID
 }
 
 pub fn task_fork(parent_task: *mut Task) -> u32 {
@@ -903,7 +901,7 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
 
         let mut slot: *mut Task = ptr::null_mut();
         for t in mgr.tasks.iter_mut() {
-            if t.state == TASK_STATE_INVALID {
+            if t.state() == TASK_STATE_INVALID {
                 slot = t as *mut Task;
                 break;
             }
@@ -933,11 +931,11 @@ pub fn task_fork(parent_task: *mut Task) -> u32 {
 
     let child = unsafe { &mut *child_task_ptr };
 
-    *child = *parent;
+    child.clone_from(parent);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
-    child.state = TASK_STATE_READY;
+    child.set_state(TASK_STATE_READY);
 
     child.kernel_stack_base = child_kernel_stack as u64;
     child.kernel_stack_top = child_kernel_stack as u64 + TASK_KERNEL_STACK_SIZE;

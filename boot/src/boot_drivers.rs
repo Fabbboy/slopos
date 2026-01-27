@@ -9,7 +9,6 @@ use slopos_tests::{
 use slopos_video as video;
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
-use crate::gdt::gdt_init;
 use crate::idt::{idt_init, idt_load};
 use crate::ist_stacks::ist_stacks_init;
 use crate::limine_protocol;
@@ -62,9 +61,7 @@ fn boot_step_debug_subsystem_fn() {
 }
 
 fn boot_step_gdt_setup_fn() {
-    klog_debug!("Initializing GDT/TSS...");
-    gdt_init();
-    klog_debug!("GDT/TSS initialized.");
+    klog_debug!("GDT/TSS already initialized via PCR in early boot.");
 }
 
 fn boot_step_idt_setup_fn() {

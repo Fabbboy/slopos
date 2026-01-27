@@ -229,10 +229,11 @@ context_switch_user:
     # After IRETQ, user runs with GS_BASE=0. When user does SYSCALL,
     # SWAPGS will swap GS_BASE(0) <-> KERNEL_GS_BASE(per-cpu), which is correct.
 
-    # First: Restore KERNEL_GS_BASE to the per-CPU data pointer
+    # First: Restore KERNEL_GS_BASE to the per-CPU PCR pointer
     # MSR 0xC0000102 = IA32_KERNEL_GS_BASE
+    # Use gs:0 (self_ref) to get current CPU's PCR address
     movl $0xC0000102, %ecx
-    movq SYSCALL_CPU_DATA_PTR(%rip), %rax
+    movq %gs:0, %rax
     movq %rax, %rdx
     shrq $32, %rdx
     wrmsr

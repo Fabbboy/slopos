@@ -5,6 +5,7 @@
 
 use core::ffi::c_void;
 use core::ptr;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 // =============================================================================
 // Task Configuration Constants
@@ -434,11 +435,10 @@ pub const TASK_FPU_OFFSET_FROM_CONTEXT: usize = 0xD0;
 // =============================================================================
 
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub struct Task {
     pub task_id: u32,
     pub name: [u8; TASK_NAME_MAX_LEN],
-    pub state: u8,
+    state_atomic: AtomicU8,
     pub priority: u8,
     pub flags: u16,
     pub block_reason: BlockReason,
@@ -481,7 +481,7 @@ impl Task {
         Self {
             task_id: INVALID_TASK_ID,
             name: [0; TASK_NAME_MAX_LEN],
-            state: TASK_STATE_INVALID,
+            state_atomic: AtomicU8::new(TASK_STATE_INVALID),
             priority: TASK_PRIORITY_NORMAL,
             flags: 0,
             block_reason: BlockReason::None,
@@ -521,27 +521,51 @@ impl Task {
     }
 
     #[inline]
+    pub fn state(&self) -> u8 {
+        self.state_atomic.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn set_state(&self, state: u8) {
+        self.state_atomic.store(state, Ordering::Release);
+    }
+
+    #[inline]
     pub fn status(&self) -> TaskStatus {
-        TaskStatus::from_u8(self.state)
+        TaskStatus::from_u8(self.state())
     }
 
     #[inline]
-    pub fn set_status(&mut self, status: TaskStatus) {
-        self.state = status.as_u8();
+    pub fn set_status(&self, status: TaskStatus) {
+        self.set_state(status.as_u8());
     }
 
     #[inline]
-    pub fn try_transition_to(&mut self, target: TaskStatus) -> bool {
-        if self.status().can_transition_to(target) {
-            self.set_status(target);
-            true
+    pub fn try_transition_to(&self, target: TaskStatus) -> bool {
+        let current = self.state();
+        let current_status = TaskStatus::from_u8(current);
+        if current_status.can_transition_to(target) {
+            match self.state_atomic.compare_exchange(
+                current,
+                target.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => true,
+                Err(_) => false,
+            }
         } else {
             false
         }
     }
 
     #[inline]
-    pub fn mark_ready(&mut self) -> bool {
+    pub fn mark_ready(&self) -> bool {
+        self.try_transition_to(TaskStatus::Ready)
+    }
+
+    #[inline]
+    pub fn mark_ready_and_clear_block(&mut self) -> bool {
         if self.try_transition_to(TaskStatus::Ready) {
             self.block_reason = BlockReason::None;
             true
@@ -551,7 +575,7 @@ impl Task {
     }
 
     #[inline]
-    pub fn mark_running(&mut self) -> bool {
+    pub fn mark_running(&self) -> bool {
         self.try_transition_to(TaskStatus::Running)
     }
 
@@ -566,7 +590,12 @@ impl Task {
     }
 
     #[inline]
-    pub fn terminate(&mut self) -> bool {
+    pub fn block_atomic(&self) -> bool {
+        self.try_transition_to(TaskStatus::Blocked)
+    }
+
+    #[inline]
+    pub fn terminate(&self) -> bool {
         self.try_transition_to(TaskStatus::Terminated)
     }
 
@@ -588,6 +617,47 @@ impl Task {
     #[inline]
     pub fn is_terminated(&self) -> bool {
         self.status() == TaskStatus::Terminated
+    }
+
+    pub fn clone_from(&mut self, other: &Task) {
+        self.task_id = other.task_id;
+        self.name = other.name;
+        self.set_state(other.state());
+        self.priority = other.priority;
+        self.flags = other.flags;
+        self.block_reason = other.block_reason;
+        self._pad0 = other._pad0;
+        self.process_id = other.process_id;
+        self.stack_base = other.stack_base;
+        self.stack_size = other.stack_size;
+        self.stack_pointer = other.stack_pointer;
+        self.kernel_stack_base = other.kernel_stack_base;
+        self.kernel_stack_top = other.kernel_stack_top;
+        self.kernel_stack_size = other.kernel_stack_size;
+        self.entry_point = other.entry_point;
+        self.entry_arg = other.entry_arg;
+        self.context = other.context;
+        self.fpu_state = other.fpu_state;
+        self.time_slice = other.time_slice;
+        self.time_slice_remaining = other.time_slice_remaining;
+        self.total_runtime = other.total_runtime;
+        self.creation_time = other.creation_time;
+        self.yield_count = other.yield_count;
+        self.last_run_timestamp = other.last_run_timestamp;
+        self.waiting_on_task_id = other.waiting_on_task_id;
+        self.user_started = other.user_started;
+        self.context_from_user = other.context_from_user;
+        self.exit_reason = other.exit_reason;
+        self.fault_reason = other.fault_reason;
+        self.exit_code = other.exit_code;
+        self.fate_token = other.fate_token;
+        self.fate_value = other.fate_value;
+        self.fate_pending = other.fate_pending;
+        self.cpu_affinity = other.cpu_affinity;
+        self.last_cpu = other.last_cpu;
+        self.migration_count = other.migration_count;
+        self.switch_ctx = other.switch_ctx;
+        self.next_ready = other.next_ready;
     }
 }
 

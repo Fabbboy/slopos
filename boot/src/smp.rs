@@ -5,12 +5,10 @@ use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 use slopos_core::wl_currency::{award_loss, award_win};
 use slopos_core::{init_scheduler_for_ap, scheduler_run_ap};
 use slopos_drivers::apic;
-use slopos_lib::{
-    activate_gs_base_for_cpu, cpu, init_bsp, init_percpu_for_cpu, is_cpu_online, klog_info,
-};
+use slopos_lib::{cpu, init_bsp, init_percpu_for_cpu, is_cpu_online, klog_info, pcr};
 use slopos_mm::tlb;
 
-use crate::gdt::{gdt_init_for_cpu, syscall_msr_init};
+use crate::gdt::syscall_msr_init;
 use crate::idt::idt_load;
 use crate::limine_protocol;
 
@@ -31,8 +29,12 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     init_percpu_for_cpu(cpu_idx, apic_id);
     tlb::register_cpu(apic_id);
 
-    gdt_init_for_cpu(cpu_idx);
-    activate_gs_base_for_cpu(cpu_idx);
+    unsafe {
+        let ap_pcr = pcr::init_ap_pcr(cpu_idx, apic_id);
+        (*ap_pcr).init_gdt();
+        (*ap_pcr).install();
+    }
+
     idt_load();
     syscall_msr_init();
     cpu::enable_interrupts();

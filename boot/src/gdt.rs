@@ -233,6 +233,11 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
         return;
     }
 
+    if slopos_lib::pcr::is_pcr_initialized() {
+        klog_debug!("GDT: Skipped - using PCR-based GDT for CPU {}", cpu_id);
+        return;
+    }
+
     klog_debug!("GDT: Initializing descriptor tables for CPU {}", cpu_id);
 
     unsafe {
@@ -286,6 +291,10 @@ pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
         PER_CPU_TSS[cpu_id].rsp0 = rsp0;
         PER_CPU_SYSCALL_DATA[cpu_id].kernel_rsp = rsp0;
     }
+    if let Some(pcr) = unsafe { slopos_lib::pcr::get_pcr_mut(cpu_id) } {
+        pcr.kernel_rsp = rsp0;
+        pcr.sync_tss_rsp0();
+    }
 }
 
 pub fn gdt_set_ist(index: u8, stack_top: u64) {
@@ -299,6 +308,9 @@ pub fn gdt_set_ist_for_cpu(cpu_id: usize, index: u8, stack_top: u64) {
     }
     unsafe {
         PER_CPU_TSS[cpu_id].ist[(index - 1) as usize] = stack_top;
+    }
+    if let Some(pcr) = unsafe { slopos_lib::pcr::get_pcr_mut(cpu_id) } {
+        pcr.set_ist(index, stack_top);
     }
 }
 
@@ -369,6 +381,10 @@ pub fn syscall_msr_init() {
 }
 
 fn syscall_gs_base_init() {
+    if slopos_lib::pcr::is_pcr_initialized() {
+        klog_debug!("SYSCALL: Skipped GS_BASE init - using PCR");
+        return;
+    }
     let cpu_id = get_current_cpu();
     syscall_gs_base_init_for_cpu(cpu_id);
 }

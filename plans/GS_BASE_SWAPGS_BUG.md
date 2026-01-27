@@ -1,8 +1,8 @@
 # GS_BASE / SWAPGS Bug Analysis
 
-## Status: INVESTIGATION NEEDED
+## Status: ✅ FIXED (2026-01-27)
 
-**Date**: 2026-01-24  
+**Date**: 2026-01-24 (analysis), 2026-01-27 (fixed)  
 **Severity**: Performance (not correctness - current fallback works)  
 **Affected Area**: Per-CPU data access, SMP performance
 
@@ -10,10 +10,15 @@
 
 ## Executive Summary
 
-SlopOS has infrastructure for fast GS-segment-based per-CPU data access, but it's currently disabled due to a bug where the `GS_BASE` MSR gets corrupted during user/kernel transitions. The kernel falls back to slow LAPIC MMIO reads (~100+ cycles) instead of fast `gs:[0]` access (~1-3 cycles).
+**Original Issue**: SlopOS had infrastructure for fast GS-segment-based per-CPU data access, but it was disabled due to a bug where the `GS_BASE` MSR got corrupted during user/kernel transitions.
 
-**Current state**: Kernel boots and passes all tests using LAPIC fallback.  
-**Goal**: Enable GS-based `get_current_cpu()` for SMP performance improvement.
+**Resolution**: Implemented Unified Processor Control Region (PCR) following Redox OS patterns.
+- `GS_BASE` now always points to the current CPU's PCR in kernel mode
+- Fast `gs:[offset]` access enabled (~1-3 cycles vs ~100+ cycles)
+- AP user-mode tasks now work correctly
+- All 360 tests pass
+
+See `lib/src/pcr.rs` and `plans/UNIFIED_PCR_IMPLEMENTATION.md` for implementation details.
 
 ---
 

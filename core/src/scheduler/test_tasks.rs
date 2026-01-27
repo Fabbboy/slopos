@@ -490,7 +490,7 @@ fn print_task_stat_line(task: *mut Task, context: *mut c_void) {
     ctx.index = ctx.index.wrapping_add(1);
 
     let name_str = unsafe { cstr_to_str((*task).name.as_ptr() as *const c_char) };
-    let state_str = unsafe { cstr_to_str(task_state_to_string((*task).state)) };
+    let state_str = unsafe { cstr_to_str(task_state_to_string((*task).state())) };
     unsafe {
         klog_info!(
             "  #{} '{}' (ID {}) [{}] runtime={} ticks yields={}",

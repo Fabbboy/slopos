@@ -191,23 +191,19 @@ pub fn activate_gs_base_for_cpu(cpu_id: usize) {
     }
 }
 
+/// Initialize BSP per-CPU data (APIC ID mapping only).
+/// GS_BASE is owned by PCR (pcr.rs) - do NOT set it here.
 pub fn init_bsp(apic_id: u32) {
     if !PERCPU_INIT.init_once() {
         return;
     }
     BSP_APIC_ID.store(apic_id, Ordering::Release);
     init_percpu_for_cpu(0, apic_id);
-    activate_gs_base_for_cpu(0);
 }
 
 #[inline]
 pub fn get_current_cpu() -> usize {
-    if !PERCPU_INIT.is_set() {
-        return 0;
-    }
-
-    let apic_id = read_lapic_id();
-    cpu_index_from_apic_id(apic_id).unwrap_or(0)
+    crate::pcr::current_cpu_id()
 }
 
 /// Convert APIC ID to CPU index.
@@ -362,6 +358,7 @@ pub fn register_lapic_id_fn(f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
 
+#[allow(dead_code)]
 fn read_lapic_id() -> u32 {
     let fn_ptr = LAPIC_ID_FN.load(Ordering::Acquire);
     if !fn_ptr.is_null() {

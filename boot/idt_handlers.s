@@ -277,11 +277,11 @@ isr_spurious:
 syscall_entry:
     swapgs
 
-    movq %rsp, %gs:0
-    movq %gs:8, %rsp
+    movq %rsp, %gs:8
+    movq %gs:16, %rsp
 
     pushq $SEL_USER_DATA
-    pushq %gs:0
+    pushq %gs:8
     pushq %r11
     pushq $SEL_USER_CODE
     pushq %rcx
@@ -361,11 +361,11 @@ syscall_entry:
     popq %rax                       # Restore RAX (return value)
     
     # Build IRET frame on kernel stack
-    # Current: RCX=RIP, R11=RFLAGS, gs:0=user RSP, gs:8=kernel stack
-    movq %gs:8, %rsp                # Switch to kernel stack
+    # Current: RCX=RIP, R11=RFLAGS, gs:8=user RSP, gs:16=kernel stack
+    movq %gs:16, %rsp               # Switch to kernel stack
     
     pushq $SEL_USER_DATA            # SS
-    pushq %gs:0                     # RSP (user RSP)
+    pushq %gs:8                     # RSP (user RSP)
     pushq %r11                      # RFLAGS
     pushq $SEL_USER_CODE            # CS  
     pushq %rcx                      # RIP

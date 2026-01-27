@@ -436,7 +436,7 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
     }
 
     unsafe {
-        if (*task).state != TASK_STATE_READY {
+        if (*task).state() != TASK_STATE_READY {
             return -1;
         }
     }
@@ -458,12 +458,6 @@ pub fn get_total_ready_tasks() -> u32 {
 pub fn select_target_cpu(task: *mut Task) -> usize {
     if task.is_null() {
         return slopos_lib::get_current_cpu();
-    }
-
-    // WORKAROUND: Force all user-mode tasks to CPU 0 until AP user-mode context switch is fixed
-    let is_user_mode = unsafe { (*task).flags & slopos_abi::task::TASK_FLAG_USER_MODE != 0 };
-    if is_user_mode {
-        return 0;
     }
 
     let affinity = unsafe { (*task).cpu_affinity };

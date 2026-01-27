@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod apic_id;
 pub mod boot_drivers;
 pub mod boot_impl;
 pub mod boot_memory;

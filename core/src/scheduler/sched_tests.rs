@@ -101,20 +101,18 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Task starts in READY state
-    let initial_state = unsafe { (*task).state };
+    let initial_state = unsafe { (*task).state() };
     if initial_state != TASK_STATE_READY {
         klog_info!("SCHED_TEST: Expected READY state, got {}", initial_state);
         return TestResult::Fail;
     }
 
-    // Transition to RUNNING
     if task_set_state(task_id, TASK_STATE_RUNNING) != 0 {
         klog_info!("SCHED_TEST: Failed to set RUNNING state");
         return TestResult::Fail;
     }
 
-    let new_state = unsafe { (*task).state };
+    let new_state = unsafe { (*task).state() };
     if new_state != TASK_STATE_RUNNING {
         klog_info!(
             "SCHED_TEST: Expected RUNNING state after transition, got {}",
@@ -152,7 +150,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     }
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).state };
+    let state = unsafe { (*task).state() };
     if state != TASK_STATE_BLOCKED {
         klog_info!("SCHED_TEST: Expected BLOCKED, got {}", state);
         return TestResult::Fail;
@@ -161,8 +159,6 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: INVALID state transition TERMINATED -> RUNNING should be rejected
-/// BUG FINDER: The current implementation logs but doesn't reject!
 pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -186,7 +182,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
 
     if !task.is_null() {
         let _result = task_set_state(task_id, TASK_STATE_RUNNING);
-        let new_state = unsafe { (*task).state };
+        let new_state = unsafe { (*task).state() };
 
         if new_state == TASK_STATE_RUNNING {
             klog_info!("SCHED_TEST: BUG - Invalid transition TERMINATED->RUNNING was allowed!");
@@ -219,7 +215,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     let _result = task_set_state(task_id, TASK_STATE_RUNNING);
 
     let task = task_find_by_id(task_id);
-    let state = unsafe { (*task).state };
+    let state = unsafe { (*task).state() };
 
     if state == TASK_STATE_RUNNING {
         klog_info!("SCHED_TEST: BUG - Invalid transition BLOCKED->RUNNING was allowed!");

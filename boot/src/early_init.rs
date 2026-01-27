@@ -526,7 +526,14 @@ crate::boot_init_step_unit!(
 pub fn kernel_main_impl() {
     wl_currency::reset();
 
-    gdt::gdt_init();
+    unsafe {
+        let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
+        slopos_lib::pcr::init_bsp_pcr(bsp_apic_id);
+        let pcr = slopos_lib::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
+        pcr.init_gdt();
+        pcr.install();
+    }
+
     idt::idt_init();
     serial::write_line("BOOT: before idt_load (early)");
     idt::idt_load();
