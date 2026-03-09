@@ -6315,6 +6315,300 @@ pub fn test_phase26_multiple_pty_pairs() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 27: POSIX Completion Set
+// ===========================================================================
+
+/// Phase 27: IGNBRK discards NUL (break condition).
+pub fn test_phase27_ignbrk_discards_break() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = slopos_abi::syscall::IGNBRK;
+    t.c_lflag = slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO;
+    ld.set_termios(&t);
+    let action = ld.input_char(0x00);
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - IGNBRK should discard break (NUL)");
+        return TestResult::Fail;
+    }
+    // Verify nothing was buffered.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - IGNBRK should not buffer any data");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: BRKINT on NUL generates SIGINT and flushes input.
+pub fn test_phase27_brkint_generates_sigint() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = slopos_abi::syscall::BRKINT;
+    t.c_lflag = slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ISIG;
+    ld.set_termios(&t);
+    // Push some data first, then break.
+    ld.input_char(b'a');
+    let action = ld.input_char(0x00);
+    match action {
+        InputAction::Signal(sig) if sig == SIGINT => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - BRKINT should generate SIGINT, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    // BRKINT should have flushed input.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - BRKINT should flush input queues");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: PARMRK on NUL inserts \xff \x00 \x00 sequence.
+pub fn test_phase27_parmrk_inserts_marker() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = slopos_abi::syscall::PARMRK;
+    // Non-canonical mode to read bytes directly.
+    t.c_lflag = 0;
+    ld.set_termios(&t);
+    ld.input_char(0x00); // break
+    let mut buf = [0u8; 8];
+    let n = ld.read(&mut buf);
+    if n != 3 || buf[0] != 0xFF || buf[1] != 0x00 || buf[2] != 0x00 {
+        klog_info!(
+            "TTY_TEST: BUG - PARMRK should insert 0xFF 0x00 0x00, got {} bytes: {:?}",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: NUL without any break flags passes through as regular byte.
+pub fn test_phase27_nul_without_break_flags_passes_through() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = 0; // No break flags set.
+    t.c_lflag = 0; // Non-canonical mode.
+    ld.set_termios(&t);
+    ld.input_char(0x00);
+    let mut buf = [0u8; 4];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != 0x00 {
+        klog_info!(
+            "TTY_TEST: BUG - NUL without break flags should pass through, got {} bytes",
+            n
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: ECHOKE visually erases the line (returns KillLineEcho).
+pub fn test_phase27_echoke_visual_erase() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = 0;
+    t.c_lflag =
+        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOKE;
+    ld.set_termios(&t);
+    // Type "abc" (3 printable chars = 3 columns).
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+    ld.input_char(b'c');
+    // Kill the line (VKILL = Ctrl+U = 0x15).
+    let action = ld.input_char(0x15);
+    match action {
+        InputAction::KillLineEcho { columns } if columns == 3 => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - ECHOKE should return KillLineEcho{{columns:3}}, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: ECHOK (without ECHOKE) echoes newline on kill.
+pub fn test_phase27_echok_newline_on_kill() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = 0;
+    t.c_lflag =
+        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOK;
+    ld.set_termios(&t);
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+    let action = ld.input_char(0x15);
+    match action {
+        InputAction::Echo { buf, len } if len == 1 && buf[0] == b'\n' => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - ECHOK should echo newline on kill, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: ECHOCTL erase produces KillLineEcho with 2 columns for a control char.
+pub fn test_phase27_echoctl_erase_two_columns() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = 0;
+    t.c_lflag = slopos_abi::syscall::ICANON
+        | slopos_abi::syscall::ECHO
+        | slopos_abi::syscall::ECHOE
+        | slopos_abi::syscall::ECHOCTL;
+    ld.set_termios(&t);
+    // Insert a control char (Ctrl+A = 0x01) via literal next.
+    // We need IEXTEN for VLNEXT.
+    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    ld.set_termios(&t);
+    // Type Ctrl+V first to enter literal mode, then Ctrl+A.
+    ld.input_char(0x16); // VLNEXT (Ctrl+V)
+    ld.input_char(0x01); // Ctrl+A - inserted literally
+    // Now erase it (VERASE = DEL = 0x7F).
+    let action = ld.input_char(0x7F);
+    match action {
+        InputAction::KillLineEcho { columns } if columns == 2 => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - ECHOCTL erase should return KillLineEcho{{columns:2}}, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: bytes_available returns correct count.
+pub fn test_phase27_bytes_available() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = 0; // non-canonical
+    t.c_iflag = 0;
+    ld.set_termios(&t);
+    if ld.bytes_available() != 0 {
+        klog_info!("TTY_TEST: BUG - fresh LineDisc should have 0 bytes available");
+        return TestResult::Fail;
+    }
+    ld.input_char(b'x');
+    ld.input_char(b'y');
+    ld.input_char(b'z');
+    if ld.bytes_available() != 3 {
+        klog_info!(
+            "TTY_TEST: BUG - expected 3 bytes available, got {}",
+            ld.bytes_available()
+        );
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 2];
+    ld.read(&mut buf);
+    if ld.bytes_available() != 1 {
+        klog_info!(
+            "TTY_TEST: BUG - expected 1 byte available after reading 2, got {}",
+            ld.bytes_available()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: RawDisc bytes_available works.
+pub fn test_phase27_raw_disc_bytes_available() -> TestResult {
+    let mut rd = RawDisc::new();
+    if rd.bytes_available() != 0 {
+        klog_info!("TTY_TEST: BUG - fresh RawDisc should have 0 bytes available");
+        return TestResult::Fail;
+    }
+    rd.input_char(b'a');
+    rd.input_char(b'b');
+    if rd.bytes_available() != 2 {
+        klog_info!(
+            "TTY_TEST: BUG - expected 2 bytes available, got {}",
+            rd.bytes_available()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: LdiscKind bytes_available dispatches correctly.
+pub fn test_phase27_ldisc_kind_bytes_available() -> TestResult {
+    let mut lk = LdiscKind::NTty(LineDisc::new());
+    {
+        let mut t = *lk.termios();
+        t.c_lflag = 0; // non-canonical
+        t.c_iflag = 0;
+        lk.set_termios(&t);
+    }
+    if lk.bytes_available() != 0 {
+        klog_info!("TTY_TEST: BUG - fresh LdiscKind::NTty should have 0 bytes");
+        return TestResult::Fail;
+    }
+    lk.input_char(b'q');
+    if lk.bytes_available() != 1 {
+        klog_info!("TTY_TEST: BUG - expected 1 byte available via LdiscKind");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: FIONREAD constant is defined.
+pub fn test_phase27_fionread_constant() -> TestResult {
+    if slopos_abi::syscall::FIONREAD != 0x541B {
+        klog_info!("TTY_TEST: BUG - FIONREAD should be 0x541B");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: KillLineEcho on empty edit buffer returns None.
+pub fn test_phase27_kill_empty_line_no_echo() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = 0;
+    t.c_lflag =
+        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOKE;
+    ld.set_termios(&t);
+    // Kill with empty buffer.
+    let action = ld.input_char(0x15);
+    if !matches!(action, InputAction::None) {
+        klog_info!(
+            "TTY_TEST: BUG - kill on empty line should return None, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 27: BRKINT + IGNBRK — IGNBRK takes priority.
+pub fn test_phase27_ignbrk_takes_priority_over_brkint() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = slopos_abi::syscall::IGNBRK | slopos_abi::syscall::BRKINT;
+    t.c_lflag = slopos_abi::syscall::ISIG;
+    ld.set_termios(&t);
+    let action = ld.input_char(0x00);
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - IGNBRK should take priority over BRKINT");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -6599,5 +6893,19 @@ slopos_lib::define_test_suite!(
         test_phase26_data_flow_with_generation,
         test_phase26_validate_peer_out_of_range,
         test_phase26_multiple_pty_pairs,
+        // Phase 27: POSIX Completion Set (Rust-Idiomatic)
+        test_phase27_ignbrk_discards_break,
+        test_phase27_brkint_generates_sigint,
+        test_phase27_parmrk_inserts_marker,
+        test_phase27_nul_without_break_flags_passes_through,
+        test_phase27_echoke_visual_erase,
+        test_phase27_echok_newline_on_kill,
+        test_phase27_echoctl_erase_two_columns,
+        test_phase27_bytes_available,
+        test_phase27_raw_disc_bytes_available,
+        test_phase27_ldisc_kind_bytes_available,
+        test_phase27_fionread_constant,
+        test_phase27_kill_empty_line_no_echo,
+        test_phase27_ignbrk_takes_priority_over_brkint,
     ]
 );
