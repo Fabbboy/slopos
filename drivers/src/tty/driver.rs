@@ -35,6 +35,17 @@ pub trait TtyDriver {
 
     /// Optional: called when termios changes (e.g. baud rate).
     fn set_termios(&self, _termios: &UserTermios) {}
+
+    /// Returns `true` if the driver has output bytes that have been accepted
+    /// but not yet fully transmitted to the hardware.  Synchronous (polling)
+    /// drivers always return `false` because `write_output` blocks until the
+    /// byte is on the wire.  Async / interrupt-driven drivers should return
+    /// `true` while the TX FIFO is non-empty.
+    ///
+    /// Used by `TCSETSW` / `TCSETSF` drain semantics.
+    fn output_pending(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +104,20 @@ impl TtyDriverKind {
             Self::SerialConsole(d) => d.set_termios(termios),
             Self::VConsole(d) => d.set_termios(termios),
             Self::PtyMaster { .. } | Self::PtySlave { .. } | Self::None => {}
+        }
+    }
+
+    /// Returns `true` if the driver backend reports pending (un-transmitted)
+    /// output.  Used by drain semantics (`TCSETSW` / `TCSETSF`).
+    pub fn output_pending(&self) -> bool {
+        match self {
+            Self::SerialConsole(d) => d.output_pending(),
+            Self::VConsole(d) => d.output_pending(),
+            // PTY output is immediately buffered in the peer — no hardware
+            // transmission latency.  POSIX considers output "sent" once it
+            // reaches the kernel buffer destined for the peer.
+            Self::PtyMaster { .. } | Self::PtySlave { .. } => false,
+            Self::None => false,
         }
     }
 

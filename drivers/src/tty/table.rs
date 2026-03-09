@@ -31,14 +31,15 @@
 //! `wait_event(|| ...)` without holding the slot lock (the condition closure
 //! locks the slot internally to check for data).
 
-use slopos_lib::IrqMutex;
-use slopos_lib::WaitQueue;
+use core::sync::atomic::AtomicU32;
 
 use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
 use super::ldisc::{LdiscKind, LineDisc};
 use super::session::TtySession;
 use super::{MAX_TTYS, Tty, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
+use slopos_lib::IrqMutex;
+use slopos_lib::WaitQueue;
 
 // ---------------------------------------------------------------------------
 // Per-TTY slots
@@ -71,6 +72,16 @@ pub static TTY_OUTPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new()
 /// `sleep_current_task_ms(1)`.  Any event that could change poll readiness
 /// (input arrival, hangup, IXON resume) wakes all waiters.
 pub static POLL_NOTIFY: WaitQueue = WaitQueue::new();
+
+/// Per-TTY output-in-flight counter.  Tracks the number of `write()`
+/// operations that have processed output through the line discipline but
+/// have not yet completed the unlocked hardware write.  Used by
+/// `wait_output_idle()` (Phase 25 drain semantics) to block `TCSETSW` /
+/// `TCSETSF` until all in-flight output reaches the hardware.
+///
+/// Increment **before** `write_driver_unlocked`, decrement **after**,
+/// then wake `TTY_OUTPUT_WAITERS` so drain waiters re-check.
+pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
 // ---------------------------------------------------------------------------
 // Initialisation

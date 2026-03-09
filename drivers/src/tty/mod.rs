@@ -43,7 +43,9 @@ use slopos_lib::kernel_services::driver_runtime::{
 use self::driver::{TtyDriverKind, write_driver_unlocked};
 use self::ldisc::{InputAction, LdiscKind, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
-use self::table::{POLL_NOTIFY, TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_SLOTS};
+use self::table::{
+    POLL_NOTIFY, TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_SLOTS,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -296,7 +298,11 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     };
 
     if let Some((driver_id, out, out_len)) = route {
+        // Phase 25: Track in-flight echo output for drain semantics.
+        TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
         write_driver_unlocked(driver_id, &out[..out_len]);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
+        TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
     if wake {
@@ -692,7 +698,13 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
         // Per-TTY lock dropped.
 
         // Phase 2: Driver I/O without any TTY lock (slow — hardware).
+        // Phase 25: Track in-flight output for drain semantics.
+        TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
         write_driver_unlocked(driver_id, &out_buf[..out_len]);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
+        // Wake drain waiters (TCSETSW / TCSETSF) now that this chunk
+        // has reached the hardware.
+        TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
     Ok(data.len())
@@ -739,16 +751,78 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     }
 }
 
+/// Wait until all in-flight output has been transmitted to the hardware.
+///
+/// Phase 25: replaces the Phase 16 stub with real drain synchronization.
+///
+/// The drain is complete when:
+///   1. The per-TTY inflight counter (`TTY_OUTPUT_INFLIGHT`) is zero — no
+///      `write()` call is between ldisc processing and driver transmission.
+///   2. The driver backend reports no pending output
+///      (`TtyDriverKind::output_pending()` returns `false`).
+///
+/// For synchronous backends (serial, vconsole) both conditions are
+/// trivially satisfied because the driver blocks until each byte is on the
+/// wire.  For future async/interrupt-driven drivers, callers will genuinely
+/// sleep on `TTY_OUTPUT_WAITERS` until the TX FIFO empties.
+///
+/// The function sleeps on `TTY_OUTPUT_WAITERS[slot]` if the scheduler is
+/// available; otherwise it busy-polls (pre-scheduler boot path).
 fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let guard = TTY_SLOTS[slot].lock();
-    match guard.as_ref() {
-        Some(_) => Ok(()),
-        None => Err(TtyError::NotAllocated),
+
+    // Quick validation: ensure the slot is allocated.
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        if guard.is_none() {
+            return Err(TtyError::NotAllocated);
+        }
     }
+
+    // Fast path: if nothing is in-flight and driver has no pending output,
+    // return immediately without touching the wait queue.
+    if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if !tty.driver.output_pending() {
+                return Ok(());
+            }
+        } else {
+            return Err(TtyError::NotAllocated);
+        }
+    }
+
+    // Slow path: wait until drain completes.
+    if scheduler_is_enabled() != 0 {
+        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+            if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
+                return false;
+            }
+            let guard = TTY_SLOTS[slot].lock();
+            match guard.as_ref() {
+                Some(tty) => !tty.driver.output_pending(),
+                None => true, // slot gone — drain vacuously satisfied
+            }
+        });
+    } else {
+        // Pre-scheduler fallback: busy-poll (very early boot only).
+        loop {
+            if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
+                let guard = TTY_SLOTS[slot].lock();
+                match guard.as_ref() {
+                    Some(tty) if !tty.driver.output_pending() => break,
+                    None => break,
+                    _ => {}
+                }
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    Ok(())
 }
 
 fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
@@ -789,6 +863,27 @@ pub fn set_termios_wait(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> 
 
 pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
     set_termios_mode(idx, t, TermiosSetMode::DrainAndFlushInput)
+}
+
+/// Returns `true` if all output to the given TTY has been fully drained:
+/// no in-flight writes and no driver-level pending output.
+///
+/// Phase 25: Exposed for test observability.  Production callers should
+/// prefer `wait_output_idle()` (via `TCSETSW` / `TCSETSF`) which blocks
+/// until drain completes.
+pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
+        return Ok(false);
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => Ok(!tty.driver.output_pending()),
+        None => Err(TtyError::NotAllocated),
+    }
 }
 
 pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
