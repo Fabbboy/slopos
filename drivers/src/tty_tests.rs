@@ -23,6 +23,7 @@ use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
 use crate::tty::table::TTY_SLOTS;
+use crate::tty::vconsole::VConsoleState;
 
 fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
@@ -4849,6 +4850,184 @@ pub fn test_phase21_poll_events_peer_closed_pollhup() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_phase22_default_console_tty_initial_value() -> TestResult {
+    if tty::default_console_tty() != TtyIndex(0) {
+        klog_info!(
+            "TTY_TEST: BUG - default_console_tty should start at 0, got {:?}",
+            tty::default_console_tty()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_set_default_console_tty() -> TestResult {
+    tty::set_default_console_tty(TtyIndex(1));
+    let updated = tty::default_console_tty();
+    tty::set_default_console_tty(TtyIndex(0));
+
+    if updated != TtyIndex(1) {
+        klog_info!(
+            "TTY_TEST: BUG - set_default_console_tty did not stick (got {:?})",
+            updated
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_switch_active_tty_valid() -> TestResult {
+    tty::table::tty_table_init();
+    let original = tty::active_tty();
+    let switched = tty::switch_active_tty(TtyIndex(1));
+    let active = tty::active_tty();
+    let _ = tty::switch_active_tty(original);
+
+    if switched.is_err() || active != TtyIndex(1) {
+        klog_info!("TTY_TEST: BUG - switch_active_tty valid switch failed");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_switch_active_tty_invalid_index() -> TestResult {
+    match tty::switch_active_tty(TtyIndex(tty::MAX_TTYS as u8)) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - invalid active tty index should return InvalidIndex, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase22_switch_active_tty_unallocated() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::switch_active_tty(TtyIndex(5)) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - unallocated active tty should return NotAllocated, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_phase22_vconsole_state_initial() -> TestResult {
+    let state = VConsoleState::new();
+    if state.cursor_row != 0 || state.cursor_col != 0 || state.rows != 25 || state.cols != 80 {
+        klog_info!(
+            "TTY_TEST: BUG - vconsole initial state mismatch row={} col={} rows={} cols={}",
+            state.cursor_row,
+            state.cursor_col,
+            state.rows,
+            state.cols
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
+    let mut state = VConsoleState::new();
+    state.write_byte(b'A');
+    if state.cells[0][0] != b'A' || state.cursor_row != 0 || state.cursor_col != 1 {
+        klog_info!("TTY_TEST: BUG - printable write did not update vconsole state");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_write_byte_newline() -> TestResult {
+    let mut state = VConsoleState::new();
+    state.write_byte(b'\n');
+    if state.cursor_row != 1 || state.cursor_col != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - newline did not move cursor to next row (row={}, col={})",
+            state.cursor_row,
+            state.cursor_col
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_write_byte_cr() -> TestResult {
+    let mut state = VConsoleState::new();
+    state.write_byte(b'A');
+    state.write_byte(b'B');
+    state.write_byte(b'\r');
+    if state.cursor_col != 0 {
+        klog_info!("TTY_TEST: BUG - carriage return should reset column to 0");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
+    let mut state = VConsoleState::new();
+    state.write_byte(b'A');
+    state.write_byte(b'B');
+    state.write_byte(0x08);
+    if state.cursor_col != 1 || state.cells[0][1] != b' ' {
+        klog_info!("TTY_TEST: BUG - backspace did not erase previous column");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_scroll_at_bottom() -> TestResult {
+    let mut state = VConsoleState::new();
+    state.rows = 2;
+    state.cols = 4;
+    state.cells[0][0] = b'A';
+    state.cells[1][0] = b'B';
+    state.cursor_row = 1;
+    state.cursor_col = 0;
+
+    state.write_byte(b'\n');
+
+    if state.cells[0][0] != b'B' || state.cells[1][0] != b' ' || state.cursor_row != 1 {
+        klog_info!("TTY_TEST: BUG - vconsole scroll did not shift/clear rows correctly");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_active_tty_independent_of_fg_pgrp() -> TestResult {
+    tty::table::tty_table_init();
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 100);
+    let _ = tty::set_foreground_pgrp(TtyIndex(1), 200);
+
+    let before0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let before1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
+
+    let _ = tty::switch_active_tty(TtyIndex(1));
+
+    let after0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let after1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
+    let _ = tty::switch_active_tty(TtyIndex(0));
+
+    if before0 != after0 || before1 != after1 {
+        klog_info!("TTY_TEST: BUG - switch_active_tty modified fg_pgrp state");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase22_vconsole_has_framebuffer_default_false() -> TestResult {
+    tty::vconsole::reset_for_tests();
+    if tty::vconsole::has_framebuffer() {
+        klog_info!("TTY_TEST: BUG - vconsole framebuffer should be absent by default");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -5078,5 +5257,18 @@ slopos_lib::define_test_suite!(
         test_phase21_poll_events_respects_requested_mask,
         test_phase21_pollhup_always_reported,
         test_phase21_poll_events_peer_closed_pollhup,
+        test_phase22_default_console_tty_initial_value,
+        test_phase22_set_default_console_tty,
+        test_phase22_switch_active_tty_valid,
+        test_phase22_switch_active_tty_invalid_index,
+        test_phase22_switch_active_tty_unallocated,
+        test_phase22_vconsole_state_initial,
+        test_phase22_vconsole_write_byte_printable,
+        test_phase22_vconsole_write_byte_newline,
+        test_phase22_vconsole_write_byte_cr,
+        test_phase22_vconsole_write_byte_backspace,
+        test_phase22_vconsole_scroll_at_bottom,
+        test_phase22_active_tty_independent_of_fg_pgrp,
+        test_phase22_vconsole_has_framebuffer_default_false,
     ]
 );
