@@ -160,6 +160,11 @@ impl Tty {
                         self.driver.write_output(&[b]);
                     }
                 }
+                InputAction::KillLineEcho { columns } => {
+                    for _ in 0..columns {
+                        self.driver.write_output(&[0x08, 0x20, 0x08]);
+                    }
+                }
                 InputAction::None => {}
             }
         }
@@ -277,6 +282,18 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 let copy_len = core::cmp::min(content.len(), out.len().saturating_sub(1));
                 out[1..1 + copy_len].copy_from_slice(&content[..copy_len]);
                 route = Some((tty.driver.id(), out, copy_len + 1));
+                has_data
+            }
+            InputAction::KillLineEcho { columns } => {
+                // Phase 27: Build BS-SP-BS triples for visual line erase.
+                let mut out = [0u8; 1025];
+                let triples = core::cmp::min(columns as usize, out.len() / 3);
+                for i in 0..triples {
+                    out[i * 3] = 0x08;
+                    out[i * 3 + 1] = 0x20;
+                    out[i * 3 + 2] = 0x08;
+                }
+                route = Some((tty.driver.id(), out, triples * 3));
                 has_data
             }
             InputAction::Signal(sig) => {
@@ -736,6 +753,33 @@ pub fn has_data(idx: TtyIndex) -> bool {
         }
     }
     result
+}
+
+/// Phase 27: Get the number of bytes available for reading from a TTY.
+///
+/// Used by the FIONREAD / TIOCINQ ioctl.  Drains pending hardware input
+/// first to ensure the count is up-to-date.
+pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let (deferred_signal, count) = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
+            let sig = tty.drain_hw_input();
+            let n = tty.ldisc.bytes_available();
+            (sig, n)
+        } else {
+            return Err(TtyError::NotAllocated);
+        }
+    };
+    if let Some((pgid, sig)) = deferred_signal {
+        if pgid != 0 {
+            let _ = signal_process_group(pgid, sig);
+        }
+    }
+    Ok(count)
 }
 
 /// Get termios for a specific TTY.

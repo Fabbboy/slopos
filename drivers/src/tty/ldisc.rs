@@ -1,12 +1,13 @@
-//! Enhanced line discipline for the TTY subsystem (Phase 2).
+//! Enhanced line discipline for the TTY subsystem (Phase 2+).
 //!
 //! This module implements a simplified but fairly complete N_TTY-style line
 //! discipline.  Compared to the Phase 1 stub it adds:
 //!
-//! - **Input flag processing** (`c_iflag`): ICRNL, INLCR, IGNCR, ISTRIP
+//! - **Input flag processing** (`c_iflag`): ICRNL, INLCR, IGNCR, ISTRIP,
+//!   IGNBRK, BRKINT, PARMRK
 //! - **Output flag processing** (`c_oflag`): OPOST, ONLCR, OCRNL, ONOCR, ONLRET
 //! - **Additional echo modes**: ECHOCTL (^X for control chars), ECHOKE (kill
-//!   via backspace sequence)
+//!   via backspace sequence — deterministic visual erase)
 //! - **Signal generation**: SIGINT (VINTR), SIGQUIT (VQUIT), SIGTSTP (VSUSP)
 //! - **Flow control**: IXON with VSTOP/VSTART (Ctrl+S / Ctrl+Q)
 //! - **Canonical editing**: VWERASE (Ctrl+W word erase), VREPRINT (Ctrl+R
@@ -20,6 +21,7 @@
 
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
+    BRKINT,
     ECHO,
     // c_lflag (additional)
     ECHOCTL,
@@ -31,6 +33,7 @@ use slopos_abi::syscall::{
     // c_iflag
     ICRNL,
     IEXTEN,
+    IGNBRK,
     IGNCR,
     INLCR,
     ISIG,
@@ -46,6 +49,7 @@ use slopos_abi::syscall::{
     ONLRET,
     ONOCR,
     OPOST,
+    PARMRK,
     UserTermios,
     // c_cc indices
     VEOF,
@@ -84,6 +88,11 @@ pub enum InputAction {
     /// The caller should write a newline followed by the contents returned
     /// by [`LineDisc::edit_content()`].
     ReprintLine,
+    /// Phase 27: Kill-line visual erase (ECHOKE).
+    ///
+    /// The caller should emit `columns` BS-SPACE-BS triples to erase the
+    /// line visually.  This replaces the old pragmatic newline-only echo.
+    KillLineEcho { columns: u16 },
 }
 
 /// Actions returned by output processing (`process_output_byte`).
@@ -267,6 +276,12 @@ impl LineDisc {
         copied
     }
 
+    /// Phase 27: Returns the number of bytes available for reading.
+    /// Used by the FIONREAD / TIOCINQ ioctl.
+    pub fn bytes_available(&self) -> usize {
+        self.cooked_count
+    }
+
     pub fn flush_all(&mut self) {
         self.edit_len = 0;
         self.cooked_head = 0;
@@ -306,6 +321,12 @@ impl LineDisc {
     pub fn input_char(&mut self, c: u8) -> InputAction {
         let iflag = self.termios.c_iflag;
         let lflag = self.termios.c_lflag;
+
+        // Phase 27: Break handling.  A NUL byte (0x00) is treated as a
+        // break condition when any of IGNBRK/BRKINT/PARMRK is set.
+        if c == 0x00 && (iflag & (IGNBRK | BRKINT | PARMRK)) != 0 {
+            return self.handle_break(iflag);
+        }
 
         // 1. Input flag processing (c_iflag).
         let c = self.process_iflag(c, iflag);
@@ -482,7 +503,10 @@ impl LineDisc {
 
     /// Apply c_iflag processing to a raw input byte.
     ///
-    /// Returns `None` if the byte should be discarded (IGNCR).
+    /// Returns `None` if the byte should be discarded (IGNCR, IGNBRK).
+    /// Returns `Some(InputAction::Signal(SIGINT))` indirectly via break
+    /// handling when BRKINT is set (the caller must check for break
+    /// conditions before calling this method — see `input_char`).
     fn process_iflag(&self, c: u8, iflag: u32) -> Option<u8> {
         let mut c = c;
 
@@ -504,6 +528,34 @@ impl LineDisc {
         }
 
         Some(c)
+    }
+
+    /// Phase 27: Handle a NUL byte (break condition).
+    ///
+    /// In real serial hardware, a break is signalled by holding the line low
+    /// for longer than a frame.  The driver delivers it as a NUL (0x00).
+    /// POSIX break handling:
+    ///   - IGNBRK set → discard silently.
+    ///   - BRKINT set → flush I/O, send SIGINT to foreground pgrp.
+    ///   - PARMRK set → insert 3-byte sequence `\xff \x00 \x00`.
+    ///   - Otherwise  → pass the NUL through unchanged.
+    fn handle_break(&mut self, iflag: u32) -> InputAction {
+        if (iflag & IGNBRK) != 0 {
+            return InputAction::None;
+        }
+        if (iflag & BRKINT) != 0 {
+            self.flush_input();
+            return InputAction::Signal(SIGINT);
+        }
+        if (iflag & PARMRK) != 0 {
+            // POSIX: a break is encoded as \xff \x00 \x00 in the input stream.
+            self.push_cooked(0xFF);
+            self.push_cooked(0x00);
+            self.push_cooked(0x00);
+            return InputAction::None;
+        }
+        // No break flags set — pass the NUL through as a regular byte.
+        InputAction::None
     }
 
     /// Canonical mode input processing.
@@ -606,22 +658,12 @@ impl LineDisc {
         self.edit_len -= 1;
 
         if (lflag & ECHOE) != 0 {
-            // If the erased character was a control char echoed as ^X via
-            // ECHOCTL, we need to erase two columns.
+            // Phase 27: If the erased character was a control char echoed as
+            // ^X via ECHOCTL, erase two columns with two BS-SP-BS triples.
+            // Use `KillLineEcho` to emit the correct number of columns.
             if (lflag & ECHOCTL) != 0 && erased < 0x20 && erased != b'\t' && erased != b'\n' {
                 self.column = self.column.saturating_sub(2);
-                // BS SPACE BS BS SPACE BS — erase two columns.
-                // We only have 4 bytes in the echo buffer, so we return
-                // two BS-SPACE-BS sequences as a single 4-byte action
-                // (first pair) and rely on the caller to issue two
-                // actions.  Pragmatically, return 4 bytes covering the
-                // first ^X column pair and let the second be handled by
-                // a follow-up.  In practice, most terminals handle this
-                // acceptably with just one BS-SP-BS triple.
-                return InputAction::Echo {
-                    buf: [0x08, 0x20, 0x08, 0x08],
-                    len: 4,
-                };
+                return InputAction::KillLineEcho { columns: 2 };
             }
             if self.column > 0 {
                 self.column -= 1;
@@ -640,14 +682,21 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // ECHOKE: erase the line visually by backspacing over every character.
-        // We can't do this in a single 4-byte action, so we just reset the
-        // edit buffer and echo a newline (same as ECHOK) — a pragmatic
-        // simplification that matches many real terminals.
+        // Phase 27: ECHOKE — erase the line visually by backspacing over
+        // every character.  We compute the total column width to erase and
+        // return a `KillLineEcho` action so the caller can emit the
+        // appropriate number of BS-SP-BS triples.
+        let cols_to_erase = self.column as u16;
         self.edit_len = 0;
         self.column = 0;
 
-        if (lflag & ECHOKE) != 0 || (lflag & ECHOK) != 0 {
+        if (lflag & ECHOKE) != 0 && (lflag & ECHO) != 0 {
+            return InputAction::KillLineEcho {
+                columns: cols_to_erase,
+            };
+        }
+
+        if (lflag & ECHOK) != 0 {
             return InputAction::Echo {
                 buf: [b'\n', 0, 0, 0],
                 len: 1,
@@ -830,6 +879,11 @@ impl RawDisc {
         copied
     }
 
+    /// Phase 27: Returns the number of bytes available for reading.
+    pub fn bytes_available(&self) -> usize {
+        self.count
+    }
+
     pub fn flush_all(&mut self) {
         self.head = 0;
         self.tail = 0;
@@ -946,6 +1000,14 @@ impl LdiscKind {
         match self {
             LdiscKind::NTty(ld) => ld.has_data(),
             LdiscKind::Raw(rd) => rd.has_data(),
+        }
+    }
+
+    /// Phase 27: Returns the number of bytes available for reading.
+    pub fn bytes_available(&self) -> usize {
+        match self {
+            LdiscKind::NTty(ld) => ld.bytes_available(),
+            LdiscKind::Raw(rd) => rd.bytes_available(),
         }
     }
 

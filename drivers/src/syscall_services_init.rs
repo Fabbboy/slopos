@@ -308,6 +308,13 @@ fn tty_detach_controlling_terminal_adapter(
     }
 }
 
+fn tty_bytes_available_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::bytes_available(tty_index) {
+        Ok(n) => n as i32,
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -344,6 +351,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     poll_events: tty_poll_events_adapter,
     poll_sleep: tty_poll_sleep_adapter,
     detach_controlling_terminal: tty_detach_controlling_terminal_adapter,
+    bytes_available: tty_bytes_available_adapter,
 };
 
 fn net_scan_members_adapter(

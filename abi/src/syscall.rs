@@ -593,6 +593,9 @@ pub const TIOCSCTTY: u64 = 0x540E;
 /// Detach the calling process from its controlling terminal.
 /// Linux value: 0x5422.
 pub const TIOCNOTTY: u64 = 0x5422;
+/// Phase 27: Get the number of bytes available for reading.
+/// Linux value: 0x541B (same as TIOCINQ).
+pub const FIONREAD: u64 = 0x541B;
 
 pub const N_TTY: u32 = 0;
 pub const N_RAW: u32 = 1;
