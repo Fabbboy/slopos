@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–24 complete; 🛠️ Phases 25–27 planned (drain semantics, PTY lifetime safety, POSIX completion)
+> **Status**: ✅ Phases 1–25 complete; 🛠️ Phases 26–27 planned (PTY lifetime safety, POSIX completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, and compositor focus split from POSIX foreground; follow-up maturity work now focuses on EOF/signal semantics, strict job-control contracts, real drain semantics, and PTY lifetime safety
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics; follow-up maturity work now focuses on PTY lifetime safety and POSIX completion
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -37,7 +37,7 @@
 26. [Phase 22: Operational Console Routing & Real VConsole ✅](#26-phase-22-operational-console-routing--real-vconsole)
 27. [Phase 23: Canonical EOF, ISIG Flush & Signal Integrity](#27-phase-23-canonical-eof-isig-flush--signal-integrity)
 28. [Phase 24: Job Control & Controlling TTY Hardening ✅](#28-phase-24-job-control--controlling-tty-hardening)
-29. [Phase 25: Real TCSETSW/TCSETSF Drain Semantics](#29-phase-25-real-tcsetswtcsetsf-drain-semantics)
+29. [Phase 25: Real TCSETSW/TCSETSF Drain Semantics ✅](#29-phase-25-real-tcsetswtcsetsf-drain-semantics)
 30. [Phase 26: PTY Lifetime Safety & Scalable Capacity](#30-phase-26-pty-lifetime-safety--scalable-capacity)
 31. [Phase 27: POSIX Completion Set (Rust-Idiomatic)](#31-phase-27-posix-completion-set-rust-idiomatic)
 32. [File Inventory](#32-file-inventory)
@@ -84,8 +84,8 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 21 | Event-driven readiness & IXON completion | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/waitqueue.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 22 | Operational console routing & real VConsole | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `boot/src/boot_drivers.rs`, `video/src/framebuffer.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vconsole.rs` | **DONE** |
 | 23 | Canonical EOF, ISIG flush & signal integrity | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 24 | Job control & controlling TTY hardening | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
-| 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 24 | Job control & controlling TTY hardening | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
+| 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs`, `plans/TTY_OVERHAUL_PLAN.md` | — | **PLANNED** |
 
@@ -2521,37 +2521,60 @@ Implemented in one pass with 13 new Phase 22 regressions (test suite count now 1
 | `core/src/syscall/fs/poll_ioctl_handlers.rs` | Added `TIOCNOTTY` import and ioctl handler arm |
 | `drivers/src/tty_tests.rs` | 7 new Phase 24 regression tests + updated existing test |
 
-## 29. Phase 25: Real `TCSETSW`/`TCSETSF` Drain Semantics
+## 29. Phase 25: Real `TCSETSW`/`TCSETSF` Drain Semantics ✅
 
-**Status**: Planned.
+**Status**: Complete.
 
 > **Priority**: P1 correctness — move from placeholder wait to explicit drain contract.
 
-### 29.1 Output drain accounting
+### 29.1 Output drain accounting — ✅
 
-- Introduce explicit per-TTY output-drain state (pending bytes or equivalent readiness contract).
-- Keep split-write architecture, but make drain completion observable.
+- Added `output_pending()` method to the `TtyDriver` trait (default: `false`) and corresponding `TtyDriverKind::output_pending()` enum dispatch.
+- Added `TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS]` static array in `table.rs` — tracks the number of `write()` operations that have processed output through the line discipline but have not yet completed the unlocked hardware write.
+- The `write()` function increments `TTY_OUTPUT_INFLIGHT[slot]` before `write_driver_unlocked()`, decrements after, and wakes `TTY_OUTPUT_WAITERS[slot]` on completion.
+- Echo output in `push_input()` also tracks inflight state for consistency.
+- For synchronous backends (SerialConsole, VConsole), `output_pending()` returns `false` (writes block until on-the-wire).
+- For PTY backends, output is immediately buffered in the peer — POSIX considers it "sent".
 
-### 29.2 `TCSETSW` / `TCSETSF` behavior
+### 29.2 `TCSETSW` / `TCSETSF` behavior — ✅
 
-- `TCSETSW`: wait for output drain before applying termios.
-- `TCSETSF`: wait for output drain, then flush pending input state before apply.
-- If a backend cannot support drain semantics, return deterministic error rather than silently succeeding.
+- Replaced the Phase 16 `wait_output_idle()` stub with real drain synchronization:
+  - **Fast path**: If `TTY_OUTPUT_INFLIGHT[slot] == 0` and `driver.output_pending() == false`, returns immediately.
+  - **Slow path**: If the scheduler is enabled, sleeps on `TTY_OUTPUT_WAITERS[slot]` with a condition closure checking both inflight and driver pending state.
+  - **Pre-scheduler fallback**: Busy-polls with `core::hint::spin_loop()` (early boot only).
+- `TCSETSW` (`set_termios_wait`): waits for output drain, then applies new termios. Pending input is preserved.
+- `TCSETSF` (`set_termios_flush`): waits for output drain, flushes pending input, then applies new termios.
+- `TCSETS` (`set_termios`): unchanged — immediate apply, no drain.
+- Added public `is_output_idle(idx)` function for test observability.
 
-### 29.3 Verification
+### 29.3 Verification — ✅
 
-- Add timing/order tests proving attribute changes do not race ahead of output visibility.
-- Add regressions for PTY and console backends.
+Added 13 Phase 25 regression tests:
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_phase25_is_output_idle_initially_true` | No inflight and no driver pending on fresh init |
+| `test_phase25_inflight_counter_initial_zero` | All `TTY_OUTPUT_INFLIGHT` counters start at 0 |
+| `test_phase25_write_updates_inflight_counter` | Inflight returns to 0 after write completes |
+| `test_phase25_tcsetsw_preserves_input_after_drain` | `TCSETSW` drains output but preserves pending input |
+| `test_phase25_tcsetsf_flushes_input_after_drain` | `TCSETSF` drains output AND flushes pending input |
+| `test_phase25_is_output_idle_invalid_index` | Invalid index returns `InvalidIndex` error |
+| `test_phase25_is_output_idle_unallocated` | Unallocated slot returns `NotAllocated` error |
+| `test_phase25_drain_invalid_index_error` | `set_termios_wait` on invalid index returns error |
+| `test_phase25_driver_output_pending_default_false` | Trait default `output_pending()` returns `false` |
+| `test_phase25_driver_kind_output_pending_dispatch` | Enum dispatch works for all driver variants |
+| `test_phase25_pty_drain_immediate` | PTY drain is immediate (no hardware latency) |
+| `test_phase25_console_drain_immediate` | Console drain is immediate (synchronous serial) |
+| `test_phase25_tcsets_now_skips_drain` | `TCSETS` (Now) applies immediately, no drain |
 
 ### 29.4 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Replace `wait_output_idle()` stub with real drain synchronization |
-| `drivers/src/tty/driver.rs` | Add/extend backend hooks needed for output-drain observability |
-| `drivers/src/tty/table.rs` | Add synchronization primitives or wait-queue integration for output drain |
-| `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | Add drain-order and timeout regressions |
-
+| `drivers/src/tty/mod.rs` | Replaced `wait_output_idle()` stub with real drain synchronization; wired inflight counters into `write()` and `push_input()` echo paths; added `is_output_idle()` |
+| `drivers/src/tty/driver.rs` | Added `output_pending()` to `TtyDriver` trait (default `false`); added `TtyDriverKind::output_pending()` enum dispatch |
+| `drivers/src/tty/table.rs` | Added `TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS]` static array |
+| `drivers/src/tty_tests.rs` | Added 13 Phase 25 regression tests covering drain accounting, TCSETSW/TCSETSF semantics, driver trait, PTY and console backends |
 ## 30. Phase 26: PTY Lifetime Safety & Scalable Capacity
 
 **Status**: Planned.
