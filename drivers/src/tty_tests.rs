@@ -5029,6 +5029,281 @@ pub fn test_phase22_vconsole_has_framebuffer_default_false() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 23: Canonical EOF, ISIG Flush & Signal Integrity
+// ===========================================================================
+
+/// Phase 23: Ctrl+D on empty buffer produces EOF (0 bytes) without phantom
+/// has_data state.  Previously, flush_edit_to_cooked incremented line_count
+/// on empty buffer, leaving has_data() stuck true.
+pub fn test_phase23_canonical_eof_empty_no_phantom() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Press Ctrl+D (VEOF = 0x04) with empty edit buffer.
+    ld.input_char(0x04);
+
+    // has_data should be true once (the EOF marker).
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data should be true immediately after empty EOF");
+        return TestResult::Fail;
+    }
+
+    // read() should return 0 (EOF).
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 0 {
+        klog_info!("TTY_TEST: BUG - empty EOF read should return 0, got {}", n);
+        return TestResult::Fail;
+    }
+
+    // After consuming the EOF, has_data should be false (no phantom).
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data still true after consuming empty EOF (phantom state)");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: Ctrl+D after text returns text without newline, then no phantom.
+pub fn test_phase23_canonical_eof_with_pending_text_no_phantom() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "abc" then Ctrl+D.
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+    ld.input_char(0x04); // VEOF
+
+    // Should have data.
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data false after text+EOF");
+        return TestResult::Fail;
+    }
+
+    // Read should return "abc" (3 bytes, no newline).
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 3 || &buf[..3] != b"abc" {
+        klog_info!("TTY_TEST: BUG - text+EOF read mismatch (got {} bytes)", n);
+        return TestResult::Fail;
+    }
+
+    // No phantom state.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data true after reading text+EOF chunk (phantom)");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: ISIG flush — Ctrl+C without NOFLSH clears edit and cooked buffers.
+pub fn test_phase23_isig_flush_no_noflsh() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "abc" into edit buffer (canonical mode, no newline yet).
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+
+    // Verify edit buffer has content.
+    if ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - edit buffer should have content before signal");
+        return TestResult::Fail;
+    }
+
+    // Ctrl+C should generate SIGINT and flush input (NOFLSH not set by default).
+    let action = ld.input_char(0x03); // VINTR = Ctrl+C
+    match action {
+        InputAction::Signal(sig) if sig == SIGINT => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected Signal(SIGINT), got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    // Edit buffer should be flushed.
+    if !ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - edit buffer should be empty after ISIG flush");
+        return TestResult::Fail;
+    }
+
+    // No cooked data should remain.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data true after ISIG flush (should be clear)");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: ISIG with NOFLSH set — Ctrl+C does NOT flush buffers.
+pub fn test_phase23_isig_flush_with_noflsh() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Set NOFLSH flag.
+    let mut t = *ld.termios();
+    t.c_lflag |= slopos_abi::syscall::NOFLSH;
+    ld.set_termios(&t);
+
+    // Type "abc" into edit buffer.
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+
+    // Ctrl+C should generate SIGINT but NOT flush.
+    let action = ld.input_char(0x03); // VINTR = Ctrl+C
+    match action {
+        InputAction::Signal(sig) if sig == SIGINT => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected Signal(SIGINT) with NOFLSH, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Edit buffer should still have content.
+    if ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - NOFLSH should preserve edit buffer on ISIG");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: After Ctrl+C (without NOFLSH), subsequent newline produces empty line.
+pub fn test_phase23_isig_ctrl_c_clears_edit_buffer() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "abc", then Ctrl+C (flushes), then newline.
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+    let _ = ld.input_char(0x03); // Ctrl+C flushes
+    ld.input_char(b'\n');
+
+    // Should have one line.
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data false after flush+newline");
+        return TestResult::Fail;
+    }
+
+    // Read should return just "\n" (1 byte), not "abc\n".
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != b'\n' {
+        klog_info!(
+            "TTY_TEST: BUG - after Ctrl+C flush, newline should produce 1-byte line, got {} bytes (first=0x{:02x})",
+            n,
+            buf[0]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: ISIG flush works for SIGQUIT (Ctrl+\\) too.
+pub fn test_phase23_isig_flush_sigquit() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "xyz" then Ctrl+\\ (VQUIT = 0x1C).
+    for &c in b"xyz" {
+        ld.input_char(c);
+    }
+    let action = ld.input_char(0x1C);
+    match action {
+        InputAction::Signal(sig) if sig == SIGQUIT => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected Signal(SIGQUIT), got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    // Buffers should be flushed (default: no NOFLSH).
+    if !ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - edit buffer should be empty after SIGQUIT flush");
+        return TestResult::Fail;
+    }
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - cooked data remains after SIGQUIT flush");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: ISIG flush works for SIGTSTP (Ctrl+Z) too.
+pub fn test_phase23_isig_flush_sigtstp() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type "xyz" then Ctrl+Z (VSUSP = 0x1A).
+    for &c in b"xyz" {
+        ld.input_char(c);
+    }
+    let action = ld.input_char(0x1A);
+    match action {
+        InputAction::Signal(sig) if sig == SIGTSTP => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected Signal(SIGTSTP), got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+
+    // Buffers should be flushed.
+    if !ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - edit buffer should be empty after SIGTSTP flush");
+        return TestResult::Fail;
+    }
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - cooked data remains after SIGTSTP flush");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 23: Double Ctrl+D does not accumulate phantom line_count.
+pub fn test_phase23_double_eof_no_phantom_accumulation() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Two consecutive Ctrl+D on empty buffer.
+    ld.input_char(0x04);
+    ld.input_char(0x04);
+
+    // First EOF read.
+    let mut buf = [0u8; 64];
+    let n1 = ld.read(&mut buf);
+    if n1 != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - first empty EOF should return 0, got {}",
+            n1
+        );
+        return TestResult::Fail;
+    }
+
+    // Second EOF read.
+    let n2 = ld.read(&mut buf);
+    if n2 != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - second empty EOF should return 0, got {}",
+            n2
+        );
+        return TestResult::Fail;
+    }
+
+    // No phantom state.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - has_data true after consuming both EOFs");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -5270,5 +5545,14 @@ slopos_lib::define_test_suite!(
         test_phase22_vconsole_scroll_at_bottom,
         test_phase22_active_tty_independent_of_fg_pgrp,
         test_phase22_vconsole_has_framebuffer_default_false,
+        // Phase 23: Canonical EOF, ISIG Flush & Signal Integrity
+        test_phase23_canonical_eof_empty_no_phantom,
+        test_phase23_canonical_eof_with_pending_text_no_phantom,
+        test_phase23_isig_flush_no_noflsh,
+        test_phase23_isig_flush_with_noflsh,
+        test_phase23_isig_ctrl_c_clears_edit_buffer,
+        test_phase23_isig_flush_sigquit,
+        test_phase23_isig_flush_sigtstp,
+        test_phase23_double_eof_no_phantom_accumulation,
     ]
 );
