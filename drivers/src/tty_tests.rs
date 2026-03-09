@@ -4564,6 +4564,292 @@ pub fn test_phase20_pty_open_slave_after_free() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 21: Event-Driven Readiness & IXON Completion
+// ===========================================================================
+
+/// Phase 21: poll_events returns POLLIN when cooked data is available.
+pub fn test_phase21_poll_events_pollin_with_data() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Feed a complete canonical line ("a\n") so cooked data is available.
+    tty::push_input(idx, b'a');
+    tty::push_input(idx, b'\n');
+
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLIN);
+    drain_tty_nonblock(idx);
+
+    if (revents & slopos_abi::syscall::POLLIN) == 0 {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLIN when cooked data exists");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events returns 0 for POLLIN when no cooked data.
+pub fn test_phase21_poll_events_no_pollin_without_data() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLIN);
+
+    if (revents & slopos_abi::syscall::POLLIN) != 0 {
+        klog_info!("TTY_TEST: BUG - poll_events should NOT report POLLIN when no cooked data");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events returns POLLOUT when output is not stopped.
+pub fn test_phase21_poll_events_pollout_when_not_stopped() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
+
+    if (revents & slopos_abi::syscall::POLLOUT) == 0 {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLOUT when not stopped");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events returns 0 for POLLOUT when IXON-stopped.
+pub fn test_phase21_poll_events_no_pollout_when_stopped() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Enable IXON and send Ctrl+S to stop output.
+    {
+        let mut guard = TTY_SLOTS[idx.0 as usize].lock();
+        if let Some(tty) = guard.as_mut() {
+            let mut t = *tty.ldisc.termios();
+            t.c_iflag |= slopos_abi::syscall::IXON;
+            tty.ldisc.set_termios(&t);
+        }
+    }
+    tty::push_input(idx, 0x13); // Ctrl+S = VSTOP
+
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
+
+    // Resume output for cleanup.
+    tty::push_input(idx, 0x11); // Ctrl+Q = VSTART
+    drain_tty_nonblock(idx);
+
+    if (revents & slopos_abi::syscall::POLLOUT) != 0 {
+        klog_info!("TTY_TEST: BUG - poll_events should NOT report POLLOUT when IXON-stopped");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events returns POLLHUP when TTY is hung up.
+pub fn test_phase21_poll_events_pollhup_on_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Hang up TTY 0.
+    tty::hangup(idx);
+
+    let revents = tty::poll_events(
+        idx,
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+
+    // Restore TTY 0 (re-init).
+    tty::table::tty_table_init();
+
+    if (revents & slopos_abi::syscall::POLLHUP) == 0 {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLHUP on hung-up TTY");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events returns 0 for invalid index.
+pub fn test_phase21_poll_events_invalid_index_returns_zero() -> TestResult {
+    let revents = tty::poll_events(
+        TtyIndex(255),
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+    if revents != 0 {
+        klog_info!("TTY_TEST: BUG - poll_events on invalid index should return 0");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: IXON stopped state is tracked in ldisc via push_input.
+pub fn test_phase21_ixon_stopped_state_via_push_input() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Enable IXON.
+    {
+        let mut guard = TTY_SLOTS[idx.0 as usize].lock();
+        if let Some(tty) = guard.as_mut() {
+            let mut t = *tty.ldisc.termios();
+            t.c_iflag |= slopos_abi::syscall::IXON;
+            tty.ldisc.set_termios(&t);
+        }
+    }
+
+    // Ctrl+S stops output.
+    tty::push_input(idx, 0x13);
+    let stopped = {
+        let guard = TTY_SLOTS[idx.0 as usize].lock();
+        guard
+            .as_ref()
+            .map(|tty| tty.ldisc.is_stopped())
+            .unwrap_or(false)
+    };
+    if !stopped {
+        klog_info!("TTY_TEST: BUG - Ctrl+S via push_input should set stopped state");
+        tty::push_input(idx, 0x11); // cleanup
+        drain_tty_nonblock(idx);
+        return TestResult::Fail;
+    }
+
+    // Ctrl+Q resumes output.
+    tty::push_input(idx, 0x11);
+    let stopped_after = {
+        let guard = TTY_SLOTS[idx.0 as usize].lock();
+        guard
+            .as_ref()
+            .map(|tty| tty.ldisc.is_stopped())
+            .unwrap_or(true)
+    };
+    drain_tty_nonblock(idx);
+
+    if stopped_after {
+        klog_info!("TTY_TEST: BUG - Ctrl+Q via push_input should clear stopped state");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: IXON resume clears stopped and any character resumes.
+pub fn test_phase21_ixon_any_char_resumes() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Enable IXON.
+    {
+        let mut guard = TTY_SLOTS[idx.0 as usize].lock();
+        if let Some(tty) = guard.as_mut() {
+            let mut t = *tty.ldisc.termios();
+            t.c_iflag |= slopos_abi::syscall::IXON;
+            tty.ldisc.set_termios(&t);
+        }
+    }
+
+    // Ctrl+S stops, then any printable char resumes.
+    tty::push_input(idx, 0x13);
+    tty::push_input(idx, b'x'); // any char resumes when IXON
+
+    let stopped = {
+        let guard = TTY_SLOTS[idx.0 as usize].lock();
+        guard
+            .as_ref()
+            .map(|tty| tty.ldisc.is_stopped())
+            .unwrap_or(true)
+    };
+    drain_tty_nonblock(idx);
+
+    if stopped {
+        klog_info!("TTY_TEST: BUG - any char should resume output when IXON stopped");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: poll_events only returns events that are requested.
+pub fn test_phase21_poll_events_respects_requested_mask() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // With data available, requesting only POLLOUT should not set POLLIN.
+    tty::push_input(idx, b'a');
+    tty::push_input(idx, b'\n');
+
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
+    drain_tty_nonblock(idx);
+
+    if (revents & slopos_abi::syscall::POLLIN) != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - poll_events should not return POLLIN when only POLLOUT requested"
+        );
+        return TestResult::Fail;
+    }
+    if (revents & slopos_abi::syscall::POLLOUT) == 0 {
+        klog_info!(
+            "TTY_TEST: BUG - poll_events should return POLLOUT when requested and not stopped"
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: POLLHUP is always returned even if not requested (POSIX).
+pub fn test_phase21_pollhup_always_reported() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    tty::hangup(idx);
+
+    // Request only POLLIN -- POLLHUP should still appear.
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLIN);
+    tty::table::tty_table_init(); // restore
+
+    if (revents & slopos_abi::syscall::POLLHUP) == 0 {
+        klog_info!("TTY_TEST: BUG - POLLHUP should always be reported on hung-up TTY");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 21: PTY peer_closed sets POLLHUP when no data remains.
+pub fn test_phase21_poll_events_peer_closed_pollhup() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed");
+            return TestResult::Fail;
+        }
+    };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).ok();
+    tty::open_ref(slave).ok();
+
+    // Close the slave to mark peer_closed on master.
+    let _ = tty::close_ref(slave);
+
+    let revents = tty::poll_events(master, slopos_abi::syscall::POLLIN);
+
+    // Cleanup.
+    let _ = tty::close_ref(master);
+
+    if (revents & slopos_abi::syscall::POLLHUP) == 0 {
+        klog_info!(
+            "TTY_TEST: BUG - poll_events should report POLLHUP when peer_closed and no data"
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -4780,5 +5066,17 @@ slopos_lib::define_test_suite!(
         test_phase20_partial_open_no_free,
         test_phase20_rapid_alloc_free_realloc,
         test_phase20_pty_open_slave_after_free,
+        // Phase 21: Event-Driven Readiness & IXON Completion
+        test_phase21_poll_events_pollin_with_data,
+        test_phase21_poll_events_no_pollin_without_data,
+        test_phase21_poll_events_pollout_when_not_stopped,
+        test_phase21_poll_events_no_pollout_when_stopped,
+        test_phase21_poll_events_pollhup_on_hangup,
+        test_phase21_poll_events_invalid_index_returns_zero,
+        test_phase21_ixon_stopped_state_via_push_input,
+        test_phase21_ixon_any_char_resumes,
+        test_phase21_poll_events_respects_requested_mask,
+        test_phase21_pollhup_always_reported,
+        test_phase21_poll_events_peer_closed_pollhup,
     ]
 );

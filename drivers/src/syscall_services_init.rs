@@ -278,6 +278,14 @@ fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> u
     tty::write(tty_index, data).unwrap_or(0)
 }
 
+fn tty_poll_events_adapter(tty_index: TtyIndex, requested: u16) -> u16 {
+    tty::poll_events(tty_index, requested)
+}
+
+fn tty_poll_sleep_adapter() {
+    tty::poll_sleep()
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -309,6 +317,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_pty_number: tty_get_pty_number_adapter,
     is_pty_slave: tty_is_pty_slave_adapter,
     open_pty_slave: tty_open_pty_slave_adapter,
+    poll_events: tty_poll_events_adapter,
+    poll_sleep: tty_poll_sleep_adapter,
 };
 
 fn net_scan_members_adapter(

@@ -42,7 +42,7 @@ use slopos_lib::kernel_services::driver_runtime::{
 use self::driver::{TtyDriverKind, write_driver_unlocked};
 use self::ldisc::{InputAction, LdiscKind, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
-use self::table::{TTY_INPUT_WAITERS, TTY_SLOTS};
+use self::table::{POLL_NOTIFY, TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_SLOTS};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -198,6 +198,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     }
 
     let mut route = None;
+    let mut output_resumed = false;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -209,8 +210,18 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             return;
         }
 
+        // Phase 21: Track stopped state before input processing so we
+        // can detect stopped→resumed transitions for IXON wakeup.
+        let was_stopped = tty.ldisc.is_stopped();
+
         let action = tty.ldisc.input_char(c);
         let has_data = tty.ldisc.has_data();
+
+        // Phase 21: If output transitioned from stopped to resumed,
+        // wake blocked writers and poll waiters.
+        if was_stopped && !tty.ldisc.is_stopped() {
+            output_resumed = true;
+        }
 
         // Handle echo, reprint, and signal actions while we hold the lock.
         match action {
@@ -236,7 +247,12 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 if pgid != 0 {
                     let _ = signal_process_group(pgid, sig);
                 }
-                return; // Signal path — wakeup not needed here.
+                // Even on signal path, wake output waiters if resumed.
+                if output_resumed {
+                    TTY_OUTPUT_WAITERS[slot].wake_all();
+                    POLL_NOTIFY.wake_all();
+                }
+                return;
             }
             InputAction::None => has_data,
         }
@@ -248,6 +264,12 @@ pub fn push_input(idx: TtyIndex, c: u8) {
 
     if wake {
         notify_input_ready(idx);
+    }
+
+    // Phase 21: Wake blocked writers and poll waiters on IXON resume.
+    if output_resumed {
+        TTY_OUTPUT_WAITERS[slot].wake_all();
+        POLL_NOTIFY.wake_all();
     }
 }
 
@@ -261,6 +283,8 @@ fn notify_input_ready(idx: TtyIndex) {
         return;
     }
     TTY_INPUT_WAITERS[slot].wake_one();
+    // Phase 21: Also wake poll/select sleepers so they can re-check readiness.
+    POLL_NOTIFY.wake_all();
 }
 
 pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc, pty_open_slave};
@@ -571,6 +595,18 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
 
     let mut pos = 0;
     while pos < data.len() {
+        // Phase 21: IXON write-side enforcement.  When the line discipline
+        // is stopped (Ctrl+S / VSTOP), block the writer on the per-TTY
+        // output wait queue until output is resumed (Ctrl+Q / VSTART or
+        // any key with IXON set).
+        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+            let guard = TTY_SLOTS[slot].lock();
+            match guard.as_ref() {
+                Some(tty) => !tty.ldisc.is_stopped(),
+                None => true, // slot gone — let the next lock attempt return NotAllocated
+            }
+        });
+
         let mut out_buf = [0u8; OUT_BUF_CAP];
         let mut out_len = 0;
         let driver_id;
@@ -1099,6 +1135,10 @@ pub fn hangup(idx: TtyIndex) {
 
     if scheduler_is_enabled() != 0 {
         TTY_INPUT_WAITERS[slot].wake_all();
+        // Phase 21: Wake output waiters (write may be blocked on IXON) and
+        // poll sleepers so they see POLLHUP.
+        TTY_OUTPUT_WAITERS[slot].wake_all();
+        POLL_NOTIFY.wake_all();
     }
 }
 
@@ -1111,6 +1151,67 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
     match guard.as_ref() {
         Some(tty) => tty.hung_up,
         None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 21: Event-driven poll readiness
+// ---------------------------------------------------------------------------
+
+/// Compute poll readiness events for a TTY file descriptor.
+///
+/// Drains pending hardware input, then checks:
+/// - `POLLIN`  — cooked data available for reading
+/// - `POLLOUT` — output is NOT stopped by IXON flow control
+/// - `POLLHUP` — TTY is hung up (or peer closed with no remaining data)
+///
+/// Only events that are both requested and ready are returned.
+pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
+    use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
+
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return 0;
+    }
+
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = match guard.as_mut() {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    // Drain any pending hardware bytes so has_data() is up-to-date.
+    let _ = tty.drain_hw_input();
+
+    let mut revents = 0u16;
+
+    if (requested & POLLIN) != 0 && tty.ldisc.has_data() {
+        revents |= POLLIN;
+    }
+
+    if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() {
+        revents |= POLLOUT;
+    }
+
+    if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
+        revents |= POLLHUP;
+    }
+
+    revents
+}
+
+/// Sleep until a TTY poll-relevant event occurs, or fall back to a short
+/// busy-wait if the scheduler is not yet enabled.
+///
+/// This replaces the `sleep_current_task_ms(1)` busy-wait loop in the
+/// poll/select syscall handlers.  The caller's own timeout logic handles
+/// deadline checking after wakeup.
+pub fn poll_sleep() {
+    if scheduler_is_enabled() != 0 {
+        POLL_NOTIFY.wait_once();
+    } else {
+        // Pre-scheduler fallback: yield briefly.
+        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
     }
 }
 

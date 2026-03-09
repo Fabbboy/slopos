@@ -61,6 +61,17 @@ pub static TTY_SLOTS: [IrqMutex<Option<Tty>>; MAX_TTYS] = [const { IrqMutex::new
 /// independently locks TTY_SLOTS[idx] to check for data).
 pub static TTY_INPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
 
+/// Per-TTY output wait queues — used by `write()` to block when IXON flow
+/// control has stopped output (Ctrl+S).  Writers sleep on this queue and are
+/// woken when output is resumed (Ctrl+Q or any key with IXON set).
+pub static TTY_OUTPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
+
+/// Global poll/select notification queue.  Tasks blocked in `poll()` or
+/// `select()` sleep on this queue instead of busy-waiting with
+/// `sleep_current_task_ms(1)`.  Any event that could change poll readiness
+/// (input arrival, hangup, IXON resume) wakes all waiters.
+pub static POLL_NOTIFY: WaitQueue = WaitQueue::new();
+
 // ---------------------------------------------------------------------------
 // Initialisation
 // ---------------------------------------------------------------------------
