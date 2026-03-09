@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–26 complete; 🛠️ Phase 27 planned (POSIX completion)
+> **Status**: ✅ Phases 1–27 complete (POSIX completion set done)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity; follow-up maturity work now focuses on POSIX completion
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -87,7 +87,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 24 | Job control & controlling TTY hardening | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs`, `plans/TTY_OVERHAUL_PLAN.md` | — | **PLANNED** |
+| 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs` | — | **DONE** |
 
 ---
 
@@ -2646,19 +2646,19 @@ Added 13 Phase 25 regression tests:
 
 ## 31. Phase 27: POSIX Completion Set (Rust-Idiomatic)
 
-**Status**: Planned.
+**Status**: ✅ Done — 1197 total tests (1197 passed, 0 failed); 13 new Phase 27 regressions.
 
 > **Priority**: P2 completeness — close high-value remaining gaps without cloning Linux internals.
 
 ### 31.1 High-value termios/ioctl completion
 
-- Complete the most impactful remaining behavior gaps (e.g., break-handling flags and selected tty ioctls) based on shell/tool compatibility impact.
-- Prioritize semantics that userspace can observe; defer kernel-internal Linux-specific machinery.
+- ✅ **Break handling (IGNBRK, BRKINT, PARMRK)**: Added `handle_break()` to `LineDisc` implementing full POSIX break semantics — IGNBRK discards silently, BRKINT flushes queues and signals SIGINT, PARMRK inserts `\xff\x00\x00` marker. Wired into `input_char()` with NUL-byte detection when any break flag is active.
+- ✅ **FIONREAD/TIOCINQ ioctl** (0x541B): Added `bytes_available()` to `LineDisc`, `RawDisc`, and `LdiscKind`. Exposed through `TtyServices`, syscall adapter, and poll/ioctl handler. Returns count of readable bytes in the input queue.
 
 ### 31.2 Echo/editing polish
 
-- Replace current pragmatic shortcuts in complex echo/edit paths (`ECHOKE`/control-char erase behavior) with deterministic behavior.
-- Keep implementation bounded and test-driven.
+- ✅ **ECHOKE deterministic visual erase**: New `InputAction::KillLineEcho { columns: u16 }` variant. `kill_line()` computes total column width and returns `KillLineEcho` when ECHOKE+ECHO are set, emitting BS-SP-BS triples for each column. Falls back to ECHOK (newline echo) when only ECHOK is set.
+- ✅ **ECHOCTL erase fix**: `erase_char()` now returns `KillLineEcho { columns: 2 }` for control characters echoed as `^X`, correctly erasing both columns (was previously sending a single incomplete BS-SP-BS triple).
 
 ### 31.3 Non-goals (explicit)
 
@@ -2673,9 +2673,38 @@ Added 13 Phase 25 regression tests:
 
 ### 31.5 Verification policy (replaces old standalone final-test phase)
 
-- Each phase must ship with targeted regressions + full `just build` + `just test` pass.
+- ✅ All 13 Phase 27 tests pass; full `just build` + `just test` pass (1197/1197).
 - No separate trailing "test-only" phase; verification is now embedded in every phase gate.
 
+### 31.6 Files modified
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/ldisc.rs` | `handle_break()`, `KillLineEcho` action variant, `bytes_available()`, fixed ECHOKE/ECHOCTL erase |
+| `drivers/src/tty/mod.rs` | `KillLineEcho` handling in `drain_hw_input()`/`push_input()`, `bytes_available()` public API |
+| `drivers/src/tty_tests.rs` | 13 new Phase 27 regression tests |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | FIONREAD ioctl handler |
+| `abi/src/syscall.rs` | `FIONREAD` constant (0x541B) |
+| `lib/src/kernel_services/syscall_services/tty.rs` | `bytes_available` service function |
+| `drivers/src/syscall_services_init.rs` | `tty_bytes_available_adapter` + registration |
+
+### 31.7 Phase 27 regression tests
+
+| # | Test | Covers |
+|---|------|--------|
+| 1 | `test_phase27_ignbrk_discards_break` | IGNBRK silently drops NUL |
+| 2 | `test_phase27_brkint_generates_sigint` | BRKINT flushes + signals |
+| 3 | `test_phase27_parmrk_inserts_marker` | PARMRK `\xff\x00\x00` sequence |
+| 4 | `test_phase27_nul_without_break_flags_passes_through` | NUL passthrough baseline |
+| 5 | `test_phase27_ignbrk_takes_priority_over_brkint` | Flag priority ordering |
+| 6 | `test_phase27_echoke_visual_erase` | ECHOKE BS-SP-BS column erase |
+| 7 | `test_phase27_echok_newline_on_kill` | ECHOK newline fallback |
+| 8 | `test_phase27_echoctl_erase_two_columns` | ECHOCTL `^X` 2-column erase |
+| 9 | `test_phase27_kill_empty_line_no_echo` | Kill on empty line = no output |
+| 10 | `test_phase27_bytes_available` | LineDisc byte count |
+| 11 | `test_phase27_raw_disc_bytes_available` | RawDisc byte count |
+| 12 | `test_phase27_ldisc_kind_bytes_available` | LdiscKind dispatch |
+| 13 | `test_phase27_fionread_constant` | ABI constant value |
 ---
 
 ## 32. File Inventory
@@ -2748,4 +2777,4 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
    - Master close → `pty_close()` → slave gets hangup
 
-The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–22 closed many critical gaps; Phases 23–27 now track the remaining semantic hardening and POSIX completion work needed to keep the design coherent without cloning Linux internals.
+The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–22 closed many critical gaps; Phases 23–27 closed the remaining semantic hardening and POSIX completion work needed to keep the design coherent without cloning Linux internals.
