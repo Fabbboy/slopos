@@ -22,7 +22,7 @@ use crate::tty::session::TtySession;
 use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
-use crate::tty::table::TTY_SLOTS;
+use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::VConsoleState;
 
 fn drain_tty_nonblock(idx: TtyIndex) {
@@ -5520,6 +5520,413 @@ pub fn test_phase24_tiocnotty_constant() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 25: Real TCSETSW/TCSETSF Drain Semantics
+// ===========================================================================
+
+/// Phase 25: The `is_output_idle` function returns `true` when no output
+/// is in flight and the driver reports no pending output.  For synchronous
+/// backends (serial, vconsole) this should always be `true` when no write
+/// is in progress.
+pub fn test_phase25_is_output_idle_initially_true() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - is_output_idle should be true initially, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: The inflight counter starts at zero for all TTY slots.
+pub fn test_phase25_inflight_counter_initial_zero() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    for i in 0..crate::tty::MAX_TTYS {
+        let val = TTY_OUTPUT_INFLIGHT[i].load(Ordering::Relaxed);
+        if val != 0 {
+            klog_info!(
+                "TTY_TEST: BUG - TTY_OUTPUT_INFLIGHT[{}] should be 0 initially, got {}",
+                i,
+                val
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 25: After a write completes, the inflight counter is back to zero
+/// and `is_output_idle` returns true.
+pub fn test_phase25_write_updates_inflight_counter() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Write some data.
+    let data = b"hello drain";
+    let result = tty::write(TtyIndex(0), data);
+    match result {
+        Ok(n) if n == data.len() => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - write should return data.len(), got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // After write completes, inflight should be zero.
+    let inflight = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Relaxed);
+    if inflight != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - inflight should be 0 after write completes, got {}",
+            inflight
+        );
+        return TestResult::Fail;
+    }
+
+    // is_output_idle should return true.
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - is_output_idle should be true after write, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `TCSETSW` (set_termios_wait) applies termios after drain and
+/// preserves pending input (does not flush).
+pub fn test_phase25_tcsetsw_preserves_input_after_drain() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Switch to raw mode so we can observe single-byte input.
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push input, then perform a write (creating output to "drain").
+    tty::push_input(TtyIndex(0), b'x');
+    let _ = tty::write(TtyIndex(0), b"output");
+
+    // Now use TCSETSW to change termios.  Input should survive.
+    let mut changed = raw;
+    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios_wait(TtyIndex(0), &changed).unwrap();
+
+    // Verify input byte is still available.
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(1) if out[0] == b'x' => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSW should preserve pending input, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `TCSETSF` (set_termios_flush) applies termios after drain and
+/// flushes pending input.
+pub fn test_phase25_tcsetsf_flushes_input_after_drain() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push input, then perform a write.
+    tty::push_input(TtyIndex(0), b'y');
+    let _ = tty::write(TtyIndex(0), b"output");
+
+    // Use TCSETSF — should drain output AND flush input.
+    let mut changed = raw;
+    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios_flush(TtyIndex(0), &changed).unwrap();
+
+    // Verify input has been flushed.
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Err(TtyError::WouldBlock) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSF should flush pending input, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `is_output_idle` returns an error for an invalid index.
+pub fn test_phase25_is_output_idle_invalid_index() -> TestResult {
+    match tty::is_output_idle(TtyIndex(255)) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - is_output_idle(255) should return InvalidIndex, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `is_output_idle` returns an error for an unallocated slot.
+pub fn test_phase25_is_output_idle_unallocated() -> TestResult {
+    tty::table::tty_table_init();
+    // Slot 7 is never allocated by default.
+    match tty::is_output_idle(TtyIndex(7)) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - is_output_idle(7) should return NotAllocated, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `wait_output_idle` (via `set_termios_wait`) returns an error
+/// for an invalid TTY index.
+pub fn test_phase25_drain_invalid_index_error() -> TestResult {
+    let t = slopos_abi::syscall::UserTermios::default();
+    match tty::set_termios_wait(TtyIndex(255), &t) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - set_termios_wait(255) should return InvalidIndex, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: The `TtyDriver` trait default `output_pending()` returns `false`.
+pub fn test_phase25_driver_output_pending_default_false() -> TestResult {
+    use crate::tty::driver::TtyDriver;
+
+    // SerialConsoleDriver uses the default implementation.
+    let serial = crate::tty::driver::SerialConsoleDriver;
+    if serial.output_pending() {
+        klog_info!("TTY_TEST: BUG - SerialConsoleDriver.output_pending() should be false");
+        return TestResult::Fail;
+    }
+
+    // VConsoleDriver uses the default implementation.
+    let vc = VConsoleDriver;
+    if vc.output_pending() {
+        klog_info!("TTY_TEST: BUG - VConsoleDriver.output_pending() should be false");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 25: `TtyDriverKind::output_pending()` dispatches correctly for all
+/// driver variants.
+pub fn test_phase25_driver_kind_output_pending_dispatch() -> TestResult {
+    use crate::tty::driver::SerialConsoleDriver;
+
+    let serial_kind = TtyDriverKind::SerialConsole(SerialConsoleDriver);
+    if serial_kind.output_pending() {
+        klog_info!("TTY_TEST: BUG - SerialConsole kind output_pending should be false");
+        return TestResult::Fail;
+    }
+
+    let vc_kind = TtyDriverKind::VConsole(VConsoleDriver);
+    if vc_kind.output_pending() {
+        klog_info!("TTY_TEST: BUG - VConsole kind output_pending should be false");
+        return TestResult::Fail;
+    }
+
+    let pty_master_kind = TtyDriverKind::PtyMaster {
+        slave_idx: TtyIndex(3),
+    };
+    if pty_master_kind.output_pending() {
+        klog_info!("TTY_TEST: BUG - PtyMaster kind output_pending should be false");
+        return TestResult::Fail;
+    }
+
+    let pty_slave_kind = TtyDriverKind::PtySlave {
+        master_idx: TtyIndex(2),
+    };
+    if pty_slave_kind.output_pending() {
+        klog_info!("TTY_TEST: BUG - PtySlave kind output_pending should be false");
+        return TestResult::Fail;
+    }
+
+    let none_kind = TtyDriverKind::None;
+    if none_kind.output_pending() {
+        klog_info!("TTY_TEST: BUG - None kind output_pending should be false");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 25: PTY drain is immediate — `is_output_idle` returns `true` right
+/// after writing to a PTY master/slave pair.
+pub fn test_phase25_pty_drain_immediate() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Allocate a PTY pair.
+    let master_idx = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => {
+            klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
+            return TestResult::Pass;
+        }
+    };
+    let slave_idx = match tty::get_pty_number(master_idx) {
+        Ok(n) => TtyIndex(n as u8),
+        Err(_) => {
+            klog_info!("TTY_TEST: SKIP - could not get PTY slave index");
+            let _ = tty::close_ref(master_idx);
+            return TestResult::Pass;
+        }
+    };
+
+    // Open the slave so the pair stays alive.
+    let _ = tty::open_ref(slave_idx);
+
+    // Write to master (goes to slave's input buffer).
+    let _ = tty::write(master_idx, b"pty drain test");
+
+    // Output should be idle immediately (PTY has no hardware latency).
+    match tty::is_output_idle(master_idx) {
+        Ok(true) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - PTY master is_output_idle should be true, got {:?}",
+                other
+            );
+            let _ = tty::close_ref(slave_idx);
+            let _ = tty::close_ref(master_idx);
+            return TestResult::Fail;
+        }
+    }
+
+    // TCSETSW on slave should complete immediately.
+    let termios = tty::get_termios(slave_idx).unwrap();
+    match tty::set_termios_wait(slave_idx, &termios) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSW on PTY slave should succeed, got {:?}",
+                e
+            );
+            let _ = tty::close_ref(slave_idx);
+            let _ = tty::close_ref(master_idx);
+            return TestResult::Fail;
+        }
+    }
+
+    // Clean up.
+    let _ = tty::close_ref(slave_idx);
+    let _ = tty::close_ref(master_idx);
+    TestResult::Pass
+}
+
+/// Phase 25: `TCSETSW` on console completes immediately because the serial
+/// driver is synchronous (all output is "drained" instantly).
+pub fn test_phase25_console_drain_immediate() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Write output to create something to "drain".
+    let _ = tty::write(TtyIndex(0), b"drain test output\r\n");
+
+    // `is_output_idle` should be true immediately.
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - console is_output_idle should be true after sync write, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // TCSETSW should complete without blocking.
+    let termios = tty::get_termios(TtyIndex(0)).unwrap();
+    match tty::set_termios_wait(TtyIndex(0), &termios) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETSW on console should succeed immediately, got {:?}",
+                e
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 25: `set_termios_mode` with `Now` does NOT call `wait_output_idle`
+/// — it applies termios immediately regardless of pending output.
+pub fn test_phase25_tcsets_now_skips_drain() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    // Push input.
+    tty::push_input(TtyIndex(0), b'z');
+
+    // TCSETS (Now) should apply immediately, input preserved.
+    let mut changed = raw;
+    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    tty::set_termios(TtyIndex(0), &changed).unwrap();
+
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(1) if out[0] == b'z' => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCSETS Now should preserve input, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -5778,5 +6185,19 @@ slopos_lib::define_test_suite!(
         test_phase24_detach_ctty_session_leader,
         test_phase24_detach_ctty_cross_session_denied,
         test_phase24_tiocnotty_constant,
+        // Phase 25: Real TCSETSW/TCSETSF Drain Semantics
+        test_phase25_is_output_idle_initially_true,
+        test_phase25_inflight_counter_initial_zero,
+        test_phase25_write_updates_inflight_counter,
+        test_phase25_tcsetsw_preserves_input_after_drain,
+        test_phase25_tcsetsf_flushes_input_after_drain,
+        test_phase25_is_output_idle_invalid_index,
+        test_phase25_is_output_idle_unallocated,
+        test_phase25_drain_invalid_index_error,
+        test_phase25_driver_output_pending_default_false,
+        test_phase25_driver_kind_output_pending_dispatch,
+        test_phase25_pty_drain_immediate,
+        test_phase25_console_drain_immediate,
+        test_phase25_tcsets_now_skips_drain,
     ]
 );
