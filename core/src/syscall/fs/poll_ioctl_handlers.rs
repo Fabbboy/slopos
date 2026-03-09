@@ -98,11 +98,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        if crate::sched::scheduler_is_preemption_enabled() != 0 {
-            crate::sched::sleep_current_task_ms(1);
-        } else {
-            crate::platform::timer_poll_delay_ms(1);
-        }
+        // Phase 21: Event-driven sleep instead of busy-wait.
+        tty::poll_sleep();
     }
 });
 
@@ -247,11 +244,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        if crate::sched::scheduler_is_preemption_enabled() != 0 {
-            crate::sched::sleep_current_task_ms(1);
-        } else {
-            crate::platform::timer_poll_delay_ms(1);
-        }
+        // Phase 21: Event-driven sleep instead of busy-wait.
+        tty::poll_sleep();
     }
 });
 

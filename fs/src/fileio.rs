@@ -1637,16 +1637,9 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
         }
 
         if let Some(tty_idx) = desc.tty_index {
-            let mut revents = 0u16;
-            if (events & POLLIN) != 0 && tty::has_cooked_data(tty_idx) {
-                revents |= POLLIN;
-            }
-            if (events & POLLOUT) != 0 {
-                revents |= POLLOUT;
-            }
-            if tty::is_hung_up(tty_idx) {
-                revents |= POLLHUP;
-            }
+            // Phase 21: Use tty::poll_events() which drains hw input,
+            // checks IXON stopped state for POLLOUT, and peer/hangup for POLLHUP.
+            let revents = tty::poll_events(tty_idx, events);
             drop(guard);
             return revents;
         }
