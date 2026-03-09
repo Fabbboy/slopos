@@ -4,7 +4,8 @@ use core::ffi::c_int;
 
 use slopos_abi::syscall::{
     POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTN, TIOCGSID,
-    TIOCGWINSZ, TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    TIOCGWINSZ, TIOCNOTTY, TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios, UserTimeval,
+    UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -399,6 +400,34 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let sid = tty::get_session_id(tty_idx);
             try_or_err!(ctx, copy_to_user(ptr, &sid));
+            ctx.ok(0)
+        }
+        TIOCNOTTY => {
+            // Phase 24: Detach calling process from its controlling terminal.
+            //
+            // If the caller has no controlling TTY, or the TTY doesn't match,
+            // return ENOTTY.
+            let task_ptr = crate::task::task_find_by_id(task_id);
+            if task_ptr.is_null() {
+                return ctx.err();
+            }
+
+            let task = unsafe { &mut *task_ptr };
+            match task.controlling_tty {
+                Some(ctty) if ctty == tty_idx => {}
+                _ => return ctx.err(), // ENOTTY — not our controlling terminal
+            }
+
+            let caller_sid = task.sid;
+            let is_session_leader = task.sid != 0 && task.sid == task.task_id;
+
+            // Always clear the caller's controlling_tty.
+            task.controlling_tty = None;
+
+            // If session leader, detach the entire session from the TTY
+            // and signal the foreground pgrp with SIGHUP + SIGCONT.
+            let _ = tty::detach_controlling_terminal(tty_idx, caller_sid, is_session_leader);
+
             ctx.ok(0)
         }
         _ => ctx.err(),

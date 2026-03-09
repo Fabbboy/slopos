@@ -868,7 +868,10 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
 /// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
 ///
 /// Only processes in the same session as the TTY's controlling session may
-/// change the foreground pgrp.  Returns 0 on success, -1 on permission error.
+/// change the foreground pgrp.  Phase 24 additionally validates that the
+/// target process group actually has living members in the session.
+///
+/// Returns `Ok(())` on success, `Err(PermissionDenied)` on validation failure.
 pub fn set_foreground_pgrp_checked(
     idx: TtyIndex,
     pgid: u32,
@@ -878,6 +881,28 @@ pub fn set_foreground_pgrp_checked(
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
+
+    // Phase 24: Before acquiring the per-TTY lock, validate that the target
+    // pgrp actually exists within the session.  This uses the scheduler's
+    // task iterator and must be done outside the TTY lock.  Clearing the
+    // foreground group (pgid == 0) is always allowed.
+    if pgid != 0 {
+        let guard = TTY_SLOTS[slot].lock();
+        let session_id = match guard.as_ref() {
+            Some(tty) if tty.session.has_session() => tty.session.session_id_raw(),
+            Some(_) => 0, // no session attached — skip pgrp validation
+            None => return Err(TtyError::NotAllocated),
+        };
+        drop(guard);
+
+        if session_id != 0 {
+            use slopos_lib::kernel_services::driver_runtime::pgrp_exists_in_session;
+            if !pgrp_exists_in_session(pgid, session_id) {
+                return Err(TtyError::PermissionDenied);
+            }
+        }
+    }
+
     let mut guard = TTY_SLOTS[slot].lock();
     match guard.as_mut() {
         Some(tty) => {
@@ -1085,6 +1110,69 @@ pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bo
     }
 
     tty.session.detach();
+    Ok(true)
+}
+
+/// Phase 24: Detach the calling process from its controlling terminal
+/// (TIOCNOTTY semantics).
+///
+/// If the caller is the session leader, the entire session loses the
+/// controlling terminal — the foreground process group receives SIGHUP +
+/// SIGCONT (matching POSIX hangup behavior).  The session is detached from
+/// the TTY, and `clear_session_controlling_tty` clears every task in the
+/// session that still refers to this TTY.
+///
+/// If the caller is NOT the session leader, only the caller's own
+/// `controlling_tty` is cleared (the TTY session state is unaffected).
+///
+/// Returns `Ok(true)` if the caller was the session leader and signals
+/// were sent, `Ok(false)` if only the caller was detached.
+pub fn detach_controlling_terminal(
+    idx: TtyIndex,
+    caller_sid: u32,
+    caller_is_session_leader: bool,
+) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    if !caller_is_session_leader {
+        // Non-leader: only the caller's controlling_tty field is cleared
+        // (done by the ioctl handler).  TTY session state is unchanged.
+        return Ok(false);
+    }
+
+    // Session leader: detach the session from the TTY and signal the
+    // foreground process group.
+    let (fg_pgid, session_id) = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        let tty = match guard.as_mut() {
+            Some(tty) => tty,
+            None => return Err(TtyError::NotAllocated),
+        };
+
+        // Only the controlling session may detach.
+        let tty_sid = tty.session.session_id_raw();
+        if tty_sid != 0 && tty_sid != caller_sid {
+            return Err(TtyError::PermissionDenied);
+        }
+
+        let pgid = tty.session.fg_pgrp_raw();
+        let sid = tty.session.session_id_raw();
+        tty.session.detach();
+        (pgid, sid)
+    };
+
+    // Signal delivery OUTSIDE the lock to avoid deadlock.
+    if session_id != 0 {
+        let _ = clear_session_controlling_tty(session_id, idx);
+    }
+    if fg_pgid != 0 {
+        let _ = signal_process_group(fg_pgid, SIGHUP);
+        let _ = signal_process_group(fg_pgid, SIGCONT);
+    }
+
     Ok(true)
 }
 

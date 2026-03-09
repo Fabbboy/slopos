@@ -590,6 +590,9 @@ pub const TIOCGSID: u64 = 0x5429;
 pub const TIOCGWINSZ: u64 = 0x5413;
 pub const TIOCSWINSZ: u64 = 0x5414;
 pub const TIOCSCTTY: u64 = 0x540E;
+/// Detach the calling process from its controlling terminal.
+/// Linux value: 0x5422.
+pub const TIOCNOTTY: u64 = 0x5422;
 
 pub const N_TTY: u32 = 0;
 pub const N_RAW: u32 = 1;

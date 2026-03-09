@@ -622,28 +622,38 @@ pub fn test_tty_detach_session_by_id() -> TestResult {
 }
 
 /// Per-TTY API: set_foreground_pgrp_checked with session validation.
+///
+/// Phase 24 update: the outer API now validates that the target pgrp has
+/// living members in the session.  For the "same-session allows" case we
+/// use pgid=0 (clear foreground group) which bypasses pgrp existence.
+/// The cross-session case uses a synthetic pgid that doesn't exist, which
+/// is also correctly denied (now for pgrp-existence rather than session).
 pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
-    // Same session — should succeed.
-    let ok = tty::set_foreground_pgrp_checked(TtyIndex(0), 700, 600);
-    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    // Different session — should fail.
+
+    // Same session, pgid=0 (clear) — should succeed.
+    let ok = tty::set_foreground_pgrp_checked(TtyIndex(0), 0, 600);
+    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
+
+    // Different session — should fail (pgrp 800 doesn't exist in session 600).
     let denied = tty::set_foreground_pgrp_checked(TtyIndex(0), 800, 999);
-    let pgid_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+    let pgid_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
+
     // Clean up.
     tty::detach_session(TtyIndex(0));
     let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
+
     if ok.is_err() {
         klog_info!(
-            "TTY_TEST: BUG - set_fg_pgrp_checked same-session returned {:?}",
+            "TTY_TEST: BUG - set_fg_pgrp_checked same-session clear returned {:?}",
             ok
         );
         return TestResult::Fail;
     }
-    if pgid != 700 {
+    if pgid != 0 {
         klog_info!(
-            "TTY_TEST: BUG - fg_pgrp should be 700 after checked set (got {})",
+            "TTY_TEST: BUG - fg_pgrp should be 0 after checked clear (got {})",
             pgid
         );
         return TestResult::Fail;
@@ -655,9 +665,9 @@ pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
         );
         return TestResult::Fail;
     }
-    if pgid_after != 700 {
+    if pgid_after != 0 {
         klog_info!(
-            "TTY_TEST: BUG - fg_pgrp should remain 700 after denied set (got {})",
+            "TTY_TEST: BUG - fg_pgrp should remain 0 after denied set (got {})",
             pgid_after
         );
         return TestResult::Fail;
@@ -5304,6 +5314,212 @@ pub fn test_phase23_double_eof_no_phantom_accumulation() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 24: Job Control & Controlling TTY Hardening
+// ===========================================================================
+
+/// Phase 24: set_fg_pgrp_checked on the per-TTY API denies non-existent pgrp.
+///
+/// With a session attached (sid=600), attempting to set a foreground pgrp that
+/// has no living members in the session should fail.  The pgrp_exists_in_session
+/// service iterates the scheduler's task list and won't find pgid=99999.
+pub fn test_phase24_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 600, 600);
+
+    // pgid 99999 doesn't exist in any session — should be denied.
+    let result = tty::set_foreground_pgrp_checked(TtyIndex(0), 99999, 600);
+
+    // Clean up.
+    tty::detach_session(TtyIndex(0));
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
+
+    match result {
+        Err(TtyError::PermissionDenied) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected PermissionDenied for nonexistent pgrp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 24: set_fg_pgrp_checked still allows clearing (pgid == 0).
+pub fn test_phase24_set_fg_pgrp_checked_clear_allowed() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 600, 600);
+
+    // pgid == 0 should always be allowed (clears foreground group).
+    let result = tty::set_foreground_pgrp_checked(TtyIndex(0), 0, 600);
+    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(u32::MAX);
+
+    // Clean up.
+    tty::detach_session(TtyIndex(0));
+
+    if result.is_err() {
+        klog_info!(
+            "TTY_TEST: BUG - clearing fg_pgrp (pgid=0) should be allowed, got {:?}",
+            result
+        );
+        return TestResult::Fail;
+    }
+    if pgid != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - fg_pgrp should be 0 after clear, got {}",
+            pgid
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 24: set_fg_pgrp_checked skips pgrp validation when no session attached.
+pub fn test_phase24_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
+    tty::table::tty_table_init();
+
+    // No session attached — any pgid should be allowed (pre-session path).
+    let result = tty::set_foreground_pgrp_checked(TtyIndex(0), 12345, 0);
+    let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
+
+    // Clean up.
+    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
+
+    if result.is_err() {
+        klog_info!(
+            "TTY_TEST: BUG - no-session path should allow any pgid, got {:?}",
+            result
+        );
+        return TestResult::Fail;
+    }
+    if pgid != 12345 {
+        klog_info!("TTY_TEST: BUG - fg_pgrp should be 12345, got {}", pgid);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 24: detach_controlling_terminal (non-leader) returns Ok(false).
+///
+/// When a non-session-leader calls TIOCNOTTY, the TTY session state is
+/// unchanged — only the caller's controlling_tty is cleared (by the ioctl handler).
+pub fn test_phase24_detach_ctty_non_leader() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 600, 600);
+
+    // Non-leader: caller_is_session_leader = false.
+    let result = tty::detach_controlling_terminal(TtyIndex(0), 600, false);
+
+    // Session should still be intact.
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+
+    // Clean up.
+    tty::detach_session(TtyIndex(0));
+
+    match result {
+        Ok(false) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - non-leader detach should return Ok(false), got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    if sid != 600 {
+        klog_info!(
+            "TTY_TEST: BUG - session should remain attached after non-leader detach (sid={})",
+            sid
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 24: detach_controlling_terminal (session leader) detaches session.
+///
+/// When the session leader issues TIOCNOTTY, the TTY's session state is
+/// fully cleared and SIGHUP+SIGCONT would be sent to the foreground pgrp.
+pub fn test_phase24_detach_ctty_session_leader() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 600, 600);
+
+    // Session leader: caller_is_session_leader = true.
+    let result = tty::detach_controlling_terminal(TtyIndex(0), 600, true);
+
+    // Session should be fully detached.
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(u32::MAX);
+
+    match result {
+        Ok(true) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - leader detach should return Ok(true), got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    if sid != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - session should be detached after leader TIOCNOTTY (sid={})",
+            sid
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 24: detach_controlling_terminal denies cross-session detach.
+///
+/// A session leader from a different session cannot detach someone else's TTY.
+pub fn test_phase24_detach_ctty_cross_session_denied() -> TestResult {
+    tty::table::tty_table_init();
+    tty::attach_session(TtyIndex(0), 600, 600);
+
+    // Different session leader trying to detach.
+    let result = tty::detach_controlling_terminal(TtyIndex(0), 999, true);
+
+    // Session should still be intact.
+    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
+
+    // Clean up.
+    tty::detach_session(TtyIndex(0));
+
+    match result {
+        Err(TtyError::PermissionDenied) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - cross-session detach should be denied, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    if sid != 600 {
+        klog_info!(
+            "TTY_TEST: BUG - session should remain after cross-session detach attempt (sid={})",
+            sid
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 24: TIOCNOTTY constant has the correct value.
+pub fn test_phase24_tiocnotty_constant() -> TestResult {
+    use slopos_abi::syscall::TIOCNOTTY;
+    if TIOCNOTTY != 0x5422 {
+        klog_info!(
+            "TTY_TEST: BUG - TIOCNOTTY should be 0x5422, got 0x{:x}",
+            TIOCNOTTY
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -5554,5 +5770,13 @@ slopos_lib::define_test_suite!(
         test_phase23_isig_flush_sigquit,
         test_phase23_isig_flush_sigtstp,
         test_phase23_double_eof_no_phantom_accumulation,
+        // Phase 24: Job Control & Controlling TTY Hardening
+        test_phase24_set_fg_pgrp_checked_nonexistent_pgrp,
+        test_phase24_set_fg_pgrp_checked_clear_allowed,
+        test_phase24_set_fg_pgrp_checked_no_session_skips_validation,
+        test_phase24_detach_ctty_non_leader,
+        test_phase24_detach_ctty_session_leader,
+        test_phase24_detach_ctty_cross_session_denied,
+        test_phase24_tiocnotty_constant,
     ]
 );

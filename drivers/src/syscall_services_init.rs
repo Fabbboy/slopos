@@ -297,6 +297,17 @@ fn tty_poll_sleep_adapter() {
     tty::poll_sleep()
 }
 
+fn tty_detach_controlling_terminal_adapter(
+    tty_index: TtyIndex,
+    caller_sid: u32,
+    caller_is_session_leader: bool,
+) -> i32 {
+    match tty::detach_controlling_terminal(tty_index, caller_sid, caller_is_session_leader) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -332,6 +343,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     open_pty_slave: tty_open_pty_slave_adapter,
     poll_events: tty_poll_events_adapter,
     poll_sleep: tty_poll_sleep_adapter,
+    detach_controlling_terminal: tty_detach_controlling_terminal_adapter,
 };
 
 fn net_scan_members_adapter(

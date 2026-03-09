@@ -135,12 +135,14 @@ define_syscall!(syscall_spawn_path(ctx, args) {
         .map(|values| values.iter().map(|v| v.as_slice()).collect::<Vec<&[u8]>>());
 
     let parent_pid = ctx.process_id().unwrap_or(slopos_abi::task::INVALID_PROCESS_ID);
+    let parent_tid = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
         argv_refs.as_deref(),
         priority,
         flags,
         parent_pid,
+        parent_tid,
     ) {
         Ok(task_id) => ctx.ok(task_id as u64),
         Err(err) => ctx.ok(err as i32 as u64),

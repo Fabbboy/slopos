@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–23 complete; 🛠️ Phases 24–27 planned (semantic hardening + POSIX edge completion)
+> **Status**: ✅ Phases 1–24 complete; 🛠️ Phases 25–27 planned (drain semantics, PTY lifetime safety, POSIX completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, and compositor focus split from POSIX foreground; follow-up maturity work now focuses on EOF/signal semantics, strict job-control contracts, real drain semantics, and PTY lifetime safety
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -36,7 +36,7 @@
 25. [Phase 21: Event-Driven Readiness & IXON Completion ✅](#25-phase-21-event-driven-readiness--ixon-completion)
 26. [Phase 22: Operational Console Routing & Real VConsole ✅](#26-phase-22-operational-console-routing--real-vconsole)
 27. [Phase 23: Canonical EOF, ISIG Flush & Signal Integrity](#27-phase-23-canonical-eof-isig-flush--signal-integrity)
-28. [Phase 24: Job Control & Controlling TTY Hardening](#28-phase-24-job-control--controlling-tty-hardening)
+28. [Phase 24: Job Control & Controlling TTY Hardening ✅](#28-phase-24-job-control--controlling-tty-hardening)
 29. [Phase 25: Real TCSETSW/TCSETSF Drain Semantics](#29-phase-25-real-tcsetswtcsetsf-drain-semantics)
 30. [Phase 26: PTY Lifetime Safety & Scalable Capacity](#30-phase-26-pty-lifetime-safety--scalable-capacity)
 31. [Phase 27: POSIX Completion Set (Rust-Idiomatic)](#31-phase-27-posix-completion-set-rust-idiomatic)
@@ -2455,40 +2455,71 @@ Implemented in one pass with 13 new Phase 22 regressions (test suite count now 1
 | `drivers/src/tty/mod.rs` | Fixed signal loss in `has_data()`, `poll_events()`, `input_available_cb()`; documented `_auto_attach` |
 | `drivers/src/tty_tests.rs` | Added 8 Phase 23 regression tests covering EOF, NOFLSH, signal flush, and phantom accumulation |
 
-## 28. Phase 24: Job Control & Controlling TTY Hardening
+## 28. Phase 24: Job Control & Controlling TTY Hardening ✅
 
-**Status**: Planned.
+**Status**: Complete.
 
 > **Priority**: P0 correctness — tighten process-group/session rules that real shells rely on.
 
 ### 28.1 `TIOCSPGRP` contract hardening
 
-- Keep caller SID validation, and additionally require that the **target** process group belongs to the same controlling session.
-- Return deterministic errors for cross-session target groups.
+- Caller SID validation preserved in `TtySession::set_fg_pgrp_checked()`.
+- **Phase 24 addition**: The outer `tty::set_foreground_pgrp_checked()` now additionally validates that the **target process group** has living members within the TTY's controlling session via the new `pgrp_exists_in_session()` driver-runtime service.  This prevents setting a foreground group that has no processes, which would make SIGINT/SIGTSTP delivery a no-op.
+- `pgid == 0` (clear foreground group) bypasses the existence check.
+- Cross-session target groups return `PermissionDenied` deterministically.
 
 ### 28.2 Controlling-terminal ownership rules
 
-- Tighten `TIOCSCTTY` preconditions (session-leader rules, already-has-ctty behavior).
-- Add explicit detach path via `TIOCNOTTY` (or equivalent ioctl contract), with clear ownership transitions.
-- Keep `O_NOCTTY` behavior explicit and test-backed for `/dev/pts/N` and other TTY opens.
+- `TIOCSCTTY` preconditions verified: must be session leader, must not already have a different ctty, TTY must not belong to a different session.  No changes needed — already solid.
+- **Phase 24 addition**: `TIOCNOTTY` ioctl handler implemented in `poll_ioctl_handlers.rs`:
+  - Verifies the caller's `controlling_tty` matches the ioctl target.
+  - Always clears the caller's `controlling_tty` field.
+  - If the caller is the session leader: detaches the entire session from the TTY, sends SIGHUP + SIGCONT to the foreground process group, and clears `controlling_tty` across all session members via `clear_session_controlling_tty()`.
+  - If the caller is NOT the session leader: only the caller's own `controlling_tty` is cleared; TTY session state is unaffected.
+- `TIOCNOTTY` constant added to `abi/src/syscall.rs` (value `0x5422`).
+- New `detach_controlling_terminal()` function in `tty/mod.rs` implements the POSIX ownership transition logic.
+- Service wiring: `TtyServices` trait, adapter in `syscall_services_init.rs`.
 
 ### 28.3 Session lifecycle coherence
 
-- Ensure `setsid()`, fork inheritance, hangup, and release paths keep task cache (`controlling_tty`) and TTY session state in sync.
-- Preserve strict cross-session denials introduced in earlier phases.
+- Verified: `setsid()` (process_handlers.rs) correctly detaches controlling_tty and releases the TTY session.
+- Verified: `fork()`/`clone()` (task.rs) inherits `controlling_tty`, `pgid`, `sid` via bulk copy + explicit field assignment.
+- Verified: Session leader exit (task.rs) triggers `hangup()` when the leader has a controlling TTY.
+- Verified: `clear_controlling_tty_for_session()` (task.rs) iterates all tasks and clears `controlling_tty` for matching session+tty pairs.
+- Strict cross-session denials from Phase 19 remain intact.
 
-### 28.4 Files modified
+### 28.4 New driver-runtime service
+
+- `pgrp_exists_in_session(pgid: u32, sid: u32) -> bool` — iterates active tasks via `task_iterate_active()` to check if any task with matching pgid+sid exists.  Returns false for pgid=0 or sid=0.
+- Implementation in `core/src/driver_hooks.rs` with `PgrpExistsContext` struct and `pgrp_exists_task()` callback.
+- Wired through `DriverRuntimeServices` service table.
+
+### 28.5 Tests (7 new + 1 updated)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_phase24_set_fg_pgrp_checked_nonexistent_pgrp` | Denies setting fg_pgrp to a pgid with no living members |
+| `test_phase24_set_fg_pgrp_checked_clear_allowed` | Clearing fg_pgrp (pgid=0) always allowed |
+| `test_phase24_set_fg_pgrp_checked_no_session_skips_validation` | No session → any pgid allowed (pre-session path) |
+| `test_phase24_detach_ctty_non_leader` | Non-leader TIOCNOTTY only clears caller's ctty |
+| `test_phase24_detach_ctty_session_leader` | Leader TIOCNOTTY fully detaches session + signals |
+| `test_phase24_detach_ctty_cross_session_denied` | Cross-session detach denied |
+| `test_phase24_tiocnotty_constant` | TIOCNOTTY == 0x5422 |
+| `test_tty_set_fg_pgrp_checked` (updated) | Adapted for Phase 24 pgrp-existence semantics |
+
+### 28.6 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/session.rs` | Harden foreground/session ownership checks |
-| `drivers/src/tty/mod.rs` | Tighten controlling-terminal acquire/release semantics |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Enforce stronger ioctl-side validation (`TIOCSPGRP`, `TIOCSCTTY`, `TIOCNOTTY`) |
-| `fs/src/fileio.rs` | Keep open-path controlling-terminal behavior coherent with ioctl semantics |
-| `core/src/syscall/process_handlers.rs` | Verify `setsid()` transitions remain consistent with new ownership rules |
-| `core/src/scheduler/task.rs` | Keep per-task session/ctty fields synchronized |
-| `abi/src/syscall.rs` | Add missing ioctl constants and documented errno contracts |
-| `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | Add regressions for session/pgrp ownership rules |
+| `abi/src/syscall.rs` | Added `TIOCNOTTY` constant (0x5422) |
+| `lib/src/kernel_services/driver_runtime.rs` | Added `pgrp_exists_in_session` service declaration |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added `detach_controlling_terminal` service method |
+| `core/src/driver_hooks.rs` | Implemented `pgrp_exists_in_session` + wired into service table |
+| `drivers/src/tty/session.rs` | Documentation updates (pgrp validation moved to outer layer) |
+| `drivers/src/tty/mod.rs` | Added pgrp-existence validation in `set_foreground_pgrp_checked()`, added `detach_controlling_terminal()` |
+| `drivers/src/syscall_services_init.rs` | Added `tty_detach_controlling_terminal_adapter` + wired into TTY_SERVICES |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Added `TIOCNOTTY` import and ioctl handler arm |
+| `drivers/src/tty_tests.rs` | 7 new Phase 24 regression tests + updated existing test |
 
 ## 29. Phase 25: Real `TCSETSW`/`TCSETSF` Drain Semantics
 

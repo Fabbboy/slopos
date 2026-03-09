@@ -23,7 +23,7 @@ use slopos_mm::process_vm::{
 
 use crate::sched::schedule_task;
 use crate::scheduler::task_struct::Task;
-use crate::task::{TaskEntry, task_create, task_get_info, task_terminate};
+use crate::task::{TaskEntry, task_create, task_find_by_id, task_get_info, task_terminate};
 use slopos_abi::task::INVALID_TASK_ID;
 
 extern crate alloc;
@@ -67,6 +67,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
         EXEC_SPAWN_DEFAULT_PRIORITY,
         TASK_FLAG_USER_MODE,
         INVALID_PROCESS_ID,
+        INVALID_TASK_ID,
     )
 }
 
@@ -97,6 +98,7 @@ pub fn spawn_program_with_attrs(
     priority: u8,
     mut flags: u16,
     inherit_fds_from: u32,
+    parent_task_id: u32,
 ) -> Result<u32, ExecError> {
     let result = (|| {
         let normalized_path = trim_nul_bytes(path);
@@ -156,6 +158,23 @@ pub fn spawn_program_with_attrs(
         if inherit_fds_from != INVALID_PROCESS_ID {
             fileio_destroy_table_for_process(process_id);
             let _ = fileio_clone_table_for_process(inherit_fds_from, process_id);
+        }
+
+        // Inherit job-control state (pgid, sid, controlling_tty) from the
+        // parent task so spawned children participate in the parent's session.
+        // This matches fork semantics and is required for proper job control:
+        // without it, the child is in its own session and the shell cannot
+        // set it as the foreground process group.
+        if parent_task_id != INVALID_TASK_ID {
+            let parent_ptr = task_find_by_id(parent_task_id);
+            if !parent_ptr.is_null() {
+                let parent = unsafe { &*parent_ptr };
+                let child = unsafe { &mut *task_info };
+                child.pgid = parent.pgid;
+                child.sid = parent.sid;
+                child.controlling_tty = parent.controlling_tty;
+                child.parent_task_id = parent_task_id;
+            }
         }
 
         if schedule_task(task_info) != 0 {

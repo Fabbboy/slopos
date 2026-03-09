@@ -167,6 +167,50 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 24: Check if a process group exists within a given session.
+// ---------------------------------------------------------------------------
+
+struct PgrpExistsContext {
+    pgid: u32,
+    sid: u32,
+    found: bool,
+}
+
+fn pgrp_exists_task(task: *mut Task, context: *mut c_void) {
+    if task.is_null() || context.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &mut *context.cast::<PgrpExistsContext>() };
+    if ctx.found {
+        return; // already found, skip remaining tasks
+    }
+    let t = unsafe { &*task };
+    if t.pgid == ctx.pgid && t.sid == ctx.sid {
+        ctx.found = true;
+    }
+}
+
+fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
+    if pgid == 0 || sid == 0 {
+        return false;
+    }
+
+    let mut ctx = PgrpExistsContext {
+        pgid,
+        sid,
+        found: false,
+    };
+
+    task::task_iterate_active(
+        Some(pgrp_exists_task),
+        (&mut ctx as *mut PgrpExistsContext).cast(),
+    );
+
+    ctx.found
+}
+
+// ---------------------------------------------------------------------------
 // Service table — pure forwards reference the real function directly.
 // ---------------------------------------------------------------------------
 
@@ -188,6 +232,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
     signal_session: runtime_signal_session,
+    pgrp_exists_in_session: runtime_pgrp_exists_in_session,
     irq_init: irq::init,
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,

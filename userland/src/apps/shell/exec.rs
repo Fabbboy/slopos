@@ -447,6 +447,9 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         return Some(0);
     }
 
+    // Put the child in its own process group so the TTY can target it
+    // with SIGINT (Ctrl+C) independently of the shell.
+    let _ = process::setpgid(pid, pid);
     enter_foreground(pid);
 
     // Stream child stdout to the shell display in real-time.
