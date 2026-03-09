@@ -263,6 +263,13 @@ fn tty_is_pty_slave_adapter(tty_index: TtyIndex) -> bool {
     tty::is_pty_slave(tty_index)
 }
 
+fn tty_open_pty_slave_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::pty_open_slave(tty_index) {
+        Ok(count) => count as i32,
+        Err(_) => -1,
+    }
+}
+
 fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
@@ -301,6 +308,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     alloc_pty: tty_alloc_pty_adapter,
     get_pty_number: tty_get_pty_number_adapter,
     is_pty_slave: tty_is_pty_slave_adapter,
+    open_pty_slave: tty_open_pty_slave_adapter,
 };
 
 fn net_scan_members_adapter(

@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–18 Complete; Phases 19–22 Planned; Phase 23 is the final verification gate
+> **Status**: Phases 1–20 Complete; Phases 21–22 Planned; Phase 23 is the final verification gate
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, and compositor focus split from POSIX foreground; follow-up maturity work still remains for controlling-terminal ownership unification, strict cross-session denial, PTY pair atomicity, event-driven readiness, IXON stop enforcement, and real VConsole routing
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, and compositor focus split from POSIX foreground; follow-up maturity work still remains for event-driven readiness, IXON stop enforcement, and real VConsole routing
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -2256,7 +2256,7 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ## 24. Phase 20: PTY Pair Atomicity & Lifecycle Hardening
 
-> **Status**: **PLANNED**
+> **Status**: **DONE** ✅
 > **Priority**: P1 — PTY functionality exists, but pair-level lifecycle still needs hardening.
 > **Rationale**: The current PTY implementation is structurally correct, but pair allocation/free still happens as separate slot operations. That is acceptable for the first landing, yet long-term PTY code should treat master/slave creation and teardown as one atomic lifecycle event so concurrent opens/closes cannot observe half-initialized or half-freed pairs.
 
@@ -2290,6 +2290,15 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 | `fs/src/fileio.rs` | Keep `/dev/ptmx` and `/dev/pts/N` opens coherent with the harder lifecycle model |
 | `drivers/src/tty_tests.rs` | Add allocation-race, close-order, and rapid-reuse regression tests |
 
+### 24.5 Implementation summary
+
+- **`PTY_ALLOC_LOCK`**: Added a `static IrqMutex<()>` pair-level serialization lock in `pty.rs`. Held during the entire find-slot + initialize sequence in `pty_alloc()` and during the check-and-free sequence in `free_pair_if_unused()`, eliminating TOCTOU windows between slot discovery and slot initialization/teardown.
+- **Atomic `pty_open_slave()`**: New function combines slave validation (`is_pty_slave`) + `open_count` increment under `PTY_ALLOC_LOCK`, replacing the two-step `is_pty_slave()` then `open_ref()` pattern in `fileio.rs` `/dev/pts/N` opens. This prevents a concurrent `free_pair_if_unused()` from freeing the slot between the check and the open.
+- **`clear_peer_closed()` scoped to `pub(crate)`**: Narrowed visibility from `pub` to `pub(crate)` — only `mod.rs::open_ref()` needs cross-module access.
+- **Lock ordering documented**: `PTY_ALLOC_LOCK` → `TTY_SLOTS[i]` (never reverse). Module-level doc comment in `pty.rs` captures the ordering contract.
+- **Syscall plumbing**: Added `open_pty_slave` to `TtyServices` trait and wired adapter in `syscall_services_init.rs`.
+- **9 regression tests** added covering: pair initialization coherence, master-first close, slave-first close, reallocation after free, open-slave type validation, open-slave preventing free, partial open preventing free, rapid alloc/free/realloc data flow, and open-slave-after-free rejection.
+- **Test count**: 1112 → 1121 (all passing).
 ---
 
 ## 25. Phase 21: Event-Driven Readiness & IXON Completion
@@ -2373,7 +2382,7 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ## 27. Phase 23: Verify & Test
 
-**Status**: Pending re-run after Phases 18–22 land. The last completed verification run covered Phases 1–17 and finished with `TESTS SUMMARY: total=1090 passed=1090 failed=0`.
+**Status**: Pending re-run after Phases 21–22 land. The last completed verification run covered Phases 1–20 and finished with `TESTS SUMMARY: total=1121 passed=1121 failed=0`.
 
 > **Priority**: Final gate — comprehensive verification after all correctness, maturity, and backend phases.
 
@@ -2547,4 +2556,4 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
    - Master close → `pty_close()` → slave gets hangup
 
-The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–17 closed many critical gaps; Phases 18–22 now track the remaining maturity work needed to make the long-term design fully coherent.
+The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–20 closed many critical gaps; Phases 21–22 now track the remaining maturity work needed to make the long-term design fully coherent.

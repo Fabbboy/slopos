@@ -4259,6 +4259,311 @@ pub fn test_phase19_cross_session_denied_error_variant() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 20: PTY Pair Atomicity & Lifecycle Hardening
+// ===========================================================================
+
+/// Phase 20: pty_alloc initialises both master and slave slots atomically.
+pub fn test_phase20_pty_alloc_pair_both_initialized() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(err) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = match tty::get_pty_number(master) {
+        Ok(n) => n,
+        Err(err) => {
+            klog_info!("TTY_TEST: BUG - get_pty_number failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+    let slave = TtyIndex(slave_num as u8);
+
+    // Both slots should be Some (initialised).
+    let master_exists =
+        tty::table::with_tty_ref(master, |tty| tty.index == master).unwrap_or(false);
+    let slave_exists = tty::table::with_tty_ref(slave, |tty| tty.index == slave).unwrap_or(false);
+
+    // Cleanup.
+    tty::open_ref(master).ok();
+    tty::open_ref(slave).ok();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    if !master_exists || !slave_exists {
+        klog_info!(
+            "TTY_TEST: BUG - pair not fully initialised (master={}, slave={})",
+            master_exists,
+            slave_exists
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: closing master then slave frees both slots.
+pub fn test_phase20_pty_close_master_first_frees_pair() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    // Close master first (triggers hangup on slave), then slave.
+    let _ = tty::close_ref(master);
+    let _ = tty::close_ref(slave);
+
+    // Both slots should now be None (freed).
+    let master_freed = TTY_SLOTS[master.0 as usize].lock().is_none();
+    let slave_freed = TTY_SLOTS[slave.0 as usize].lock().is_none();
+
+    if !master_freed || !slave_freed {
+        klog_info!(
+            "TTY_TEST: BUG - pair not freed after master-first close (master_freed={}, slave_freed={})",
+            master_freed,
+            slave_freed
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: closing slave then master frees both slots (order independence).
+pub fn test_phase20_pty_close_slave_first_frees_pair() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    // Close slave first, then master.
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    let master_freed = TTY_SLOTS[master.0 as usize].lock().is_none();
+    let slave_freed = TTY_SLOTS[slave.0 as usize].lock().is_none();
+
+    if !master_freed || !slave_freed {
+        klog_info!(
+            "TTY_TEST: BUG - pair not freed after slave-first close (master_freed={}, slave_freed={})",
+            master_freed,
+            slave_freed
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: freed pair can be reallocated with fresh state.
+pub fn test_phase20_pty_reallocation_after_free() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Allocate + open + close a pair to return slots to the free pool.
+    let master1 = tty::pty_alloc().unwrap();
+    let slave1 = TtyIndex(tty::get_pty_number(master1).unwrap() as u8);
+    tty::open_ref(master1).unwrap();
+    tty::open_ref(slave1).unwrap();
+    let _ = tty::close_ref(slave1);
+    let _ = tty::close_ref(master1);
+
+    // Reallocate — should succeed and return valid indices.
+    let master2 = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(err) => {
+            klog_info!("TTY_TEST: BUG - reallocation failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+    let slave2 = TtyIndex(tty::get_pty_number(master2).unwrap() as u8);
+
+    // Verify the reallocated pair is functional.
+    tty::open_ref(master2).unwrap();
+    tty::open_ref(slave2).unwrap();
+
+    let slave_is_pty = tty::is_pty_slave(slave2);
+    let master_is_not_slave = !tty::is_pty_slave(master2);
+
+    let _ = tty::close_ref(slave2);
+    let _ = tty::close_ref(master2);
+
+    if !slave_is_pty || !master_is_not_slave {
+        klog_info!(
+            "TTY_TEST: BUG - reallocated pair has wrong types (slave_is_pty={}, master_is_not_slave={})",
+            slave_is_pty,
+            master_is_not_slave
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: pty_open_slave validates that the slot is actually a PTY slave.
+pub fn test_phase20_pty_open_slave_validates_type() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Try to open a serial console slot (index 0) as a PTY slave — should fail.
+    let result = tty::pty_open_slave(TtyIndex(0));
+    if result.is_ok() {
+        klog_info!("TTY_TEST: BUG - pty_open_slave should reject non-slave index 0");
+        // Undo the accidental open.
+        let _ = tty::close_ref(TtyIndex(0));
+        return TestResult::Fail;
+    }
+
+    // Try to open a non-existent slot — should fail.
+    let result = tty::pty_open_slave(TtyIndex(5));
+    if result.is_ok() {
+        klog_info!("TTY_TEST: BUG - pty_open_slave should reject empty slot 5");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Phase 20: pty_open_slave increments open_count, preventing pair free.
+pub fn test_phase20_pty_open_slave_prevents_free() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+
+    // Open slave via the validated path.
+    let open_rc = tty::pty_open_slave(slave);
+    if open_rc.is_err() {
+        klog_info!("TTY_TEST: BUG - pty_open_slave failed on valid slave");
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    // Close master — slave still has open_count > 0, so pair should NOT be freed.
+    let _ = tty::close_ref(master);
+
+    let slave_still_exists = TTY_SLOTS[slave.0 as usize].lock().is_some();
+
+    // Cleanup.
+    let _ = tty::close_ref(slave);
+
+    if !slave_still_exists {
+        klog_info!("TTY_TEST: BUG - slave freed while open_count > 0");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: free_pair_if_unused does not free when one side has open_count > 0.
+pub fn test_phase20_partial_open_no_free() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    // Open slave a second time to keep it alive.
+    tty::open_ref(slave).unwrap();
+
+    // Close master (open_count → 0, hangup slave).
+    let _ = tty::close_ref(master);
+
+    // Close slave once (open_count → 1, still alive).
+    let _ = tty::close_ref(slave);
+
+    let slave_alive = TTY_SLOTS[slave.0 as usize].lock().is_some();
+    let master_alive = TTY_SLOTS[master.0 as usize].lock().is_some();
+
+    // Final close of slave (open_count → 0).
+    let _ = tty::close_ref(slave);
+
+    if !slave_alive {
+        klog_info!("TTY_TEST: BUG - slave freed with open_count > 0");
+        return TestResult::Fail;
+    }
+    // Master should still be alive because pair-free only happens when BOTH are 0.
+    if !master_alive {
+        klog_info!("TTY_TEST: BUG - master freed while slave still has open_count > 0");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: rapid allocate/free/reallocate cycles produce valid pairs.
+pub fn test_phase20_rapid_alloc_free_realloc() -> TestResult {
+    tty::table::tty_table_init();
+
+    for i in 0..3u8 {
+        let master = match tty::pty_alloc() {
+            Ok(idx) => idx,
+            Err(err) => {
+                klog_info!("TTY_TEST: BUG - rapid alloc cycle {} failed: {:?}", i, err);
+                return TestResult::Fail;
+            }
+        };
+        let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+
+        tty::open_ref(master).unwrap();
+        tty::open_ref(slave).unwrap();
+
+        // Verify data flows correctly on this pair.
+        let saved = tty::get_termios(slave).unwrap();
+        let mut raw = saved;
+        raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+        tty::set_termios(slave, &raw).unwrap();
+
+        let write_ok = tty::write(master, b"x").is_ok();
+        let mut buf = [0u8; 4];
+        let read_ok = tty::read(slave, &mut buf, true) == Ok(1) && buf[0] == b'x';
+
+        tty::set_termios(slave, &saved).unwrap();
+        let _ = tty::close_ref(slave);
+        let _ = tty::close_ref(master);
+
+        if !write_ok || !read_ok {
+            klog_info!(
+                "TTY_TEST: BUG - rapid alloc cycle {} data flow broken (write={}, read={})",
+                i,
+                write_ok,
+                read_ok
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 20: pty_open_slave on a freed slave returns NotAllocated.
+pub fn test_phase20_pty_open_slave_after_free() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = tty::pty_alloc().unwrap();
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::open_ref(master).unwrap();
+    tty::open_ref(slave).unwrap();
+
+    // Free the pair.
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+
+    // Attempting to open the freed slave should fail.
+    let result = tty::pty_open_slave(slave);
+    match result {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - pty_open_slave on freed slave expected NotAllocated, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -4465,5 +4770,15 @@ slopos_lib::define_test_suite!(
         test_phase19_same_session_background_write_sigttou,
         test_phase19_check_write_no_session_allowed,
         test_phase19_cross_session_denied_error_variant,
+        // Phase 20: PTY Pair Atomicity & Lifecycle Hardening
+        test_phase20_pty_alloc_pair_both_initialized,
+        test_phase20_pty_close_master_first_frees_pair,
+        test_phase20_pty_close_slave_first_frees_pair,
+        test_phase20_pty_reallocation_after_free,
+        test_phase20_pty_open_slave_validates_type,
+        test_phase20_pty_open_slave_prevents_free,
+        test_phase20_partial_open_no_free,
+        test_phase20_rapid_alloc_free_realloc,
+        test_phase20_pty_open_slave_after_free,
     ]
 );

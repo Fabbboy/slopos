@@ -805,10 +805,9 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
     }
 
     if let Some(slave_idx) = parse_pts_path(path_bytes) {
-        if !tty::is_pty_slave(slave_idx) {
-            return -1;
-        }
-
+        // Phase 20: use open_pty_slave() which atomically validates the
+        // slot is still a live PTY slave AND increments its open count,
+        // preventing races with concurrent pair teardown.
         return with_tables(|kernel, processes| {
             let kernel_ptr = kernel as *mut FileTableSlot;
             let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
@@ -834,6 +833,12 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
                 return -1;
             };
 
+            // Atomically validate + open the slave before populating the FD.
+            if tty::open_pty_slave(slave_idx) < 0 {
+                drop(guard);
+                return -1;
+            }
+
             let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
             desc.inode = 0;
             desc.fs = None;
@@ -846,12 +851,6 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
             desc.socket_idx = INVALID_SOCKET_IDX;
             desc.pipe_read_end = false;
             desc.pipe_write_end = false;
-
-            if tty::open_ref(slave_idx) < 0 {
-                reset_descriptor(desc);
-                drop(guard);
-                return -1;
-            }
 
             drop(guard);
             maybe_acquire_controlling_tty_on_open(slave_idx, flags);

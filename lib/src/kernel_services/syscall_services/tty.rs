@@ -28,6 +28,7 @@ crate::define_service! {
         alloc_pty() -> i32;
         get_pty_number(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
+        open_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         detach_session_by_id(session_id: u32);
     }
 }

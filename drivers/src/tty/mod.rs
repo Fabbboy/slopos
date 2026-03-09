@@ -263,7 +263,7 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_INPUT_WAITERS[slot].wake_one();
 }
 
-pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc};
+pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc, pty_open_slave};
 
 /// Read cooked data from a specific TTY.
 ///
