@@ -27,6 +27,7 @@ pub mod ldisc;
 pub mod pty;
 pub mod session;
 pub mod table;
+pub mod vconsole;
 
 use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
@@ -172,6 +173,7 @@ impl Tty {
 /// The currently active TTY index (receives keyboard input).
 /// Defaults to 0 (serial console).
 static ACTIVE_TTY: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_CONSOLE_TTY: AtomicU8 = AtomicU8::new(0);
 
 /// Returns the TTY index that should receive keyboard input.
 pub fn active_tty() -> TtyIndex {
@@ -181,6 +183,41 @@ pub fn active_tty() -> TtyIndex {
 /// Set the active TTY (the one receiving keyboard input).
 pub fn set_active_tty(idx: TtyIndex) {
     ACTIVE_TTY.store(idx.0, Ordering::Relaxed);
+}
+
+/// Switch keyboard routing to a specific active TTY.
+///
+/// This controls only the TTY input route (`active_tty`). It does not alter:
+/// - compositor focus (UI/window focus)
+/// - POSIX foreground process group/job control (`fg_pgrp`)
+pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        match guard.as_ref() {
+            Some(tty) if tty.active => {}
+            _ => return Err(TtyError::NotAllocated),
+        }
+    }
+
+    set_active_tty(idx);
+    if scheduler_is_enabled() != 0 {
+        TTY_INPUT_WAITERS[slot].wake_all();
+        POLL_NOTIFY.wake_all();
+    }
+    Ok(())
+}
+
+pub fn set_default_console_tty(idx: TtyIndex) {
+    DEFAULT_CONSOLE_TTY.store(idx.0, Ordering::Relaxed);
+}
+
+pub fn default_console_tty() -> TtyIndex {
+    TtyIndex(DEFAULT_CONSOLE_TTY.load(Ordering::Relaxed))
 }
 
 // ---------------------------------------------------------------------------

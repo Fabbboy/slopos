@@ -5,7 +5,7 @@
 //!
 //! Implementations:
 //! - `SerialConsoleDriver` — wraps COM1 UART (polling-based)
-//! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer output (stub)
+//! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer text output
 //! - `PtyMaster` / `PtySlave` — pseudo-terminal pair (stub, Phase 14)
 //!
 //! Phase 8 adds `DriverId` for lock-free I/O dispatch: the TTY core copies
@@ -130,7 +130,7 @@ impl TtyDriverKind {
 pub enum DriverId {
     /// COM1 serial console.
     SerialConsole,
-    /// PS/2 + framebuffer virtual console (currently mirrors to serial).
+    /// PS/2 + framebuffer virtual console.
     VConsole,
     /// PTY master (Phase 14 stub).
     PtyMaster { slave_idx: TtyIndex },
@@ -154,8 +154,13 @@ pub enum DriverId {
 /// does not block operations on other TTYs.
 pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
     match driver {
-        DriverId::SerialConsole | DriverId::VConsole => {
-            // Both currently output via COM1 serial.
+        DriverId::SerialConsole => {
+            for &b in data {
+                serial::serial_putc_com1(b);
+            }
+        }
+        DriverId::VConsole => {
+            super::vconsole::write(data);
             for &b in data {
                 serial::serial_putc_com1(b);
             }
@@ -209,19 +214,17 @@ impl TtyDriver for SerialConsoleDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Virtual console driver — PS/2 keyboard + framebuffer (stub)
+// Virtual console driver — PS/2 keyboard + framebuffer
 // ---------------------------------------------------------------------------
 
 /// Driver backend for a virtual console (PS/2 keyboard + framebuffer).
 ///
 /// Input arrives via interrupt (`tty::push_input`), so `drain_input` returns 0.
-/// Output will eventually go to the framebuffer; for now it mirrors to serial.
 pub struct VConsoleDriver;
 
 impl TtyDriver for VConsoleDriver {
     fn write_output(&self, buf: &[u8]) {
-        // TODO(Phase 3+): Route to framebuffer text renderer.
-        // For now, mirror to serial so we don't lose output.
+        super::vconsole::write(buf);
         for &b in buf {
             serial::serial_putc_com1(b);
         }
