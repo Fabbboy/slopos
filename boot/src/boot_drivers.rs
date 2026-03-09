@@ -128,6 +128,18 @@ fn boot_step_timer_setup_fn() {
         info: bf.info,
     });
     video::init(fb, backend);
+    if let (Some(base), Some(info)) = (
+        video::framebuffer::get_fb_base_ptr(),
+        video::framebuffer::get_display_info(),
+    ) {
+        slopos_drivers::tty::vconsole::register_framebuffer(
+            base,
+            info.pitch,
+            info.width,
+            info.height,
+            info.bytes_per_pixel(),
+        );
+    }
     sync_mouse_bounds(fb);
 }
 

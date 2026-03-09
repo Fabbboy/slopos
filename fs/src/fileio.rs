@@ -532,6 +532,8 @@ fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
 /// through the platform console/TTY instead of a filesystem.  This ensures
 /// every new user process satisfies the POSIX FD bootstrap contract.
 fn bootstrap_console_fds(table: &mut FileTableSlot) {
+    let console_tty = tty::default_console_tty();
+
     // FD 0 = stdin (read-only console)
     table.descriptors[0] = FileDescriptor {
         inode: 0,
@@ -540,7 +542,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_READ,
         valid: true,
         cloexec: false,
-        tty_index: Some(TtyIndex(0)),
+        tty_index: Some(console_tty),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -554,7 +556,7 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        tty_index: Some(TtyIndex(0)),
+        tty_index: Some(console_tty),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
@@ -568,16 +570,16 @@ fn bootstrap_console_fds(table: &mut FileTableSlot) {
         flags: FILE_OPEN_WRITE,
         valid: true,
         cloexec: false,
-        tty_index: Some(TtyIndex(0)),
+        tty_index: Some(console_tty),
         pipe_id: INVALID_PIPE_ID,
         socket_idx: INVALID_SOCKET_IDX,
         pipe_read_end: false,
         pipe_write_end: false,
     };
 
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::open_ref(TtyIndex(0));
+    let _ = tty::open_ref(console_tty);
+    let _ = tty::open_ref(console_tty);
+    let _ = tty::open_ref(console_tty);
 }
 
 fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u32) {
