@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: Phases 1–20 Complete; Phases 21–22 Planned; Phase 23 is the final verification gate
+> **Status**: Phases 1–22 Complete; Phase 23 is the final verification gate
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, and compositor focus split from POSIX foreground; follow-up maturity work still remains for event-driven readiness, IXON stop enforcement, and real VConsole routing
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -78,7 +78,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 19 | Strict session gates & foreground outcomes | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
 | 20 | PTY pair atomicity & lifecycle hardening | `drivers/src/tty/pty.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
 | 21 | Event-driven readiness & IXON completion | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/waitqueue.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
-| 22 | Operational console routing & real VConsole | `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/ps2/keyboard.rs`, `fs/src/fileio.rs`, `core/src/syscall/ui_handlers.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
+| 22 | Operational console routing & real VConsole | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `boot/src/boot_drivers.rs`, `video/src/framebuffer.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vconsole.rs` | **DONE** |
 | 23 | Final verification & testing | `plans/TTY_OVERHAUL_PLAN.md` | — | **PENDING** |
 
 ---
@@ -2348,7 +2348,7 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ## 26. Phase 22: Operational Console Routing & Real VConsole
 
-> **Status**: **PLANNED**
+> **Status**: **DONE** ✅
 > **Priority**: P2 — Not a POSIX blocker, but important to complete the long-term TTY vision.
 > **Rationale**: The architecture now supports multiple TTYs, yet the operational console story is still serial-first: bootstrap stdio is pinned to `TtyIndex(0)` and `VConsoleDriver` still mirrors output to serial instead of acting as a real framebuffer-backed console. Linux and Redox both separate terminal semantics from transport/backend details; SlopOS should finish that separation too.
 
@@ -2374,20 +2374,43 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ### 26.4 Files modified
 
-| File | Planned change |
-|------|----------------|
-| `drivers/src/tty/driver.rs` | Implement real VConsole output instead of serial mirroring |
-| `drivers/src/tty/mod.rs` | Clarify active-console vs POSIX foreground boundaries |
-| `drivers/src/ps2/keyboard.rs` | Keep active-TTY input routing aligned with the real console backend |
-| `fs/src/fileio.rs` | Revisit bootstrap console FD assignment policy |
-| `core/src/syscall/ui_handlers.rs` | Keep compositor-facing focus/activation hooks explicit |
-| `drivers/src/tty_tests.rs` | Add active-console and VConsole backend regressions |
+| File | Change |
+|------|--------|
+| `drivers/src/tty/vconsole.rs` | Added framebuffer-backed virtual console renderer with static cell buffer, cursor control, scrolling, and serial fallback |
+| `drivers/src/tty/driver.rs` | Routed `DriverId::VConsole` and `VConsoleDriver` writes through `vconsole::write()` with serial debug mirroring |
+| `drivers/src/tty/mod.rs` | Added policy default console selector (`DEFAULT_CONSOLE_TTY`) and validated `switch_active_tty()` with waiter wakeup |
+| `fs/src/fileio.rs` | Console FD bootstrap now uses `tty::default_console_tty()` instead of hardcoded `TtyIndex(0)` |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added `default_console_tty()` and `switch_active_tty()` to `TtyServices` |
+| `drivers/src/syscall_services_init.rs` | Added adapters and service wiring for `default_console_tty()` and `switch_active_tty()` |
+| `video/src/framebuffer.rs` | Added `get_fb_base_ptr()` to expose mapped framebuffer virtual base |
+| `boot/src/boot_drivers.rs` | Registered framebuffer geometry/base with TTY VConsole after `video::init()` |
+| `drivers/src/tty_tests.rs` | Added 13 Phase 22 regression tests for default console policy, active switch validation, and VConsole state machine behavior |
+
+### 26.5 Implementation Summary
+
+Implemented in one pass with 13 new Phase 22 regressions (test suite count now 1145 before final full-gate rerun).
+
+**Console bootstrap policy**:
+- Added `DEFAULT_CONSOLE_TTY` atomic in `tty::mod` with `set_default_console_tty()` and `default_console_tty()`.
+- Exposed `default_console_tty()` through `TtyServices` so `fs::fileio` uses policy-selected console bootstrap from the syscall service boundary.
+- Updated `bootstrap_console_fds()` so FD 0/1/2 and all three `open_ref()` calls use the policy-selected TTY.
+
+**Operational VConsole renderer**:
+- Added `tty::vconsole` module with a const-initializable `VConsoleState` (cursor, dimensions, fixed cell buffer, optional framebuffer metadata).
+- Implemented byte semantics for printable/control characters (`\n`, `\r`, backspace, tab), wrap logic, scroll-up, per-cell glyph rendering, and framebuffer row clear/move.
+- Added framebuffer registration path from boot (`boot_drivers`) using video subsystem metadata plus mapped framebuffer base.
+- Added `video::framebuffer::get_fb_base_ptr()` so boot can register the already mapped virtual framebuffer pointer without duplicating mapping logic.
+
+**Active TTY switching contract**:
+- Added `switch_active_tty(idx) -> Result<(), TtyError>` with index bounds checks, allocation/active validation, and waiter wakeups so blocked readers re-check readiness.
+- Documented and tested the separation between compositor focus, active keyboard route, and POSIX foreground process-group control.
+- Exposed `switch_active_tty()` through `TtyServices` with adapter wiring.
 
 ---
 
 ## 27. Phase 23: Verify & Test
 
-**Status**: Pending re-run after Phases 21–22 land. The last completed verification run covered Phases 1–20 and finished with `TESTS SUMMARY: total=1121 passed=1121 failed=0`.
+**Status**: Pending final sign-off. Latest full verification after Phase 22 reports `TESTS SUMMARY: total=1145 passed=1145 failed=0`.
 
 > **Priority**: Final gate — comprehensive verification after all correctness, maturity, and backend phases.
 
