@@ -160,6 +160,10 @@ pub fn get_display_info() -> Option<DisplayInfo> {
     FRAMEBUFFER.lock().fb.map(|fb| fb.info)
 }
 
+pub fn get_fb_base_ptr() -> Option<*mut u8> {
+    FRAMEBUFFER.lock().fb.map(|fb| fb.base_ptr())
+}
+
 pub(crate) fn snapshot() -> Option<FbState> {
     FRAMEBUFFER.lock().fb
 }

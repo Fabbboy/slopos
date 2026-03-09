@@ -174,6 +174,13 @@ fn tty_get_compositor_focus_adapter() -> u32 {
     tty::get_compositor_focus().unwrap_or(0)
 }
 
+fn tty_switch_active_tty_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::switch_active_tty(tty_index) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 fn tty_set_foreground_pgrp_adapter(tty_index: TtyIndex, pgid: u32) -> i32 {
     match tty::set_foreground_pgrp(tty_index, pgid) {
         Ok(()) => 0,
@@ -221,6 +228,10 @@ fn tty_release_controlling_terminal_adapter(tty_index: TtyIndex, session_id: u32
         Ok(false) => -1,
         Err(_) => -1,
     }
+}
+
+fn tty_default_console_tty_adapter() -> TtyIndex {
+    tty::default_console_tty()
 }
 
 fn tty_open_ref_adapter(tty_index: TtyIndex) -> i32 {
@@ -300,6 +311,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     set_winsize: tty_set_winsize_adapter,
     set_compositor_focus: tty_set_compositor_focus_adapter,
     get_compositor_focus: tty_get_compositor_focus_adapter,
+    switch_active_tty: tty_switch_active_tty_adapter,
     set_foreground_pgrp: tty_set_foreground_pgrp_adapter,
     get_foreground_pgrp: tty_get_foreground_pgrp_adapter,
     get_session_id: tty_get_session_id_adapter,
@@ -309,6 +321,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     attach_session: tty_attach_session_adapter,
     acquire_controlling_terminal: tty_acquire_controlling_terminal_adapter,
     release_controlling_terminal: tty_release_controlling_terminal_adapter,
+    default_console_tty: tty_default_console_tty_adapter,
     open_ref: tty_open_ref_adapter,
     close_ref: tty_close_ref_adapter,
     hangup: tty_hangup_adapter,

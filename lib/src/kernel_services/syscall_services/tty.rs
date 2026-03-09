@@ -13,6 +13,7 @@ crate::define_service! {
         set_winsize(tty_index: slopos_abi::syscall::TtyIndex, ws: *const slopos_abi::syscall::UserWinsize);
         set_compositor_focus(target: u32) -> i32;
         get_compositor_focus() -> u32;
+        switch_active_tty(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         set_foreground_pgrp(tty_index: slopos_abi::syscall::TtyIndex, pgid: u32) -> i32;
         get_foreground_pgrp(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
         get_session_id(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
@@ -21,6 +22,7 @@ crate::define_service! {
         attach_session(tty_index: slopos_abi::syscall::TtyIndex, leader_pid: u32, leader_pgid: u32);
         acquire_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_leader: u32, session_pgid: u32) -> i32;
         release_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_id: u32) -> i32;
+        default_console_tty() -> slopos_abi::syscall::TtyIndex;
         open_ref(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         close_ref(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         hangup(tty_index: slopos_abi::syscall::TtyIndex);
