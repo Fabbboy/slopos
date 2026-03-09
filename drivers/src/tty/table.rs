@@ -35,6 +35,7 @@ use core::sync::atomic::AtomicU32;
 
 use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
 use super::ldisc::{LdiscKind, LineDisc};
+use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, Tty, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
@@ -82,6 +83,15 @@ pub static POLL_NOTIFY: WaitQueue = WaitQueue::new();
 /// Increment **before** `write_driver_unlocked`, decrement **after**,
 /// then wake `TTY_OUTPUT_WAITERS` so drain waiters re-check.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
+
+/// Per-TTY generation counter.  Incremented each time a slot transitions
+/// from allocated → free (`*slot = None`).  Used by `PtyPeerHandle` to
+/// detect stale references after rapid PTY free/reuse cycles.
+///
+/// A write to a peer whose generation no longer matches is silently
+/// discarded — the peer slot may have been freed and reallocated to an
+/// unrelated PTY pair.
+pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
 // ---------------------------------------------------------------------------
 // Initialisation
@@ -164,11 +174,11 @@ impl Tty {
         }
     }
 
-    pub fn new_pty_master(index: TtyIndex, slave_idx: TtyIndex) -> Self {
+    pub fn new_pty_master(index: TtyIndex, peer: PtyPeerHandle) -> Self {
         Self {
             index,
             ldisc: LdiscKind::Raw(super::ldisc::RawDisc::new()),
-            driver: TtyDriverKind::PtyMaster { slave_idx },
+            driver: TtyDriverKind::PtyMaster { peer },
             session: TtySession::new(),
             winsize: UserWinsize {
                 ws_row: 24,
@@ -183,11 +193,11 @@ impl Tty {
         }
     }
 
-    pub fn new_pty_slave(index: TtyIndex, master_idx: TtyIndex) -> Self {
+    pub fn new_pty_slave(index: TtyIndex, peer: PtyPeerHandle) -> Self {
         Self {
             index,
             ldisc: LdiscKind::NTty(LineDisc::new()),
-            driver: TtyDriverKind::PtySlave { master_idx },
+            driver: TtyDriverKind::PtySlave { peer },
             session: TtySession::new(),
             winsize: UserWinsize {
                 ws_row: 24,

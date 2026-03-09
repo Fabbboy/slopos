@@ -14,15 +14,82 @@
 //! `write`, `push_input`).  Per-TTY slot locks in `TTY_SLOTS` remain the
 //! fast-path protection for those.
 //!
+//! # Generation-Safe Peer Identity (Phase 26)
+//!
+//! PTY peer references are wrapped in [`PtyPeerHandle`], which combines a
+//! `TtyIndex` with a generation counter.  The generation counter
+//! (`TTY_GENERATIONS[slot]`) is incremented each time a slot is freed.
+//! Before any cross-end write, the stored generation is compared against
+//! the current generation — a mismatch means the slot was freed and
+//! potentially reused by an unrelated PTY pair, so the write is silently
+//! discarded.
+//!
 //! # Lock Ordering
 //!
 //! `PTY_ALLOC_LOCK` → `TTY_SLOTS[i]` (never the reverse).
 
+use core::sync::atomic::Ordering;
+
 use slopos_lib::IrqMutex;
 
 use super::driver::TtyDriverKind;
-use super::table::{TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding};
+use super::table::{
+    TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
+};
 use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
+
+// ---------------------------------------------------------------------------
+// Generation-safe peer identity (Phase 26)
+// ---------------------------------------------------------------------------
+
+/// A generation-tagged handle to a PTY peer slot.
+///
+/// Combines a `TtyIndex` (which slot) with a generation counter (which
+/// incarnation of that slot).  Used inside `TtyDriverKind::PtyMaster` and
+/// `TtyDriverKind::PtySlave` to prevent stale-slot misrouting after rapid
+/// free/reuse cycles.
+///
+/// Before any cross-end data write, [`validate_peer`] compares the stored
+/// generation against the current `TTY_GENERATIONS[slot]` — a mismatch
+/// means the slot was freed and potentially reallocated to an unrelated
+/// pair, so the write is silently discarded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PtyPeerHandle {
+    /// The slot index of the peer TTY.
+    pub idx: TtyIndex,
+    /// The generation counter of the peer slot at the time the PTY pair
+    /// was allocated.
+    pub generation: u32,
+}
+
+impl PtyPeerHandle {
+    /// Create a new peer handle capturing the current generation of `idx`.
+    pub fn new(idx: TtyIndex, generation: u32) -> Self {
+        Self { idx, generation }
+    }
+
+    /// Snapshot the current generation of `idx` into a new handle.
+    pub fn snapshot(idx: TtyIndex) -> Self {
+        let slot = idx.0 as usize;
+        let generation = if slot < MAX_TTYS {
+            TTY_GENERATIONS[slot].load(Ordering::Acquire)
+        } else {
+            0
+        };
+        Self { idx, generation }
+    }
+}
+
+/// Returns `true` if `handle` still refers to the same incarnation of
+/// its slot — i.e. the slot has not been freed and potentially reused
+/// since the handle was created.
+pub fn validate_peer(handle: &PtyPeerHandle) -> bool {
+    let slot = handle.idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return false;
+    }
+    TTY_GENERATIONS[slot].load(Ordering::Acquire) == handle.generation
+}
 
 // ---------------------------------------------------------------------------
 // Pair-level lifecycle lock
@@ -47,8 +114,12 @@ static PTY_ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
 /// guaranteeing that no concurrent `pty_alloc()` or `free_pair_if_unused()`
 /// can observe a half-initialised pair.
 ///
+/// Phase 26: peer cross-references now carry generation-tagged
+/// [`PtyPeerHandle`]s so that stale writes after rapid free/reuse are
+/// safely discarded.
+///
 /// Returns the master `TtyIndex`; the slave index is embedded in the
-/// master's `TtyDriverKind::PtyMaster { slave_idx }`.
+/// master's `TtyDriverKind::PtyMaster { peer }`.
 pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
     let _alloc = PTY_ALLOC_LOCK.lock();
 
@@ -58,13 +129,19 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
     let master_idx = TtyIndex(master_slot as u8);
     let slave_idx = TtyIndex(slave_slot as u8);
 
+    // Snapshot the current generation of each slot *before* initialisation.
+    // These generations were set when the slots were last freed (or are 0
+    // for never-used slots).
+    let slave_peer = PtyPeerHandle::snapshot(slave_idx);
+    let master_peer = PtyPeerHandle::snapshot(master_idx);
+
     {
         let mut guard = TTY_SLOTS[master_slot].lock();
-        *guard = Some(Tty::new_pty_master(master_idx, slave_idx));
+        *guard = Some(Tty::new_pty_master(master_idx, slave_peer));
     }
     {
         let mut guard = TTY_SLOTS[slave_slot].lock();
-        *guard = Some(Tty::new_pty_slave(slave_idx, master_idx));
+        *guard = Some(Tty::new_pty_slave(slave_idx, master_peer));
     }
 
     Ok(master_idx)
@@ -98,14 +175,14 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
         let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
 
         match tty.driver {
-            TtyDriverKind::PtySlave { master_idx } => {
+            TtyDriverKind::PtySlave { ref peer } => {
                 tty.open_count = tty
                     .open_count
                     .checked_add(1)
                     .unwrap_or_else(|| panic!("pty slave open_count overflow for idx {}", idx.0));
                 tty.hung_up = false;
                 tty.peer_closed = false;
-                (tty.open_count, master_idx)
+                (tty.open_count, peer.idx)
             }
             _ => return Err(TtyError::NotAllocated),
         }
@@ -118,17 +195,33 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Data routing
+// Data routing (Phase 26: generation-validated)
 // ---------------------------------------------------------------------------
 
-pub fn master_write(slave_idx: TtyIndex, data: &[u8]) {
+/// Master write → push bytes into the slave's line discipline input.
+///
+/// Phase 26: validates the peer handle's generation before writing.
+/// If the peer slot was freed and potentially reused, the write is
+/// silently discarded.
+pub fn master_write(peer: PtyPeerHandle, data: &[u8]) {
+    if !validate_peer(&peer) {
+        return;
+    }
     for &byte in data {
-        super::push_input(slave_idx, byte);
+        super::push_input(peer.idx, byte);
     }
 }
 
-pub fn slave_write(master_idx: TtyIndex, data: &[u8]) {
-    let slot = master_idx.0 as usize;
+/// Slave write → push bytes into the master's raw read buffer.
+///
+/// Phase 26: validates the peer handle's generation before writing.
+/// If the peer slot was freed and potentially reused, the write is
+/// silently discarded.
+pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) {
+    if !validate_peer(&peer) {
+        return;
+    }
+    let slot = peer.idx.0 as usize;
     if slot >= MAX_TTYS {
         return;
     }
@@ -181,7 +274,7 @@ pub fn get_pty_number(idx: TtyIndex) -> Result<u32, TtyError> {
     let guard = TTY_SLOTS[slot].lock();
     let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
     match tty.driver {
-        TtyDriverKind::PtyMaster { slave_idx } => Ok(slave_idx.0 as u32),
+        TtyDriverKind::PtyMaster { ref peer } => Ok(peer.idx.0 as u32),
         _ => Err(TtyError::NotAllocated),
     }
 }
@@ -217,7 +310,7 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
 }
 
 // ---------------------------------------------------------------------------
-// Pair lifecycle (Phase 20: atomic check-and-free)
+// Pair lifecycle (Phase 20: atomic check-and-free, Phase 26: generation bump)
 // ---------------------------------------------------------------------------
 
 /// Free both sides of a PTY pair if both have `open_count == 0`.
@@ -225,6 +318,10 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
 /// Holds `PTY_ALLOC_LOCK` for the entire check-and-free sequence so that
 /// no concurrent `pty_alloc()` or `pty_open_slave()` can observe a
 /// partially freed pair (TOCTOU prevention).
+///
+/// Phase 26: increments `TTY_GENERATIONS` for each freed slot so that
+/// any stale `PtyPeerHandle` referencing the old incarnation will fail
+/// generation validation on subsequent writes.
 pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
     let _alloc = PTY_ALLOC_LOCK.lock();
 
@@ -251,8 +348,13 @@ pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
         let mut guard = TTY_SLOTS[idx_slot].lock();
         *guard = None;
     }
+    // Bump generation so stale PtyPeerHandles pointing at this slot are
+    // invalidated.
+    TTY_GENERATIONS[idx_slot].fetch_add(1, Ordering::Release);
+
     {
         let mut guard = TTY_SLOTS[peer_slot].lock();
         *guard = None;
     }
+    TTY_GENERATIONS[peer_slot].fetch_add(1, Ordering::Release);
 }

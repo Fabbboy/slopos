@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–25 complete; 🛠️ Phases 26–27 planned (PTY lifetime safety, POSIX completion)
+> **Status**: ✅ Phases 1–26 complete; 🛠️ Phase 27 planned (POSIX completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics; follow-up maturity work now focuses on PTY lifetime safety and POSIX completion
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity; follow-up maturity work now focuses on POSIX completion
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -86,7 +86,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 23 | Canonical EOF, ISIG flush & signal integrity | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 24 | Job control & controlling TTY hardening | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
+| 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs`, `plans/TTY_OVERHAUL_PLAN.md` | — | **PLANNED** |
 
 ---
@@ -2577,7 +2577,7 @@ Added 13 Phase 25 regression tests:
 | `drivers/src/tty_tests.rs` | Added 13 Phase 25 regression tests covering drain accounting, TCSETSW/TCSETSF semantics, driver trait, PTY and console backends |
 ## 30. Phase 26: PTY Lifetime Safety & Scalable Capacity
 
-**Status**: Planned.
+**Status**: ✅ Done — generation-safe `PtyPeerHandle`, `MAX_TTYS` scaled to 32, 11 new regression tests. Total test count: 1184 (all pass).
 
 > **Priority**: P1 robustness — prevent stale-slot reuse bugs and raise practical PTY limits.
 
@@ -2605,6 +2605,44 @@ Added 13 Phase 25 regression tests:
 | `drivers/src/tty/mod.rs` | Integrate generation checks into read/write/open/close paths |
 | `drivers/src/tty/table.rs` | Support scalable slot configuration and generation bookkeeping |
 | `drivers/src/tty_tests.rs` | Add PTY stress and stale-handle regressions |
+
+### 30.5 Implementation Summary
+
+**Completed in Phase 26:**
+
+1. **`PtyPeerHandle` generation-safe identity** (`pty.rs`)
+   - New `PtyPeerHandle { idx: TtyIndex, generation: u32 }` struct replaces bare `TtyIndex` for cross-end peer references.
+   - `PtyPeerHandle::snapshot()` captures the current generation from `TTY_GENERATIONS[slot]` at allocation time.
+   - `validate_peer()` checks stored generation against the live `TTY_GENERATIONS` counter — stale handles (from freed/reused slots) are detected and rejected.
+   - `master_write()` and `slave_write()` validate generation before forwarding data; stale writes are silently discarded (no panic, no misroute).
+
+2. **Per-slot generation counter** (`table.rs`)
+   - `pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS]` — monotonically increasing counter per slot.
+   - `free_pair_if_unused()` bumps both master and slave slot generations via `fetch_add(1, Release)` on free.
+
+3. **Driver-layer plumbing** (`driver.rs`)
+   - `TtyDriverKind::PtyMaster { peer: PtyPeerHandle }` and `PtySlave { peer: PtyPeerHandle }` replace raw `slave_idx`/`master_idx` fields.
+   - `DriverId` variants carry the same `PtyPeerHandle` for consistent identity throughout dispatch.
+   - All `write_output()` and `write_driver_unlocked()` paths pass `PtyPeerHandle` through.
+
+4. **Capacity scaling** (`mod.rs`)
+   - `MAX_TTYS` increased from 8 to 32 — suitable for tmux/ssh-heavy workflows.
+   - All open/close/destructuring paths updated for `PtyPeerHandle`.
+
+5. **Regression tests** (`tty_tests.rs` — 11 new tests)
+   - `test_phase26_max_ttys_is_32` — compile-time capacity assertion.
+   - `test_phase26_pty_peer_handle_creation` — `PtyPeerHandle` stores idx + generation.
+   - `test_phase26_pty_peer_handle_snapshot` — snapshot captures current `TTY_GENERATIONS`.
+   - `test_phase26_generation_bumped_on_free` — `free_pair_if_unused` increments both slot generations.
+   - `test_phase26_stale_handle_detected` — `validate_peer` returns false after free.
+   - `test_phase26_pty_alloc_captures_generation` — alloc stores correct peer generation.
+   - `test_phase26_stale_write_safe_noop` — stale handle write after free/realloc is a silent no-op.
+   - `test_phase26_rapid_alloc_free_stress` — 10 rapid alloc/free cycles, generations monotonically increase.
+   - `test_phase26_data_flow_with_generation` — master→slave data flow works with generation handles.
+   - `test_phase26_validate_peer_out_of_range` — out-of-range index rejected.
+   - `test_phase26_multiple_pty_pairs` — 10 concurrent PTY pairs can be allocated.
+
+**Test results**: `just test` → 1184 total, 1184 passed, 0 failed.
 
 ## 31. Phase 27: POSIX Completion Set (Rust-Idiomatic)
 

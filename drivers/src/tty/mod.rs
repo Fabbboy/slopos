@@ -56,7 +56,7 @@ use self::table::{
 pub use slopos_abi::syscall::TtyIndex;
 
 /// Maximum number of TTY instances.
-pub const MAX_TTYS: usize = 8;
+pub const MAX_TTYS: usize = 32;
 
 /// The central TTY structure — one per terminal.
 pub struct Tty {
@@ -1282,7 +1282,7 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
         let peer_to_reopen = match tty.driver {
-            TtyDriverKind::PtySlave { master_idx } => Some(master_idx),
+            TtyDriverKind::PtySlave { ref peer } => Some(peer.idx),
             _ => None,
         };
         tty.open_count = tty
@@ -1317,13 +1317,15 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
         let open_count = tty.open_count;
         if tty.open_count == 0 {
             match tty.driver {
-                TtyDriverKind::PtyMaster { slave_idx } => {
+                TtyDriverKind::PtyMaster { ref peer } => {
+                    let slave_idx = peer.idx;
                     drop(guard);
                     hangup(slave_idx);
                     pty::free_pair_if_unused(idx, slave_idx);
                     return Ok(0);
                 }
-                TtyDriverKind::PtySlave { master_idx } => {
+                TtyDriverKind::PtySlave { ref peer } => {
+                    let master_idx = peer.idx;
                     drop(guard);
                     pty::mark_peer_closed(master_idx);
                     pty::free_pair_if_unused(idx, master_idx);
