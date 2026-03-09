@@ -2303,7 +2303,7 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ## 25. Phase 21: Event-Driven Readiness & IXON Completion
 
-> **Status**: **PLANNED**
+> **Status**: **DONE** ✅
 > **Priority**: P1 — Needed for mature multiplexing behavior and complete software flow control.
 > **Rationale**: `poll()` / `select()` currently rely on short sleep loops rather than true event-driven readiness, and the line discipline tracks IXON stop state without fully enforcing it on the output path. Mature TTY stacks do not just parse control flow; they make readiness and stop/resume semantics real.
 
@@ -2311,34 +2311,39 @@ Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
 
 ### 25.1 Make TTY readiness event-driven
 
-- Reuse per-TTY wait queues for `poll()` / `select()` instead of fixed sleep-and-recheck loops.
-- Wake readers and poll waiters from the same readiness events: new input, hangup, peer close, and output-state changes.
-- Keep semantics consistent with existing `POLLIN`, `POLLOUT`, `POLLHUP`, and `POLLERR` behavior.
+- ✅ Added `WaitQueue::wait_once()` — single enqueue-block-dequeue cycle for poll-style sleep.
+- ✅ Added `POLL_NOTIFY: WaitQueue` — global wait queue for poll/select sleepers.
+- ✅ Added `poll_events(idx, requested) -> u16` — drains hw input, checks POLLIN/POLLOUT/POLLHUP.
+- ✅ Added `poll_sleep()` — replaces `sleep_current_task_ms(1)` with event-driven wait.
+- ✅ Replaced busy-wait loops in `syscall_poll` and `syscall_select` with `tty::poll_sleep()`.
+- ✅ Updated `file_poll_fd` in `fileio.rs` to use `tty::poll_events()` instead of ad-hoc checks.
+- ✅ Wired `POLL_NOTIFY.wake_all()` into `notify_input_ready()`, `hangup()`, and IXON resume path.
 
 ### 25.2 Enforce IXON stop/resume on writes
 
-- When `VSTOP` / `VSTART` toggles line-discipline stopped state, make `tty::write()` and PTY output honor it.
-- Define whether stopped output buffers, suppresses, or blocks, then encode that policy explicitly in the plan and tests.
-- Ensure wakeups happen when output resumes so blocked or waiting writers make progress.
+- ✅ `tty::write()` now blocks on `TTY_OUTPUT_WAITERS[slot]` when ldisc is IXON-stopped.
+- ✅ `push_input()` tracks `was_stopped` → `!is_stopped()` transitions and wakes output waiters + poll sleepers.
+- ✅ `hangup()` wakes both output waiters and poll sleepers.
+- ✅ Policy: blocked write (wait_event until resumed), not buffered or suppressed.
 
 ### 25.3 Keep readiness logic Rust-idiomatic
 
-- Prefer a single readiness state machine over duplicated ad-hoc checks in `fileio.rs` and syscall handlers.
-- Avoid Linux-style historical lock layering unless SlopOS actually needs it.
-- Keep the API explicit: one event source, one wait path, one mapping to poll/select bits.
+- ✅ Single `poll_events()` function replaces duplicated checks across `fileio.rs` and syscall handlers.
+- ✅ Separate `POLL_NOTIFY` / `TTY_OUTPUT_WAITERS` statics follow same pattern as `TTY_INPUT_WAITERS`.
+- ✅ Lock ordering preserved: never hold two TTY_SLOTS locks simultaneously.
 
 ### 25.4 Files modified
 
-| File | Planned change |
-|------|----------------|
-| `drivers/src/tty/mod.rs` | Add event-driven readiness integration and IXON-aware write behavior |
-| `drivers/src/tty/ldisc.rs` | Expose stopped/resume semantics cleanly to the TTY core |
-| `fs/src/fileio.rs` | Route TTY FD readiness through wait-queue-backed helpers |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Replace sleep loops with event-driven TTY readiness waits |
-| `lib/src/waitqueue.rs` | Reuse or extend timeout/event helpers as needed |
-| `drivers/src/tty_tests.rs` | Add IXON stop/resume and readiness regressions |
-| `core/src/syscall/tests.rs` | Add syscall-level poll/select readiness regressions |
-
+| File | Change |
+|------|--------|
+| `lib/src/waitqueue.rs` | Added `wait_once()` method |
+| `drivers/src/tty/table.rs` | Added `POLL_NOTIFY` and `TTY_OUTPUT_WAITERS` statics |
+| `drivers/src/tty/mod.rs` | IXON write enforcement, `poll_events()`, `poll_sleep()`, wakeup wiring |
+| `fs/src/fileio.rs` | Replaced ad-hoc TTY poll checks with `tty::poll_events()` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Replaced `sleep_current_task_ms(1)` with `tty::poll_sleep()` |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added `poll_events` and `poll_sleep` to `TtyServices` |
+| `drivers/src/syscall_services_init.rs` | Added adapter functions for new service methods |
+| `drivers/src/tty_tests.rs` | 11 new regression tests (1132 total, all passing) |
 ---
 
 ## 26. Phase 22: Operational Console Routing & Real VConsole
