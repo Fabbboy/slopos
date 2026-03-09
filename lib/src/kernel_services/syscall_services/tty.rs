@@ -30,5 +30,7 @@ crate::define_service! {
         is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         open_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         detach_session_by_id(session_id: u32);
+        poll_events(tty_index: slopos_abi::syscall::TtyIndex, requested: u16) -> u16;
+        poll_sleep();
     }
 }

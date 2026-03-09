@@ -197,6 +197,45 @@ impl WaitQueue {
         }
     }
 
+    /// Block the current task exactly once, without checking any condition.
+    ///
+    /// Unlike `wait_event`, this does **not** loop or re-check a predicate.
+    /// The caller is enqueued, blocked, and then removed from the queue on
+    /// wakeup.  This is intended for poll/select-style sleep where the caller
+    /// manages its own retry loop and timeout.
+    ///
+    /// Returns `true` if the task was successfully enqueued and blocked,
+    /// `false` if the runtime is not initialized, the task handle is null,
+    /// or the queue is full.
+    pub fn wait_once(&self) -> bool {
+        if !driver_runtime::is_driver_runtime_initialized() {
+            return false;
+        }
+
+        let task = current_task();
+        if task.is_null() {
+            return false;
+        }
+
+        {
+            let mut inner = self.inner.lock();
+            if !inner.enqueue(task) {
+                return false;
+            }
+        }
+
+        block_current_task();
+
+        // Remove ourselves in case of spurious wakeup or if wake_all
+        // already dequeued us (remove_task is a no-op in that case).
+        {
+            let mut inner = self.inner.lock();
+            inner.remove_task(task);
+        }
+
+        true
+    }
+
     /// Block the current task until `condition()` returns `true` or
     /// `timeout_ms` milliseconds elapse.
     ///
