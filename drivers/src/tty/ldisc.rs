@@ -39,6 +39,7 @@ use slopos_abi::syscall::{
     N_RAW,
     N_TTY,
     NCCS,
+    NOFLSH,
     // c_oflag
     OCRNL,
     ONLCR,
@@ -70,6 +71,7 @@ const COOKED_BUF_SIZE: usize = 4096;
 // ---------------------------------------------------------------------------
 
 /// Actions returned by the line discipline after processing an input byte.
+#[derive(Debug)]
 pub enum InputAction {
     /// No action needed.
     None,
@@ -226,6 +228,18 @@ impl LineDisc {
     /// Read cooked bytes into `out`, returning the number of bytes copied.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let canonical = self.is_canonical();
+
+        // Phase 23: Canonical EOF on empty buffer.  When VEOF (Ctrl+D) is
+        // pressed with an empty edit buffer, `flush_edit_to_cooked()` bumps
+        // `line_count` but pushes zero bytes.  Without this guard, `has_data()`
+        // keeps returning true (line_count > 0) and `read()` returns 0 bytes
+        // without decrementing, creating a phantom-readable state.  Fix: detect
+        // the zero-byte line and consume it immediately.
+        if canonical && self.line_count > 0 && self.cooked_count == 0 {
+            self.line_count -= 1;
+            return 0;
+        }
+
         let mut copied = 0usize;
         while copied < out.len() && self.cooked_count > 0 {
             let byte = self.cooked[self.cooked_tail];
@@ -309,16 +323,23 @@ impl LineDisc {
             return self.insert_char(c, lflag);
         }
 
-        // 3. Signal generation (ISIG).
+        // 3. Signal generation (ISIG) + Phase 23 NOFLSH flush.
         if (lflag & ISIG) != 0 {
-            if c == self.cc(VINTR) {
-                return InputAction::Signal(SIGINT);
-            }
-            if c == self.cc(VQUIT) {
-                return InputAction::Signal(SIGQUIT);
-            }
-            if c == self.cc(VSUSP) {
-                return InputAction::Signal(SIGTSTP);
+            let sig = if c == self.cc(VINTR) {
+                Some(SIGINT)
+            } else if c == self.cc(VQUIT) {
+                Some(SIGQUIT)
+            } else if c == self.cc(VSUSP) {
+                Some(SIGTSTP)
+            } else {
+                None
+            };
+            if let Some(sig) = sig {
+                // POSIX: unless NOFLSH is set, flush input queues on signal.
+                if (lflag & NOFLSH) == 0 {
+                    self.flush_input();
+                }
+                return InputAction::Signal(sig);
             }
         }
 

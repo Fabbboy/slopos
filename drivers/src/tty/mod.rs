@@ -337,6 +337,11 @@ pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyE
     read_with_attach(idx, buf, nonblock, true)
 }
 
+/// Phase 23 note: `_auto_attach` is intentionally dead.  Phase 18 removed
+/// durable read-side ownership mutation, so reads no longer claim controlling
+/// terminal regardless of this flag.  The parameter is preserved to maintain
+/// ABI compatibility with the kernel services trait (`read_cooked_with_attach`).
+
 pub fn read_with_attach(
     idx: TtyIndex,
     buf: &mut [u8],
@@ -694,18 +699,31 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
 }
 
 /// Check if a TTY has cooked data available for reading.
+///
+/// Phase 23: Properly captures and delivers deferred signals from
+/// `drain_hw_input()` instead of silently discarding them.
 pub fn has_data(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return false;
     }
-    let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        let _ = tty.drain_hw_input();
-        tty.ldisc.has_data()
-    } else {
-        false
+    let (deferred_signal, result) = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
+            let sig = tty.drain_hw_input();
+            let data = tty.ldisc.has_data();
+            (sig, data)
+        } else {
+            return false;
+        }
+    };
+    // Deliver deferred signal outside lock to avoid deadlock.
+    if let Some((pgid, sig)) = deferred_signal {
+        if pgid != 0 {
+            let _ = signal_process_group(pgid, sig);
+        }
     }
+    result
 }
 
 /// Get termios for a specific TTY.
@@ -1202,6 +1220,9 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
 /// - `POLLOUT` — output is NOT stopped by IXON flow control
 /// - `POLLHUP` — TTY is hung up (or peer closed with no remaining data)
 ///
+/// Phase 23: Properly captures and delivers deferred signals from
+/// `drain_hw_input()` instead of silently discarding them.
+///
 /// Only events that are both requested and ready are returned.
 pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
@@ -1211,27 +1232,38 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         return 0;
     }
 
-    let mut guard = TTY_SLOTS[slot].lock();
-    let tty = match guard.as_mut() {
-        Some(t) => t,
-        None => return 0,
+    let (deferred_signal, revents) = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        let tty = match guard.as_mut() {
+            Some(t) => t,
+            None => return 0,
+        };
+
+        // Drain any pending hardware bytes so has_data() is up-to-date.
+        let sig = tty.drain_hw_input();
+
+        let mut revents = 0u16;
+
+        if (requested & POLLIN) != 0 && tty.ldisc.has_data() {
+            revents |= POLLIN;
+        }
+
+        if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() {
+            revents |= POLLOUT;
+        }
+
+        if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
+            revents |= POLLHUP;
+        }
+
+        (sig, revents)
     };
 
-    // Drain any pending hardware bytes so has_data() is up-to-date.
-    let _ = tty.drain_hw_input();
-
-    let mut revents = 0u16;
-
-    if (requested & POLLIN) != 0 && tty.ldisc.has_data() {
-        revents |= POLLIN;
-    }
-
-    if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() {
-        revents |= POLLOUT;
-    }
-
-    if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
-        revents |= POLLHUP;
+    // Phase 23: Deliver deferred signal outside lock to avoid deadlock.
+    if let Some((pgid, sig)) = deferred_signal {
+        if pgid != 0 {
+            let _ = signal_process_group(pgid, sig);
+        }
     }
 
     revents
@@ -1260,22 +1292,32 @@ pub fn poll_sleep() {
 ///
 /// Phase 8: now iterates all active TTYs instead of only TTY 0.  Each
 /// per-TTY lock is acquired and released individually.
+///
+/// Phase 23: Properly captures and delivers deferred signals from
+/// `drain_hw_input()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
     let mut any_data = false;
     for i in 0..MAX_TTYS {
-        let has_data = {
+        let (deferred_signal, has_data) = {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
                 if tty.active {
-                    let _ = tty.drain_hw_input();
-                    tty.ldisc.has_data()
+                    let sig = tty.drain_hw_input();
+                    let data = tty.ldisc.has_data();
+                    (sig, data)
                 } else {
-                    false
+                    (None, false)
                 }
             } else {
-                false
+                (None, false)
             }
         };
+        // Phase 23: Deliver deferred signal outside lock.
+        if let Some((pgid, sig)) = deferred_signal {
+            if pgid != 0 {
+                let _ = signal_process_group(pgid, sig);
+            }
+        }
         if has_data {
             notify_input_ready(TtyIndex(i as u8));
             any_data = true;
