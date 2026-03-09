@@ -81,6 +81,7 @@ fn tty_read_with_attach_adapter(
         Ok(n) => n as isize,
         Err(tty::TtyError::WouldBlock) => -11,
         Err(tty::TtyError::HungUp) => -5,
+        Err(tty::TtyError::CrossSessionDenied) => -5, // EIO
         Err(_) => -1,
     }
 }

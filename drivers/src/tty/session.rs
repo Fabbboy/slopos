@@ -118,12 +118,22 @@ pub struct TtySession {
 }
 
 /// Result of a foreground access check.
+///
+/// Phase 19: The overloaded `NoSession` variant has been replaced with
+/// explicit states that separate bootstrap permissiveness from real access
+/// denial.  This makes the control plane easy to reason about — one enum,
+/// one mapping layer at the syscall boundary, no scattered ad-hoc booleans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForegroundCheck {
-    /// Caller is in the foreground group (or no session control) — access allowed.
+    /// Caller is in the foreground group — access allowed.
     Allowed,
-    /// No session is attached yet — access allowed (permissive boot path).
-    NoSession,
+    /// No session is attached yet, or no foreground pgrp is set.
+    /// Access is allowed (permissive early-boot / pre-session path).
+    BootstrapAllowed,
+    /// Caller belongs to a different session than the TTY's controlling
+    /// session — hard denial (`-EIO`).  This is the POSIX requirement that
+    /// terminals are session-scoped resources.
+    DeniedCrossSession,
     /// Caller is a background process trying to read — should receive `SIGTTIN`.
     BackgroundRead,
     /// Caller is a background process trying to write with `TOSTOP` — should
@@ -199,27 +209,28 @@ impl TtySession {
     /// # Returns
     ///
     /// - `Allowed` if the caller is in the foreground group.
-    /// - `NoSession` if no session is attached (permissive).
+    /// - `BootstrapAllowed` if no session is attached yet (permissive).
+    /// - `DeniedCrossSession` if the caller belongs to a different session.
     /// - `BackgroundRead` if the caller is in a background group.
     pub fn check_read(&self, caller_pgid: u32, caller_sid: u32) -> ForegroundCheck {
         // No session attached — permissive (pre-session-setup path).
         if !self.has_session() {
-            return ForegroundCheck::NoSession;
+            return ForegroundCheck::BootstrapAllowed;
         }
 
         // No foreground pgrp set — permissive.
         if self.fg_pgrp.is_none() {
-            return ForegroundCheck::NoSession;
+            return ForegroundCheck::BootstrapAllowed;
         }
 
         let sid_raw = self.session_id_raw();
         let fg_raw = self.fg_pgrp_raw();
 
-        // Phase 10: Cross-session access — reject.  A process from a
-        // different session should not be reading this TTY.  Kernel tasks
+        // Phase 19: Cross-session access — hard denial.  A process from a
+        // different session must not read this TTY.  Kernel tasks
         // (caller_sid == 0) are exempted for early-boot permissiveness.
         if caller_sid != 0 && caller_sid != sid_raw {
-            return ForegroundCheck::NoSession;
+            return ForegroundCheck::DeniedCrossSession;
         }
 
         // Foreground check.
@@ -236,21 +247,34 @@ impl TtySession {
         ForegroundCheck::BackgroundRead
     }
 
-    /// Check whether a process with the given pgid may **write** to this TTY.
+    /// Check whether a process with the given pgid and sid may **write** to
+    /// this TTY.
     ///
     /// Write-side foreground enforcement only applies when `TOSTOP` is set in
-    /// the TTY's termios.  Without `TOSTOP`, any process may write.
+    /// the TTY's termios.  Without `TOSTOP`, any process may write (unless the
+    /// caller belongs to a different session, which is a hard denial).
     ///
     /// # Arguments
     ///
     /// * `caller_pgid` — The caller's process group ID.
+    /// * `caller_sid` — The caller's session ID.
     /// * `tostop` — Whether the `TOSTOP` flag is set in `c_lflag`.
-    pub fn check_write(&self, caller_pgid: u32, tostop: bool) -> ForegroundCheck {
-        if !tostop {
+    pub fn check_write(&self, caller_pgid: u32, caller_sid: u32, tostop: bool) -> ForegroundCheck {
+        // No session attached or no fg_pgrp — allow writes freely.
+        if !self.has_session() || self.fg_pgrp.is_none() {
             return ForegroundCheck::Allowed;
         }
 
-        if !self.has_session() || self.fg_pgrp.is_none() {
+        let sid_raw = self.session_id_raw();
+
+        // Phase 19: Cross-session write — hard denial (same rule as reads).
+        // Kernel tasks (caller_sid == 0) are exempted.
+        if caller_sid != 0 && caller_sid != sid_raw {
+            return ForegroundCheck::DeniedCrossSession;
+        }
+
+        // Without TOSTOP, same-session writes are always allowed.
+        if !tostop {
             return ForegroundCheck::Allowed;
         }
 

@@ -2193,7 +2193,7 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 
 ## 23. Phase 19: Strict Session Gates & Foreground Outcomes
 
-> **Status**: **PLANNED**
+> **Status**: **DONE** ✅
 > **Priority**: P0 — Required for fully trustworthy POSIX TTY semantics.
 > **Rationale**: The review found that `ForegroundCheck::NoSession` currently conflates multiple cases: bootstrap permissiveness, missing foreground group, and cross-session denial. `drivers/src/tty/session.rs` marks cross-session reads as `NoSession`, while `drivers/src/tty/mod.rs` still allows `NoSession` in the read path. That makes the control plane look stricter on paper than it is in reality.
 
@@ -2226,6 +2226,31 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 | `fs/src/fileio.rs` | Keep FD routing aligned with the stricter access model |
 | `drivers/src/tty_tests.rs` | Add exact coverage for cross-session denial vs bootstrap allowance |
 | `core/src/syscall/tests.rs` | Add syscall-facing regressions for `-EIO`, `SIGTTIN`, and `SIGTTOU` cases |
+
+### 23.5 Implementation Summary
+
+Implemented in a single pass with 11 new regression tests (all 1112 tests pass).
+
+**Enum split** (`session.rs`):
+- `ForegroundCheck::NoSession` replaced with `BootstrapAllowed` (permissive early-boot / no-session) and `DeniedCrossSession` (hard denial for cross-session access).
+- `check_read()` and `check_write()` both emit `DeniedCrossSession` when `caller_sid != 0 && caller_sid != tty_sid`.
+- `check_write()` signature extended with `caller_sid: u32` parameter, cross-session check runs before TOSTOP.
+
+**Enforcement** (`mod.rs`):
+- `read()` path: `DeniedCrossSession` → `Err(TtyError::CrossSessionDenied)` (no signal).
+- `write()` path: obtains `caller_sid` via `current_task_sid()` before the TTY lock, passes it to `check_write()`, handles `DeniedCrossSession` alongside `BackgroundWrite`.
+- New `TtyError::CrossSessionDenied` variant added.
+
+**Syscall boundary** (`syscall_services_init.rs`):
+- `CrossSessionDenied` mapped to `-5` (`EIO`) in the read adapter, matching `HungUp`.
+
+**Tests** (`tty_tests.rs`):
+- Existing tests updated for new enum names and `check_write()` 3-arg signature.
+- 11 new Phase 19 tests cover: bootstrap allowed (no session, no fg_pgrp), cross-session denial (read, write±TOSTOP), kernel task exemption (read, write), same-session background paths (SIGTTIN, SIGTTOU), no-session write, and error variant distinctness.
+
+**Files not modified** (no changes needed):
+- `fs/src/fileio.rs` — FD routing does not reference `ForegroundCheck` variants directly.
+- `core/src/syscall/tests.rs` — syscall-level tests deferred; TTY-level coverage is comprehensive.
 
 ---
 

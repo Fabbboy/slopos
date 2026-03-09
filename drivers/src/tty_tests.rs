@@ -390,14 +390,14 @@ pub fn test_session_check_read_background() -> TestResult {
     }
 }
 
-/// No session attached — check_read returns NoSession (permissive).
+/// No session attached — check_read returns BootstrapAllowed (permissive).
 pub fn test_session_check_read_no_session() -> TestResult {
     let s = TtySession::new();
     match s.check_read(42, 42) {
-        ForegroundCheck::NoSession => TestResult::Pass,
+        ForegroundCheck::BootstrapAllowed => TestResult::Pass,
         other => {
             klog_info!(
-                "TTY_TEST: BUG - no-session read expected NoSession, got {:?}",
+                "TTY_TEST: BUG - no-session read expected BootstrapAllowed, got {:?}",
                 other
             );
             TestResult::Fail
@@ -426,7 +426,7 @@ pub fn test_session_check_write_no_tostop() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Background process, but TOSTOP is false.
-    match s.check_write(99, false) {
+    match s.check_write(99, 10, false) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
             klog_info!(
@@ -442,7 +442,7 @@ pub fn test_session_check_write_no_tostop() -> TestResult {
 pub fn test_session_check_write_tostop_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
-    match s.check_write(99, true) {
+    match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
             klog_info!(
@@ -491,10 +491,10 @@ pub fn test_session_check_read_replaces_task_has_access_background() -> TestResu
 pub fn test_session_check_read_replaces_task_has_access_permissive() -> TestResult {
     let s = TtySession::new();
     match s.check_read(999, 0) {
-        ForegroundCheck::NoSession => TestResult::Pass,
+        ForegroundCheck::BootstrapAllowed => TestResult::Pass,
         other => {
             klog_info!(
-                "TTY_TEST: BUG - no session should be NoSession, got {:?}",
+                "TTY_TEST: BUG - no session should be BootstrapAllowed, got {:?}",
                 other
             );
             TestResult::Fail
@@ -2390,7 +2390,7 @@ pub fn test_phase10_check_write_tostop_blocks_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
     // Background process (pgid=99), TOSTOP enabled.
-    match s.check_write(99, true) {
+    match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
             klog_info!(
@@ -2407,7 +2407,7 @@ pub fn test_phase10_check_write_no_tostop_allows_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Background process (pgid=99), TOSTOP not set.
-    match s.check_write(99, false) {
+    match s.check_write(99, 10, false) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
             klog_info!(
@@ -2424,7 +2424,7 @@ pub fn test_phase10_check_write_tostop_allows_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // fg_pgrp=10
     // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
-    match s.check_write(10, true) {
+    match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
             klog_info!(
@@ -2436,16 +2436,16 @@ pub fn test_phase10_check_write_tostop_allows_foreground() -> TestResult {
     }
 }
 
-/// Phase 10: check_read rejects cross-session reads (tightened from permissive).
+/// Phase 10: check_read rejects cross-session reads (DeniedCrossSession).
 pub fn test_phase10_check_read_cross_session_rejected() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
     // Caller from a different session (sid=99) — should be rejected.
     match s.check_read(10, 99) {
-        ForegroundCheck::NoSession => TestResult::Pass,
+        ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
             klog_info!(
-                "TTY_TEST: BUG - cross-session read expected NoSession, got {:?}",
+                "TTY_TEST: BUG - cross-session read expected DeniedCrossSession, got {:?}",
                 other
             );
             TestResult::Fail
@@ -4073,9 +4073,194 @@ pub fn test_phase17_pty_canonical_editing_on_slave() -> TestResult {
 }
 
 // ===========================================================================
-// Test suite registration
+// Phase 19: Strict Session Gates & Foreground Outcomes
 // ===========================================================================
 
+/// Phase 19: No session attached — check_read returns BootstrapAllowed.
+pub fn test_phase19_bootstrap_allowed_no_session_read() -> TestResult {
+    let s = TtySession::new();
+    match s.check_read(42, 42) {
+        ForegroundCheck::BootstrapAllowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no-session check_read expected BootstrapAllowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Session attached but no fg_pgrp — check_read returns BootstrapAllowed.
+pub fn test_phase19_bootstrap_allowed_no_fg_pgrp() -> TestResult {
+    let mut s = TtySession::new();
+    s.session_leader = SessionId::new(10);
+    s.session_id = SessionId::new(10);
+    // fg_pgrp remains None
+    match s.check_read(42, 10) {
+        ForegroundCheck::BootstrapAllowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no-fg-pgrp check_read expected BootstrapAllowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Cross-session read — DeniedCrossSession.
+pub fn test_phase19_denied_cross_session_read() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Caller from different session (sid=99).
+    match s.check_read(10, 99) {
+        ForegroundCheck::DeniedCrossSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - cross-session read expected DeniedCrossSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Cross-session write with TOSTOP — DeniedCrossSession (not BackgroundWrite).
+pub fn test_phase19_denied_cross_session_write_tostop() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Cross-session (sid=99) + TOSTOP: cross-session takes priority.
+    match s.check_write(10, 99, true) {
+        ForegroundCheck::DeniedCrossSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - cross-session write+TOSTOP expected DeniedCrossSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Cross-session write without TOSTOP — still DeniedCrossSession.
+pub fn test_phase19_cross_session_write_no_tostop_still_denied() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Cross-session (sid=99), no TOSTOP: still denied.
+    match s.check_write(10, 99, false) {
+        ForegroundCheck::DeniedCrossSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - cross-session write no-TOSTOP expected DeniedCrossSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Kernel task (sid=0) is exempted from cross-session denial on read.
+pub fn test_phase19_kernel_task_exempted_cross_session_read() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Kernel task: pgid=0, sid=0 — should be Allowed, not DeniedCrossSession.
+    match s.check_read(0, 0) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task read expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Kernel task (sid=0) is exempted from cross-session denial on write.
+pub fn test_phase19_kernel_task_exempted_cross_session_write() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Kernel task: pgid=0, sid=0, TOSTOP=true — should be Allowed.
+    match s.check_write(0, 0, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task write expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Same-session background read — BackgroundRead (not DeniedCrossSession).
+pub fn test_phase19_same_session_background_read_sigttin() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
+    match s.check_read(99, 10) {
+        ForegroundCheck::BackgroundRead => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - same-session bg read expected BackgroundRead, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: Same-session background write with TOSTOP — BackgroundWrite.
+pub fn test_phase19_same_session_background_write_sigttou() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Same session (sid=10), background (pgid=99), TOSTOP=true — SIGTTOU path.
+    match s.check_write(99, 10, true) {
+        ForegroundCheck::BackgroundWrite => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - same-session bg write+TOSTOP expected BackgroundWrite, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: check_write with no session returns Allowed (not BootstrapAllowed).
+/// The write path uses a simpler model: no session = Allowed, not BootstrapAllowed.
+pub fn test_phase19_check_write_no_session_allowed() -> TestResult {
+    let s = TtySession::new();
+    match s.check_write(42, 42, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no-session check_write expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 19: TtyError::CrossSessionDenied is a distinct error variant.
+pub fn test_phase19_cross_session_denied_error_variant() -> TestResult {
+    let err = TtyError::CrossSessionDenied;
+    // Verify it is distinguishable from other error variants.
+    if err == TtyError::BackgroundRead
+        || err == TtyError::BackgroundWrite
+        || err == TtyError::PermissionDenied
+    {
+        klog_info!("TTY_TEST: BUG - CrossSessionDenied should be distinct from other errors");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Test suite registration
+// ===========================================================================
 slopos_lib::define_test_suite!(
     tty,
     [
@@ -4268,5 +4453,17 @@ slopos_lib::define_test_suite!(
         test_phase17_master_close_hangs_up_slave,
         test_phase17_slave_close_returns_master_eof,
         test_phase17_pty_canonical_editing_on_slave,
+        // Phase 19: Strict Session Gates & Foreground Outcomes
+        test_phase19_bootstrap_allowed_no_session_read,
+        test_phase19_bootstrap_allowed_no_fg_pgrp,
+        test_phase19_denied_cross_session_read,
+        test_phase19_denied_cross_session_write_tostop,
+        test_phase19_cross_session_write_no_tostop_still_denied,
+        test_phase19_kernel_task_exempted_cross_session_read,
+        test_phase19_kernel_task_exempted_cross_session_write,
+        test_phase19_same_session_background_read_sigttin,
+        test_phase19_same_session_background_write_sigttou,
+        test_phase19_check_write_no_session_allowed,
+        test_phase19_cross_session_denied_error_variant,
     ]
 );

@@ -99,7 +99,11 @@ pub enum TtyError {
     WouldBlock,
     /// Permission denied (e.g. different session for TIOCSPGRP).
     PermissionDenied,
+    /// Unsupported line discipline ID.
     UnsupportedLineDiscipline,
+    /// Caller belongs to a different session than the TTY's controlling
+    /// session — hard denial (Phase 19).
+    CrossSessionDenied,
 }
 
 #[derive(Clone, Copy)]
@@ -329,7 +333,10 @@ pub fn read_with_attach(
                         }
                         return Err(TtyError::BackgroundRead);
                     }
-                    ForegroundCheck::Allowed | ForegroundCheck::NoSession => {}
+                    ForegroundCheck::DeniedCrossSession => {
+                        return Err(TtyError::CrossSessionDenied);
+                    }
+                    ForegroundCheck::Allowed | ForegroundCheck::BootstrapAllowed => {}
                     ForegroundCheck::BackgroundWrite => {
                         // Should not happen on read path, treat as allowed.
                     }
@@ -473,6 +480,7 @@ pub fn read_with_attach(
                             if matches!(
                                 tty.session.check_read(caller_pgid, caller_sid),
                                 ForegroundCheck::BackgroundRead
+                                    | ForegroundCheck::DeniedCrossSession
                             ) {
                                 return false;
                             }
@@ -525,26 +533,34 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 10: Write-side foreground check (TOSTOP).
+    // Phase 10 + Phase 19: Write-side foreground check.
+    // Enforce cross-session denial (Phase 19) and TOSTOP (Phase 10).
     // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
     let task_id = current_task_id();
     if task_id != 0 {
         let caller_pgid = current_task_pgid();
+        let caller_sid = current_task_sid();
         let guard = TTY_SLOTS[slot].lock();
         let check_result = match guard.as_ref() {
             Some(tty) => {
                 let tostop = (tty.ldisc.termios().c_lflag & TOSTOP) != 0;
-                Some(tty.session.check_write(caller_pgid, tostop))
+                Some(tty.session.check_write(caller_pgid, caller_sid, tostop))
             }
             None => return Err(TtyError::NotAllocated),
         };
         drop(guard);
 
-        if let Some(ForegroundCheck::BackgroundWrite) = check_result {
-            if caller_pgid != 0 {
-                let _ = signal_process_group(caller_pgid, SIGTTOU);
+        match check_result {
+            Some(ForegroundCheck::BackgroundWrite) => {
+                if caller_pgid != 0 {
+                    let _ = signal_process_group(caller_pgid, SIGTTOU);
+                }
+                return Err(TtyError::BackgroundWrite);
             }
-            return Err(TtyError::BackgroundWrite);
+            Some(ForegroundCheck::DeniedCrossSession) => {
+                return Err(TtyError::CrossSessionDenied);
+            }
+            _ => {}
         }
     }
 
