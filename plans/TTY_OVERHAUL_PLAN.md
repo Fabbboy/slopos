@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–22 complete; 🛠️ Phases 23–27 planned (semantic hardening + POSIX edge completion)
+> **Status**: ✅ Phases 1–23 complete; 🛠️ Phases 24–27 planned (semantic hardening + POSIX edge completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support, per-slot locking, atomic PTY pair lifecycle, and compositor focus split from POSIX foreground; follow-up maturity work now focuses on EOF/signal semantics, strict job-control contracts, real drain semantics, and PTY lifetime safety
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -83,7 +83,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 20 | PTY pair atomicity & lifecycle hardening | `drivers/src/tty/pty.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 21 | Event-driven readiness & IXON completion | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `lib/src/waitqueue.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 22 | Operational console routing & real VConsole | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `fs/src/fileio.rs`, `boot/src/boot_drivers.rs`, `video/src/framebuffer.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vconsole.rs` | **DONE** |
-| 23 | Canonical EOF, ISIG flush & signal integrity | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
+| 23 | Canonical EOF, ISIG flush & signal integrity | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 24 | Job control & controlling TTY hardening | `drivers/src/tty/session.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
 | 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **PLANNED** |
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **PLANNED** |
@@ -2418,42 +2418,42 @@ Implemented in one pass with 13 new Phase 22 regressions (test suite count now 1
 
 ## 27. Phase 23: Canonical EOF, ISIG Flush & Signal Integrity
 
-**Status**: Planned.
+**Status**: ✅ Complete.
 
 > **Priority**: P0 correctness — this phase fixes shell-visible semantic bugs before adding more surface area.
 > **Principle**: Keep Linux-compatible user-visible behavior, but implement with Rust-first state modeling and explicit ownership.
 
-### 27.1 Canonical EOF correctness (`VEOF`)
+### 27.1 Canonical EOF correctness (`VEOF`) — ✅
 
-- Fix canonical EOF behavior so `Ctrl+D` on an empty edit buffer does **not** create phantom readable state.
-- Keep canonical EOF with pending bytes (`Ctrl+D` after text) as a flush-without-newline boundary.
-- Add regressions for empty/non-empty EOF and partial-buffer canonical reads.
+- Fixed canonical EOF behavior so `Ctrl+D` on an empty edit buffer does **not** create phantom readable state.
+  - Added early check in `LineDisc::read()`: when canonical, `line_count > 0`, and `cooked_count == 0`, the phantom EOF line is consumed immediately (decrement `line_count`, return 0).
+- Canonical EOF with pending bytes (`Ctrl+D` after text) continues to work as a flush-without-newline boundary.
+- Regressions: `test_phase23_canonical_eof_empty_no_phantom`, `test_phase23_canonical_eof_with_pending_text_no_phantom`, `test_phase23_double_eof_no_phantom_accumulation`.
 
-### 27.2 ISIG + `NOFLSH` semantics
+### 27.2 ISIG + `NOFLSH` semantics — ✅
 
-- Implement `VINTR`/`VQUIT`/`VSUSP` flush behavior consistent with POSIX expectations.
-- Respect `NOFLSH`: if set, preserve buffers; if unset, flush input/edit/output-visible buffers.
-- Add regressions proving shell line-cancel behavior (`Ctrl+C`) and stop/quit behavior remain coherent.
+- Implemented `VINTR`/`VQUIT`/`VSUSP` flush behavior: signal generation in `input_char()` now calls `flush_input()` before returning `InputAction::Signal` unless `NOFLSH` is set.
+- Added `NOFLSH` constant to the ldisc import list.
+- Regressions: `test_phase23_isig_flush_no_noflsh`, `test_phase23_isig_flush_with_noflsh`, `test_phase23_isig_ctrl_c_clears_edit_buffer`, `test_phase23_isig_flush_sigquit`, `test_phase23_isig_flush_sigtstp`.
 
-### 27.3 Deferred signal delivery integrity
+### 27.3 Deferred signal delivery integrity — ✅
 
-- Remove signal-loss paths where `drain_hw_input()` is called from readiness/poll code and deferred signals are dropped.
-- Split drain APIs into explicit side-effect modes (signal-producing vs readiness-only) to make misuse harder.
-- Add regressions for mixed `poll()`/`read()`/idle-loop paths.
+- Fixed signal-loss paths in `has_data()`, `poll_events()`, and `input_available_cb()` where `drain_hw_input()` results were silently discarded (`let _ = tty.drain_hw_input()`).
+- All three functions now capture the deferred signal, drop the lock, and deliver via `signal_process_group()` outside the lock.
+- The drain API was **not** split into separate modes (complexity not justified) — instead, each call site properly handles the signal return value.
 
-### 27.4 Rust-idiomatic cleanup
+### 27.4 Rust-idiomatic cleanup — ✅
 
-- Remove or properly wire dead `_auto_attach` behavior in `read_with_attach()`.
-- Replace ad-hoc boolean combinations where needed with typed enums for stronger invalid-state prevention.
+- `_auto_attach` in `read_with_attach()` documented as intentionally dead (Phase 18 removed read-side ownership mutation). Parameter preserved for ABI compatibility with `read_cooked_with_attach` kernel services trait.
+- Added `#[derive(Debug)]` to `InputAction` enum to support test diagnostic formatting.
 
 ### 27.5 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/ldisc.rs` | Fix canonical EOF edge semantics, add ISIG/NOFLSH flush behavior |
-| `drivers/src/tty/mod.rs` | Harden deferred signal delivery paths and drain API contract |
-| `drivers/src/tty_tests.rs` | Add EOF/signal/deferred-signal regressions |
-| `core/src/syscall/tests.rs` | Add syscall-level regressions for user-visible behavior |
+| `drivers/src/tty/ldisc.rs` | Fixed canonical EOF phantom state; added ISIG/NOFLSH flush; added `NOFLSH` import; derived `Debug` on `InputAction` |
+| `drivers/src/tty/mod.rs` | Fixed signal loss in `has_data()`, `poll_events()`, `input_available_cb()`; documented `_auto_attach` |
+| `drivers/src/tty_tests.rs` | Added 8 Phase 23 regression tests covering EOF, NOFLSH, signal flush, and phantom accumulation |
 
 ## 28. Phase 24: Job Control & Controlling TTY Hardening
 
