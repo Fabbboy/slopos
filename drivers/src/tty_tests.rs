@@ -20,7 +20,7 @@ use crate::tty;
 use crate::tty::TtyError;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
-use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
+use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
@@ -1572,11 +1572,11 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: VConsole driver drain_input returns 0 via drain_hw_input (interrupt-driven).
+/// Phase 3: VConsole driver drain_input returns 0 via drain_hw_input_locked (interrupt-driven).
 pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     tty::table::tty_table_init();
 
-    // TTY 1 is VConsole — drain_hw_input should be a no-op (input is
+    // TTY 1 is VConsole — drain_hw_input_locked should be a no-op (input is
     // interrupt-driven via push_input), so no data should appear.
     drain_tty_nonblock(TtyIndex(1));
 
@@ -1591,7 +1591,7 @@ pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     tty::set_termios(TtyIndex(1), &saved).unwrap();
 
     if has {
-        klog_info!("TTY_TEST: BUG - VConsole drain_hw_input produced phantom data");
+        klog_info!("TTY_TEST: BUG - VConsole drain_hw_input_locked produced phantom data");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -2297,7 +2297,7 @@ pub fn test_phase8_split_write_returns_input_len() -> TestResult {
 
 /// Phase 8: Idle callback iterates all active TTYs (not just TTY 0).
 /// Push data to TTY 1 and verify has_data reports it after the idle-loop
-/// path runs (via has_data which calls drain_hw_input internally).
+/// path runs (via has_data which calls drain_hw_input_locked internally).
 pub fn test_phase8_idle_cb_iterates_all_ttys() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -2307,7 +2307,7 @@ pub fn test_phase8_idle_cb_iterates_all_ttys() -> TestResult {
     tty::push_input(TtyIndex(1), b'z');
     tty::push_input(TtyIndex(1), b'\n');
 
-    // has_data internally calls drain_hw_input, simulating the idle path.
+    // has_data internally calls drain_hw_input_locked, simulating the idle path.
     let has1 = tty::has_data(TtyIndex(1));
     drain_tty_nonblock(TtyIndex(1));
 
@@ -6737,6 +6737,247 @@ pub fn test_phase28_control_flags_empty() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 29: LdiscKind Dispatch Consolidation
+// ===========================================================================
+
+/// Phase 29: The `LdiscOps` trait is implemented for `LineDisc` and the trait
+/// methods delegate to the inherent methods (no infinite recursion).
+pub fn test_phase29_ldisc_ops_linedisc_trait_delegation() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Use the trait methods explicitly via UFCS to prove the trait impls exist
+    // and delegate correctly to the inherent methods.
+    let t = <LineDisc as LdiscOps>::termios(&ld);
+    if t.c_line != slopos_abi::syscall::N_TTY as u8 {
+        klog_info!("TTY_TEST: BUG - LdiscOps::termios for LineDisc returned wrong c_line");
+        return TestResult::Fail;
+    }
+    let (vmin, _vtime) = <LineDisc as LdiscOps>::vmin_vtime(&ld);
+    if vmin != 1 {
+        klog_info!("TTY_TEST: BUG - LdiscOps::vmin_vtime for LineDisc wrong vmin");
+        return TestResult::Fail;
+    }
+    if !<LineDisc as LdiscOps>::is_canonical(&ld) {
+        klog_info!("TTY_TEST: BUG - LdiscOps::is_canonical for LineDisc should be true");
+        return TestResult::Fail;
+    }
+    if <LineDisc as LdiscOps>::has_data(&ld) {
+        klog_info!("TTY_TEST: BUG - LdiscOps::has_data for LineDisc should be false initially");
+        return TestResult::Fail;
+    }
+    if <LineDisc as LdiscOps>::bytes_available(&ld) != 0 {
+        klog_info!("TTY_TEST: BUG - LdiscOps::bytes_available for LineDisc should be 0");
+        return TestResult::Fail;
+    }
+    if <LineDisc as LdiscOps>::is_stopped(&ld) {
+        klog_info!("TTY_TEST: BUG - LdiscOps::is_stopped for LineDisc should be false");
+        return TestResult::Fail;
+    }
+    // Exercise a mutation via the trait.
+    let _action = <LineDisc as LdiscOps>::input_char(&mut ld, b'x');
+    <LineDisc as LdiscOps>::flush_all(&mut ld);
+    TestResult::Pass
+}
+
+/// Phase 29: The `LdiscOps` trait is implemented for `RawDisc`.
+pub fn test_phase29_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
+    let mut rd = RawDisc::new();
+    let t = <RawDisc as LdiscOps>::termios(&rd);
+    if t.c_line != slopos_abi::syscall::N_RAW as u8 {
+        klog_info!("TTY_TEST: BUG - LdiscOps::termios for RawDisc returned wrong c_line");
+        return TestResult::Fail;
+    }
+    if <RawDisc as LdiscOps>::is_canonical(&rd) {
+        klog_info!("TTY_TEST: BUG - LdiscOps::is_canonical for RawDisc should be false");
+        return TestResult::Fail;
+    }
+    if <RawDisc as LdiscOps>::has_data(&rd) {
+        klog_info!("TTY_TEST: BUG - LdiscOps::has_data for RawDisc should be false initially");
+        return TestResult::Fail;
+    }
+    // Push a byte via trait and check.
+    let action = <RawDisc as LdiscOps>::input_char(&mut rd, b'z');
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - RawDisc input_char via trait should return None");
+        return TestResult::Fail;
+    }
+    if !<RawDisc as LdiscOps>::has_data(&rd) {
+        klog_info!("TTY_TEST: BUG - RawDisc should have data after input_char via trait");
+        return TestResult::Fail;
+    }
+    if <RawDisc as LdiscOps>::bytes_available(&rd) != 1 {
+        klog_info!("TTY_TEST: BUG - RawDisc bytes_available should be 1 after input");
+        return TestResult::Fail;
+    }
+    <RawDisc as LdiscOps>::flush_all(&mut rd);
+    if <RawDisc as LdiscOps>::has_data(&rd) {
+        klog_info!("TTY_TEST: BUG - RawDisc should have no data after flush via trait");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 29: `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
+/// Verifies NTty variant routing.
+pub fn test_phase29_dispatch_macro_ntty_routing() -> TestResult {
+    let mut lk = LdiscKind::NTty(LineDisc::new());
+    // id() is manually implemented, not via macro.
+    if lk.id() != slopos_abi::syscall::N_TTY {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty id() wrong");
+        return TestResult::Fail;
+    }
+    // Methods generated by dispatch_ldisc! macro.
+    if !lk.is_canonical() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty is_canonical should be true");
+        return TestResult::Fail;
+    }
+    if lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty has_data should be false initially");
+        return TestResult::Fail;
+    }
+    if lk.bytes_available() != 0 {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty bytes_available should be 0");
+        return TestResult::Fail;
+    }
+    // Feed a char + newline through the macro-dispatched input_char.
+    let _ = lk.input_char(b'A');
+    let _ = lk.input_char(b'\n');
+    if !lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty should have data after newline");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 4];
+    let n = lk.read(&mut buf);
+    if n != 2 || buf[0] != b'A' || buf[1] != b'\n' {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty read mismatch n={}", n);
+        return TestResult::Fail;
+    }
+    lk.flush_all();
+    TestResult::Pass
+}
+
+/// Phase 29: `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
+/// Verifies Raw variant routing.
+pub fn test_phase29_dispatch_macro_raw_routing() -> TestResult {
+    let mut lk = LdiscKind::Raw(RawDisc::new());
+    if lk.id() != slopos_abi::syscall::N_RAW {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw id() wrong");
+        return TestResult::Fail;
+    }
+    if lk.is_canonical() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw is_canonical should be false");
+        return TestResult::Fail;
+    }
+    // Raw mode: input goes directly to buffer.
+    let _ = lk.input_char(b'R');
+    if !lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw should have data after input");
+        return TestResult::Fail;
+    }
+    if lk.bytes_available() != 1 {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw bytes_available should be 1");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 4];
+    let n = lk.read(&mut buf);
+    if n != 1 || buf[0] != b'R' {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw read mismatch");
+        return TestResult::Fail;
+    }
+    lk.flush_all();
+    if lk.has_data() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::Raw should have no data after flush");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 29: `LdiscKind::from_id` still works after dispatch refactor.
+pub fn test_phase29_from_id_still_works() -> TestResult {
+    let default_termios = LineDisc::new().termios().clone();
+    // N_TTY
+    let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios);
+    if ntty.is_none() {
+        klog_info!("TTY_TEST: BUG - from_id(N_TTY) returned None");
+        return TestResult::Fail;
+    }
+    if ntty.unwrap().id() != slopos_abi::syscall::N_TTY {
+        klog_info!("TTY_TEST: BUG - from_id(N_TTY) id mismatch");
+        return TestResult::Fail;
+    }
+    // N_RAW
+    let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios);
+    if nraw.is_none() {
+        klog_info!("TTY_TEST: BUG - from_id(N_RAW) returned None");
+        return TestResult::Fail;
+    }
+    if nraw.unwrap().id() != slopos_abi::syscall::N_RAW {
+        klog_info!("TTY_TEST: BUG - from_id(N_RAW) id mismatch");
+        return TestResult::Fail;
+    }
+    // Invalid ID
+    if LdiscKind::from_id(999, default_termios).is_some() {
+        klog_info!("TTY_TEST: BUG - from_id(999) should return None");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 29: Output processing via macro-dispatched `process_output_byte`.
+pub fn test_phase29_process_output_byte_dispatch() -> TestResult {
+    // NTty with OPOST+ONLCR: '\n' should produce CR+LF.
+    let mut ntty = LdiscKind::NTty(LineDisc::new());
+    let action = ntty.process_output_byte(b'\n');
+    match action {
+        OutputAction::Emit { buf, len } => {
+            if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
+                klog_info!("TTY_TEST: BUG - NTty output '\\n' should be CR+LF");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - NTty output '\\n' should be Emit");
+            return TestResult::Fail;
+        }
+    }
+    // Raw: '\n' should pass through unchanged.
+    let mut raw = LdiscKind::Raw(RawDisc::new());
+    let action = raw.process_output_byte(b'\n');
+    match action {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\n' {
+                klog_info!("TTY_TEST: BUG - Raw output '\\n' should be passthrough");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - Raw output '\\n' should be Emit");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 29: `edit_content` dispatch works for both variants.
+pub fn test_phase29_edit_content_dispatch() -> TestResult {
+    // NTty: type some chars (no newline), edit_content should show them.
+    let mut ntty = LdiscKind::NTty(LineDisc::new());
+    let _ = ntty.input_char(b'h');
+    let _ = ntty.input_char(b'i');
+    let content = ntty.edit_content();
+    if content.len() != 2 || content[0] != b'h' || content[1] != b'i' {
+        klog_info!("TTY_TEST: BUG - NTty edit_content should show typed chars");
+        return TestResult::Fail;
+    }
+    // Raw: edit_content is always empty.
+    let raw = LdiscKind::Raw(RawDisc::new());
+    if !raw.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - Raw edit_content should be empty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -7046,5 +7287,13 @@ slopos_lib::define_test_suite!(
         test_phase28_user_termios_typed_accessors,
         test_phase28_ldisc_typed_flags_behavioral_equivalence,
         test_phase28_control_flags_empty,
+        // Phase 29: LdiscKind Dispatch Consolidation
+        test_phase29_from_id_still_works,
+        test_phase29_ldisc_ops_linedisc_trait_delegation,
+        test_phase29_ldisc_ops_rawdisc_trait_delegation,
+        test_phase29_dispatch_macro_ntty_routing,
+        test_phase29_dispatch_macro_raw_routing,
+        test_phase29_process_output_byte_dispatch,
+        test_phase29_edit_content_dispatch,
     ]
 );
