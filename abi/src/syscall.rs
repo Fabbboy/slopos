@@ -666,6 +666,154 @@ pub const VREPRINT: usize = 12;
 pub const VWERASE: usize = 14;
 pub const VLNEXT: usize = 15;
 
+// =============================================================================
+// Phase 28: Type-safe termios flag types
+// =============================================================================
+
+bitflags::bitflags! {
+    /// Type-safe wrapper for `c_iflag` — input processing flags.
+    ///
+    /// Constructed from the raw `u32` via `InputFlags::from_bits_truncate()`.
+    /// Convert back with `.bits()`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct InputFlags: u32 {
+        const IGNBRK = 0x001;
+        const BRKINT = 0x002;
+        const IGNPAR = 0x004;
+        const PARMRK = 0x008;
+        const INPCK  = 0x010;
+        const ISTRIP = 0x020;
+        const INLCR  = 0x040;
+        const IGNCR  = 0x080;
+        const ICRNL  = 0x100;
+        const IXON   = 0x400;
+        const IXOFF  = 0x1000;
+        const IUTF8  = 0x4000;
+    }
+}
+
+bitflags::bitflags! {
+    /// Type-safe wrapper for `c_oflag` — output processing flags.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OutputFlags: u32 {
+        const OPOST  = 0x01;
+        const ONLCR  = 0x04;
+        const OCRNL  = 0x08;
+        const ONOCR  = 0x10;
+        const ONLRET = 0x20;
+    }
+}
+
+bitflags::bitflags! {
+    /// Type-safe wrapper for `c_lflag` — local (line discipline) flags.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct LocalFlags: u32 {
+        const ISIG    = 0x01;
+        const ICANON  = 0x02;
+        const ECHO    = 0x08;
+        const ECHOE   = 0x10;
+        const ECHOK   = 0x20;
+        const ECHONL  = 0x40;
+        const NOFLSH  = 0x80;
+        const TOSTOP  = 0x100;
+        const ECHOCTL = 0x200;
+        const ECHOPRT = 0x400;
+        const ECHOKE  = 0x800;
+        const IEXTEN  = 0x8000;
+    }
+}
+
+bitflags::bitflags! {
+    /// Type-safe wrapper for `c_cflag` — control (hardware) flags.
+    ///
+    /// No control flags are currently used by SlopOS.  The type exists
+    /// for completeness and future CREAD/PARENB/HUPCL support.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ControlFlags: u32 {
+        // Reserved for future use.
+    }
+}
+
+// =============================================================================
+// Phase 28: Strongly-typed c_cc index enum
+// =============================================================================
+
+/// Strongly-typed index into the `c_cc` control character array.
+///
+/// Replaces raw `usize` constants (`VINTR`, `VQUIT`, …) with a closed enum
+/// so that invalid indices are compile-time errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CcIndex {
+    Vintr = 0,
+    Vquit = 1,
+    Verase = 2,
+    Vkill = 3,
+    Veof = 4,
+    Vtime = 5,
+    Vmin = 6,
+    Vstart = 8,
+    Vstop = 9,
+    Vsusp = 10,
+    Veol = 11,
+    Vreprint = 12,
+    Vwerase = 14,
+    Vlnext = 15,
+}
+
+impl CcIndex {
+    /// Convert to the underlying `usize` for array indexing.
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self as usize
+    }
+}
+
+/// POSIX `_POSIX_VDISABLE` — value indicating a disabled control character.
+pub const POSIX_VDISABLE: u8 = 0;
+
+// =============================================================================
+// Phase 28: UserTermios typed accessors
+// =============================================================================
+
+impl UserTermios {
+    /// Get the typed input flags.
+    #[inline]
+    pub fn input_flags(&self) -> InputFlags {
+        InputFlags::from_bits_truncate(self.c_iflag)
+    }
+
+    /// Get the typed output flags.
+    #[inline]
+    pub fn output_flags(&self) -> OutputFlags {
+        OutputFlags::from_bits_truncate(self.c_oflag)
+    }
+
+    /// Get the typed local flags.
+    #[inline]
+    pub fn local_flags(&self) -> LocalFlags {
+        LocalFlags::from_bits_truncate(self.c_lflag)
+    }
+
+    /// Get the typed control flags.
+    #[inline]
+    pub fn control_flags(&self) -> ControlFlags {
+        ControlFlags::from_bits_truncate(self.c_cflag)
+    }
+
+    /// Look up a control character by typed index.
+    #[inline]
+    pub fn cc(&self, idx: CcIndex) -> u8 {
+        self.c_cc[idx.as_usize()]
+    }
+
+    /// Set a control character by typed index.
+    #[inline]
+    pub fn set_cc(&mut self, idx: CcIndex, val: u8) {
+        self.c_cc[idx.as_usize()] = val;
+    }
+}
+
 impl Default for UserTermios {
     fn default() -> Self {
         let mut cc = [0u8; NCCS];

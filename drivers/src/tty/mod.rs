@@ -34,7 +34,7 @@ use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
-use slopos_abi::syscall::{TOSTOP, UserTermios, UserWinsize};
+use slopos_abi::syscall::{LocalFlags, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     clear_session_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
     register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, signal_session,
@@ -86,6 +86,12 @@ pub struct Tty {
 }
 
 /// Kernel-internal error type for TTY operations.
+///
+/// # Phase 28: `to_errno()` boundary mapping
+///
+/// Each variant maps to a POSIX errno at the syscall boundary via
+/// [`TtyError::to_errno()`].  Internal code matches on variants directly;
+/// the adapter layer in `syscall_services_init.rs` calls `to_errno()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtyError {
     /// TTY index is out of range (>= MAX_TTYS).
@@ -107,6 +113,29 @@ pub enum TtyError {
     /// Caller belongs to a different session than the TTY's controlling
     /// session — hard denial (Phase 19).
     CrossSessionDenied,
+    /// Operation was interrupted by a signal (Phase 28).
+    SignalInterrupt,
+}
+
+impl TtyError {
+    /// Map this error to a negative errno value for the syscall boundary.
+    ///
+    /// The returned value follows the Linux errno convention (negative).
+    #[inline]
+    pub const fn to_errno(self) -> i32 {
+        match self {
+            TtyError::InvalidIndex => -22,              // EINVAL
+            TtyError::NotAllocated => -6,               // ENXIO
+            TtyError::BackgroundRead => -1,             // signal delivered
+            TtyError::BackgroundWrite => -1,            // signal delivered
+            TtyError::HungUp => -5,                     // EIO
+            TtyError::WouldBlock => -11,                // EAGAIN
+            TtyError::PermissionDenied => -1,           // EPERM
+            TtyError::UnsupportedLineDiscipline => -22, // EINVAL
+            TtyError::CrossSessionDenied => -5,         // EIO
+            TtyError::SignalInterrupt => -4,            // EINTR
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -197,6 +226,7 @@ pub fn set_active_tty(idx: TtyIndex) {
 /// This controls only the TTY input route (`active_tty`). It does not alter:
 /// - compositor focus (UI/window focus)
 /// - POSIX foreground process group/job control (`fg_pgrp`)
+#[must_use]
 pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -356,6 +386,7 @@ pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc, pty_open_slave};
 ///
 /// Phase 8: drain + foreground check + read are merged into a single per-TTY
 /// lock acquisition per loop iteration (previously 5–6 separate locks).
+#[must_use]
 pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
     read_with_attach(idx, buf, nonblock, true)
 }
@@ -616,6 +647,7 @@ pub fn read_with_attach(
 /// Phase 10: write-side foreground check — when `TOSTOP` is set in the
 /// TTY's `c_lflag`, background processes receive `SIGTTOU` instead of
 /// being silently allowed to write.  This matches POSIX job control.
+#[must_use]
 pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -632,7 +664,11 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
         let guard = TTY_SLOTS[slot].lock();
         let check_result = match guard.as_ref() {
             Some(tty) => {
-                let tostop = (tty.ldisc.termios().c_lflag & TOSTOP) != 0;
+                let tostop = tty
+                    .ldisc
+                    .termios()
+                    .local_flags()
+                    .contains(LocalFlags::TOSTOP);
                 Some(tty.session.check_write(caller_pgid, caller_sid, tostop))
             }
             None => return Err(TtyError::NotAllocated),
@@ -759,6 +795,7 @@ pub fn has_data(idx: TtyIndex) -> bool {
 ///
 /// Used by the FIONREAD / TIOCINQ ioctl.  Drains pending hardware input
 /// first to ensure the count is up-to-date.
+#[must_use]
 pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -783,6 +820,7 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
 }
 
 /// Get termios for a specific TTY.
+#[must_use]
 pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -897,14 +935,17 @@ fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Res
 }
 
 /// Set termios for a specific TTY.
+#[must_use]
 pub fn set_termios(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
     set_termios_mode(idx, t, TermiosSetMode::Now)
 }
 
+#[must_use]
 pub fn set_termios_wait(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
     set_termios_mode(idx, t, TermiosSetMode::Drain)
 }
 
+#[must_use]
 pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError> {
     set_termios_mode(idx, t, TermiosSetMode::DrainAndFlushInput)
 }
@@ -915,6 +956,7 @@ pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError>
 /// Phase 25: Exposed for test observability.  Production callers should
 /// prefer `wait_output_idle()` (via `TCSETSW` / `TCSETSF`) which blocks
 /// until drain completes.
+#[must_use]
 pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -930,6 +972,7 @@ pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     }
 }
 
+#[must_use]
 pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -943,6 +986,7 @@ pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
+#[must_use]
 pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -976,6 +1020,7 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
 }
 
 /// Get the foreground process group for a specific TTY.
+#[must_use]
 pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -989,6 +1034,7 @@ pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
 }
 
 /// Set the foreground process group for a specific TTY.
+#[must_use]
 pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1056,6 +1102,7 @@ pub fn set_foreground_pgrp_checked(
 }
 
 /// Get window size for a specific TTY.
+#[must_use]
 pub fn get_winsize(idx: TtyIndex) -> Result<UserWinsize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1072,6 +1119,7 @@ pub fn get_winsize(idx: TtyIndex) -> Result<UserWinsize, TtyError> {
 ///
 /// If the new size differs from the old size, sends SIGWINCH to the
 /// foreground process group so applications can re-query dimensions.
+#[must_use]
 pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1115,6 +1163,7 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
 ///
 /// Compositor focus is used for input routing; foreground pgrp is used
 /// for job control signals and read/write access gating.
+#[must_use]
 pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
     let idx = active_tty();
     let slot = idx.0 as usize;
@@ -1139,6 +1188,7 @@ pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
 }
 
 /// Get the compositor-focused task ID from the active TTY.
+#[must_use]
 pub fn get_compositor_focus() -> Result<u32, TtyError> {
     let idx = active_tty();
     let slot = idx.0 as usize;
@@ -1162,6 +1212,7 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 /// Get the session ID for a specific TTY.
+#[must_use]
 pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1232,6 +1283,7 @@ pub fn detach_session(idx: TtyIndex) {
     }
 }
 
+#[must_use]
 pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bool, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1318,6 +1370,7 @@ pub fn detach_controlling_terminal(
 /// Re-export `detach_session_by_id` from `session.rs` (Phase 14 extraction).
 pub use self::session::detach_session_by_id;
 
+#[must_use]
 pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -1347,6 +1400,7 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     Err(TtyError::NotAllocated)
 }
 
+#[must_use]
 pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {

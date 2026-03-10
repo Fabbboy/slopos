@@ -10,6 +10,9 @@
 //! read gate, TtyIndex type safety, signal constant verification.
 
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH};
+use slopos_abi::syscall::{
+    CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,
+};
 use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
@@ -6608,6 +6611,131 @@ pub fn test_phase27_ignbrk_takes_priority_over_brkint() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_phase28_input_flags_from_bits() -> TestResult {
+    let flags = InputFlags::from_bits_truncate(0x100);
+    if !flags.contains(InputFlags::ICRNL) {
+        klog_info!("TTY_TEST: BUG - InputFlags::from_bits_truncate(0x100) missing ICRNL");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_output_flags_from_bits() -> TestResult {
+    let flags = OutputFlags::from_bits_truncate(0x05);
+    if !flags.contains(OutputFlags::OPOST | OutputFlags::ONLCR) {
+        klog_info!("TTY_TEST: BUG - OutputFlags::from_bits_truncate(0x05) missing OPOST|ONLCR");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_local_flags_from_bits() -> TestResult {
+    let raw = (LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG).bits();
+    let flags = LocalFlags::from_bits_truncate(raw);
+    if flags != (LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG) {
+        klog_info!("TTY_TEST: BUG - LocalFlags round-trip mismatch");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_cc_index_values() -> TestResult {
+    if CcIndex::Vintr.as_usize() != 0
+        || CcIndex::Veof.as_usize() != 4
+        || CcIndex::Vtime.as_usize() != 5
+        || CcIndex::Vmin.as_usize() != 6
+        || CcIndex::Vwerase.as_usize() != 14
+    {
+        klog_info!("TTY_TEST: BUG - CcIndex values do not match expected ABI indices");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_posix_vdisable() -> TestResult {
+    if POSIX_VDISABLE != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - POSIX_VDISABLE should be 0, got {}",
+            POSIX_VDISABLE
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_tty_error_to_errno() -> TestResult {
+    let pairs = [
+        (TtyError::InvalidIndex, -22),
+        (TtyError::NotAllocated, -6),
+        (TtyError::BackgroundRead, -1),
+        (TtyError::BackgroundWrite, -1),
+        (TtyError::HungUp, -5),
+        (TtyError::WouldBlock, -11),
+        (TtyError::PermissionDenied, -1),
+        (TtyError::UnsupportedLineDiscipline, -22),
+        (TtyError::CrossSessionDenied, -5),
+        (TtyError::SignalInterrupt, -4),
+    ];
+    for (err, expected) in pairs {
+        if err.to_errno() != expected {
+            klog_info!(
+                "TTY_TEST: BUG - TtyError::{:?}.to_errno()={} expected {}",
+                err,
+                err.to_errno(),
+                expected
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_tty_error_signal_interrupt() -> TestResult {
+    if TtyError::SignalInterrupt.to_errno() != -4 {
+        klog_info!("TTY_TEST: BUG - SignalInterrupt should map to -4 (EINTR)");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_user_termios_typed_accessors() -> TestResult {
+    let mut t = slopos_abi::syscall::UserTermios::default();
+    t.c_iflag = slopos_abi::syscall::ICRNL;
+    t.c_lflag = LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Vintr, 0x03);
+
+    if !t.input_flags().contains(InputFlags::ICRNL)
+        || !t.local_flags().contains(LocalFlags::ECHO)
+        || t.cc(CcIndex::Vintr) != 0x03
+    {
+        klog_info!("TTY_TEST: BUG - UserTermios typed accessors mismatch");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_ldisc_typed_flags_behavioral_equivalence() -> TestResult {
+    let mut ld = LineDisc::new();
+    for &c in b"abc\n" {
+        ld.input_char(c);
+    }
+    let mut out = [0u8; 8];
+    let n = ld.read(&mut out);
+    if n != 4 || &out[..4] != b"abc\n" {
+        klog_info!("TTY_TEST: BUG - typed flag migration changed canonical behavior");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_phase28_control_flags_empty() -> TestResult {
+    if !ControlFlags::empty().is_empty() || ControlFlags::empty().bits() != 0 {
+        klog_info!("TTY_TEST: BUG - ControlFlags::empty is not zero/empty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -6907,5 +7035,16 @@ slopos_lib::define_test_suite!(
         test_phase27_fionread_constant,
         test_phase27_kill_empty_line_no_echo,
         test_phase27_ignbrk_takes_priority_over_brkint,
+        // Phase 28: Type-Safe Termios Foundation
+        test_phase28_input_flags_from_bits,
+        test_phase28_output_flags_from_bits,
+        test_phase28_local_flags_from_bits,
+        test_phase28_cc_index_values,
+        test_phase28_posix_vdisable,
+        test_phase28_tty_error_to_errno,
+        test_phase28_tty_error_signal_interrupt,
+        test_phase28_user_termios_typed_accessors,
+        test_phase28_ldisc_typed_flags_behavioral_equivalence,
+        test_phase28_control_flags_empty,
     ]
 );

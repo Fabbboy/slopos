@@ -21,50 +21,7 @@
 
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
-    BRKINT,
-    ECHO,
-    // c_lflag (additional)
-    ECHOCTL,
-    ECHOE,
-    ECHOK,
-    ECHOKE,
-    ECHONL,
-    ICANON,
-    // c_iflag
-    ICRNL,
-    IEXTEN,
-    IGNBRK,
-    IGNCR,
-    INLCR,
-    ISIG,
-    ISTRIP,
-    IXON,
-    N_RAW,
-    N_TTY,
-    NCCS,
-    NOFLSH,
-    // c_oflag
-    OCRNL,
-    ONLCR,
-    ONLRET,
-    ONOCR,
-    OPOST,
-    PARMRK,
-    UserTermios,
-    // c_cc indices
-    VEOF,
-    VERASE,
-    VINTR,
-    VKILL,
-    VLNEXT,
-    VMIN,
-    VQUIT,
-    VREPRINT,
-    VSTART,
-    VSTOP,
-    VSUSP,
-    VTIME,
-    VWERASE,
+    CcIndex, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, UserTermios,
 };
 
 const EDIT_BUF_SIZE: usize = 1024;
@@ -167,10 +124,16 @@ impl LineDisc {
         ];
         Self {
             termios: UserTermios {
-                c_iflag: ICRNL,
-                c_oflag: OPOST | ONLCR,
+                c_iflag: slopos_abi::syscall::ICRNL,
+                c_oflag: slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR,
                 c_cflag: 0,
-                c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE,
+                c_lflag: slopos_abi::syscall::ISIG
+                    | slopos_abi::syscall::ICANON
+                    | slopos_abi::syscall::ECHO
+                    | slopos_abi::syscall::ECHOE
+                    | slopos_abi::syscall::ECHOK
+                    | slopos_abi::syscall::ECHOCTL
+                    | slopos_abi::syscall::ECHOKE,
                 c_line: N_TTY as u8,
                 c_cc: cc,
                 c_ispeed: 0,
@@ -199,22 +162,21 @@ impl LineDisc {
     /// Returns (vmin, vtime_deciseconds) for non-canonical mode reads.
     /// vtime is in deciseconds (100ms units) as per POSIX.
     pub fn vmin_vtime(&self) -> (u8, u8) {
-        // c_cc layout: index 5 = VTIME, index 6 = VMIN
-        let vtime = self.termios.c_cc[5];
-        let vmin = self.termios.c_cc[6];
+        let vtime = self.termios.c_cc[CcIndex::Vtime.as_usize()];
+        let vmin = self.termios.c_cc[CcIndex::Vmin.as_usize()];
         (vmin, vtime)
     }
 
     /// Returns true if in canonical mode.
     pub fn is_canonical(&self) -> bool {
-        (self.termios.c_lflag & ICANON) != 0
+        self.termios.local_flags().contains(LocalFlags::ICANON)
     }
 
     /// Update termios.  If canonical mode is toggled off, flushes the edit
     /// buffer so that any pending characters become available for raw reads.
     pub fn set_termios(&mut self, t: &UserTermios) {
-        let was_canon = (self.termios.c_lflag & ICANON) != 0;
-        let is_canon = (t.c_lflag & ICANON) != 0;
+        let was_canon = self.termios.local_flags().contains(LocalFlags::ICANON);
+        let is_canon = LocalFlags::from_bits_truncate(t.c_lflag).contains(LocalFlags::ICANON);
         self.termios = *t;
         if was_canon && !is_canon {
             self.flush_edit_to_cooked();
@@ -319,12 +281,14 @@ impl LineDisc {
     /// Returns an [`InputAction`] indicating what the caller should do (echo,
     /// signal, reprint, or nothing).
     pub fn input_char(&mut self, c: u8) -> InputAction {
-        let iflag = self.termios.c_iflag;
-        let lflag = self.termios.c_lflag;
+        let iflag = self.termios.input_flags();
+        let lflag = self.termios.local_flags();
 
         // Phase 27: Break handling.  A NUL byte (0x00) is treated as a
         // break condition when any of IGNBRK/BRKINT/PARMRK is set.
-        if c == 0x00 && (iflag & (IGNBRK | BRKINT | PARMRK)) != 0 {
+        if c == 0x00
+            && iflag.intersects(InputFlags::IGNBRK | InputFlags::BRKINT | InputFlags::PARMRK)
+        {
             return self.handle_break(iflag);
         }
 
@@ -345,19 +309,19 @@ impl LineDisc {
         }
 
         // 3. Signal generation (ISIG) + Phase 23 NOFLSH flush.
-        if (lflag & ISIG) != 0 {
-            let sig = if c == self.cc(VINTR) {
+        if lflag.contains(LocalFlags::ISIG) {
+            let sig = if c == self.cc(CcIndex::Vintr) {
                 Some(SIGINT)
-            } else if c == self.cc(VQUIT) {
+            } else if c == self.cc(CcIndex::Vquit) {
                 Some(SIGQUIT)
-            } else if c == self.cc(VSUSP) {
+            } else if c == self.cc(CcIndex::Vsusp) {
                 Some(SIGTSTP)
             } else {
                 None
             };
             if let Some(sig) = sig {
                 // POSIX: unless NOFLSH is set, flush input queues on signal.
-                if (lflag & NOFLSH) == 0 {
+                if !lflag.contains(LocalFlags::NOFLSH) {
                     self.flush_input();
                 }
                 return InputAction::Signal(sig);
@@ -365,12 +329,12 @@ impl LineDisc {
         }
 
         // 4. Flow control (IXON).
-        if (iflag & IXON) != 0 {
-            if c == self.cc(VSTOP) {
+        if iflag.contains(InputFlags::IXON) {
+            if c == self.cc(CcIndex::Vstop) {
                 self.stopped = true;
                 return InputAction::None;
             }
-            if c == self.cc(VSTART) {
+            if c == self.cc(CcIndex::Vstart) {
                 self.stopped = false;
                 return InputAction::None;
             }
@@ -381,11 +345,11 @@ impl LineDisc {
         }
 
         // 5. Extended input processing (IEXTEN).
-        if (lflag & IEXTEN) != 0 {
-            if c == self.cc(VLNEXT) {
+        if lflag.contains(LocalFlags::IEXTEN) {
+            if c == self.cc(CcIndex::Vlnext) {
                 self.literal_next = true;
                 // Echo ^V if ECHOCTL is set.
-                if (lflag & ECHOCTL) != 0 && (lflag & ECHO) != 0 {
+                if lflag.contains(LocalFlags::ECHOCTL | LocalFlags::ECHO) {
                     return InputAction::Echo {
                         buf: [b'^', b'V', 0, 0],
                         len: 2,
@@ -393,18 +357,18 @@ impl LineDisc {
                 }
                 return InputAction::None;
             }
-            if (lflag & ICANON) != 0 {
-                if c == self.cc(VWERASE) {
+            if lflag.contains(LocalFlags::ICANON) {
+                if c == self.cc(CcIndex::Vwerase) {
                     return self.word_erase(lflag);
                 }
-                if c == self.cc(VREPRINT) {
+                if c == self.cc(CcIndex::Vreprint) {
                     return InputAction::ReprintLine;
                 }
             }
         }
 
         // 6. Canonical vs non-canonical.
-        if (lflag & ICANON) != 0 {
+        if lflag.contains(LocalFlags::ICANON) {
             self.canonical_input(c, lflag)
         } else {
             self.raw_input(c, lflag)
@@ -417,8 +381,8 @@ impl LineDisc {
     ///
     /// Called by the TTY core's `write()` function for each output byte.
     pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
-        let oflag = self.termios.c_oflag;
-        if (oflag & OPOST) == 0 {
+        let oflag = self.termios.output_flags();
+        if !oflag.contains(OutputFlags::OPOST) {
             // No output processing — still track column for echo accuracy.
             self.update_column_raw(c);
             return OutputAction::Emit {
@@ -427,16 +391,16 @@ impl LineDisc {
             };
         }
         match c {
-            b'\n' if (oflag & ONLCR) != 0 => {
+            b'\n' if oflag.contains(OutputFlags::ONLCR) => {
                 self.column = 0;
                 OutputAction::Emit {
                     buf: [b'\r', b'\n'],
                     len: 2,
                 }
             }
-            b'\r' if (oflag & OCRNL) != 0 => {
+            b'\r' if oflag.contains(OutputFlags::OCRNL) => {
                 // OCRNL: convert CR to NL.  If ONLRET is also set, reset column.
-                if (oflag & ONLRET) != 0 {
+                if oflag.contains(OutputFlags::ONLRET) {
                     self.column = 0;
                 }
                 OutputAction::Emit {
@@ -444,8 +408,10 @@ impl LineDisc {
                     len: 1,
                 }
             }
-            b'\r' if (oflag & ONOCR) != 0 && self.column == 0 => OutputAction::Suppress,
-            b'\n' if (oflag & ONLRET) != 0 => {
+            b'\r' if oflag.contains(OutputFlags::ONOCR) && self.column == 0 => {
+                OutputAction::Suppress
+            }
+            b'\n' if oflag.contains(OutputFlags::ONLRET) => {
                 // ONLRET: NL performs CR function — reset column.
                 self.column = 0;
                 OutputAction::Emit {
@@ -507,23 +473,23 @@ impl LineDisc {
     /// Returns `Some(InputAction::Signal(SIGINT))` indirectly via break
     /// handling when BRKINT is set (the caller must check for break
     /// conditions before calling this method — see `input_char`).
-    fn process_iflag(&self, c: u8, iflag: u32) -> Option<u8> {
+    fn process_iflag(&self, c: u8, iflag: InputFlags) -> Option<u8> {
         let mut c = c;
 
         // ISTRIP: strip bit 7.
-        if (iflag & ISTRIP) != 0 {
+        if iflag.contains(InputFlags::ISTRIP) {
             c &= 0x7F;
         }
 
         // CR/NL mapping.
         if c == b'\r' {
-            if (iflag & IGNCR) != 0 {
+            if iflag.contains(InputFlags::IGNCR) {
                 return None; // Discard CR entirely.
             }
-            if (iflag & ICRNL) != 0 {
+            if iflag.contains(InputFlags::ICRNL) {
                 c = b'\n'; // Map CR → NL.
             }
-        } else if c == b'\n' && (iflag & INLCR) != 0 {
+        } else if c == b'\n' && iflag.contains(InputFlags::INLCR) {
             c = b'\r'; // Map NL → CR.
         }
 
@@ -539,15 +505,15 @@ impl LineDisc {
     ///   - BRKINT set → flush I/O, send SIGINT to foreground pgrp.
     ///   - PARMRK set → insert 3-byte sequence `\xff \x00 \x00`.
     ///   - Otherwise  → pass the NUL through unchanged.
-    fn handle_break(&mut self, iflag: u32) -> InputAction {
-        if (iflag & IGNBRK) != 0 {
+    fn handle_break(&mut self, iflag: InputFlags) -> InputAction {
+        if iflag.contains(InputFlags::IGNBRK) {
             return InputAction::None;
         }
-        if (iflag & BRKINT) != 0 {
+        if iflag.contains(InputFlags::BRKINT) {
             self.flush_input();
             return InputAction::Signal(SIGINT);
         }
-        if (iflag & PARMRK) != 0 {
+        if iflag.contains(InputFlags::PARMRK) {
             // POSIX: a break is encoded as \xff \x00 \x00 in the input stream.
             self.push_cooked(0xFF);
             self.push_cooked(0x00);
@@ -559,19 +525,19 @@ impl LineDisc {
     }
 
     /// Canonical mode input processing.
-    fn canonical_input(&mut self, c: u8, lflag: u32) -> InputAction {
+    fn canonical_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
         // VERASE (backspace).
-        if c == self.cc(VERASE) || c == 0x08 {
+        if c == self.cc(CcIndex::Verase) || c == 0x08 {
             return self.erase_char(lflag);
         }
 
         // VKILL (kill line).
-        if c == self.cc(VKILL) {
+        if c == self.cc(CcIndex::Vkill) {
             return self.kill_line(lflag);
         }
 
         // VEOF (Ctrl+D) — flush without adding a newline.
-        if c == self.cc(VEOF) {
+        if c == self.cc(CcIndex::Veof) {
             self.flush_edit_to_cooked();
             return InputAction::None;
         }
@@ -584,7 +550,7 @@ impl LineDisc {
             }
             self.flush_edit_to_cooked();
             self.column = 0;
-            if (lflag & (ECHO | ECHONL)) != 0 {
+            if lflag.intersects(LocalFlags::ECHO | LocalFlags::ECHONL) {
                 return InputAction::Echo {
                     buf: [b'\n', 0, 0, 0],
                     len: 1,
@@ -598,18 +564,18 @@ impl LineDisc {
     }
 
     /// Insert a character into the edit buffer and produce an echo action.
-    fn insert_char(&mut self, c: u8, lflag: u32) -> InputAction {
+    fn insert_char(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
         if self.edit_len < EDIT_BUF_SIZE {
             self.edit_buf[self.edit_len] = c;
             self.edit_len += 1;
         }
 
-        if (lflag & ECHO) == 0 {
+        if !lflag.contains(LocalFlags::ECHO) {
             return InputAction::None;
         }
 
         // ECHOCTL: control characters (except TAB, NL) are echoed as ^X.
-        if (lflag & ECHOCTL) != 0 && c < 0x20 && c != b'\t' && c != b'\n' {
+        if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
             self.column += 2;
             return InputAction::Echo {
                 buf: [b'^', c + 0x40, 0, 0],
@@ -630,11 +596,11 @@ impl LineDisc {
     }
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.
-    fn raw_input(&mut self, c: u8, lflag: u32) -> InputAction {
+    fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
         self.push_cooked(c);
-        if (lflag & ECHO) != 0 {
+        if lflag.contains(LocalFlags::ECHO) {
             // ECHOCTL in raw mode.
-            if (lflag & ECHOCTL) != 0 && c < 0x20 && c != b'\t' && c != b'\n' {
+            if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
                 return InputAction::Echo {
                     buf: [b'^', c + 0x40, 0, 0],
                     len: 2,
@@ -649,7 +615,7 @@ impl LineDisc {
     }
 
     /// Erase one character (VERASE / backspace).
-    fn erase_char(&mut self, lflag: u32) -> InputAction {
+    fn erase_char(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
         }
@@ -657,11 +623,15 @@ impl LineDisc {
         let erased = self.edit_buf[self.edit_len - 1];
         self.edit_len -= 1;
 
-        if (lflag & ECHOE) != 0 {
+        if lflag.contains(LocalFlags::ECHOE) {
             // Phase 27: If the erased character was a control char echoed as
             // ^X via ECHOCTL, erase two columns with two BS-SP-BS triples.
             // Use `KillLineEcho` to emit the correct number of columns.
-            if (lflag & ECHOCTL) != 0 && erased < 0x20 && erased != b'\t' && erased != b'\n' {
+            if lflag.contains(LocalFlags::ECHOCTL)
+                && erased < 0x20
+                && erased != b'\t'
+                && erased != b'\n'
+            {
                 self.column = self.column.saturating_sub(2);
                 return InputAction::KillLineEcho { columns: 2 };
             }
@@ -677,7 +647,7 @@ impl LineDisc {
     }
 
     /// Kill the entire line (VKILL).
-    fn kill_line(&mut self, lflag: u32) -> InputAction {
+    fn kill_line(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
         }
@@ -690,13 +660,13 @@ impl LineDisc {
         self.edit_len = 0;
         self.column = 0;
 
-        if (lflag & ECHOKE) != 0 && (lflag & ECHO) != 0 {
+        if lflag.contains(LocalFlags::ECHOKE | LocalFlags::ECHO) {
             return InputAction::KillLineEcho {
                 columns: cols_to_erase,
             };
         }
 
-        if (lflag & ECHOK) != 0 {
+        if lflag.contains(LocalFlags::ECHOK) {
             return InputAction::Echo {
                 buf: [b'\n', 0, 0, 0],
                 len: 1,
@@ -717,7 +687,7 @@ impl LineDisc {
     /// spaces, matching the behavior of most POSIX terminals.  This correctly
     /// handles paths like `/usr/local/bin` -- Ctrl+W erases `bin`, then `local`,
     /// etc.
-    fn word_erase(&mut self, lflag: u32) -> InputAction {
+    fn word_erase(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
         }
@@ -741,7 +711,7 @@ impl LineDisc {
         // We can only return 4 bytes, so for longer erases we just echo
         // a newline + the remaining edit content (like a simplified reprint).
         // Most terminals handle this gracefully.
-        if erased <= 1 && (lflag & ECHOE) != 0 {
+        if erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
             return InputAction::Echo {
                 buf: [0x08, 0x20, 0x08, 0],
                 len: 3,
@@ -749,7 +719,7 @@ impl LineDisc {
         }
 
         // For multi-char erases, request a reprint so the line is redrawn.
-        if (lflag & ECHO) != 0 {
+        if lflag.contains(LocalFlags::ECHO) {
             return InputAction::ReprintLine;
         }
 
@@ -757,12 +727,8 @@ impl LineDisc {
     }
 
     /// Look up a control character from the c_cc array.
-    fn cc(&self, idx: usize) -> u8 {
-        if idx < NCCS {
-            self.termios.c_cc[idx]
-        } else {
-            0
-        }
+    fn cc(&self, idx: CcIndex) -> u8 {
+        self.termios.c_cc[idx.as_usize()]
     }
 
     /// Returns `true` if `c` is a printable ASCII character or tab.
@@ -857,7 +823,10 @@ impl RawDisc {
     }
 
     pub fn vmin_vtime(&self) -> (u8, u8) {
-        (self.termios.c_cc[VMIN], self.termios.c_cc[VTIME])
+        (
+            self.termios.c_cc[CcIndex::Vmin.as_usize()],
+            self.termios.c_cc[CcIndex::Vtime.as_usize()],
+        )
     }
 
     pub fn is_canonical(&self) -> bool {
