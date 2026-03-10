@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–27 complete (POSIX completion set done)
+> **Status**: ✅ Phases 1–27 complete | 📋 Phases 28–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity; follow-up maturity work now focuses on POSIX completion
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity; Phases 28–42 target type-safe Rust idioms, `/dev/tty` magic device, SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -40,8 +40,23 @@
 29. [Phase 25: Real TCSETSW/TCSETSF Drain Semantics ✅](#29-phase-25-real-tcsetswtcsetsf-drain-semantics)
 30. [Phase 26: PTY Lifetime Safety & Scalable Capacity](#30-phase-26-pty-lifetime-safety--scalable-capacity)
 31. [Phase 27: POSIX Completion Set (Rust-Idiomatic)](#31-phase-27-posix-completion-set-rust-idiomatic)
-32. [File Inventory](#32-file-inventory)
-33. [Appendix: Linux N_TTY Reference](#33-appendix-linux-n_tty-reference)
+32. [Phase 28: Type-Safe Termios Foundation](#32-phase-28-type-safe-termios-foundation)
+33. [Phase 29: LdiscKind Dispatch Consolidation](#33-phase-29-ldisckind-dispatch-consolidation)
+34. [Phase 30: `/dev/tty` Controlling Terminal Device](#34-phase-30-devtty-controlling-terminal-device)
+35. [Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)](#35-phase-31-background-write-protection-sigttou-on-tcsetattr)
+36. [Phase 32: Controlling Terminal Lifecycle Integrity](#36-phase-32-controlling-terminal-lifecycle-integrity)
+37. [Phase 33: Post-Hangup I/O Hardening](#37-phase-33-post-hangup-io-hardening)
+38. [Phase 34: Extended Line Boundaries (VEOL, VEOL2)](#38-phase-34-extended-line-boundaries-veol-veol2)
+39. [Phase 35: UTF-8 Aware Editing (IUTF8)](#39-phase-35-utf-8-aware-editing-iutf8)
+40. [Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)](#40-phase-36-input-buffer-policy-imaxbel-ixoff-cread)
+41. [Phase 37: Deferred Reprint (PENDIN)](#41-phase-37-deferred-reprint-pendin)
+42. [Phase 38: PTY Namespace & Device Nodes](#42-phase-38-pty-namespace--device-nodes)
+43. [Phase 39: PTY Packet Mode (TIOCPKT)](#43-phase-39-pty-packet-mode-tiocpkt)
+44. [Phase 40: VT100/ANSI Terminal Emulation](#44-phase-40-vt100ansi-terminal-emulation)
+45. [Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)](#45-phase-41-advanced-pty--session-control-extproc-vhangup)
+46. [Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)](#46-phase-42-legacy-termios-completion-echoprt-iuclc-olcuc)
+47. [File Inventory](#47-file-inventory)
+48. [Appendix: Linux N_TTY Reference](#48-appendix-linux-n_tty-reference)
 
 ---
 
@@ -88,6 +103,21 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs` | — | **DONE** |
+| 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/pty.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 36 | Input buffer policy (IMAXBEL bell, IXOFF flow control, CREAD gate) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 38 | PTY namespace & device nodes (`/dev/ptmx`, `/dev/pts/N`, lock ioctls) | `drivers/src/tty/pty.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 39 | PTY packet mode (TIOCPKT, control byte framing) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 40 | VT100/ANSI terminal emulation (escape parser, CSI, cursor/color) | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vtparser.rs` | **TODO** |
+| 41 | Advanced PTY & session control (EXTPROC, `vhangup()`) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/process_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 42 | Legacy termios completion (ECHOPRT, IUCLC, OLCUC) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 
 ---
 
@@ -2707,7 +2737,722 @@ Added 13 Phase 25 regression tests:
 | 13 | `test_phase27_fionread_constant` | ABI constant value |
 ---
 
-## 32. File Inventory
+## 32. Phase 28: Type-Safe Termios Foundation
+
+**Status**: 📋 Planned
+
+> **Priority**: P1 infrastructure — foundational type safety that every subsequent phase benefits from.
+> **Principle**: Replace raw integer bitmasking with Rust-idiomatic `bitflags!` types. Make invalid flag combinations unrepresentable. Keep the ABI wire format (`UserTermios`) unchanged — conversion happens at the kernel/userspace boundary.
+
+### 32.1 `bitflags!` for termios flag words
+
+- Define `InputFlags`, `OutputFlags`, `LocalFlags`, `ControlFlags` bitflags types wrapping `c_iflag`/`c_oflag`/`c_lflag`/`c_cflag`.
+- All existing flag constants (`ICRNL`, `OPOST`, `ECHO`, `CREAD`, etc.) become named bitflags members with `contains()` / `insert()` / `remove()` semantics.
+- Migrate all flag checks in `ldisc.rs`, `mod.rs`, `session.rs`, `pty.rs` from `termios.c_iflag & ICRNL != 0` to `flags.contains(InputFlags::ICRNL)`.
+- `UserTermios` in `abi/src/syscall.rs` retains raw `u32` fields for syscall ABI stability. `From<u32>` / `Into<u32>` impls on the bitflags types handle conversion at the boundary.
+
+### 32.2 Strongly-typed `CcIndex` enum
+
+- Replace raw `usize` indices into `c_cc[]` with a `CcIndex` enum: `VINTR`, `VQUIT`, `VERASE`, `VKILL`, `VEOF`, `VTIME`, `VMIN`, `VSTART`, `VSTOP`, `VSUSP`, `VEOL`, `VREPRINT`, `VDISCARD`, `VWERASE`, `VLNEXT`, `VEOL2`.
+- Implement `Into<usize>` for array access. Invalid indices become compile-time errors instead of runtime panics.
+- Add `_POSIX_VDISABLE` constant (value `0`) for disabled control characters.
+
+### 32.3 `TtyError` refinement
+
+- Split the monolithic `TtyError` enum into internal diagnostic variants (for logging/debugging within the TTY subsystem) and a boundary `to_errno()` mapping method.
+- Add `#[must_use]` on all error-returning functions to prevent silent error drops.
+- Keep error variants semantically meaningful: `HungUp`, `NotAllocated`, `InvalidIndex`, `WouldBlock`, `PermissionDenied`, `SignalInterrupt`, etc.
+
+### 32.4 Non-goals
+
+- No new termios features — pure type-safety refactor.
+- No changes to external behavior or ABI wire format.
+- No behavioral changes to any existing test.
+
+### 32.5 Verification
+
+- All existing 1197+ tests pass unchanged (behavioral equivalence proves the migration is correct).
+- New compile-time tests: invalid flag combinations rejected, `CcIndex` exhaustiveness verified.
+- `just build` + `just test` gate.
+
+### 32.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `bitflags!` type definitions, `CcIndex` enum, `From`/`Into` impls between raw and typed representations |
+| `drivers/src/tty/ldisc.rs` | Migrate all flag checks to `bitflags!` `contains()` API; use `CcIndex` for `c_cc` access |
+| `drivers/src/tty/mod.rs` | Migrate flag checks, refine `TtyError` enum, add `#[must_use]` |
+| `drivers/src/tty/session.rs` | Migrate any flag checks to typed API |
+| `drivers/src/tty/pty.rs` | Migrate any flag checks to typed API |
+| `drivers/src/tty_tests.rs` | Update test helpers to use typed flags; add compile-time exhaustiveness tests |
+
+---
+
+## 33. Phase 29: LdiscKind Dispatch Consolidation
+
+**Status**: 📋 Planned
+
+> **Priority**: P2 maintainability — eliminate mechanical duplication that makes the ldisc layer harder to extend.
+> **Principle**: Reduce boilerplate without sacrificing explicitness. Codify the split-write invariant with naming conventions so future contributors can’t accidentally violate it.
+
+### 33.1 `dispatch_ldisc!` macro
+
+- Create a `dispatch_ldisc!` macro that generates delegating match arms for methods shared across `LineDisc` and `RawDisc`.
+- Each method signature is declared once in the macro invocation; the macro expands to the full `match self { NTty(l) => l.foo(), Raw(r) => r.foo() }` dispatch.
+- Target: eliminate 40+ mechanical match arms currently duplicated in `LdiscKind`.
+
+### 33.2 `*_locked()` naming convention
+
+- Rename internal methods that must be called while holding the TTY slot lock to use the `_locked` suffix (e.g., `process_input_locked()`, `read_locked()`).
+- Methods that operate on data extracted outside the lock keep their current names (e.g., `write_driver_unlocked()`).
+- Document the convention in a module-level comment so future contributors understand the split-write contract.
+
+### 33.3 Internal `LdiscOps` trait
+
+- Where `LineDisc` and `RawDisc` share identical method signatures, extract a private `LdiscOps` trait to formalize the contract.
+- The `dispatch_ldisc!` macro dispatches through this trait.
+- The trait is `pub(crate)` — purely internal organizational improvement. External API unchanged.
+
+### 33.4 Dead code audit
+
+- Identify and remove any ldisc methods that exist but are never called from the public `tty::` API.
+- Document intentionally-unused methods (if any) with `#[allow(dead_code)]` and a justification comment.
+
+### 33.5 Verification
+
+- All existing tests pass unchanged.
+- Code line count in `ldisc.rs` reduced measurably (target: 15–25% reduction in boilerplate lines).
+- `just build` + `just test` gate.
+
+### 33.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/ldisc.rs` | Add `dispatch_ldisc!` macro, extract `LdiscOps` trait, rename `*_locked` methods, remove dead code |
+| `drivers/src/tty/mod.rs` | Update call sites for renamed methods, add module-level convention documentation |
+| `drivers/src/tty_tests.rs` | Update any test helpers referencing renamed internals |
+
+---
+
+## 34. Phase 30: `/dev/tty` Controlling Terminal Device
+
+**Status**: 📋 Planned
+
+> **Priority**: P0 correctness — the single most critical missing feature for bash/zsh job control.
+> **Principle**: `/dev/tty` is a per-process magic alias that resolves to the caller’s controlling terminal. Shells use it for prompts, job control, and error output. Without it, interactive shells cannot function correctly.
+
+### 34.1 Resolution logic
+
+- When a process opens `/dev/tty`, the kernel looks up `current_task().controlling_tty`.
+- If set: the open succeeds and the returned FD operates on that TTY index. All read/write/ioctl/poll operations go through the same per-TTY dispatch as a direct device open.
+- If not set (no controlling terminal): the open fails with `ENXIO`.
+- Opening `/dev/tty` never acquires a new controlling terminal — it only accesses an existing one. `O_NOCTTY` is irrelevant.
+
+### 34.2 FD routing
+
+- The file descriptor created by `/dev/tty` open is identical in kind to one opened on the actual device path (`/dev/ttyN` or `/dev/pts/N`).
+- Intercept `/dev/tty` in `fileio.rs` open path, alongside existing `/dev/ptmx` and `/dev/pts/N` intercepts.
+- Reuse `controlling_tty` field from `task_struct.rs` — no new kernel state needed.
+
+### 34.3 Process inheritance
+
+- Child processes inherit the controlling terminal via `fork()`, so `/dev/tty` resolves to the same device as the parent.
+- After `setsid()`, the controlling terminal is cleared, so `/dev/tty` returns `ENXIO` until a new ctty is acquired.
+
+### 34.4 Verification
+
+- Test: process with controlling terminal opens `/dev/tty` → reads/writes succeed, ioctl returns same termios as direct device open.
+- Test: process without controlling terminal opens `/dev/tty` → `ENXIO`.
+- Test: `setsid()` + open `/dev/tty` → `ENXIO` (ctty cleared by setsid).
+- Test: fork child inherits `/dev/tty` resolution.
+- `just build` + `just test` gate.
+
+### 34.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `fs/src/fileio.rs` | Add `/dev/tty` path intercept in `open()`, resolve via `controlling_tty` |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Add `get_controlling_tty()` service method if not already exposed |
+| `drivers/src/syscall_services_init.rs` | Wire adapter if new service method needed |
+| `drivers/src/tty_tests.rs` | Regression tests for `/dev/tty` resolution, `ENXIO`, fork inheritance |
+
+---
+
+## 35. Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)
+
+**Status**: 📋 Planned
+
+> **Priority**: P0 correctness — POSIX requires SIGTTOU when a background process changes terminal settings.
+> **Principle**: Background processes must not silently mutate the terminal. The foreground application’s terminal state is sacred.
+
+### 35.1 Foreground check on `tcsetattr`
+
+- Before applying any termios change (`TCSETS`, `TCSETSW`, `TCSETSF`), verify that the calling process is in the foreground process group of the target TTY.
+- If the caller is in a background process group and `SIGTTOU` is not blocked or set to `SIG_IGN` by the caller, deliver `SIGTTOU` to the caller’s process group and return `EINTR`.
+- Reuse the existing `ForegroundCheck` enum outcomes from `session.rs`.
+- Add the check in `tty::set_termios_mode()`, `set_termios_wait()`, and `set_termios_flush()` before acquiring the slot lock.
+
+### 35.2 Blocked/ignored SIGTTOU bypass
+
+- Per POSIX, if `SIGTTOU` is blocked or set to `SIG_IGN` in the caller’s signal disposition, the `tcsetattr` proceeds silently (no signal, no error).
+- Implement signal disposition check via existing `signal_is_blocked_or_ignored()` infrastructure, or add a minimal check against the task’s signal handler table.
+
+### 35.3 Orphaned process group
+
+- If the background process group is orphaned (no process in the group has a parent in a different process group within the same session), return `EIO` instead of delivering `SIGTTOU`.
+- Orphan detection reuses `pgrp_exists_in_session()` from Phase 24 + parent cross-check.
+
+### 35.4 TOSTOP audit
+
+- Verify that `TOSTOP` flag on `write()` paths correctly delivers `SIGTTOU` for background writes.
+- Audit the existing implementation against POSIX specification and harden edge cases if needed.
+
+### 35.5 Verification
+
+- Test: background process `tcsetattr` → `SIGTTOU` delivered, termios unchanged.
+- Test: background process with `SIGTTOU` blocked → `tcsetattr` succeeds silently.
+- Test: foreground process `tcsetattr` → no signal, applies normally.
+- Test: `TOSTOP` + background write → `SIGTTOU` delivered.
+- Test: orphaned background pgrp `tcsetattr` → `EIO`.
+- `just build` + `just test` gate.
+
+### 35.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Add foreground check to `set_termios_mode()`, `set_termios_wait()`, `set_termios_flush()` |
+| `drivers/src/tty/session.rs` | Add `is_sigttou_relevant()` helper or extend `ForegroundCheck` |
+| `abi/src/syscall.rs` | Verify `SIGTTOU` constant present, add `EIO` errno if missing |
+| `drivers/src/tty_tests.rs` | Regression tests for SIGTTOU on tcsetattr, TOSTOP audit, blocked signal bypass, orphan EIO |
+
+---
+
+## 36. Phase 32: Controlling Terminal Lifecycle Integrity
+
+**Status**: 📋 Planned
+
+> **Priority**: P0 correctness — the controlling terminal lifecycle chain must be watertight for shells to work.
+> **Principle**: Individual pieces exist from earlier phases. This phase performs a comprehensive end-to-end audit and hardens every state transition in the controlling terminal lifecycle: `fork()` → `setsid()` → `open()` → `TIOCSCTTY` → `TIOCNOTTY` → process exit.
+
+### 36.1 `fork()` inheritance audit
+
+- Verify child inherits `controlling_tty`, `session_id`, `pgid` correctly.
+- Add explicit test for deep fork chains: grandchild inherits grandparent’s ctty.
+- Verify no accidental double-assignment or stale reference on fork.
+
+### 36.2 `setsid()` clearing
+
+- Verify `setsid()` clears `controlling_tty` and detaches from the TTY’s session state.
+- Verify subsequent opens do NOT auto-acquire a ctty unless `TIOCSCTTY` is explicitly used.
+- Verify `setsid()` fails with `EPERM` if the caller is already a session leader or shares a pgid with another session.
+
+### 36.3 `O_NOCTTY` enforcement
+
+- Verify that opening a TTY device with `O_NOCTTY` does not acquire it as controlling terminal, even if the process is a session leader without a ctty.
+- Verify that opening a TTY device WITHOUT `O_NOCTTY` as a session leader without a ctty DOES auto-acquire (Linux behavior).
+
+### 36.4 `TIOCSCTTY` preconditions
+
+- Verify all preconditions: must be session leader, must not already have a different ctty, TTY must not belong to a different session.
+- Document steal-ctty semantics (`arg=1` with sufficient privilege) as explicit non-goal for now, or implement if needed for specific userspace.
+
+### 36.5 Session leader exit → hangup
+
+- Verify the full chain: session leader exits → controlling TTY receives hangup → all session members get `SIGHUP` + `SIGCONT` → controlling terminal cleared for all members.
+- Verify non-leader exit does NOT trigger hangup.
+
+### 36.6 Race condition audit
+
+- Audit for TOCTOU races between checking and setting controlling terminal (e.g., two session leaders racing to `TIOCSCTTY` the same device).
+- Add stress test with rapid `fork()`/`setsid()`/`TIOCSCTTY` cycling.
+
+### 36.7 Verification
+
+- Minimum 12 lifecycle chain tests covering every state transition.
+- Stress test: rapid fork/setsid/TIOCSCTTY cycling.
+- `just build` + `just test` gate.
+
+### 36.8 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Fix any discovered inconsistencies in ctty acquisition/release |
+| `drivers/src/tty/session.rs` | Harden TIOCSCTTY preconditions, document steal semantics |
+| `fs/src/fileio.rs` | Audit and fix O_NOCTTY handling, auto-acquire logic on open |
+| `core/src/syscall/process_handlers.rs` | Audit setsid() ctty clearing, EPERM checks |
+| `core/src/scheduler/task.rs` | Audit fork inheritance, session leader exit → hangup chain |
+| `drivers/src/tty_tests.rs` | 12+ lifecycle chain tests, race condition stress tests |
+
+---
+
+## 37. Phase 33: Post-Hangup I/O Hardening
+
+**Status**: 📋 Planned
+
+> **Priority**: P0 correctness — consistent I/O behavior after hangup is essential for shells to detect session termination.
+> **Principle**: A hung-up TTY is permanently dead. All I/O operations must produce deterministic, POSIX-mandated results. No code path may silently succeed on a hung-up device.
+
+### 37.1 I/O behavior after hangup
+
+- **Read → EOF (0 bytes)**: All `tty_read()` paths return 0 bytes when the TTY is hung up. This is how shells detect session termination.
+- **Write → `-EIO`**: All `tty_write()` paths return `EIO` after hangup. The data has nowhere to go.
+- **Poll → `POLLHUP`**: Readers see `POLLIN | POLLHUP` (readable with immediate EOF). Writers see `POLLHUP`.
+- **Ioctl → `EIO` with exceptions**: Most ioctls return `EIO`. Exceptions: `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID` remain functional (POSIX requires job control queries to work after hangup).
+
+### 37.2 Hangup flag consistency
+
+- Verify a per-TTY `hung_up: bool` flag is checked at the top of every I/O entry point.
+- The flag is set by `tty_hangup()` and never cleared — a hung-up TTY is permanently dead until the slot is reclaimed.
+- Use a consistent early-return pattern: `if self.hung_up { return Err(TtyError::HungUp); }` at method entry, with `HungUp` mapped to appropriate errno at the syscall boundary.
+
+### 37.3 PTY cross-end hangup
+
+- When the master side of a PTY is closed, the slave sees hangup.
+- Verify slave reads return 0 (EOF), slave writes return `EIO`, slave poll returns `POLLHUP`.
+- Verify the master cannot be written to after the slave is hung up (generation check should catch this, but audit explicitly).
+
+### 37.4 Verification
+
+- Test: hangup → read returns 0.
+- Test: hangup → write returns `EIO`.
+- Test: hangup → poll returns `POLLHUP`.
+- Test: PTY master close → slave read returns 0, slave write returns `EIO`.
+- Test: hangup → `TIOCGPGRP` still works (hangup-safe ioctl).
+- Test: hangup → `TCSETS` returns `EIO` (hangup-blocked ioctl).
+- `just build` + `just test` gate.
+
+### 37.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Add/verify `hung_up` flag, add early-return checks to read/write/poll |
+| `drivers/src/tty/ldisc.rs` | Verify ldisc methods propagate hangup state |
+| `drivers/src/tty/pty.rs` | Verify cross-end hangup propagation |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add hangup checks to ioctl dispatch, document hangup-safe ioctls |
+| `drivers/src/tty_tests.rs` | Hangup I/O consistency tests, PTY cross-end hangup tests |
+
+---
+
+## 38. Phase 34: Extended Line Boundaries (VEOL, VEOL2)
+
+**Status**: 📋 Planned
+
+> **Priority**: P1 completeness — required for protocols and applications that use custom line delimiters.
+> **Principle**: POSIX allows two additional end-of-line terminators beyond hardcoded `\n` and `VEOF`. These are user-configurable via `c_cc[VEOL]` and `c_cc[VEOL2]`.
+
+### 38.1 Scope
+
+- In canonical mode, when the input character matches `c_cc[VEOL]` (and VEOL is not disabled, i.e., value != `_POSIX_VDISABLE` / 0), treat it as a line terminator: increment `line_count`, complete the canonical line, wake blocked readers.
+- Same behavior for `c_cc[VEOL2]` — a second independent line terminator.
+- VEOL/VEOL2 do NOT replace `\n` or `VEOF` — they are additional terminators. Line completion logic checks all four: `\n`, `VEOF`, `VEOL`, `VEOL2`.
+- VEOL/VEOL2 characters are echoed normally if `ECHO` is set (they are not control characters in the ECHOCTL sense).
+- Disabled by default (`_POSIX_VDISABLE` = 0 in default termios `c_cc`).
+- Use `CcIndex` from Phase 28 for type-safe access.
+
+### 38.2 Verification
+
+- Test: VEOL character completes canonical line.
+- Test: VEOL2 character completes canonical line.
+- Test: VEOL disabled (value 0) → no effect.
+- Test: VEOL + `\n` both work simultaneously as independent terminators.
+- Test: VEOL echo behavior with ECHO set.
+- `just build` + `just test` gate.
+
+### 38.3 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `VEOL`/`VEOL2` `CcIndex` entries if missing, `_POSIX_VDISABLE` constant |
+| `drivers/src/tty/ldisc.rs` | Add VEOL/VEOL2 checks in canonical input path alongside NL/EOF |
+| `drivers/src/tty_tests.rs` | Line boundary tests for VEOL/VEOL2, disabled state, multi-terminator |
+
+---
+
+## 39. Phase 35: UTF-8 Aware Editing (IUTF8)
+
+**Status**: 📋 Planned
+
+> **Priority**: P1 quality — without IUTF8, backspace erases a single byte, potentially leaving partial UTF-8 sequences in the edit buffer. Required for zsh/readline quality.
+> **Principle**: When IUTF8 is set, editing operations work on codepoints, not bytes. Display width accounts for wide characters. When IUTF8 is not set, byte-at-a-time editing continues unchanged (backward compatible).
+
+### 39.1 Backspace (VERASE) with IUTF8
+
+- Count the number of bytes in the trailing UTF-8 codepoint by examining continuation byte prefixes (`10xxxxxx` pattern).
+- Erase all bytes of the codepoint from the edit buffer.
+- Echo the correct number of BS-SP-BS triples based on the codepoint’s display width (1 for most characters, 2 for CJK/fullwidth).
+
+### 39.2 Word erase (VWERASE) with IUTF8
+
+- Erase full codepoints until a word boundary (whitespace).
+- Each codepoint’s display width determines the echo erase column count.
+
+### 39.3 Display width helper
+
+- Implement a minimal `utf8_char_width(codepoint: u32) -> u8` function that returns:
+  - `2` for CJK Unified Ideographs, fullwidth forms, and common emoji ranges (U+1100–U+115F, U+2E80–U+A4CF, U+F900–U+FAFF, U+FE30–U+FE6F, U+FF01–U+FF60, U+FFE0–U+FFE6, U+20000–U+2FA1F).
+  - `1` for everything else.
+- This is a range-based lookup, NOT a full Unicode database. Covers the common cases without bloating the kernel.
+
+### 39.4 Fallback
+
+- When `IUTF8` is not set, byte-at-a-time editing continues unchanged.
+- No output processing changes — IUTF8 only affects input editing.
+
+### 39.5 Verification
+
+- Test: IUTF8 + backspace on ASCII → 1 byte erased, 1 column cleared.
+- Test: IUTF8 + backspace on 2-byte UTF-8 (e.g., é) → 2 bytes erased, 1 column cleared.
+- Test: IUTF8 + backspace on 3-byte CJK → 3 bytes erased, 2 columns cleared.
+- Test: IUTF8 off + backspace on multi-byte → 1 byte erased (legacy behavior preserved).
+- Test: word erase with mixed ASCII + UTF-8 content.
+- `just build` + `just test` gate.
+
+### 39.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `IUTF8` constant to input flags |
+| `drivers/src/tty/ldisc.rs` | UTF-8 aware `erase_char()`, `word_erase()`, `utf8_char_width()` helper function |
+| `drivers/src/tty_tests.rs` | UTF-8 editing tests, display width tests, fallback behavior tests |
+
+---
+
+## 40. Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
+
+**Status**: 📋 Planned
+
+> **Priority**: P1 completeness — three input-side termios flags that control buffer-full behavior, terminal-to-host flow control, and receiver enable/disable.
+> **Principle**: Each flag is a cheap early check in the input path. Implement them as clean, orthogonal guards rather than interleaved conditionals.
+
+### 40.1 IMAXBEL
+
+- When `IMAXBEL` is set and the input buffer is full, ring the bell (send BEL `\x07` to output) instead of silently discarding the character.
+- Without `IMAXBEL`, buffer-full characters are silently dropped (current behavior).
+- Implementation: check buffer capacity before enqueue in `LineDisc::input_char()`. If full and `IMAXBEL` set, return an `InputAction::Bell` (or emit BEL directly through the output path).
+
+### 40.2 IXOFF
+
+- When `IXOFF` is set, the kernel sends `XOFF` (`c_cc[VSTOP]`, typically `^S`) to the terminal when the input buffer reaches a high-water mark (~80% capacity), and `XON` (`c_cc[VSTART]`, typically `^Q`) when buffer level drops below a low-water mark (~20% capacity).
+- This is terminal-to-kernel flow control: the kernel tells the terminal device to stop/start sending.
+- Track `xoff_sent: bool` flag per ldisc. Check thresholds in `input_char()` (high-water) and `read()` (low-water).
+
+### 40.3 CREAD
+
+- When `CREAD` is NOT set in `c_cflag`, input characters are silently discarded (receiver disabled).
+- Check at the very top of `input_char()` — before any other processing.
+- Default termios has `CREAD` set (receiver enabled).
+
+### 40.4 Verification
+
+- Test: IMAXBEL set + buffer full → BEL output, character discarded.
+- Test: IMAXBEL not set + buffer full → silent discard (no BEL).
+- Test: IXOFF set + buffer fills past high water → XOFF sent to output.
+- Test: IXOFF + buffer drained past low water after XOFF → XON sent.
+- Test: CREAD cleared → all input silently discarded.
+- Test: CREAD set → input processed normally (baseline).
+- `just build` + `just test` gate.
+
+### 40.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `IMAXBEL`, `IXOFF`, `CREAD` flag constants if missing |
+| `drivers/src/tty/ldisc.rs` | Add CREAD gate at top of `input_char()`, IMAXBEL bell action on buffer full, IXOFF threshold tracking with `xoff_sent` state |
+| `drivers/src/tty/mod.rs` | Wire IXOFF XON/XOFF output actions to driver write path |
+| `drivers/src/tty_tests.rs` | Tests for all three flags independently and their interactions |
+
+---
+
+## 41. Phase 37: Deferred Reprint (PENDIN)
+
+**Status**: 📋 Planned
+
+> **Priority**: P1 quality — PENDIN ensures users see their pending input re-echoed correctly after terminal mode changes. Required for quality readline/zsh experience.
+> **Principle**: PENDIN is a one-shot flag. When set, the next input processing call triggers a full reprint of the edit buffer with current echo settings. The flag is then cleared.
+
+### 41.1 PENDIN flag semantics
+
+- Add `pending_reprint: bool` to `LineDisc` state.
+- When `PENDIN` is set in `c_lflag`, the line discipline marks the input as needing reprint.
+- The next `input_char()` call (or explicit `VREPRINT` character) triggers a full reprint of the pending edit buffer contents through the current echo processing logic.
+- After reprint, `PENDIN` is cleared (one-shot).
+
+### 41.2 Mode change trigger
+
+- Certain termios changes (switching between canonical/non-canonical, changing echo flags like ECHO, ECHOE, ECHOK, ECHOCTL) automatically set `PENDIN`.
+- This causes the user to see their pending input re-echoed with the new settings applied.
+- Set `pending_reprint = true` in `set_termios_mode()` when echo-affecting flags change.
+
+### 41.3 VREPRINT integration
+
+- `VREPRINT` character already triggers reprint — enhance it to also clear the `PENDIN` flag.
+- Reprint mechanism: walk the edit buffer and re-echo each character through current echo processing. Prefix reprint output with `^R\n` (per convention).
+
+### 41.4 Verification
+
+- Test: toggle ECHO flag → PENDIN set automatically → next input reprints buffer.
+- Test: VREPRINT character triggers reprint and clears PENDIN.
+- Test: PENDIN reprint reflects current echo settings, not the old ones.
+- Test: PENDIN only fires once (one-shot: set, trigger, cleared).
+- `just build` + `just test` gate.
+
+### 41.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `PENDIN` constant to local flags if missing |
+| `drivers/src/tty/ldisc.rs` | Add `pending_reprint` state, reprint logic in `input_char()`, VREPRINT clearing |
+| `drivers/src/tty/mod.rs` | Set PENDIN automatically on termios changes that affect echo/canonical mode |
+| `drivers/src/tty_tests.rs` | PENDIN auto-set, VREPRINT clearing, echo-mode-change reprint, one-shot behavior |
+
+---
+
+## 42. Phase 38: PTY Namespace & Device Nodes
+
+**Status**: 📋 Planned
+
+> **Priority**: P2 infrastructure — standard Unix PTY allocation interface required for tmux, screen, ssh, and any process that programmatically creates terminals.
+> **Principle**: Replace internal-only PTY allocation with filesystem-visible device nodes. `/dev/ptmx` for master allocation, `/dev/pts/N` for slave access, with proper lock semantics to prevent setup races.
+
+### 42.1 `/dev/ptmx` open
+
+- Opening `/dev/ptmx` allocates a new PTY pair and returns a file descriptor to the master side.
+- The slave is identified by its PTY number N (obtainable via `TIOCGPTN` ioctl, already partially implemented).
+- The slave starts locked — cannot be opened until the master holder unlocks it.
+
+### 42.2 `/dev/pts/N` open
+
+- Opening `/dev/pts/N` returns a file descriptor to the slave side of PTY pair N.
+- The slave must be unlocked (via `TIOCSPTLCK` with arg=0) before it can be opened. Attempting to open a locked slave returns `EIO`.
+- Slave open also triggers controlling terminal acquisition if the opener is a session leader without a ctty (unless `O_NOCTTY`).
+
+### 42.3 Lock ioctls
+
+- **`TIOCSPTLCK`**: Set the PTY slave lock state. `arg=0` unlocks, `arg=1` locks. Only valid on the master FD.
+- **`TIOCGPTLCK`**: Get the current lock state. Returns 0 (unlocked) or 1 (locked).
+- Add `locked: bool` per PTY pair in `pty.rs`. Default `true` on allocation.
+
+### 42.4 devfs integration
+
+- If SlopOS devfs supports dynamic node creation: register `/dev/ptmx` as a static device and `/dev/pts/` as a dynamic directory where entries appear/disappear with PTY allocation/free.
+- If devfs does not yet support dynamic entries: use path-based intercepts in `fileio.rs` as a stepping stone (consistent with existing `/dev/ptmx` and `/dev/pts/N` handling).
+
+### 42.5 Verification
+
+- Test: open `/dev/ptmx` → returns master FD with valid `TIOCGPTN`.
+- Test: slave locked by default → open `/dev/pts/N` fails with `EIO`.
+- Test: `TIOCSPTLCK` with arg=0 → slave unlocked → open succeeds.
+- Test: data flow through device node FDs (master write → slave read and vice versa).
+- Test: close master → slave hangup.
+- Test: multiple simultaneous PTY pairs via `/dev/ptmx`.
+- `just build` + `just test` gate.
+
+### 42.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/pty.rs` | Add `locked` field per PTY pair, lock/unlock methods, slave-open guard |
+| `fs/src/fileio.rs` | Enhance `/dev/ptmx` and `/dev/pts/N` open paths with lock checking |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add `TIOCSPTLCK`/`TIOCGPTLCK` ioctl handlers |
+| `abi/src/syscall.rs` | Add `TIOCSPTLCK`/`TIOCGPTLCK` ioctl constants |
+| `drivers/src/tty_tests.rs` | PTY namespace tests, lock semantics, multi-pair allocation via device nodes |
+
+---
+
+## 43. Phase 39: PTY Packet Mode (TIOCPKT)
+
+**Status**: 📋 Planned
+
+> **Priority**: P2 infrastructure — terminal multiplexers (tmux, screen) need packet mode to receive out-of-band control information about slave-side state changes.
+> **Principle**: When packet mode is enabled on a PTY master, every `read()` is prefixed with a single control byte indicating the event type. This gives multiplexers visibility into flow control, flushes, and mode changes on the slave.
+
+### 43.1 `TIOCPKT` ioctl
+
+- Enable/disable packet mode on a PTY master FD.
+- When enabled, every `read()` on the master is prefixed with a single control byte.
+- When disabled, reads behave normally (no prefix).
+
+### 43.2 Control byte encoding
+
+- `TIOCPKT_DATA` (0x00): Normal data follows.
+- `TIOCPKT_FLUSHREAD` (0x01): Slave input queue was flushed.
+- `TIOCPKT_FLUSHWRITE` (0x02): Slave output queue was flushed.
+- `TIOCPKT_STOP` (0x04): Slave output stopped (XOFF received).
+- `TIOCPKT_START` (0x08): Slave output started (XON received).
+- `TIOCPKT_NOSTOP` (0x10): `IXON` cleared on slave.
+- `TIOCPKT_DOSTOP` (0x20): `IXON` set on slave.
+
+### 43.3 Event tracking
+
+- Add `packet_mode: bool` and `packet_events: u8` bitmask to PTY master state in `pty.rs`.
+- When events occur on the slave (queue flush, flow control state change, IXON toggle via termios), set the corresponding bit in `packet_events`.
+- On master `read()`: if `packet_events != 0`, return a zero-data read with just the control byte (events are consumed). If no events pending and data available, return `TIOCPKT_DATA` prefix + data.
+- `TIOCPKT` ioctl toggles `packet_mode`. Clearing it resets `packet_events`.
+
+### 43.4 Poll interaction
+
+- Master reports `POLLIN` when either data OR pending packet events are available.
+
+### 43.5 Verification
+
+- Test: `TIOCPKT` on → master read gets control byte prefix on normal data.
+- Test: slave flush → master sees `TIOCPKT_FLUSHREAD`/`TIOCPKT_FLUSHWRITE`.
+- Test: slave IXON toggle → master sees `TIOCPKT_DOSTOP`/`TIOCPKT_NOSTOP`.
+- Test: `TIOCPKT` off → normal read (no prefix).
+- Test: poll reports readable when packet events pending.
+- `just build` + `just test` gate.
+
+### 43.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/pty.rs` | Add `packet_mode`, `packet_events` fields; modify `master_read()` for packet framing; event bit tracking |
+| `drivers/src/tty/mod.rs` | Set packet event bits on flush and flow control changes |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add `TIOCPKT` ioctl handler |
+| `abi/src/syscall.rs` | Add `TIOCPKT` and `TIOCPKT_*` constants |
+| `drivers/src/tty_tests.rs` | Packet mode tests, event delivery, toggle on/off, poll interaction |
+
+---
+
+## 44. Phase 40: VT100/ANSI Terminal Emulation
+
+**Status**: 📋 Planned
+
+> **Priority**: P2 infrastructure — required for programs that use cursor positioning, colors, or screen clearing (ncurses, vi, top, htop, etc.).
+> **Principle**: Replace raw byte output in the virtual console with a state-machine-driven ANSI/VT100 parser. The parser is pure `no_std`, no-alloc, and produces typed actions that the console renderer executes. Separate parsing from rendering for testability.
+
+### 44.1 `VtParser` state machine
+
+- Implement a `VtParser` with states: `Ground`, `Escape`, `CsiEntry`, `CsiParam`, `CsiIntermediate`, `OscString`.
+- Parse CSI sequences (`\x1b[...`) with parameter accumulation into a fixed-size array (max 16 params, matching xterm).
+- Produce `VtAction` enum variants: `Print(u8)`, `MoveCursor { direction, count }`, `SetCursorPos { row, col }`, `EraseDisplay(mode)`, `EraseLine(mode)`, `ScrollUp(n)`, `ScrollDown(n)`, `SetAttribute(SgrAttr)`, `SaveCursor`, `RestoreCursor`, `SetMode(mode)`, `ResetMode(mode)`.
+
+### 44.2 Supported sequences (initial set)
+
+- **Cursor movement**: CUU (`\x1b[A`), CUD (`\x1b[B`), CUF (`\x1b[C`), CUB (`\x1b[D`), CUP (`\x1b[row;colH`), home (`\x1b[H`).
+- **Erase**: ED (`\x1b[J`, `\x1b[0J`, `\x1b[1J`, `\x1b[2J`), EL (`\x1b[K`, `\x1b[0K`, `\x1b[1K`, `\x1b[2K`).
+- **Scroll**: SU (`\x1b[nS`), SD (`\x1b[nT`).
+- **SGR**: Reset (`\x1b[0m`), bold (`1`), underline (`4`), inverse (`7`), 8-color foreground (`30-37`), 8-color background (`40-47`), bright variants (`90-97`, `100-107`).
+- **Misc**: DECSC/DECRC (save/restore cursor), cursor visibility (`\x1b[?25h`/`\x1b[?25l`), alternate screen buffer (`\x1b[?1049h`/`\x1b[?1049l`).
+- **Non-goals for this phase**: 256-color, 24-bit truecolor, Unicode grapheme clustering.
+
+### 44.3 Integration
+
+- Wire `VtParser` into `VConsoleDriver` output path. Each byte passes through the parser; `VtAction` variants are dispatched to `VConsoleState` methods.
+- `VConsoleState` gains cursor attributes (foreground/background color, bold, underline, inverse) and applies them when rendering glyphs.
+- Malformed or unrecognized sequences are silently discarded (no panic, no corruption).
+
+### 44.4 Verification
+
+- Test: `\x1b[2J` clears screen.
+- Test: `\x1b[10;20H` positions cursor at row 10, column 20.
+- Test: `\x1b[31m` sets red foreground.
+- Test: `\x1b[0m` resets all attributes.
+- Test: `\x1b[A` moves cursor up one row.
+- Test: nested/malformed sequences handled gracefully (garbage in → no crash, parser returns to ground state).
+- Test: parser state machine fuzz with random byte sequences.
+- `just build` + `just test` gate.
+
+### 44.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/vtparser.rs` | **New file** — VT100/ANSI escape sequence state machine, `VtAction` enum, parameter accumulator |
+| `drivers/src/tty/vconsole.rs` | Integrate `VtParser`, add cursor attribute state (color, bold, etc.), implement erase/scroll/color rendering |
+| `drivers/src/tty/mod.rs` | Update module declarations for `vtparser` |
+| `drivers/src/tty_tests.rs` | VT parser unit tests, cursor movement, SGR, erase, malformed sequence resilience |
+
+---
+
+## 45. Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)
+
+**Status**: 📋 Planned
+
+> **Priority**: P2 infrastructure — EXTPROC is needed for ssh/network terminals; vhangup is needed for secure session handoff (login/getty).
+> **Principle**: Two independent features grouped because both relate to PTY/session edge cases beyond basic terminal usage.
+
+### 45.1 EXTPROC
+
+- **`EXTPROC` local flag**: When set, the line discipline passes all input to the read buffer without local echo or canonical editing. Signal characters (`VINTR`, `VQUIT`, `VSUSP`) are still processed if `ISIG` is set.
+- Use case: network TTY protocols (ssh, telnet) where the remote side handles line editing. The local ldisc should not interfere.
+- Implementation: check `EXTPROC` at the top of the canonical editing path in `input_char()`. If set, bypass VERASE/VKILL/VWERASE processing and enqueue the character directly. Suppress echo output.
+- When `EXTPROC` is cleared, normal canonical/echo behavior resumes.
+
+### 45.2 `vhangup()` syscall
+
+- Revokes access to the calling process’s controlling terminal. All other file descriptors referencing this TTY become invalid — subsequent I/O returns `EIO`.
+- Use case: `login` calls `vhangup()` to ensure no leftover FDs from previous sessions can spy on the new session. The caller then re-opens the device to get a fresh, uncompromised FD.
+- Implementation: `vhangup()` calls `tty_hangup()` on the caller’s controlling terminal, reusing the existing hangup infrastructure from Phases 7 and 33.
+- Only callable by a process that holds the controlling terminal. Return `EPERM` if the caller has no ctty.
+
+### 45.3 Verification
+
+- Test: EXTPROC set → no echo, no canonical editing, signals still delivered.
+- Test: EXTPROC cleared → normal canonical/echo behavior resumes.
+- Test: `vhangup()` → existing FDs return `EIO` on I/O.
+- Test: caller can re-open device after `vhangup()` for a fresh FD.
+- Test: `vhangup()` without ctty → `EPERM`.
+- `just build` + `just test` gate.
+
+### 45.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `EXTPROC` flag constant, `SYS_VHANGUP` syscall number |
+| `drivers/src/tty/ldisc.rs` | Add EXTPROC bypass in canonical input path, suppress echo when EXTPROC active |
+| `drivers/src/tty/mod.rs` | Wire `vhangup()` public API through hangup infrastructure |
+| `core/src/syscall/process_handlers.rs` | Add `sys_vhangup` handler with ctty + permission checks |
+| `drivers/src/tty_tests.rs` | EXTPROC behavior tests, vhangup lifecycle tests |
+
+---
+
+## 46. Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
+
+**Status**: 📋 Planned
+
+> **Priority**: P3 parity — remaining POSIX/Linux termios flags for claiming complete termios support. Low urgency but necessary for full compatibility.
+> **Principle**: Implement remaining flags cleanly without legacy baggage. Each flag is a small, isolated transformation that slots into existing processing pipelines.
+
+### 46.1 ECHOPRT (hardcopy erase style)
+
+- When `ECHOPRT` and `ECHO` are set, erased characters display between `\` and `/` instead of using BS-SP-BS. This is the "hardcopy terminal" erase style.
+- On first erase in a sequence: output `\`, then the erased character.
+- On subsequent contiguous erases: output each erased character without another `\`.
+- When the erase sequence ends (next non-erase input): output `/`.
+- Implementation: add `in_erase_seq: bool` to `LineDisc` state. Set on first VERASE with ECHOPRT; clear on any non-erase input.
+
+### 46.2 IUCLC (input uppercase-to-lowercase)
+
+- When `IUCLC` is set in `c_iflag`, uppercase input characters (A-Z) are mapped to lowercase (a-z).
+- Applied in `input_char()` before canonical editing and echo processing.
+- Simple range check: `if b'A' <= ch && ch <= b'Z' { ch += 32 }`.
+- Linux marks this as non-POSIX (XSI extension) but supports it. We implement for compatibility.
+
+### 46.3 OLCUC (output lowercase-to-uppercase)
+
+- When `OLCUC` is set in `c_oflag`, lowercase output characters (a-z) are mapped to uppercase (A-Z).
+- Applied during output processing in `process_output_byte()` alongside existing OPOST/ONLCR/OCRNL transforms.
+- Inverse of IUCLC — used by legacy terminals that only support uppercase.
+
+### 46.4 Verification
+
+- Test: ECHOPRT erase produces `\chars/` format.
+- Test: ECHOPRT ends `\...` sequence on non-erase input with `/`.
+- Test: IUCLC maps A-Z to a-z in input.
+- Test: IUCLC does not affect non-alpha or already-lowercase characters.
+- Test: OLCUC maps a-z to A-Z in output.
+- Test: all three flags disabled by default (no effect in default termios).
+- `just build` + `just test` gate.
+
+### 46.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `ECHOPRT`, `IUCLC`, `OLCUC` flag constants |
+| `drivers/src/tty/ldisc.rs` | ECHOPRT erase state machine with `in_erase_seq` tracking, IUCLC mapping in input path, OLCUC mapping in output path |
+| `drivers/src/tty_tests.rs` | Tests for all three flags, erase sequence state transitions, case mapping edge cases |
+
+## 47. File Inventory
 
 ### New files
 
@@ -2719,6 +3464,8 @@ Added 13 Phase 25 regression tests:
 | `drivers/src/tty/ldisc.rs` | Enhanced `LineDisc`, `RawDisc`, `LdiscKind` abstraction |
 | `drivers/src/tty/session.rs` | `TtySession`, foreground checks, session policy, `SessionId`/`ProcessGroupId` newtypes |
 | `drivers/src/tty/pty.rs` | PTY pair allocation, constructors, free-slot helpers (Phase 17) |
+| `drivers/src/tty/vconsole.rs` | Framebuffer-backed virtual console renderer (Phase 22) |
+| `drivers/src/tty/vtparser.rs` | VT100/ANSI escape sequence state machine (Phase 40, planned) |
 
 ### Modified files
 
@@ -2744,7 +3491,7 @@ Added 13 Phase 25 regression tests:
 
 ---
 
-## 33. Appendix: Linux N_TTY Reference
+## 48. Appendix: Linux N_TTY Reference
 
 For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.c`) handles:
 
@@ -2777,4 +3524,4 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
    - Master close → `pty_close()` → slave gets hangup
 
-The SlopOS implementation follows this structure but simplified (no IUCLC, no TABDLY baud rate, no UTF-8 for now). Phases 15–22 closed many critical gaps; Phases 23–27 closed the remaining semantic hardening and POSIX completion work needed to keep the design coherent without cloning Linux internals.
+The SlopOS implementation follows this structure but simplified for `no_std` Rust. Phases 1–27 built the core subsystem and closed critical semantic gaps; Phases 28–42 target Rust-idiomatic type safety, complete POSIX termios flag coverage (including IUTF8, IUCLC, OLCUC, EXTPROC), PTY namespace/packet mode for multiplexer support, and VT100/ANSI terminal emulation.
