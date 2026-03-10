@@ -21,6 +21,13 @@
 //! shims.  The `TtyServices` function pointers (registered in
 //! `syscall_services_init.rs`) perform the `u8 → TtyIndex` conversion at the
 //! boundary.
+//!
+//! # Locking Convention (Phase 29)
+//!
+//! Methods that operate on a `Tty` while the slot `IrqMutex` is already held
+//! use the `*_locked()` suffix (e.g. `drain_hw_input_locked`).  This makes the
+//! caller responsible for acquiring the lock and documents the precondition at
+//! the call site.
 
 pub mod driver;
 pub mod ldisc;
@@ -158,7 +165,7 @@ impl Tty {
     /// Returns a deferred signal `(pgid, signum)` if signal generation was
     /// triggered (e.g. Ctrl+C on serial).  The caller **must** deliver the
     /// signal **after** dropping the per-TTY lock to avoid deadlock.
-    fn drain_hw_input(&mut self) -> Option<(u32, u8)> {
+    fn drain_hw_input_locked(&mut self) -> Option<(u32, u8)> {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut deferred_signal = None;
@@ -263,7 +270,7 @@ pub fn default_console_tty() -> TtyIndex {
 
 /// Push a raw input byte to a specific TTY.
 ///
-/// Called from interrupt context (keyboard ISR) or from `drain_hw_input`.
+/// Called from interrupt context (keyboard ISR) or from `drain_hw_input_locked`.
 /// Feeds the byte through the line discipline and handles echo/signal actions.
 pub fn push_input(idx: TtyIndex, c: u8) {
     let slot = idx.0 as usize;
@@ -464,7 +471,7 @@ pub fn read_with_attach(
             }
 
             // Drain hardware input (merged — single lock for drain + read).
-            deferred_signal = tty.drain_hw_input();
+            deferred_signal = tty.drain_hw_input_locked();
 
             // Try to read from the cooked buffer.
             let got = tty.ldisc.read(&mut buf[total..]);
@@ -605,7 +612,7 @@ pub fn read_with_attach(
                                 return false;
                             }
                         }
-                        let sig = tty.drain_hw_input();
+                        let sig = tty.drain_hw_input_locked();
                         let result = tty.hung_up || tty.peer_closed || tty.ldisc.has_data();
                         (sig, result)
                     }
@@ -766,7 +773,7 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
 /// Check if a TTY has cooked data available for reading.
 ///
 /// Phase 23: Properly captures and delivers deferred signals from
-/// `drain_hw_input()` instead of silently discarding them.
+/// `drain_hw_input_locked()` instead of silently discarding them.
 pub fn has_data(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -775,7 +782,7 @@ pub fn has_data(idx: TtyIndex) -> bool {
     let (deferred_signal, result) = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            let sig = tty.drain_hw_input();
+            let sig = tty.drain_hw_input_locked();
             let data = tty.ldisc.has_data();
             (sig, data)
         } else {
@@ -804,7 +811,7 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     let (deferred_signal, count) = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            let sig = tty.drain_hw_input();
+            let sig = tty.drain_hw_input_locked();
             let n = tty.ldisc.bytes_available();
             (sig, n)
         } else {
@@ -1504,7 +1511,7 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
 /// - `POLLHUP` — TTY is hung up (or peer closed with no remaining data)
 ///
 /// Phase 23: Properly captures and delivers deferred signals from
-/// `drain_hw_input()` instead of silently discarding them.
+/// `drain_hw_input_locked()` instead of silently discarding them.
 ///
 /// Only events that are both requested and ready are returned.
 pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
@@ -1523,7 +1530,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         };
 
         // Drain any pending hardware bytes so has_data() is up-to-date.
-        let sig = tty.drain_hw_input();
+        let sig = tty.drain_hw_input_locked();
 
         let mut revents = 0u16;
 
@@ -1577,7 +1584,7 @@ pub fn poll_sleep() {
 /// per-TTY lock is acquired and released individually.
 ///
 /// Phase 23: Properly captures and delivers deferred signals from
-/// `drain_hw_input()` instead of silently discarding them.
+/// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
     let mut any_data = false;
     for i in 0..MAX_TTYS {
@@ -1585,7 +1592,7 @@ fn input_available_cb() -> c_int {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
                 if tty.active {
-                    let sig = tty.drain_hw_input();
+                    let sig = tty.drain_hw_input_locked();
                     let data = tty.ldisc.has_data();
                     (sig, data)
                 } else {

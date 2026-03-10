@@ -63,6 +63,110 @@ pub enum OutputAction {
 }
 
 // ---------------------------------------------------------------------------
+// LdiscOps — shared contract for line discipline variants (Phase 29)
+// ---------------------------------------------------------------------------
+
+/// Trait formalising the shared API surface of every line-discipline variant.
+///
+/// `LdiscKind` delegates to this trait via the `dispatch_ldisc!` macro so that
+/// adding a new method only requires one signature change instead of a manual
+/// match arm in every wrapper.
+///
+/// **Crate-internal only** — external API surface is unchanged.
+#[allow(dead_code)]
+pub(crate) trait LdiscOps {
+    fn termios(&self) -> &UserTermios;
+    fn vmin_vtime(&self) -> (u8, u8);
+    fn is_canonical(&self) -> bool;
+    fn set_termios(&mut self, t: &UserTermios);
+    fn has_data(&self) -> bool;
+    fn bytes_available(&self) -> usize;
+    fn read(&mut self, out: &mut [u8]) -> usize;
+    fn flush_all(&mut self);
+    fn flush_input(&mut self);
+    fn edit_content(&self) -> &[u8];
+    fn is_stopped(&self) -> bool;
+    fn input_char(&mut self, c: u8) -> InputAction;
+    fn process_output_byte(&mut self, c: u8) -> OutputAction;
+}
+
+/// Generates delegating `impl LdiscKind` methods that forward to the inner
+/// variant via the `LdiscOps` trait.  Supports `&self` and `&mut self` receivers.
+///
+/// Usage:
+/// ```ignore
+/// dispatch_ldisc! {
+///     fn termios(&self) -> &UserTermios;
+///     fn set_termios(&mut self, t: &UserTermios);
+/// }
+/// ```
+macro_rules! dispatch_ldisc {
+    // &self, with return type
+    (@one &, $name:ident, ($($arg:ident : $argty:ty),*), $ret:ty) => {
+        #[inline]
+        pub fn $name(&self $(, $arg: $argty)*) -> $ret {
+            match self {
+                LdiscKind::NTty(inner) => inner.$name($($arg),*),
+                LdiscKind::Raw(inner) => inner.$name($($arg),*),
+            }
+        }
+    };
+    // &self, no return type
+    (@one &, $name:ident, ($($arg:ident : $argty:ty),*), ()) => {
+        #[inline]
+        pub fn $name(&self $(, $arg: $argty)*) {
+            match self {
+                LdiscKind::NTty(inner) => inner.$name($($arg),*),
+                LdiscKind::Raw(inner) => inner.$name($($arg),*),
+            }
+        }
+    };
+    // &mut self, with return type
+    (@one &mut, $name:ident, ($($arg:ident : $argty:ty),*), $ret:ty) => {
+        #[inline]
+        pub fn $name(&mut self $(, $arg: $argty)*) -> $ret {
+            match self {
+                LdiscKind::NTty(inner) => inner.$name($($arg),*),
+                LdiscKind::Raw(inner) => inner.$name($($arg),*),
+            }
+        }
+    };
+    // &mut self, no return type
+    (@one &mut, $name:ident, ($($arg:ident : $argty:ty),*), ()) => {
+        #[inline]
+        pub fn $name(&mut self $(, $arg: $argty)*) {
+            match self {
+                LdiscKind::NTty(inner) => inner.$name($($arg),*),
+                LdiscKind::Raw(inner) => inner.$name($($arg),*),
+            }
+        }
+    };
+    // ── Entry arms ──────────────────────────────────────────────────────
+    // &self with return type
+    (fn $name:ident(&self $(, $arg:ident : $argty:ty)*) -> $ret:ty; $($tail:tt)*) => {
+        dispatch_ldisc!(@one &, $name, ($($arg : $argty),*), $ret);
+        dispatch_ldisc!($($tail)*);
+    };
+    // &self no return type
+    (fn $name:ident(&self $(, $arg:ident : $argty:ty)*); $($tail:tt)*) => {
+        dispatch_ldisc!(@one &, $name, ($($arg : $argty),*), ());
+        dispatch_ldisc!($($tail)*);
+    };
+    // &mut self with return type
+    (fn $name:ident(&mut self $(, $arg:ident : $argty:ty)*) -> $ret:ty; $($tail:tt)*) => {
+        dispatch_ldisc!(@one &mut, $name, ($($arg : $argty),*), $ret);
+        dispatch_ldisc!($($tail)*);
+    };
+    // &mut self no return type
+    (fn $name:ident(&mut self $(, $arg:ident : $argty:ty)*); $($tail:tt)*) => {
+        dispatch_ldisc!(@one &mut, $name, ($($arg : $argty),*), ());
+        dispatch_ldisc!($($tail)*);
+    };
+    // base case: empty
+    () => {};
+}
+
+// ---------------------------------------------------------------------------
 // LineDisc
 // ---------------------------------------------------------------------------
 
@@ -774,6 +878,61 @@ impl LineDisc {
     }
 }
 
+impl LdiscOps for LineDisc {
+    #[inline]
+    fn termios(&self) -> &UserTermios {
+        self.termios()
+    }
+    #[inline]
+    fn vmin_vtime(&self) -> (u8, u8) {
+        self.vmin_vtime()
+    }
+    #[inline]
+    fn is_canonical(&self) -> bool {
+        self.is_canonical()
+    }
+    #[inline]
+    fn set_termios(&mut self, t: &UserTermios) {
+        self.set_termios(t)
+    }
+    #[inline]
+    fn has_data(&self) -> bool {
+        self.has_data()
+    }
+    #[inline]
+    fn bytes_available(&self) -> usize {
+        self.bytes_available()
+    }
+    #[inline]
+    fn read(&mut self, out: &mut [u8]) -> usize {
+        self.read(out)
+    }
+    #[inline]
+    fn flush_all(&mut self) {
+        self.flush_all()
+    }
+    #[inline]
+    fn flush_input(&mut self) {
+        self.flush_input()
+    }
+    #[inline]
+    fn edit_content(&self) -> &[u8] {
+        self.edit_content()
+    }
+    #[inline]
+    fn is_stopped(&self) -> bool {
+        self.is_stopped()
+    }
+    #[inline]
+    fn input_char(&mut self, c: u8) -> InputAction {
+        self.input_char(c)
+    }
+    #[inline]
+    fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        self.process_output_byte(c)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RawDisc — minimal passthrough line discipline (Phase 14)
 // ---------------------------------------------------------------------------
@@ -893,6 +1052,61 @@ impl RawDisc {
     }
 }
 
+impl LdiscOps for RawDisc {
+    #[inline]
+    fn termios(&self) -> &UserTermios {
+        self.termios()
+    }
+    #[inline]
+    fn vmin_vtime(&self) -> (u8, u8) {
+        self.vmin_vtime()
+    }
+    #[inline]
+    fn is_canonical(&self) -> bool {
+        self.is_canonical()
+    }
+    #[inline]
+    fn set_termios(&mut self, t: &UserTermios) {
+        self.set_termios(t)
+    }
+    #[inline]
+    fn has_data(&self) -> bool {
+        self.has_data()
+    }
+    #[inline]
+    fn bytes_available(&self) -> usize {
+        self.bytes_available()
+    }
+    #[inline]
+    fn read(&mut self, out: &mut [u8]) -> usize {
+        self.read(out)
+    }
+    #[inline]
+    fn flush_all(&mut self) {
+        self.flush_all()
+    }
+    #[inline]
+    fn flush_input(&mut self) {
+        self.flush_input()
+    }
+    #[inline]
+    fn edit_content(&self) -> &[u8] {
+        self.edit_content()
+    }
+    #[inline]
+    fn is_stopped(&self) -> bool {
+        self.is_stopped()
+    }
+    #[inline]
+    fn input_char(&mut self, c: u8) -> InputAction {
+        self.input_char(c)
+    }
+    #[inline]
+    fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        self.process_output_byte(c)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LdiscKind — swappable line discipline abstraction (Phase 14)
 // ---------------------------------------------------------------------------
@@ -909,6 +1123,7 @@ pub enum LdiscKind {
 }
 
 impl LdiscKind {
+    /// Returns the numeric line-discipline identifier (e.g. `N_TTY`, `N_RAW`).
     pub fn id(&self) -> u32 {
         match self {
             LdiscKind::NTty(_) => N_TTY,
@@ -916,6 +1131,7 @@ impl LdiscKind {
         }
     }
 
+    /// Construct an `LdiscKind` from a numeric id, applying the given termios.
     pub fn from_id(ldisc_id: u32, termios: UserTermios) -> Option<Self> {
         match ldisc_id {
             N_TTY => {
@@ -932,106 +1148,25 @@ impl LdiscKind {
         }
     }
 
-    /// Immutable reference to the current termios.
-    pub fn termios(&self) -> &UserTermios {
-        match self {
-            LdiscKind::NTty(ld) => ld.termios(),
-            LdiscKind::Raw(rd) => rd.termios(),
-        }
-    }
+    // --- Dispatched methods (Phase 29) ---
+    // All methods below are generated by the `dispatch_ldisc!` macro, which
+    // delegates to the inner variant via matching.  Adding a new shared method
+    // only requires a single signature line here and `impl LdiscOps` entries
+    // for each variant.
 
-    /// Returns (vmin, vtime_deciseconds) for non-canonical mode reads.
-    pub fn vmin_vtime(&self) -> (u8, u8) {
-        match self {
-            LdiscKind::NTty(ld) => ld.vmin_vtime(),
-            LdiscKind::Raw(rd) => rd.vmin_vtime(),
-        }
-    }
-
-    /// Returns true if in canonical mode.
-    pub fn is_canonical(&self) -> bool {
-        match self {
-            LdiscKind::NTty(ld) => ld.is_canonical(),
-            LdiscKind::Raw(rd) => rd.is_canonical(),
-        }
-    }
-
-    /// Update termios.
-    pub fn set_termios(&mut self, t: &UserTermios) {
-        match self {
-            LdiscKind::NTty(ld) => ld.set_termios(t),
-            LdiscKind::Raw(rd) => rd.set_termios(t),
-        }
-    }
-
-    /// Returns `true` if cooked data is available for reading.
-    pub fn has_data(&self) -> bool {
-        match self {
-            LdiscKind::NTty(ld) => ld.has_data(),
-            LdiscKind::Raw(rd) => rd.has_data(),
-        }
-    }
-
-    /// Phase 27: Returns the number of bytes available for reading.
-    pub fn bytes_available(&self) -> usize {
-        match self {
-            LdiscKind::NTty(ld) => ld.bytes_available(),
-            LdiscKind::Raw(rd) => rd.bytes_available(),
-        }
-    }
-
-    /// Read cooked bytes into `out`, returning the number of bytes copied.
-    pub fn read(&mut self, out: &mut [u8]) -> usize {
-        match self {
-            LdiscKind::NTty(ld) => ld.read(out),
-            LdiscKind::Raw(rd) => rd.read(out),
-        }
-    }
-
-    /// Flush all buffers.
-    pub fn flush_all(&mut self) {
-        match self {
-            LdiscKind::NTty(ld) => ld.flush_all(),
-            LdiscKind::Raw(rd) => rd.flush_all(),
-        }
-    }
-
-    pub fn flush_input(&mut self) {
-        match self {
-            LdiscKind::NTty(ld) => ld.flush_input(),
-            LdiscKind::Raw(rd) => rd.flush_input(),
-        }
-    }
-
-    /// Return a slice of the current edit buffer contents (for VREPRINT echo).
-    pub fn edit_content(&self) -> &[u8] {
-        match self {
-            LdiscKind::NTty(ld) => ld.edit_content(),
-            LdiscKind::Raw(rd) => rd.edit_content(),
-        }
-    }
-
-    /// Whether output is currently stopped (XOFF / Ctrl+S).
-    pub fn is_stopped(&self) -> bool {
-        match self {
-            LdiscKind::NTty(ld) => ld.is_stopped(),
-            LdiscKind::Raw(rd) => rd.is_stopped(),
-        }
-    }
-
-    /// Process a single raw input byte through the line discipline.
-    pub fn input_char(&mut self, c: u8) -> InputAction {
-        match self {
-            LdiscKind::NTty(ld) => ld.input_char(c),
-            LdiscKind::Raw(rd) => rd.input_char(c),
-        }
-    }
-
-    /// Process a single byte through output processing before sending to the driver.
-    pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
-        match self {
-            LdiscKind::NTty(ld) => ld.process_output_byte(c),
-            LdiscKind::Raw(rd) => rd.process_output_byte(c),
-        }
+    dispatch_ldisc! {
+        fn termios(&self) -> &UserTermios;
+        fn vmin_vtime(&self) -> (u8, u8);
+        fn is_canonical(&self) -> bool;
+        fn set_termios(&mut self, t: &UserTermios);
+        fn has_data(&self) -> bool;
+        fn bytes_available(&self) -> usize;
+        fn read(&mut self, out: &mut [u8]) -> usize;
+        fn flush_all(&mut self);
+        fn flush_input(&mut self);
+        fn edit_content(&self) -> &[u8];
+        fn is_stopped(&self) -> bool;
+        fn input_char(&mut self, c: u8) -> InputAction;
+        fn process_output_byte(&mut self, c: u8) -> OutputAction;
     }
 }

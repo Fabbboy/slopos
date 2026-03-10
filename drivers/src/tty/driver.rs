@@ -34,7 +34,7 @@ pub trait TtyDriver {
     fn write_output(&self, buf: &[u8]);
 
     /// Poll for pending hardware input, returning bytes read into `out`.
-    /// Called by `Tty::drain_hw_input`.  May return 0 if no data is available
+    /// Called by `Tty::drain_hw_input_locked`.  May return 0 if no data is available
     /// (e.g. PS/2 input comes via interrupt, not polling).
     fn drain_input(&self, out: &mut [u8]) -> usize;
 
