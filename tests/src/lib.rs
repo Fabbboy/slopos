@@ -72,15 +72,13 @@ pub fn tests_run_all(
 
         if let Some(run) = desc.run {
             let config_ptr = config as *const ();
-            let suite_result = slopos_lib::catch_panic!({
-                run(config_ptr, &mut res);
-                0
-            });
-            if suite_result != 0 {
-                res.unexpected_exceptions = res.unexpected_exceptions.saturating_add(1);
-                res.failed = res.failed.saturating_add(1);
-                klog_info!("TESTS: suite panic caught, continuing");
-            }
+            // Call the suite runner directly — no outer catch_panic!.
+            // Individual tests use catch_panic! internally (run_single_test)
+            // to catch intentional panics. Unexpected suite-level panics
+            // propagate to the default panic handler which exits QEMU with
+            // a failure code in test mode, avoiding deadlocks from longjmp
+            // through held locks or corrupted state.
+            run(config_ptr, &mut res);
         }
 
         if PANIC_SEEN.is_active() {

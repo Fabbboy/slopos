@@ -94,6 +94,22 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
             panic_serial_write(buf.as_str());
         }
 
+        // Also print the panic message for diagnostics
+        {
+            let mut msg_buf = MessageBuffer::new();
+            if let Some(msg) = info.message().as_str() {
+                let _ = write!(msg_buf, "  message: {}", msg);
+            } else {
+                let _ = write!(msg_buf, "  message: {}", info.message());
+            }
+            panic_serial_write(msg_buf.as_str());
+        }
+
+        // NOTE: Do NOT exit QEMU here. This is the CAUGHT panic path —
+        // catch_panic! will handle it via longjmp and the test harness
+        // will record the failure and continue to the next suite.
+        // The uncaught path (below) handles the QEMU exit.
+
         panic_recovery::recovery_set_active(false);
 
         // Re-enable interrupts if they were enabled before panic
@@ -173,6 +189,15 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     panic_serial_write("===================");
     panic_serial_write("Kernel panic: unrecoverable error");
+
+    // In test mode, exit QEMU immediately with a failure code instead of
+    // waiting for keyboard input. The kernel panic handler already called
+    // tests_mark_panic() before we got here, so just request shutdown.
+    #[cfg(feature = "builtin-tests")]
+    {
+        panic_serial_write("TEST MODE: Exiting QEMU with failure code");
+        slopos_tests::tests_request_shutdown(1);
+    }
 
     if panic_screen::display_panic_screen(
         Some(message_str),

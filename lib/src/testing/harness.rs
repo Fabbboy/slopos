@@ -6,7 +6,7 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 /// Maximum number of test suites that can be registered.
-pub const HARNESS_MAX_SUITES: usize = 48;
+pub const HARNESS_MAX_SUITES: usize = 64;
 
 /// Default cycles per millisecond estimate (3 GHz).
 const DEFAULT_CYCLES_PER_MS: u64 = 3_000_000;
