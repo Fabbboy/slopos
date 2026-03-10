@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–27 complete | 📋 Phases 28–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–28 complete | 📋 Phases 29–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity; Phases 28–42 target type-safe Rust idioms, `/dev/tty` magic device, SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`); Phases 29–42 target dispatch consolidation, `/dev/tty` magic device, SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -40,7 +40,7 @@
 29. [Phase 25: Real TCSETSW/TCSETSF Drain Semantics ✅](#29-phase-25-real-tcsetswtcsetsf-drain-semantics)
 30. [Phase 26: PTY Lifetime Safety & Scalable Capacity](#30-phase-26-pty-lifetime-safety--scalable-capacity)
 31. [Phase 27: POSIX Completion Set (Rust-Idiomatic)](#31-phase-27-posix-completion-set-rust-idiomatic)
-32. [Phase 28: Type-Safe Termios Foundation](#32-phase-28-type-safe-termios-foundation)
+32. [Phase 28: Type-Safe Termios Foundation ✅](#32-phase-28-type-safe-termios-foundation)
 33. [Phase 29: LdiscKind Dispatch Consolidation](#33-phase-29-ldisckind-dispatch-consolidation)
 34. [Phase 30: `/dev/tty` Controlling Terminal Device](#34-phase-30-devtty-controlling-terminal-device)
 35. [Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)](#35-phase-31-background-write-protection-sigttou-on-tcsetattr)
@@ -103,7 +103,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 25 | Real `TCSETSW`/`TCSETSF` drain semantics | `drivers/src/tty/mod.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs` | — | **DONE** |
-| 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `drivers/src/tty/pty.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -2737,9 +2737,9 @@ Added 13 Phase 25 regression tests:
 | 13 | `test_phase27_fionread_constant` | ABI constant value |
 ---
 
-## 32. Phase 28: Type-Safe Termios Foundation
+## 32. Phase 28: Type-Safe Termios Foundation ✅
 
-**Status**: 📋 Planned
+**Status**: ✅ Done — 1207 total tests (1207 passed, 0 failed); 10 new Phase 28 regression tests. `InputFlags`, `OutputFlags`, `LocalFlags`, `ControlFlags` bitflags types, `CcIndex` enum, `TtyError::SignalInterrupt` + `to_errno()`, `#[must_use]` on 21 functions, full `ldisc.rs` migration (~40 flag checks, ~15 c_cc accesses).
 
 > **Priority**: P1 infrastructure — foundational type safety that every subsequent phase benefits from.
 > **Principle**: Replace raw integer bitmasking with Rust-idiomatic `bitflags!` types. Make invalid flag combinations unrepresentable. Keep the ABI wire format (`UserTermios`) unchanged — conversion happens at the kernel/userspace boundary.
@@ -2782,10 +2782,19 @@ Added 13 Phase 25 regression tests:
 | `abi/src/syscall.rs` | Add `bitflags!` type definitions, `CcIndex` enum, `From`/`Into` impls between raw and typed representations |
 | `drivers/src/tty/ldisc.rs` | Migrate all flag checks to `bitflags!` `contains()` API; use `CcIndex` for `c_cc` access |
 | `drivers/src/tty/mod.rs` | Migrate flag checks, refine `TtyError` enum, add `#[must_use]` |
-| `drivers/src/tty/session.rs` | Migrate any flag checks to typed API |
-| `drivers/src/tty/pty.rs` | Migrate any flag checks to typed API |
+| `drivers/src/tty/session.rs` | No flag checks found — no changes needed |
+| `drivers/src/tty/pty.rs` | No flag checks found — no changes needed |
 | `drivers/src/tty_tests.rs` | Update test helpers to use typed flags; add compile-time exhaustiveness tests |
 
+### 32.7 Implementation notes
+
+- **`session.rs` and `pty.rs`**: Audited — neither file contains direct termios flag checks requiring migration; only comments reference flag names. No changes applied.
+- **Backward compatibility**: Raw `u32`/`usize` constants preserved in `abi/src/syscall.rs` for userland consumers (`userland/src/apps/shell/input.rs` imports `ECHO`, `ECHOE`, `ICANON`, `ISIG` as raw constants).
+- **`bitflags` crate**: v2.4 already a workspace dependency — no new crates added.
+- **`UserTermios` ABI**: Struct fields remain raw `u32`; typed accessor methods (`input_flags()`, `output_flags()`, `local_flags()`, `control_flags()`, `cc(CcIndex)`, `set_cc(CcIndex, u8)`) handle conversion at kernel/userspace boundary.
+- **`CcIndex`**: 14 variants (`Vintr`..`Vlnext`); `VDISCARD` omitted (not wired in SlopOS). `POSIX_VDISABLE = 0` constant added.
+- **`TtyError`**: Added `SignalInterrupt` variant and `to_errno()` method mapping all variants to negative errno values.
+- **Test delta**: +10 tests (1197 → 1207). All behavioral-equivalence tests confirm zero regression.
 ---
 
 ## 33. Phase 29: LdiscKind Dispatch Consolidation
@@ -3524,4 +3533,4 @@ For implementation reference, Linux's N_TTY line discipline (`drivers/tty/n_tty.
    - Slave write → output processed through slave's ldisc → stored in `tty->write_buf` → master reads it
    - Master close → `pty_close()` → slave gets hangup
 
-The SlopOS implementation follows this structure but simplified for `no_std` Rust. Phases 1–27 built the core subsystem and closed critical semantic gaps; Phases 28–42 target Rust-idiomatic type safety, complete POSIX termios flag coverage (including IUTF8, IUCLC, OLCUC, EXTPROC), PTY namespace/packet mode for multiplexer support, and VT100/ANSI terminal emulation.
+The SlopOS implementation follows this structure but simplified for `no_std` Rust. Phases 1–28 built the core subsystem, closed critical semantic gaps, and established a type-safe termios foundation; Phases 29–42 target dispatch consolidation, `/dev/tty` magic device, complete POSIX termios flag coverage (including IUTF8, IUCLC, OLCUC, EXTPROC), PTY namespace/packet mode for multiplexer support, and VT100/ANSI terminal emulation.
