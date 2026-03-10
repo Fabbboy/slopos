@@ -104,7 +104,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 26 | PTY lifetime safety & scalable capacity | `drivers/src/tty/pty.rs`, `drivers/src/tty/driver.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs` | — | **DONE** |
 | 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -2799,7 +2799,7 @@ Added 13 Phase 25 regression tests:
 
 ## 33. Phase 29: LdiscKind Dispatch Consolidation
 
-**Status**: 📋 Planned
+**Status**: ✅ **DONE**
 
 > **Priority**: P2 maintainability — eliminate mechanical duplication that makes the ldisc layer harder to extend.
 > **Principle**: Reduce boilerplate without sacrificing explicitness. Codify the split-write invariant with naming conventions so future contributors can’t accidentally violate it.
