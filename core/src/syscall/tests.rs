@@ -2194,6 +2194,197 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// Phase 30: /dev/tty Controlling Terminal Device
+// =============================================================================
+
+/// Phase 30: A freshly created task with no controlling terminal cannot open
+/// `/dev/tty` — the open must return ENXIO (-6).
+pub fn test_phase30_dev_tty_no_ctty_returns_enxio() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    // The task has no controlling terminal by default.
+    assert_eq_test!(
+        unsafe { (*task_ptr).controlling_tty },
+        None,
+        "fresh task should have no controlling_tty"
+    );
+
+    let pid = unsafe { (*task_ptr).process_id };
+    let path = b"/dev/tty\0";
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_eq_test!(
+        fd,
+        -6,
+        "open(/dev/tty) without ctty should return -6 (ENXIO)"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Phase 30: After acquiring a controlling terminal via TIOCSCTTY, opening
+/// `/dev/tty` succeeds and returns a valid FD that can be used for read/write.
+pub fn test_phase30_dev_tty_with_ctty_succeeds() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    // Acquire controlling terminal via TIOCSCTTY.
+    let mut frame = zero_frame();
+    frame.rdi = 0; // fd 0 (console)
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(task_ptr, &mut frame);
+    assert_eq_test!(frame.rax, 0, "TIOCSCTTY should succeed");
+    assert_eq_test!(
+        unsafe { (*task_ptr).controlling_tty },
+        Some(TtyIndex(0)),
+        "controlling_tty should be set after TIOCSCTTY"
+    );
+
+    // Now open /dev/tty — should succeed.
+    let pid = unsafe { (*task_ptr).process_id };
+    let path = b"/dev/tty\0";
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_test!(fd >= 0, "open(/dev/tty) with ctty should succeed");
+
+    // Clean up the FD.
+    if fd >= 0 {
+        let _ = file_close_fd(pid, fd);
+    }
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Phase 30: After `setsid()`, the controlling terminal is cleared, so opening
+/// `/dev/tty` must return ENXIO.
+pub fn test_phase30_setsid_then_dev_tty_returns_enxio() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr, "parent lookup failed");
+
+    // Give parent a controlling terminal.
+    let mut frame = zero_frame();
+    frame.rdi = 0;
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(parent_ptr, &mut frame);
+    assert_eq_test!(frame.rax, 0, "TIOCSCTTY should succeed");
+
+    // Fork a child — it inherits the controlling terminal.
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr, "child lookup failed");
+
+    // Child should have inherited controlling_tty.
+    assert_eq_test!(
+        unsafe { (*child_ptr).controlling_tty },
+        Some(TtyIndex(0)),
+        "child should inherit controlling_tty from parent"
+    );
+
+    // Child calls setsid() — controlling terminal cleared.
+    let mut setsid_frame = zero_frame();
+    let _ = syscall_setsid(child_ptr, &mut setsid_frame);
+    assert_eq_test!(
+        unsafe { (*child_ptr).controlling_tty },
+        None,
+        "setsid should clear controlling_tty"
+    );
+
+    // Now child tries to open /dev/tty — should fail with ENXIO.
+    let child_pid = unsafe { (*child_ptr).process_id };
+    let path = b"/dev/tty\0";
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
+    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_eq_test!(
+        fd,
+        -6,
+        "open(/dev/tty) after setsid should return -6 (ENXIO)"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
+/// Phase 30: A forked child inherits the parent's controlling terminal, so
+/// `/dev/tty` resolves to the same TTY index as the parent.
+pub fn test_phase30_fork_child_inherits_dev_tty() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr, "parent lookup failed");
+
+    // Parent acquires controlling terminal.
+    let mut frame = zero_frame();
+    frame.rdi = 0;
+    frame.rsi = TIOCSCTTY;
+    frame.rdx = 0;
+    let _ = syscall_ioctl(parent_ptr, &mut frame);
+    assert_eq_test!(frame.rax, 0, "TIOCSCTTY should succeed for parent");
+
+    // Fork child.
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr, "child lookup failed");
+
+    // Child should have inherited controlling_tty.
+    let parent_ctty = unsafe { (*parent_ptr).controlling_tty };
+    let child_ctty = unsafe { (*child_ptr).controlling_tty };
+    assert_eq_test!(
+        parent_ctty,
+        child_ctty,
+        "child should inherit same controlling_tty as parent"
+    );
+
+    // Child opens /dev/tty — should succeed (inherits parent's ctty).
+    let child_pid = unsafe { (*child_ptr).process_id };
+    let path = b"/dev/tty\0";
+    let cpu_id = slopos_lib::get_current_cpu();
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
+    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
+
+    assert_test!(fd >= 0, "child open(/dev/tty) should succeed");
+
+    if fd >= 0 {
+        let _ = file_close_fd(child_pid, fd);
+    }
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     syscall_valid,
     [
@@ -2247,6 +2438,11 @@ slopos_lib::define_test_suite!(
         test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
         test_vm_mmap_munmap_stress_baseline,
         test_spawn_path_stale_argv_regression,
+        // Phase 30: /dev/tty Controlling Terminal Device
+        test_phase30_dev_tty_no_ctty_returns_enxio,
+        test_phase30_dev_tty_with_ctty_succeeds,
+        test_phase30_setsid_then_dev_tty_returns_enxio,
+        test_phase30_fork_child_inherits_dev_tty,
     ]
 );
 
@@ -2278,5 +2474,10 @@ slopos_lib::define_test_suite!(
         test_futex_wait_mismatch_and_wake_no_waiters,
         test_arch_prctl_set_get_fs_roundtrip,
         test_spawn_path_stale_argv_regression,
+        // Phase 30: /dev/tty Controlling Terminal Device
+        test_phase30_dev_tty_no_ctty_returns_enxio,
+        test_phase30_dev_tty_with_ctty_succeeds,
+        test_phase30_setsid_then_dev_tty_returns_enxio,
+        test_phase30_fork_child_inherits_dev_tty,
     ]
 );

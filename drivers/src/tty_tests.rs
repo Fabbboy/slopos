@@ -6978,6 +6978,257 @@ pub fn test_phase29_edit_content_dispatch() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 30: /dev/tty Controlling Terminal Device
+// ===========================================================================
+
+/// Phase 30: `open_ref` increments open count for the same TTY slot — this is
+/// the mechanism that `/dev/tty` relies on (a second FD referencing the same
+/// TTY index via the caller's controlling terminal).
+pub fn test_phase30_open_ref_second_fd_increments_count() -> TestResult {
+    let idx = TtyIndex(0);
+    // Read initial open_count.
+    let initial = {
+        let guard = TTY_SLOTS[0].lock();
+        match guard.as_ref() {
+            Some(tty) => tty.open_count,
+            None => {
+                klog_info!("TTY_TEST: BUG - TTY0 not allocated");
+                return TestResult::Fail;
+            }
+        }
+    };
+    // Simulate /dev/tty open: open_ref on the same TTY.
+    let after_open = match tty::open_ref(idx) {
+        Ok(count) => count,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - open_ref failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    if after_open != initial + 1 {
+        klog_info!(
+            "TTY_TEST: BUG - open_ref should increment: expected {}, got {}",
+            initial + 1,
+            after_open
+        );
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+    // Close the extra ref.
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+/// Phase 30: After `open_ref` (simulating `/dev/tty` open), read/write/termios
+/// operations work identically on the same TTY index — the FD created by
+/// `/dev/tty` is indistinguishable from one opened on the actual device path.
+pub fn test_phase30_dev_tty_operations_identical_to_direct() -> TestResult {
+    let idx = TtyIndex(0);
+    // open_ref simulates /dev/tty open.
+    let _ = tty::open_ref(idx);
+
+    // get_termios should work.
+    let termios = match tty::get_termios(idx) {
+        Ok(t) => t,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_termios after open_ref failed: {:?}", e);
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    };
+    // Verify it returns a valid termios (ICANON should be set by default).
+    if termios.c_lflag & 0x2 == 0 {
+        klog_info!("TTY_TEST: BUG - termios from /dev/tty FD missing ICANON");
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+
+    // write should succeed (returns byte count).
+    match tty::write(idx, b"phase30") {
+        Ok(n) if n == 7 => {}
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - write via /dev/tty FD returned {}, expected 7",
+                n
+            );
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - write via /dev/tty FD failed: {:?}", e);
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    // get_session_id should succeed.
+    if tty::get_session_id(idx).is_err() {
+        klog_info!("TTY_TEST: BUG - get_session_id after open_ref failed");
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+/// Phase 30: `open_ref` on a TTY does NOT modify session state — opening
+/// `/dev/tty` only accesses an existing controlling terminal, never acquires one.
+pub fn test_phase30_open_ref_does_not_modify_session() -> TestResult {
+    let idx = TtyIndex(0);
+    // Snapshot session state before open_ref.
+    let (sid_before, fg_before) = {
+        let guard = TTY_SLOTS[0].lock();
+        match guard.as_ref() {
+            Some(tty) => (tty.session.session_id_raw(), tty.session.fg_pgrp_raw()),
+            None => {
+                klog_info!("TTY_TEST: BUG - TTY0 not allocated");
+                return TestResult::Fail;
+            }
+        }
+    };
+
+    // open_ref simulates /dev/tty open.
+    let _ = tty::open_ref(idx);
+
+    // Snapshot after.
+    let (sid_after, fg_after) = {
+        let guard = TTY_SLOTS[0].lock();
+        match guard.as_ref() {
+            Some(tty) => (tty.session.session_id_raw(), tty.session.fg_pgrp_raw()),
+            None => {
+                klog_info!("TTY_TEST: BUG - TTY0 vanished");
+                let _ = tty::close_ref(idx);
+                return TestResult::Fail;
+            }
+        }
+    };
+
+    if sid_before != sid_after || fg_before != fg_after {
+        klog_info!(
+            "TTY_TEST: BUG - open_ref modified session: sid {}->{}, fg {}->{}",
+            sid_before,
+            sid_after,
+            fg_before,
+            fg_after
+        );
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+/// Phase 30: `open_ref` on an invalid TTY index returns `InvalidIndex` error,
+/// matching the ENXIO semantics when `/dev/tty` resolution fails.
+pub fn test_phase30_open_ref_invalid_index_returns_error() -> TestResult {
+    let bad = TtyIndex(u8::MAX);
+    match tty::open_ref(bad) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - open_ref(255) should return InvalidIndex, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 30: `close_ref` correctly decrements the open count — ensures the
+/// `/dev/tty` FD lifecycle is properly paired with the direct device FD.
+pub fn test_phase30_close_ref_decrements_after_open() -> TestResult {
+    let idx = TtyIndex(0);
+    let before = {
+        let guard = TTY_SLOTS[0].lock();
+        guard.as_ref().map(|t| t.open_count).unwrap_or(0)
+    };
+    let _ = tty::open_ref(idx);
+    let _ = tty::close_ref(idx);
+    let after = {
+        let guard = TTY_SLOTS[0].lock();
+        guard.as_ref().map(|t| t.open_count).unwrap_or(0)
+    };
+    if before != after {
+        klog_info!(
+            "TTY_TEST: BUG - open+close ref should restore count: {} != {}",
+            before,
+            after
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 30: Multiple `open_ref` calls (simulating multiple `/dev/tty` opens)
+/// all succeed and increment sequentially.
+pub fn test_phase30_multiple_open_ref_sequential() -> TestResult {
+    let idx = TtyIndex(0);
+    let base = match tty::open_ref(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - first open_ref failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let second = match tty::open_ref(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - second open_ref failed: {:?}", e);
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    };
+    if second != base + 1 {
+        klog_info!(
+            "TTY_TEST: BUG - sequential open_ref should increment: {} then {}",
+            base,
+            second
+        );
+        let _ = tty::close_ref(idx);
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+    let _ = tty::close_ref(idx);
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+/// Phase 30: `get_winsize` works identically regardless of whether the FD was
+/// obtained via `/dev/tty` or direct device open (both use the same TTY index).
+pub fn test_phase30_dev_tty_winsize_matches_direct() -> TestResult {
+    let idx = TtyIndex(0);
+    let ws_before = match tty::get_winsize(idx) {
+        Ok(ws) => ws,
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - get_winsize before open_ref failed: {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    };
+    // Simulate /dev/tty open.
+    let _ = tty::open_ref(idx);
+    let ws_after = match tty::get_winsize(idx) {
+        Ok(ws) => ws,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_winsize after open_ref failed: {:?}", e);
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    };
+    if ws_before.ws_row != ws_after.ws_row || ws_before.ws_col != ws_after.ws_col {
+        klog_info!("TTY_TEST: BUG - winsize differs after open_ref");
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -7295,5 +7546,13 @@ slopos_lib::define_test_suite!(
         test_phase29_dispatch_macro_raw_routing,
         test_phase29_process_output_byte_dispatch,
         test_phase29_edit_content_dispatch,
+        // Phase 30: /dev/tty Controlling Terminal Device
+        test_phase30_open_ref_second_fd_increments_count,
+        test_phase30_dev_tty_operations_identical_to_direct,
+        test_phase30_open_ref_does_not_modify_session,
+        test_phase30_open_ref_invalid_index_returns_error,
+        test_phase30_close_ref_decrements_after_open,
+        test_phase30_multiple_open_ref_sequential,
+        test_phase30_dev_tty_winsize_matches_direct,
     ]
 );
