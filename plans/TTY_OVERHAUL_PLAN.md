@@ -3182,7 +3182,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 40. Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
 
-**Status**: 📋 Planned
+**Status**: ✅ Complete
 
 > **Priority**: P1 completeness — three input-side termios flags that control buffer-full behavior, terminal-to-host flow control, and receiver enable/disable.
 > **Principle**: Each flag is a cheap early check in the input path. Implement them as clean, orthogonal guards rather than interleaved conditionals.
@@ -3224,6 +3224,16 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 | `drivers/src/tty/mod.rs` | Wire IXOFF XON/XOFF output actions to driver write path |
 | `drivers/src/tty_tests.rs` | Tests for all three flags independently and their interactions |
 
+### 40.6 Implementation Summary
+
+**Completed.** All three flags implemented with full test coverage:
+
+- **CREAD gate**: Added at top of `LineDisc::input_char()` and `RawDisc::input_char()`. Silently discards all input when CREAD is not set in `c_cflag`. Default termios for both `LineDisc` and `RawDisc` sets CREAD.
+- **IMAXBEL**: Added in `LineDisc::insert_char()` (canonical mode, edit buffer full) and `LineDisc::raw_input()` (non-canonical mode, cooked buffer full). Returns `InputAction::Bell` when IMAXBEL is set, `InputAction::None` otherwise. TTY core wires Bell to BEL (0x07) output in both `push_input()` and `drain_hw_input_locked()`.
+- **IXOFF flow control**: `ixoff_check_xoff()` sends VSTOP when combined pending input (edit + cooked) reaches high-water (80% of 5120 = 4096). `ixoff_check_xon()` sends VSTART when pending drops below low-water (20% = 1024). State tracked via `xoff_sent` bool, reset on flush. Wired in `push_input()` (after lock drop), `drain_hw_input_locked()` (inline), and `read_with_attach()` (after consuming data, on all return paths).
+- **ABI**: `IMAXBEL = 0x2000` in `InputFlags`, `CREAD = 0x80` in `ControlFlags`.
+- **Tests**: 13 regression tests covering CREAD enabled/disabled (LineDisc + RawDisc), IMAXBEL bell/silent/normal (canonical + raw), IXOFF high-water XOFF, low-water XON, disabled no-op, and flag constant values.
+- **Build + test**: `cargo fmt`, `just build`, `just test` all pass (1296/1296 tests).
 ---
 
 ## 41. Phase 37: Deferred Reprint (PENDIN)
