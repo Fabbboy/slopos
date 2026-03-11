@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–31, 33–34 complete | 📋 Phase 32, Phases 35–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31, 33–35 complete | 📋 Phase 32, Phases 36–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -110,7 +110,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 36 | Input buffer policy (IMAXBEL bell, IXOFF flow control, CREAD gate) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 38 | PTY namespace & device nodes (`/dev/ptmx`, `/dev/pts/N`, lock ioctls) | `drivers/src/tty/pty.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -3122,7 +3122,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 39. Phase 35: UTF-8 Aware Editing (IUTF8)
 
-**Status**: 📋 Planned
+**Status**: ✅ Complete
 
 > **Priority**: P1 quality — without IUTF8, backspace erases a single byte, potentially leaving partial UTF-8 sequences in the edit buffer. Required for zsh/readline quality.
 > **Principle**: When IUTF8 is set, editing operations work on codepoints, not bytes. Display width accounts for wide characters. When IUTF8 is not set, byte-at-a-time editing continues unchanged (backward compatible).
@@ -3166,6 +3166,17 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 | `abi/src/syscall.rs` | Add `IUTF8` constant to input flags |
 | `drivers/src/tty/ldisc.rs` | UTF-8 aware `erase_char()`, `word_erase()`, `utf8_char_width()` helper function |
 | `drivers/src/tty_tests.rs` | UTF-8 editing tests, display width tests, fallback behavior tests |
+
+### 39.7 Implementation summary
+
+- **`IUTF8` flag**: Already present in `abi/src/syscall.rs` (`0x4000`) — no ABI changes needed.
+- **UTF-8 helpers** added to `ldisc.rs`: `utf8_is_continuation()`, `utf8_byte_count()`, `utf8_decode()`, `utf8_char_width()`, `utf8_trailing_codepoint_len()`, `is_word_codepoint()`.
+- **`insert_char()`**: Delegates to `insert_char_utf8()` when IUTF8 is set and byte ≥ 0x80. Tracks `utf8_remaining` state for multi-byte sequences; increments column only when the final byte completes the codepoint.
+- **`erase_char()`**: Delegates to `erase_char_utf8()` when IUTF8 is set. Erases full trailing codepoint atomically, computes display width for echo.
+- **`word_erase()`**: Delegates to `word_erase_utf8()` when IUTF8 is set. Erases full codepoints in two phases (skip non-word, then erase word codepoints) with proper width tracking.
+- **`utf8_char_width()`**: Range-based lookup returning 2 for CJK/Hangul/fullwidth/emoji, 1 for everything else. Goes beyond Linux `n_tty` which only distinguishes continuation vs non-continuation bytes.
+- **Backward compatibility**: When IUTF8 is not set, all paths fall through to existing byte-at-a-time behavior.
+- **Tests**: 10 regression tests covering width helper, ASCII/2-byte/3-byte/4-byte backspace, legacy fallback, column tracking, word erase with mixed content, and flag value verification.
 
 ---
 

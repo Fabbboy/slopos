@@ -167,6 +167,148 @@ macro_rules! dispatch_ldisc {
 }
 
 // ---------------------------------------------------------------------------
+// UTF-8 helpers (Phase 35: IUTF8)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `b` is a UTF-8 continuation byte (`10xxxxxx`).
+#[inline]
+const fn utf8_is_continuation(b: u8) -> bool {
+    b & 0xC0 == 0x80
+}
+
+/// Returns the total number of bytes in a UTF-8 sequence given the leading byte.
+/// Returns 1 for ASCII (< 0x80) and invalid leading bytes as a fallback.
+#[inline]
+const fn utf8_byte_count(leading: u8) -> usize {
+    if leading < 0x80 {
+        1
+    } else if leading < 0xC0 {
+        1 // continuation byte used as leading — fallback
+    } else if leading < 0xE0 {
+        2
+    } else if leading < 0xF0 {
+        3
+    } else if leading < 0xF8 {
+        4
+    } else {
+        1 // invalid — fallback
+    }
+}
+
+/// Decode a UTF-8 codepoint from a complete byte sequence.
+/// Returns U+FFFD (replacement character) for empty or oversized slices.
+fn utf8_decode(buf: &[u8]) -> u32 {
+    match buf.len() {
+        1 => buf[0] as u32,
+        2 => ((buf[0] as u32 & 0x1F) << 6) | (buf[1] as u32 & 0x3F),
+        3 => {
+            ((buf[0] as u32 & 0x0F) << 12) | ((buf[1] as u32 & 0x3F) << 6) | (buf[2] as u32 & 0x3F)
+        }
+        4 => {
+            ((buf[0] as u32 & 0x07) << 18)
+                | ((buf[1] as u32 & 0x3F) << 12)
+                | ((buf[2] as u32 & 0x3F) << 6)
+                | (buf[3] as u32 & 0x3F)
+        }
+        _ => 0xFFFD,
+    }
+}
+
+/// Returns the display width of a Unicode codepoint.
+///
+/// Returns 2 for CJK Unified Ideographs, fullwidth forms, Hangul syllables,
+/// and common emoji ranges.  Returns 1 for everything else.
+///
+/// This is a range-based approximation — not a full Unicode database — but
+/// covers the vast majority of wide characters encountered in practice.
+pub(crate) fn utf8_char_width(codepoint: u32) -> u8 {
+    match codepoint {
+        // Hangul Jamo
+        0x1100..=0x115F => 2,
+        // Hangul Jamo Extended-A
+        0xA960..=0xA97C => 2,
+        // CJK Radicals Supplement .. Yi Radicals
+        0x2E80..=0xA4CF => 2,
+        // Hangul Syllables
+        0xAC00..=0xD7AF => 2,
+        // CJK Compatibility Ideographs
+        0xF900..=0xFAFF => 2,
+        // CJK Compatibility Forms
+        0xFE30..=0xFE6F => 2,
+        // Fullwidth Forms (excluding halfwidth)
+        0xFF01..=0xFF60 => 2,
+        // Fullwidth Signs
+        0xFFE0..=0xFFE6 => 2,
+        // CJK Unified Ideographs Extension B .. Kangxi Radicals Supplement
+        0x20000..=0x2FA1F => 2,
+        // Miscellaneous Symbols and Pictographs, Emoticons, etc. (common emoji)
+        0x1F300..=0x1F9FF => 2,
+        // Supplemental Symbols and Pictographs
+        0x1FA00..=0x1FA6F => 2,
+        // Symbols and Pictographs Extended-A
+        0x1FA70..=0x1FAFF => 2,
+        // Everything else — single width
+        _ => 1,
+    }
+}
+
+/// Count the bytes of the trailing UTF-8 codepoint at the end of `buf`.
+///
+/// Scans backward from the last byte through continuation bytes to find the
+/// leading byte.  Returns the total byte count (1–4) of the trailing codepoint.
+/// Returns 1 for orphan continuation bytes or invalid sequences.
+fn utf8_trailing_codepoint_len(buf: &[u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    let last = buf.len() - 1;
+
+    // If the last byte is not a continuation byte it is either ASCII or a
+    // (possibly invalid) leading byte — either way, it is a single codepoint.
+    if !utf8_is_continuation(buf[last]) {
+        return 1;
+    }
+
+    // Scan backward through continuation bytes (at most 3).
+    let mut cont_bytes: usize = 0;
+    let mut pos = last;
+    while pos > 0 && utf8_is_continuation(buf[pos]) && cont_bytes < 3 {
+        cont_bytes += 1;
+        pos -= 1;
+    }
+
+    // `buf[pos]` should be the leading byte.  If it is still a continuation
+    // byte we ran into the start of the buffer — treat as orphan, erase 1.
+    if utf8_is_continuation(buf[pos]) {
+        return 1;
+    }
+
+    let expected = utf8_byte_count(buf[pos]);
+    let actual = cont_bytes + 1;
+
+    // Valid sequence: expected byte count matches what we found.
+    if actual == expected {
+        return actual;
+    }
+
+    // More continuation bytes than expected → orphans; erase just 1.
+    // Fewer → incomplete sequence; erase the partial group.
+    if actual > expected { 1 } else { actual }
+}
+
+/// Returns `true` if `cp` is an ASCII word character (alphanumeric or `_`).
+/// Non-ASCII codepoints are treated as non-word for POSIX word boundaries.
+#[inline]
+fn is_word_codepoint(cp: u32) -> bool {
+    if cp <= 0x7F {
+        let c = cp as u8;
+        c.is_ascii_alphanumeric() || c == b'_'
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LineDisc
 // ---------------------------------------------------------------------------
 
@@ -202,6 +344,12 @@ pub struct LineDisc {
 
     // -- Column tracking (for ECHOKE / backspace echo) --
     column: usize,
+
+    // -- UTF-8 multi-byte tracking (Phase 35: IUTF8) --
+    /// Number of UTF-8 continuation bytes still expected for the current
+    /// multi-byte character being inserted.  0 = not in a multi-byte sequence.
+    /// Only meaningful when IUTF8 is set in `c_iflag`.
+    utf8_remaining: u8,
 }
 
 impl LineDisc {
@@ -254,6 +402,7 @@ impl LineDisc {
             stopped: false,
             literal_next: false,
             column: 0,
+            utf8_remaining: 0,
         }
     }
 
@@ -359,6 +508,7 @@ impl LineDisc {
         self.stopped = false;
         self.literal_next = false;
         self.column = 0;
+        self.utf8_remaining = 0;
     }
 
     pub fn flush_input(&mut self) {
@@ -368,6 +518,7 @@ impl LineDisc {
         self.cooked_count = 0;
         self.line_count = 0;
         self.literal_next = false;
+        self.utf8_remaining = 0;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -696,6 +847,16 @@ impl LineDisc {
             self.edit_len += 1;
         }
 
+        // Phase 35: IUTF8 multi-byte column tracking.
+        let iutf8 = self.termios.input_flags().contains(InputFlags::IUTF8);
+        if iutf8 && c >= 0x80 {
+            return self.insert_char_utf8(c, lflag);
+        }
+        // Reset multi-byte state for ASCII bytes when IUTF8 is active.
+        if iutf8 {
+            self.utf8_remaining = 0;
+        }
+
         if !lflag.contains(LocalFlags::ECHO) {
             return InputAction::None;
         }
@@ -721,6 +882,50 @@ impl LineDisc {
         InputAction::None
     }
 
+    /// Phase 35: Insert a multi-byte UTF-8 byte (>= 0x80) with proper column
+    /// tracking.  Continuation bytes do not advance the column; the column is
+    /// incremented by the codepoint's display width only when the final
+    /// continuation byte completes the sequence.
+    fn insert_char_utf8(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
+        if utf8_is_continuation(c) {
+            if self.utf8_remaining > 0 {
+                self.utf8_remaining -= 1;
+                if self.utf8_remaining == 0 {
+                    // Codepoint complete — decode and add display width.
+                    let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
+                    let cp = utf8_decode(
+                        &self.edit_buf[self.edit_len.saturating_sub(cp_len)..self.edit_len],
+                    );
+                    self.column += utf8_char_width(cp) as usize;
+                }
+            } else {
+                // Orphan continuation byte — treat as width 1.
+                self.column += 1;
+            }
+        } else {
+            // Leading byte of a new multi-byte sequence.
+            let total = utf8_byte_count(c);
+            if total > 1 {
+                self.utf8_remaining = (total - 1) as u8;
+            } else {
+                // Shouldn't reach here (c >= 0x80 but byte_count == 1 means
+                // invalid leading byte) — treat as width 1.
+                self.column += 1;
+            }
+        }
+
+        // Always echo the raw byte so the terminal can reconstruct the
+        // multi-byte character.
+        if lflag.contains(LocalFlags::ECHO) {
+            InputAction::Echo {
+                buf: [c, 0, 0, 0],
+                len: 1,
+            }
+        } else {
+            InputAction::None
+        }
+    }
+
     /// Non-canonical (raw) mode: push directly to cooked buffer.
     fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
         self.push_cooked(c);
@@ -741,18 +946,27 @@ impl LineDisc {
     }
 
     /// Erase one character (VERASE / backspace).
+    ///
+    /// When IUTF8 is set, erases the full trailing UTF-8 codepoint (1–4 bytes)
+    /// and echoes based on the codepoint's display width.  When IUTF8 is not
+    /// set, erases exactly one byte (legacy behavior).
     fn erase_char(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;
         }
 
+        // Phase 35: IUTF8 multi-byte erase.
+        if self.termios.input_flags().contains(InputFlags::IUTF8) {
+            return self.erase_char_utf8(lflag);
+        }
+
+        // Legacy single-byte erase.
         let erased = self.edit_buf[self.edit_len - 1];
         self.edit_len -= 1;
 
         if lflag.contains(LocalFlags::ECHOE) {
             // Phase 27: If the erased character was a control char echoed as
             // ^X via ECHOCTL, erase two columns with two BS-SP-BS triples.
-            // Use `KillLineEcho` to emit the correct number of columns.
             if lflag.contains(LocalFlags::ECHOCTL)
                 && erased < 0x20
                 && erased != b'\t'
@@ -770,6 +984,40 @@ impl LineDisc {
             };
         }
         InputAction::None
+    }
+
+    /// Phase 35: UTF-8 aware backspace — erases the full trailing codepoint.
+    fn erase_char_utf8(&mut self, lflag: LocalFlags) -> InputAction {
+        let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
+        if cp_len == 0 {
+            return InputAction::None;
+        }
+
+        let cp_start = self.edit_len - cp_len;
+        let codepoint = utf8_decode(&self.edit_buf[cp_start..self.edit_len]);
+        let width = utf8_char_width(codepoint) as usize;
+
+        // Remove all bytes of the codepoint.
+        self.edit_len = cp_start;
+        self.utf8_remaining = 0;
+
+        if !lflag.contains(LocalFlags::ECHOE) {
+            return InputAction::None;
+        }
+
+        self.column = self.column.saturating_sub(width);
+
+        if width <= 1 {
+            // Single-column character — one BS-SP-BS triple.
+            return InputAction::Echo {
+                buf: [0x08, 0x20, 0x08, 0],
+                len: 3,
+            };
+        }
+        // Multi-column character (e.g. CJK, emoji) — multiple BS-SP-BS triples.
+        InputAction::KillLineEcho {
+            columns: width as u16,
+        }
     }
 
     /// Kill the entire line (VKILL).
@@ -818,6 +1066,11 @@ impl LineDisc {
             return InputAction::None;
         }
 
+        // Phase 35: IUTF8 codepoint-aware word erase.
+        if self.termios.input_flags().contains(InputFlags::IUTF8) {
+            return self.word_erase_utf8(lflag);
+        }
+
         let mut erased = 0usize;
 
         // Phase 1: skip trailing non-word characters (whitespace, punctuation).
@@ -845,6 +1098,64 @@ impl LineDisc {
         }
 
         // For multi-char erases, request a reprint so the line is redrawn.
+        if lflag.contains(LocalFlags::ECHO) {
+            return InputAction::ReprintLine;
+        }
+
+        InputAction::None
+    }
+
+    /// Phase 35: UTF-8 aware word erase — erases full codepoints until a word
+    /// boundary, tracking column width per codepoint.
+    fn word_erase_utf8(&mut self, lflag: LocalFlags) -> InputAction {
+        let mut columns_erased: usize = 0;
+
+        // Phase 1: skip trailing non-word codepoints (whitespace, punctuation,
+        // CJK characters, etc.).
+        while self.edit_len > 0 {
+            let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
+            if cp_len == 0 {
+                break;
+            }
+            let cp_start = self.edit_len - cp_len;
+            let cp = utf8_decode(&self.edit_buf[cp_start..self.edit_len]);
+            if is_word_codepoint(cp) {
+                break;
+            }
+            columns_erased += utf8_char_width(cp) as usize;
+            self.edit_len = cp_start;
+        }
+
+        // Phase 2: erase word codepoints (ASCII alphanumeric + underscore).
+        while self.edit_len > 0 {
+            let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
+            if cp_len == 0 {
+                break;
+            }
+            let cp_start = self.edit_len - cp_len;
+            let cp = utf8_decode(&self.edit_buf[cp_start..self.edit_len]);
+            if !is_word_codepoint(cp) {
+                break;
+            }
+            columns_erased += utf8_char_width(cp) as usize;
+            self.edit_len = cp_start;
+        }
+
+        self.column = self.column.saturating_sub(columns_erased);
+        self.utf8_remaining = 0;
+
+        if columns_erased == 0 {
+            return InputAction::None;
+        }
+
+        if columns_erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
+            return InputAction::Echo {
+                buf: [0x08, 0x20, 0x08, 0],
+                len: 3,
+            };
+        }
+
+        // For multi-column erases, request a reprint so the line is redrawn.
         if lflag.contains(LocalFlags::ECHO) {
             return InputAction::ReprintLine;
         }
