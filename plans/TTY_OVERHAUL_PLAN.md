@@ -112,7 +112,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 36 | Input buffer policy (IMAXBEL bell, IXOFF flow control, CREAD gate) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
-| 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 38 | PTY namespace & device nodes (`/dev/ptmx`, `/dev/pts/N`, lock ioctls) | `drivers/src/tty/pty.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 39 | PTY packet mode (TIOCPKT, control byte framing) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 40 | VT100/ANSI terminal emulation (escape parser, CSI, cursor/color) | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vtparser.rs` | **TODO** |
@@ -3238,7 +3238,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 41. Phase 37: Deferred Reprint (PENDIN)
 
-**Status**: 📋 Planned
+**Status**: ✅ Completed
 
 > **Priority**: P1 quality — PENDIN ensures users see their pending input re-echoed correctly after terminal mode changes. Required for quality readline/zsh experience.
 > **Principle**: PENDIN is a one-shot flag. When set, the next input processing call triggers a full reprint of the edit buffer with current echo settings. The flag is then cleared.
