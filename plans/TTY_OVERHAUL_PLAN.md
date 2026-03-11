@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–31, 33–35, 37–38, 40 complete | 📋 Phase 32, 36, Phases 39, 41–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31, 33–35, 37–38, 40–41 complete | 📋 Phase 32, 36, Phases 39, 42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -116,7 +116,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 38 | PTY namespace & device nodes (`/dev/ptmx`, `/dev/pts/N`, lock ioctls) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 39 | PTY packet mode (TIOCPKT, control byte framing) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 40 | VT100/ANSI terminal emulation (escape parser, CSI, cursor/color) | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vtparser.rs` | **DONE** |
-| 41 | Advanced PTY & session control (EXTPROC, `vhangup()`) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/process_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 41 | Advanced PTY & session control (EXTPROC, `vhangup()`) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 42 | Legacy termios completion (ECHOPRT, IUCLC, OLCUC) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 
 ---
@@ -3446,7 +3446,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 45. Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)
 
-**Status**: 📋 Planned
+**Status**: ✅ Completed
 
 > **Priority**: P2 infrastructure — EXTPROC is needed for ssh/network terminals; vhangup is needed for secure session handoff (login/getty).
 > **Principle**: Two independent features grouped because both relate to PTY/session edge cases beyond basic terminal usage.
@@ -3484,6 +3484,15 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 | `core/src/syscall/process_handlers.rs` | Add `sys_vhangup` handler with ctty + permission checks |
 | `drivers/src/tty_tests.rs` | EXTPROC behavior tests, vhangup lifecycle tests |
 
+### 45.5 Implementation Summary
+
+**Completed.** All features implemented and verified:
+
+- **EXTPROC local flag** (`0x10000`): Bypasses canonical editing and echo in `input_char()` step 5, after ISIG signal processing and IXON flow control. Characters go directly to cooked buffer via `extproc_input()`. IMAXBEL bell on buffer full. Signals and flow control still function normally under EXTPROC.
+- **`vhangup()` syscall** (`SYSCALL_VHANGUP = 139`): Wired through dispatch table. Handler checks caller's controlling TTY; returns `EPERM` if none. Delegates to existing `hangup()` infrastructure from Phases 7+33.
+- **12 regression tests**: 11 in `drivers/src/tty_tests.rs` (EXTPROC echo suppression, editing bypass, signal delivery, IEXTEN bypass, flow control, IMAXBEL, clear-resume, raw mode, vhangup trigger, flag values) + 1 in `core/src/syscall/tests.rs` (dispatch table registration).
+
+**Files modified**: `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/process_handlers.rs`, `core/src/syscall/handlers.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs`
 ---
 
 ## 46. Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
