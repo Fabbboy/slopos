@@ -671,6 +671,7 @@ pub const ICRNL: u32 = 0x100;
 pub const IXON: u32 = 0x400;
 pub const IXOFF: u32 = 0x1000;
 pub const IUTF8: u32 = 0x4000;
+pub const IUCLC: u32 = 0x200;
 pub const IMAXBEL: u32 = 0x2000;
 
 // c_oflag bits — output processing flags
@@ -679,6 +680,7 @@ pub const ONLCR: u32 = 0x04;
 pub const OCRNL: u32 = 0x08;
 pub const ONOCR: u32 = 0x10;
 pub const ONLRET: u32 = 0x20;
+pub const OLCUC: u32 = 0x02;
 
 // c_lflag bits (additional — see ISIG..ECHONL above)
 pub const ECHOCTL: u32 = 0x200;
@@ -733,6 +735,7 @@ bitflags::bitflags! {
         const IXOFF  = 0x1000;
         const IUTF8  = 0x4000;
         const IMAXBEL = 0x2000;
+        const IUCLC  = 0x200;
     }
 }
 
@@ -745,6 +748,7 @@ bitflags::bitflags! {
         const OCRNL  = 0x08;
         const ONOCR  = 0x10;
         const ONLRET = 0x20;
+        const OLCUC  = 0x02;
     }
 }
 
