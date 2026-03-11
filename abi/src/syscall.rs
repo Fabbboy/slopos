@@ -416,6 +416,17 @@ pub const SYSCALL_GETSOCKOPT: u64 = 137;
 /// * Negative errno on failure
 pub const SYSCALL_SHUTDOWN: u64 = 138;
 
+/// Revoke access to the calling process's controlling terminal.
+///
+/// All other file descriptors referencing this TTY become invalid —
+/// subsequent I/O returns `EIO`.  Only callable by a process that holds
+/// a controlling terminal; returns `-EPERM` if the caller has no ctty.
+///
+/// # Returns
+/// * 0 on success
+/// * -EPERM: caller has no controlling terminal
+pub const SYSCALL_VHANGUP: u64 = 139;
+
 // =============================================================================
 // Socket option constants
 // =============================================================================
@@ -677,6 +688,7 @@ pub const NOFLSH: u32 = 0x80;
 pub const TOSTOP: u32 = 0x100;
 pub const IEXTEN: u32 = 0x8000;
 pub const PENDIN: u32 = 0x4000;
+pub const EXTPROC: u32 = 0x10000;
 
 // c_cflag bits — control (hardware) flags
 pub const CREAD: u32 = 0x80;
@@ -753,6 +765,7 @@ bitflags::bitflags! {
         const ECHOKE  = 0x800;
         const PENDIN  = 0x4000;
         const IEXTEN  = 0x8000;
+        const EXTPROC = 0x10000;
     }
 }
 
@@ -1068,7 +1081,7 @@ pub const ERRNO_EPERM: u64 = (-1i64) as u64;
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 139;
+pub const SYSCALL_TABLE_SIZE: usize = 140;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
