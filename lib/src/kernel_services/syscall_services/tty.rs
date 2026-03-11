@@ -38,5 +38,6 @@ crate::define_service! {
         bytes_available(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         set_pty_lock(tty_index: slopos_abi::syscall::TtyIndex, locked: bool) -> i32;
         get_pty_lock(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        set_packet_mode(tty_index: slopos_abi::syscall::TtyIndex, enable: bool) -> i32;
     }
 }

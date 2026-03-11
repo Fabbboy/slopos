@@ -602,6 +602,25 @@ pub const TIOCSPTLCK: u64 = 0x4004_5431;
 /// Phase 38: Get PTY slave lock state. Returns 0 (unlocked) or 1 (locked).
 /// Linux value: 0x80045439.
 pub const TIOCGPTLCK: u64 = 0x8004_5439;
+/// Phase 39: Enable/disable PTY packet mode on a master FD.
+/// Linux value: 0x5420.
+pub const TIOCPKT: u64 = 0x5420;
+
+/// Phase 39: Packet mode control byte constants.
+/// Normal data follows — no special event.
+pub const TIOCPKT_DATA: u8 = 0x00;
+/// Slave input queue was flushed.
+pub const TIOCPKT_FLUSHREAD: u8 = 0x01;
+/// Slave output queue was flushed.
+pub const TIOCPKT_FLUSHWRITE: u8 = 0x02;
+/// Slave output stopped (XOFF received).
+pub const TIOCPKT_STOP: u8 = 0x04;
+/// Slave output started (XON received).
+pub const TIOCPKT_START: u8 = 0x08;
+/// `IXON` cleared on slave termios.
+pub const TIOCPKT_NOSTOP: u8 = 0x10;
+/// `IXON` set on slave termios.
+pub const TIOCPKT_DOSTOP: u8 = 0x20;
 
 pub const N_TTY: u32 = 0;
 pub const N_RAW: u32 = 1;

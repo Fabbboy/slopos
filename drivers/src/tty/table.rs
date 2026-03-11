@@ -172,6 +172,8 @@ impl Tty {
             hung_up: false,
             peer_closed: false,
             slave_locked: false,
+            packet_mode: false,
+            packet_events: 0,
         }
     }
 
@@ -192,6 +194,8 @@ impl Tty {
             hung_up: false,
             peer_closed: false,
             slave_locked: false,
+            packet_mode: false,
+            packet_events: 0,
         }
     }
 
@@ -212,6 +216,8 @@ impl Tty {
             hung_up: false,
             peer_closed: false,
             slave_locked: true,
+            packet_mode: false,
+            packet_events: 0,
         }
     }
 }

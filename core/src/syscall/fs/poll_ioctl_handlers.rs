@@ -4,7 +4,7 @@ use core::ffi::c_int;
 
 use slopos_abi::syscall::{
     FIONREAD, POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTLCK,
-    TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK,
+    TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK,
     UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
@@ -472,6 +472,18 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 let state = state as i32;
                 try_or_err!(ctx, copy_to_user(ptr, &state));
                 ctx.ok(0)
+            }
+        }
+        // Phase 39: PTY packet mode.
+        TIOCPKT => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
+            let val = try_or_err!(ctx, copy_from_user(ptr));
+            let enable = val != 0;
+            if tty::set_packet_mode(tty_idx, enable) == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
             }
         }
         _ => ctx.err(),

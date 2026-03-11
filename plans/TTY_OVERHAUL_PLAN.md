@@ -3341,7 +3341,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 43. Phase 39: PTY Packet Mode (TIOCPKT)
 
-**Status**: 📋 Planned
+**Status**: ✅ Done
 
 > **Priority**: P2 infrastructure — terminal multiplexers (tmux, screen) need packet mode to receive out-of-band control information about slave-side state changes.
 > **Principle**: When packet mode is enabled on a PTY master, every `read()` is prefixed with a single control byte indicating the event type. This gives multiplexers visibility into flow control, flushes, and mode changes on the slave.

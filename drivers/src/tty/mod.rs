@@ -98,6 +98,17 @@ pub struct Tty {
     /// `true` on `pty_alloc()` — the master holder must unlock via
     /// `TIOCSPTLCK` before the slave can be opened.
     pub slave_locked: bool,
+
+    /// Phase 39: PTY packet mode.  When `true` on a PTY master, every
+    /// `read()` is prefixed with a single control byte indicating the
+    /// event type (see `TIOCPKT_*` constants in `abi`).
+    pub packet_mode: bool,
+
+    /// Phase 39: Pending packet-mode event bits.  Bitwise OR of
+    /// `TIOCPKT_FLUSHREAD`, `TIOCPKT_FLUSHWRITE`, `TIOCPKT_STOP`,
+    /// `TIOCPKT_START`, `TIOCPKT_NOSTOP`, `TIOCPKT_DOSTOP`.
+    /// Consumed on the next master `read()` when non-zero.
+    pub packet_events: u8,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -301,6 +312,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     let mut route = None;
     let mut ixoff_byte_out = None;
     let mut output_resumed = false;
+    let mut deferred_pkt_event: u8 = 0;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -326,6 +338,15 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         // wake blocked writers and poll waiters.
         if was_stopped && !tty.ldisc.is_stopped() {
             output_resumed = true;
+        }
+
+        // Phase 39: Track flow-control transitions for packet mode.
+        // Deferred: queue_packet_event acquires its own TTY slot lock,
+        // so we must not call it while holding `guard`.
+        if !was_stopped && tty.ldisc.is_stopped() {
+            deferred_pkt_event = slopos_abi::syscall::TIOCPKT_STOP;
+        } else if was_stopped && !tty.ldisc.is_stopped() {
+            deferred_pkt_event = slopos_abi::syscall::TIOCPKT_START;
         }
 
         // Handle echo, reprint, and signal actions while we hold the lock.
@@ -372,6 +393,10 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                     TTY_OUTPUT_WAITERS[slot].wake_all();
                     POLL_NOTIFY.wake_all();
                 }
+                // Phase 39: Deliver deferred packet event.
+                if deferred_pkt_event != 0 {
+                    pty::queue_packet_event(idx, deferred_pkt_event);
+                }
                 return;
             }
             InputAction::Bell => {
@@ -383,6 +408,11 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             InputAction::None => has_data,
         }
     };
+
+    // Phase 39: Deliver deferred packet event now that the slot lock is released.
+    if deferred_pkt_event != 0 {
+        pty::queue_packet_event(idx, deferred_pkt_event);
+    }
 
     if let Some((driver_id, out, out_len)) = route {
         // Phase 25: Track in-flight echo output for drain semantics.
@@ -423,8 +453,8 @@ fn notify_input_ready(idx: TtyIndex) {
 }
 
 pub use self::pty::{
-    get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc, pty_open_slave,
-    set_pty_lock,
+    get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
+    pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 /// Read cooked data from a specific TTY.
@@ -514,14 +544,59 @@ pub fn read_with_attach(
             // Drain hardware input (merged — single lock for drain + read).
             deferred_signal = tty.drain_hw_input_locked();
 
-            // Try to read from the cooked buffer.
-            let got = tty.ldisc.read(&mut buf[total..]);
-            total = total.saturating_add(got);
-            if got > 0 {
-                ixoff_xon = tty
-                    .ldisc
-                    .ixoff_check_xon()
-                    .map(|xon| (tty.driver.id(), xon));
+            // Phase 39: PTY packet mode — if this master has pending
+            // packet events, return a single-byte read with the event
+            // bitmask (consuming the events).  If no events but data is
+            // available, prefix the read with TIOCPKT_DATA (0x00).
+            if tty.packet_mode && total == 0 {
+                if tty.packet_events != 0 {
+                    buf[0] = tty.packet_events;
+                    tty.packet_events = 0;
+                    drop(guard);
+                    if let Some((pgid, sig)) = deferred_signal {
+                        if pgid != 0 {
+                            let _ = signal_process_group(pgid, sig);
+                        }
+                    }
+                    return Ok(1);
+                }
+                // Reserve buf[0] for the TIOCPKT_DATA prefix byte.
+                if buf.len() < 2 {
+                    // Not enough room for prefix + data; fall through
+                    // to the wait logic below.
+                } else {
+                    let got = tty.ldisc.read(&mut buf[1..]);
+                    if got > 0 {
+                        buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
+                        total = 1 + got;
+                        ixoff_xon = tty
+                            .ldisc
+                            .ixoff_check_xon()
+                            .map(|xon| (tty.driver.id(), xon));
+                        // Canonical mode: return immediately with prefix.
+                        drop(guard);
+                        if let Some((driver_id, xon)) = ixoff_xon {
+                            write_driver_unlocked(driver_id, &[xon]);
+                        }
+                        if let Some((pgid, sig)) = deferred_signal {
+                            if pgid != 0 {
+                                let _ = signal_process_group(pgid, sig);
+                            }
+                        }
+                        return Ok(total);
+                    }
+                    // No data available — fall through to wait logic.
+                }
+            } else {
+                // Normal (non-packet) read path.
+                let got = tty.ldisc.read(&mut buf[total..]);
+                total = total.saturating_add(got);
+                if got > 0 {
+                    ixoff_xon = tty
+                        .ldisc
+                        .ixoff_check_xon()
+                        .map(|xon| (tty.driver.id(), xon));
+                }
             }
 
             let is_canonical = tty.ldisc.is_canonical();
@@ -1082,18 +1157,42 @@ fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Res
         wait_output_idle(idx)?;
     }
 
-    let mut guard = TTY_SLOTS[slot].lock();
-    match guard.as_mut() {
-        Some(tty) => {
-            if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
-                tty.ldisc.flush_input();
+    let mut deferred_pkt_events: u8 = 0;
+    let result = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        match guard.as_mut() {
+            Some(tty) => {
+                // Phase 39: Capture old IXON state before applying termios.
+                let old_ixon = tty.ldisc.termios().c_iflag & slopos_abi::syscall::IXON;
+                let new_ixon = t.c_iflag & slopos_abi::syscall::IXON;
+
+                if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
+                    tty.ldisc.flush_input();
+                    // Phase 39: Input flush on slave → TIOCPKT_FLUSHREAD.
+                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_FLUSHREAD;
+                }
+                tty.ldisc.set_termios(t);
+                tty.driver.set_termios(t);
+
+                // Phase 39: Track IXON toggle for packet mode.
+                if old_ixon == 0 && new_ixon != 0 {
+                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_DOSTOP;
+                } else if old_ixon != 0 && new_ixon == 0 {
+                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_NOSTOP;
+                }
+
+                Ok(())
             }
-            tty.ldisc.set_termios(t);
-            tty.driver.set_termios(t);
-            Ok(())
+            None => Err(TtyError::NotAllocated),
         }
-        None => Err(TtyError::NotAllocated),
+    };
+
+    // Phase 39: Deliver deferred packet events now that the slot lock is released.
+    if deferred_pkt_events != 0 {
+        pty::queue_packet_event(idx, deferred_pkt_events);
     }
+
+    result
 }
 
 /// Set termios for a specific TTY.
@@ -1155,36 +1254,47 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    let mut guard = TTY_SLOTS[slot].lock();
-    let tty = match guard.as_mut() {
-        Some(tty) => tty,
-        None => return Err(TtyError::NotAllocated),
-    };
+    let did_flush;
+    let result = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        let tty = match guard.as_mut() {
+            Some(tty) => tty,
+            None => return Err(TtyError::NotAllocated),
+        };
 
-    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
-    // on a hung-up TTY return EIO.
-    if tty.hung_up {
-        return Err(TtyError::HungUp);
-    }
+        // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+        // on a hung-up TTY return EIO.
+        if tty.hung_up {
+            return Err(TtyError::HungUp);
+        }
 
-    if tty.ldisc.id() == ldisc_id {
+        if tty.ldisc.id() == ldisc_id {
+            let mut termios = *tty.ldisc.termios();
+            termios.c_line = ldisc_id as u8;
+            tty.ldisc.set_termios(&termios);
+            tty.driver.set_termios(tty.ldisc.termios());
+            return Ok(());
+        }
+
         let mut termios = *tty.ldisc.termios();
         termios.c_line = ldisc_id as u8;
-        tty.ldisc.set_termios(&termios);
-        tty.driver.set_termios(tty.ldisc.termios());
-        return Ok(());
-    }
+        let Some(new_ldisc) = LdiscKind::from_id(ldisc_id, termios) else {
+            return Err(TtyError::UnsupportedLineDiscipline);
+        };
 
-    let mut termios = *tty.ldisc.termios();
-    termios.c_line = ldisc_id as u8;
-    let Some(new_ldisc) = LdiscKind::from_id(ldisc_id, termios) else {
-        return Err(TtyError::UnsupportedLineDiscipline);
+        tty.ldisc.flush_input();
+        did_flush = true;
+        tty.ldisc = new_ldisc;
+        tty.driver.set_termios(tty.ldisc.termios());
+        Ok(())
     };
 
-    tty.ldisc.flush_input();
-    tty.ldisc = new_ldisc;
-    tty.driver.set_termios(tty.ldisc.termios());
-    Ok(())
+    // Phase 39: ldisc switch flush → TIOCPKT_FLUSHREAD (after lock released).
+    if did_flush {
+        pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHREAD);
+    }
+
+    result
 }
 
 /// Get the foreground process group for a specific TTY.
@@ -1637,10 +1747,18 @@ pub fn hangup(idx: TtyIndex) {
         };
         let sid = tty.session.session_id_raw();
         tty.ldisc.flush_all();
+        // Phase 39: full flush → both FLUSHREAD + FLUSHWRITE packet events.
+        // Deferred until after lock is dropped to avoid self-deadlock.
         tty.session.detach();
         tty.hung_up = true;
         sid
     };
+
+    // Phase 39: Deliver deferred packet events now that the slot lock is released.
+    pty::queue_packet_event(
+        idx,
+        slopos_abi::syscall::TIOCPKT_FLUSHREAD | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
+    );
 
     // Phase 15: Signal the entire session (not just fg_pgrp) so that all
     // processes in the session receive SIGHUP + SIGCONT on hangup.
@@ -1706,7 +1824,10 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
 
         let mut revents = 0u16;
 
-        if (requested & POLLIN) != 0 && tty.ldisc.has_data() {
+        // Phase 39: Packet events also make the master readable.
+        if (requested & POLLIN) != 0
+            && (tty.ldisc.has_data() || (tty.packet_mode && tty.packet_events != 0))
+        {
             revents |= POLLIN;
         }
 

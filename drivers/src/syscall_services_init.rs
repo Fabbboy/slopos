@@ -329,6 +329,13 @@ fn tty_get_pty_lock_adapter(tty_index: TtyIndex) -> i32 {
     }
 }
 
+fn tty_set_packet_mode_adapter(tty_index: TtyIndex, enable: bool) -> i32 {
+    match tty::set_packet_mode(tty_index, enable) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -368,6 +375,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     bytes_available: tty_bytes_available_adapter,
     set_pty_lock: tty_set_pty_lock_adapter,
     get_pty_lock: tty_get_pty_lock_adapter,
+    set_packet_mode: tty_set_packet_mode_adapter,
 };
 
 fn net_scan_members_adapter(

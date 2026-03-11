@@ -449,3 +449,95 @@ pub fn is_slave_locked(idx: TtyIndex) -> bool {
         None => false,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 39: PTY packet mode
+// ---------------------------------------------------------------------------
+
+/// Enable or disable packet mode on a PTY master.
+///
+/// `idx` must refer to a **master** FD.  When packet mode is disabled,
+/// any pending `packet_events` are cleared.
+pub fn set_packet_mode(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
+    match tty.driver {
+        TtyDriverKind::PtyMaster { .. } => {}
+        _ => return Err(TtyError::NotAllocated),
+    }
+
+    tty.packet_mode = enable;
+    if !enable {
+        tty.packet_events = 0;
+    }
+    Ok(())
+}
+
+/// Get the current packet mode state of a PTY master.
+pub fn get_packet_mode(idx: TtyIndex) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let guard = TTY_SLOTS[slot].lock();
+    let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+    match tty.driver {
+        TtyDriverKind::PtyMaster { .. } => Ok(tty.packet_mode),
+        _ => Err(TtyError::NotAllocated),
+    }
+}
+
+/// Queue packet event bits on the PTY master paired with a slave at `slave_idx`.
+///
+/// Resolves the master peer from the slave's driver, and ORs `event_bits`
+/// into the master's `packet_events` if packet mode is enabled.
+/// Wakes master readers and poll waiters so they see the pending events.
+pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
+    let slot = slave_idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+
+    // Resolve the master peer index from the slave.
+    let master_idx = {
+        let guard = TTY_SLOTS[slot].lock();
+        let Some(tty) = guard.as_ref() else { return };
+        match tty.driver {
+            TtyDriverKind::PtySlave { ref peer } => {
+                if !validate_peer(peer) {
+                    return;
+                }
+                peer.idx
+            }
+            _ => return,
+        }
+    };
+
+    let master_slot = master_idx.0 as usize;
+    if master_slot >= MAX_TTYS {
+        return;
+    }
+
+    let should_wake = {
+        let mut guard = TTY_SLOTS[master_slot].lock();
+        let Some(master) = guard.as_mut() else {
+            return;
+        };
+        if !master.packet_mode {
+            return;
+        }
+        master.packet_events |= event_bits;
+        true
+    };
+
+    if should_wake {
+        TTY_INPUT_WAITERS[master_slot].wake_all();
+        super::table::POLL_NOTIFY.wake_all();
+    }
+}
