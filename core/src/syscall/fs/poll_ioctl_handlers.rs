@@ -3,9 +3,9 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    FIONREAD, POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTN,
-    TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCSCTTY, TIOCSETD, TIOCSPGRP, UserPollFd, UserTermios,
-    UserTimeval, UserWinsize,
+    FIONREAD, POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTLCK,
+    TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK,
+    UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -447,6 +447,30 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             } else {
                 let count = count as i32;
                 try_or_err!(ctx, copy_to_user(ptr, &count));
+                ctx.ok(0)
+            }
+        }
+        // Phase 38: PTY slave lock ioctls.
+        TIOCSPTLCK => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
+            let val = try_or_err!(ctx, copy_from_user(ptr));
+            let locked = val != 0;
+            if tty::set_pty_lock(tty_idx, locked) == 0 {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
+        }
+        TIOCGPTLCK => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
+            let state = tty::get_pty_lock(tty_idx);
+            if state < 0 {
+                ctx.err()
+            } else {
+                let state = state as i32;
+                try_or_err!(ctx, copy_to_user(ptr, &state));
                 ctx.ok(0)
             }
         }

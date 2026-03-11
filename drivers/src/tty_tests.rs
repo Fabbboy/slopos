@@ -4451,6 +4451,9 @@ pub fn test_phase20_pty_open_slave_prevents_free() -> TestResult {
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::open_ref(master).unwrap();
 
+    // Unlock slave so it can be opened (Phase 38 lock guard).
+    tty::set_pty_lock(master, false).unwrap();
+
     // Open slave via the validated path.
     let open_rc = tty::pty_open_slave(slave);
     if open_rc.is_err() {
@@ -8117,6 +8120,9 @@ pub fn test_phase33_pty_master_close_slave_eof_eio() -> TestResult {
         }
     };
 
+    // Unlock slave so it can be opened (Phase 38 lock guard).
+    crate::tty::set_pty_lock(master_idx, false).unwrap();
+
     // Open slave.
     if let Err(e) = crate::tty::pty::pty_open_slave(slave_idx) {
         klog_info!("TTY_TEST: BUG - pty_open_slave failed: {:?}", e);
@@ -8209,6 +8215,9 @@ pub fn test_phase33_pty_slave_poll_pollhup_after_master_close() -> TestResult {
             None => return TestResult::Fail,
         }
     };
+
+    // Unlock slave so it can be opened (Phase 38 lock guard).
+    crate::tty::set_pty_lock(master_idx, false).unwrap();
 
     if let Err(_) = crate::tty::pty::pty_open_slave(slave_idx) {
         return TestResult::Fail;
@@ -9275,6 +9284,420 @@ pub fn test_phase37_flush_input_clears_pendin() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 38: PTY Namespace & Device Nodes
+// ===========================================================================
+
+/// Phase 38: TIOCSPTLCK and TIOCGPTLCK ioctl constants match Linux values.
+pub fn test_phase38_ioctl_constants() -> TestResult {
+    use slopos_abi::syscall::{TIOCGPTLCK, TIOCSPTLCK};
+    if TIOCSPTLCK != 0x4004_5431 {
+        klog_info!(
+            "TTY_TEST: BUG - TIOCSPTLCK is {:#x}, expected 0x40045431",
+            TIOCSPTLCK
+        );
+        return TestResult::Fail;
+    }
+    if TIOCGPTLCK != 0x8004_5439 {
+        klog_info!(
+            "TTY_TEST: BUG - TIOCGPTLCK is {:#x}, expected 0x80045439",
+            TIOCGPTLCK
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 38: New PTY slaves are locked by default.
+pub fn test_phase38_slave_locked_by_default() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = match tty::get_pty_number(master) {
+        Ok(n) => n,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_pty_number failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave = TtyIndex(slave_num as u8);
+
+    // Slave should be locked by default.
+    if !crate::tty::pty::is_slave_locked(slave) {
+        klog_info!("TTY_TEST: BUG - new PTY slave should be locked by default");
+        crate::tty::pty::free_pair_if_unused(master, slave);
+        return TestResult::Fail;
+    }
+
+    crate::tty::pty::free_pair_if_unused(master, slave);
+    TestResult::Pass
+}
+
+/// Phase 38: Locked slave cannot be opened via pty_open_slave.
+pub fn test_phase38_locked_slave_open_rejected() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Slave is locked (default) — open should fail.
+    match tty::pty_open_slave(slave) {
+        Err(TtyError::PermissionDenied) => {} // expected
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - locked slave open should return PermissionDenied, got {:?}",
+                other
+            );
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    crate::tty::pty::free_pair_if_unused(master, slave);
+    TestResult::Pass
+}
+
+/// Phase 38: set_pty_lock unlocks the slave, enabling open.
+pub fn test_phase38_unlock_enables_open() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Unlock the slave.
+    if let Err(e) = tty::set_pty_lock(master, false) {
+        klog_info!("TTY_TEST: BUG - set_pty_lock(false) failed: {:?}", e);
+        crate::tty::pty::free_pair_if_unused(master, slave);
+        return TestResult::Fail;
+    }
+
+    // Now open should succeed.
+    match tty::pty_open_slave(slave) {
+        Ok(_count) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - unlocked slave open failed: {:?}", e);
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::close_ref(slave);
+    crate::tty::pty::free_pair_if_unused(master, slave);
+    TestResult::Pass
+}
+
+/// Phase 38: get_pty_lock reads back the lock state.
+pub fn test_phase38_get_lock_round_trip() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Default: locked.
+    match tty::get_pty_lock(master) {
+        Ok(true) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - get_pty_lock should return Ok(true), got {:?}",
+                other
+            );
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    // Unlock.
+    tty::set_pty_lock(master, false).unwrap();
+    match tty::get_pty_lock(master) {
+        Ok(false) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - after unlock, get_pty_lock should return Ok(false), got {:?}",
+                other
+            );
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    // Re-lock.
+    tty::set_pty_lock(master, true).unwrap();
+    match tty::get_pty_lock(master) {
+        Ok(true) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - after re-lock, get_pty_lock should return Ok(true), got {:?}",
+                other
+            );
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    crate::tty::pty::free_pair_if_unused(master, slave);
+    TestResult::Pass
+}
+
+/// Phase 38: set_pty_lock on non-master returns NotAllocated.
+pub fn test_phase38_set_lock_non_master_rejected() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Calling set_pty_lock on the slave (not master) should fail.
+    match tty::set_pty_lock(slave, false) {
+        Err(TtyError::NotAllocated) => {} // expected — slave is not a PtyMaster
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - set_pty_lock on slave should return NotAllocated, got {:?}",
+                other
+            );
+            crate::tty::pty::free_pair_if_unused(master, slave);
+            return TestResult::Fail;
+        }
+    }
+
+    crate::tty::pty::free_pair_if_unused(master, slave);
+    TestResult::Pass
+}
+
+/// Phase 38: Data flow through unlocked PTY device node FDs.
+pub fn test_phase38_data_flow_after_unlock() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Unlock slave.
+    tty::set_pty_lock(master, false).unwrap();
+
+    // Open slave.
+    tty::pty_open_slave(slave).unwrap();
+
+    // Set slave to raw mode for simple data flow.
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Master write -> slave read.
+    let _ = tty::write(master, b"test");
+    let mut buf = [0u8; 16];
+    match tty::read(slave, &mut buf, true) {
+        Ok(n) if n == 4 && &buf[..4] == b"test" => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - data flow after unlock failed: {:?}", other);
+            tty::set_termios(slave, &saved).unwrap();
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Phase 38: Master close -> slave hangup still works with lock semantics.
+pub fn test_phase38_master_close_slave_hangup() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+
+    // Unlock and open slave.
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Close master -> slave should see hangup.
+    let _ = tty::close_ref(master);
+    crate::tty::pty::mark_peer_closed(slave);
+
+    // Read from slave should indicate peer closed (EOF or HungUp).
+    let mut buf = [0u8; 16];
+    match tty::read(slave, &mut buf, true) {
+        Ok(0) | Err(TtyError::HungUp) | Err(TtyError::WouldBlock) => {} // acceptable
+        other => {
+            klog_info!("TTY_TEST: BUG - slave read after master close: {:?}", other);
+            let _ = tty::close_ref(slave);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::close_ref(slave);
+    TestResult::Pass
+}
+
+/// Phase 38: Multiple simultaneous PTY pairs via /dev/ptmx.
+pub fn test_phase38_multiple_pairs_with_locks() -> TestResult {
+    tty::table::tty_table_init();
+
+    let mut pairs: [(TtyIndex, TtyIndex); 5] = [(TtyIndex(0), TtyIndex(0)); 5];
+    for i in 0..5 {
+        let master = match tty::pty_alloc() {
+            Ok(idx) => idx,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed at pair {}", i);
+                for j in 0..i {
+                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
+                }
+                return TestResult::Fail;
+            }
+        };
+        let slave_num = match tty::get_pty_number(master) {
+            Ok(n) => n,
+            Err(_) => {
+                klog_info!("TTY_TEST: BUG - get_pty_number failed at pair {}", i);
+                for j in 0..i {
+                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
+                }
+                return TestResult::Fail;
+            }
+        };
+        pairs[i] = (master, TtyIndex(slave_num as u8));
+
+        // Each pair's slave should be independently locked.
+        if !crate::tty::pty::is_slave_locked(pairs[i].1) {
+            klog_info!("TTY_TEST: BUG - pair {} slave not locked", i);
+            for j in 0..=i {
+                crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
+            }
+            return TestResult::Fail;
+        }
+    }
+
+    // Unlock only pair 2 — others should remain locked.
+    tty::set_pty_lock(pairs[2].0, false).unwrap();
+
+    if crate::tty::pty::is_slave_locked(pairs[2].1) {
+        klog_info!("TTY_TEST: BUG - pair 2 should be unlocked");
+        for i in 0..5 {
+            crate::tty::pty::free_pair_if_unused(pairs[i].0, pairs[i].1);
+        }
+        return TestResult::Fail;
+    }
+    // Others still locked.
+    for i in [0, 1, 3, 4] {
+        if !crate::tty::pty::is_slave_locked(pairs[i].1) {
+            klog_info!("TTY_TEST: BUG - pair {} should still be locked", i);
+            for j in 0..5 {
+                crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
+            }
+            return TestResult::Fail;
+        }
+    }
+
+    for i in 0..5 {
+        crate::tty::pty::free_pair_if_unused(pairs[i].0, pairs[i].1);
+    }
+    TestResult::Pass
+}
+
+/// Phase 38: is_slave_locked returns false for non-PTY TTYs.
+pub fn test_phase38_non_pty_not_locked() -> TestResult {
+    tty::table::tty_table_init();
+
+    // TTY 0 (serial console) should not report as locked.
+    if crate::tty::pty::is_slave_locked(TtyIndex(0)) {
+        klog_info!("TTY_TEST: BUG - serial console should not be slave_locked");
+        return TestResult::Fail;
+    }
+    // TTY 1 (vconsole) should not report as locked.
+    if crate::tty::pty::is_slave_locked(TtyIndex(1)) {
+        klog_info!("TTY_TEST: BUG - vconsole should not be slave_locked");
+        return TestResult::Fail;
+    }
+    // Out-of-range index.
+    if crate::tty::pty::is_slave_locked(TtyIndex(255)) {
+        klog_info!("TTY_TEST: BUG - out-of-range index should not be slave_locked");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 38: get_pty_lock on non-master returns error.
+pub fn test_phase38_get_lock_non_master_error() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Serial console is not a PTY master.
+    match tty::get_pty_lock(TtyIndex(0)) {
+        Err(TtyError::NotAllocated) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - get_pty_lock on console should return NotAllocated, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Invalid index.
+    match tty::get_pty_lock(TtyIndex(255)) {
+        Err(TtyError::InvalidIndex) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - get_pty_lock on invalid index should return InvalidIndex, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -9682,5 +10105,17 @@ slopos_lib::define_test_suite!(
         test_phase37_pendin_empty_edit_buffer,
         test_phase37_flush_clears_pendin,
         test_phase37_flush_input_clears_pendin,
+        // Phase 38: PTY Namespace & Device Nodes
+        test_phase38_ioctl_constants,
+        test_phase38_slave_locked_by_default,
+        test_phase38_locked_slave_open_rejected,
+        test_phase38_unlock_enables_open,
+        test_phase38_get_lock_round_trip,
+        test_phase38_set_lock_non_master_rejected,
+        test_phase38_data_flow_after_unlock,
+        test_phase38_master_close_slave_hangup,
+        test_phase38_multiple_pairs_with_locks,
+        test_phase38_non_pty_not_locked,
+        test_phase38_get_lock_non_master_error,
     ]
 );

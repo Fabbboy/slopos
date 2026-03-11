@@ -683,6 +683,9 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
         }
     };
 
+    // Unlock slave so /dev/pts/N open succeeds (Phase 38 lock guard).
+    slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+
     let pid = unsafe { (*task_ptr).process_id };
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
@@ -730,6 +733,9 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
             return TestResult::Fail;
         }
     };
+
+    // Unlock slave so /dev/pts/N open succeeds (Phase 38 lock guard).
+    slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
     let cpu_id = slopos_lib::get_current_cpu();

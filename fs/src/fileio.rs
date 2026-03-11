@@ -835,7 +835,8 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
                 return -1;
             };
 
-            // Atomically validate + open the slave before populating the FD.
+            // Phase 20: Atomically validate + open the slave before populating the FD.
+            // Phase 38: open_pty_slave now also rejects locked slaves (EIO).
             if tty::open_pty_slave(slave_idx) < 0 {
                 drop(guard);
                 return -1;
