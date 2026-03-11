@@ -31,6 +31,8 @@ crate::define_service! {
         signal_process_group(pgid: u32, signum: u8) -> bool;
         signal_session(sid: u32, signum: u8) -> bool;
         pgrp_exists_in_session(pgid: u32, sid: u32) -> bool;
+        is_current_signal_blocked_or_ignored(signum: u8) -> bool;
+        is_pgrp_orphaned(pgid: u32, sid: u32) -> bool;
 
         irq_init();
         irq_set_route(irq_line: u8, gsi: u32);

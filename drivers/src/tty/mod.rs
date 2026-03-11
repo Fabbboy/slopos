@@ -44,7 +44,8 @@ use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{LocalFlags, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     clear_session_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
-    register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, signal_session,
+    is_current_signal_blocked_or_ignored, is_pgrp_orphaned, register_idle_wakeup_callback,
+    scheduler_is_enabled, signal_process_group, signal_session,
 };
 
 use self::driver::{TtyDriverKind, write_driver_unlocked};
@@ -122,6 +123,9 @@ pub enum TtyError {
     CrossSessionDenied,
     /// Operation was interrupted by a signal (Phase 28).
     SignalInterrupt,
+    /// Background process in an orphaned process group tried to change
+    /// terminal settings — returns EIO instead of SIGTTOU (Phase 31).
+    OrphanedProcessGroup,
 }
 
 impl TtyError {
@@ -141,6 +145,7 @@ impl TtyError {
             TtyError::UnsupportedLineDiscipline => -22, // EINVAL
             TtyError::CrossSessionDenied => -5,         // EIO
             TtyError::SignalInterrupt => -4,            // EINTR
+            TtyError::OrphanedProcessGroup => -5,       // EIO
         }
     }
 }
@@ -654,6 +659,9 @@ pub fn read_with_attach(
 /// Phase 10: write-side foreground check — when `TOSTOP` is set in the
 /// TTY's `c_lflag`, background processes receive `SIGTTOU` instead of
 /// being silently allowed to write.  This matches POSIX job control.
+///
+/// Phase 31: TOSTOP audit — added SIGTTOU blocked/ignored bypass and
+/// orphaned process group → EIO handling to match `tcsetattr` semantics.
 #[must_use]
 pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
@@ -661,8 +669,10 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 10 + Phase 19: Write-side foreground check.
+    // Phase 10 + Phase 19 + Phase 31: Write-side foreground check.
     // Enforce cross-session denial (Phase 19) and TOSTOP (Phase 10).
+    // Phase 31: bypass if SIGTTOU is blocked/ignored; return EIO for
+    // orphaned background process groups.
     // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
     let task_id = current_task_id();
     if task_id != 0 {
@@ -684,10 +694,18 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
 
         match check_result {
             Some(ForegroundCheck::BackgroundWrite) => {
-                if caller_pgid != 0 {
-                    let _ = signal_process_group(caller_pgid, SIGTTOU);
+                // Phase 31: if SIGTTOU is blocked or ignored, proceed silently.
+                if !is_current_signal_blocked_or_ignored(SIGTTOU) {
+                    // Phase 31: orphaned pgrp → EIO.
+                    if is_pgrp_orphaned(caller_pgid, caller_sid) {
+                        return Err(TtyError::OrphanedProcessGroup);
+                    }
+                    if caller_pgid != 0 {
+                        let _ = signal_process_group(caller_pgid, SIGTTOU);
+                    }
+                    return Err(TtyError::BackgroundWrite);
                 }
-                return Err(TtyError::BackgroundWrite);
+                // SIGTTOU blocked or ignored — fall through to write.
             }
             Some(ForegroundCheck::DeniedCrossSession) => {
                 return Err(TtyError::CrossSessionDenied);
@@ -914,17 +932,71 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     Ok(())
 }
 
+/// Internal helper that applies termios changes with optional drain and
+/// input-flush semantics.
+///
+/// # Phase 31: Background write protection on `tcsetattr`
+///
+/// Before applying any termios change, the function checks whether the
+/// calling process is in the foreground group of the target TTY.  Per
+/// POSIX, a background process that calls `tcsetattr` receives `SIGTTOU`
+/// unless the signal is blocked or set to `SIG_IGN`.  If the background
+/// process group is orphaned, `EIO` is returned instead (there is no
+/// parent to continue a stopped group).
 fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    // Phase 31: Background write protection — SIGTTOU on tcsetattr.
+    // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
+    let task_id = current_task_id();
+    if task_id != 0 {
+        let caller_pgid = current_task_pgid();
+        let caller_sid = current_task_sid();
+
+        let check_result = {
+            let guard = TTY_SLOTS[slot].lock();
+            match guard.as_ref() {
+                Some(tty) => {
+                    // tcsetattr always enforces foreground check (unlike
+                    // write() which only checks when TOSTOP is set).
+                    tty.session.check_write(caller_pgid, caller_sid, true)
+                }
+                None => return Err(TtyError::NotAllocated),
+            }
+        };
+
+        match check_result {
+            ForegroundCheck::BackgroundWrite => {
+                // POSIX: if SIGTTOU is blocked or ignored, proceed silently.
+                if !is_current_signal_blocked_or_ignored(SIGTTOU) {
+                    // Check if the process group is orphaned.
+                    if is_pgrp_orphaned(caller_pgid, caller_sid) {
+                        return Err(TtyError::OrphanedProcessGroup);
+                    }
+                    // Deliver SIGTTOU to the caller's process group.
+                    if caller_pgid != 0 {
+                        let _ = signal_process_group(caller_pgid, SIGTTOU);
+                    }
+                    return Err(TtyError::SignalInterrupt);
+                }
+                // SIGTTOU blocked or ignored — fall through to apply termios.
+            }
+            ForegroundCheck::DeniedCrossSession => {
+                return Err(TtyError::CrossSessionDenied);
+            }
+            _ => {}
+        }
+    }
+
+    // Drain pending output if required by the mode.
     if matches!(
         mode,
         TermiosSetMode::Drain | TermiosSetMode::DrainAndFlushInput
     ) {
         wait_output_idle(idx)?;
-    }
-
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return Err(TtyError::InvalidIndex);
     }
 
     let mut guard = TTY_SLOTS[slot].lock();
