@@ -651,6 +651,7 @@ pub const ECHOKE: u32 = 0x800;
 pub const NOFLSH: u32 = 0x80;
 pub const TOSTOP: u32 = 0x100;
 pub const IEXTEN: u32 = 0x8000;
+pub const PENDIN: u32 = 0x4000;
 
 // c_cflag bits — control (hardware) flags
 pub const CREAD: u32 = 0x80;
@@ -725,6 +726,7 @@ bitflags::bitflags! {
         const ECHOCTL = 0x200;
         const ECHOPRT = 0x400;
         const ECHOKE  = 0x800;
+        const PENDIN  = 0x4000;
         const IEXTEN  = 0x8000;
     }
 }

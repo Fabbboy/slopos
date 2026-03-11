@@ -370,6 +370,12 @@ pub struct LineDisc {
     /// Whether an XOFF has been sent to the terminal (via IXOFF).
     /// When `true`, a subsequent low-water condition triggers XON.
     xoff_sent: bool,
+
+    // -- Phase 37: Deferred reprint (PENDIN) --
+    /// When `true`, the next `input_char()` call triggers an automatic
+    /// reprint of the edit buffer before processing the new byte.  Set
+    /// by `set_termios()` when echo-affecting flags change.
+    pending_reprint: bool,
 }
 
 impl LineDisc {
@@ -424,6 +430,7 @@ impl LineDisc {
             column: 0,
             utf8_remaining: 0,
             xoff_sent: false,
+            pending_reprint: false,
         }
     }
 
@@ -450,8 +457,27 @@ impl LineDisc {
     /// Update termios.  If canonical mode is toggled off, flushes the edit
     /// buffer so that any pending characters become available for raw reads.
     pub fn set_termios(&mut self, t: &UserTermios) {
-        let was_canon = self.termios.local_flags().contains(LocalFlags::ICANON);
-        let is_canon = LocalFlags::from_bits_truncate(t.c_lflag).contains(LocalFlags::ICANON);
+        let old_lflag = self.termios.local_flags();
+        let was_canon = old_lflag.contains(LocalFlags::ICANON);
+        let new_lflag = LocalFlags::from_bits_truncate(t.c_lflag);
+        let is_canon = new_lflag.contains(LocalFlags::ICANON);
+
+        // Phase 37: Detect echo-affecting flag changes and set PENDIN so
+        // the next input_char() reprints the edit buffer under the new
+        // settings.  Only meaningful when there is content to reprint.
+        const ECHO_MASK: LocalFlags = LocalFlags::ECHO
+            .union(LocalFlags::ECHOE)
+            .union(LocalFlags::ECHOK)
+            .union(LocalFlags::ECHONL)
+            .union(LocalFlags::ECHOCTL)
+            .union(LocalFlags::ECHOKE)
+            .union(LocalFlags::ICANON);
+        if old_lflag.intersection(ECHO_MASK) != new_lflag.intersection(ECHO_MASK)
+            && self.edit_len > 0
+        {
+            self.pending_reprint = true;
+        }
+
         self.termios = *t;
         if was_canon && !is_canon {
             self.flush_edit_to_cooked();
@@ -531,6 +557,7 @@ impl LineDisc {
         self.column = 0;
         self.utf8_remaining = 0;
         self.xoff_sent = false;
+        self.pending_reprint = false;
     }
 
     pub fn flush_input(&mut self) {
@@ -542,6 +569,7 @@ impl LineDisc {
         self.literal_next = false;
         self.utf8_remaining = 0;
         self.xoff_sent = false;
+        self.pending_reprint = false;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -565,6 +593,14 @@ impl LineDisc {
         // silently discard all input.
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
+        }
+
+        // Phase 37: Deferred reprint (PENDIN) — if echo-affecting flags
+        // changed since the last input, reprint the edit buffer *before*
+        // processing this byte so the user sees up-to-date echo output.
+        if self.pending_reprint {
+            self.pending_reprint = false;
+            return InputAction::ReprintLine;
         }
 
         let iflag = self.termios.input_flags();
@@ -648,6 +684,9 @@ impl LineDisc {
                     return self.word_erase(lflag);
                 }
                 if c == self.cc(CcIndex::Vreprint) {
+                    // Phase 37: An explicit VREPRINT also clears any
+                    // pending deferred-reprint so we don't double-echo.
+                    self.pending_reprint = false;
                     return InputAction::ReprintLine;
                 }
             }

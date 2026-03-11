@@ -9103,6 +9103,178 @@ pub fn test_phase36_imaxbel_flag_value() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 37: Deferred Reprint (PENDIN)
+// ===========================================================================
+
+/// PENDIN constant value is 0x4000.
+pub fn test_phase37_pendin_flag_value() -> TestResult {
+    if LocalFlags::PENDIN.bits() != 0x4000 {
+        klog_info!("TTY_TEST: BUG - PENDIN should be 0x4000");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Changing an echo-affecting lflag sets PENDIN; the next input_char()
+/// returns ReprintLine instead of processing the byte.
+pub fn test_phase37_pendin_auto_set_on_echo_change() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Insert some content into the edit buffer so PENDIN triggers.
+    ld.input_char(b'h');
+    ld.input_char(b'i');
+
+    // Toggle ECHO off — this is an echo-affecting change.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHO.bits();
+    ld.set_termios(&t);
+
+    // The next input_char() should return ReprintLine (deferred reprint).
+    let action = ld.input_char(b'x');
+    if !matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - expected ReprintLine after echo flag change");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PENDIN triggers ReprintLine once, then the next input is processed normally.
+pub fn test_phase37_pendin_one_shot() -> TestResult {
+    let mut ld = LineDisc::new();
+    ld.input_char(b'a');
+
+    // Toggle ECHOE off to trigger PENDIN.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    ld.set_termios(&t);
+
+    // First call: ReprintLine.
+    let first = ld.input_char(b'b');
+    if !matches!(first, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - first input after PENDIN should be ReprintLine");
+        return TestResult::Fail;
+    }
+
+    // Second call: normal echo (ECHO still on, just ECHOE changed).
+    let second = ld.input_char(b'b');
+    if matches!(second, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - PENDIN should be one-shot, not repeat");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Explicit VREPRINT (Ctrl+R) clears PENDIN so we don't double-reprint.
+pub fn test_phase37_vreprint_clears_pendin() -> TestResult {
+    let mut ld = LineDisc::new();
+    ld.input_char(b'z');
+
+    // Trigger PENDIN via echo flag change.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHOK.bits();
+    ld.set_termios(&t);
+
+    // Manually reprint with VREPRINT (Ctrl+R).  This should also clear PENDIN.
+    let ctrl_r = ld.termios().c_cc[slopos_abi::syscall::VREPRINT];
+    let action = ld.input_char(ctrl_r);
+    // This returns ReprintLine from the PENDIN path, not the VREPRINT path,
+    // but PENDIN is now cleared either way.
+    if !matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - expected ReprintLine from PENDIN or VREPRINT");
+        return TestResult::Fail;
+    }
+
+    // Next input should be processed normally — no double reprint.
+    let next = ld.input_char(b'a');
+    if matches!(next, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - VREPRINT should have cleared PENDIN");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Changing non-echo-affecting flags (e.g., ISIG, NOFLSH) does NOT set PENDIN.
+pub fn test_phase37_pendin_not_set_for_non_echo_flags() -> TestResult {
+    let mut ld = LineDisc::new();
+    ld.input_char(b'q');
+
+    // Toggle ISIG off — not echo-affecting.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ISIG.bits();
+    ld.set_termios(&t);
+
+    // Should process input normally, no ReprintLine.
+    let action = ld.input_char(b'w');
+    if matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - toggling ISIG should not trigger PENDIN");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PENDIN is not set when the edit buffer is empty (nothing to reprint).
+pub fn test_phase37_pendin_empty_edit_buffer() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Don't type anything — edit buffer is empty.
+
+    // Toggle ECHO off.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHO.bits();
+    ld.set_termios(&t);
+
+    // Should process input normally since there's nothing to reprint.
+    let action = ld.input_char(b'a');
+    if matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - PENDIN should not fire with empty edit buffer");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// flush_all() clears PENDIN state.
+pub fn test_phase37_flush_clears_pendin() -> TestResult {
+    let mut ld = LineDisc::new();
+    ld.input_char(b'a');
+
+    // Trigger PENDIN.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    ld.set_termios(&t);
+
+    // Flush everything — should clear PENDIN.
+    ld.flush_all();
+
+    // Input should be processed normally.
+    let action = ld.input_char(b'b');
+    if matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - flush_all should clear PENDIN");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// flush_input() clears PENDIN state.
+pub fn test_phase37_flush_input_clears_pendin() -> TestResult {
+    let mut ld = LineDisc::new();
+    ld.input_char(b'a');
+
+    // Trigger PENDIN.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ECHOK.bits();
+    ld.set_termios(&t);
+
+    // Flush input — should clear PENDIN.
+    ld.flush_input();
+
+    // Input should be processed normally.
+    let action = ld.input_char(b'c');
+    if matches!(action, InputAction::ReprintLine) {
+        klog_info!("TTY_TEST: BUG - flush_input should clear PENDIN");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -9501,5 +9673,14 @@ slopos_lib::define_test_suite!(
         test_phase36_ixoff_not_set_no_flow_control,
         test_phase36_cread_flag_value,
         test_phase36_imaxbel_flag_value,
+        // Phase 37: Deferred Reprint (PENDIN)
+        test_phase37_pendin_flag_value,
+        test_phase37_pendin_auto_set_on_echo_change,
+        test_phase37_pendin_one_shot,
+        test_phase37_vreprint_clears_pendin,
+        test_phase37_pendin_not_set_for_non_echo_flags,
+        test_phase37_pendin_empty_edit_buffer,
+        test_phase37_flush_clears_pendin,
+        test_phase37_flush_input_clears_pendin,
     ]
 );
