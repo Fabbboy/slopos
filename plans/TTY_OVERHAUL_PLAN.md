@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–30 complete | 📋 Phases 31–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31 complete | 📋 Phases 32–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal; Phases 31–42 target SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -43,7 +43,7 @@
 32. [Phase 28: Type-Safe Termios Foundation ✅](#32-phase-28-type-safe-termios-foundation)
 33. [Phase 29: LdiscKind Dispatch Consolidation](#33-phase-29-ldisckind-dispatch-consolidation)
 34. [Phase 30: `/dev/tty` Controlling Terminal Device ✅](#34-phase-30-devtty-controlling-terminal-device)
-35. [Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)](#35-phase-31-background-write-protection-sigttou-on-tcsetattr)
+35. [Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`) ✅](#35-phase-31-background-write-protection-sigttou-on-tcsetattr)
 36. [Phase 32: Controlling Terminal Lifecycle Integrity](#36-phase-32-controlling-terminal-lifecycle-integrity)
 37. [Phase 33: Post-Hangup I/O Hardening](#37-phase-33-post-hangup-io-hardening)
 38. [Phase 34: Extended Line Boundaries (VEOL, VEOL2)](#38-phase-34-extended-line-boundaries-veol-veol2)
@@ -106,7 +106,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
-| 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -2894,53 +2894,50 @@ Added 13 Phase 25 regression tests:
 | `core/src/syscall/tests.rs` | 4 new Phase 30 integration tests: no ctty ENXIO, with ctty success, setsid + ENXIO, fork inheritance |
 ---
 
-## 35. Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)
+## 35. Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`) ✅
 
-**Status**: 📋 Planned
+**Status**: Completed. All tests pass (1238/1238, 9 new Phase 31 regression tests). Build clean. `cargo fmt --all`, `just build`, and `just test` pass.
 
 > **Priority**: P0 correctness — POSIX requires SIGTTOU when a background process changes terminal settings.
-> **Principle**: Background processes must not silently mutate the terminal. The foreground application’s terminal state is sacred.
+> **Principle**: Background processes must not silently mutate the terminal. The foreground application's terminal state is sacred.
+
+**Implementation summary**:
+- **35.1 (Foreground check on `tcsetattr`)**: Added Phase 31 foreground check at the top of `set_termios_mode()` in `drivers/src/tty/mod.rs`. Before applying any termios change (`TCSETS`, `TCSETSW`, `TCSETSF`), the function reads the caller's task ID, pgid, and sid, then calls `session.check_write(caller_pgid, caller_sid, true)` (always `tostop=true` since tcsetattr unconditionally enforces background write protection). If `BackgroundWrite` is returned: (a) checks if SIGTTOU is blocked/ignored via the new `is_current_signal_blocked_or_ignored()` service — if so, proceeds silently; (b) checks if the pgrp is orphaned via the new `is_pgrp_orphaned()` service — returns `OrphanedProcessGroup` (EIO); (c) delivers SIGTTOU to the caller's pgrp and returns `SignalInterrupt` (EINTR). Kernel tasks (task_id == 0) are exempted.
+- **35.2 (Blocked/ignored SIGTTOU bypass)**: Added `is_current_signal_blocked_or_ignored(signum: u8) -> bool` service function to `lib/src/kernel_services/driver_runtime.rs` and implemented in `core/src/driver_hooks.rs`. Checks both the task's `signal_blocked` bitmask and whether `signal_actions[signum-1].handler == SIG_IGN`.
+- **35.3 (Orphaned process group → EIO)**: Added `is_pgrp_orphaned(pgid: u32, sid: u32) -> bool` service function. Implementation in `core/src/driver_hooks.rs` iterates all tasks via `task_iterate_active()`: first confirms the pgrp has members in the session, then checks if any member has a parent in a different pgrp within the same session (if not, the group is orphaned). Added `TtyError::OrphanedProcessGroup` variant mapping to EIO (-5).
+- **35.4 (TOSTOP audit)**: Hardened the existing `write()` path to also check `is_current_signal_blocked_or_ignored(SIGTTOU)` and `is_pgrp_orphaned()` before delivering SIGTTOU. Previously, background writes with TOSTOP always delivered SIGTTOU without checking signal disposition or orphan status.
+- **Regression tests**: 9 new Phase 31 tests: `test_phase31_tcsetattr_background_blocked` (check_write with tostop=true blocks background), `test_phase31_tcsetattr_foreground_allowed` (foreground proceeds normally), `test_phase31_tcsetattr_no_session_allowed` (no session bootstrap path), `test_phase31_tcsetattr_cross_session_denied` (different session hard denial), `test_phase31_orphaned_pgrp_errno` (OrphanedProcessGroup maps to -5/EIO), `test_phase31_tcsetattr_kernel_task_bypass` (kernel task bypasses check), `test_phase31_tcsetsw_tcsetsf_kernel_task_bypass` (drain/flush paths also bypass), `test_phase31_tostop_background_write_check` (TOSTOP audit — background vs foreground), `test_phase31_kernel_task_check_write_allowed` (pgid=0 always allowed).
 
 ### 35.1 Foreground check on `tcsetattr`
 
 - Before applying any termios change (`TCSETS`, `TCSETSW`, `TCSETSF`), verify that the calling process is in the foreground process group of the target TTY.
-- If the caller is in a background process group and `SIGTTOU` is not blocked or set to `SIG_IGN` by the caller, deliver `SIGTTOU` to the caller’s process group and return `EINTR`.
+- If the caller is in a background process group and `SIGTTOU` is not blocked or set to `SIG_IGN` by the caller, deliver `SIGTTOU` to the caller's process group and return `EINTR`.
 - Reuse the existing `ForegroundCheck` enum outcomes from `session.rs`.
-- Add the check in `tty::set_termios_mode()`, `set_termios_wait()`, and `set_termios_flush()` before acquiring the slot lock.
+- Add the check in `tty::set_termios_mode()` before the drain/lock steps.
 
 ### 35.2 Blocked/ignored SIGTTOU bypass
 
-- Per POSIX, if `SIGTTOU` is blocked or set to `SIG_IGN` in the caller’s signal disposition, the `tcsetattr` proceeds silently (no signal, no error).
-- Implement signal disposition check via existing `signal_is_blocked_or_ignored()` infrastructure, or add a minimal check against the task’s signal handler table.
+- Per POSIX, if `SIGTTOU` is blocked or set to `SIG_IGN` in the caller's signal disposition, the `tcsetattr` proceeds silently (no signal, no error).
+- Implemented via new `is_current_signal_blocked_or_ignored(signum: u8) -> bool` driver runtime service that checks both `signal_blocked` bitmask and `signal_actions[signum-1].handler == SIG_IGN`.
 
 ### 35.3 Orphaned process group
 
 - If the background process group is orphaned (no process in the group has a parent in a different process group within the same session), return `EIO` instead of delivering `SIGTTOU`.
-- Orphan detection reuses `pgrp_exists_in_session()` from Phase 24 + parent cross-check.
+- Implemented via new `is_pgrp_orphaned(pgid: u32, sid: u32) -> bool` driver runtime service using `task_iterate_active()` + parent cross-pgrp check.
 
 ### 35.4 TOSTOP audit
 
-- Verify that `TOSTOP` flag on `write()` paths correctly delivers `SIGTTOU` for background writes.
-- Audit the existing implementation against POSIX specification and harden edge cases if needed.
+- Verified and hardened `write()` path: added SIGTTOU blocked/ignored bypass and orphaned pgrp EIO handling to match the new `tcsetattr` semantics.
+- The existing `check_write()` session logic was already correct — no changes needed to `session.rs`.
 
-### 35.5 Verification
-
-- Test: background process `tcsetattr` → `SIGTTOU` delivered, termios unchanged.
-- Test: background process with `SIGTTOU` blocked → `tcsetattr` succeeds silently.
-- Test: foreground process `tcsetattr` → no signal, applies normally.
-- Test: `TOSTOP` + background write → `SIGTTOU` delivered.
-- Test: orphaned background pgrp `tcsetattr` → `EIO`.
-- `just build` + `just test` gate.
-
-### 35.6 Files expected to change
+### 35.5 Files modified
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Add foreground check to `set_termios_mode()`, `set_termios_wait()`, `set_termios_flush()` |
-| `drivers/src/tty/session.rs` | Add `is_sigttou_relevant()` helper or extend `ForegroundCheck` |
-| `abi/src/syscall.rs` | Verify `SIGTTOU` constant present, add `EIO` errno if missing |
-| `drivers/src/tty_tests.rs` | Regression tests for SIGTTOU on tcsetattr, TOSTOP audit, blocked signal bypass, orphan EIO |
-
+| `drivers/src/tty/mod.rs` | Added foreground check to `set_termios_mode()` with SIGTTOU blocked/ignored bypass and orphaned pgrp EIO; hardened `write()` with same bypass/orphan logic; added `TtyError::OrphanedProcessGroup` variant |
+| `lib/src/kernel_services/driver_runtime.rs` | Added `is_current_signal_blocked_or_ignored(signum: u8) -> bool` and `is_pgrp_orphaned(pgid: u32, sid: u32) -> bool` service declarations |
+| `core/src/driver_hooks.rs` | Implemented `runtime_is_current_signal_blocked_or_ignored` (checks signal_blocked bitmask + SIG_IGN) and `runtime_is_pgrp_orphaned` (iterates tasks checking parent cross-pgrp) |
+| `drivers/src/tty_tests.rs` | 9 new Phase 31 regression tests: tcsetattr background/foreground/no-session/cross-session checks, OrphanedProcessGroup errno, kernel task bypass, TCSETSW/TCSETSF paths, TOSTOP audit |
 ---
 
 ## 36. Phase 32: Controlling Terminal Lifecycle Integrity
