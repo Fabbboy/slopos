@@ -10834,6 +10834,271 @@ pub fn test_phase41_extproc_raw_mode_same_behavior() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
+// ===========================================================================
+
+/// ECHOPRT: first erase produces `\` then erased char.
+pub fn test_phase42_echoprt_erase_format() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
+    // Disable ECHOE to ensure ECHOPRT path is taken.
+    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    ld.set_termios(&t);
+
+    // Type "abc".
+    for &c in b"abc" {
+        ld.input_char(c);
+    }
+
+    // Erase 'c' — expect `\c` (backslash then the erased char).
+    let action = ld.input_char(0x7F); // DEL = VERASE default
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 2 || buf[0] != b'\\' || buf[1] != b'c' {
+                klog_info!(
+                    "TTY_TEST: BUG - ECHOPRT first erase expected \\c, got {:?} len={}",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - ECHOPRT erase should return Echo, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Erase 'b' — continuing sequence, expect just `b` (no leading \\).
+    let action = ld.input_char(0x7F);
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 1 || buf[0] != b'b' {
+                klog_info!(
+                    "TTY_TEST: BUG - ECHOPRT subsequent erase expected b, got {:?} len={}",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - ECHOPRT subsequent erase should return Echo");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// ECHOPRT: non-erase input closes the erase sequence with `/`.
+pub fn test_phase42_echoprt_close_on_input() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
+    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    ld.set_termios(&t);
+
+    // Type "ab", erase 'b', then type 'x'.
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+    ld.input_char(0x7F); // erase 'b' → starts erase sequence
+
+    // Type 'x' — should close erase sequence with '/' prepended.
+    let action = ld.input_char(b'x');
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 2 || buf[0] != b'/' || buf[1] != b'x' {
+                klog_info!(
+                    "TTY_TEST: BUG - ECHOPRT close expected /x, got {:?} len={}",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - ECHOPRT close+insert should return Echo");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// IUCLC maps A-Z to a-z in input.
+pub fn test_phase42_iuclc_maps_upper_to_lower() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_iflag |= InputFlags::IUCLC.bits();
+    ld.set_termios(&t);
+
+    // Type 'H' — should be mapped to 'h'.
+    let action = ld.input_char(b'H');
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 1 || buf[0] != b'h' {
+                klog_info!(
+                    "TTY_TEST: BUG - IUCLC should map H→h, got {:?} len={}",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - IUCLC should echo mapped char");
+            return TestResult::Fail;
+        }
+    }
+
+    // Flush and verify the cooked buffer contains 'h'.
+    ld.input_char(b'\n');
+    let mut buf = [0u8; 8];
+    let n = ld.read(&mut buf);
+    if n != 2 || buf[0] != b'h' || buf[1] != b'\n' {
+        klog_info!(
+            "TTY_TEST: BUG - IUCLC cooked should be h\\n, got {:?}",
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// IUCLC does not affect non-alpha or already-lowercase characters.
+pub fn test_phase42_iuclc_no_effect_non_alpha() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_iflag |= InputFlags::IUCLC.bits();
+    ld.set_termios(&t);
+
+    // Type 'a' (already lowercase) — should remain 'a'.
+    let action = ld.input_char(b'a');
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 1 || buf[0] != b'a' {
+                klog_info!("TTY_TEST: BUG - IUCLC should not affect lowercase");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Echo for lowercase");
+            return TestResult::Fail;
+        }
+    }
+
+    // Type '5' (digit) — should remain '5'.
+    let action = ld.input_char(b'5');
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 1 || buf[0] != b'5' {
+                klog_info!("TTY_TEST: BUG - IUCLC should not affect digits");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Echo for digit");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// OLCUC maps a-z to A-Z in output.
+pub fn test_phase42_olcuc_maps_lower_to_upper() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_oflag = OutputFlags::OPOST.bits() | OutputFlags::OLCUC.bits();
+    ld.set_termios(&t);
+
+    // Process 'h' through output — should become 'H'.
+    let action = ld.process_output_byte(b'h');
+    match action {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'H' {
+                klog_info!(
+                    "TTY_TEST: BUG - OLCUC should map h→H, got {:?} len={}",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - OLCUC should return Emit");
+            return TestResult::Fail;
+        }
+    }
+
+    // Process 'Z' (uppercase) — should remain 'Z'.
+    let action = ld.process_output_byte(b'Z');
+    match action {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'Z' {
+                klog_info!("TTY_TEST: BUG - OLCUC should not affect uppercase");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Emit for uppercase");
+            return TestResult::Fail;
+        }
+    }
+
+    // Process '5' (digit) — should remain '5'.
+    let action = ld.process_output_byte(b'5');
+    match action {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'5' {
+                klog_info!("TTY_TEST: BUG - OLCUC should not affect digits");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Emit for digit");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// All three flags disabled by default (no effect in default termios).
+pub fn test_phase42_flags_disabled_by_default() -> TestResult {
+    let ld = LineDisc::new();
+    let t = ld.termios();
+
+    // ECHOPRT should not be in default c_lflag.
+    if t.local_flags().contains(LocalFlags::ECHOPRT) {
+        klog_info!("TTY_TEST: BUG - ECHOPRT should not be in default c_lflag");
+        return TestResult::Fail;
+    }
+
+    // IUCLC should not be in default c_iflag.
+    if t.input_flags().contains(InputFlags::IUCLC) {
+        klog_info!("TTY_TEST: BUG - IUCLC should not be in default c_iflag");
+        return TestResult::Fail;
+    }
+
+    // OLCUC should not be in default c_oflag.
+    if t.output_flags().contains(OutputFlags::OLCUC) {
+        klog_info!("TTY_TEST: BUG - OLCUC should not be in default c_oflag");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -11295,5 +11560,12 @@ slopos_lib::define_test_suite!(
         test_phase41_vhangup_syscall_constant,
         test_phase41_vhangup_triggers_hangup,
         test_phase41_extproc_raw_mode_same_behavior,
+        // Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
+        test_phase42_echoprt_erase_format,
+        test_phase42_echoprt_close_on_input,
+        test_phase42_iuclc_maps_upper_to_lower,
+        test_phase42_iuclc_no_effect_non_alpha,
+        test_phase42_olcuc_maps_lower_to_upper,
+        test_phase42_flags_disabled_by_default,
     ]
 );

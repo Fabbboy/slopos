@@ -376,6 +376,11 @@ pub struct LineDisc {
     /// reprint of the edit buffer before processing the new byte.  Set
     /// by `set_termios()` when echo-affecting flags change.
     pending_reprint: bool,
+
+    // -- Phase 42: ECHOPRT hardcopy erase sequence --
+    /// When `true`, we are inside a `\...` erase sequence (ECHOPRT).  The
+    /// next non-erase input closes the sequence by emitting `/`.
+    in_erase_seq: bool,
 }
 
 impl LineDisc {
@@ -431,6 +436,7 @@ impl LineDisc {
             utf8_remaining: 0,
             xoff_sent: false,
             pending_reprint: false,
+            in_erase_seq: false,
         }
     }
 
@@ -564,6 +570,7 @@ impl LineDisc {
         self.utf8_remaining = 0;
         self.xoff_sent = false;
         self.pending_reprint = false;
+        self.in_erase_seq = false;
     }
 
     pub fn flush_input(&mut self) {
@@ -576,6 +583,7 @@ impl LineDisc {
         self.utf8_remaining = 0;
         self.xoff_sent = false;
         self.pending_reprint = false;
+        self.in_erase_seq = false;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -633,7 +641,11 @@ impl LineDisc {
         // 2. Literal-next mode (Ctrl+V was pressed previously).
         if self.literal_next {
             self.literal_next = false;
-            return self.insert_char(c, lflag);
+            let close_erase = self.in_erase_seq;
+            if close_erase {
+                self.in_erase_seq = false;
+            }
+            return self.insert_char(c, lflag, close_erase);
         }
 
         // 3. Signal generation (ISIG) + Phase 23 NOFLSH flush.
@@ -729,6 +741,13 @@ impl LineDisc {
                 len: 1,
             };
         }
+        // Phase 42: OLCUC — map lowercase output to uppercase.
+        let c = if oflag.contains(OutputFlags::OLCUC) && c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        };
+
         match c {
             b'\n' if oflag.contains(OutputFlags::ONLCR) => {
                 self.column = 0;
@@ -832,6 +851,11 @@ impl LineDisc {
             c = b'\r'; // Map NL → CR.
         }
 
+        // Phase 42: IUCLC — map uppercase input to lowercase.
+        if iflag.contains(InputFlags::IUCLC) && c.is_ascii_uppercase() {
+            c = c.to_ascii_lowercase();
+        }
+
         Some(c)
     }
 
@@ -870,6 +894,14 @@ impl LineDisc {
             return self.erase_char(lflag);
         }
 
+        // Phase 42: Close any active ECHOPRT erase sequence. Every
+        // non-erase input that reaches canonical processing ends the
+        // `\...` sequence by emitting `/`.
+        let close_erase = self.in_erase_seq;
+        if close_erase {
+            self.in_erase_seq = false;
+        }
+
         // VKILL (kill line).
         if c == self.cc(CcIndex::Vkill) {
             return self.kill_line(lflag);
@@ -878,6 +910,12 @@ impl LineDisc {
         // VEOF (Ctrl+D) — flush without adding a newline.
         if c == self.cc(CcIndex::Veof) {
             self.flush_edit_to_cooked();
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', 0, 0, 0],
+                    len: 1,
+                };
+            }
             return InputAction::None;
         }
 
@@ -894,8 +932,20 @@ impl LineDisc {
                 if self.is_printable(c) {
                     self.column += 1;
                 }
+                if close_erase {
+                    return InputAction::Echo {
+                        buf: [b'/', c, 0, 0],
+                        len: 2,
+                    };
+                }
                 return InputAction::Echo {
                     buf: [c, 0, 0, 0],
+                    len: 1,
+                };
+            }
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', 0, 0, 0],
                     len: 1,
                 };
             }
@@ -910,8 +960,20 @@ impl LineDisc {
             self.flush_edit_to_cooked();
             self.column = 0;
             if lflag.intersects(LocalFlags::ECHO | LocalFlags::ECHONL) {
+                if close_erase {
+                    return InputAction::Echo {
+                        buf: [b'/', b'\n', 0, 0],
+                        len: 2,
+                    };
+                }
                 return InputAction::Echo {
                     buf: [b'\n', 0, 0, 0],
+                    len: 1,
+                };
+            }
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', 0, 0, 0],
                     len: 1,
                 };
             }
@@ -919,11 +981,14 @@ impl LineDisc {
         }
 
         // Regular character — insert into edit buffer.
-        self.insert_char(c, lflag)
+        self.insert_char(c, lflag, close_erase)
     }
 
     /// Insert a character into the edit buffer and produce an echo action.
-    fn insert_char(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
+    ///
+    /// `close_erase`: when `true`, a `/` is prepended to the echo output to
+    /// close an active ECHOPRT `\...` erase sequence.
+    fn insert_char(&mut self, c: u8, lflag: LocalFlags, close_erase: bool) -> InputAction {
         // Phase 36: IMAXBEL — if the edit buffer is full, ring the bell
         // instead of silently discarding.  Without IMAXBEL, discard silently.
         if self.edit_len >= EDIT_BUF_SIZE {
@@ -947,12 +1012,24 @@ impl LineDisc {
         }
 
         if !lflag.contains(LocalFlags::ECHO) {
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', 0, 0, 0],
+                    len: 1,
+                };
+            }
             return InputAction::None;
         }
 
         // ECHOCTL: control characters (except TAB, NL) are echoed as ^X.
         if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
             self.column += 2;
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', b'^', c + 0x40, 0],
+                    len: 3,
+                };
+            }
             return InputAction::Echo {
                 buf: [b'^', c + 0x40, 0, 0],
                 len: 2,
@@ -961,6 +1038,12 @@ impl LineDisc {
 
         if self.is_printable(c) {
             self.column += 1;
+            if close_erase {
+                return InputAction::Echo {
+                    buf: [b'/', c, 0, 0],
+                    len: 2,
+                };
+            }
             return InputAction::Echo {
                 buf: [c, 0, 0, 0],
                 len: 1,
@@ -968,6 +1051,12 @@ impl LineDisc {
         }
 
         // Non-printable, no ECHOCTL — no echo.
+        if close_erase {
+            return InputAction::Echo {
+                buf: [b'/', 0, 0, 0],
+                len: 1,
+            };
+        }
         InputAction::None
     }
 
@@ -1079,6 +1168,25 @@ impl LineDisc {
         let erased = self.edit_buf[self.edit_len - 1];
         self.edit_len -= 1;
 
+        // Phase 42: ECHOPRT — hardcopy erase style (\chars/).
+        // Takes priority over ECHOE when both ECHOPRT and ECHO are set.
+        if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
+            if self.in_erase_seq {
+                // Continuing an existing erase sequence — just echo the erased char.
+                return InputAction::Echo {
+                    buf: [erased, 0, 0, 0],
+                    len: 1,
+                };
+            } else {
+                // First erase in a new sequence — output \ then the erased char.
+                self.in_erase_seq = true;
+                return InputAction::Echo {
+                    buf: [b'\\', erased, 0, 0],
+                    len: 2,
+                };
+            }
+        }
+
         if lflag.contains(LocalFlags::ECHOE) {
             // Phase 27: If the erased character was a control char echoed as
             // ^X via ECHOCTL, erase two columns with two BS-SP-BS triples.
@@ -1115,6 +1223,24 @@ impl LineDisc {
         // Remove all bytes of the codepoint.
         self.edit_len = cp_start;
         self.utf8_remaining = 0;
+
+        // Phase 42: ECHOPRT — hardcopy erase style for UTF-8 codepoints.
+        // Echo the first byte of the erased codepoint as a representative.
+        if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
+            let representative = self.edit_buf[cp_start];
+            if self.in_erase_seq {
+                return InputAction::Echo {
+                    buf: [representative, 0, 0, 0],
+                    len: 1,
+                };
+            } else {
+                self.in_erase_seq = true;
+                return InputAction::Echo {
+                    buf: [b'\\', representative, 0, 0],
+                    len: 2,
+                };
+            }
+        }
 
         if !lflag.contains(LocalFlags::ECHOE) {
             return InputAction::None;
