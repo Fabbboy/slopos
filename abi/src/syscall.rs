@@ -635,6 +635,7 @@ pub const ICRNL: u32 = 0x100;
 pub const IXON: u32 = 0x400;
 pub const IXOFF: u32 = 0x1000;
 pub const IUTF8: u32 = 0x4000;
+pub const IMAXBEL: u32 = 0x2000;
 
 // c_oflag bits — output processing flags
 pub const OPOST: u32 = 0x01;
@@ -650,6 +651,9 @@ pub const ECHOKE: u32 = 0x800;
 pub const NOFLSH: u32 = 0x80;
 pub const TOSTOP: u32 = 0x100;
 pub const IEXTEN: u32 = 0x8000;
+
+// c_cflag bits — control (hardware) flags
+pub const CREAD: u32 = 0x80;
 
 pub const VINTR: usize = 0;
 pub const VQUIT: usize = 1;
@@ -690,6 +694,7 @@ bitflags::bitflags! {
         const IXON   = 0x400;
         const IXOFF  = 0x1000;
         const IUTF8  = 0x4000;
+        const IMAXBEL = 0x2000;
     }
 }
 
@@ -731,7 +736,7 @@ bitflags::bitflags! {
     /// for completeness and future CREAD/PARENB/HUPCL support.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ControlFlags: u32 {
-        // Reserved for future use.
+        const CREAD = 0x80;
     }
 }
 

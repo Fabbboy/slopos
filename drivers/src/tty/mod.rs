@@ -191,6 +191,9 @@ impl Tty {
                         self.driver.write_output(&[buf[j]]);
                     }
                 }
+                InputAction::Bell => {
+                    self.driver.write_output(&[0x07]);
+                }
                 InputAction::Signal(sig) => {
                     deferred_signal = Some((self.session.fg_pgrp_raw(), sig));
                 }
@@ -207,6 +210,11 @@ impl Tty {
                     }
                 }
                 InputAction::None => {}
+            }
+
+            // Phase 36: IXOFF — send XOFF if input buffer is filling up.
+            if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
+                self.driver.write_output(&[xoff]);
             }
         }
 
@@ -284,6 +292,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     }
 
     let mut route = None;
+    let mut ixoff_byte_out = None;
     let mut output_resumed = false;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
@@ -302,6 +311,9 @@ pub fn push_input(idx: TtyIndex, c: u8) {
 
         let action = tty.ldisc.input_char(c);
         let has_data = tty.ldisc.has_data();
+        if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
+            ixoff_byte_out = Some((tty.driver.id(), xoff));
+        }
 
         // Phase 21: If output transitioned from stopped to resumed,
         // wake blocked writers and poll waiters.
@@ -342,6 +354,9 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 let pgid = tty.session.fg_pgrp_raw();
                 // Release lock before signalling to avoid deadlock.
                 drop(guard);
+                if let Some((driver_id, xoff)) = ixoff_byte_out {
+                    write_driver_unlocked(driver_id, &[xoff]);
+                }
                 if pgid != 0 {
                     let _ = signal_process_group(pgid, sig);
                 }
@@ -351,6 +366,12 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                     POLL_NOTIFY.wake_all();
                 }
                 return;
+            }
+            InputAction::Bell => {
+                let mut out = [0u8; 1025];
+                out[0] = 0x07;
+                route = Some((tty.driver.id(), out, 1));
+                has_data
             }
             InputAction::None => has_data,
         }
@@ -362,6 +383,11 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         write_driver_unlocked(driver_id, &out[..out_len]);
         TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
         TTY_OUTPUT_WAITERS[slot].wake_all();
+    }
+
+    // Phase 36: IXOFF — send XOFF byte to terminal if high-water exceeded.
+    if let Some((driver_id, xoff)) = ixoff_byte_out {
+        write_driver_unlocked(driver_id, &[xoff]);
     }
 
     if wake {
@@ -435,6 +461,7 @@ pub fn read_with_attach(
         let deferred_signal;
         let mut should_wait = false;
         let mut wait_timeout_ms: Option<u64> = None;
+        let mut ixoff_xon = None;
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -480,6 +507,12 @@ pub fn read_with_attach(
             // Try to read from the cooked buffer.
             let got = tty.ldisc.read(&mut buf[total..]);
             total = total.saturating_add(got);
+            if got > 0 {
+                ixoff_xon = tty
+                    .ldisc
+                    .ixoff_check_xon()
+                    .map(|xon| (tty.driver.id(), xon));
+            }
 
             let is_canonical = tty.ldisc.is_canonical();
             let (vmin_u8, vtime_u8) = tty.ldisc.vmin_vtime();
@@ -490,6 +523,9 @@ pub fn read_with_attach(
                 if total > 0 {
                     // Drop guard before delivering deferred signal.
                     drop(guard);
+                    if let Some((driver_id, xon)) = ixoff_xon {
+                        write_driver_unlocked(driver_id, &[xon]);
+                    }
                     if let Some((pgid, sig)) = deferred_signal {
                         if pgid != 0 {
                             let _ = signal_process_group(pgid, sig);
@@ -501,6 +537,9 @@ pub fn read_with_attach(
                 match (vmin_u8, vtime_u8) {
                     (0, 0) => {
                         drop(guard);
+                        if let Some((driver_id, xon)) = ixoff_xon {
+                            write_driver_unlocked(driver_id, &[xon]);
+                        }
                         if let Some((pgid, sig)) = deferred_signal {
                             if pgid != 0 {
                                 let _ = signal_process_group(pgid, sig);
@@ -511,6 +550,9 @@ pub fn read_with_attach(
                     (0, _) => {
                         if total > 0 {
                             drop(guard);
+                            if let Some((driver_id, xon)) = ixoff_xon {
+                                write_driver_unlocked(driver_id, &[xon]);
+                            }
                             if let Some((pgid, sig)) = deferred_signal {
                                 if pgid != 0 {
                                     let _ = signal_process_group(pgid, sig);
@@ -524,6 +566,9 @@ pub fn read_with_attach(
                     (_, 0) => {
                         if total >= vmin {
                             drop(guard);
+                            if let Some((driver_id, xon)) = ixoff_xon {
+                                write_driver_unlocked(driver_id, &[xon]);
+                            }
                             if let Some((pgid, sig)) = deferred_signal {
                                 if pgid != 0 {
                                     let _ = signal_process_group(pgid, sig);
@@ -539,6 +584,9 @@ pub fn read_with_attach(
                         // NOT when read() is called.
                         if total >= vmin {
                             drop(guard);
+                            if let Some((driver_id, xon)) = ixoff_xon {
+                                write_driver_unlocked(driver_id, &[xon]);
+                            }
                             if let Some((pgid, sig)) = deferred_signal {
                                 if pgid != 0 {
                                     let _ = signal_process_group(pgid, sig);
@@ -572,6 +620,9 @@ pub fn read_with_attach(
             if !is_canonical && !should_wait {
                 if total > 0 {
                     drop(guard);
+                    if let Some((driver_id, xon)) = ixoff_xon {
+                        write_driver_unlocked(driver_id, &[xon]);
+                    }
                     if let Some((pgid, sig)) = deferred_signal {
                         if pgid != 0 {
                             let _ = signal_process_group(pgid, sig);
@@ -582,6 +633,10 @@ pub fn read_with_attach(
             }
         }
         // --- Per-TTY lock dropped ---
+
+        if let Some((driver_id, xon)) = ixoff_xon {
+            write_driver_unlocked(driver_id, &[xon]);
+        }
 
         // Deliver deferred signal from drain (e.g. Ctrl+C on serial).
         if let Some((pgid, sig)) = deferred_signal {

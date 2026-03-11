@@ -8827,6 +8827,282 @@ pub fn test_phase35_iutf8_flag_value() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
+// ===========================================================================
+
+/// CREAD enabled (default) — input bytes are processed normally.
+pub fn test_phase36_cread_enabled_input_processed() -> TestResult {
+    let mut ld = LineDisc::new();
+    // CREAD is set by default in LineDisc::new().
+    let action = ld.input_char(b'a');
+    // In canonical mode with ECHO, should echo the character.
+    let ok = matches!(action, InputAction::Echo { buf, len } if buf[0] == b'a' && len == 1);
+    if !ok {
+        klog_info!("TTY_TEST: BUG - CREAD enabled should process input normally");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// CREAD cleared — all input is silently discarded.
+pub fn test_phase36_cread_disabled_input_discarded() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Clear CREAD in c_cflag.
+    t.c_cflag &= !ControlFlags::CREAD.bits();
+    ld.set_termios(&t);
+
+    let action = ld.input_char(b'a');
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - CREAD disabled should discard input");
+        return TestResult::Fail;
+    }
+    // Verify nothing was buffered.
+    if ld.has_data() || !ld.edit_content().is_empty() {
+        klog_info!("TTY_TEST: BUG - CREAD disabled should not buffer any data");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// CREAD gate in RawDisc — discard input when receiver disabled.
+pub fn test_phase36_cread_disabled_rawdisc() -> TestResult {
+    let mut rd = RawDisc::new();
+    let mut t = *rd.termios();
+    t.c_cflag |= ControlFlags::CREAD.bits();
+    rd.set_termios(&t);
+
+    // With CREAD set, input should be accepted.
+    let action = rd.input_char(b'x');
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - RawDisc with CREAD should accept input");
+        return TestResult::Fail;
+    }
+    if !rd.has_data() {
+        klog_info!("TTY_TEST: BUG - RawDisc should have data after CREAD input");
+        return TestResult::Fail;
+    }
+
+    // Clear CREAD — input should be discarded.
+    let mut rd2 = RawDisc::new();
+    let mut t2 = *rd2.termios();
+    t2.c_cflag &= !ControlFlags::CREAD.bits();
+    rd2.set_termios(&t2);
+
+    rd2.input_char(b'y');
+    if rd2.has_data() {
+        klog_info!("TTY_TEST: BUG - RawDisc without CREAD should discard input");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IMAXBEL set + edit buffer full → InputAction::Bell.
+pub fn test_phase36_imaxbel_buffer_full_rings_bell() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    ld.set_termios(&t);
+
+    // Fill the edit buffer (1024 bytes).
+    for _ in 0..1024 {
+        ld.input_char(b'x');
+    }
+
+    // Next char should ring the bell.
+    let action = ld.input_char(b'z');
+    if !matches!(action, InputAction::Bell) {
+        klog_info!("TTY_TEST: BUG - IMAXBEL should return Bell when edit buffer full");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IMAXBEL not set + edit buffer full → silent discard (InputAction::None).
+pub fn test_phase36_imaxbel_not_set_buffer_full_silent() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    // Ensure IMAXBEL is NOT set.
+    t.c_iflag &= !InputFlags::IMAXBEL.bits();
+    ld.set_termios(&t);
+
+    // Fill the edit buffer.
+    for _ in 0..1024 {
+        ld.input_char(b'x');
+    }
+
+    // Next char should be silently discarded.
+    let action = ld.input_char(b'z');
+    if !matches!(action, InputAction::None) {
+        klog_info!("TTY_TEST: BUG - without IMAXBEL, full buffer should silently discard");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IMAXBEL set but buffer NOT full — normal echo.
+pub fn test_phase36_imaxbel_buffer_not_full_normal() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    ld.set_termios(&t);
+
+    let action = ld.input_char(b'a');
+    let ok = matches!(action, InputAction::Echo { buf, len } if buf[0] == b'a' && len == 1);
+    if !ok {
+        klog_info!("TTY_TEST: BUG - IMAXBEL with space should echo normally");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IMAXBEL in non-canonical (raw) mode — bell when cooked buffer full.
+pub fn test_phase36_imaxbel_raw_mode_buffer_full() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Non-canonical mode with ECHO + IMAXBEL.
+    t.c_lflag = LocalFlags::ECHO.bits(); // no ICANON
+    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    ld.set_termios(&t);
+
+    // Fill the cooked buffer (4096 bytes).
+    for _ in 0..4096 {
+        ld.input_char(b'a');
+    }
+
+    // Next char should ring the bell.
+    let action = ld.input_char(b'z');
+    if !matches!(action, InputAction::Bell) {
+        klog_info!("TTY_TEST: BUG - IMAXBEL in raw mode should Bell when cooked buffer full");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IXOFF high-water: after enough input, ixoff_check_xoff returns VSTOP byte.
+pub fn test_phase36_ixoff_high_water_sends_xoff() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Non-canonical mode so input goes to cooked buffer.
+    t.c_lflag = 0; // no ICANON, no ECHO
+    t.c_iflag |= InputFlags::IXOFF.bits();
+    // Ensure VSTOP is Ctrl+S (0x13) — should be the default.
+    t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
+    ld.set_termios(&t);
+
+    // High-water is 80% of (1024 + 4096) = 4096.
+    // Fill cooked buffer to just past high-water.
+    for _ in 0..4097 {
+        ld.input_char(b'x');
+    }
+
+    let xoff = ld.ixoff_check_xoff();
+    if xoff != Some(0x13) {
+        klog_info!("TTY_TEST: BUG - IXOFF should return XOFF (0x13) at high-water");
+        return TestResult::Fail;
+    }
+
+    // Second call should return None (already sent).
+    let xoff2 = ld.ixoff_check_xoff();
+    if xoff2.is_some() {
+        klog_info!("TTY_TEST: BUG - IXOFF should not send XOFF twice");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IXOFF low-water: after consuming enough input, ixoff_check_xon returns VSTART.
+pub fn test_phase36_ixoff_low_water_sends_xon() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = 0; // non-canonical, no echo
+    t.c_iflag |= InputFlags::IXOFF.bits();
+    t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
+    t.c_cc[CcIndex::Vstart.as_usize()] = 0x11;
+    ld.set_termios(&t);
+
+    // Fill past high-water and trigger XOFF.
+    for _ in 0..4097 {
+        ld.input_char(b'x');
+    }
+    let _ = ld.ixoff_check_xoff(); // consume the XOFF
+
+    // Read enough to drop below low-water (1024).
+    // cooked_count is 4097, need to read at least 4097 - 1023 = 3074 bytes.
+    let mut drain = [0u8; 256];
+    let mut total_read = 0usize;
+    while total_read < 3074 {
+        let got = ld.read(&mut drain);
+        if got == 0 {
+            break;
+        }
+        total_read += got;
+    }
+
+    let xon = ld.ixoff_check_xon();
+    if xon != Some(0x11) {
+        klog_info!(
+            "TTY_TEST: BUG - IXOFF should return XON (0x11) at low-water, read {} bytes",
+            total_read
+        );
+        return TestResult::Fail;
+    }
+
+    // Second call should return None (already sent).
+    let xon2 = ld.ixoff_check_xon();
+    if xon2.is_some() {
+        klog_info!("TTY_TEST: BUG - IXOFF should not send XON twice");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IXOFF not set — flow control methods always return None.
+pub fn test_phase36_ixoff_not_set_no_flow_control() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = 0; // non-canonical
+    t.c_iflag &= !InputFlags::IXOFF.bits(); // ensure IXOFF is off
+    ld.set_termios(&t);
+
+    // Fill buffer.
+    for _ in 0..4097 {
+        ld.input_char(b'x');
+    }
+
+    if ld.ixoff_check_xoff().is_some() {
+        klog_info!("TTY_TEST: BUG - without IXOFF, check_xoff should return None");
+        return TestResult::Fail;
+    }
+    if ld.ixoff_check_xon().is_some() {
+        klog_info!("TTY_TEST: BUG - without IXOFF, check_xon should return None");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// CREAD constant value is 0x80.
+pub fn test_phase36_cread_flag_value() -> TestResult {
+    if ControlFlags::CREAD.bits() != 0x80 {
+        klog_info!("TTY_TEST: BUG - CREAD should be 0x80");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// IMAXBEL constant value is 0x2000.
+pub fn test_phase36_imaxbel_flag_value() -> TestResult {
+    if InputFlags::IMAXBEL.bits() != 0x2000 {
+        klog_info!("TTY_TEST: BUG - IMAXBEL should be 0x2000");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -9212,5 +9488,18 @@ slopos_lib::define_test_suite!(
         test_phase35_iutf8_word_erase_mixed,
         test_phase35_iutf8_word_erase_preserves_prefix,
         test_phase35_iutf8_flag_value,
+        // Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
+        test_phase36_cread_enabled_input_processed,
+        test_phase36_cread_disabled_input_discarded,
+        test_phase36_cread_disabled_rawdisc,
+        test_phase36_imaxbel_buffer_full_rings_bell,
+        test_phase36_imaxbel_not_set_buffer_full_silent,
+        test_phase36_imaxbel_buffer_not_full_normal,
+        test_phase36_imaxbel_raw_mode_buffer_full,
+        test_phase36_ixoff_high_water_sends_xoff,
+        test_phase36_ixoff_low_water_sends_xon,
+        test_phase36_ixoff_not_set_no_flow_control,
+        test_phase36_cread_flag_value,
+        test_phase36_imaxbel_flag_value,
     ]
 );

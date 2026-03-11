@@ -9,7 +9,7 @@
 //! - **Additional echo modes**: ECHOCTL (^X for control chars), ECHOKE (kill
 //!   via backspace sequence — deterministic visual erase)
 //! - **Signal generation**: SIGINT (VINTR), SIGQUIT (VQUIT), SIGTSTP (VSUSP)
-//! - **Flow control**: IXON with VSTOP/VSTART (Ctrl+S / Ctrl+Q)
+//! - **Flow control**: IXON with VSTOP/VSTART (Ctrl+S / Ctrl+Q), IXOFF
 //! - **Canonical editing**: VWERASE (Ctrl+W word erase), VREPRINT (Ctrl+R
 //!   redisplay), VLNEXT (Ctrl+V literal next)
 //! - **Non-canonical mode**: VMIN/VTIME parsed (timing not yet enforced)
@@ -21,11 +21,19 @@
 
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
-    CcIndex, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE, UserTermios,
+    CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
+    UserTermios,
 };
 
 const EDIT_BUF_SIZE: usize = 1024;
 const COOKED_BUF_SIZE: usize = 4096;
+
+// Phase 36: IXOFF flow-control water marks.
+// High-water: send XOFF when combined pending input exceeds this.
+// Low-water: send XON when combined pending input drops below this.
+const IXOFF_TOTAL_CAPACITY: usize = EDIT_BUF_SIZE + COOKED_BUF_SIZE;
+const IXOFF_HIGH_WATER: usize = (IXOFF_TOTAL_CAPACITY * 4) / 5; // 80%
+const IXOFF_LOW_WATER: usize = IXOFF_TOTAL_CAPACITY / 5; // 20%
 
 // ---------------------------------------------------------------------------
 // Action enums returned to the caller
@@ -50,6 +58,11 @@ pub enum InputAction {
     /// The caller should emit `columns` BS-SPACE-BS triples to erase the
     /// line visually.  This replaces the old pragmatic newline-only echo.
     KillLineEcho { columns: u16 },
+    /// Phase 36: Ring the terminal bell (BEL, `\x07`).
+    ///
+    /// Returned when IMAXBEL is set and the input buffer is full.
+    /// The caller should send BEL to the output driver.
+    Bell,
 }
 
 /// Actions returned by output processing (`process_output_byte`).
@@ -88,6 +101,8 @@ pub(crate) trait LdiscOps {
     fn is_stopped(&self) -> bool;
     fn input_char(&mut self, c: u8) -> InputAction;
     fn process_output_byte(&mut self, c: u8) -> OutputAction;
+    fn ixoff_check_xoff(&mut self) -> Option<u8>;
+    fn ixoff_check_xon(&mut self) -> Option<u8>;
 }
 
 /// Generates delegating `impl LdiscKind` methods that forward to the inner
@@ -350,6 +365,11 @@ pub struct LineDisc {
     /// multi-byte character being inserted.  0 = not in a multi-byte sequence.
     /// Only meaningful when IUTF8 is set in `c_iflag`.
     utf8_remaining: u8,
+
+    // -- Phase 36: IXOFF flow-control state --
+    /// Whether an XOFF has been sent to the terminal (via IXOFF).
+    /// When `true`, a subsequent low-water condition triggers XON.
+    xoff_sent: bool,
 }
 
 impl LineDisc {
@@ -379,7 +399,7 @@ impl LineDisc {
             termios: UserTermios {
                 c_iflag: slopos_abi::syscall::ICRNL,
                 c_oflag: slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR,
-                c_cflag: 0,
+                c_cflag: slopos_abi::syscall::CREAD,
                 c_lflag: slopos_abi::syscall::ISIG
                     | slopos_abi::syscall::ICANON
                     | slopos_abi::syscall::ECHO
@@ -403,6 +423,7 @@ impl LineDisc {
             literal_next: false,
             column: 0,
             utf8_remaining: 0,
+            xoff_sent: false,
         }
     }
 
@@ -509,6 +530,7 @@ impl LineDisc {
         self.literal_next = false;
         self.column = 0;
         self.utf8_remaining = 0;
+        self.xoff_sent = false;
     }
 
     pub fn flush_input(&mut self) {
@@ -519,6 +541,7 @@ impl LineDisc {
         self.line_count = 0;
         self.literal_next = false;
         self.utf8_remaining = 0;
+        self.xoff_sent = false;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -538,6 +561,12 @@ impl LineDisc {
     /// Returns an [`InputAction`] indicating what the caller should do (echo,
     /// signal, reprint, or nothing).
     pub fn input_char(&mut self, c: u8) -> InputAction {
+        // Phase 36: CREAD gate — if the receiver is disabled in c_cflag,
+        // silently discard all input.
+        if !self.termios.control_flags().contains(ControlFlags::CREAD) {
+            return InputAction::None;
+        }
+
         let iflag = self.termios.input_flags();
         let lflag = self.termios.local_flags();
 
@@ -842,10 +871,17 @@ impl LineDisc {
 
     /// Insert a character into the edit buffer and produce an echo action.
     fn insert_char(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
-        if self.edit_len < EDIT_BUF_SIZE {
-            self.edit_buf[self.edit_len] = c;
-            self.edit_len += 1;
+        // Phase 36: IMAXBEL — if the edit buffer is full, ring the bell
+        // instead of silently discarding.  Without IMAXBEL, discard silently.
+        if self.edit_len >= EDIT_BUF_SIZE {
+            if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
+                return InputAction::Bell;
+            }
+            return InputAction::None;
         }
+
+        self.edit_buf[self.edit_len] = c;
+        self.edit_len += 1;
 
         // Phase 35: IUTF8 multi-byte column tracking.
         let iutf8 = self.termios.input_flags().contains(InputFlags::IUTF8);
@@ -928,6 +964,13 @@ impl LineDisc {
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.
     fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
+        // Phase 36: IMAXBEL — ring bell when cooked buffer is full in non-canonical mode.
+        if self.cooked_count >= COOKED_BUF_SIZE {
+            if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
+                return InputAction::Bell;
+            }
+            return InputAction::None;
+        }
         self.push_cooked(c);
         if lflag.contains(LocalFlags::ECHO) {
             // ECHOCTL in raw mode.
@@ -1210,6 +1253,42 @@ impl LineDisc {
         self.cooked_count += 1;
     }
 
+    /// Phase 36: IXOFF — check if input buffer exceeds high-water mark.
+    /// Returns the XOFF byte (VSTOP) if IXOFF is enabled and we should send XOFF.
+    pub fn ixoff_check_xoff(&mut self) -> Option<u8> {
+        if !self.termios.input_flags().contains(InputFlags::IXOFF) {
+            return None;
+        }
+        if self.xoff_sent {
+            return None;
+        }
+        let pending = self.edit_len + self.cooked_count;
+        if pending >= IXOFF_HIGH_WATER {
+            self.xoff_sent = true;
+            Some(self.cc(CcIndex::Vstop))
+        } else {
+            None
+        }
+    }
+
+    /// Phase 36: IXOFF — check if input buffer dropped below low-water mark.
+    /// Returns the XON byte (VSTART) if IXOFF is enabled and we should send XON.
+    pub fn ixoff_check_xon(&mut self) -> Option<u8> {
+        if !self.termios.input_flags().contains(InputFlags::IXOFF) {
+            return None;
+        }
+        if !self.xoff_sent {
+            return None;
+        }
+        let pending = self.edit_len + self.cooked_count;
+        if pending < IXOFF_LOW_WATER {
+            self.xoff_sent = false;
+            Some(self.cc(CcIndex::Vstart))
+        } else {
+            None
+        }
+    }
+
     /// Move everything in the edit buffer into the cooked ring buffer.
     fn flush_edit_to_cooked(&mut self) {
         let mut i = 0usize;
@@ -1275,6 +1354,14 @@ impl LdiscOps for LineDisc {
     fn process_output_byte(&mut self, c: u8) -> OutputAction {
         self.process_output_byte(c)
     }
+    #[inline]
+    fn ixoff_check_xoff(&mut self) -> Option<u8> {
+        self.ixoff_check_xoff()
+    }
+    #[inline]
+    fn ixoff_check_xon(&mut self) -> Option<u8> {
+        self.ixoff_check_xon()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,7 +1390,7 @@ impl RawDisc {
             termios: UserTermios {
                 c_iflag: 0,
                 c_oflag: 0,
-                c_cflag: 0,
+                c_cflag: slopos_abi::syscall::CREAD,
                 c_lflag: 0,
                 c_line: N_RAW as u8,
                 c_cc: [0; NCCS],
@@ -1379,6 +1466,10 @@ impl RawDisc {
 
     /// Raw input: push byte directly to buffer, no processing.
     pub fn input_char(&mut self, c: u8) -> InputAction {
+        // Phase 36: CREAD gate — discard input when receiver disabled.
+        if !self.termios.control_flags().contains(ControlFlags::CREAD) {
+            return InputAction::None;
+        }
         if self.count < RAW_BUF_SIZE {
             self.buf[self.head] = c;
             self.head = (self.head + 1) % RAW_BUF_SIZE;
@@ -1393,6 +1484,16 @@ impl RawDisc {
             buf: [c, 0],
             len: 1,
         }
+    }
+
+    /// Phase 36: IXOFF — RawDisc does not implement IXOFF flow control.
+    pub fn ixoff_check_xoff(&mut self) -> Option<u8> {
+        None
+    }
+
+    /// Phase 36: IXOFF — RawDisc does not implement IXOFF flow control.
+    pub fn ixoff_check_xon(&mut self) -> Option<u8> {
+        None
     }
 }
 
@@ -1448,6 +1549,14 @@ impl LdiscOps for RawDisc {
     #[inline]
     fn process_output_byte(&mut self, c: u8) -> OutputAction {
         self.process_output_byte(c)
+    }
+    #[inline]
+    fn ixoff_check_xoff(&mut self) -> Option<u8> {
+        self.ixoff_check_xoff()
+    }
+    #[inline]
+    fn ixoff_check_xon(&mut self) -> Option<u8> {
+        self.ixoff_check_xon()
     }
 }
 
@@ -1512,5 +1621,7 @@ impl LdiscKind {
         fn is_stopped(&self) -> bool;
         fn input_char(&mut self, c: u8) -> InputAction;
         fn process_output_byte(&mut self, c: u8) -> OutputAction;
+        fn ixoff_check_xoff(&mut self) -> Option<u8>;
+        fn ixoff_check_xon(&mut self) -> Option<u8>;
     }
 }
