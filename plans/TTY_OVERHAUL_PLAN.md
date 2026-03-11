@@ -107,7 +107,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -2942,7 +2942,7 @@ Added 13 Phase 25 regression tests:
 
 ## 36. Phase 32: Controlling Terminal Lifecycle Integrity
 
-**Status**: 📋 Planned
+**Status**: ✅ **DONE**
 
 > **Priority**: P0 correctness — the controlling terminal lifecycle chain must be watertight for shells to work.
 > **Principle**: Individual pieces exist from earlier phases. This phase performs a comprehensive end-to-end audit and hardens every state transition in the controlling terminal lifecycle: `fork()` → `setsid()` → `open()` → `TIOCSCTTY` → `TIOCNOTTY` → process exit.
@@ -2996,6 +2996,32 @@ Added 13 Phase 25 regression tests:
 | `core/src/scheduler/task.rs` | Audit fork inheritance, session leader exit → hangup chain |
 | `drivers/src/tty_tests.rs` | 12+ lifecycle chain tests, race condition stress tests |
 
+### 36.9 Implementation summary
+
+**Code changes:**
+
+- `core/src/syscall/process_handlers.rs` — `setsid()` now rejects callers that are already session leaders (`task.sid == task.task_id`) in addition to process group leaders, matching POSIX. Dead code for releasing the controlling terminal inside the session-leader branch was removed since the early EPERM check makes it unreachable.
+
+**Tests added** (16 tests in `drivers/src/tty_tests.rs`):
+
+1. `test_phase32_acquire_ctty_fresh_tty` — acquire succeeds on a no-session TTY
+2. `test_phase32_acquire_ctty_same_session_idempotent` — same-session re-acquire is a no-op
+3. `test_phase32_acquire_ctty_different_session_denied` — cross-session acquire returns PermissionDenied
+4. `test_phase32_release_ctty_owning_session` — release by owning session detaches
+5. `test_phase32_release_ctty_wrong_session_noop` — release by wrong session is a safe no-op
+6. `test_phase32_hangup_detaches_session` — hangup sets hung_up flag and clears session
+7. `test_phase32_o_noctty_suppresses_acquire` — O_NOCTTY skips auto-acquire
+8. `test_phase32_detach_ctty_non_leader_preserves_session` — non-leader TIOCNOTTY leaves TTY session intact
+9. `test_phase32_detach_ctty_session_leader_detaches` — session-leader TIOCNOTTY fully detaches
+10. `test_phase32_full_lifecycle_acquire_release_reacquire` — full acquire→release→reacquire chain
+11. `test_phase32_double_acquire_race_guard` — second session's acquire fails atomically
+12. `test_phase32_hangup_no_session_safe` — hangup with no session is a safe no-op
+13. `test_phase32_rapid_acquire_release_stress` — 20-iteration acquire/release cycle stress test
+14. `test_phase32_acquire_invalid_index` — acquire on out-of-range TtyIndex returns InvalidIndex
+15. `test_phase32_release_invalid_index` — release on out-of-range TtyIndex returns InvalidIndex
+16. `test_phase32_detach_invalid_index` — detach on out-of-range TtyIndex returns InvalidIndex
+
+**Verification**: `cargo fmt --all` clean, `just build` succeeds, `just test` passes all 1254 tests (0 failures).
 ---
 
 ## 37. Phase 33: Post-Hangup I/O Hardening

@@ -398,15 +398,15 @@ define_syscall!(syscall_setsid(ctx, args) requires(let task_id) {
         return ctx.err();
     }
     let task = unsafe { &mut *task_ptr };
-    // POSIX: EPERM if the process is already a process group leader.
-    if task.pgid == task.task_id {
+    // POSIX: EPERM if the process is already a process group leader
+    // or already a session leader.
+    if task.pgid == task.task_id || task.sid == task.task_id {
         return ctx.err();
     }
-    if let Some(tty_idx) = task.controlling_tty {
-        use slopos_lib::kernel_services::syscall_services::tty;
-        if task.sid != 0 && task.sid == task.task_id {
-            let _ = tty::release_controlling_terminal(tty_idx, task.sid);
-        }
+    // Clear any inherited controlling terminal. Since we already rejected
+    // session leaders above, the caller is never their session's leader,
+    // so just drop the reference without a full release.
+    if task.controlling_tty.is_some() {
         task.controlling_tty = None;
     }
     // Create new session: task becomes session leader and pgrp leader.
