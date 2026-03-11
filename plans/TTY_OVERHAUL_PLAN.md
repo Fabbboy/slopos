@@ -1,8 +1,8 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–28 complete | 📋 Phases 29–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–30 complete | 📋 Phases 31–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
-> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`); Phases 29–42 target dispatch consolidation, `/dev/tty` magic device, SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
+> **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal; Phases 31–42 target SIGTTOU enforcement, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
 
 ---
@@ -42,7 +42,7 @@
 31. [Phase 27: POSIX Completion Set (Rust-Idiomatic)](#31-phase-27-posix-completion-set-rust-idiomatic)
 32. [Phase 28: Type-Safe Termios Foundation ✅](#32-phase-28-type-safe-termios-foundation)
 33. [Phase 29: LdiscKind Dispatch Consolidation](#33-phase-29-ldisckind-dispatch-consolidation)
-34. [Phase 30: `/dev/tty` Controlling Terminal Device](#34-phase-30-devtty-controlling-terminal-device)
+34. [Phase 30: `/dev/tty` Controlling Terminal Device ✅](#34-phase-30-devtty-controlling-terminal-device)
 35. [Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)](#35-phase-31-background-write-protection-sigttou-on-tcsetattr)
 36. [Phase 32: Controlling Terminal Lifecycle Integrity](#36-phase-32-controlling-terminal-lifecycle-integrity)
 37. [Phase 33: Post-Hangup I/O Hardening](#37-phase-33-post-hangup-io-hardening)
@@ -105,7 +105,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 27 | POSIX completion set (Rust-idiomatic, non-clone) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs` | — | **DONE** |
 | 28 | Type-safe termios foundation (`bitflags!`, `CcIndex`, `TtyError` refinement) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 29 | LdiscKind dispatch consolidation (`dispatch_ldisc!` macro, `*_locked()` convention) | `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
-| 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 30 | `/dev/tty` controlling terminal magic device | `fs/src/fileio.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -2843,12 +2843,19 @@ Added 13 Phase 25 regression tests:
 
 ---
 
-## 34. Phase 30: `/dev/tty` Controlling Terminal Device
+## 34. Phase 30: `/dev/tty` Controlling Terminal Device ✅
 
-**Status**: 📋 Planned
+**Status**: Completed. All 1229 tests pass (11 new Phase 30 regression tests: 7 unit tests in `tty_tests.rs`, 4 integration tests in `core/src/syscall/tests.rs`). Build clean. `just test` passes.
 
 > **Priority**: P0 correctness — the single most critical missing feature for bash/zsh job control.
-> **Principle**: `/dev/tty` is a per-process magic alias that resolves to the caller’s controlling terminal. Shells use it for prompts, job control, and error output. Without it, interactive shells cannot function correctly.
+> **Principle**: `/dev/tty` is a per-process magic alias that resolves to the caller's controlling terminal. Shells use it for prompts, job control, and error output. Without it, interactive shells cannot function correctly.
+
+**Implementation summary**:
+- **34.1 (Resolution logic)**: The `/dev/tty` path intercept in `fs/src/fileio.rs::file_open_for_process()` was implemented in Phase 9 and resolves to `current_task_controlling_tty()` from `DriverRuntimeServices`. Returns `-6` (`ENXIO`) if no controlling terminal exists. The FD created is identical in kind to one opened on the actual device path—same `tty_index` field, same `open_ref` lifecycle.
+- **34.2 (FD routing)**: The `/dev/tty` open creates a `FileDescriptor` with `tty_index: Some(resolved_idx)` and calls `tty::open_ref(resolved_idx)`. All subsequent read/write/ioctl/poll operations go through the same per-TTY dispatch as a direct device open. No `maybe_acquire_controlling_tty_on_open` call—opening `/dev/tty` never acquires a controlling terminal.
+- **34.3 (Process inheritance)**: Child processes inherit `controlling_tty` via `fork()` (in `exec/mod.rs`), so `/dev/tty` resolves identically in parent and children. After `setsid()`, `controlling_tty` is cleared (in `process_handlers.rs`), so `/dev/tty` returns `ENXIO` until a new ctty is acquired via `TIOCSCTTY`.
+- **34.4 (Infrastructure)**: All service plumbing was already in place from Phase 9: `current_task_controlling_tty()` in `DriverRuntimeServices`, `runtime_current_task_controlling_tty` in `core/src/driver_hooks.rs`, and `controlling_tty: Option<TtyIndex>` in `task_struct.rs`. No new service methods or adapters were needed.
+- **Regression tests**: 7 unit tests in `drivers/src/tty_tests.rs`: `test_phase30_open_ref_second_fd_increments_count` (open_ref lifecycle for `/dev/tty` use), `test_phase30_dev_tty_operations_identical_to_direct` (read/write/termios via same TTY index), `test_phase30_open_ref_does_not_modify_session` (session state unchanged), `test_phase30_open_ref_invalid_index_returns_error` (ENXIO semantics), `test_phase30_close_ref_decrements_after_open` (paired lifecycle), `test_phase30_multiple_open_ref_sequential` (multiple `/dev/tty` opens), `test_phase30_dev_tty_winsize_matches_direct` (winsize identical). 4 integration tests in `core/src/syscall/tests.rs`: `test_phase30_dev_tty_no_ctty_returns_enxio` (no ctty → -6), `test_phase30_dev_tty_with_ctty_succeeds` (TIOCSCTTY + open → success), `test_phase30_setsid_then_dev_tty_returns_enxio` (setsid clears ctty → -6), `test_phase30_fork_child_inherits_dev_tty` (fork inheritance → child can open).
 
 ### 34.1 Resolution logic
 
@@ -2876,15 +2883,15 @@ Added 13 Phase 25 regression tests:
 - Test: fork child inherits `/dev/tty` resolution.
 - `just build` + `just test` gate.
 
-### 34.5 Files expected to change
+### 34.5 Files modified (actual)
 
 | File | Change |
 |------|--------|
-| `fs/src/fileio.rs` | Add `/dev/tty` path intercept in `open()`, resolve via `controlling_tty` |
-| `lib/src/kernel_services/syscall_services/tty.rs` | Add `get_controlling_tty()` service method if not already exposed |
-| `drivers/src/syscall_services_init.rs` | Wire adapter if new service method needed |
-| `drivers/src/tty_tests.rs` | Regression tests for `/dev/tty` resolution, `ENXIO`, fork inheritance |
-
+| `fs/src/fileio.rs` | `/dev/tty` path intercept already implemented (Phase 9); resolves via `current_task_controlling_tty()`, returns `-6` (ENXIO) if no ctty, creates FD with `tty_index: Some(resolved_idx)`, calls `open_ref` |
+| `lib/src/kernel_services/driver_runtime.rs` | `current_task_controlling_tty()` already exposed (Phase 9) |
+| `core/src/driver_hooks.rs` | `runtime_current_task_controlling_tty` already wired (Phase 9) |
+| `drivers/src/tty_tests.rs` | 7 new Phase 30 unit tests: open_ref lifecycle, operations identical, session unchanged, invalid index, close_ref, multiple opens, winsize match |
+| `core/src/syscall/tests.rs` | 4 new Phase 30 integration tests: no ctty ENXIO, with ctty success, setsid + ENXIO, fork inheritance |
 ---
 
 ## 35. Phase 31: Background Write Protection (SIGTTOU on `tcsetattr`)
