@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–31, 33–35, 37–38 complete | 📋 Phase 32, 36, Phases 39–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31, 33–35, 37–38, 40 complete | 📋 Phase 32, 36, Phases 39, 41–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -115,7 +115,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 38 | PTY namespace & device nodes (`/dev/ptmx`, `/dev/pts/N`, lock ioctls) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty/table.rs`, `fs/src/fileio.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `lib/src/kernel_services/syscall_services/tty.rs`, `drivers/src/syscall_services_init.rs`, `drivers/src/tty_tests.rs`, `core/src/syscall/tests.rs` | — | **DONE** |
 | 39 | PTY packet mode (TIOCPKT, control byte framing) | `drivers/src/tty/pty.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
-| 40 | VT100/ANSI terminal emulation (escape parser, CSI, cursor/color) | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vtparser.rs` | **TODO** |
+| 40 | VT100/ANSI terminal emulation (escape parser, CSI, cursor/color) | `drivers/src/tty/vconsole.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | `drivers/src/tty/vtparser.rs` | **DONE** |
 | 41 | Advanced PTY & session control (EXTPROC, `vhangup()`) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `core/src/syscall/process_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 42 | Legacy termios completion (ECHOPRT, IUCLC, OLCUC) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 
@@ -3396,7 +3396,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 44. Phase 40: VT100/ANSI Terminal Emulation
 
-**Status**: 📋 Planned
+**Status**: ✅ **DONE**
 
 > **Priority**: P2 infrastructure — required for programs that use cursor positioning, colors, or screen clearing (ncurses, vi, top, htop, etc.).
 > **Principle**: Replace raw byte output in the virtual console with a state-machine-driven ANSI/VT100 parser. The parser is pure `no_std`, no-alloc, and produces typed actions that the console renderer executes. Separate parsing from rendering for testability.
@@ -3545,7 +3545,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 | `drivers/src/tty/session.rs` | `TtySession`, foreground checks, session policy, `SessionId`/`ProcessGroupId` newtypes |
 | `drivers/src/tty/pty.rs` | PTY pair allocation, constructors, free-slot helpers (Phase 17) |
 | `drivers/src/tty/vconsole.rs` | Framebuffer-backed virtual console renderer (Phase 22) |
-| `drivers/src/tty/vtparser.rs` | VT100/ANSI escape sequence state machine (Phase 40, planned) |
+| `drivers/src/tty/vtparser.rs` | VT100/ANSI escape sequence state machine (Phase 40, **done**) |
 
 ### Modified files
 
