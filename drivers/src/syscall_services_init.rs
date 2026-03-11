@@ -315,6 +315,20 @@ fn tty_bytes_available_adapter(tty_index: TtyIndex) -> i32 {
     }
 }
 
+fn tty_set_pty_lock_adapter(tty_index: TtyIndex, locked: bool) -> i32 {
+    match tty::set_pty_lock(tty_index, locked) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn tty_get_pty_lock_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::get_pty_lock(tty_index) {
+        Ok(locked) => i32::from(locked),
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -352,6 +366,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     poll_sleep: tty_poll_sleep_adapter,
     detach_controlling_terminal: tty_detach_controlling_terminal_adapter,
     bytes_available: tty_bytes_available_adapter,
+    set_pty_lock: tty_set_pty_lock_adapter,
+    get_pty_lock: tty_get_pty_lock_adapter,
 };
 
 fn net_scan_members_adapter(

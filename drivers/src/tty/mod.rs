@@ -91,6 +91,13 @@ pub struct Tty {
     pub hung_up: bool,
 
     pub peer_closed: bool,
+
+    /// Phase 38: PTY slave lock state.  When `true`, the corresponding
+    /// `/dev/pts/N` device node cannot be opened.  Only meaningful for
+    /// PTY slaves (always `false` for consoles and masters).  Defaults to
+    /// `true` on `pty_alloc()` — the master holder must unlock via
+    /// `TIOCSPTLCK` before the slave can be opened.
+    pub slave_locked: bool,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -415,7 +422,10 @@ fn notify_input_ready(idx: TtyIndex) {
     POLL_NOTIFY.wake_all();
 }
 
-pub use self::pty::{get_pty_number, is_pty_slave, pty_alloc, pty_open_slave};
+pub use self::pty::{
+    get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc, pty_open_slave,
+    set_pty_lock,
+};
 
 /// Read cooked data from a specific TTY.
 ///

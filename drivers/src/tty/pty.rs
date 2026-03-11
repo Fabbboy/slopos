@@ -148,16 +148,20 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Validated slave open (Phase 20)
+// Validated slave open (Phase 20, Phase 38: lock guard)
 // ---------------------------------------------------------------------------
 
-/// Atomically validate that `idx` is still a live PTY slave and increment
-/// its open count.
+/// Atomically validate that `idx` is still a live PTY slave, check the
+/// slave lock, and increment its open count.
 ///
 /// Acquires `PTY_ALLOC_LOCK` to prevent races with `free_pair_if_unused()`:
 /// if a concurrent close is freeing the pair, this call will either see the
 /// slot as `None` (and return `NotAllocated`) or succeed and increment the
 /// open count (preventing the pair from being freed).
+///
+/// Phase 38: Returns `TtyError::PermissionDenied` if the slave is locked.
+/// The master holder must call `TIOCSPTLCK` with arg=0 to unlock before
+/// the slave can be opened.
 ///
 /// Also clears `hung_up` and `peer_closed` on the slave (re-open semantics),
 /// and clears `peer_closed` on the paired master — matching the existing
@@ -176,6 +180,10 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 
         match tty.driver {
             TtyDriverKind::PtySlave { ref peer } => {
+                // Phase 38: Locked slaves cannot be opened.
+                if tty.slave_locked {
+                    return Err(TtyError::PermissionDenied);
+                }
                 tty.open_count = tty
                     .open_count
                     .checked_add(1)
@@ -357,4 +365,87 @@ pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
         *guard = None;
     }
     TTY_GENERATIONS[peer_slot].fetch_add(1, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 38: PTY slave lock management
+// ---------------------------------------------------------------------------
+
+/// Set the PTY slave lock state.
+///
+/// `idx` must refer to a **master** FD — the function resolves the
+/// paired slave and sets its `slave_locked` flag.  Returns
+/// `TtyError::NotAllocated` if `idx` is not a PTY master.
+pub fn set_pty_lock(idx: TtyIndex, locked: bool) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    // Resolve the peer (slave) index from the master.
+    let slave_idx = {
+        let guard = TTY_SLOTS[slot].lock();
+        let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+        match tty.driver {
+            TtyDriverKind::PtyMaster { ref peer } => peer.idx,
+            _ => return Err(TtyError::NotAllocated),
+        }
+    };
+
+    // Set the lock on the slave.
+    let slave_slot = slave_idx.0 as usize;
+    if slave_slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let mut guard = TTY_SLOTS[slave_slot].lock();
+    let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
+    tty.slave_locked = locked;
+    Ok(())
+}
+
+/// Get the PTY slave lock state.
+///
+/// `idx` must refer to a **master** FD — the function resolves the
+/// paired slave and reads its `slave_locked` flag.  Returns
+/// `TtyError::NotAllocated` if `idx` is not a PTY master.
+pub fn get_pty_lock(idx: TtyIndex) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    // Resolve the peer (slave) index from the master.
+    let slave_idx = {
+        let guard = TTY_SLOTS[slot].lock();
+        let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+        match tty.driver {
+            TtyDriverKind::PtyMaster { ref peer } => peer.idx,
+            _ => return Err(TtyError::NotAllocated),
+        }
+    };
+
+    // Read the lock from the slave.
+    let slave_slot = slave_idx.0 as usize;
+    if slave_slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let guard = TTY_SLOTS[slave_slot].lock();
+    let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+    Ok(tty.slave_locked)
+}
+
+/// Check whether a PTY slave is currently locked.
+///
+/// Returns `true` if the slave at `idx` has `slave_locked == true`,
+/// `false` if unlocked or the slot is not a PTY slave.
+pub fn is_slave_locked(idx: TtyIndex) -> bool {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return false;
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => tty.slave_locked,
+        None => false,
+    }
 }

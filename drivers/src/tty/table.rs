@@ -171,6 +171,7 @@ impl Tty {
             open_count: 0,
             hung_up: false,
             peer_closed: false,
+            slave_locked: false,
         }
     }
 
@@ -190,6 +191,7 @@ impl Tty {
             open_count: 0,
             hung_up: false,
             peer_closed: false,
+            slave_locked: false,
         }
     }
 
@@ -209,6 +211,7 @@ impl Tty {
             open_count: 0,
             hung_up: false,
             peer_closed: false,
+            slave_locked: true,
         }
     }
 }
