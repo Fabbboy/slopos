@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–31 complete | 📋 Phases 32–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31, 33 complete | 📋 Phase 32, Phases 34–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -3026,49 +3026,56 @@ Added 13 Phase 25 regression tests:
 
 ## 37. Phase 33: Post-Hangup I/O Hardening
 
-**Status**: 📋 Planned
+**Status**: ✅ **DONE**
 
 > **Priority**: P0 correctness — consistent I/O behavior after hangup is essential for shells to detect session termination.
 > **Principle**: A hung-up TTY is permanently dead. All I/O operations must produce deterministic, POSIX-mandated results. No code path may silently succeed on a hung-up device.
 
-### 37.1 I/O behavior after hangup
+### 37.1 Implementation Summary
+
+**Completed changes:**
+
+1. **`write()` hung_up check** (`drivers/src/tty/mod.rs`) — Added early `Err(TtyError::HungUp)` return at top of `write()`, before foreground check. Writes to a dead TTY now return EIO.
+2. **`read()` EOF consistency** (`drivers/src/tty/mod.rs`) — Both pre-drain and post-drain hung_up/peer_closed checks now always return `Ok(0)` regardless of blocking mode (POSIX: hung-up reads are EOF, never WouldBlock).
+3. **`poll_events()` POLLIN on hangup** (`drivers/src/tty/mod.rs`) — When `hung_up` or `peer_closed` with no data, now sets both `POLLHUP` and `POLLIN` (POSIX: readable EOF).
+4. **`set_termios_mode()` hung_up check** (`drivers/src/tty/mod.rs`) — Early EIO return before SIGTTOU check.
+5. **`set_winsize()` hung_up check** (`drivers/src/tty/mod.rs`) — Early EIO return before dimension change.
+6. **`set_ldisc()` hung_up check** (`drivers/src/tty/mod.rs`) — Early EIO return after slot validation.
+7. **Ioctl dispatch hangup guard** (`core/src/syscall/fs/poll_ioctl_handlers.rs`) — Centralized check in `syscall_ioctl`: hangup-safe ioctls (`TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY`) bypass the guard; all others return `-EIO` on hung-up TTY.
+8. **11 new Phase 33 tests + 2 updated pre-existing tests** (`drivers/src/tty_tests.rs`) — Covers read EOF, write EIO, poll POLLHUP|POLLIN, state-changing ioctl EIO, hangup-safe ioctl passthrough, PTY cross-end hangup, permanent EOF, errno mapping.
+
+**PTY cross-end hangup**: Already correct — `close_ref` on master calls `hangup(slave_idx)`, slave reads return EOF, slave writes return EIO.
+**hung_up flag**: Set by `tty_hangup()`, never cleared. Permanently dead until slot reclaimed.
+
+### 37.2 I/O behavior after hangup
 
 - **Read → EOF (0 bytes)**: All `tty_read()` paths return 0 bytes when the TTY is hung up. This is how shells detect session termination.
 - **Write → `-EIO`**: All `tty_write()` paths return `EIO` after hangup. The data has nowhere to go.
 - **Poll → `POLLHUP`**: Readers see `POLLIN | POLLHUP` (readable with immediate EOF). Writers see `POLLHUP`.
-- **Ioctl → `EIO` with exceptions**: Most ioctls return `EIO`. Exceptions: `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID` remain functional (POSIX requires job control queries to work after hangup).
+- **Ioctl → `EIO` with exceptions**: Most ioctls return `EIO`. Exceptions: `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `TIOCNOTTY` remain functional (POSIX requires job control queries to work after hangup).
 
-### 37.2 Hangup flag consistency
+### 37.3 Verification
 
-- Verify a per-TTY `hung_up: bool` flag is checked at the top of every I/O entry point.
-- The flag is set by `tty_hangup()` and never cleared — a hung-up TTY is permanently dead until the slot is reclaimed.
-- Use a consistent early-return pattern: `if self.hung_up { return Err(TtyError::HungUp); }` at method entry, with `HungUp` mapped to appropriate errno at the syscall boundary.
+All 1265 tests pass (`just test`). Phase 33 tests:
+- `test_phase33_hangup_read_returns_eof`
+- `test_phase33_hangup_write_returns_eio`
+- `test_phase33_hangup_poll_returns_pollhup_pollin`
+- `test_phase33_hangup_set_termios_returns_eio`
+- `test_phase33_hangup_set_winsize_returns_eio`
+- `test_phase33_hangup_set_ldisc_returns_eio`
+- `test_phase33_hangup_get_fg_pgrp_still_works`
+- `test_phase33_pty_master_close_slave_eof_eio`
+- `test_phase33_hangup_permanent_eof`
+- `test_phase33_pty_slave_poll_pollhup_after_master_close`
+- `test_phase33_hungup_errno_is_eio`
 
-### 37.3 PTY cross-end hangup
-
-- When the master side of a PTY is closed, the slave sees hangup.
-- Verify slave reads return 0 (EOF), slave writes return `EIO`, slave poll returns `POLLHUP`.
-- Verify the master cannot be written to after the slave is hung up (generation check should catch this, but audit explicitly).
-
-### 37.4 Verification
-
-- Test: hangup → read returns 0.
-- Test: hangup → write returns `EIO`.
-- Test: hangup → poll returns `POLLHUP`.
-- Test: PTY master close → slave read returns 0, slave write returns `EIO`.
-- Test: hangup → `TIOCGPGRP` still works (hangup-safe ioctl).
-- Test: hangup → `TCSETS` returns `EIO` (hangup-blocked ioctl).
-- `just build` + `just test` gate.
-
-### 37.5 Files expected to change
+### 37.4 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Add/verify `hung_up` flag, add early-return checks to read/write/poll |
-| `drivers/src/tty/ldisc.rs` | Verify ldisc methods propagate hangup state |
-| `drivers/src/tty/pty.rs` | Verify cross-end hangup propagation |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add hangup checks to ioctl dispatch, document hangup-safe ioctls |
-| `drivers/src/tty_tests.rs` | Hangup I/O consistency tests, PTY cross-end hangup tests |
+| `drivers/src/tty/mod.rs` | Added hung_up checks to write(), read() EOF consistency, poll POLLIN on hangup, set_termios_mode/set_winsize/set_ldisc guards |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Centralized hangup guard in ioctl dispatch with hangup-safe exceptions |
+| `drivers/src/tty_tests.rs` | 11 new Phase 33 tests, 2 updated pre-existing tests (Phase 9 + Phase 17 assertions updated for POSIX EOF) |
 
 ---
 

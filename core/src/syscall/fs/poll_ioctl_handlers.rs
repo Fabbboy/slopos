@@ -262,6 +262,14 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         None => return ctx.err(), // ENOTTY
     };
 
+    // Phase 33: Post-hangup I/O hardening — most ioctls return EIO on a
+    // hung-up TTY.  Exceptions (POSIX-mandated): TIOCGPGRP, TIOCSPGRP,
+    // TIOCGSID must remain functional for job control cleanup after hangup.
+    let hangup_safe = matches!(cmd, TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY);
+    if !hangup_safe && tty::is_hung_up(tty_idx) {
+        return ctx.err(); // EIO
+    }
+
     match cmd {
         TCGETS => {
             require_nonzero!(ctx, arg);

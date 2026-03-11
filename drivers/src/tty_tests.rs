@@ -2010,9 +2010,9 @@ pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
     let _ = tty::open_ref(TtyIndex(0));
     let _ = tty::close_ref(TtyIndex(0));
 
-    if rc != Err(TtyError::HungUp) {
+    if rc != Ok(0) {
         klog_info!(
-            "TTY_TEST: BUG - nonblock read on hung tty expected HungUp, got {:?}",
+            "TTY_TEST: BUG - nonblock read on hung tty expected Ok(0), got {:?}",
             rc
         );
         return TestResult::Fail;
@@ -2210,11 +2210,14 @@ pub fn test_phase9_hangup_read_returns_hung_up() -> TestResult {
     let _ = tty::open_ref(TtyIndex(0));
     let _ = tty::close_ref(TtyIndex(0));
 
+    // Phase 33: hung-up TTY reads now always return EOF (Ok(0)),
+    // regardless of blocking mode.  Previously nonblock returned
+    // Err(HungUp) but POSIX requires EOF for reads after hangup.
     match result {
-        Err(TtyError::HungUp) => TestResult::Pass,
+        Ok(0) => TestResult::Pass,
         other => {
             klog_info!(
-                "TTY_TEST: BUG - hangup nonblock read expected HungUp, got {:?}",
+                "TTY_TEST: BUG - hangup nonblock read expected Ok(0) EOF, got {:?}",
                 other
             );
             TestResult::Fail
@@ -4013,7 +4016,7 @@ pub fn test_phase17_master_close_hangs_up_slave() -> TestResult {
 
     let _ = tty::close_ref(slave);
 
-    if close_rc != Ok(0) || !is_hung || read_rc != Err(TtyError::HungUp) {
+    if close_rc != Ok(0) || !is_hung || read_rc != Ok(0) {
         klog_info!(
             "TTY_TEST: BUG - master close should hang up slave (close={:?}, is_hung={}, read={:?})",
             close_rc,
@@ -7883,6 +7886,366 @@ pub fn test_phase32_detach_invalid_index() -> TestResult {
         }
     }
 }
+
+// ===========================================================================
+// Phase 33: Post-Hangup I/O Hardening regression tests
+// ===========================================================================
+
+/// Phase 33: read() on a hung-up TTY with no buffered data returns EOF (0
+/// bytes), regardless of blocking/nonblock mode.
+pub fn test_phase33_hangup_read_returns_eof() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let mut out = [0u8; 8];
+    // Nonblocking read on hung-up TTY.
+    let result = tty::read(idx, &mut out, true);
+
+    // Re-init before checking.
+    tty::table::tty_table_init();
+
+    match result {
+        Ok(0) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup read expected Ok(0) EOF, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: write() on a hung-up TTY returns Err(HungUp) which maps to EIO.
+pub fn test_phase33_hangup_write_returns_eio() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let result = tty::write(idx, b"hello");
+
+    tty::table::tty_table_init();
+
+    match result {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup write expected HungUp (EIO), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: poll_events() on a hung-up TTY returns POLLHUP | POLLIN.
+pub fn test_phase33_hangup_poll_returns_pollhup_pollin() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+    tty::hangup(idx);
+
+    let revents = tty::poll_events(
+        idx,
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+
+    tty::table::tty_table_init();
+
+    let has_pollhup = (revents & slopos_abi::syscall::POLLHUP) != 0;
+    let has_pollin = (revents & slopos_abi::syscall::POLLIN) != 0;
+
+    if !has_pollhup {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLHUP on hung-up TTY");
+        return TestResult::Fail;
+    }
+    if !has_pollin {
+        klog_info!(
+            "TTY_TEST: BUG - poll_events should report POLLIN on hung-up TTY (readable EOF)"
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 33: set_termios on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_phase33_hangup_set_termios_returns_eio() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let termios = tty::get_termios(idx);
+    let result = match termios {
+        Ok(t) => tty::set_termios(idx, &t),
+        Err(_) => {
+            // get_termios may also fail on hung-up — that's fine, but
+            // set_termios is the one we're testing.
+            let t = slopos_abi::syscall::UserTermios::default();
+            tty::set_termios(idx, &t)
+        }
+    };
+
+    tty::table::tty_table_init();
+
+    match result {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup set_termios expected HungUp (EIO), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: set_winsize on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_phase33_hangup_set_winsize_returns_eio() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let ws = slopos_abi::syscall::UserWinsize {
+        ws_row: 25,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = tty::set_winsize(idx, &ws);
+
+    tty::table::tty_table_init();
+
+    match result {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup set_winsize expected HungUp (EIO), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: set_ldisc on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_phase33_hangup_set_ldisc_returns_eio() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let result = tty::set_ldisc(idx, 0);
+
+    tty::table::tty_table_init();
+
+    match result {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - hangup set_ldisc expected HungUp (EIO), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: get_foreground_pgrp is a hangup-safe ioctl — still works after
+/// hangup so shells can query job control state during session cleanup.
+pub fn test_phase33_hangup_get_fg_pgrp_still_works() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    // Set a foreground pgrp before hangup.
+    let _ = tty::set_foreground_pgrp(idx, 42);
+    tty::hangup(idx);
+
+    // get_foreground_pgrp should still succeed after hangup.
+    let result = tty::get_foreground_pgrp(idx);
+
+    tty::table::tty_table_init();
+
+    match result {
+        Ok(_) => TestResult::Pass,
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - get_foreground_pgrp should work after hangup, got {:?}",
+                e
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 33: PTY master close → slave read returns EOF, slave write returns
+/// EIO.  Validates cross-end hangup propagation.
+pub fn test_phase33_pty_master_close_slave_eof_eio() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Allocate a PTY pair.
+    let master_idx = match crate::tty::pty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    // Open master so close_ref will actually decrement to 0 and trigger hangup.
+    tty::open_ref(master_idx).unwrap();
+
+    // Find slave index from master's driver.
+    let slave_idx = {
+        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
+        match guard.as_ref() {
+            Some(tty) => match &tty.driver {
+                TtyDriverKind::PtyMaster { peer } => peer.idx,
+                _ => {
+                    klog_info!("TTY_TEST: BUG - master is not PtyMaster");
+                    return TestResult::Fail;
+                }
+            },
+            None => {
+                klog_info!("TTY_TEST: BUG - master slot is empty");
+                return TestResult::Fail;
+            }
+        }
+    };
+
+    // Open slave.
+    if let Err(e) = crate::tty::pty::pty_open_slave(slave_idx) {
+        klog_info!("TTY_TEST: BUG - pty_open_slave failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    // Close master (decrement to 0 triggers hangup on slave).
+    let _ = tty::close_ref(master_idx);
+
+    // Slave read should return EOF (0 bytes).
+    let mut out = [0u8; 8];
+    let read_result = tty::read(slave_idx, &mut out, true);
+
+    // Slave write should return EIO.
+    let write_result = tty::write(slave_idx, b"test");
+
+    // Cleanup.
+    tty::table::tty_table_init();
+
+    let read_ok = matches!(read_result, Ok(0));
+    let write_ok = matches!(write_result, Err(TtyError::HungUp));
+
+    if !read_ok {
+        klog_info!(
+            "TTY_TEST: BUG - PTY slave read after master close expected Ok(0), got {:?}",
+            read_result
+        );
+        return TestResult::Fail;
+    }
+    if !write_ok {
+        klog_info!(
+            "TTY_TEST: BUG - PTY slave write after master close expected HungUp, got {:?}",
+            write_result
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 33: hung_up flag is never cleared — a hung-up TTY is permanently dead
+/// until the slot is reclaimed.  Verify multiple reads all return EOF.
+pub fn test_phase33_hangup_permanent_eof() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    tty::hangup(idx);
+
+    let mut out = [0u8; 8];
+    let r1 = tty::read(idx, &mut out, true);
+    let r2 = tty::read(idx, &mut out, true);
+    let r3 = tty::read(idx, &mut out, true);
+
+    tty::table::tty_table_init();
+
+    let all_eof = matches!(r1, Ok(0)) && matches!(r2, Ok(0)) && matches!(r3, Ok(0));
+    if !all_eof {
+        klog_info!(
+            "TTY_TEST: BUG - multiple reads on hung-up should all be Ok(0), got {:?} {:?} {:?}",
+            r1,
+            r2,
+            r3
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 33: PTY slave poll returns POLLHUP after master closes.
+pub fn test_phase33_pty_slave_poll_pollhup_after_master_close() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master_idx = match crate::tty::pty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+
+    // Open master so close_ref will decrement to 0 and trigger hangup.
+    tty::open_ref(master_idx).unwrap();
+
+    let slave_idx = {
+        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
+        match guard.as_ref() {
+            Some(tty) => match &tty.driver {
+                TtyDriverKind::PtyMaster { peer } => peer.idx,
+                _ => return TestResult::Fail,
+            },
+            None => return TestResult::Fail,
+        }
+    };
+
+    if let Err(_) = crate::tty::pty::pty_open_slave(slave_idx) {
+        return TestResult::Fail;
+    }
+
+    // Close master.
+    let _ = tty::close_ref(master_idx);
+
+    // Poll slave.
+    let revents = tty::poll_events(
+        slave_idx,
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+
+    tty::table::tty_table_init();
+
+    if (revents & slopos_abi::syscall::POLLHUP) == 0 {
+        klog_info!("TTY_TEST: BUG - PTY slave poll should return POLLHUP after master close");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 33: TtyError::HungUp maps to errno -5 (EIO).
+pub fn test_phase33_hungup_errno_is_eio() -> TestResult {
+    let errno = TtyError::HungUp.to_errno();
+    if errno == -5 {
+        TestResult::Pass
+    } else {
+        klog_info!(
+            "TTY_TEST: BUG - TtyError::HungUp.to_errno() expected -5 (EIO), got {}",
+            errno
+        );
+        TestResult::Fail
+    }
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -8236,5 +8599,17 @@ slopos_lib::define_test_suite!(
         test_phase32_acquire_invalid_index,
         test_phase32_release_invalid_index,
         test_phase32_detach_invalid_index,
+        // Phase 33: Post-Hangup I/O Hardening
+        test_phase33_hangup_read_returns_eof,
+        test_phase33_hangup_write_returns_eio,
+        test_phase33_hangup_poll_returns_pollhup_pollin,
+        test_phase33_hangup_set_termios_returns_eio,
+        test_phase33_hangup_set_winsize_returns_eio,
+        test_phase33_hangup_set_ldisc_returns_eio,
+        test_phase33_hangup_get_fg_pgrp_still_works,
+        test_phase33_pty_master_close_slave_eof_eio,
+        test_phase33_hangup_permanent_eof,
+        test_phase33_pty_slave_poll_pollhup_after_master_close,
+        test_phase33_hungup_errno_is_eio,
     ]
 );

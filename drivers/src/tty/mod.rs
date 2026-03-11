@@ -442,17 +442,16 @@ pub fn read_with_attach(
                 None => return Err(TtyError::NotAllocated),
             };
 
-            // Hung-up check (before drain).
+            // Phase 33: Post-hangup I/O hardening — a hung-up TTY is
+            // permanently dead.  Reads always return EOF (0 bytes) once
+            // any buffered data has been consumed, regardless of whether
+            // the read is blocking or non-blocking.
             if tty.peer_closed && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
             if tty.hung_up && !tty.ldisc.has_data() {
-                return if nonblock {
-                    Err(TtyError::HungUp)
-                } else {
-                    Ok(0)
-                };
+                return Ok(0);
             }
 
             // Foreground check via check_read().
@@ -560,17 +559,14 @@ pub fn read_with_attach(
                 }
             }
 
-            // Check hung-up after drain (data may have been flushed by hangup).
+            // Phase 33: Check hung-up after drain (data may have been
+            // flushed by hangup).  Always EOF regardless of blocking mode.
             if tty.peer_closed && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
-            if tty.hung_up {
-                return if nonblock {
-                    Err(TtyError::HungUp)
-                } else {
-                    Ok(0)
-                };
+            if tty.hung_up && !tty.ldisc.has_data() {
+                return Ok(0);
             }
 
             if !is_canonical && !should_wait {
@@ -667,6 +663,17 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
+    }
+
+    // Phase 33: Post-hangup I/O hardening — writes to a hung-up TTY
+    // always return EIO.  The data has nowhere to go.
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if tty.hung_up {
+                return Err(TtyError::HungUp);
+            }
+        }
     }
 
     // Phase 10 + Phase 19 + Phase 31: Write-side foreground check.
@@ -949,6 +956,17 @@ fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Res
         return Err(TtyError::InvalidIndex);
     }
 
+    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+    // on a hung-up TTY return EIO.
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if tty.hung_up {
+                return Err(TtyError::HungUp);
+            }
+        }
+    }
+
     // Phase 31: Background write protection — SIGTTOU on tcsetattr.
     // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
     let task_id = current_task_id();
@@ -1078,6 +1096,12 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
         None => return Err(TtyError::NotAllocated),
     };
 
+    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+    // on a hung-up TTY return EIO.
+    if tty.hung_up {
+        return Err(TtyError::HungUp);
+    }
+
     if tty.ldisc.id() == ldisc_id {
         let mut termios = *tty.ldisc.termios();
         termios.c_line = ldisc_id as u8;
@@ -1203,6 +1227,17 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
+    }
+
+    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+    // on a hung-up TTY return EIO.
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if tty.hung_up {
+                return Err(TtyError::HungUp);
+            }
+        }
     }
 
     let signal_pgid = {
@@ -1614,8 +1649,15 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             revents |= POLLOUT;
         }
 
+        // Phase 33: Post-hangup I/O hardening — a hung-up or peer-closed
+        // (with no remaining data) TTY reports both POLLHUP and POLLIN.
+        // POLLIN is set because a subsequent read() will return immediately
+        // with EOF (0 bytes), making the fd "readable".
         if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
             revents |= POLLHUP;
+            if (requested & POLLIN) != 0 {
+                revents |= POLLIN;
+            }
         }
 
         (sig, revents)
