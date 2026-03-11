@@ -35,6 +35,7 @@ pub mod pty;
 pub mod session;
 pub mod table;
 pub mod vconsole;
+pub mod vtparser;
 
 use core::ffi::c_int;
 use core::sync::atomic::AtomicU8;
