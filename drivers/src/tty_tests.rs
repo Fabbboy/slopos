@@ -7229,6 +7229,217 @@ pub fn test_phase30_dev_tty_winsize_matches_direct() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 31: Background Write Protection (SIGTTOU on tcsetattr)
+// ===========================================================================
+
+/// Phase 31: check_write with tostop=true (simulating tcsetattr foreground
+/// check) blocks background processes with BackgroundWrite.
+pub fn test_phase31_tcsetattr_background_blocked() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Background process (pgid=50), tostop=true (tcsetattr always uses this).
+    match s.check_write(50, 10, true) {
+        ForegroundCheck::BackgroundWrite => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcsetattr bg expected BackgroundWrite, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 31: Foreground process tcsetattr proceeds normally (no signal).
+pub fn test_phase31_tcsetattr_foreground_allowed() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10); // session=10, fg_pgrp=10
+    // Foreground process (pgid=10), tostop=true.
+    match s.check_write(10, 10, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcsetattr fg expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 31: tcsetattr with no session attached is allowed (bootstrap path).
+pub fn test_phase31_tcsetattr_no_session_allowed() -> TestResult {
+    let s = TtySession::new();
+    // No session — should allow.
+    match s.check_write(50, 50, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcsetattr no session expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 31: tcsetattr from a different session returns DeniedCrossSession.
+pub fn test_phase31_tcsetattr_cross_session_denied() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    // Cross-session caller (sid=99) — hard denial.
+    match s.check_write(10, 99, true) {
+        ForegroundCheck::DeniedCrossSession => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcsetattr cross-session expected DeniedCrossSession, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Phase 31: TtyError::OrphanedProcessGroup maps to EIO (-5).
+pub fn test_phase31_orphaned_pgrp_errno() -> TestResult {
+    let errno = TtyError::OrphanedProcessGroup.to_errno();
+    if errno != -5 {
+        klog_info!(
+            "TTY_TEST: BUG - OrphanedProcessGroup errno expected -5, got {}",
+            errno
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 31: Kernel task (task_id=0) bypasses tcsetattr foreground check.
+/// In the test harness, task_id is always 0, so set_termios should succeed
+/// even if the TTY has a session with a different foreground group.
+pub fn test_phase31_tcsetattr_kernel_task_bypass() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    // Attach a session with fg_pgrp=10.
+    tty::attach_session(idx, 10, 10);
+    let saved = match tty::get_termios(idx) {
+        Ok(t) => t,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_termios failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    // Modify termios (kernel task_id=0 should bypass foreground check).
+    let mut t = saved;
+    t.c_iflag ^= 0x01; // toggle a bit
+    match tty::set_termios(idx, &t) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task set_termios should succeed, got {:?}",
+                e
+            );
+            let _ = tty::set_termios(idx, &saved);
+            return TestResult::Fail;
+        }
+    }
+    // Restore original termios.
+    let _ = tty::set_termios(idx, &saved);
+    TestResult::Pass
+}
+
+/// Phase 31: set_termios_wait and set_termios_flush also have the foreground
+/// check (kernel task bypass verifies the path doesn't crash).
+pub fn test_phase31_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    tty::attach_session(idx, 10, 10);
+    let saved = match tty::get_termios(idx) {
+        Ok(t) => t,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_termios failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let mut t = saved;
+    t.c_iflag ^= 0x01;
+    // TCSETSW path
+    match tty::set_termios_wait(idx, &t) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task set_termios_wait should succeed, got {:?}",
+                e
+            );
+            let _ = tty::set_termios(idx, &saved);
+            return TestResult::Fail;
+        }
+    }
+    // TCSETSF path
+    match tty::set_termios_flush(idx, &t) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task set_termios_flush should succeed, got {:?}",
+                e
+            );
+            let _ = tty::set_termios(idx, &saved);
+            return TestResult::Fail;
+        }
+    }
+    let _ = tty::set_termios(idx, &saved);
+    TestResult::Pass
+}
+
+/// Phase 31: TOSTOP + background write with SIGTTOU blocked/ignored bypass.
+/// Exercises the check_write path with tostop=true, verifying the session-level
+/// check correctly identifies background writers. The signal bypass logic itself
+/// is tested at the driver_hooks level.
+pub fn test_phase31_tostop_background_write_check() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(20, 20); // session=20, fg_pgrp=20
+    // Background writer (pgid=30) with TOSTOP enabled.
+    match s.check_write(30, 20, true) {
+        ForegroundCheck::BackgroundWrite => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TOSTOP bg write expected BackgroundWrite, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    // Same writer without TOSTOP — allowed.
+    match s.check_write(30, 20, false) {
+        ForegroundCheck::Allowed => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - no TOSTOP bg write expected Allowed, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 31: Kernel task (pgid=0) is always allowed through check_write,
+/// even with tostop=true.
+pub fn test_phase31_kernel_task_check_write_allowed() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    match s.check_write(0, 0, true) {
+        ForegroundCheck::Allowed => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - kernel task check_write expected Allowed, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -7554,5 +7765,15 @@ slopos_lib::define_test_suite!(
         test_phase30_close_ref_decrements_after_open,
         test_phase30_multiple_open_ref_sequential,
         test_phase30_dev_tty_winsize_matches_direct,
+        // Phase 31: Background Write Protection (SIGTTOU on tcsetattr)
+        test_phase31_tcsetattr_background_blocked,
+        test_phase31_tcsetattr_foreground_allowed,
+        test_phase31_tcsetattr_no_session_allowed,
+        test_phase31_tcsetattr_cross_session_denied,
+        test_phase31_orphaned_pgrp_errno,
+        test_phase31_tcsetattr_kernel_task_bypass,
+        test_phase31_tcsetsw_tcsetsf_kernel_task_bypass,
+        test_phase31_tostop_background_write_check,
+        test_phase31_kernel_task_check_write_allowed,
     ]
 );
