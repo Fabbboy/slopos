@@ -16,7 +16,7 @@
 .equ SERIAL_MARKER_L, 'L'
 .equ SERIAL_MARKER_S, 'S'
 
-.equ KERNEL_STACK_SIZE, 131072
+.equ KERNEL_STACK_SIZE, 524288
 
 .section .text
 .global _start
@@ -131,11 +131,11 @@ early_serial_init:
 .size _start, . - _start
 
 # Kernel stack in BSS section
-# 128KB stack — test harness with 280+ macro expansions needs headroom in debug mode
+# 512KB stack — test harness needs extra headroom in debug mode
 .section .bss
 .align 16
 .global kernel_stack_bottom
 kernel_stack_bottom:
-    .skip KERNEL_STACK_SIZE             # 64KB stack
+    .skip KERNEL_STACK_SIZE             # 512KB stack
 .global kernel_stack_top
 kernel_stack_top:

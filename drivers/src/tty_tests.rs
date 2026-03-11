@@ -9,6 +9,10 @@
 //! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
 //! read gate, TtyIndex type safety, signal constant verification.
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,
@@ -26,10 +30,58 @@ use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
-use crate::tty::vconsole::VConsoleState;
+use crate::tty::vconsole::{
+    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
+};
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
 use crate::tty::pty::PtyPeerHandle;
+
+fn boxed_vconsole_state() -> Box<VConsoleState> {
+    let mut state = Box::<VConsoleState>::new_uninit();
+    unsafe {
+        let state_ref = state.as_mut_ptr();
+        let default_cell = CellAttributes {
+            fg: 0x00AAAAAA,
+            bg: 0x00000000,
+        };
+        let default_cursor = CursorAttributes {
+            fg: 0x00AAAAAA,
+            bg: 0x00000000,
+            bold: false,
+            underline: false,
+            inverse: false,
+        };
+        (*state_ref).cursor_row = 0;
+        (*state_ref).cursor_col = 0;
+        (*state_ref).rows = 25;
+        (*state_ref).cols = 80;
+        (*state_ref).fb = None;
+        for r in 0..VCONSOLE_MAX_ROWS {
+            (*state_ref).cells[r].fill(b' ');
+            for c in 0..VCONSOLE_MAX_COLS {
+                (*state_ref).cell_attrs[r][c] = default_cell;
+            }
+        }
+        (*state_ref).parser = VtParser::new();
+        (*state_ref).cursor_attrs = default_cursor;
+        (*state_ref).saved_cursor_row = 0;
+        (*state_ref).saved_cursor_col = 0;
+        (*state_ref).saved_cursor_attrs = default_cursor;
+        (*state_ref).cursor_visible = true;
+        for r in 0..VCONSOLE_MAX_ROWS {
+            (*state_ref).alt_screen_cells[r].fill(b' ');
+            for c in 0..VCONSOLE_MAX_COLS {
+                (*state_ref).alt_screen_attrs[r][c] = default_cell;
+            }
+        }
+        (*state_ref).alt_screen_cursor_row = 0;
+        (*state_ref).alt_screen_cursor_col = 0;
+        (*state_ref).in_alt_screen = false;
+        state.assume_init()
+    }
+}
+
 fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -4939,7 +4991,7 @@ pub fn test_phase22_switch_active_tty_unallocated() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_state_initial() -> TestResult {
-    let state = VConsoleState::new();
+    let state = boxed_vconsole_state();
     if state.cursor_row != 0 || state.cursor_col != 0 || state.rows != 25 || state.cols != 80 {
         klog_info!(
             "TTY_TEST: BUG - vconsole initial state mismatch row={} col={} rows={} cols={}",
@@ -4954,7 +5006,7 @@ pub fn test_phase22_vconsole_state_initial() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     if state.cells[0][0] != b'A' || state.cursor_row != 0 || state.cursor_col != 1 {
         klog_info!("TTY_TEST: BUG - printable write did not update vconsole state");
@@ -4964,7 +5016,7 @@ pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_write_byte_newline() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     state.write_byte(b'\n');
     if state.cursor_row != 1 || state.cursor_col != 0 {
         klog_info!(
@@ -4978,7 +5030,7 @@ pub fn test_phase22_vconsole_write_byte_newline() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_write_byte_cr() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     state.write_byte(b'B');
     state.write_byte(b'\r');
@@ -4990,7 +5042,7 @@ pub fn test_phase22_vconsole_write_byte_cr() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     state.write_byte(b'B');
     state.write_byte(0x08);
@@ -5002,7 +5054,7 @@ pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
 }
 
 pub fn test_phase22_vconsole_scroll_at_bottom() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     state.rows = 2;
     state.cols = 4;
     state.cells[0][0] = b'A';
@@ -10237,7 +10289,7 @@ pub fn test_phase40_sgr_multi_param() -> TestResult {
 
 /// Phase 40: VConsoleState processes ESC[2J to clear screen.
 pub fn test_phase40_vconsole_clear_screen() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Write some chars first.
     state.process_byte(b'H');
     state.process_byte(b'i');
@@ -10262,7 +10314,7 @@ pub fn test_phase40_vconsole_clear_screen() -> TestResult {
 
 /// Phase 40: VConsoleState processes ESC[10;20H to move cursor.
 pub fn test_phase40_vconsole_cursor_pos() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     for &b in b"\x1b[10;20H" {
         state.process_byte(b);
     }
@@ -10279,7 +10331,7 @@ pub fn test_phase40_vconsole_cursor_pos() -> TestResult {
 
 /// Phase 40: SGR red foreground changes cursor_attrs.fg.
 pub fn test_phase40_vconsole_sgr_color() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // ESC[31m = red foreground
     for &b in b"\x1b[31m" {
         state.process_byte(b);
@@ -10306,7 +10358,7 @@ pub fn test_phase40_vconsole_sgr_color() -> TestResult {
 
 /// Phase 40: SGR reset restores default colors.
 pub fn test_phase40_vconsole_sgr_reset() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Set red fg, then reset
     for &b in b"\x1b[31m" {
         state.process_byte(b);
@@ -10330,7 +10382,7 @@ pub fn test_phase40_vconsole_sgr_reset() -> TestResult {
 
 /// Phase 40: Save/restore cursor (ESC 7 / ESC 8).
 pub fn test_phase40_vconsole_save_restore_cursor() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Move to (5,10)
     for &b in b"\x1b[6;11H" {
         state.process_byte(b);
@@ -10378,7 +10430,7 @@ pub fn test_phase40_parser_fuzz_no_panic() -> TestResult {
 
 /// Phase 40: Erase line (EL) modes work correctly.
 pub fn test_phase40_vconsole_erase_line() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Write "ABCDE" at row 0
     for &b in b"ABCDE" {
         state.process_byte(b);
@@ -10405,7 +10457,7 @@ pub fn test_phase40_vconsole_erase_line() -> TestResult {
 
 /// Phase 40: Cursor movement clamping (ESC[A at row 0 stays at row 0).
 pub fn test_phase40_cursor_movement_clamping() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Cursor starts at (0,0), move up — should stay at 0
     for &b in b"\x1b[5A" {
         state.process_byte(b);
@@ -10433,7 +10485,7 @@ pub fn test_phase40_cursor_movement_clamping() -> TestResult {
 
 /// Phase 40: Scroll up via ESC[S.
 pub fn test_phase40_vconsole_scroll_up() -> TestResult {
-    let mut state = VConsoleState::new();
+    let mut state = boxed_vconsole_state();
     // Write 'A' at row 0 col 0, 'B' at row 1 col 0
     state.process_byte(b'A');
     for &b in b"\x1b[2;1H" {
@@ -10455,6 +10507,334 @@ pub fn test_phase40_vconsole_scroll_up() -> TestResult {
     TestResult::Pass
 }
 
+// ===========================================================================
+// Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)
+// ===========================================================================
+
+/// Phase 41: EXTPROC flag constant has the expected value (0x10000).
+pub fn test_phase41_extproc_flag_value() -> TestResult {
+    if LocalFlags::EXTPROC.bits() != 0x10000 {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC is {:#x}, expected 0x10000",
+            LocalFlags::EXTPROC.bits()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC set → no echo, input goes directly to cooked buffer.
+pub fn test_phase41_extproc_no_echo() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC + ICANON + ECHO.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    // Type a printable character.
+    let action = ld.input_char(b'a');
+    // EXTPROC should suppress echo — action should be None.
+    if !matches!(action, InputAction::None) {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC should suppress echo, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    // But the character should be in the cooked buffer.
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - character should be in cooked buffer under EXTPROC");
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 16];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != b'a' {
+        klog_info!("TTY_TEST: BUG - expected 1 byte 'a', got {} bytes", n);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC set → canonical editing (VERASE/VKILL) is bypassed.
+pub fn test_phase41_extproc_no_canonical_editing() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC + ICANON + ECHO + ECHOE.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    // Type 'a', then DEL (VERASE character).
+    ld.input_char(b'a');
+    let erase_char = t.c_cc[slopos_abi::syscall::CcIndex::Verase.as_usize()];
+    ld.input_char(erase_char);
+
+    // Both bytes should be in the cooked buffer (no editing).
+    // Under EXTPROC, VERASE is NOT processed — it's passed through.
+    // Note: EXTPROC pushes to cooked directly, bypassing canonical mode,
+    // so has_data() may return true even without a newline since the
+    // data is not in canonical line-buffered mode.
+    let mut buf = [0u8; 16];
+    let n = ld.read(&mut buf);
+    if n != 2 {
+        klog_info!(
+            "TTY_TEST: BUG - expected 2 bytes (a + DEL) in EXTPROC, got {}",
+            n
+        );
+        return TestResult::Fail;
+    }
+    if buf[0] != b'a' || buf[1] != erase_char {
+        klog_info!(
+            "TTY_TEST: BUG - expected [a, DEL], got [{:#x}, {:#x}]",
+            buf[0],
+            buf[1]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC set + ISIG → signals are still delivered.
+pub fn test_phase41_extproc_signals_still_delivered() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC + ISIG.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    // Ctrl+C should still deliver SIGINT.
+    let vintr = t.c_cc[slopos_abi::syscall::CcIndex::Vintr.as_usize()];
+    let action = ld.input_char(vintr);
+    match action {
+        InputAction::Signal(sig) if sig == SIGINT => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - EXTPROC + ISIG should deliver SIGINT, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Ctrl+\\ should deliver SIGQUIT.
+    let vquit = t.c_cc[slopos_abi::syscall::CcIndex::Vquit.as_usize()];
+    let action = ld.input_char(vquit);
+    match action {
+        InputAction::Signal(sig) if sig == SIGQUIT => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - EXTPROC + ISIG should deliver SIGQUIT, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Ctrl+Z should deliver SIGTSTP.
+    let vsusp = t.c_cc[slopos_abi::syscall::CcIndex::Vsusp.as_usize()];
+    let action = ld.input_char(vsusp);
+    match action {
+        InputAction::Signal(sig) if sig == SIGTSTP => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - EXTPROC + ISIG should deliver SIGTSTP, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC cleared → normal canonical/echo behavior resumes.
+pub fn test_phase41_extproc_cleared_resumes_normal() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC first.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    // Clear EXTPROC.
+    t.c_lflag &= !LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    // Now typing should echo normally.
+    let action = ld.input_char(b'x');
+    match action {
+        InputAction::Echo { len, .. } if len > 0 => {}
+        _ => {
+            klog_info!(
+                "TTY_TEST: BUG - after clearing EXTPROC, echo should resume, got {:?}",
+                action
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC bypasses VLNEXT, VWERASE, VREPRINT.
+pub fn test_phase41_extproc_bypasses_iexten_editing() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC + ICANON + ECHO + IEXTEN.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits() | LocalFlags::IEXTEN.bits();
+    ld.set_termios(&t);
+
+    // VLNEXT (Ctrl+V) should be passed through, not trigger literal-next.
+    let vlnext = t.c_cc[slopos_abi::syscall::CcIndex::Vlnext.as_usize()];
+    let action = ld.input_char(vlnext);
+    if !matches!(action, InputAction::None) {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC should bypass VLNEXT, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    // VLNEXT byte should be in the cooked buffer.
+    let mut buf = [0u8; 4];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != vlnext {
+        klog_info!("TTY_TEST: BUG - VLNEXT byte should be in cooked buffer under EXTPROC");
+        return TestResult::Fail;
+    }
+
+    // VWERASE (Ctrl+W) should be passed through, not trigger word erase.
+    let vwerase = t.c_cc[slopos_abi::syscall::CcIndex::Vwerase.as_usize()];
+    let action = ld.input_char(vwerase);
+    if !matches!(action, InputAction::None) {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC should bypass VWERASE, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    let mut buf2 = [0u8; 4];
+    let n = ld.read(&mut buf2);
+    if n != 1 || buf2[0] != vwerase {
+        klog_info!("TTY_TEST: BUG - VWERASE byte should be in cooked buffer under EXTPROC");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC + IXON → flow control still works.
+pub fn test_phase41_extproc_flow_control_works() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable EXTPROC + IXON.
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_iflag |= slopos_abi::syscall::IXON;
+    ld.set_termios(&t);
+
+    // Ctrl+S (VSTOP) should stop output.
+    let vstop = t.c_cc[slopos_abi::syscall::CcIndex::Vstop.as_usize()];
+    ld.input_char(vstop);
+    if !ld.is_stopped() {
+        klog_info!("TTY_TEST: BUG - EXTPROC + IXON should still honor VSTOP");
+        return TestResult::Fail;
+    }
+
+    // Ctrl+Q (VSTART) should resume.
+    let vstart = t.c_cc[slopos_abi::syscall::CcIndex::Vstart.as_usize()];
+    ld.input_char(vstart);
+    if ld.is_stopped() {
+        klog_info!("TTY_TEST: BUG - EXTPROC + IXON should still honor VSTART");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC with buffer full + IMAXBEL rings bell.
+pub fn test_phase41_extproc_imaxbel() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_lflag &= !LocalFlags::ICANON.bits(); // non-canonical for direct read
+    t.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    ld.set_termios(&t);
+
+    // Fill the cooked buffer.
+    for _ in 0..4096 {
+        ld.input_char(b'x');
+    }
+
+    // Next input should ring bell.
+    let action = ld.input_char(b'y');
+    if !matches!(action, InputAction::Bell) {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC + full buffer + IMAXBEL should ring Bell, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: SYSCALL_VHANGUP constant has expected value.
+pub fn test_phase41_vhangup_syscall_constant() -> TestResult {
+    if slopos_abi::syscall::SYSCALL_VHANGUP != 139 {
+        klog_info!(
+            "TTY_TEST: BUG - SYSCALL_VHANGUP is {}, expected 139",
+            slopos_abi::syscall::SYSCALL_VHANGUP
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Phase 41: vhangup() on a TTY triggers hangup (reuses existing hangup infra).
+pub fn test_phase41_vhangup_triggers_hangup() -> TestResult {
+    tty::table::tty_table_init();
+
+    // Verify TTY 0 is not hung up initially.
+    let idx = TtyIndex(0);
+    if tty::is_hung_up(idx) {
+        klog_info!("TTY_TEST: BUG - TTY 0 should not be hung up initially");
+        return TestResult::Fail;
+    }
+
+    // Call vhangup.
+    tty::vhangup(idx);
+
+    // TTY should now be hung up.
+    if !tty::is_hung_up(idx) {
+        klog_info!("TTY_TEST: BUG - TTY 0 should be hung up after vhangup()");
+        return TestResult::Fail;
+    }
+
+    // Re-init for cleanup.
+    tty::table::tty_table_init();
+    TestResult::Pass
+}
+
+/// Phase 41: EXTPROC does not affect raw (non-canonical) mode —
+/// both paths push to cooked without echo.
+pub fn test_phase41_extproc_raw_mode_same_behavior() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Non-canonical, no echo, EXTPROC.
+    t.c_lflag = LocalFlags::EXTPROC.bits();
+    ld.set_termios(&t);
+
+    let action = ld.input_char(b'z');
+    if !matches!(action, InputAction::None) {
+        klog_info!(
+            "TTY_TEST: BUG - EXTPROC raw mode should not echo, got {:?}",
+            action
+        );
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 4];
+    let n = ld.read(&mut buf);
+    if n != 1 || buf[0] != b'z' {
+        klog_info!("TTY_TEST: BUG - byte should be readable from cooked buffer");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
+// Test suite registration
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -10903,5 +11283,17 @@ slopos_lib::define_test_suite!(
         test_phase40_vconsole_erase_line,
         test_phase40_cursor_movement_clamping,
         test_phase40_vconsole_scroll_up,
+        // Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)
+        test_phase41_extproc_flag_value,
+        test_phase41_extproc_no_echo,
+        test_phase41_extproc_no_canonical_editing,
+        test_phase41_extproc_signals_still_delivered,
+        test_phase41_extproc_cleared_resumes_normal,
+        test_phase41_extproc_bypasses_iexten_editing,
+        test_phase41_extproc_flow_control_works,
+        test_phase41_extproc_imaxbel,
+        test_phase41_vhangup_syscall_constant,
+        test_phase41_vhangup_triggers_hangup,
+        test_phase41_extproc_raw_mode_same_behavior,
     ]
 );

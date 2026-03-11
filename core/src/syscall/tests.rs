@@ -27,7 +27,7 @@ use slopos_abi::syscall::{
     SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL,
     SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
     SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
-    SYSCALL_TABLE_SIZE, TIOCSCTTY, TtyIndex,
+    SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_lib::InterruptFrame;
@@ -2391,6 +2391,18 @@ pub fn test_phase30_fork_child_inherits_dev_tty() -> TestResult {
     TestResult::Pass
 }
 
+/// Phase 41: SYSCALL_VHANGUP is registered in the dispatch table.
+pub fn test_phase41_vhangup_syscall_in_dispatch_table() -> TestResult {
+    let entry = syscall_lookup(SYSCALL_VHANGUP);
+    assert_not_null!(entry, "SYSCALL_VHANGUP lookup returned null");
+    let entry_ref = unsafe { &*entry };
+    assert_test!(
+        entry_ref.handler.is_some(),
+        "SYSCALL_VHANGUP has no handler"
+    );
+    TestResult::Pass
+}
+
 slopos_lib::define_test_suite!(
     syscall_valid,
     [
@@ -2449,6 +2461,8 @@ slopos_lib::define_test_suite!(
         test_phase30_dev_tty_with_ctty_succeeds,
         test_phase30_setsid_then_dev_tty_returns_enxio,
         test_phase30_fork_child_inherits_dev_tty,
+        // Phase 41: EXTPROC & vhangup
+        test_phase41_vhangup_syscall_in_dispatch_table,
     ]
 );
 
@@ -2485,5 +2499,7 @@ slopos_lib::define_test_suite!(
         test_phase30_dev_tty_with_ctty_succeeds,
         test_phase30_setsid_then_dev_tty_returns_enxio,
         test_phase30_fork_child_inherits_dev_tty,
+        // Phase 41: EXTPROC & vhangup
+        test_phase41_vhangup_syscall_in_dispatch_table,
     ]
 );
