@@ -490,7 +490,11 @@ impl LineDisc {
     /// line has been committed (newline pressed or EOF flush).  This prevents
     /// `read()` from returning partial lines.
     pub fn has_data(&self) -> bool {
-        if self.is_canonical() {
+        // Phase 41: EXTPROC bypasses canonical line buffering, so treat
+        // it like non-canonical mode for readiness checks.
+        let canonical =
+            self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
+        if canonical {
             self.line_count > 0
         } else {
             self.cooked_count > 0
@@ -499,7 +503,9 @@ impl LineDisc {
 
     /// Read cooked bytes into `out`, returning the number of bytes copied.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
-        let canonical = self.is_canonical();
+        // Phase 41: EXTPROC bypasses canonical line buffering.
+        let canonical =
+            self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
 
         // Phase 23: Canonical EOF on empty buffer.  When VEOF (Ctrl+D) is
         // pressed with an empty edit buffer, `flush_edit_to_cooked()` bumps
@@ -666,7 +672,15 @@ impl LineDisc {
             }
         }
 
-        // 5. Extended input processing (IEXTEN).
+        // 5. EXTPROC bypass (Phase 41): when EXTPROC is set, the line
+        //    discipline passes input directly to the read buffer without
+        //    canonical editing or echo.  Signal processing (ISIG, step 3)
+        //    and flow control (IXON, step 4) are already handled above.
+        if lflag.contains(LocalFlags::EXTPROC) {
+            return self.extproc_input(c);
+        }
+
+        // 6. Extended input processing (IEXTEN).
         if lflag.contains(LocalFlags::IEXTEN) {
             if c == self.cc(CcIndex::Vlnext) {
                 self.literal_next = true;
@@ -692,7 +706,7 @@ impl LineDisc {
             }
         }
 
-        // 6. Canonical vs non-canonical.
+        // 7. Canonical vs non-canonical.
         if lflag.contains(LocalFlags::ICANON) {
             self.canonical_input(c, lflag)
         } else {
@@ -999,6 +1013,25 @@ impl LineDisc {
         } else {
             InputAction::None
         }
+    }
+
+    /// Phase 41: EXTPROC mode — push input directly to the cooked buffer
+    /// without any canonical editing or echo.  Used by network terminal
+    /// protocols (ssh, telnet) where the remote side handles line editing.
+    ///
+    /// ISIG signal processing and IXON flow control are already handled
+    /// upstream in `input_char()` before this method is called.
+    fn extproc_input(&mut self, c: u8) -> InputAction {
+        // Buffer-full guard (same as raw_input).
+        if self.cooked_count >= COOKED_BUF_SIZE {
+            if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
+                return InputAction::Bell;
+            }
+            return InputAction::None;
+        }
+        self.push_cooked(c);
+        // No echo — external processor handles display.
+        InputAction::None
     }
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.

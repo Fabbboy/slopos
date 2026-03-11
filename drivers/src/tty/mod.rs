@@ -1790,6 +1790,21 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
     }
 }
 
+/// Phase 41: Revoke access to the caller's controlling terminal.
+///
+/// This is the kernel-side implementation of the `vhangup()` syscall.
+/// It reuses the existing hangup infrastructure (Phase 7/33) to:
+/// - Flush buffers and detach the session
+/// - Mark the TTY as hung up so subsequent I/O returns EIO
+/// - Signal the session with SIGHUP + SIGCONT
+/// - Wake all blocked readers/writers
+///
+/// The caller must provide their controlling terminal index.  Permission
+/// checks (caller has a ctty) are enforced by the syscall handler.
+pub fn vhangup(idx: TtyIndex) {
+    hangup(idx);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 21: Event-driven poll readiness
 // ---------------------------------------------------------------------------

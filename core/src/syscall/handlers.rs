@@ -28,7 +28,7 @@ pub use crate::syscall::process_handlers::{
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid,
     syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
-    syscall_spawn_path, syscall_terminate_task, syscall_waitpid,
+    syscall_spawn_path, syscall_terminate_task, syscall_vhangup, syscall_waitpid,
 };
 use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
@@ -218,6 +218,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SETPGID] => syscall_setpgid, "setpgid";
     [SYSCALL_GETPGID] => syscall_getpgid, "getpgid";
     [SYSCALL_SETSID] => syscall_setsid, "setsid";
+    [SYSCALL_VHANGUP] => syscall_vhangup, "vhangup";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

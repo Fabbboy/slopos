@@ -597,3 +597,24 @@ pub fn syscall_futex(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
 
     ctx.ok(rc as u64)
 }
+
+define_syscall!(syscall_vhangup(ctx, args) requires(let task_id) {
+    let _ = args;
+    let task_ptr = task_find_by_id(task_id);
+    if task_ptr.is_null() {
+        return ctx.err();
+    }
+    let task = unsafe { &*task_ptr };
+    // POSIX: caller must have a controlling terminal.
+    let ctty = match task.controlling_tty {
+        Some(idx) => idx,
+        None => {
+            return ctx.ok(ERRNO_EPERM);
+        }
+    };
+    // Delegate to the TTY subsystem's existing hangup infrastructure
+    // (Phases 7 + 33).  This flushes buffers, detaches the session,
+    // signals SIGHUP + SIGCONT, and wakes all blocked readers/writers.
+    slopos_lib::kernel_services::syscall_services::tty::hangup(ctty);
+    ctx.ok(0)
+});

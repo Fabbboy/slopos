@@ -865,5 +865,31 @@ pub fn has_framebuffer() -> bool {
 
 #[cfg(feature = "itests")]
 pub(crate) fn reset_for_tests() {
-    *VCONSOLE_STATE.lock() = VConsoleState::new();
+    let mut state = VCONSOLE_STATE.lock();
+    state.cursor_row = 0;
+    state.cursor_col = 0;
+    state.rows = DEFAULT_ROWS;
+    state.cols = DEFAULT_COLS;
+    state.fb = None;
+    for r in 0..VCONSOLE_MAX_ROWS {
+        state.cells[r].fill(b' ');
+        for c in 0..VCONSOLE_MAX_COLS {
+            state.cell_attrs[r][c] = CellAttributes::default_colors();
+        }
+    }
+    state.parser = VtParser::new();
+    state.cursor_attrs = CursorAttributes::default_attrs();
+    state.saved_cursor_row = 0;
+    state.saved_cursor_col = 0;
+    state.saved_cursor_attrs = CursorAttributes::default_attrs();
+    state.cursor_visible = true;
+    for r in 0..VCONSOLE_MAX_ROWS {
+        state.alt_screen_cells[r].fill(b' ');
+        for c in 0..VCONSOLE_MAX_COLS {
+            state.alt_screen_attrs[r][c] = CellAttributes::default_colors();
+        }
+    }
+    state.alt_screen_cursor_row = 0;
+    state.alt_screen_cursor_col = 0;
+    state.in_alt_screen = false;
 }
