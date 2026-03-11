@@ -21,7 +21,7 @@
 
 use slopos_abi::signal::{SIGINT, SIGQUIT, SIGTSTP};
 use slopos_abi::syscall::{
-    CcIndex, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, UserTermios,
+    CcIndex, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE, UserTermios,
 };
 
 const EDIT_BUF_SIZE: usize = 1024;
@@ -224,7 +224,8 @@ impl LineDisc {
             0,    // (unused index 13)
             0x17, // VWERASE = Ctrl+W
             0x16, // VLNEXT  = Ctrl+V
-            0, 0, 0,
+            0,    // VEOL2 (disabled)
+            0, 0,
         ];
         Self {
             termios: UserTermios {
@@ -324,8 +325,9 @@ impl LineDisc {
             copied += 1;
 
             // In canonical mode, stop after consuming one complete line.
-            // A line boundary is marked by a newline character.
-            if canonical && byte == b'\n' {
+            // A line boundary is marked by a newline or an enabled
+            // VEOL/VEOL2 character (Phase 34).
+            if canonical && (byte == b'\n' || self.is_veol(byte)) {
                 self.line_count = self.line_count.saturating_sub(1);
                 return copied;
             }
@@ -646,6 +648,26 @@ impl LineDisc {
             return InputAction::None;
         }
 
+        // Phase 34: VEOL / VEOL2 — additional configurable line terminators.
+        // The character is added to the edit buffer (unlike VEOF) and then
+        // flushed, completing a canonical line.  Echoed normally — no ECHOCTL.
+        if self.is_veol(c) {
+            if self.edit_len < EDIT_BUF_SIZE {
+                self.edit_buf[self.edit_len] = c;
+                self.edit_len += 1;
+            }
+            self.flush_edit_to_cooked();
+            if lflag.contains(LocalFlags::ECHO) {
+                if self.is_printable(c) {
+                    self.column += 1;
+                }
+                return InputAction::Echo {
+                    buf: [c, 0, 0, 0],
+                    len: 1,
+                };
+            }
+            return InputAction::None;
+        }
         // Newline / carriage return — flush with newline appended.
         if c == b'\n' || c == b'\r' {
             if self.edit_len < EDIT_BUF_SIZE {
@@ -833,6 +855,17 @@ impl LineDisc {
     /// Look up a control character from the c_cc array.
     fn cc(&self, idx: CcIndex) -> u8 {
         self.termios.c_cc[idx.as_usize()]
+    }
+
+    /// Phase 34: Returns `true` if `c` matches an enabled VEOL or VEOL2
+    /// control character.  A value of `POSIX_VDISABLE` (0) means disabled.
+    fn is_veol(&self, c: u8) -> bool {
+        let veol = self.cc(CcIndex::Veol);
+        if veol != POSIX_VDISABLE && c == veol {
+            return true;
+        }
+        let veol2 = self.cc(CcIndex::Veol2);
+        veol2 != POSIX_VDISABLE && c == veol2
     }
 
     /// Returns `true` if `c` is a printable ASCII character or tab.

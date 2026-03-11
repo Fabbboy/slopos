@@ -1,6 +1,6 @@
 # SlopOS TTY Overhaul Plan
 
-> **Status**: ✅ Phases 1–31, 33 complete | 📋 Phase 32, Phases 34–42 planned (post-overhaul hardening & POSIX gold-standard completion)
+> **Status**: ✅ Phases 1–31, 33–34 complete | 📋 Phase 32, Phases 35–42 planned (post-overhaul hardening & POSIX gold-standard completion)
 > **Target**: Replace the global singleton TTY with a proper per-terminal TTY subsystem comparable to Linux N_TTY / RedoxOS
 > **Current**: `drivers/src/tty/` module directory — clean per-TTY API, PTY support with generation-safe peer handles, per-slot locking, atomic PTY pair lifecycle, compositor focus split from POSIX foreground, real output drain semantics, scalable 32-slot capacity, type-safe termios foundation (`bitflags!` flag types, `CcIndex` enum, refined `TtyError`), dispatch consolidation via `LdiscOps` trait, `/dev/tty` magic device resolving to controlling terminal, SIGTTOU enforcement on `tcsetattr` with blocked/ignored bypass and orphaned pgrp EIO; Phases 32–42 target controlling terminal lifecycle hardening, UTF-8 editing, PTY namespace, VT100 emulation, and full POSIX termios parity
 > **Bugs Addressed**: Double-typing on PS/2 keyboard, nc immediate termination, dual input delivery, blocked-reader wakeup regression (PS/2/TTY reads)
@@ -109,7 +109,7 @@ This plan replaces the singleton with a proper **per-terminal TTY subsystem** mo
 | 31 | SIGTTOU on background `tcsetattr`, TOSTOP audit | `drivers/src/tty/mod.rs`, `lib/src/kernel_services/driver_runtime.rs`, `core/src/driver_hooks.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 32 | Controlling terminal lifecycle integrity (fork/setsid/O_NOCTTY/TIOCSCTTY chain) | `drivers/src/tty/mod.rs`, `drivers/src/tty/session.rs`, `fs/src/fileio.rs`, `core/src/syscall/process_handlers.rs`, `core/src/scheduler/task.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 33 | Post-hangup I/O hardening (EOF/EIO/POLLHUP consistency) | `drivers/src/tty/mod.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/pty.rs`, `core/src/syscall/fs/poll_ioctl_handlers.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
-| 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
+| 34 | Extended line boundaries (VEOL, VEOL2) | `drivers/src/tty/ldisc.rs`, `abi/src/syscall.rs`, `drivers/src/tty_tests.rs` | — | **DONE** |
 | 35 | UTF-8 aware editing (IUTF8, multi-byte backspace, char width) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 36 | Input buffer policy (IMAXBEL bell, IXOFF flow control, CREAD gate) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
 | 37 | Deferred reprint (PENDIN flag, VREPRINT integration) | `abi/src/syscall.rs`, `drivers/src/tty/ldisc.rs`, `drivers/src/tty/mod.rs`, `drivers/src/tty_tests.rs` | — | **TODO** |
@@ -3079,12 +3079,18 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ---
 
-## 38. Phase 34: Extended Line Boundaries (VEOL, VEOL2)
+## 38. Phase 34: Extended Line Boundaries (VEOL, VEOL2) ✅ COMPLETED
 
-**Status**: 📋 Planned
+**Status**: Completed. All 1274 tests pass (9 new Phase 34 regression tests). Build clean. `just test` passes.
 
 > **Priority**: P1 completeness — required for protocols and applications that use custom line delimiters.
 > **Principle**: POSIX allows two additional end-of-line terminators beyond hardcoded `\n` and `VEOF`. These are user-configurable via `c_cc[VEOL]` and `c_cc[VEOL2]`.
+
+**Implementation summary**:
+- **ABI**: Added `VEOL2: usize = 16` constant and `CcIndex::Veol2 = 16` enum variant to `abi/src/syscall.rs`. `POSIX_VDISABLE` (already at 0) used to check disabled state.
+- **Line discipline (`ldisc.rs`)**: Added `is_veol(c: u8) -> bool` helper that checks both `c_cc[VEOL]` and `c_cc[VEOL2]` against the input byte (disabled when value == `POSIX_VDISABLE`). In `canonical_input()`, VEOL/VEOL2 characters are treated as line terminators: the character is added to the edit buffer, `flush_edit_to_cooked()` is called (incrementing `line_count`), and the character is echoed normally (no ECHOCTL). In `read()`, the canonical line boundary check now stops at `\n` OR any enabled VEOL/VEOL2 character.
+- **Default termios**: Both VEOL (index 11) and VEOL2 (index 16) default to 0 (disabled) in `LineDisc::new()` and `UserTermios::default()`.
+- **Regression tests**: 9 new Phase 34 tests: `test_phase34_veol_completes_line`, `test_phase34_veol2_completes_line`, `test_phase34_veol_disabled_no_effect`, `test_phase34_veol_and_newline_coexist`, `test_phase34_veol_echo_behavior`, `test_phase34_veol_no_echo`, `test_phase34_veol2_cc_index`, `test_phase34_veol_veol2_both_active`, `test_phase34_veol_and_eof_coexist`.
 
 ### 38.1 Scope
 
@@ -3104,13 +3110,13 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 - Test: VEOL echo behavior with ECHO set.
 - `just build` + `just test` gate.
 
-### 38.3 Files expected to change
+### 38.3 Files modified
 
 | File | Change |
 |------|--------|
-| `abi/src/syscall.rs` | Add `VEOL`/`VEOL2` `CcIndex` entries if missing, `_POSIX_VDISABLE` constant |
-| `drivers/src/tty/ldisc.rs` | Add VEOL/VEOL2 checks in canonical input path alongside NL/EOF |
-| `drivers/src/tty_tests.rs` | Line boundary tests for VEOL/VEOL2, disabled state, multi-terminator |
+| `abi/src/syscall.rs` | Added `VEOL2: usize = 16` constant and `CcIndex::Veol2 = 16` variant |
+| `drivers/src/tty/ldisc.rs` | Added `is_veol()` helper, VEOL/VEOL2 checks in `canonical_input()` and `read()` line boundary |
+| `drivers/src/tty_tests.rs` | 9 Phase 34 regression tests (VEOL/VEOL2 line completion, disabled state, coexistence, echo) |
 
 ---
 

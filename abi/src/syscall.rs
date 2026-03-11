@@ -665,6 +665,7 @@ pub const VSUSP: usize = 10;
 pub const VREPRINT: usize = 12;
 pub const VWERASE: usize = 14;
 pub const VLNEXT: usize = 15;
+pub const VEOL2: usize = 16;
 
 // =============================================================================
 // Phase 28: Type-safe termios flag types
@@ -759,6 +760,7 @@ pub enum CcIndex {
     Vreprint = 12,
     Vwerase = 14,
     Vlnext = 15,
+    Veol2 = 16,
 }
 
 impl CcIndex {

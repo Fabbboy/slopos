@@ -8247,6 +8247,269 @@ pub fn test_phase33_hungup_errno_is_eio() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 34: Extended Line Boundaries (VEOL, VEOL2)
+// ===========================================================================
+
+/// VEOL character completes a canonical line.
+pub fn test_phase34_veol_completes_line() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Enable canonical + echo, set VEOL to ';'.
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol, b';');
+    ld.set_termios(&t);
+
+    // Type "abc;".
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+    ld.input_char(b'c');
+    let action = ld.input_char(b';');
+
+    // The VEOL character should produce an echo of ';'.
+    let echoed = matches!(action, InputAction::Echo { buf, len } if buf[0] == b';' && len == 1);
+    if !echoed {
+        klog_info!("TTY_TEST: BUG - VEOL did not produce echo of ';'");
+        return TestResult::Fail;
+    }
+
+    // Data should be available (line_count > 0).
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - VEOL did not complete canonical line");
+        return TestResult::Fail;
+    }
+
+    // Read should return "abc;".
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 4 || &buf[..4] != b"abc;" {
+        klog_info!("TTY_TEST: BUG - expected 'abc;' (4 bytes), got {} bytes", n);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL2 character completes a canonical line.
+pub fn test_phase34_veol2_completes_line() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol2, b'|');
+    ld.set_termios(&t);
+
+    // Type "xy|".
+    ld.input_char(b'x');
+    ld.input_char(b'y');
+    ld.input_char(b'|');
+
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - VEOL2 did not complete canonical line");
+        return TestResult::Fail;
+    }
+
+    let mut buf = [0u8; 64];
+    let n = ld.read(&mut buf);
+    if n != 3 || &buf[..3] != b"xy|" {
+        klog_info!("TTY_TEST: BUG - expected 'xy|' (3 bytes), got {} bytes", n);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL disabled (value 0 / POSIX_VDISABLE) has no effect.
+pub fn test_phase34_veol_disabled_no_effect() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    // VEOL defaults to 0 (disabled).  Ensure typing a NUL doesn't
+    // accidentally trigger line completion.
+    t.set_cc(CcIndex::Veol, POSIX_VDISABLE);
+    t.set_cc(CcIndex::Veol2, POSIX_VDISABLE);
+    ld.set_termios(&t);
+
+    ld.input_char(b'a');
+    ld.input_char(b'b');
+
+    // No line should be complete yet.
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - disabled VEOL produced a complete line");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL and newline both work simultaneously as independent terminators.
+pub fn test_phase34_veol_and_newline_coexist() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol, b';');
+    ld.set_termios(&t);
+
+    // First line terminated by VEOL.
+    ld.input_char(b'a');
+    ld.input_char(b';');
+
+    // Second line terminated by newline.
+    ld.input_char(b'b');
+    ld.input_char(b'\n');
+
+    // Both lines should be available.
+    let mut buf = [0u8; 64];
+    let n1 = ld.read(&mut buf);
+    if n1 != 2 || &buf[..2] != b"a;" {
+        klog_info!(
+            "TTY_TEST: BUG - first line expected 'a;' (2 bytes), got {} bytes",
+            n1
+        );
+        return TestResult::Fail;
+    }
+
+    let n2 = ld.read(&mut buf);
+    if n2 != 2 || &buf[..2] != b"b\n" {
+        klog_info!(
+            "TTY_TEST: BUG - second line expected 'b\\n' (2 bytes), got {} bytes",
+            n2
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL echo behavior: character is echoed normally when ECHO is set.
+pub fn test_phase34_veol_echo_behavior() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol, b'#');
+    ld.set_termios(&t);
+
+    let action = ld.input_char(b'#');
+    match action {
+        InputAction::Echo { buf, len } => {
+            if len != 1 || buf[0] != b'#' {
+                klog_info!(
+                    "TTY_TEST: BUG - VEOL echo expected '#' (1 byte), got {:?} ({} bytes)",
+                    &buf[..len as usize],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - VEOL did not produce Echo action");
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// VEOL with no ECHO set: no echo produced.
+pub fn test_phase34_veol_no_echo() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits(); // ECHO off
+    t.set_cc(CcIndex::Veol, b'#');
+    ld.set_termios(&t);
+
+    ld.input_char(b'a');
+    let action = ld.input_char(b'#');
+    match action {
+        InputAction::None => {}
+        _ => {
+            klog_info!("TTY_TEST: BUG - VEOL produced echo with ECHO disabled");
+            return TestResult::Fail;
+        }
+    }
+
+    // Line should still be completed.
+    if !ld.has_data() {
+        klog_info!("TTY_TEST: BUG - VEOL without ECHO did not complete line");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL2 CcIndex exists and maps to index 16.
+pub fn test_phase34_veol2_cc_index() -> TestResult {
+    if CcIndex::Veol2.as_usize() != 16 {
+        klog_info!(
+            "TTY_TEST: BUG - CcIndex::Veol2 expected 16, got {}",
+            CcIndex::Veol2.as_usize()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Both VEOL and VEOL2 can be set simultaneously to different characters.
+pub fn test_phase34_veol_veol2_both_active() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol, b';');
+    t.set_cc(CcIndex::Veol2, b'|');
+    ld.set_termios(&t);
+
+    // Line 1: terminated by VEOL.
+    ld.input_char(b'a');
+    ld.input_char(b';');
+
+    // Line 2: terminated by VEOL2.
+    ld.input_char(b'b');
+    ld.input_char(b'|');
+
+    let mut buf = [0u8; 64];
+    let n1 = ld.read(&mut buf);
+    if n1 != 2 || &buf[..2] != b"a;" {
+        klog_info!("TTY_TEST: BUG - VEOL line expected 'a;', got {} bytes", n1);
+        return TestResult::Fail;
+    }
+
+    let n2 = ld.read(&mut buf);
+    if n2 != 2 || &buf[..2] != b"b|" {
+        klog_info!("TTY_TEST: BUG - VEOL2 line expected 'b|', got {} bytes", n2);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// VEOL does not interfere with VEOF behavior.
+pub fn test_phase34_veol_and_eof_coexist() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.set_cc(CcIndex::Veol, b';');
+    ld.set_termios(&t);
+
+    // VEOL-terminated line.
+    ld.input_char(b'a');
+    ld.input_char(b';');
+
+    // EOF-flushed line (Ctrl+D).
+    ld.input_char(b'b');
+    ld.input_char(ld.termios().cc(CcIndex::Veof));
+
+    // Read VEOL line first.
+    let mut buf = [0u8; 64];
+    let n1 = ld.read(&mut buf);
+    if n1 != 2 || &buf[..2] != b"a;" {
+        klog_info!("TTY_TEST: BUG - VEOL line expected 'a;', got {} bytes", n1);
+        return TestResult::Fail;
+    }
+
+    // Read EOF-flushed line (no delimiter in output).
+    let n2 = ld.read(&mut buf);
+    if n2 != 1 || buf[0] != b'b' {
+        klog_info!(
+            "TTY_TEST: BUG - EOF line expected 'b' (1 byte), got {} bytes",
+            n2
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 slopos_lib::define_test_suite!(
@@ -8611,5 +8874,15 @@ slopos_lib::define_test_suite!(
         test_phase33_hangup_permanent_eof,
         test_phase33_pty_slave_poll_pollhup_after_master_close,
         test_phase33_hungup_errno_is_eio,
+        // Phase 34: Extended Line Boundaries (VEOL, VEOL2)
+        test_phase34_veol_completes_line,
+        test_phase34_veol2_completes_line,
+        test_phase34_veol_disabled_no_effect,
+        test_phase34_veol_and_newline_coexist,
+        test_phase34_veol_echo_behavior,
+        test_phase34_veol_no_echo,
+        test_phase34_veol2_cc_index,
+        test_phase34_veol_veol2_both_active,
+        test_phase34_veol_and_eof_coexist,
     ]
 );
