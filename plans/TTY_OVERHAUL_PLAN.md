@@ -3497,7 +3497,7 @@ All 1265 tests pass (`just test`). Phase 33 tests:
 
 ## 46. Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
 
-**Status**: 📋 Planned
+**Status**: ✅ **DONE**
 
 > **Priority**: P3 parity — remaining POSIX/Linux termios flags for claiming complete termios support. Low urgency but necessary for full compatibility.
 > **Principle**: Implement remaining flags cleanly without legacy baggage. Each flag is a small, isolated transformation that slots into existing processing pipelines.
