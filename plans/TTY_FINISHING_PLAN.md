@@ -426,7 +426,7 @@ When setting termios from userland:
 
 ## 8. Phase 5: Missing Ioctls (TCFLSH, TCSBRK, TCXONC)
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P1 compatibility — `TCFLSH` (`tcflush()`) is used by programs that need to discard stale input before reading fresh input (e.g., after a mode change). `TCSBRK` and `TCXONC` are less critical but expected by `stty` and libc.
 > **Principle**: Implement `TCFLSH` fully (it's a simple buffer clear). Stub `TCSBRK` and `TCXONC` as harmless no-ops for now — real break signaling and explicit XON/XOFF control are edge cases in a QEMU-only environment.

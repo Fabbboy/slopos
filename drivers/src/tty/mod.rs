@@ -151,6 +151,8 @@ pub enum TtyError {
     /// Background process in an orphaned process group tried to change
     /// terminal settings — returns EIO instead of SIGTTOU (Phase 31).
     OrphanedProcessGroup,
+    /// Invalid argument (Finishing Phase 5: bad `tcflush` queue selector).
+    InvalidArg,
 }
 
 impl TtyError {
@@ -171,6 +173,7 @@ impl TtyError {
             TtyError::CrossSessionDenied => -5,         // EIO
             TtyError::SignalInterrupt => -4,            // EINTR
             TtyError::OrphanedProcessGroup => -5,       // EIO
+            TtyError::InvalidArg => -22,                // EINVAL
         }
     }
 }
@@ -1876,6 +1879,72 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
         return Ok(open_count);
     }
     Err(TtyError::NotAllocated)
+}
+
+// ---------------------------------------------------------------------------
+// Finishing Phase 5: Missing ioctls (TCFLSH, TCSBRK, TCXONC)
+// ---------------------------------------------------------------------------
+
+/// Flush TTY queues (implements `tcflush()` / `TCFLSH` ioctl).
+///
+/// `queue` values:
+///   - `TCIFLUSH` (0): flush input (edit + cooked buffers).
+///   - `TCOFLUSH` (1): flush output (reset inflight counter).
+///   - `TCIOFLUSH` (2): flush both.
+pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
+    use slopos_abi::syscall::{TCIFLUSH, TCIOFLUSH, TCOFLUSH};
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    match queue {
+        TCIFLUSH | TCIOFLUSH => {
+            let mut guard = TTY_SLOTS[slot].lock();
+            if let Some(tty) = guard.as_mut() {
+                tty.ldisc.flush_input();
+            } else {
+                return Err(TtyError::NotAllocated);
+            }
+            if queue == TCIOFLUSH {
+                TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+            }
+        }
+        TCOFLUSH => {
+            TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+        }
+        _ => return Err(TtyError::InvalidArg),
+    }
+    Ok(())
+}
+
+/// Send break / drain output (implements `tcsendbreak()` / `TCSBRK` ioctl).
+///
+/// `arg == 0`: send break for ~0.25 s — no-op on PTYs and QEMU serial.
+/// `arg > 0` : equivalent to `tcdrain()` — wait for output to complete.
+pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
+    if arg > 0 {
+        wait_output_idle(idx)?;
+    }
+    // arg == 0 is a hardware break — no-op for virtual terminals.
+    Ok(())
+}
+
+/// Start/stop I/O (implements `tcflow()` / `TCXONC` ioctl).
+///
+/// Stubbed as no-op for all four action codes (TCOOFF/TCOON/TCIOFF/TCION).
+/// Real XON/XOFF control is handled by the existing IXON/IXOFF infrastructure
+/// at the line discipline level.
+pub fn tcxonc(idx: TtyIndex, _action: i32) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    if guard.as_ref().is_none() {
+        return Err(TtyError::NotAllocated);
+    }
+    // Stub: all actions succeed without effect.
+    Ok(())
 }
 
 pub fn hangup(idx: TtyIndex) {

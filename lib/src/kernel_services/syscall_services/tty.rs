@@ -40,5 +40,9 @@ crate::define_service! {
         set_pty_lock(tty_index: slopos_abi::syscall::TtyIndex, locked: bool) -> i32;
         get_pty_lock(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         set_packet_mode(tty_index: slopos_abi::syscall::TtyIndex, enable: bool) -> i32;
+        // Finishing Phase 5: Missing ioctls.
+        tcflush(tty_index: slopos_abi::syscall::TtyIndex, queue: i32) -> i32;
+        tcsbrk(tty_index: slopos_abi::syscall::TtyIndex, arg: i32) -> i32;
+        tcxonc(tty_index: slopos_abi::syscall::TtyIndex, action: i32) -> i32;
     }
 }

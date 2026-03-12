@@ -346,6 +346,28 @@ fn tty_set_packet_mode_adapter(tty_index: TtyIndex, enable: bool) -> i32 {
     }
 }
 
+// Finishing Phase 5: Missing ioctls (TCFLSH, TCSBRK, TCXONC) adapters.
+fn tty_tcflush_adapter(tty_index: TtyIndex, queue: i32) -> i32 {
+    match tty::tcflush(tty_index, queue) {
+        Ok(()) => 0,
+        Err(e) => e.to_errno(),
+    }
+}
+
+fn tty_tcsbrk_adapter(tty_index: TtyIndex, arg: i32) -> i32 {
+    match tty::tcsbrk(tty_index, arg) {
+        Ok(()) => 0,
+        Err(e) => e.to_errno(),
+    }
+}
+
+fn tty_tcxonc_adapter(tty_index: TtyIndex, action: i32) -> i32 {
+    match tty::tcxonc(tty_index, action) {
+        Ok(()) => 0,
+        Err(e) => e.to_errno(),
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -387,6 +409,9 @@ static TTY_SERVICES: TtyServices = TtyServices {
     set_pty_lock: tty_set_pty_lock_adapter,
     get_pty_lock: tty_get_pty_lock_adapter,
     set_packet_mode: tty_set_packet_mode_adapter,
+    tcflush: tty_tcflush_adapter,
+    tcsbrk: tty_tcsbrk_adapter,
+    tcxonc: tty_tcxonc_adapter,
 };
 
 fn net_scan_members_adapter(

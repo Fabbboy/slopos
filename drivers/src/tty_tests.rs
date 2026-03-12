@@ -12000,6 +12000,198 @@ pub fn test_fp4_cread_value_preserved() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Finishing Phase 5: Missing Ioctls (TCFLSH, TCSBRK, TCXONC) tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 5: ABI constants have correct values.
+pub fn test_fp5_ioctl_constants() -> TestResult {
+    use slopos_abi::syscall::*;
+    if TCSBRK != 0x5409 {
+        klog_info!("TTY_TEST: BUG - TCSBRK=0x{:x}", TCSBRK);
+        return TestResult::Fail;
+    }
+    if TCXONC != 0x540A {
+        klog_info!("TTY_TEST: BUG - TCXONC=0x{:x}", TCXONC);
+        return TestResult::Fail;
+    }
+    if TCFLSH != 0x540B {
+        klog_info!("TTY_TEST: BUG - TCFLSH=0x{:x}", TCFLSH);
+        return TestResult::Fail;
+    }
+    if TCIFLUSH != 0 || TCOFLUSH != 1 || TCIOFLUSH != 2 {
+        klog_info!("TTY_TEST: BUG - flush selectors wrong");
+        return TestResult::Fail;
+    }
+    if TCOOFF != 0 || TCOON != 1 || TCIOFF != 2 || TCION != 3 {
+        klog_info!("TTY_TEST: BUG - flow selectors wrong");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 5: TCFLSH with TCIFLUSH clears input.
+pub fn test_fp5_tcflush_input() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Push some data (canonical: need newline to commit to cooked).
+    tty::push_input(idx, b'H');
+    tty::push_input(idx, b'i');
+    tty::push_input(idx, b'\n');
+
+    // Data should be available.
+    if !tty::has_data(idx) {
+        klog_info!("TTY_TEST: BUG - no data after push_input");
+        drain_tty_nonblock(idx);
+        return TestResult::Fail;
+    }
+
+    // Flush input.
+    match tty::tcflush(idx, slopos_abi::syscall::TCIFLUSH) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcflush TCIFLUSH failed: {:?}", e);
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    // Now read should return 0 (no data).
+    let mut buf = [0u8; 64];
+    match tty::read(idx, &mut buf, true) {
+        Ok(0) | Err(_) => {}
+        Ok(n) => {
+            klog_info!("TTY_TEST: BUG - read {} bytes after TCIFLUSH", n);
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 5: TCFLSH with TCOFLUSH resets output inflight.
+pub fn test_fp5_tcflush_output() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+
+    // Artificially set inflight counter.
+    crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(5, Ordering::Release);
+
+    // Flush output.
+    tty::tcflush(idx, slopos_abi::syscall::TCOFLUSH).unwrap();
+
+    let val = crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire);
+    if val != 0 {
+        klog_info!("TTY_TEST: BUG - inflight={} after TCOFLUSH", val);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 5: TCFLSH with TCIOFLUSH clears both input and output.
+pub fn test_fp5_tcflush_both() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+    drain_tty_nonblock(idx);
+
+    // Push data.
+    tty::push_input(idx, b'A');
+    tty::push_input(idx, b'\n');
+
+    // Set inflight.
+    crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(3, Ordering::Release);
+
+    // Flush both.
+    tty::tcflush(idx, slopos_abi::syscall::TCIOFLUSH).unwrap();
+
+    // Input cleared.
+    let mut buf = [0u8; 64];
+    match tty::read(idx, &mut buf, true) {
+        Ok(0) | Err(_) => {}
+        Ok(n) => {
+            klog_info!("TTY_TEST: BUG - read {} bytes after TCIOFLUSH", n);
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    // Output cleared.
+    let val = crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire);
+    if val != 0 {
+        klog_info!("TTY_TEST: BUG - inflight={} after TCIOFLUSH", val);
+        return TestResult::Fail;
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 5: TCFLSH with invalid argument returns error.
+pub fn test_fp5_tcflush_invalid_arg() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    match tty::tcflush(idx, 99) {
+        Err(TtyError::InvalidArg) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcflush(99) = {:?}, expected InvalidArg",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 5: TCSBRK with arg=0 returns success (no-op).
+pub fn test_fp5_tcsbrk_noop() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    match tty::tcsbrk(idx, 0) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcsbrk(0) failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 5: TCSBRK with arg>0 drains output (succeeds).
+pub fn test_fp5_tcsbrk_drain() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    match tty::tcsbrk(idx, 1) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcsbrk(1) failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 5: TCXONC with all four actions returns success.
+pub fn test_fp5_tcxonc_all_actions() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    for action in 0..4 {
+        match tty::tcxonc(idx, action) {
+            Ok(()) => {}
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - tcxonc({}) failed: {:?}", action, e);
+                return TestResult::Fail;
+            }
+        }
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -12498,5 +12690,14 @@ slopos_lib::define_test_suite!(
         test_fp4_speed_fields_populated,
         test_fp4_speed_follows_baud_change,
         test_fp4_cread_value_preserved,
+        // Finishing Phase 5: Missing Ioctls (TCFLSH, TCSBRK, TCXONC)
+        test_fp5_ioctl_constants,
+        test_fp5_tcflush_input,
+        test_fp5_tcflush_output,
+        test_fp5_tcflush_both,
+        test_fp5_tcflush_invalid_arg,
+        test_fp5_tcsbrk_noop,
+        test_fp5_tcsbrk_drain,
+        test_fp5_tcxonc_all_actions,
     ]
 );

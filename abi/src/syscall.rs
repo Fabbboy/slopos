@@ -592,6 +592,19 @@ pub const TCGETS: u64 = 0x5401;
 pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
+// Finishing Phase 5: Missing ioctls.
+pub const TCSBRK: u64 = 0x5409;
+pub const TCXONC: u64 = 0x540A;
+pub const TCFLSH: u64 = 0x540B;
+// tcflush() queue selectors.
+pub const TCIFLUSH: i32 = 0;
+pub const TCOFLUSH: i32 = 1;
+pub const TCIOFLUSH: i32 = 2;
+// tcflow() action selectors.
+pub const TCOOFF: i32 = 0;
+pub const TCOON: i32 = 1;
+pub const TCIOFF: i32 = 2;
+pub const TCION: i32 = 3;
 pub const TIOCGPGRP: u64 = 0x540F;
 pub const TIOCSPGRP: u64 = 0x5410;
 pub const TIOCGPTN: u64 = 0x8004_5430;

@@ -3,9 +3,9 @@
 use core::ffi::c_int;
 
 use slopos_abi::syscall::{
-    FIONREAD, POLLIN, POLLOUT, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGETD, TIOCGPGRP, TIOCGPTLCK,
-    TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK,
-    UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCGETD,
+    TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCPKT, TIOCSCTTY, TIOCSETD,
+    TIOCSPGRP, TIOCSPTLCK, UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -527,6 +527,22 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             } else {
                 ctx.err()
             }
+        }
+        // Finishing Phase 5: Missing ioctls.
+        TCFLSH => {
+            let queue = arg as i32;
+            let rc = tty::tcflush(tty_idx, queue);
+            if rc == 0 { ctx.ok(0) } else { ctx.err() }
+        }
+        TCSBRK => {
+            let brk_arg = arg as i32;
+            let rc = tty::tcsbrk(tty_idx, brk_arg);
+            if rc == 0 { ctx.ok(0) } else { ctx.err() }
+        }
+        TCXONC => {
+            let action = arg as i32;
+            let rc = tty::tcxonc(tty_idx, action);
+            if rc == 0 { ctx.ok(0) } else { ctx.err() }
         }
         _ => ctx.err(),
     }
