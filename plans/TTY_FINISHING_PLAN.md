@@ -51,7 +51,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **DONE** ✅ |
 | 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **DONE** ✅ |
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **DONE** ✅ |
-| 12 | `no_room`-style overflow recovery | P1 | Medium | **TODO** |
+| 12 | `no_room`-style overflow recovery | P1 | Medium | **DONE** ✅ |
 | 13 | Output drain semantics hardening | P2 | Small | **TODO** |
 
 ---
@@ -806,7 +806,7 @@ Current output processing already converts `\t` to spaces, but does not gate beh
 
 ## 15. Phase 12: no_room-style Overflow Recovery (Tier 3)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅ — Added `no_room: bool` and `overflow_count: u32` fields to both `LineDisc` and `RawDisc`. `push_cooked()` and `RawDisc::input_char()` set the flag and increment the counter on buffer-full. `check_no_room_recovery()` clears the flag when occupancy falls to `THROTTLE_LOW_WATER` (1024 bytes). `flush_input()` and `flush_all()` reset both fields. Added `no_room()`, `overflow_count()`, and `check_no_room_recovery()` to `LdiscOps` trait with dispatch through `dispatch_ldisc!`. Wired recovery into `tty_read()` at three wake sites: packet-mode drain, normal read drain, and after-lock-drop path — each calls `check_no_room_recovery()` and wakes `TTY_INPUT_WAITERS`/`TTY_POLL_WAITERS` on the local slot. 14 regression tests added.
 
 > **Priority**: P1 resilience — IMAXBEL + throttle prevent most loss, but explicit "buffer has no room" state improves recovery clarity and behavior under sustained pressure.
 > **Principle**: Follow Linux's `no_room` concept, adapted to SlopOS's per-slot lock model.
@@ -831,13 +831,13 @@ When cooked input is full, bytes are dropped with IMAXBEL feedback. There is no 
 - Regression: IMAXBEL behavior preserved.
 - `just build` + `just test` gate.
 
-### 15.4 Files expected to change
+### 15.4 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/ldisc.rs` | Add no_room-style state and recovery logic |
-| `drivers/src/tty/mod.rs` | Integrate no_room transitions with wake/unthrottle points |
-| `drivers/src/tty_tests.rs` | Add overflow recovery tests |
+| `drivers/src/tty/ldisc.rs` | Added `no_room: bool` + `overflow_count: u32` to `LineDisc` and `RawDisc`, set on buffer-full in `push_cooked()`/`input_char()`, cleared in `flush_input()`/`flush_all()`, `check_no_room_recovery()` at `THROTTLE_LOW_WATER`, accessors added to `LdiscOps` trait + both impls + `dispatch_ldisc!` |
+| `drivers/src/tty/mod.rs` | Wired `no_room_recovered` into `tty_read()` at 3 wake sites: packet-mode drain, normal read drain, after-lock-drop — calls `check_no_room_recovery()` and wakes `TTY_INPUT_WAITERS`/`TTY_POLL_WAITERS` on recovery |
+| `drivers/src/tty_tests.rs` | Added 14 tests (`test_fp12_*`): initial false, set on full, not set before full, overflow count increments, overflow count saturates, clears on drain below threshold, stays above threshold, flush_input clears, flush_all clears, fill/drain cycle, RawDisc no_room, IMAXBEL preserved, RawDisc recovery, LdiscKind dispatch |
 
 ---
 

@@ -532,6 +532,9 @@ pub fn read_with_attach(
         // Finishing Phase 2: Track if this read unthrottled the TTY so we
         // can wake the master-side writer after releasing the lock.
         let mut unthrottled_peer: Option<usize> = None;
+        // Finishing Phase 12: Track if no_room recovery happened so we
+        // can wake producers after releasing the lock.
+        let mut no_room_recovered = false;
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -604,7 +607,7 @@ pub fn read_with_attach(
                             .ixoff_check_xon()
                             .map(|xon| (tty.driver.id(), xon));
                         // Finishing Phase 2: Unthrottle after packet-mode read.
-                        let pkt_unthrottled_peer = if tty.throttled
+                        let mut pkt_unthrottled_peer = if tty.throttled
                             && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                         {
                             tty.throttled = false;
@@ -615,6 +618,13 @@ pub fn read_with_attach(
                         } else {
                             None
                         };
+                        // Finishing Phase 12: No-room recovery after packet-mode drain.
+                        let pkt_no_room_recovered = tty.ldisc.check_no_room_recovery();
+                        if pkt_no_room_recovered && pkt_unthrottled_peer.is_none() {
+                            if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                                pkt_unthrottled_peer = Some(peer.idx.0 as usize);
+                            }
+                        }
                         // Canonical mode: return immediately with prefix.
                         drop(guard);
                         if let Some((driver_id, xon)) = ixoff_xon {
@@ -631,6 +641,11 @@ pub fn read_with_attach(
                                 TTY_OUTPUT_WAITERS[ps].wake_all();
                                 TTY_POLL_WAITERS[ps].wake_all();
                             }
+                        }
+                        // Finishing Phase 12: Wake local waiters on no_room recovery.
+                        if pkt_no_room_recovered {
+                            TTY_INPUT_WAITERS[slot].wake_all();
+                            TTY_POLL_WAITERS[slot].wake_all();
                         }
                         return Ok(total);
                     }
@@ -654,6 +669,15 @@ pub fn read_with_attach(
                     tty.throttled = false;
                     if let TtyDriverKind::PtySlave { peer } = &tty.driver {
                         unthrottled_peer = Some(peer.idx.0 as usize);
+                    }
+                }
+                // Finishing Phase 12: No-room recovery after normal drain.
+                if got > 0 && tty.ldisc.check_no_room_recovery() {
+                    no_room_recovered = true;
+                    if unthrottled_peer.is_none() {
+                        if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                            unthrottled_peer = Some(peer.idx.0 as usize);
+                        }
                     }
                 }
             }
@@ -681,6 +705,11 @@ pub fn read_with_attach(
                             TTY_OUTPUT_WAITERS[ps].wake_all();
                             TTY_POLL_WAITERS[ps].wake_all();
                         }
+                    }
+                    // Finishing Phase 12: Wake local waiters on no_room recovery.
+                    if no_room_recovered {
+                        TTY_INPUT_WAITERS[slot].wake_all();
+                        TTY_POLL_WAITERS[slot].wake_all();
                     }
                     return Ok(total);
                 }
@@ -802,6 +831,12 @@ pub fn read_with_attach(
                 TTY_OUTPUT_WAITERS[ps].wake_all();
                 TTY_POLL_WAITERS[ps].wake_all();
             }
+        }
+
+        // Finishing Phase 12: Wake local waiters on no_room recovery.
+        if no_room_recovered {
+            TTY_INPUT_WAITERS[slot].wake_all();
+            TTY_POLL_WAITERS[slot].wake_all();
         }
 
         if nonblock {

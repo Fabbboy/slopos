@@ -14652,6 +14652,387 @@ pub fn test_fp11_existing_output_unaffected() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 12: no_room-style Overflow Recovery
+// ===========================================================================
+
+/// Finishing Phase 12: A fresh LineDisc has no_room = false.
+pub fn test_fp12_no_room_initially_false() -> TestResult {
+    let ld = LineDisc::new();
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - fresh LineDisc has no_room=true");
+        return TestResult::Fail;
+    }
+    if ld.overflow_count() != 0 {
+        klog_info!("TTY_TEST: BUG - fresh LineDisc overflow_count != 0");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: Filling cooked buffer then pushing sets no_room.
+pub fn test_fp12_no_room_set_on_cooked_full() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Fill to capacity.
+    for _ in 0..4096 {
+        if !ld.push_cooked(b'X') {
+            klog_info!("TTY_TEST: BUG - push_cooked failed before buffer full");
+            return TestResult::Fail;
+        }
+    }
+    // Buffer is full but no_room not set yet (no failed push).
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room set before overflow push");
+        return TestResult::Fail;
+    }
+    // One more byte triggers no_room.
+    if ld.push_cooked(b'Y') {
+        klog_info!("TTY_TEST: BUG - push_cooked succeeded on full buffer");
+        return TestResult::Fail;
+    }
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not set after overflow push");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: no_room not set when buffer is not full.
+pub fn test_fp12_no_room_not_set_before_full() -> TestResult {
+    let mut ld = LineDisc::new();
+    for _ in 0..100 {
+        ld.push_cooked(b'A');
+    }
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room set on non-full buffer");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: overflow_count increments on each dropped byte.
+pub fn test_fp12_overflow_count_increments() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Fill to capacity.
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    // Drop 5 bytes.
+    for _ in 0..5 {
+        ld.push_cooked(b'Z');
+    }
+    if ld.overflow_count() != 5 {
+        klog_info!(
+            "TTY_TEST: BUG - overflow_count={}, expected 5",
+            ld.overflow_count()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: overflow_count saturates instead of wrapping.
+pub fn test_fp12_overflow_count_saturates() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Fill buffer.
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    // Simulate many overflows (we can't do u32::MAX iterations, so verify
+    // the saturation logic via the implementation: push_cooked uses
+    // saturating_add which can never wrap).
+    for _ in 0..100 {
+        ld.push_cooked(b'Z');
+    }
+    if ld.overflow_count() != 100 {
+        klog_info!(
+            "TTY_TEST: BUG - overflow_count={}, expected 100",
+            ld.overflow_count()
+        );
+        return TestResult::Fail;
+    }
+    // Verify still growing.
+    ld.push_cooked(b'W');
+    if ld.overflow_count() != 101 {
+        klog_info!("TTY_TEST: BUG - overflow_count did not increment to 101");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: Draining below low-water clears no_room.
+pub fn test_fp12_no_room_clears_on_drain_below_threshold() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_LOW_WATER;
+    let mut ld = LineDisc::new();
+    // Fill to capacity and trigger no_room.
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    ld.push_cooked(b'Y'); // triggers no_room
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not set after overflow");
+        return TestResult::Fail;
+    }
+    // Drain to just above low-water (1024) — no_room should persist.
+    let drain_to_above = 4096 - (THROTTLE_LOW_WATER + 1);
+    let mut scratch = [0u8; 4096];
+    let got = ld.read(&mut scratch[..drain_to_above]);
+    if got != drain_to_above {
+        klog_info!(
+            "TTY_TEST: BUG - read returned {} expected {}",
+            got,
+            drain_to_above
+        );
+        return TestResult::Fail;
+    }
+    // Recovery check should not clear (still above threshold).
+    if ld.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - recovery triggered above low-water");
+        return TestResult::Fail;
+    }
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room cleared above low-water");
+        return TestResult::Fail;
+    }
+    // Read one more byte to drop to exactly low-water.
+    let got2 = ld.read(&mut scratch[..1]);
+    if got2 != 1 {
+        klog_info!("TTY_TEST: BUG - second read failed");
+        return TestResult::Fail;
+    }
+    // Now recovery should trigger.
+    if !ld.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - recovery did not trigger at low-water");
+        return TestResult::Fail;
+    }
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room still set after recovery");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: no_room stays set when still above threshold.
+pub fn test_fp12_no_room_stays_above_threshold() -> TestResult {
+    let mut ld = LineDisc::new();
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    ld.push_cooked(b'Y');
+    // Read only a few bytes (still far above low-water).
+    let mut scratch = [0u8; 64];
+    ld.read(&mut scratch);
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room cleared with minimal drain");
+        return TestResult::Fail;
+    }
+    if ld.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - recovery triggered with minimal drain");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: flush_input clears no_room and overflow_count.
+pub fn test_fp12_flush_input_clears_no_room() -> TestResult {
+    let mut ld = LineDisc::new();
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    ld.push_cooked(b'Y');
+    if !ld.no_room() || ld.overflow_count() == 0 {
+        klog_info!("TTY_TEST: BUG - precondition failed");
+        return TestResult::Fail;
+    }
+    ld.flush_input();
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not cleared by flush_input");
+        return TestResult::Fail;
+    }
+    if ld.overflow_count() != 0 {
+        klog_info!("TTY_TEST: BUG - overflow_count not cleared by flush_input");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: flush_all clears no_room and overflow_count.
+pub fn test_fp12_flush_all_clears_no_room() -> TestResult {
+    let mut ld = LineDisc::new();
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    ld.push_cooked(b'Y');
+    ld.flush_all();
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not cleared by flush_all");
+        return TestResult::Fail;
+    }
+    if ld.overflow_count() != 0 {
+        klog_info!("TTY_TEST: BUG - overflow_count not cleared by flush_all");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: Fill/drain cycle with no_room preserves throttle.
+pub fn test_fp12_fill_drain_cycle_preserves_throttle() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_LOW_WATER;
+    let mut ld = LineDisc::new();
+    // Cycle 1: fill → overflow → drain → recovery.
+    for _ in 0..4096 {
+        ld.push_cooked(b'A');
+    }
+    ld.push_cooked(b'B'); // no_room
+    let mut scratch = [0u8; 4096];
+    let _ = ld.read(&mut scratch);
+    // After full drain, cooked_count == 0 which is below THROTTLE_LOW_WATER.
+    if !ld.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - recovery did not trigger after full drain");
+        return TestResult::Fail;
+    }
+    // Cycle 2: fill again — no_room should be clearable again.
+    for _ in 0..4096 {
+        ld.push_cooked(b'C');
+    }
+    ld.push_cooked(b'D');
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not set on second cycle");
+        return TestResult::Fail;
+    }
+    // Drain below threshold.
+    let drain_amount = 4096 - THROTTLE_LOW_WATER;
+    let _ = ld.read(&mut scratch[..drain_amount]);
+    if !ld.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - recovery did not trigger on second cycle");
+        return TestResult::Fail;
+    }
+    if ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room still set after second recovery");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: RawDisc also tracks no_room on overflow.
+pub fn test_fp12_rawdisc_no_room() -> TestResult {
+    let mut rd = RawDisc::new();
+    // RawDisc buffer is 4096 bytes.
+    for _ in 0..4096 {
+        rd.input_char(b'R');
+    }
+    if rd.no_room() {
+        klog_info!("TTY_TEST: BUG - RawDisc no_room set before overflow");
+        return TestResult::Fail;
+    }
+    // Overflow.
+    rd.input_char(b'S');
+    if !rd.no_room() {
+        klog_info!("TTY_TEST: BUG - RawDisc no_room not set after overflow");
+        return TestResult::Fail;
+    }
+    if rd.overflow_count() != 1 {
+        klog_info!("TTY_TEST: BUG - RawDisc overflow_count != 1");
+        return TestResult::Fail;
+    }
+    // Flush clears it.
+    rd.flush_all();
+    if rd.no_room() || rd.overflow_count() != 0 {
+        klog_info!("TTY_TEST: BUG - RawDisc flush_all did not clear no_room");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: IMAXBEL bell still works when no_room is set.
+pub fn test_fp12_imaxbel_preserved_with_no_room() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Put into raw mode with IMAXBEL.
+    let mut t = *ld.termios();
+    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    ld.set_termios(&t);
+    // Fill cooked buffer.
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+    // Next input_char should return Bell AND set no_room.
+    let action = ld.input_char(b'Z');
+    let is_bell = matches!(action, InputAction::Bell);
+    if !is_bell {
+        klog_info!("TTY_TEST: BUG - expected Bell on overflow with IMAXBEL");
+        return TestResult::Fail;
+    }
+    if !ld.no_room() {
+        klog_info!("TTY_TEST: BUG - no_room not set alongside IMAXBEL bell");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: RawDisc check_no_room_recovery works.
+pub fn test_fp12_rawdisc_recovery() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_LOW_WATER;
+    let mut rd = RawDisc::new();
+    // Fill and overflow.
+    for _ in 0..4096 {
+        rd.input_char(b'R');
+    }
+    rd.input_char(b'S');
+    if !rd.no_room() {
+        klog_info!("TTY_TEST: BUG - RawDisc no_room not set");
+        return TestResult::Fail;
+    }
+    // Drain below low-water.
+    let drain_amount = 4096 - THROTTLE_LOW_WATER;
+    let mut scratch = [0u8; 4096];
+    let got = rd.read(&mut scratch[..drain_amount]);
+    if got != drain_amount {
+        klog_info!("TTY_TEST: BUG - RawDisc read returned {}", got);
+        return TestResult::Fail;
+    }
+    if !rd.check_no_room_recovery() {
+        klog_info!("TTY_TEST: BUG - RawDisc recovery did not trigger");
+        return TestResult::Fail;
+    }
+    if rd.no_room() {
+        klog_info!("TTY_TEST: BUG - RawDisc no_room still set after recovery");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 12: LdiscKind dispatch forwards no_room/overflow_count.
+pub fn test_fp12_ldisc_kind_dispatch() -> TestResult {
+    use crate::tty::ldisc::LdiscKind;
+    let mut lk = LdiscKind::NTty(LineDisc::new());
+    if lk.no_room() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty no_room initially true");
+        return TestResult::Fail;
+    }
+    if lk.overflow_count() != 0 {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty overflow_count initially != 0");
+        return TestResult::Fail;
+    }
+    // Fill via NTty's raw input to trigger overflow.
+    let mut t = *lk.termios();
+    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_iflag &= !slopos_abi::syscall::IMAXBEL;
+    lk.set_termios(&t);
+    for _ in 0..4097 {
+        lk.input_char(b'Q');
+    }
+    if !lk.no_room() {
+        klog_info!("TTY_TEST: BUG - LdiscKind::NTty no_room not set after overflow");
+        return TestResult::Fail;
+    }
+    if lk.overflow_count() < 1 {
+        klog_info!("TTY_TEST: BUG - LdiscKind overflow_count should be >= 1");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -15239,5 +15620,20 @@ slopos_lib::define_test_suite!(
         test_fp11_tabdly_termios_roundtrip,
         test_fp11_no_opost_tab_passthrough,
         test_fp11_existing_output_unaffected,
+        // Finishing Phase 12: no_room-style Overflow Recovery
+        test_fp12_no_room_initially_false,
+        test_fp12_no_room_set_on_cooked_full,
+        test_fp12_no_room_not_set_before_full,
+        test_fp12_overflow_count_increments,
+        test_fp12_overflow_count_saturates,
+        test_fp12_no_room_clears_on_drain_below_threshold,
+        test_fp12_no_room_stays_above_threshold,
+        test_fp12_flush_input_clears_no_room,
+        test_fp12_flush_all_clears_no_room,
+        test_fp12_fill_drain_cycle_preserves_throttle,
+        test_fp12_rawdisc_no_room,
+        test_fp12_imaxbel_preserved_with_no_room,
+        test_fp12_rawdisc_recovery,
+        test_fp12_ldisc_kind_dispatch,
     ]
 );

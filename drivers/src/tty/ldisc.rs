@@ -122,6 +122,9 @@ pub(crate) trait LdiscOps {
     fn ixoff_check_xon(&mut self) -> Option<u8>;
     fn input_full(&self) -> bool;
     fn should_wake_reader(&mut self) -> bool;
+    fn no_room(&self) -> bool;
+    fn overflow_count(&self) -> u32;
+    fn check_no_room_recovery(&mut self) -> bool;
 }
 
 /// Generates delegating `impl LdiscKind` methods that forward to the inner
@@ -407,6 +410,19 @@ pub struct LineDisc {
     /// this counter crosses `WAKEUP_CHARS` (or an immediate-wake condition
     /// such as buffer-near-full or canonical line completion applies).
     wake_chars_pending: usize,
+
+    // -- Finishing Phase 12: no_room-style overflow recovery --
+    /// Sticky overflow flag.  Set when `push_cooked()` fails because the
+    /// cooked buffer is completely full.  Cleared when a read drains
+    /// occupancy below `THROTTLE_LOW_WATER` (via `check_no_room_recovery()`)
+    /// or on `flush_input()`/`flush_all()`.  Allows deterministic recovery
+    /// wakeups so blocked producers retry after the reader drains.
+    no_room: bool,
+
+    /// Cumulative count of bytes dropped due to cooked buffer overflow.
+    /// Incremented by `push_cooked()` on each failed push.  Reset on
+    /// `flush_input()`/`flush_all()`.  Diagnostic-only.
+    overflow_count: u32,
 }
 
 impl LineDisc {
@@ -469,6 +485,8 @@ impl LineDisc {
             pending_reprint: false,
             in_erase_seq: false,
             wake_chars_pending: 0,
+            no_room: false,
+            overflow_count: 0,
         }
     }
 
@@ -598,6 +616,32 @@ impl LineDisc {
         self.cooked_count >= COOKED_BUF_SIZE && self.edit_len >= EDIT_BUF_SIZE
     }
 
+    /// Finishing Phase 12: Returns `true` if the cooked buffer has
+    /// entered overflow state (at least one byte was dropped).
+    pub fn no_room(&self) -> bool {
+        self.no_room
+    }
+
+    /// Finishing Phase 12: Returns the cumulative count of bytes
+    /// dropped due to cooked buffer overflow.
+    pub fn overflow_count(&self) -> u32 {
+        self.overflow_count
+    }
+
+    /// Finishing Phase 12: Check and clear no-room recovery condition.
+    ///
+    /// Returns `true` if `no_room` was set and occupancy has dropped
+    /// below `THROTTLE_LOW_WATER`, clearing the flag.  The caller
+    /// should wake relevant waiters to re-arm the producer path.
+    pub fn check_no_room_recovery(&mut self) -> bool {
+        if self.no_room && self.cooked_count <= THROTTLE_LOW_WATER {
+            self.no_room = false;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Finishing Phase 10: Decide whether the caller should wake readers.
     ///
     /// In **canonical mode**, returns `true` when at least one complete line
@@ -650,6 +694,8 @@ impl LineDisc {
         self.pending_reprint = false;
         self.in_erase_seq = false;
         self.wake_chars_pending = 0;
+        self.no_room = false;
+        self.overflow_count = 0;
     }
 
     pub fn flush_input(&mut self) {
@@ -664,6 +710,8 @@ impl LineDisc {
         self.pending_reprint = false;
         self.in_erase_seq = false;
         self.wake_chars_pending = 0;
+        self.no_room = false;
+        self.overflow_count = 0;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -1214,28 +1262,26 @@ impl LineDisc {
     /// ISIG signal processing and IXON flow control are already handled
     /// upstream in `input_char()` before this method is called.
     fn extproc_input(&mut self, c: u8) -> InputAction {
-        // Buffer-full guard (same as raw_input).
-        if self.cooked_count >= COOKED_BUF_SIZE {
+        // Finishing Phase 12: Overflow tracking centralised in push_cooked().
+        if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
                 return InputAction::Bell;
             }
             return InputAction::None;
         }
-        self.push_cooked(c);
         // No echo — external processor handles display.
         InputAction::None
     }
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.
     fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
-        // Phase 36: IMAXBEL — ring bell when cooked buffer is full in non-canonical mode.
-        if self.cooked_count >= COOKED_BUF_SIZE {
+        // Finishing Phase 12: Overflow tracking centralised in push_cooked().
+        if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
                 return InputAction::Bell;
             }
             return InputAction::None;
         }
-        self.push_cooked(c);
         if lflag.contains(LocalFlags::ECHO) {
             // ECHOCTL in raw mode.
             if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
@@ -1548,8 +1594,13 @@ impl LineDisc {
     ///
     /// Returns `true` if the byte was enqueued, `false` if the buffer
     /// was full and the byte was dropped (Finishing Phase 3 hardening).
+    ///
+    /// Finishing Phase 12: On failure, sets the `no_room` sticky flag and
+    /// increments `overflow_count` for diagnostics.
     pub(crate) fn push_cooked(&mut self, c: u8) -> bool {
         if self.cooked_count >= COOKED_BUF_SIZE {
+            self.no_room = true;
+            self.overflow_count = self.overflow_count.saturating_add(1);
             return false;
         }
         self.cooked[self.cooked_head] = c;
@@ -1699,6 +1750,18 @@ impl LdiscOps for LineDisc {
     fn should_wake_reader(&mut self) -> bool {
         self.should_wake_reader()
     }
+    #[inline]
+    fn no_room(&self) -> bool {
+        self.no_room()
+    }
+    #[inline]
+    fn overflow_count(&self) -> u32 {
+        self.overflow_count()
+    }
+    #[inline]
+    fn check_no_room_recovery(&mut self) -> bool {
+        self.check_no_room_recovery()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,6 +1783,12 @@ pub struct RawDisc {
     count: usize,
     // Finishing Phase 10: Input wake batching (same as LineDisc).
     wake_chars_pending: usize,
+
+    // -- Finishing Phase 12: no_room-style overflow recovery --
+    /// Sticky overflow flag (see `LineDisc::no_room` for full docs).
+    no_room: bool,
+    /// Cumulative overflow byte count (see `LineDisc::overflow_count`).
+    overflow_count: u32,
 }
 
 impl RawDisc {
@@ -1744,6 +1813,8 @@ impl RawDisc {
             tail: 0,
             count: 0,
             wake_chars_pending: 0,
+            no_room: false,
+            overflow_count: 0,
         }
     }
 
@@ -1791,6 +1862,26 @@ impl RawDisc {
         self.count >= RAW_BUF_SIZE
     }
 
+    /// Finishing Phase 12: Returns `true` if overflow state is active.
+    pub fn no_room(&self) -> bool {
+        self.no_room
+    }
+
+    /// Finishing Phase 12: Returns cumulative overflow byte count.
+    pub fn overflow_count(&self) -> u32 {
+        self.overflow_count
+    }
+
+    /// Finishing Phase 12: Check and clear no-room recovery condition.
+    pub fn check_no_room_recovery(&mut self) -> bool {
+        if self.no_room && self.count <= THROTTLE_LOW_WATER {
+            self.no_room = false;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Finishing Phase 10: Decide whether the caller should wake readers.
     ///
     /// RawDisc is always non-canonical.  Batches wakeups: returns `true`
@@ -1813,6 +1904,8 @@ impl RawDisc {
         self.tail = 0;
         self.count = 0;
         self.wake_chars_pending = 0;
+        self.no_room = false;
+        self.overflow_count = 0;
     }
 
     pub fn flush_input(&mut self) {
@@ -1820,6 +1913,8 @@ impl RawDisc {
         self.tail = 0;
         self.count = 0;
         self.wake_chars_pending = 0;
+        self.no_room = false;
+        self.overflow_count = 0;
     }
 
     pub fn edit_content(&self) -> &[u8] {
@@ -1842,6 +1937,10 @@ impl RawDisc {
             self.head = (self.head + 1) % RAW_BUF_SIZE;
             self.count += 1;
             self.wake_chars_pending += 1;
+        } else {
+            // Finishing Phase 12: Record overflow state.
+            self.no_room = true;
+            self.overflow_count = self.overflow_count.saturating_add(1);
         }
         InputAction::None
     }
@@ -1934,6 +2033,18 @@ impl LdiscOps for RawDisc {
     fn should_wake_reader(&mut self) -> bool {
         self.should_wake_reader()
     }
+    #[inline]
+    fn no_room(&self) -> bool {
+        self.no_room()
+    }
+    #[inline]
+    fn overflow_count(&self) -> u32 {
+        self.overflow_count()
+    }
+    #[inline]
+    fn check_no_room_recovery(&mut self) -> bool {
+        self.check_no_room_recovery()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2001,5 +2112,8 @@ impl LdiscKind {
         fn ixoff_check_xon(&mut self) -> Option<u8>;
         fn input_full(&self) -> bool;
         fn should_wake_reader(&mut self) -> bool;
+        fn no_room(&self) -> bool;
+        fn overflow_count(&self) -> u32;
+        fn check_no_room_recovery(&mut self) -> bool;
     }
 }
