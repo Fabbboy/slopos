@@ -611,10 +611,10 @@ impl VConsoleState {
     }
 
     // -----------------------------------------------------------------------
-    // Legacy write_byte (kept for backward compat / direct callers)
+    // Simple byte-level output (used by integration tests)
     // -----------------------------------------------------------------------
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Called by tty_tests — not visible to the lib build.
     pub(crate) fn write_byte(&mut self, b: u8) {
         match b {
             b'\n' => {

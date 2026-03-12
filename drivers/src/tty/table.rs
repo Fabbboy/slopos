@@ -104,7 +104,7 @@ pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }
 ///
 /// Allocates:
 /// - TTY 0  → SerialConsoleDriver (COM1)
-/// - TTY 1  → VConsoleDriver (PS/2 + framebuffer, stub)
+/// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
 pub fn tty_table_init() {
     {
         let mut slot = TTY_SLOTS[0].lock();

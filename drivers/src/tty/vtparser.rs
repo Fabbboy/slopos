@@ -121,18 +121,6 @@ impl VtParser {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.state = State::Ground;
-        self.params = [0; MAX_PARAMS];
-        self.param_count = 0;
-        self.current_param = 0;
-        self.has_digit = false;
-        self.private_mode = false;
-        self.pending_count = 0;
-        self.pending_idx = 0;
-    }
-
     /// Feed one byte into the parser.  Returns a single `VtAction`.
     ///
     /// When a CSI `m` (SGR) sequence carries multiple parameters, the first
