@@ -282,12 +282,23 @@ fn tty_open_pty_slave_adapter(tty_index: TtyIndex) -> i32 {
     }
 }
 
-fn tty_write_bytes_adapter(tty_index: TtyIndex, buf: *const u8, len: usize) -> usize {
+fn tty_write_bytes_adapter(
+    tty_index: TtyIndex,
+    buf: *const u8,
+    len: usize,
+    nonblock: bool,
+) -> isize {
     if buf.is_null() || len == 0 {
         return 0;
     }
     let data = unsafe { core::slice::from_raw_parts(buf, len) };
-    tty::write(tty_index, data).unwrap_or(0)
+    match tty::write(tty_index, data, nonblock) {
+        Ok(n) => n as isize,
+        Err(tty::TtyError::WouldBlock) => -11, // EAGAIN
+        Err(tty::TtyError::HungUp) => -5,      // EIO
+        Err(tty::TtyError::Restart) => -512,   // ERESTARTSYS (internal)
+        Err(_) => -1,
+    }
 }
 
 fn tty_poll_events_adapter(tty_index: TtyIndex, requested: u16) -> u16 {

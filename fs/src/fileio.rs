@@ -1157,9 +1157,10 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
 
             // TTY descriptors: route through the TTY subsystem (output processing).
             if let Some(tty_idx) = desc.tty_index {
+                let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
                 drop(guard);
-                let written = tty::write_bytes(tty_idx, buffer as *const u8, count);
-                return written as ssize_t;
+                let result = tty::write_bytes(tty_idx, buffer as *const u8, count, is_nonblock);
+                return result as ssize_t;
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {

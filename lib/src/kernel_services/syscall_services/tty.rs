@@ -18,7 +18,7 @@ crate::define_service! {
         get_foreground_pgrp(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
         get_session_id(tty_index: slopos_abi::syscall::TtyIndex) -> u32;
         set_foreground_pgrp_checked(tty_index: slopos_abi::syscall::TtyIndex, pgid: u32, caller_sid: u32) -> i32;
-        write_bytes(tty_index: slopos_abi::syscall::TtyIndex, buf: *const u8, len: usize) -> usize;
+        write_bytes(tty_index: slopos_abi::syscall::TtyIndex, buf: *const u8, len: usize, nonblock: bool) -> isize;
         attach_session(tty_index: slopos_abi::syscall::TtyIndex, leader_pid: u32, leader_pgid: u32);
         acquire_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_leader: u32, session_pgid: u32) -> i32;
         release_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_id: u32) -> i32;

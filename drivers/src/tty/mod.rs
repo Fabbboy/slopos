@@ -162,24 +162,23 @@ pub enum TtyError {
 
 impl TtyError {
     /// Map this error to a negative errno value for the syscall boundary.
-    ///
-    /// The returned value follows the Linux errno convention (negative).
     #[inline]
     pub const fn to_errno(self) -> i32 {
+        use slopos_abi::syscall::*;
         match self {
-            TtyError::InvalidIndex => -22,              // EINVAL
-            TtyError::NotAllocated => -6,               // ENXIO
-            TtyError::BackgroundRead => -1,             // signal delivered
-            TtyError::BackgroundWrite => -1,            // signal delivered
-            TtyError::HungUp => -5,                     // EIO
-            TtyError::WouldBlock => -11,                // EAGAIN
-            TtyError::PermissionDenied => -1,           // EPERM
-            TtyError::UnsupportedLineDiscipline => -22, // EINVAL
-            TtyError::CrossSessionDenied => -5,         // EIO
-            TtyError::SignalInterrupt => -4,            // EINTR
-            TtyError::OrphanedProcessGroup => -5,       // EIO
-            TtyError::InvalidArg => -22,                // EINVAL
-            TtyError::Restart => -512,                  // ERESTARTSYS (internal)
+            TtyError::InvalidIndex => ERRNO_EINVAL as i32,
+            TtyError::NotAllocated => ERRNO_ENXIO as i32,
+            TtyError::BackgroundRead => ERRNO_EPERM as i32,
+            TtyError::BackgroundWrite => ERRNO_EPERM as i32,
+            TtyError::HungUp => ERRNO_EIO as i32,
+            TtyError::WouldBlock => ERRNO_EAGAIN as i32,
+            TtyError::PermissionDenied => ERRNO_EPERM as i32,
+            TtyError::UnsupportedLineDiscipline => ERRNO_EINVAL as i32,
+            TtyError::CrossSessionDenied => ERRNO_EIO as i32,
+            TtyError::SignalInterrupt => ERRNO_EINTR as i32,
+            TtyError::OrphanedProcessGroup => ERRNO_EIO as i32,
+            TtyError::InvalidArg => ERRNO_EINVAL as i32,
+            TtyError::Restart => ERRNO_ERESTARTSYS as i32,
         }
     }
 }
@@ -883,7 +882,7 @@ pub fn read_with_attach(
 /// Phase 31: TOSTOP audit — added SIGTTOU blocked/ignored bypass and
 /// orphaned process group → EIO handling to match `tcsetattr` semantics.
 #[must_use]
-pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
+pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
@@ -966,15 +965,33 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     while pos < data.len() {
         // Finishing Phase 2: PTY master throttle back-pressure.
         // If the peer slave is throttled, block until the slave reader
-        // drains enough data to unthrottle.
+        // drains enough data to unthrottle.  Non-blocking writes return
+        // a short write (or EAGAIN if no bytes written yet) instead of
+        // blocking.
         if let Some(peer_slot) = peer_slave_slot {
-            TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+            if nonblock {
                 let guard = TTY_SLOTS[peer_slot].lock();
-                match guard.as_ref() {
-                    Some(tty) => !tty.throttled || tty.hung_up || tty.peer_closed,
-                    None => true,
+                let is_throttled = match guard.as_ref() {
+                    Some(tty) => tty.throttled && !tty.hung_up && !tty.peer_closed,
+                    None => false,
+                };
+                drop(guard);
+                if is_throttled {
+                    return if pos > 0 {
+                        Ok(pos) // short write
+                    } else {
+                        Err(TtyError::WouldBlock)
+                    };
                 }
-            });
+            } else {
+                TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+                    let guard = TTY_SLOTS[peer_slot].lock();
+                    match guard.as_ref() {
+                        Some(tty) => !tty.throttled || tty.hung_up || tty.peer_closed,
+                        None => true,
+                    }
+                });
+            }
             // Re-check hangup after unblock.
             {
                 let guard = TTY_SLOTS[slot].lock();
@@ -993,14 +1010,31 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
         // Phase 21: IXON write-side enforcement.  When the line discipline
         // is stopped (Ctrl+S / VSTOP), block the writer on the per-TTY
         // output wait queue until output is resumed (Ctrl+Q / VSTART or
-        // any key with IXON set).
-        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+        // any key with IXON set).  Non-blocking writes return a short
+        // write (or EAGAIN) instead of blocking.
+        if nonblock {
             let guard = TTY_SLOTS[slot].lock();
-            match guard.as_ref() {
-                Some(tty) => !tty.ldisc.is_stopped(),
-                None => true, // slot gone — let the next lock attempt return NotAllocated
+            let is_stopped = match guard.as_ref() {
+                Some(tty) => tty.ldisc.is_stopped(),
+                None => false,
+            };
+            drop(guard);
+            if is_stopped {
+                return if pos > 0 {
+                    Ok(pos) // short write
+                } else {
+                    Err(TtyError::WouldBlock)
+                };
             }
-        });
+        } else {
+            TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+                let guard = TTY_SLOTS[slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => !tty.ldisc.is_stopped(),
+                    None => true, // slot gone — let the next lock attempt return NotAllocated
+                }
+            });
+        }
 
         let mut out_buf = [0u8; OUT_BUF_CAP];
         let mut out_len = 0;
@@ -1152,79 +1186,6 @@ fn cflag_to_speed(cflag: u32) -> u32 {
     }
 }
 
-/// Reverse of `cflag_to_speed`: map a numeric baud rate to the `c_cflag`
-/// baud-rate bits (`CBAUD` mask).  Returns `None` for unrecognised speeds,
-/// in which case the caller should leave `c_cflag` unchanged (Linux
-/// `termios2` semantics).
-///
-/// This enables the `c_ispeed`/`c_ospeed` → `c_cflag` round-trip required
-/// by programs that set speed via the speed fields instead of manipulating
-/// `c_cflag` bits directly (e.g. `cfsetispeed()`/`cfsetospeed()` in glibc).
-fn speed_to_cflag_bits(speed: u32) -> Option<u32> {
-    use slopos_abi::syscall::*;
-    let bits = match speed {
-        0 => B0,
-        50 => B50,
-        75 => B75,
-        110 => B110,
-        134 => B134,
-        150 => B150,
-        200 => B200,
-        300 => B300,
-        600 => B600,
-        1200 => B1200,
-        1800 => B1800,
-        2400 => B2400,
-        4800 => B4800,
-        9600 => B9600,
-        19200 => B19200,
-        38400 => B38400,
-        57600 => B57600,
-        115200 => B115200,
-        230400 => B230400,
-        460800 => B460800,
-        500000 => B500000,
-        576000 => B576000,
-        921600 => B921600,
-        1000000 => B1000000,
-        1152000 => B1152000,
-        1500000 => B1500000,
-        2000000 => B2000000,
-        2500000 => B2500000,
-        3000000 => B3000000,
-        3500000 => B3500000,
-        4000000 => B4000000,
-        _ => return None,
-    };
-    Some(bits)
-}
-
-/// Merge user-provided `c_ispeed`/`c_ospeed` into `c_cflag` baud-rate bits.
-///
-/// If `c_ospeed` (or `c_ispeed`, if `c_ospeed` is zero) encodes a recognised
-/// baud rate that differs from the rate already in `c_cflag`, the `CBAUD`
-/// bits of `c_cflag` are updated to match.  If neither speed field is set
-/// (both zero), `c_cflag` is returned unchanged.
-///
-/// This matches the Linux `termios2` behaviour where the speed fields take
-/// precedence over the `c_cflag` encoding when both are present.
-fn merge_speed_into_cflag(t: &mut UserTermios) {
-    use slopos_abi::syscall::CBAUD;
-    // Prefer c_ospeed; fall back to c_ispeed.
-    let speed = if t.c_ospeed != 0 {
-        t.c_ospeed
-    } else if t.c_ispeed != 0 {
-        t.c_ispeed
-    } else {
-        return; // no speed override
-    };
-
-    if let Some(bits) = speed_to_cflag_bits(speed) {
-        // Replace only the CBAUD portion, preserving all other c_cflag bits.
-        t.c_cflag = (t.c_cflag & !CBAUD) | bits;
-    }
-}
-
 /// Get termios for a specific TTY.
 ///
 /// Finishing Phase 4: Populates `c_ispeed`/`c_ospeed` from the baud rate
@@ -1334,12 +1295,9 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 /// process group is orphaned, `EIO` is returned instead (there is no
 /// parent to continue a stopped group).
 fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
-    // Review fix: merge c_ispeed/c_ospeed into c_cflag baud-rate bits
-    // before applying, so programs that set speed via the speed fields
-    // (Linux termios2 style) have the correct CBAUD bits stored.
-    let mut merged = *t;
-    merge_speed_into_cflag(&mut merged);
-    let t = &merged;
+    // c_cflag is the authoritative source for baud rate (POSIX).
+    // c_ispeed/c_ospeed are informational fields populated by get_termios;
+    // they do not override c_cflag in the standard set_termios path.
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
