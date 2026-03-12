@@ -40,7 +40,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 remaining ga
 | 4 | c_cflag ABI completion (constants + defaults) | P1 | Small | **TODO** |
 | 5 | Missing ioctls (TCFLSH, TCSBRK, TCXONC) | P1 | Small | **TODO** |
 | 6 | Edit buffer expansion (1024 → 4096) | P2 | Trivial | **TODO** |
-| 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **TODO** |
+| 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **DONE** ✅ |
 
 ---
 
@@ -548,7 +548,7 @@ For a `no_std` kernel running in QEMU with ≥128 MiB RAM, 96 KiB is negligible.
 
 ## 10. Phase 7: Signal Restart Infrastructure (ERESTARTSYS)
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P2 architecture — this is a cross-cutting concern that affects every blocking syscall, not just TTY. The TTY subsystem is the primary consumer, but the fix lives in the syscall return path.
 > **Principle**: Linux's signal restart mechanism allows blocking reads to be transparently restarted after a signal is delivered, if the signal handler was registered with `SA_RESTART`. Without it, every TTY read in userland needs a manual retry loop around `-EINTR`. Programs like readline, vim, less, and bash depend on `SA_RESTART` working correctly.

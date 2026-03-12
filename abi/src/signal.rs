@@ -72,6 +72,7 @@ pub const SA_RESTORER: u64 = 0x04000000;
 pub const SA_SIGINFO: u64 = 0x00000004;
 pub const SA_NODEFER: u64 = 0x40000000;
 pub const SA_RESETHAND: u64 = 0x80000000;
+pub const SA_RESTART: u64 = 0x10000000;
 
 /// User-visible sigaction structure passed via rt_sigaction syscall.
 ///

@@ -45,8 +45,8 @@ use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{LocalFlags, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     clear_session_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
-    is_current_signal_blocked_or_ignored, is_pgrp_orphaned, register_idle_wakeup_callback,
-    scheduler_is_enabled, signal_process_group, signal_session,
+    has_pending_signal, is_current_signal_blocked_or_ignored, is_pgrp_orphaned,
+    register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, signal_session,
 };
 
 use self::driver::{TtyDriverKind, write_driver_unlocked};
@@ -153,6 +153,11 @@ pub enum TtyError {
     OrphanedProcessGroup,
     /// Invalid argument (Finishing Phase 5: bad `tcflush` queue selector).
     InvalidArg,
+    /// Finishing Phase 7: Blocking syscall was interrupted by a signal and
+    /// may be transparently restarted.  Maps to the kernel-internal
+    /// ERESTARTSYS (-512) — the syscall return path converts this to EINTR
+    /// or restarts depending on SA_RESTART.  MUST NEVER reach userland.
+    Restart,
 }
 
 impl TtyError {
@@ -174,6 +179,7 @@ impl TtyError {
             TtyError::SignalInterrupt => -4,            // EINTR
             TtyError::OrphanedProcessGroup => -5,       // EIO
             TtyError::InvalidArg => -22,                // EINVAL
+            TtyError::Restart => -512,                  // ERESTARTSYS (internal)
         }
     }
 }
@@ -802,6 +808,11 @@ pub fn read_with_attach(
 
         // Block on per-TTY wait queue.
         let wait_condition = || {
+            // Finishing Phase 7: Check for pending signals so the wait
+            // breaks out and the read can return ERESTARTSYS.
+            if has_pending_signal() {
+                return true;
+            }
             let (sig, result) = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 match guard.as_mut() {
@@ -839,6 +850,17 @@ pub fn read_with_attach(
         };
         if !wait_ok {
             return if total > 0 { Ok(total) } else { Ok(0) };
+        }
+
+        // Finishing Phase 7: If the wait was broken by a pending signal
+        // rather than data arrival, return partial data (if any) or
+        // ERESTARTSYS so the syscall return path can handle SA_RESTART.
+        if has_pending_signal() {
+            return if total > 0 {
+                Ok(total)
+            } else {
+                Err(TtyError::Restart)
+            };
         }
     }
 }

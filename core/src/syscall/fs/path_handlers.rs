@@ -36,6 +36,11 @@ define_syscall!(syscall_fs_read(ctx, args) requires(let pid: process_id) {
 
     let bytes = file_read_fd(pid, args.arg0 as c_int, tmp.as_mut_ptr() as *mut c_char, capped_len);
     if bytes < 0 {
+        // Finishing Phase 7: Propagate ERESTARTSYS (-512) directly so the
+        // syscall dispatch restart logic can intercept it.
+        if bytes == -512 {
+            return ctx.err_with(slopos_abi::syscall::ERRNO_ERESTARTSYS);
+        }
         return ctx.err();
     }
 

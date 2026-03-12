@@ -6734,6 +6734,7 @@ pub fn test_phase28_tty_error_to_errno() -> TestResult {
         (TtyError::UnsupportedLineDiscipline, -22),
         (TtyError::CrossSessionDenied, -5),
         (TtyError::SignalInterrupt, -4),
+        (TtyError::Restart, -512),
     ];
     for (err, expected) in pairs {
         if err.to_errno() != expected {
@@ -12316,6 +12317,173 @@ pub fn test_fp6_backspace_in_expanded_buffer() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 7: Signal Restart Infrastructure (ERESTARTSYS)
+// ===========================================================================
+
+/// Finishing Phase 7: TtyError::Restart maps to -512 (ERESTARTSYS).
+pub fn test_fp7_restart_error_to_errno() -> TestResult {
+    if TtyError::Restart.to_errno() != -512 {
+        klog_info!(
+            "TTY_TEST: BUG - TtyError::Restart.to_errno()={} expected -512",
+            TtyError::Restart.to_errno()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: TtyError::Restart is distinct from SignalInterrupt.
+pub fn test_fp7_restart_distinct_from_signal_interrupt() -> TestResult {
+    if TtyError::Restart.to_errno() == TtyError::SignalInterrupt.to_errno() {
+        klog_info!("TTY_TEST: BUG - Restart and SignalInterrupt map to same errno");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: ERESTARTSYS constant value matches Linux convention.
+pub fn test_fp7_erestartsys_constant_value() -> TestResult {
+    if slopos_abi::syscall::ERRNO_ERESTARTSYS != (-512i64) as u64 {
+        klog_info!("TTY_TEST: BUG - ERRNO_ERESTARTSYS is not -512");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: ERRNO_EINTR constant value matches Linux convention.
+pub fn test_fp7_eintr_constant_value() -> TestResult {
+    if slopos_abi::syscall::ERRNO_EINTR != (-4i64) as u64 {
+        klog_info!("TTY_TEST: BUG - ERRNO_EINTR is not -4");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: SA_RESTART flag has correct Linux-compatible value.
+pub fn test_fp7_sa_restart_flag_value() -> TestResult {
+    if slopos_abi::signal::SA_RESTART != 0x10000000 {
+        klog_info!(
+            "TTY_TEST: BUG - SA_RESTART=0x{:08X} expected 0x10000000",
+            slopos_abi::signal::SA_RESTART
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: SA_RESTART is distinct from other SA_ flags.
+pub fn test_fp7_sa_restart_distinct() -> TestResult {
+    use slopos_abi::signal::*;
+    let sa_restart = SA_RESTART;
+    if (sa_restart & SA_RESTORER) != 0
+        || (sa_restart & SA_SIGINFO) != 0
+        || (sa_restart & SA_NODEFER) != 0
+        || (sa_restart & SA_RESETHAND) != 0
+    {
+        klog_info!("TTY_TEST: BUG - SA_RESTART overlaps with another SA_ flag");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: SignalInterrupt still maps to EINTR (-4).
+/// Regression: ensure existing behavior is preserved.
+pub fn test_fp7_signal_interrupt_still_eintr() -> TestResult {
+    if TtyError::SignalInterrupt.to_errno() != -4 {
+        klog_info!(
+            "TTY_TEST: BUG - SignalInterrupt.to_errno()={} expected -4",
+            TtyError::SignalInterrupt.to_errno()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: All existing TtyError variants preserve their errno mappings.
+/// Regression test: ensure Phase 7 changes don't alter existing error codes.
+pub fn test_fp7_all_error_variants_preserved() -> TestResult {
+    let pairs: &[(TtyError, i32)] = &[
+        (TtyError::InvalidIndex, -22),
+        (TtyError::NotAllocated, -6),
+        (TtyError::BackgroundRead, -1),
+        (TtyError::BackgroundWrite, -1),
+        (TtyError::HungUp, -5),
+        (TtyError::WouldBlock, -11),
+        (TtyError::PermissionDenied, -1),
+        (TtyError::UnsupportedLineDiscipline, -22),
+        (TtyError::CrossSessionDenied, -5),
+        (TtyError::SignalInterrupt, -4),
+        (TtyError::OrphanedProcessGroup, -5),
+        (TtyError::InvalidArg, -22),
+        (TtyError::Restart, -512),
+    ];
+    for &(err, expected) in pairs {
+        if err.to_errno() != expected {
+            klog_info!(
+                "TTY_TEST: BUG - TtyError::{:?}.to_errno()={} expected {}",
+                err,
+                err.to_errno(),
+                expected
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: Non-blocking read on empty TTY returns WouldBlock, not Restart.
+pub fn test_fp7_nonblock_empty_returns_wouldblock() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Non-blocking read on empty TTY should return WouldBlock.
+    let mut buf = [0u8; 64];
+    match tty::read(idx, &mut buf, true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - nonblock empty read expected WouldBlock, got {:?}",
+                other
+            );
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 7: Read with available data succeeds normally (no ERESTARTSYS).
+pub fn test_fp7_read_with_data_succeeds() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Push data + newline (canonical mode).
+    for &c in b"hello\n" {
+        tty::push_input(idx, c);
+    }
+
+    let mut buf = [0u8; 64];
+    match tty::read(idx, &mut buf, true) {
+        Ok(n) if n == 6 && &buf[..6] == b"hello\n" => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - read with data expected 6 bytes, got {:?}",
+                other
+            );
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -12826,5 +12994,16 @@ slopos_lib::define_test_suite!(
         test_fp6_canonical_input_over_1024,
         test_fp6_large_paste_canonical,
         test_fp6_backspace_in_expanded_buffer,
+        // Finishing Phase 7: Signal Restart Infrastructure (ERESTARTSYS)
+        test_fp7_restart_error_to_errno,
+        test_fp7_restart_distinct_from_signal_interrupt,
+        test_fp7_erestartsys_constant_value,
+        test_fp7_eintr_constant_value,
+        test_fp7_sa_restart_flag_value,
+        test_fp7_sa_restart_distinct,
+        test_fp7_signal_interrupt_still_eintr,
+        test_fp7_all_error_variants_preserved,
+        test_fp7_nonblock_empty_returns_wouldblock,
+        test_fp7_read_with_data_succeeds,
     ]
 );

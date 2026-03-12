@@ -238,6 +238,24 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Finishing Phase 7: Check if the current task has any deliverable (pending
+// and not blocked) signals.  Used by the TTY read path to detect signal
+// interruption and return ERESTARTSYS.
+// ---------------------------------------------------------------------------
+
+fn runtime_has_pending_signal() -> bool {
+    let task = scheduler::scheduler_get_current_task();
+    if task.is_null() {
+        return false;
+    }
+    unsafe {
+        let pending = (*task).signal_pending.load(Ordering::Acquire);
+        let deliverable = pending & !(*task).signal_blocked;
+        deliverable != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 31: Check if a process group is orphaned within a session.
 //
 // A process group is orphaned if no member of the group has a parent that is
@@ -337,6 +355,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     pgrp_exists_in_session: runtime_pgrp_exists_in_session,
     is_current_signal_blocked_or_ignored: runtime_is_current_signal_blocked_or_ignored,
     is_pgrp_orphaned: runtime_is_pgrp_orphaned,
+    has_pending_signal: runtime_has_pending_signal,
     irq_init: irq::init,
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,

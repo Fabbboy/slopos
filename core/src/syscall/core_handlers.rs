@@ -130,6 +130,10 @@ define_syscall!(syscall_user_read(ctx, args) {
 
     let read_len = tty::read_cooked(TtyIndex(0), tmp.as_mut_ptr(), max_len, false);
     if read_len < 0 {
+        // Finishing Phase 7: Propagate ERESTARTSYS directly.
+        if read_len == -512 {
+            return ctx.err_with(slopos_abi::syscall::ERRNO_ERESTARTSYS);
+        }
         return ctx.err();
     }
 

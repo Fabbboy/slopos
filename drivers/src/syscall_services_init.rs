@@ -82,6 +82,7 @@ fn tty_read_with_attach_adapter(
         Err(tty::TtyError::WouldBlock) => -11,
         Err(tty::TtyError::HungUp) => -5,
         Err(tty::TtyError::CrossSessionDenied) => -5, // EIO
+        Err(tty::TtyError::Restart) => -512,          // ERESTARTSYS (internal)
         Err(_) => -1,
     }
 }

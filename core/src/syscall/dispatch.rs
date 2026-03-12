@@ -1,3 +1,7 @@
+use core::sync::atomic::Ordering;
+
+use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
+use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_lib::klog_info;
 
 use crate::sched::save_task_context_from_interrupt_frame;
@@ -85,7 +89,25 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         let handler = unsafe { (*entry).handler };
         if let Some(func) = handler {
             func(task, frame);
+
+            // ---------------------------------------------------------------
+            // Finishing Phase 7: ERESTARTSYS signal restart logic.
+            //
+            // If the handler returned ERESTARTSYS (-512), the blocking
+            // syscall (typically a TTY read) was interrupted by a signal.
+            // We decide here whether to restart transparently or convert
+            // to EINTR, based on the pending signal's SA_RESTART flag.
+            //
+            // This MUST run before deliver_pending_signal so that the
+            // signal frame captures the correct state (either the
+            // restart state or the EINTR state).
+            // ---------------------------------------------------------------
+            handle_erestartsys(task, frame, sysno);
+
             crate::syscall::signal::deliver_pending_signal(task, frame);
+
+            // Safety net: ERESTARTSYS must NEVER leak to userland.
+            debug_assert_erestartsys_not_leaked(frame);
         }
     }
 
@@ -110,5 +132,96 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
         (*task).context.rdi = (*frame).rdi;
         (*task).context.rsi = (*frame).rsi;
         (*task).context.rdx = (*frame).rdx;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Finishing Phase 7: ERESTARTSYS restart handling
+//
+// When a blocking syscall (currently TTY read) is interrupted by a signal,
+// it returns ERESTARTSYS (-512) instead of EINTR.  This function inspects
+// the pending signal that caused the interruption and decides:
+//
+//   - User handler with SA_RESTART: rewind RIP to the `syscall` instruction
+//     and restore RAX to the original syscall number.  When the signal
+//     handler returns via sigreturn, the process transparently re-executes
+//     the syscall.
+//
+//   - User handler without SA_RESTART: convert to EINTR (-4).  The signal
+//     frame will capture this value, and userland sees EINTR after the
+//     handler returns.
+//
+//   - SIG_DFL or SIG_IGN: the signal does not invoke a user handler.
+//     Restart the syscall unconditionally (the signal is either ignored or
+//     its default action will be taken — if that action terminates the
+//     process, the restart is moot).
+//
+//   - No pending signals: restart unconditionally.  The signal was consumed
+//     between the TTY wait and this check (e.g. by concurrent delivery).
+// ---------------------------------------------------------------------------
+
+/// The x86_64 `syscall` instruction is 2 bytes (0F 05).  After `syscall`,
+/// RCX holds the return address (instruction after `syscall`), which the
+/// kernel saves as frame.rip.  Rewinding by 2 bytes points back at the
+/// `syscall` instruction itself, enabling transparent re-execution.
+const SYSCALL_INSN_SIZE: u64 = 2;
+
+fn handle_erestartsys(task: *mut Task, frame: *mut InterruptFrame, sysno: u64) {
+    let result = unsafe { (*frame).rax };
+    if result != ERRNO_ERESTARTSYS {
+        return;
+    }
+
+    unsafe {
+        let pending = (*task).signal_pending.load(Ordering::Acquire);
+        let deliverable = pending & !(*task).signal_blocked;
+
+        if deliverable == 0 {
+            // No deliverable signals — restart the syscall immediately.
+            (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
+            (*frame).rax = sysno;
+            return;
+        }
+
+        // Inspect the signal that deliver_pending_signal will pick (the
+        // lowest-numbered deliverable signal, matching its trailing_zeros
+        // selection).
+        let signum = (deliverable.trailing_zeros() + 1) as u8;
+        let idx = (signum as usize).wrapping_sub(1);
+        let action = (*task).signal_actions[idx];
+
+        let is_user_handler = action.handler != SIG_DFL && action.handler != SIG_IGN;
+
+        if !is_user_handler {
+            // SIG_DFL or SIG_IGN: no user handler will run.
+            // Restart the syscall — if the default action is Terminate,
+            // deliver_pending_signal will kill the process and the
+            // restart is moot.
+            (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
+            (*frame).rax = sysno;
+        } else if (action.flags & SA_RESTART) != 0 {
+            // User handler with SA_RESTART: set up for transparent
+            // restart after the signal handler returns via sigreturn.
+            (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
+            (*frame).rax = sysno;
+        } else {
+            // User handler without SA_RESTART: convert to EINTR.
+            (*frame).rax = (-4i64) as u64;
+        }
+    }
+}
+
+/// Safety net: assert that ERESTARTSYS never leaks to userland.
+/// In debug builds, this panics.  In release builds, it silently converts
+/// to EINTR as a last resort.
+fn debug_assert_erestartsys_not_leaked(frame: *mut InterruptFrame) {
+    let rax = unsafe { (*frame).rax };
+    if rax == ERRNO_ERESTARTSYS {
+        // This should never happen — handle_erestartsys should have
+        // already converted or restarted.  Convert to EINTR as a
+        // safety net.
+        unsafe {
+            (*frame).rax = (-4i64) as u64;
+        }
     }
 }
