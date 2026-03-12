@@ -2025,10 +2025,14 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
 
 /// Start/stop I/O (implements `tcflow()` / `TCXONC` ioctl).
 ///
-/// Stubbed as no-op for all four action codes (TCOOFF/TCOON/TCIOFF/TCION).
-/// Real XON/XOFF control is handled by the existing IXON/IXOFF infrastructure
-/// at the line discipline level.
-pub fn tcxonc(idx: TtyIndex, _action: i32) -> Result<(), TtyError> {
+/// Validates the action code against the four POSIX-defined values
+/// (`TCOOFF`/`TCOON`/`TCIOFF`/`TCION`) and returns `InvalidArg` for
+/// anything else — matching Linux’s `EINVAL` behaviour.
+///
+/// The actions themselves are stubbed as no-ops: real XON/XOFF control
+/// is handled by the existing IXON/IXOFF infrastructure at the line
+/// discipline level.
+pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
@@ -2037,8 +2041,13 @@ pub fn tcxonc(idx: TtyIndex, _action: i32) -> Result<(), TtyError> {
     if guard.as_ref().is_none() {
         return Err(TtyError::NotAllocated);
     }
-    // Stub: all actions succeed without effect.
-    Ok(())
+    // Validate action against the four POSIX-defined constants.
+    // Linux returns -EINVAL for out-of-range values.
+    use slopos_abi::syscall::{TCIOFF, TCION, TCOOFF, TCOON};
+    match action {
+        TCOOFF | TCOON | TCIOFF | TCION => Ok(()),
+        _ => Err(TtyError::InvalidArg),
+    }
 }
 
 pub fn hangup(idx: TtyIndex) {

@@ -217,12 +217,26 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 /// high-water mark (`throttled == true`), enabling short writes and
 /// back-pressure.  The caller is responsible for retrying the remainder.
 ///
-/// Review fix: Throttle is checked once per batch rather than once per
-/// byte.  The previous per-byte lock acquisition turned an O(1) check
-/// into O(n) lock/unlock cycles for n-byte writes.  `push_input()`
-/// already sets `throttled = true` inside the slot lock when the buffer
-/// reaches `THROTTLE_HIGH_WATER`, so we only need to re-check between
-/// batches (or after the full write) to detect the transition.
+/// # Throttle granularity (design decision)
+///
+/// Throttle is checked once per `BATCH_SIZE` (64 bytes) rather than
+/// per byte.  This is an intentional trade-off:
+///
+/// - **Per-byte checking** requires acquiring the per-slot `IrqMutex`
+///   on every byte, turning an O(1) cost into O(n) lock/unlock cycles.
+///   Linux avoids this in `n_tty_receive_buf_common` only because its
+///   `TTY_THROTTLED` flag lives outside the line discipline lock.
+///
+/// - **Batch checking** allows up to `BATCH_SIZE - 1` bytes (63) to be
+///   pushed past `THROTTLE_HIGH_WATER` before the flag is noticed.  With
+///   `COOKED_BUF_SIZE = 4096` and `HIGH_WATER = 3072`, the worst-case
+///   occupancy is ~3135 — well within the remaining 1024-byte headroom.
+///   `push_cooked()` independently guards against actual overflow, so no
+///   data loss occurs.
+///
+/// This is safe because `push_input()` sets `throttled = true` inside
+/// the slot lock when the buffer reaches high-water, and the flag is
+/// visible on the next batch boundary check.
 pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     if !validate_peer(&peer) {
         return 0;

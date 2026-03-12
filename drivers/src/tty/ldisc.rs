@@ -899,7 +899,20 @@ impl LineDisc {
             return InputAction::Signal(SIGINT);
         }
         if iflag.contains(InputFlags::PARMRK) {
-            // POSIX: a break is encoded as \xff \x00 \x00 in the input stream.
+            // POSIX: a break is encoded as \xff \x00 \x00 in the input
+            // stream.  All three bytes must be inserted atomically —
+            // a partial sequence would be misparsed by userland as either
+            // a stray 0xFF literal or the start of a different PARMRK
+            // encoding.  If the cooked buffer does not have room for the
+            // full triplet, drop it entirely (matching Linux's
+            // n_tty_receive_break behaviour) and ring the bell when
+            // IMAXBEL is set.
+            if self.cooked_free() < 3 {
+                if iflag.contains(InputFlags::IMAXBEL) {
+                    return InputAction::Bell;
+                }
+                return InputAction::None;
+            }
             self.push_cooked(0xFF);
             self.push_cooked(0x00);
             self.push_cooked(0x00);
@@ -1475,6 +1488,14 @@ impl LineDisc {
         self.cooked_head = (self.cooked_head + 1) % COOKED_BUF_SIZE;
         self.cooked_count += 1;
         true
+    }
+
+    /// Returns the number of free bytes in the cooked ring buffer.
+    ///
+    /// Used to check whether a multi-byte sequence (e.g. PARMRK's 3-byte
+    /// break encoding) can be inserted atomically without partial pushes.
+    fn cooked_free(&self) -> usize {
+        COOKED_BUF_SIZE - self.cooked_count
     }
 
     /// Phase 36: IXOFF — check if input buffer exceeds high-water mark.

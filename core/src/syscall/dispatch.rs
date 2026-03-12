@@ -166,6 +166,32 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
 /// `syscall` instruction itself, enabling transparent re-execution.
 const SYSCALL_INSN_SIZE: u64 = 2;
 
+/// Inspect the syscall return value and, if it is `ERESTARTSYS`, decide
+/// whether to transparently restart the syscall or convert to `EINTR`.
+///
+/// # Signal-inspection race safety
+///
+/// This function reads `signal_pending` and inspects `signal_actions`
+/// *before* `deliver_pending_signal` dequeues the signal.  A concurrent
+/// signal arrival could theoretically alter the set between the two
+/// operations, causing the `SA_RESTART` decision to be made against a
+/// different signal than the one actually delivered.
+///
+/// This race is safe in practice because:
+///
+/// 1. **Same-CPU signals**: This code runs in the syscall return path
+///    with interrupts disabled (we are inside the ISR / SYSCALL exit).
+///    No interrupt handler on this CPU can post a new signal between
+///    our read and `deliver_pending_signal`.
+///
+/// 2. **Cross-CPU signals**: Another CPU may set a bit in
+///    `signal_pending` via IPI, but that IPI will not be serviced on
+///    this CPU until interrupts are re-enabled — which happens *after*
+///    both `handle_erestartsys` and `deliver_pending_signal` have
+///    completed.
+///
+/// 3. **Safety net**: `debug_assert_erestartsys_not_leaked` catches any
+///    leaked `ERESTARTSYS` value as a last resort.
 fn handle_erestartsys(task: *mut Task, frame: *mut InterruptFrame, sysno: u64) {
     let result = unsafe { (*frame).rax };
     if result != ERRNO_ERESTARTSYS {

@@ -13236,6 +13236,278 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Bug-fix regression tests (TTY architectural review — PARMRK, TCXONC)
+// ---------------------------------------------------------------------------
+
+/// PARMRK atomic insertion: with 3+ bytes free in the cooked buffer, the
+/// full \xff \x00 \x00 triplet is inserted.
+pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Enable PARMRK, disable canonical mode so we can read directly.
+    t.c_iflag = slopos_abi::syscall::PARMRK;
+    t.c_lflag = 0;
+    ld.set_termios(&t);
+
+    // Fill cooked buffer to capacity minus exactly 3 bytes.
+    for _ in 0..4093 {
+        if !ld.push_cooked(b'X') {
+            klog_info!("TTY_TEST: BUG - push_cooked failed during fill");
+            return TestResult::Fail;
+        }
+    }
+
+    // Now there is room for exactly 3 bytes.  A break (NUL with PARMRK)
+    // should succeed and insert the full triplet.
+    let action = ld.input_char(0x00);
+    match action {
+        InputAction::None => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - PARMRK with 3 free bytes returned {:?}, expected None",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Drain the fill bytes first.
+    let mut drain = [0u8; 4093];
+    let n_drain = ld.read(&mut drain);
+    if n_drain != 4093 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4093", n_drain);
+        return TestResult::Fail;
+    }
+
+    // Now read the PARMRK triplet.
+    let mut buf = [0u8; 8];
+    let n = ld.read(&mut buf);
+    if n != 3 || buf[0] != 0xFF || buf[1] != 0x00 || buf[2] != 0x00 {
+        klog_info!(
+            "TTY_TEST: BUG - PARMRK triplet expected [0xFF, 0x00, 0x00], got {} bytes: {:?}",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PARMRK atomic insertion: with only 2 bytes free, the entire triplet is
+/// dropped (no partial sequence).  Without IMAXBEL, returns None.
+pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Enable PARMRK only (no IMAXBEL), disable canonical mode.
+    t.c_iflag = slopos_abi::syscall::PARMRK;
+    t.c_lflag = 0;
+    ld.set_termios(&t);
+
+    // Fill cooked buffer to capacity minus 2 bytes — NOT enough for the
+    // 3-byte PARMRK triplet.
+    for _ in 0..4094 {
+        ld.push_cooked(b'X');
+    }
+
+    // A break should be silently dropped (atomic: all-or-nothing).
+    let action = ld.input_char(0x00);
+    match action {
+        InputAction::None => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - PARMRK with 2 free bytes returned {:?}, expected None",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Drain the fill bytes.
+    let mut drain = [0u8; 4094];
+    let n_drain = ld.read(&mut drain);
+    if n_drain != 4094 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4094", n_drain);
+        return TestResult::Fail;
+    }
+
+    // No further data should be available — the triplet was dropped.
+    let mut buf = [0u8; 8];
+    let n = ld.read(&mut buf);
+    if n != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - PARMRK partial sequence leaked: {} bytes {:?}",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PARMRK atomic insertion: with only 1 byte free and IMAXBEL set, a bell
+/// is returned instead of a partial sequence.
+pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    // Enable PARMRK + IMAXBEL, disable canonical mode.
+    t.c_iflag = slopos_abi::syscall::PARMRK | slopos_abi::syscall::IMAXBEL;
+    t.c_lflag = 0;
+    ld.set_termios(&t);
+
+    // Fill cooked buffer to capacity minus 1 byte.
+    for _ in 0..4095 {
+        ld.push_cooked(b'X');
+    }
+
+    // A break should produce Bell (not None, not a partial push).
+    let action = ld.input_char(0x00);
+    match action {
+        InputAction::Bell => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - PARMRK+IMAXBEL with 1 free byte returned {:?}, expected Bell",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Drain and verify no partial PARMRK sequence leaked.
+    let mut drain = [0u8; 4095];
+    let n_drain = ld.read(&mut drain);
+    if n_drain != 4095 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4095", n_drain);
+        return TestResult::Fail;
+    }
+    let mut buf = [0u8; 8];
+    let n = ld.read(&mut buf);
+    if n != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - partial PARMRK sequence leaked: {} bytes {:?}",
+            n,
+            &buf[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// PARMRK atomic insertion: with 0 bytes free (completely full buffer),
+/// the triplet is dropped.  Verifies the boundary condition.
+pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag = slopos_abi::syscall::PARMRK;
+    t.c_lflag = 0;
+    ld.set_termios(&t);
+
+    // Fill cooked buffer completely.
+    for _ in 0..4096 {
+        ld.push_cooked(b'X');
+    }
+
+    // Break with zero space — must be silently dropped.
+    let action = ld.input_char(0x00);
+    match action {
+        InputAction::None => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - PARMRK on full buffer returned {:?}, expected None",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+/// TCXONC argument validation: invalid action codes return InvalidArg.
+pub fn test_bugfix_tcxonc_invalid_action_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // Valid actions (0..=3) should succeed.
+    for action in 0..=3i32 {
+        match tty::tcxonc(idx, action) {
+            Ok(()) => {}
+            Err(e) => {
+                klog_info!(
+                    "TTY_TEST: BUG - tcxonc({}) failed unexpectedly: {:?}",
+                    action,
+                    e
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    // Invalid actions should return InvalidArg.
+    for &bad_action in &[4i32, -1, 99, i32::MAX, i32::MIN] {
+        match tty::tcxonc(idx, bad_action) {
+            Err(TtyError::InvalidArg) => {}
+            other => {
+                klog_info!(
+                    "TTY_TEST: BUG - tcxonc({}) = {:?}, expected InvalidArg",
+                    bad_action,
+                    other
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+    TestResult::Pass
+}
+
+/// TCXONC argument validation: boundary values (0 and 3) are accepted.
+pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // Exact boundary: TCOOFF (0) and TCION (3).
+    match tty::tcxonc(idx, slopos_abi::syscall::TCOOFF) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcxonc(TCOOFF) failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+    match tty::tcxonc(idx, slopos_abi::syscall::TCION) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcxonc(TCION) failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+
+    // Just outside boundary: 4 and -1.
+    match tty::tcxonc(idx, 4) {
+        Err(TtyError::InvalidArg) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcxonc(4) = {:?}, expected InvalidArg",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    match tty::tcxonc(idx, -1) {
+        Err(TtyError::InvalidArg) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - tcxonc(-1) = {:?}, expected InvalidArg",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -13774,5 +14046,12 @@ slopos_lib::define_test_suite!(
         test_bugfix_rawdisc_input_full,
         test_bugfix_slave_write_stops_on_full,
         test_bugfix_linedisc_input_full,
+        // Bug-fix regression tests (TTY architectural review)
+        test_bugfix_parmrk_atomic_full_insert,
+        test_bugfix_parmrk_drop_when_insufficient_space,
+        test_bugfix_parmrk_imaxbel_bell_on_insufficient_space,
+        test_bugfix_parmrk_drop_when_buffer_completely_full,
+        test_bugfix_tcxonc_invalid_action_returns_error,
+        test_bugfix_tcxonc_boundary_values,
     ]
 );
