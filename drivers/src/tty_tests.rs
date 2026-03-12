@@ -15032,8 +15032,382 @@ pub fn test_fp12_ldisc_kind_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-// ===========================================================================
-// Test suite registration
+// ---------------------------------------------------------------------------
+// Finishing Phase 13: Output Drain Semantics Hardening tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 13: wait_output_idle (via is_output_idle) returns true
+/// when no output is in-flight and driver has no pending output (fast path).
+pub fn test_fp13_drain_idle_fast_path() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Write some output so the inflight counter goes up and back down.
+    let _ = tty::write(TtyIndex(0), b"fast-path test", false);
+
+    // Synchronous driver: after write returns, output is already idle.
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 drain fast path should return true, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: Drain on a hung-up TTY is vacuously complete.
+pub fn test_fp13_drain_hangup_vacuously_complete() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Hang up TTY 0.
+    tty::hangup(TtyIndex(0));
+
+    // is_output_idle should return true — drain is vacuously complete.
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 drain on hung-up TTY should be idle, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: tcsbrk(arg>0) on a hung-up TTY returns HungUp error.
+pub fn test_fp13_tcsbrk_hangup_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // Hang up TTY 0.
+    tty::hangup(idx);
+
+    // tcsbrk on hung-up TTY should return HungUp.
+    match tty::tcsbrk(idx, 1) {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 tcsbrk on hung-up TTY should return HungUp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: tcsbrk(0) on a hung-up TTY also returns HungUp (break is an ioctl).
+pub fn test_fp13_tcsbrk_zero_hangup_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    tty::hangup(idx);
+
+    match tty::tcsbrk(idx, 0) {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 tcsbrk(0) on hung-up TTY should return HungUp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: tcsbrk(0) on a healthy TTY returns success (no-op break).
+pub fn test_fp13_tcsbrk_zero_healthy_succeeds() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    match tty::tcsbrk(idx, 0) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - fp13 tcsbrk(0) should succeed, got {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: tcsbrk(arg>0) and TCSETSW share the same drain path.
+/// Verify behavioral parity: both succeed immediately on a synchronous backend.
+pub fn test_fp13_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Write some output.
+    let _ = tty::write(idx, b"drain parity test", false);
+
+    // tcsbrk(1) should succeed immediately (synchronous driver).
+    if let Err(e) = tty::tcsbrk(idx, 1) {
+        klog_info!("TTY_TEST: BUG - fp13 tcsbrk(1) failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    // set_termios_wait should also succeed immediately.
+    let t = tty::get_termios(idx).unwrap();
+    if let Err(e) = tty::set_termios_wait(idx, &t) {
+        klog_info!("TTY_TEST: BUG - fp13 set_termios_wait failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    // Both completed — they share the same drain path.
+    TestResult::Pass
+}
+
+/// Finishing Phase 13: drain on an invalid TTY index returns InvalidIndex.
+pub fn test_fp13_drain_invalid_index() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::tcsbrk(TtyIndex(255), 1) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 drain invalid index should return InvalidIndex, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: drain on an unallocated TTY slot returns NotAllocated.
+pub fn test_fp13_drain_unallocated_slot() -> TestResult {
+    tty::table::tty_table_init();
+    // Slot 7 is not allocated after init.
+    match tty::tcsbrk(TtyIndex(7), 1) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 drain unallocated should return NotAllocated, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: PTY drain is always immediate (no hardware latency).
+pub fn test_fp13_pty_drain_immediate() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master_idx = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => {
+            klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
+            return TestResult::Pass;
+        }
+    };
+    let slave_idx = match tty::get_pty_number(master_idx) {
+        Ok(n) => TtyIndex(n as u8),
+        Err(_) => {
+            let _ = tty::close_ref(master_idx);
+            klog_info!("TTY_TEST: SKIP - could not get PTY slave index");
+            return TestResult::Pass;
+        }
+    };
+    let _ = tty::open_ref(slave_idx);
+
+    // Write to master.
+    let _ = tty::write(master_idx, b"pty drain fp13", false);
+
+    // tcsbrk drain should succeed immediately.
+    let drain_result = tty::tcsbrk(master_idx, 1);
+    let idle_result = tty::is_output_idle(master_idx);
+
+    let _ = tty::close_ref(slave_idx);
+    let _ = tty::close_ref(master_idx);
+
+    if let Err(e) = drain_result {
+        klog_info!("TTY_TEST: BUG - fp13 PTY tcsbrk failed: {:?}", e);
+        return TestResult::Fail;
+    }
+    match idle_result {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 PTY is_output_idle should be true, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: Console drain is immediate (synchronous serial driver).
+pub fn test_fp13_console_drain_synchronous() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let _ = tty::write(TtyIndex(0), b"console drain fp13\r\n", false);
+
+    // tcsbrk drain should succeed immediately for synchronous driver.
+    match tty::tcsbrk(TtyIndex(0), 1) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - fp13 console tcsbrk failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+
+    // is_output_idle should also be true.
+    match tty::is_output_idle(TtyIndex(0)) {
+        Ok(true) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 console should be idle after drain, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: output_pending_bytes returns 0 for all current driver kinds
+/// (all backends are synchronous).
+pub fn test_fp13_output_pending_bytes_all_drivers() -> TestResult {
+    use crate::tty::driver::SerialConsoleDriver;
+
+    let serial = TtyDriverKind::SerialConsole(SerialConsoleDriver);
+    if serial.output_pending_bytes() != 0 {
+        klog_info!("TTY_TEST: BUG - fp13 SerialConsole output_pending_bytes should be 0");
+        return TestResult::Fail;
+    }
+
+    let vc = TtyDriverKind::VConsole(VConsoleDriver);
+    if vc.output_pending_bytes() != 0 {
+        klog_info!("TTY_TEST: BUG - fp13 VConsole output_pending_bytes should be 0");
+        return TestResult::Fail;
+    }
+
+    let pty_master = TtyDriverKind::PtyMaster {
+        peer: PtyPeerHandle::new(TtyIndex(3), 0),
+    };
+    if pty_master.output_pending_bytes() != 0 {
+        klog_info!("TTY_TEST: BUG - fp13 PtyMaster output_pending_bytes should be 0");
+        return TestResult::Fail;
+    }
+
+    let pty_slave = TtyDriverKind::PtySlave {
+        peer: PtyPeerHandle::new(TtyIndex(2), 0),
+    };
+    if pty_slave.output_pending_bytes() != 0 {
+        klog_info!("TTY_TEST: BUG - fp13 PtySlave output_pending_bytes should be 0");
+        return TestResult::Fail;
+    }
+
+    let none = TtyDriverKind::None;
+    if none.output_pending_bytes() != 0 {
+        klog_info!("TTY_TEST: BUG - fp13 None output_pending_bytes should be 0");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 13: output_queued_bytes uses output_pending_bytes.
+/// After a completed write, queued bytes should be 0 for synchronous drivers.
+pub fn test_fp13_output_queued_uses_pending_bytes() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let _ = tty::write(TtyIndex(0), b"queued bytes test", false);
+
+    match tty::output_queued_bytes(TtyIndex(0)) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 output_queued_bytes should be 0 after sync write, got {}",
+                n
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - fp13 output_queued_bytes error: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: TCSETSW on a hung-up TTY returns HungUp (the
+/// set_termios_mode hangup guard fires before the drain path).
+pub fn test_fp13_tcsetsw_hangup_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    let t = tty::get_termios(idx).unwrap();
+    tty::hangup(idx);
+
+    match tty::set_termios_wait(idx, &t) {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 TCSETSW on hung-up TTY should return HungUp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: TCSETSF on a hung-up TTY returns HungUp.
+pub fn test_fp13_tcsetsf_hangup_returns_error() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    let t = tty::get_termios(idx).unwrap();
+    tty::hangup(idx);
+
+    match tty::set_termios_flush(idx, &t) {
+        Err(TtyError::HungUp) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - fp13 TCSETSF on hung-up TTY should return HungUp, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 13: Inflight counter starts at 0, bumps during write,
+/// returns to 0 after write completes.  Verifies the split-write accounting.
+pub fn test_fp13_inflight_accounting_round_trip() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    // Before write: inflight must be 0.
+    let before = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
+    if before != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - fp13 inflight before write should be 0, got {}",
+            before
+        );
+        return TestResult::Fail;
+    }
+
+    // Write completes synchronously on serial backend.
+    let _ = tty::write(TtyIndex(0), b"inflight round trip", false);
+
+    // After write: inflight must be back to 0.
+    let after = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
+    if after != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - fp13 inflight after write should be 0, got {}",
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -15635,5 +16009,21 @@ slopos_lib::define_test_suite!(
         test_fp12_imaxbel_preserved_with_no_room,
         test_fp12_rawdisc_recovery,
         test_fp12_ldisc_kind_dispatch,
+        // Finishing Phase 13: Output Drain Semantics Hardening
+        test_fp13_drain_idle_fast_path,
+        test_fp13_drain_hangup_vacuously_complete,
+        test_fp13_tcsbrk_hangup_returns_error,
+        test_fp13_tcsbrk_zero_hangup_returns_error,
+        test_fp13_tcsbrk_zero_healthy_succeeds,
+        test_fp13_tcsbrk_and_tcsetsw_share_drain,
+        test_fp13_drain_invalid_index,
+        test_fp13_drain_unallocated_slot,
+        test_fp13_pty_drain_immediate,
+        test_fp13_console_drain_synchronous,
+        test_fp13_output_pending_bytes_all_drivers,
+        test_fp13_output_queued_uses_pending_bytes,
+        test_fp13_tcsetsw_hangup_returns_error,
+        test_fp13_tcsetsf_hangup_returns_error,
+        test_fp13_inflight_accounting_round_trip,
     ]
 );

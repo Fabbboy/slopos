@@ -1211,9 +1211,9 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     let driver_pending = {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            // output_pending() is bool; future drivers may expose a
-            // byte count, but for now we only know "pending or not".
-            if tty.driver.output_pending() { 1 } else { 0 }
+            // Phase 13: use output_pending_bytes() for finer-grained
+            // queue depth reporting (defaults to 0/1 for bool-only drivers).
+            tty.driver.output_pending_bytes()
         } else {
             return Err(TtyError::NotAllocated);
         }
@@ -1285,32 +1285,58 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 
 /// Wait until all in-flight output has been transmitted to the hardware.
 ///
-/// Phase 25: replaces the Phase 16 stub with real drain synchronization.
+/// # Drain Contract (Phase 13 — Output Drain Semantics Hardening)
 ///
-/// The drain is complete when:
-///   1. The per-TTY inflight counter (`TTY_OUTPUT_INFLIGHT`) is zero — no
-///      `write()` call is between ldisc processing and driver transmission.
-///   2. The driver backend reports no pending output
-///      (`TtyDriverKind::output_pending()` returns `false`).
+/// This is the **single authoritative drain path** for the TTY subsystem.
+/// Both `tcsbrk(arg > 0)` and `set_termios_mode(Drain | DrainAndFlushInput)`
+/// delegate to this function.  No other code path may independently
+/// implement drain logic — all drain consumers MUST go through here.
+///
+/// ## Definition of "idle"
+///
+/// Output is considered **idle** when ANY of the following are true:
+///
+///   - The TTY is hung up (`tty.hung_up == true`).  Hangup discards all
+///     pending output, so the drain is vacuously complete.
+///   - The slot has been deallocated (`None`).  Same reasoning.
+///   - BOTH of these hold simultaneously:
+///     1. `TTY_OUTPUT_INFLIGHT[slot] == 0` — no `write()` is between
+///        ldisc processing and driver transmission.
+///     2. `!tty.driver.output_pending()` — the driver backend has no
+///        un-transmitted bytes in its hardware FIFO.
+///
+/// ## Edge-case behavior
+///
+///   - **Invalid index** (`>= MAX_TTYS`): returns `Err(InvalidIndex)`.
+///   - **Unallocated slot**: returns `Err(NotAllocated)`.
+///   - **Signal interruption**: the current implementation does NOT check
+///     for pending signals; drain is NOT interruptible.  Callers that
+///     need interruptibility should add `wait_event_interruptible`.
+///
+/// ## Synchronous vs asynchronous drivers
 ///
 /// For synchronous backends (serial, vconsole) both conditions are
-/// trivially satisfied because the driver blocks until each byte is on the
-/// wire.  For future async/interrupt-driven drivers, callers will genuinely
-/// sleep on `TTY_OUTPUT_WAITERS` until the TX FIFO empties.
+/// trivially satisfied because the driver blocks until each byte is on
+/// the wire.  For future async/interrupt-driven drivers, callers will
+/// genuinely sleep on `TTY_OUTPUT_WAITERS` until the TX FIFO empties.
+///
+/// ## Scheduler awareness
 ///
 /// The function sleeps on `TTY_OUTPUT_WAITERS[slot]` if the scheduler is
-/// available; otherwise it busy-polls (pre-scheduler boot path).
+/// available; otherwise it busy-polls (pre-scheduler boot path only).
 fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Quick validation: ensure the slot is allocated.
+    // Quick validation: ensure the slot is allocated (and not hung up).
     {
         let guard = TTY_SLOTS[slot].lock();
-        if guard.is_none() {
-            return Err(TtyError::NotAllocated);
+        match guard.as_ref() {
+            Some(tty) if tty.hung_up => return Ok(()), // hangup discards output
+            Some(_) => {}                              // slot alive, proceed
+            None => return Err(TtyError::NotAllocated),
         }
     }
 
@@ -1319,11 +1345,11 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if !tty.driver.output_pending() {
+            if tty.hung_up || !tty.driver.output_pending() {
                 return Ok(());
             }
         } else {
-            return Err(TtyError::NotAllocated);
+            return Ok(()); // slot gone — drain vacuously satisfied
         }
     }
 
@@ -1335,7 +1361,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
             }
             let guard = TTY_SLOTS[slot].lock();
             match guard.as_ref() {
-                Some(tty) => !tty.driver.output_pending(),
+                Some(tty) => tty.hung_up || !tty.driver.output_pending(),
                 None => true, // slot gone — drain vacuously satisfied
             }
         });
@@ -1345,7 +1371,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
             if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
                 let guard = TTY_SLOTS[slot].lock();
                 match guard.as_ref() {
-                    Some(tty) if !tty.driver.output_pending() => break,
+                    Some(tty) if tty.hung_up || !tty.driver.output_pending() => break,
                     None => break,
                     _ => {}
                 }
@@ -1495,9 +1521,12 @@ pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError>
 /// Returns `true` if all output to the given TTY has been fully drained:
 /// no in-flight writes and no driver-level pending output.
 ///
-/// Phase 25: Exposed for test observability.  Production callers should
-/// prefer `wait_output_idle()` (via `TCSETSW` / `TCSETSF`) which blocks
-/// until drain completes.
+/// Phase 25: Exposed for test observability and `TIOCOUTQ`.  Production
+/// callers that need to *block* until drain completes should use
+/// `wait_output_idle()` (via `TCSETSW` / `TCSETSF` / `tcsbrk(arg>0)`).
+///
+/// Phase 13: A hung-up TTY is considered idle (drain is vacuously
+/// complete because hangup discards all pending output).
 #[must_use]
 pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     let slot = idx.0 as usize;
@@ -1509,7 +1538,7 @@ pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(!tty.driver.output_pending()),
+        Some(tty) => Ok(tty.hung_up || !tty.driver.output_pending()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -2087,9 +2116,38 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
 
 /// Send break / drain output (implements `tcsendbreak()` / `TCSBRK` ioctl).
 ///
-/// `arg == 0`: send break for ~0.25 s — no-op on PTYs and QEMU serial.
-/// `arg > 0` : equivalent to `tcdrain()` — wait for output to complete.
+/// # Drain contract (Phase 13)
+///
+/// `arg > 0` delegates to [`wait_output_idle`] — the single authoritative
+/// drain path shared with `TCSETSW` / `TCSETSF`.  See its doc comment for
+/// the full drain contract.
+///
+/// # Hangup guard
+///
+/// Per POSIX, ioctls on a hung-up TTY return `EIO`.  This function checks
+/// `hung_up` before attempting drain and returns `Err(HungUp)` early.
+///
+/// # Arguments
+///
+/// - `arg == 0`: send break for ~0.25 s — no-op on PTYs and QEMU serial.
+/// - `arg > 0`: equivalent to `tcdrain()` — wait for output to complete.
 pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    // Phase 13: Hangup guard — state-changing ioctls on a hung-up TTY
+    // return EIO (matching Linux and the set_termios_mode pattern).
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        match guard.as_ref() {
+            Some(tty) if tty.hung_up => return Err(TtyError::HungUp),
+            Some(_) => {}
+            None => return Err(TtyError::NotAllocated),
+        }
+    }
+
     if arg > 0 {
         wait_output_idle(idx)?;
     }

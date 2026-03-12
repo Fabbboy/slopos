@@ -1,6 +1,6 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-11 complete, Phases 12-13 queued
+> **Status**: ✅ 13-phase gold-standard roadmap — ALL PHASES COMPLETE
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
@@ -52,7 +52,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **DONE** ✅ |
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **DONE** ✅ |
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **DONE** ✅ |
-| 13 | Output drain semantics hardening | P2 | Small | **TODO** |
+| 13 | Output drain semantics hardening | P2 | Small | **DONE** ✅ |
 
 ---
 
@@ -843,7 +843,7 @@ When cooked input is full, bytes are dropped with IMAXBEL feedback. There is no 
 
 ## 16. Phase 13: Output Drain Semantics Hardening (Tier 3)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅
 
 > **Priority**: P2 semantic clarity — `wait_output_idle()` exists and is strong, but this phase codifies strict `tcdrain`/`tcsbrk` behavior across edge conditions and drivers.
 > **Principle**: Keep existing design, tighten guarantees and tests.
@@ -867,13 +867,13 @@ Drain logic currently combines `TTY_OUTPUT_INFLIGHT` and `driver.output_pending(
 - Regression: existing Phase 25/29 drain tests pass unchanged.
 - `just build` + `just test` gate.
 
-### 16.4 Files expected to change
+### 16.4 Implementation summary
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Harden/document drain semantics and shared wait path |
-| `drivers/src/tty/driver.rs` | Optional stronger pending-state contract |
-| `drivers/src/tty_tests.rs` | Add edge/race drain tests |
+| `drivers/src/tty/mod.rs` | Hardened `wait_output_idle()` with formal drain contract (hangup awareness, single authoritative drain path, edge-case documentation). Hardened `tcsbrk()` with hangup guard and slot validation. Updated `is_output_idle()` to return true for hung-up TTYs. Updated `output_queued_bytes()` to use `output_pending_bytes()`. |
+| `drivers/src/tty/driver.rs` | Added `output_pending_bytes()` to `TtyDriver` trait (default: 1-if-pending, 0-if-idle) and `TtyDriverKind` dispatch. Enhanced `output_pending()` doc comments. |
+| `drivers/src/tty_tests.rs` | Added 15 tests (`test_fp13_*`): drain idle fast path, hangup vacuously complete, tcsbrk hangup returns error, tcsbrk zero hangup returns error, tcsbrk zero healthy succeeds, tcsbrk and tcsetsw share drain, drain invalid index, drain unallocated slot, PTY drain immediate, console drain synchronous, output pending bytes all drivers, output queued uses pending bytes, TCSETSW hangup returns error, TCSETSF hangup returns error, inflight accounting round trip |
 
 ---
 

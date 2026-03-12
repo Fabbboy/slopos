@@ -47,9 +47,23 @@ pub trait TtyDriver {
     /// byte is on the wire.  Async / interrupt-driven drivers should return
     /// `true` while the TX FIFO is non-empty.
     ///
-    /// Used by `TCSETSW` / `TCSETSF` drain semantics.
+    /// Used by `wait_output_idle()` drain semantics (Phase 13 contract).
     fn output_pending(&self) -> bool {
         false
+    }
+
+    /// Returns the number of bytes that have been accepted by the driver but
+    /// not yet fully transmitted to the hardware.  Defaults to `0` or `1`
+    /// based on [`output_pending`](TtyDriver::output_pending), since most
+    /// synchronous drivers only know "pending or not".
+    ///
+    /// Async / interrupt-driven drivers with FIFO depth visibility should
+    /// override this to return the actual byte count for accurate
+    /// `TIOCOUTQ` reporting.
+    ///
+    /// Phase 13: Stronger per-driver pending-byte semantics.
+    fn output_pending_bytes(&self) -> usize {
+        if self.output_pending() { 1 } else { 0 }
     }
 }
 
@@ -127,6 +141,21 @@ impl TtyDriverKind {
             // reaches the kernel buffer destined for the peer.
             Self::PtyMaster { .. } | Self::PtySlave { .. } => false,
             Self::None => false,
+        }
+    }
+
+    /// Returns the number of bytes pending in the driver's output queue.
+    ///
+    /// Phase 13: Finer-grained queue depth for `TIOCOUTQ`.  Falls back to
+    /// `output_pending()` for bool-only drivers (returns 0 or 1).
+    pub fn output_pending_bytes(&self) -> usize {
+        match self {
+            Self::SerialConsole(d) => d.output_pending_bytes(),
+            Self::VConsole(d) => d.output_pending_bytes(),
+            // PTY output is immediately buffered in the peer — zero
+            // hardware-level pending bytes.
+            Self::PtyMaster { .. } | Self::PtySlave { .. } => 0,
+            Self::None => 0,
         }
     }
 
