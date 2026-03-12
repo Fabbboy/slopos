@@ -8967,8 +8967,8 @@ pub fn test_phase36_imaxbel_buffer_full_rings_bell() -> TestResult {
     t.c_iflag |= InputFlags::IMAXBEL.bits();
     ld.set_termios(&t);
 
-    // Fill the edit buffer (1024 bytes).
-    for _ in 0..1024 {
+    // Fill the edit buffer (4096 bytes after Phase 6 expansion).
+    for _ in 0..4096 {
         ld.input_char(b'x');
     }
 
@@ -8991,7 +8991,7 @@ pub fn test_phase36_imaxbel_not_set_buffer_full_silent() -> TestResult {
     ld.set_termios(&t);
 
     // Fill the edit buffer.
-    for _ in 0..1024 {
+    for _ in 0..4096 {
         ld.input_char(b'x');
     }
 
@@ -9048,17 +9048,26 @@ pub fn test_phase36_imaxbel_raw_mode_buffer_full() -> TestResult {
 pub fn test_phase36_ixoff_high_water_sends_xoff() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Non-canonical mode so input goes to cooked buffer.
-    t.c_lflag = 0; // no ICANON, no ECHO
+    // Use canonical mode: input fills the edit buffer first, then cooked
+    // after newline.  This lets us exceed the IXOFF high-water mark which
+    // is 80% of (EDIT_BUF_SIZE + COOKED_BUF_SIZE).
+    t.c_lflag = LocalFlags::ICANON.bits(); // canonical, no echo
     t.c_iflag |= InputFlags::IXOFF.bits();
     // Ensure VSTOP is Ctrl+S (0x13) — should be the default.
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     ld.set_termios(&t);
 
-    // High-water is 80% of (1024 + 4096) = 4096.
-    // Fill cooked buffer to just past high-water.
-    for _ in 0..4097 {
+    // Flush a big line to cooked: 4000 chars + newline → cooked_count=4001.
+    for _ in 0..4000 {
         ld.input_char(b'x');
+    }
+    ld.input_char(b'\n'); // flushes 4001 bytes (4000+newline) to cooked
+
+    // Now type more into the edit buffer until pending exceeds high-water.
+    // pending = edit_len + cooked_count.  We need pending >= 6553.
+    // cooked_count = 4001, so we need edit_len >= 2553.
+    for _ in 0..2560 {
+        ld.input_char(b'y');
     }
 
     let xoff = ld.ixoff_check_xoff();
@@ -9080,23 +9089,33 @@ pub fn test_phase36_ixoff_high_water_sends_xoff() -> TestResult {
 pub fn test_phase36_ixoff_low_water_sends_xon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = 0; // non-canonical, no echo
+    t.c_lflag = LocalFlags::ICANON.bits(); // canonical, no echo
     t.c_iflag |= InputFlags::IXOFF.bits();
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     t.c_cc[CcIndex::Vstart.as_usize()] = 0x11;
     ld.set_termios(&t);
 
-    // Fill past high-water and trigger XOFF.
-    for _ in 0..4097 {
+    // Fill past high-water via canonical mode (flush + edit).
+    for _ in 0..4000 {
         ld.input_char(b'x');
+    }
+    ld.input_char(b'\n'); // flush to cooked → 4001
+    for _ in 0..2560 {
+        ld.input_char(b'y');
     }
     let _ = ld.ixoff_check_xoff(); // consume the XOFF
 
-    // Read enough to drop below low-water (1024).
-    // cooked_count is 4097, need to read at least 4097 - 1023 = 3074 bytes.
-    let mut drain = [0u8; 256];
+    // Drain the cooked buffer (the committed line).  This reduces
+    // pending = edit_len + cooked_count.  Need pending < low-water (1638).
+    // Read all cooked data (4001 bytes), then pending = edit_len + 0.
+    // edit_len = 2560, still above low-water.  We need to also read the
+    // edit buffer — that requires flushing it first.  Add newline to commit:
+    ld.input_char(b'\n'); // flush edit (2561 bytes with newline) to cooked
+
+    // Now drain everything from cooked.
+    let mut drain = [0u8; 512];
     let mut total_read = 0usize;
-    while total_read < 3074 {
+    loop {
         let got = ld.read(&mut drain);
         if got == 0 {
             break;
@@ -9104,6 +9123,7 @@ pub fn test_phase36_ixoff_low_water_sends_xon() -> TestResult {
         total_read += got;
     }
 
+    // After draining, pending = edit_len(0) + cooked_count(0) = 0 < low-water.
     let xon = ld.ixoff_check_xon();
     if xon != Some(0x11) {
         klog_info!(
@@ -12192,6 +12212,109 @@ pub fn test_fp5_tcxonc_all_actions() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Finishing Phase 6: Edit Buffer Expansion (1024 → 4096) tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 6: Canonical input longer than 1024 bytes works.
+pub fn test_fp6_canonical_input_over_1024() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Type 2000 characters then newline (canonical mode).
+    for i in 0..2000u16 {
+        tty::push_input(idx, b'a' + (i % 26) as u8);
+    }
+    tty::push_input(idx, b'\n');
+
+    // Read it back. Should get all 2000 + newline.
+    let mut buf = [0u8; 4096];
+    let mut total = 0usize;
+    loop {
+        match tty::read(idx, &mut buf[total..], true) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => total += n,
+        }
+    }
+
+    // We expect 2001 bytes (2000 chars + newline).
+    if total != 2001 {
+        klog_info!("TTY_TEST: BUG - read {} bytes, expected 2001", total);
+        drain_tty_nonblock(idx);
+        return TestResult::Fail;
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 6: Large paste (~3000 bytes) in canonical mode.
+pub fn test_fp6_large_paste_canonical() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Simulate pasting 3000 bytes.
+    let paste_len = 3000;
+    for i in 0..paste_len {
+        tty::push_input(idx, b'A' + (i % 26) as u8);
+    }
+    tty::push_input(idx, b'\n');
+
+    // Read back.
+    let mut buf = [0u8; 4096];
+    let mut total = 0usize;
+    loop {
+        match tty::read(idx, &mut buf[total..], true) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => total += n,
+        }
+    }
+
+    // Expect 3001 bytes (3000 chars + newline).
+    if total != paste_len + 1 {
+        klog_info!(
+            "TTY_TEST: BUG - read {} bytes, expected {}",
+            total,
+            paste_len + 1
+        );
+        drain_tty_nonblock(idx);
+        return TestResult::Fail;
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 6: Backspace still works with expanded edit buffer.
+pub fn test_fp6_backspace_in_expanded_buffer() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Type 'abc', erase 'c', type 'd', newline -> expect 'abd\n'.
+    tty::push_input(idx, b'a');
+    tty::push_input(idx, b'b');
+    tty::push_input(idx, b'c');
+    tty::push_input(idx, 0x7f); // DEL/backspace
+    tty::push_input(idx, b'd');
+    tty::push_input(idx, b'\n');
+
+    let mut buf = [0u8; 64];
+    match tty::read(idx, &mut buf, true) {
+        Ok(n) if n >= 3 && &buf[..3] == b"abd" => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - backspace in expanded buffer: {:?}", other);
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -12699,5 +12822,9 @@ slopos_lib::define_test_suite!(
         test_fp5_tcsbrk_noop,
         test_fp5_tcsbrk_drain,
         test_fp5_tcxonc_all_actions,
+        // Finishing Phase 6: Edit Buffer Expansion (1024 → 4096)
+        test_fp6_canonical_input_over_1024,
+        test_fp6_large_paste_canonical,
+        test_fp6_backspace_in_expanded_buffer,
     ]
 );

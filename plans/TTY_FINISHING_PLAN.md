@@ -507,7 +507,7 @@ pub const TCION:  i32 = 3;
 
 ## 9. Phase 6: Edit Buffer Expansion
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P2 quality — a single constant change with no architectural impact.
 > **Principle**: POSIX requires `MAX_CANON ≥ 255`, and the current 1024 is compliant. But real-world canonical-mode usage (terminal paste, long commands with history expansion, heredocs) regularly exceeds 1024. Linux and RedoxOS both use 4096.

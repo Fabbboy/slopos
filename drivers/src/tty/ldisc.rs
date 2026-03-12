@@ -25,7 +25,9 @@ use slopos_abi::syscall::{
     UserTermios,
 };
 
-const EDIT_BUF_SIZE: usize = 1024;
+// Finishing Phase 6: Expanded from 1024 to 4096 to match Linux/RedoxOS.
+// Handles long pastes, history expansion, and heredoc input gracefully.
+const EDIT_BUF_SIZE: usize = 4096;
 const COOKED_BUF_SIZE: usize = 4096;
 
 // Finishing Phase 2: PTY throttle water marks for back-pressure.
