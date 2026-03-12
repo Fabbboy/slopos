@@ -13882,6 +13882,190 @@ pub fn test_fp8_tcxonc_invalid_index() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Finishing Phase 9: Output Queue Visibility (TIOCOUTQ) tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 9: TIOCOUTQ ABI constant is correct.
+pub fn test_fp9_tiocoutq_abi_constant() -> TestResult {
+    if slopos_abi::syscall::TIOCOUTQ != 0x5411 {
+        klog_info!(
+            "TTY_TEST: BUG - TIOCOUTQ should be 0x5411, got 0x{:X}",
+            slopos_abi::syscall::TIOCOUTQ
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 9: output_queued_bytes returns 0 when idle.
+pub fn test_fp9_output_queued_zero_when_idle() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // With no in-flight output, queued bytes should be 0.
+    match tty::output_queued_bytes(idx) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - output_queued_bytes idle = {}, expected 0",
+                n
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - output_queued_bytes failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 9: output_queued_bytes reflects TTY_OUTPUT_INFLIGHT.
+pub fn test_fp9_output_queued_reflects_inflight() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+
+    // Artificially set inflight counter.
+    crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(7, Ordering::Release);
+
+    let result = tty::output_queued_bytes(idx);
+
+    // Reset before checking (avoid polluting other tests).
+    crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+
+    match result {
+        Ok(7) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!("TTY_TEST: BUG - output_queued_bytes = {}, expected 7", n);
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - output_queued_bytes failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 9: output_queued_bytes returns 0 after TCOFLUSH.
+pub fn test_fp9_output_queued_zero_after_flush() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+
+    // Set inflight, then flush output.
+    crate::tty::table::TTY_OUTPUT_INFLIGHT[slot].store(5, Ordering::Release);
+    tty::tcflush(idx, slopos_abi::syscall::TCOFLUSH).unwrap();
+
+    match tty::output_queued_bytes(idx) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - output_queued_bytes after flush = {}, expected 0",
+                n
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - output_queued_bytes after flush failed: {:?}",
+                e
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 9: output_queued_bytes on unallocated slot returns error.
+pub fn test_fp9_output_queued_unallocated() -> TestResult {
+    tty::table::tty_table_init();
+    // Slot 5 is never allocated by tty_table_init().
+    let idx = TtyIndex(5);
+
+    match tty::output_queued_bytes(idx) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - output_queued_bytes(5) = {:?}, expected NotAllocated",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 9: output_queued_bytes on invalid index returns error.
+pub fn test_fp9_output_queued_invalid_index() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(255);
+
+    match tty::output_queued_bytes(idx) {
+        Err(TtyError::InvalidIndex) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - output_queued_bytes(255) = {:?}, expected InvalidIndex",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// Finishing Phase 9: FIONREAD behavior is unchanged by TIOCOUTQ addition.
+pub fn test_fp9_fionread_unchanged() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Push data (canonical: need newline to commit to cooked).
+    tty::push_input(idx, b'A');
+    tty::push_input(idx, b'B');
+    tty::push_input(idx, b'\n');
+
+    // bytes_available (FIONREAD equivalent) should report 3.
+    match tty::bytes_available(idx) {
+        Ok(3) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - bytes_available after push = {:?}, expected Ok(3)",
+                other
+            );
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 9: output_queued_bytes on console TTY 1 works.
+pub fn test_fp9_output_queued_vconsole() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(1);
+
+    // Console should report 0 queued bytes (synchronous driver).
+    match tty::output_queued_bytes(idx) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - vconsole output_queued_bytes = {}, expected 0",
+                n
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - vconsole output_queued_bytes failed: {:?}",
+                e
+            );
+            TestResult::Fail
+        }
+    }
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -14440,5 +14624,14 @@ slopos_lib::define_test_suite!(
         test_fp8_output_stopped_independent_of_ixon,
         test_fp8_tcxonc_unallocated_slot,
         test_fp8_tcxonc_invalid_index,
+        // Finishing Phase 9: Output Queue Visibility (TIOCOUTQ)
+        test_fp9_tiocoutq_abi_constant,
+        test_fp9_output_queued_zero_when_idle,
+        test_fp9_output_queued_reflects_inflight,
+        test_fp9_output_queued_zero_after_flush,
+        test_fp9_output_queued_unallocated,
+        test_fp9_output_queued_invalid_index,
+        test_fp9_fionread_unchanged,
+        test_fp9_output_queued_vconsole,
     ]
 );

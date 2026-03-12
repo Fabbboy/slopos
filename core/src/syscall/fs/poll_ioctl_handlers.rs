@@ -4,8 +4,8 @@ use core::ffi::c_int;
 
 use slopos_abi::syscall::{
     FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCGETD,
-    TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCPKT, TIOCSCTTY, TIOCSETD,
-    TIOCSPGRP, TIOCSPTLCK, UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCOUTQ, TIOCPKT, TIOCSCTTY,
+    TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -543,6 +543,19 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let action = arg as i32;
             let rc = tty::tcxonc(tty_idx, action);
             if rc == 0 { ctx.ok(0) } else { ctx.err() }
+        }
+        // Finishing Phase 9: Output queue visibility.
+        TIOCOUTQ => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
+            let count = tty::output_queued_bytes(tty_idx);
+            if count < 0 {
+                ctx.err()
+            } else {
+                let count = count as i32;
+                try_or_err!(ctx, copy_to_user(ptr, &count));
+                ctx.ok(0)
+            }
         }
         _ => ctx.err(),
     }

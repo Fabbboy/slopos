@@ -380,6 +380,14 @@ fn tty_tcxonc_adapter(tty_index: TtyIndex, action: i32) -> i32 {
     }
 }
 
+// Finishing Phase 9: Output queue visibility (TIOCOUTQ) adapter.
+fn tty_output_queued_bytes_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::output_queued_bytes(tty_index) {
+        Ok(n) => n as i32,
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -424,6 +432,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     tcflush: tty_tcflush_adapter,
     tcsbrk: tty_tcsbrk_adapter,
     tcxonc: tty_tcxonc_adapter,
+    output_queued_bytes: tty_output_queued_bytes_adapter,
 };
 
 fn net_scan_members_adapter(

@@ -44,5 +44,7 @@ crate::define_service! {
         tcflush(tty_index: slopos_abi::syscall::TtyIndex, queue: i32) -> i32;
         tcsbrk(tty_index: slopos_abi::syscall::TtyIndex, arg: i32) -> i32;
         tcxonc(tty_index: slopos_abi::syscall::TtyIndex, action: i32) -> i32;
+        // Finishing Phase 9: Output queue visibility.
+        output_queued_bytes(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
     }
 }

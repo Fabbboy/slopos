@@ -1153,6 +1153,38 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     Ok(count)
 }
 
+/// Finishing Phase 9: Get the number of bytes queued for output on a TTY.
+///
+/// Used by the `TIOCOUTQ` ioctl.  Returns the sum of:
+///   1. The per-TTY inflight counter (`TTY_OUTPUT_INFLIGHT`) — bytes that
+///      have been processed by the line discipline but not yet transmitted
+///      to the hardware driver.
+///   2. Driver-level pending output (for async/interrupt-driven drivers).
+///
+/// For synchronous backends (serial console, vconsole) the driver pending
+/// count is always zero because `write_output` blocks until the byte is on
+/// the wire.  For PTYs, output is immediately buffered in the peer so the
+/// driver also reports zero.
+#[must_use]
+pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let inflight = TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) as usize;
+    let driver_pending = {
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            // output_pending() is bool; future drivers may expose a
+            // byte count, but for now we only know "pending or not".
+            if tty.driver.output_pending() { 1 } else { 0 }
+        } else {
+            return Err(TtyError::NotAllocated);
+        }
+    };
+    Ok(inflight + driver_pending)
+}
+
 /// Finishing Phase 4: Map baud rate bits from `c_cflag & CBAUD` to numeric speed.
 fn cflag_to_speed(cflag: u32) -> u32 {
     use slopos_abi::syscall::*;
