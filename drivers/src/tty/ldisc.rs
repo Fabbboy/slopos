@@ -435,7 +435,9 @@ impl LineDisc {
         Self {
             termios: UserTermios {
                 c_iflag: slopos_abi::syscall::ICRNL,
-                c_oflag: slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR,
+                c_oflag: slopos_abi::syscall::OPOST
+                    | slopos_abi::syscall::ONLCR
+                    | slopos_abi::syscall::XTABS,
                 c_cflag: slopos_abi::syscall::CS8
                     | slopos_abi::syscall::CREAD
                     | slopos_abi::syscall::HUPCL
@@ -870,9 +872,19 @@ impl LineDisc {
                 }
             }
             b'\t' => {
-                let spaces = 8 - (self.column % 8);
-                self.column += spaces;
-                OutputAction::Tab(spaces as u8)
+                // Finishing Phase 11: Gate tab expansion through TABDLY/XTABS.
+                // TAB3/XTABS: expand tab to spaces using column tracking.
+                // TAB0 (no TABDLY bits set): pass literal tab to terminal.
+                let tab_advance = 8 - (self.column % 8);
+                self.column += tab_advance;
+                if oflag.contains(OutputFlags::TAB3) {
+                    OutputAction::Tab(tab_advance as u8)
+                } else {
+                    OutputAction::Emit {
+                        buf: [b'\t', 0],
+                        len: 1,
+                    }
+                }
             }
             0x08 => {
                 // Backspace — decrement column if possible.

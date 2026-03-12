@@ -1,6 +1,6 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-9 complete, Phases 10-13 queued
+> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-11 complete, Phases 12-13 queued
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
@@ -49,8 +49,8 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **DONE** ✅ |
 | 8 | TCXONC behavioral completion (real flow control semantics) | P0 | Medium | **DONE** ✅ |
 | 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **DONE** ✅ |
-| 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **TODO** |
-| 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **TODO** |
+| 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **DONE** ✅ |
+| 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **DONE** ✅ |
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **TODO** |
 | 13 | Output drain semantics hardening | P2 | Small | **TODO** |
 
@@ -769,7 +769,7 @@ On high-rate input streams, frequent `wake_all` behavior can produce avoidable s
 
 ## 14. Phase 11: TABDLY/XTABS Output Compatibility (Tier 2)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅ — Added `TABDLY` (0x1800), `TAB0` (0x0000), `TAB3` (0x1800), `XTABS` (0x1800) constants to `OutputFlags` bitflags and as raw `pub const` values in `abi/src/syscall.rs`. Gated tab expansion in `process_output_byte()` through `OutputFlags::TAB3` check: TAB3/XTABS expands tabs to spaces using column tracking, TAB0 passes literal tab through while still tracking column position. Updated default `c_oflag` to include `XTABS` (preserving existing tab expansion behavior). Updated `test_phase12_output_column_tracking_cr` to include XTABS for tab-verification steps. 9 regression tests added covering: ABI constant values, default oflag includes XTABS, XTABS tab-to-spaces expansion, TAB0 literal passthrough, TAB0 column tracking accuracy, XTABS column tracking across CR/LF/TAB mixes, TABDLY termios roundtrip, no-OPOST passthrough, and existing output processing compatibility.
 
 > **Priority**: P1 compatibility — many terminal stacks assume standard tab-delay flag behavior even if only `XTABS` is used in practice.
 > **Principle**: Implement the practical subset (`TAB0`/`TAB3`/`XTABS`) and keep legacy delay complexity out.
@@ -794,13 +794,13 @@ Current output processing already converts `\t` to spaces, but does not gate beh
 - Regression: existing output processing tests pass.
 - `just build` + `just test` gate.
 
-### 14.4 Files expected to change
+### 14.4 Files changed
 
 | File | Change |
 |------|--------|
-| `abi/src/syscall.rs` | Add TABDLY/TAB0/TAB3/XTABS constants |
-| `drivers/src/tty/ldisc.rs` | Gate tab expansion behavior through TABDLY/XTABS flags |
-| `drivers/src/tty_tests.rs` | Add tab flag compatibility tests |
+| `abi/src/syscall.rs` | Added `TABDLY`/`TAB0`/`TAB3`/`XTABS` to `OutputFlags` bitflags (0x1800/0x0000/0x1800/0x1800) and matching raw `pub const` values |
+| `drivers/src/tty/ldisc.rs` | Gated `b'\t'` branch in `process_output_byte()` through `OutputFlags::TAB3` — TAB3/XTABS returns `OutputAction::Tab(n)`, TAB0 returns `OutputAction::Emit` with literal tab; updated default `c_oflag` to `OPOST \| ONLCR \| XTABS` |
+| `drivers/src/tty_tests.rs` | Added 9 tests (`test_fp11_*`): ABI constants, default oflag, XTABS expansion, TAB0 passthrough, TAB0 column tracking, mixed CR/LF/TAB column tracking, termios roundtrip, no-OPOST passthrough, existing output regression; fixed `test_phase12_output_column_tracking_cr` to include XTABS |
 
 ---
 

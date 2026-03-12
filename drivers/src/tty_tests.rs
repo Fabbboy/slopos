@@ -2886,7 +2886,7 @@ pub fn test_phase12_output_column_tracking_cr() -> TestResult {
     let mut ld = LineDisc::new();
     // Disable ONLCR so CR is not suppressed/converted.
     let mut t = *ld.termios();
-    t.c_oflag = slopos_abi::syscall::OPOST; // OPOST only, no ONLCR
+    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::XTABS; // OPOST + XTABS, no ONLCR
     ld.set_termios(&t);
 
     for ch in b"ABCDE" {
@@ -14323,6 +14323,335 @@ pub fn test_fp10_canonical_eof_wakes() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 11: TABDLY/XTABS Output Compatibility
+// ===========================================================================
+
+/// Finishing Phase 11: ABI constants have correct Linux-compatible values.
+pub fn test_fp11_tabdly_abi_constants() -> TestResult {
+    use slopos_abi::syscall::{TAB0, TAB3, TABDLY, XTABS};
+
+    if TABDLY != 0x1800 {
+        klog_info!("TTY_TEST: BUG - TABDLY != 0x1800, got 0x{:x}", TABDLY);
+        return TestResult::Fail;
+    }
+    if TAB0 != 0x0000 {
+        klog_info!("TTY_TEST: BUG - TAB0 != 0x0000, got 0x{:x}", TAB0);
+        return TestResult::Fail;
+    }
+    if TAB3 != 0x1800 {
+        klog_info!("TTY_TEST: BUG - TAB3 != 0x1800, got 0x{:x}", TAB3);
+        return TestResult::Fail;
+    }
+    if XTABS != TAB3 {
+        klog_info!("TTY_TEST: BUG - XTABS != TAB3");
+        return TestResult::Fail;
+    }
+
+    // Verify bitflags variants agree with raw constants.
+    if OutputFlags::TABDLY.bits() != TABDLY {
+        klog_info!("TTY_TEST: BUG - OutputFlags::TABDLY mismatch");
+        return TestResult::Fail;
+    }
+    if OutputFlags::TAB3.bits() != TAB3 {
+        klog_info!("TTY_TEST: BUG - OutputFlags::TAB3 mismatch");
+        return TestResult::Fail;
+    }
+    if OutputFlags::XTABS.bits() != XTABS {
+        klog_info!("TTY_TEST: BUG - OutputFlags::XTABS mismatch");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: Default termios c_oflag includes XTABS.
+pub fn test_fp11_default_oflag_includes_xtabs() -> TestResult {
+    let ld = LineDisc::new();
+    let oflag = ld.termios().output_flags();
+
+    if !oflag.contains(OutputFlags::OPOST) {
+        klog_info!("TTY_TEST: BUG - default oflag missing OPOST");
+        return TestResult::Fail;
+    }
+    if !oflag.contains(OutputFlags::ONLCR) {
+        klog_info!("TTY_TEST: BUG - default oflag missing ONLCR");
+        return TestResult::Fail;
+    }
+    if !oflag.contains(OutputFlags::XTABS) {
+        klog_info!("TTY_TEST: BUG - default oflag missing XTABS");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: OPOST|XTABS expands tab to expected number of spaces.
+pub fn test_fp11_xtabs_expands_tab_to_spaces() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default has OPOST|XTABS. Tab at column 0 => 8 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - XTABS tab at col 0 expected 8, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - XTABS expected Tab variant at col 0");
+            return TestResult::Fail;
+        }
+    }
+
+    // Print 3 chars (column=11), tab => 8 - (11 % 8) = 5.
+    for ch in b"abc" {
+        ld.process_output_byte(*ch);
+    }
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 5 {
+                klog_info!("TTY_TEST: BUG - XTABS tab at col 11 expected 5, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - XTABS expected Tab variant at col 11");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: OPOST without XTABS passes literal tab through.
+pub fn test_fp11_tab0_passes_literal_tab() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Clear TABDLY bits (set TAB0) while keeping OPOST.
+    let mut t = *ld.termios();
+    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY.bits()) | OutputFlags::TAB0.bits();
+    ld.set_termios(&t);
+
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\t' {
+                klog_info!(
+                    "TTY_TEST: BUG - TAB0 expected literal tab, got [{:#04x}, {:#04x}] len={}",
+                    buf[0],
+                    buf[1],
+                    len
+                );
+                return TestResult::Fail;
+            }
+        }
+        OutputAction::Tab(n) => {
+            klog_info!("TTY_TEST: BUG - TAB0 should not produce Tab({})", n);
+            return TestResult::Fail;
+        }
+        OutputAction::Suppress => {
+            klog_info!("TTY_TEST: BUG - TAB0 should not suppress");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: TAB0 still tracks column correctly for echo accuracy.
+pub fn test_fp11_tab0_column_tracking() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Set TAB0 (clear TABDLY bits).
+    let mut t = *ld.termios();
+    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY.bits()) | OutputFlags::TAB0.bits();
+    ld.set_termios(&t);
+
+    // Print 3 chars (column=3), then tab => column advances to 8.
+    for ch in b"abc" {
+        ld.process_output_byte(*ch);
+    }
+    ld.process_output_byte(b'\t');
+
+    // Print one more char; column should be 9.
+    // Next tab should advance to column 16 (8 - (9 % 8) = 7 spaces worth).
+    ld.process_output_byte(b'x');
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\t' {
+                klog_info!("TTY_TEST: BUG - TAB0 column tracking second tab wrong");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - TAB0 should emit literal tab");
+            return TestResult::Fail;
+        }
+    }
+
+    // Verify column by checking next tab stop: print 'y' (col 17), tab => 8-(17%8)=7.
+    // Since TAB0, it emits literal tab but column should now be 24.
+    ld.process_output_byte(b'y');
+    // Column should be 17.  Tab from 17 => column 24 (7 advance).
+    // We verify indirectly: switch to XTABS and check the space count.
+    let mut t2 = *ld.termios();
+    t2.c_oflag |= OutputFlags::XTABS.bits();
+    ld.set_termios(&t2);
+
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            // Column was 17, so 8-(17%8) = 7.
+            if n != 7 {
+                klog_info!(
+                    "TTY_TEST: BUG - TAB0 column drift: expected 7 spaces, got {}",
+                    n
+                );
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant after switching to XTABS");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: Column tracking correct across CR/LF/TAB with XTABS.
+pub fn test_fp11_xtabs_column_tracking_mixed() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default: OPOST | ONLCR | XTABS
+
+    // Print "ab" (col=2), CR resets col to 0.
+    ld.process_output_byte(b'a');
+    ld.process_output_byte(b'b');
+    ld.process_output_byte(b'\r');
+
+    // Tab at col 0 => 8 spaces.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - tab after CR expected 8, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant after CR");
+            return TestResult::Fail;
+        }
+    }
+
+    // NL with ONLCR: column resets to 0 (ONLCR emits CR+NL).
+    ld.process_output_byte(b'\n');
+
+    // Tab at col 0 again.
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Tab(n) => {
+            if n != 8 {
+                klog_info!("TTY_TEST: BUG - tab after NL expected 8, got {}", n);
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Tab variant after NL");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: TABDLY bits roundtrip through termios get/set.
+pub fn test_fp11_tabdly_termios_roundtrip() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Set TAB0 (clear XTABS).
+    let mut t = *ld.termios();
+    t.c_oflag &= !OutputFlags::TABDLY.bits();
+    ld.set_termios(&t);
+
+    let readback = ld.termios().output_flags();
+    if readback.contains(OutputFlags::TAB3) {
+        klog_info!("TTY_TEST: BUG - TAB0 readback still has TAB3 set");
+        return TestResult::Fail;
+    }
+
+    // Set TAB3/XTABS back.
+    let mut t2 = *ld.termios();
+    t2.c_oflag |= OutputFlags::XTABS.bits();
+    ld.set_termios(&t2);
+
+    let readback2 = ld.termios().output_flags();
+    if !readback2.contains(OutputFlags::XTABS) {
+        klog_info!("TTY_TEST: BUG - XTABS readback missing after set");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: No OPOST means tab passes through regardless of TABDLY.
+pub fn test_fp11_no_opost_tab_passthrough() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Disable OPOST entirely.
+    let mut t = *ld.termios();
+    t.c_oflag = 0;
+    ld.set_termios(&t);
+
+    match ld.process_output_byte(b'\t') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'\t' {
+                klog_info!("TTY_TEST: BUG - no OPOST should pass tab through");
+                return TestResult::Fail;
+            }
+        }
+        OutputAction::Tab(_) => {
+            klog_info!("TTY_TEST: BUG - no OPOST should not expand tab");
+            return TestResult::Fail;
+        }
+        OutputAction::Suppress => {
+            klog_info!("TTY_TEST: BUG - no OPOST should not suppress tab");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 11: Existing output processing tests still pass with XTABS default.
+pub fn test_fp11_existing_output_unaffected() -> TestResult {
+    let mut ld = LineDisc::new();
+    // Default: OPOST | ONLCR | XTABS
+
+    // NL with ONLCR should still produce CR+NL.
+    match ld.process_output_byte(b'\n') {
+        OutputAction::Emit { buf, len } => {
+            if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
+                klog_info!("TTY_TEST: BUG - ONLCR regression with XTABS default");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Emit for NL with ONLCR");
+            return TestResult::Fail;
+        }
+    }
+
+    // Printable character still emitted normally.
+    match ld.process_output_byte(b'A') {
+        OutputAction::Emit { buf, len } => {
+            if len != 1 || buf[0] != b'A' {
+                klog_info!("TTY_TEST: BUG - printable char regression with XTABS default");
+                return TestResult::Fail;
+            }
+        }
+        _ => {
+            klog_info!("TTY_TEST: BUG - expected Emit for printable");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -14900,5 +15229,15 @@ slopos_lib::define_test_suite!(
         test_fp10_rawdisc_wake_batching,
         test_fp10_wake_resets_counter,
         test_fp10_canonical_eof_wakes,
+        // Finishing Phase 11: TABDLY/XTABS Output Compatibility
+        test_fp11_tabdly_abi_constants,
+        test_fp11_default_oflag_includes_xtabs,
+        test_fp11_xtabs_expands_tab_to_spaces,
+        test_fp11_tab0_passes_literal_tab,
+        test_fp11_tab0_column_tracking,
+        test_fp11_xtabs_column_tracking_mixed,
+        test_fp11_tabdly_termios_roundtrip,
+        test_fp11_no_opost_tab_passthrough,
+        test_fp11_existing_output_unaffected,
     ]
 );

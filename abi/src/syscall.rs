@@ -698,6 +698,12 @@ pub const ONOCR: u32 = 0x10;
 pub const ONLRET: u32 = 0x20;
 pub const OLCUC: u32 = 0x02;
 
+// Finishing Phase 11: Tab delay output flags
+pub const TABDLY: u32 = 0x1800;
+pub const TAB0: u32 = 0x0000;
+pub const TAB3: u32 = 0x1800;
+pub const XTABS: u32 = 0x1800;
+
 // c_lflag bits (additional — see ISIG..ECHONL above)
 pub const ECHOCTL: u32 = 0x200;
 pub const ECHOPRT: u32 = 0x400;
@@ -809,6 +815,14 @@ bitflags::bitflags! {
         const ONOCR  = 0x10;
         const ONLRET = 0x20;
         const OLCUC  = 0x02;
+
+        // Finishing Phase 11: Tab delay flags (TABDLY/XTABS).
+        // TABDLY is a 2-bit mask; only TAB0 (no expansion) and
+        // TAB3/XTABS (expand to spaces) are implemented.
+        const TABDLY = 0x1800;
+        const TAB0   = 0x0000;
+        const TAB3   = 0x1800;
+        const XTABS  = 0x1800;
     }
 }
 
