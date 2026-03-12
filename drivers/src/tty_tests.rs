@@ -13509,6 +13509,380 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 8: TCXONC Behavioral Completion tests
+// ===========================================================================
+
+/// Finishing Phase 8: TCOOFF sets output_stopped, nonblocking write returns
+/// WouldBlock on a console TTY.
+pub fn test_fp8_tcooff_blocks_nonblock_write() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Suspend output via TCOOFF.
+    if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCOOFF) {
+        klog_info!("TTY_TEST: BUG - tcxonc(TCOOFF) failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    // Non-blocking write should return WouldBlock (no bytes written yet).
+    match tty::write(idx, b"hello", true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - nonblock write under TCOOFF should return WouldBlock, got {:?}",
+                other
+            );
+            // Clean up: resume output before returning.
+            let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+            return TestResult::Fail;
+        }
+    }
+
+    // Resume output for cleanup.
+    let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCOON clears output_stopped, nonblocking write
+/// succeeds after resume.
+pub fn test_fp8_tcoon_resumes_write() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Stop output.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+
+    // Verify stopped.
+    match tty::write(idx, b"test", true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected WouldBlock while stopped, got {:?}",
+                other
+            );
+            let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+            return TestResult::Fail;
+        }
+    }
+
+    // Resume output.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+
+    // Write should now succeed.
+    match tty::write(idx, b"hello", true) {
+        Ok(n) if n == 5 => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - write after TCOON should succeed with 5, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: Double TCOOFF is idempotent (does not error).
+pub fn test_fp8_tcooff_idempotent() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+
+    // Still stopped — verify.
+    match tty::write(idx, b"x", true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - double TCOOFF should still block, got {:?}",
+                other
+            );
+            let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+            return TestResult::Fail;
+        }
+    }
+
+    // Resume.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: Double TCOON is idempotent (does not error).
+pub fn test_fp8_tcoon_idempotent() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // Start with a clean state.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+    // Calling TCOON again when already running is fine.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+
+    // Write should succeed.
+    match tty::write(idx, b"ok", true) {
+        Ok(n) if n == 2 => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - write after double TCOON should succeed, got {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCOOFF then TCOON cycle — write works after resume.
+pub fn test_fp8_stop_resume_cycle() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Cycle 1: stop → verify blocked → resume → verify working.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+    if tty::write(idx, b"a", true) != Err(TtyError::WouldBlock) {
+        klog_info!("TTY_TEST: BUG - cycle 1 stop did not block");
+        let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+        return TestResult::Fail;
+    }
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+    if tty::write(idx, b"a", true).is_err() {
+        klog_info!("TTY_TEST: BUG - cycle 1 resume did not unblock");
+        return TestResult::Fail;
+    }
+
+    // Cycle 2: same thing again — no residual state.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+    if tty::write(idx, b"b", true) != Err(TtyError::WouldBlock) {
+        klog_info!("TTY_TEST: BUG - cycle 2 stop did not block");
+        let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+        return TestResult::Fail;
+    }
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+    if tty::write(idx, b"b", true).is_err() {
+        klog_info!("TTY_TEST: BUG - cycle 2 resume did not unblock");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCIOFF and TCION succeed (control-byte path).
+pub fn test_fp8_tcioff_tcion_succeed() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    // TCIOFF: transmit STOP byte — should succeed.
+    if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCIOFF) {
+        klog_info!("TTY_TEST: BUG - tcxonc(TCIOFF) failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    // TCION: transmit START byte — should succeed.
+    if let Err(e) = tty::tcxonc(idx, slopos_abi::syscall::TCION) {
+        klog_info!("TTY_TEST: BUG - tcxonc(TCION) failed: {:?}", e);
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCIOFF/TCION do not affect output_stopped state.
+pub fn test_fp8_tcioff_tcion_no_output_stop() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Ensure output is running.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOON).unwrap();
+
+    // TCIOFF should not block output.
+    tty::tcxonc(idx, slopos_abi::syscall::TCIOFF).unwrap();
+    match tty::write(idx, b"data", true) {
+        Ok(4) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCIOFF should not block output, write returned {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // TCION should also not affect output.
+    tty::tcxonc(idx, slopos_abi::syscall::TCION).unwrap();
+    match tty::write(idx, b"data", true) {
+        Ok(4) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCION should not affect output, write returned {:?}",
+                other
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: Invalid TCXONC actions still return InvalidArg.
+/// (Regression test for Phase 5 validation preservation.)
+pub fn test_fp8_invalid_action_still_errors() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+
+    for &bad in &[4i32, -1, 99, i32::MAX, i32::MIN] {
+        match tty::tcxonc(idx, bad) {
+            Err(TtyError::InvalidArg) => {}
+            other => {
+                klog_info!(
+                    "TTY_TEST: BUG - tcxonc({}) = {:?}, expected InvalidArg",
+                    bad,
+                    other
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCOOFF on a PTY slave stops nonblocking writes to that
+/// slave.
+pub fn test_fp8_tcooff_pty_slave_write() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Stop output on the slave.
+    tty::tcxonc(slave, slopos_abi::syscall::TCOOFF).unwrap();
+
+    // Non-blocking write to slave should return WouldBlock.
+    match tty::write(slave, b"blocked", true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - slave write under TCOOFF should return WouldBlock, got {:?}",
+                other
+            );
+            let _ = tty::tcxonc(slave, slopos_abi::syscall::TCOON);
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    // Resume and verify write works.
+    tty::tcxonc(slave, slopos_abi::syscall::TCOON).unwrap();
+    match tty::write(slave, b"ok", true) {
+        Ok(n) if n > 0 => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - slave write after TCOON should succeed, got {:?}",
+                other
+            );
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: output_stopped is independent of ldisc IXON stopped.
+pub fn test_fp8_output_stopped_independent_of_ixon() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Verify that output_stopped (TCXONC) and IXON stopped are separate.
+    // TCOOFF should block even when IXON flow control is not active.
+    // The default termios does NOT have IXON set (no keyboard flow
+    // control), so ldisc.is_stopped() is false.  TCOOFF should still
+    // block writes.
+    tty::tcxonc(idx, slopos_abi::syscall::TCOOFF).unwrap();
+
+    match tty::write(idx, b"x", true) {
+        Err(TtyError::WouldBlock) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - TCOOFF should block independently of IXON, got {:?}",
+                other
+            );
+            let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON);
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCXONC on unallocated slot returns NotAllocated.
+pub fn test_fp8_tcxonc_unallocated_slot() -> TestResult {
+    tty::table::tty_table_init();
+    // Slot 30 should not be allocated after init.
+    let idx = TtyIndex(30);
+
+    for action in 0..=3i32 {
+        match tty::tcxonc(idx, action) {
+            Err(TtyError::NotAllocated) => {}
+            other => {
+                klog_info!(
+                    "TTY_TEST: BUG - tcxonc({}) on unallocated slot = {:?}, expected NotAllocated",
+                    action,
+                    other
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 8: TCXONC on out-of-range index returns InvalidIndex.
+pub fn test_fp8_tcxonc_invalid_index() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(255);
+
+    for action in 0..=3i32 {
+        match tty::tcxonc(idx, action) {
+            Err(TtyError::InvalidIndex) => {}
+            other => {
+                klog_info!(
+                    "TTY_TEST: BUG - tcxonc({}) on invalid index = {:?}, expected InvalidIndex",
+                    action,
+                    other
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -14053,5 +14427,18 @@ slopos_lib::define_test_suite!(
         test_bugfix_parmrk_drop_when_buffer_completely_full,
         test_bugfix_tcxonc_invalid_action_returns_error,
         test_bugfix_tcxonc_boundary_values,
+        // Finishing Phase 8: TCXONC Behavioral Completion
+        test_fp8_tcooff_blocks_nonblock_write,
+        test_fp8_tcoon_resumes_write,
+        test_fp8_tcooff_idempotent,
+        test_fp8_tcoon_idempotent,
+        test_fp8_stop_resume_cycle,
+        test_fp8_tcioff_tcion_succeed,
+        test_fp8_tcioff_tcion_no_output_stop,
+        test_fp8_invalid_action_still_errors,
+        test_fp8_tcooff_pty_slave_write,
+        test_fp8_output_stopped_independent_of_ixon,
+        test_fp8_tcxonc_unallocated_slot,
+        test_fp8_tcxonc_invalid_index,
     ]
 );

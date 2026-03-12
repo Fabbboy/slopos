@@ -116,6 +116,12 @@ pub struct Tty {
     /// the master-side writer must be back-pressured (blocked or EAGAIN).
     /// Cleared when a slave `read()` drains below `THROTTLE_LOW_WATER`.
     pub throttled: bool,
+
+    /// Finishing Phase 8: Explicit output-stop state for TCXONC.  When `true`,
+    /// `tty_write()` blocks (or returns EAGAIN for non-blocking) until output
+    /// is resumed via `tcxonc(TCOON)`.  Separate from the ldisc `stopped`
+    /// flag which is driven by IXON (Ctrl+S / Ctrl+Q keyboard flow control).
+    pub output_stopped: bool,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -1007,15 +1013,15 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             }
         }
 
-        // Phase 21: IXON write-side enforcement.  When the line discipline
-        // is stopped (Ctrl+S / VSTOP), block the writer on the per-TTY
-        // output wait queue until output is resumed (Ctrl+Q / VSTART or
-        // any key with IXON set).  Non-blocking writes return a short
-        // write (or EAGAIN) instead of blocking.
+        // Phase 21 + Finishing Phase 8: Output-stop enforcement.
+        // Block the writer when EITHER the line discipline is stopped
+        // (IXON: Ctrl+S / VSTOP) OR the TTY has been explicitly stopped
+        // via tcxonc(TCOOFF).  Non-blocking writes return a short write
+        // (or EAGAIN if no bytes written yet) instead of blocking.
         if nonblock {
             let guard = TTY_SLOTS[slot].lock();
             let is_stopped = match guard.as_ref() {
-                Some(tty) => tty.ldisc.is_stopped(),
+                Some(tty) => tty.ldisc.is_stopped() || tty.output_stopped,
                 None => false,
             };
             drop(guard);
@@ -1030,7 +1036,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             TTY_OUTPUT_WAITERS[slot].wait_event(|| {
                 let guard = TTY_SLOTS[slot].lock();
                 match guard.as_ref() {
-                    Some(tty) => !tty.ldisc.is_stopped(),
+                    Some(tty) => !tty.ldisc.is_stopped() && !tty.output_stopped,
                     None => true, // slot gone — let the next lock attempt return NotAllocated
                 }
             });
@@ -2025,27 +2031,87 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
 
 /// Start/stop I/O (implements `tcflow()` / `TCXONC` ioctl).
 ///
-/// Validates the action code against the four POSIX-defined values
-/// (`TCOOFF`/`TCOON`/`TCIOFF`/`TCION`) and returns `InvalidArg` for
-/// anything else — matching Linux’s `EINVAL` behaviour.
+/// Finishing Phase 8: Full behavioral implementation replacing the Phase 5
+/// validation-only stub.
 ///
-/// The actions themselves are stubbed as no-ops: real XON/XOFF control
-/// is handled by the existing IXON/IXOFF infrastructure at the line
-/// discipline level.
+/// - `TCOOFF`: suspend output — sets `output_stopped = true` so the write
+///   path blocks (or returns EAGAIN for non-blocking FDs).
+/// - `TCOON`: resume output — clears `output_stopped`, wakes blocked
+///   writers and poll waiters.
+/// - `TCIOFF`: transmit the STOP character (`VSTOP`, typically Ctrl+S /
+///   XOFF 0x13) to the terminal device.
+/// - `TCION`: transmit the START character (`VSTART`, typically Ctrl+Q /
+///   XON 0x11) to the terminal device.
+///
+/// Invalid action codes return `InvalidArg` (matching Linux `EINVAL`).
 pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let guard = TTY_SLOTS[slot].lock();
-    if guard.as_ref().is_none() {
-        return Err(TtyError::NotAllocated);
-    }
-    // Validate action against the four POSIX-defined constants.
-    // Linux returns -EINVAL for out-of-range values.
-    use slopos_abi::syscall::{TCIOFF, TCION, TCOOFF, TCOON};
+
+    use slopos_abi::syscall::{CcIndex, TCIOFF, TCION, TCOOFF, TCOON};
+
     match action {
-        TCOOFF | TCOON | TCIOFF | TCION => Ok(()),
+        TCOOFF => {
+            // Suspend output: set output_stopped flag so writers block.
+            let was_stopped = {
+                let mut guard = TTY_SLOTS[slot].lock();
+                let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
+                let prev = tty.output_stopped;
+                tty.output_stopped = true;
+                prev
+            };
+            // Phase 39: Notify master of flow-control stop transition.
+            if !was_stopped {
+                pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_STOP);
+            }
+            Ok(())
+        }
+        TCOON => {
+            // Resume output: clear output_stopped flag, wake blocked
+            // writers and poll waiters.
+            let was_stopped = {
+                let mut guard = TTY_SLOTS[slot].lock();
+                let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
+                let prev = tty.output_stopped;
+                tty.output_stopped = false;
+                prev
+            };
+            // Wake writers and poll waiters regardless — no harm in a
+            // spurious wake, and it keeps the logic simple.
+            TTY_OUTPUT_WAITERS[slot].wake_all();
+            TTY_POLL_WAITERS[slot].wake_all();
+            // Phase 39: Notify master of flow-control start transition.
+            if was_stopped {
+                pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_START);
+            }
+            Ok(())
+        }
+        TCIOFF => {
+            // Transmit the STOP control byte (VSTOP / XOFF) to the
+            // terminal device — the host→device flow-control path.
+            let (driver_id, stop_byte) = {
+                let guard = TTY_SLOTS[slot].lock();
+                let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+                let stop = tty.ldisc.termios().c_cc[CcIndex::Vstop.as_usize()];
+                (tty.driver.id(), stop)
+            };
+            write_driver_unlocked(driver_id, &[stop_byte]);
+            Ok(())
+        }
+        TCION => {
+            // Transmit the START control byte (VSTART / XON) to the
+            // terminal device — the host→device flow-control path.
+            let (driver_id, start_byte) = {
+                let guard = TTY_SLOTS[slot].lock();
+                let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+                let start = tty.ldisc.termios().c_cc[CcIndex::Vstart.as_usize()];
+                (tty.driver.id(), start)
+            };
+            write_driver_unlocked(driver_id, &[start_byte]);
+            Ok(())
+        }
         _ => Err(TtyError::InvalidArg),
     }
 }
@@ -2064,6 +2130,9 @@ pub fn hangup(idx: TtyIndex) {
         };
         let sid = tty.session.session_id_raw();
         tty.ldisc.flush_all();
+        // Finishing Phase 8: Clear output stop so blocked writers unblock
+        // and see the hung_up flag on re-check.
+        tty.output_stopped = false;
         // Phase 39: full flush → both FLUSHREAD + FLUSHWRITE packet events.
         // Deferred until after lock is dropped to avoid self-deadlock.
         tty.session.detach();

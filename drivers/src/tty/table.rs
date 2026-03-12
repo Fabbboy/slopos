@@ -177,6 +177,7 @@ impl Tty {
             packet_mode: false,
             packet_events: 0,
             throttled: false,
+            output_stopped: false,
         }
     }
 
@@ -200,6 +201,7 @@ impl Tty {
             packet_mode: false,
             packet_events: 0,
             throttled: false,
+            output_stopped: false,
         }
     }
 
@@ -223,6 +225,7 @@ impl Tty {
             packet_mode: false,
             packet_events: 0,
             throttled: false,
+            output_stopped: false,
         }
     }
 }
