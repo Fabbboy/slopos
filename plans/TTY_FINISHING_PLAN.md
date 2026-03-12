@@ -302,7 +302,7 @@ Both can coexist. The IXOFF watermarks (80%/20%) may be aligned with throttle wa
 
 ## 7. Phase 4: c_cflag ABI Completion
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P1 compatibility — `c_cflag` currently defines only `CREAD`. Any program that reads termios attributes sees missing character size, parity, baud rate, and modem control flags. Programs that roundtrip `tcgetattr`/`tcsetattr` will clear unknown bits.
 > **Principle**: These are pure ABI definitions with zero runtime cost. The kernel stores and returns them faithfully. For PTYs and QEMU serial, no hardware action is needed — but userland programs expect the constants to exist and the defaults to be sane.

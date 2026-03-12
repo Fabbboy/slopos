@@ -418,7 +418,10 @@ impl LineDisc {
             termios: UserTermios {
                 c_iflag: slopos_abi::syscall::ICRNL,
                 c_oflag: slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR,
-                c_cflag: slopos_abi::syscall::CREAD,
+                c_cflag: slopos_abi::syscall::CS8
+                    | slopos_abi::syscall::CREAD
+                    | slopos_abi::syscall::HUPCL
+                    | slopos_abi::syscall::B38400,
                 c_lflag: slopos_abi::syscall::ISIG
                     | slopos_abi::syscall::ICANON
                     | slopos_abi::syscall::ECHO
@@ -1607,7 +1610,10 @@ impl RawDisc {
             termios: UserTermios {
                 c_iflag: 0,
                 c_oflag: 0,
-                c_cflag: slopos_abi::syscall::CREAD,
+                c_cflag: slopos_abi::syscall::CS8
+                    | slopos_abi::syscall::CREAD
+                    | slopos_abi::syscall::HUPCL
+                    | slopos_abi::syscall::B38400,
                 c_lflag: 0,
                 c_line: N_RAW as u8,
                 c_cc: [0; NCCS],

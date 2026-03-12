@@ -693,7 +693,51 @@ pub const PENDIN: u32 = 0x4000;
 pub const EXTPROC: u32 = 0x10000;
 
 // c_cflag bits — control (hardware) flags
-pub const CREAD: u32 = 0x80;
+pub const CSIZE: u32 = 0o000060;
+pub const CS5: u32 = 0o000000;
+pub const CS6: u32 = 0o000020;
+pub const CS7: u32 = 0o000040;
+pub const CS8: u32 = 0o000060;
+pub const CSTOPB: u32 = 0o000100;
+pub const CREAD: u32 = 0o000200;
+pub const PARENB: u32 = 0o000400;
+pub const PARODD: u32 = 0o001000;
+pub const HUPCL: u32 = 0o002000;
+pub const CLOCAL: u32 = 0o004000;
+pub const CBAUD: u32 = 0o010017;
+pub const B0: u32 = 0o000000;
+pub const B50: u32 = 0o000001;
+pub const B75: u32 = 0o000002;
+pub const B110: u32 = 0o000003;
+pub const B134: u32 = 0o000004;
+pub const B150: u32 = 0o000005;
+pub const B200: u32 = 0o000006;
+pub const B300: u32 = 0o000007;
+pub const B600: u32 = 0o000010;
+pub const B1200: u32 = 0o000011;
+pub const B1800: u32 = 0o000012;
+pub const B2400: u32 = 0o000013;
+pub const B4800: u32 = 0o000014;
+pub const B9600: u32 = 0o000015;
+pub const B19200: u32 = 0o000016;
+pub const B38400: u32 = 0o000017;
+pub const CBAUDEX: u32 = 0o010000;
+pub const B57600: u32 = 0o010001;
+pub const B115200: u32 = 0o010002;
+pub const B230400: u32 = 0o010003;
+pub const B460800: u32 = 0o010004;
+pub const B500000: u32 = 0o010005;
+pub const B576000: u32 = 0o010006;
+pub const B921600: u32 = 0o010007;
+pub const B1000000: u32 = 0o010010;
+pub const B1152000: u32 = 0o010011;
+pub const B1500000: u32 = 0o010012;
+pub const B2000000: u32 = 0o010013;
+pub const B2500000: u32 = 0o010014;
+pub const B3000000: u32 = 0o010015;
+pub const B3500000: u32 = 0o010016;
+pub const B4000000: u32 = 0o010017;
+pub const CRTSCTS: u32 = 0o020000000;
 
 pub const VINTR: usize = 0;
 pub const VQUIT: usize = 1;
@@ -776,11 +820,22 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// Type-safe wrapper for `c_cflag` — control (hardware) flags.
     ///
-    /// No control flags are currently used by SlopOS.  The type exists
-    /// for completeness and future CREAD/PARENB/HUPCL support.
+    /// Finishing Phase 4: Full c_cflag ABI with character size, parity,
+    /// stop bits, modem control, baud rates, and hardware flow control.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ControlFlags: u32 {
-        const CREAD = 0x80;
+        const CSIZE   = 0o000060;
+        const CS5     = 0o000000;
+        const CS6     = 0o000020;
+        const CS7     = 0o000040;
+        const CS8     = 0o000060;
+        const CSTOPB  = 0o000100;
+        const CREAD   = 0o000200;
+        const PARENB  = 0o000400;
+        const PARODD  = 0o001000;
+        const HUPCL   = 0o002000;
+        const CLOCAL  = 0o004000;
+        const CRTSCTS = 0o020000000;
     }
 }
 

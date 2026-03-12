@@ -11857,6 +11857,149 @@ pub fn test_fp3_no_imaxbel_silent_drop() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Finishing Phase 4: c_cflag ABI Completion tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 4: ControlFlags constants have correct octal values.
+pub fn test_fp4_control_flag_values() -> TestResult {
+    use slopos_abi::syscall::*;
+    // Character size.
+    if CS5 != 0o000000 || CS6 != 0o000020 || CS7 != 0o000040 || CS8 != 0o000060 {
+        klog_info!("TTY_TEST: BUG - CS5/6/7/8 values wrong");
+        return TestResult::Fail;
+    }
+    if CSIZE != 0o000060 {
+        klog_info!("TTY_TEST: BUG - CSIZE value wrong");
+        return TestResult::Fail;
+    }
+    // Parity.
+    if PARENB != 0o000400 || PARODD != 0o001000 {
+        klog_info!("TTY_TEST: BUG - PARENB/PARODD values wrong");
+        return TestResult::Fail;
+    }
+    // Stop/modem.
+    if CSTOPB != 0o000100 || HUPCL != 0o002000 || CLOCAL != 0o004000 {
+        klog_info!("TTY_TEST: BUG - CSTOPB/HUPCL/CLOCAL values wrong");
+        return TestResult::Fail;
+    }
+    // Baud.
+    if B0 != 0 || B9600 != 0o000015 || B38400 != 0o000017 || B115200 != 0o010002 {
+        klog_info!("TTY_TEST: BUG - baud rate constants wrong");
+        return TestResult::Fail;
+    }
+    if CBAUD != 0o010017 || CBAUDEX != 0o010000 {
+        klog_info!("TTY_TEST: BUG - CBAUD/CBAUDEX wrong");
+        return TestResult::Fail;
+    }
+    // Hardware flow control.
+    if CRTSCTS != 0o020000000 {
+        klog_info!("TTY_TEST: BUG - CRTSCTS value wrong");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 4: Default termios c_cflag contains CS8|CREAD|HUPCL|B38400.
+pub fn test_fp4_default_cflag() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let t = tty::get_termios(TtyIndex(0)).unwrap();
+    let expected = CS8 | CREAD | HUPCL | B38400;
+    if t.c_cflag != expected {
+        klog_info!(
+            "TTY_TEST: BUG - default c_cflag 0x{:x}, expected 0x{:x}",
+            t.c_cflag,
+            expected
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 4: tcsetattr with CS7|PARENB roundtrips through tcgetattr.
+pub fn test_fp4_cflag_roundtrip() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    let mut t = saved;
+    t.c_cflag = CS7 | PARENB | CREAD | B9600;
+    tty::set_termios(idx, &t).unwrap();
+
+    let got = tty::get_termios(idx).unwrap();
+    if got.c_cflag != t.c_cflag {
+        klog_info!(
+            "TTY_TEST: BUG - roundtrip c_cflag 0x{:x} vs 0x{:x}",
+            got.c_cflag,
+            t.c_cflag
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+/// Finishing Phase 4: c_ispeed/c_ospeed populated from default baud (38400).
+pub fn test_fp4_speed_fields_populated() -> TestResult {
+    tty::table::tty_table_init();
+    let t = tty::get_termios(TtyIndex(0)).unwrap();
+    if t.c_ispeed != 38400 {
+        klog_info!("TTY_TEST: BUG - c_ispeed={}, expected 38400", t.c_ispeed);
+        return TestResult::Fail;
+    }
+    if t.c_ospeed != 38400 {
+        klog_info!("TTY_TEST: BUG - c_ospeed={}, expected 38400", t.c_ospeed);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 4: Changing baud rate updates c_ispeed/c_ospeed.
+pub fn test_fp4_speed_follows_baud_change() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    let mut t = saved;
+    // Clear old baud bits and set B9600.
+    t.c_cflag = (t.c_cflag & !CBAUD) | B9600;
+    tty::set_termios(idx, &t).unwrap();
+
+    let got = tty::get_termios(idx).unwrap();
+    if got.c_ispeed != 9600 || got.c_ospeed != 9600 {
+        klog_info!(
+            "TTY_TEST: BUG - speed={}/{}, expected 9600",
+            got.c_ispeed,
+            got.c_ospeed
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+/// Finishing Phase 4: CREAD value preserved after ABI update.
+pub fn test_fp4_cread_value_preserved() -> TestResult {
+    // CREAD was 0x80 before, now 0o000200 = 128 = 0x80. Same value.
+    use slopos_abi::syscall::ControlFlags;
+    let cread = ControlFlags::CREAD;
+    if cread.bits() != 0x80 {
+        klog_info!(
+            "TTY_TEST: BUG - CREAD bits 0x{:x}, expected 0x80",
+            cread.bits()
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -12348,5 +12491,12 @@ slopos_lib::define_test_suite!(
         test_fp3_canonical_flush_fits_in_cooked,
         test_fp3_imaxbel_bell_on_cooked_overflow,
         test_fp3_no_imaxbel_silent_drop,
+        // Finishing Phase 4: c_cflag ABI Completion
+        test_fp4_control_flag_values,
+        test_fp4_default_cflag,
+        test_fp4_cflag_roundtrip,
+        test_fp4_speed_fields_populated,
+        test_fp4_speed_follows_baud_change,
+        test_fp4_cread_value_preserved,
     ]
 );
