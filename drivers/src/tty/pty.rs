@@ -211,13 +211,29 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 /// Phase 26: validates the peer handle's generation before writing.
 /// If the peer slot was freed and potentially reused, the write is
 /// silently discarded.
-pub fn master_write(peer: PtyPeerHandle, data: &[u8]) {
+///
+/// Finishing Phase 2: Returns the number of bytes successfully pushed.
+/// Stops early when the slave’s cooked buffer hits the throttle
+/// high-water mark (`throttled == true`), enabling short writes and
+/// back-pressure.  The caller is responsible for retrying the remainder.
+pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     if !validate_peer(&peer) {
-        return;
+        return 0;
     }
-    for &byte in data {
+    let slave_slot = peer.idx.0 as usize;
+    for (i, &byte) in data.iter().enumerate() {
+        // Check the slave’s throttle flag before each byte.
+        {
+            let guard = TTY_SLOTS[slave_slot].lock();
+            if let Some(tty) = guard.as_ref() {
+                if tty.throttled {
+                    return i; // short write — caller retries
+                }
+            }
+        }
         super::push_input(peer.idx, byte);
     }
+    data.len()
 }
 
 /// Slave write → push bytes into the master's raw read buffer.

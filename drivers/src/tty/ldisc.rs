@@ -28,6 +28,14 @@ use slopos_abi::syscall::{
 const EDIT_BUF_SIZE: usize = 1024;
 const COOKED_BUF_SIZE: usize = 4096;
 
+// Finishing Phase 2: PTY throttle water marks for back-pressure.
+// When the cooked buffer occupancy hits high-water, the slave sets
+// `throttled = true` on the TTY, signalling the master to stop writing.
+// When a read drains occupancy to the low-water mark, the slave clears
+// `throttled` and wakes the master so it can resume.
+pub(crate) const THROTTLE_HIGH_WATER: usize = COOKED_BUF_SIZE * 3 / 4; // 3072
+pub(crate) const THROTTLE_LOW_WATER: usize = COOKED_BUF_SIZE / 4; // 1024
+
 // Phase 36: IXOFF flow-control water marks.
 // High-water: send XOFF when combined pending input exceeds this.
 // Low-water: send XON when combined pending input drops below this.

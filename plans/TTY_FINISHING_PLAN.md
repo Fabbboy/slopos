@@ -178,7 +178,7 @@ The generation-tagged `PtyPeerHandle` already provides safe peer slot resolution
 
 ## 5. Phase 2: PTY Flow Control (Throttle Mechanism)
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P0 correctness — without throttling, rapid PTY master writes silently overflow the slave's cooked buffer, causing data loss.
 > **Principle**: Linux's `TTY_THROTTLED` flag is a proven pattern. When the slave's input buffer fills, the master must be back-pressured. This is not optional for any terminal multiplexer (tmux, screen, ssh) to function correctly.

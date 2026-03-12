@@ -110,6 +110,12 @@ pub struct Tty {
     /// `TIOCPKT_START`, `TIOCPKT_NOSTOP`, `TIOCPKT_DOSTOP`.
     /// Consumed on the next master `read()` when non-zero.
     pub packet_events: u8,
+
+    /// Finishing Phase 2: PTY flow control throttle flag.  When `true`,
+    /// the slave's cooked buffer has exceeded `THROTTLE_HIGH_WATER` and
+    /// the master-side writer must be back-pressured (blocked or EAGAIN).
+    /// Cleared when a slave `read()` drains below `THROTTLE_LOW_WATER`.
+    pub throttled: bool,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -350,6 +356,11 @@ pub fn push_input(idx: TtyIndex, c: u8) {
             deferred_pkt_event = slopos_abi::syscall::TIOCPKT_START;
         }
 
+        // Finishing Phase 2: Activate throttle when cooked buffer fills.
+        if !tty.throttled && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER {
+            tty.throttled = true;
+        }
+
         // Handle echo, reprint, and signal actions while we hold the lock.
         match action {
             InputAction::Echo { buf, len } => {
@@ -503,6 +514,9 @@ pub fn read_with_attach(
         let mut should_wait = false;
         let mut wait_timeout_ms: Option<u64> = None;
         let mut ixoff_xon = None;
+        // Finishing Phase 2: Track if this read unthrottled the TTY so we
+        // can wake the master-side writer after releasing the lock.
+        let mut unthrottled_peer: Option<usize> = None;
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -574,6 +588,18 @@ pub fn read_with_attach(
                             .ldisc
                             .ixoff_check_xon()
                             .map(|xon| (tty.driver.id(), xon));
+                        // Finishing Phase 2: Unthrottle after packet-mode read.
+                        let pkt_unthrottled_peer = if tty.throttled
+                            && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
+                        {
+                            tty.throttled = false;
+                            match &tty.driver {
+                                TtyDriverKind::PtySlave { peer } => Some(peer.idx.0 as usize),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         // Canonical mode: return immediately with prefix.
                         drop(guard);
                         if let Some((driver_id, xon)) = ixoff_xon {
@@ -582,6 +608,13 @@ pub fn read_with_attach(
                         if let Some((pgid, sig)) = deferred_signal {
                             if pgid != 0 {
                                 let _ = signal_process_group(pgid, sig);
+                            }
+                        }
+                        // Finishing Phase 2: Wake master-side writer after unthrottle.
+                        if let Some(ps) = pkt_unthrottled_peer {
+                            if ps < MAX_TTYS {
+                                TTY_OUTPUT_WAITERS[ps].wake_all();
+                                TTY_POLL_WAITERS[ps].wake_all();
                             }
                         }
                         return Ok(total);
@@ -597,6 +630,16 @@ pub fn read_with_attach(
                         .ldisc
                         .ixoff_check_xon()
                         .map(|xon| (tty.driver.id(), xon));
+                }
+                // Finishing Phase 2: Unthrottle if occupancy dropped below low-water.
+                if got > 0
+                    && tty.throttled
+                    && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
+                {
+                    tty.throttled = false;
+                    if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                        unthrottled_peer = Some(peer.idx.0 as usize);
+                    }
                 }
             }
 
@@ -615,6 +658,13 @@ pub fn read_with_attach(
                     if let Some((pgid, sig)) = deferred_signal {
                         if pgid != 0 {
                             let _ = signal_process_group(pgid, sig);
+                        }
+                    }
+                    // Finishing Phase 2: Wake master after unthrottle.
+                    if let Some(ps) = unthrottled_peer {
+                        if ps < MAX_TTYS {
+                            TTY_OUTPUT_WAITERS[ps].wake_all();
+                            TTY_POLL_WAITERS[ps].wake_all();
                         }
                     }
                     return Ok(total);
@@ -728,6 +778,14 @@ pub fn read_with_attach(
         if let Some((pgid, sig)) = deferred_signal {
             if pgid != 0 {
                 let _ = signal_process_group(pgid, sig);
+            }
+        }
+
+        // Finishing Phase 2: Wake master-side writer if this read unthrottled.
+        if let Some(ps) = unthrottled_peer {
+            if ps < MAX_TTYS {
+                TTY_OUTPUT_WAITERS[ps].wake_all();
+                TTY_POLL_WAITERS[ps].wake_all();
             }
         }
 
@@ -867,8 +925,46 @@ pub fn write(idx: TtyIndex, data: &[u8]) -> Result<usize, TtyError> {
     // for expansion while keeping the stack buffer small.
     const OUT_BUF_CAP: usize = 256;
 
+    // Finishing Phase 2: Determine if this TTY is a PTY master so we can
+    // apply slave-side throttle back-pressure in the write loop.
+    let peer_slave_slot: Option<usize> = {
+        let guard = TTY_SLOTS[slot].lock();
+        match guard.as_ref() {
+            Some(tty) => match &tty.driver {
+                TtyDriverKind::PtyMaster { peer } => Some(peer.idx.0 as usize),
+                _ => None,
+            },
+            None => None,
+        }
+    };
     let mut pos = 0;
     while pos < data.len() {
+        // Finishing Phase 2: PTY master throttle back-pressure.
+        // If the peer slave is throttled, block until the slave reader
+        // drains enough data to unthrottle.
+        if let Some(peer_slot) = peer_slave_slot {
+            TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+                let guard = TTY_SLOTS[peer_slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => !tty.throttled || tty.hung_up || tty.peer_closed,
+                    None => true,
+                }
+            });
+            // Re-check hangup after unblock.
+            {
+                let guard = TTY_SLOTS[slot].lock();
+                if let Some(tty) = guard.as_ref() {
+                    if tty.hung_up {
+                        return if pos > 0 {
+                            Ok(pos)
+                        } else {
+                            Err(TtyError::HungUp)
+                        };
+                    }
+                }
+            }
+        }
+
         // Phase 21: IXON write-side enforcement.  When the line discipline
         // is stopped (Ctrl+S / VSTOP), block the writer on the per-TTY
         // output wait queue until output is resumed (Ctrl+Q / VSTART or

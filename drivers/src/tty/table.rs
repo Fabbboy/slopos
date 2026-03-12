@@ -176,6 +176,7 @@ impl Tty {
             slave_locked: false,
             packet_mode: false,
             packet_events: 0,
+            throttled: false,
         }
     }
 
@@ -198,6 +199,7 @@ impl Tty {
             slave_locked: false,
             packet_mode: false,
             packet_events: 0,
+            throttled: false,
         }
     }
 
@@ -220,6 +222,7 @@ impl Tty {
             slave_locked: true,
             packet_mode: false,
             packet_events: 0,
+            throttled: false,
         }
     }
 }
