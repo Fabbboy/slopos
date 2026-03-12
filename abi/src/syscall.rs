@@ -620,6 +620,9 @@ pub const TIOCNOTTY: u64 = 0x5422;
 /// Phase 27: Get the number of bytes available for reading.
 /// Linux value: 0x541B (same as TIOCINQ).
 pub const FIONREAD: u64 = 0x541B;
+/// Finishing Phase 9: Get the number of bytes in the output queue.
+/// Linux value: 0x5411.
+pub const TIOCOUTQ: u64 = 0x5411;
 /// Phase 38: Set PTY slave lock state (0=unlock, 1=lock). Master FD only.
 /// Linux value: 0x40045431.
 pub const TIOCSPTLCK: u64 = 0x4004_5431;
