@@ -113,6 +113,7 @@ pub(crate) trait LdiscOps {
     fn process_output_byte(&mut self, c: u8) -> OutputAction;
     fn ixoff_check_xoff(&mut self) -> Option<u8>;
     fn ixoff_check_xon(&mut self) -> Option<u8>;
+    fn input_full(&self) -> bool;
 }
 
 /// Generates delegating `impl LdiscKind` methods that forward to the inner
@@ -569,6 +570,14 @@ impl LineDisc {
     /// Used by the FIONREAD / TIOCINQ ioctl.
     pub fn bytes_available(&self) -> usize {
         self.cooked_count
+    }
+
+    /// Returns `true` if both the edit and cooked buffers are full.
+    ///
+    /// Used by PTY slave write paths to detect back-pressure before
+    /// pushing bytes that would otherwise be silently dropped.
+    pub fn input_full(&self) -> bool {
+        self.cooked_count >= COOKED_BUF_SIZE && self.edit_len >= EDIT_BUF_SIZE
     }
 
     pub fn flush_all(&mut self) {
@@ -1506,10 +1515,11 @@ impl LineDisc {
 
     /// Move everything in the edit buffer into the cooked ring buffer.
     ///
-    /// Finishing Phase 3: Uses the `bool` return from `push_cooked()` to
-    /// stop early if the cooked buffer fills up.  In practice the edit
-    /// buffer (1024) always fits in the cooked buffer (4096), so this
-    /// branch is a defensive guard only.
+    /// Uses the `bool` return from `push_cooked()` to stop early if the
+    /// cooked buffer fills up.  Any bytes that could not be flushed are
+    /// preserved: the unflushed tail is shifted to the front of the edit
+    /// buffer and `edit_len` is set to the remainder count.  This prevents
+    /// silent data loss when the cooked buffer is partially occupied.
     fn flush_edit_to_cooked(&mut self) {
         let mut i = 0usize;
         while i < self.edit_len {
@@ -1518,7 +1528,14 @@ impl LineDisc {
             }
             i += 1;
         }
-        self.edit_len = 0;
+        // Preserve any unflushed remainder by shifting to front of edit buffer.
+        if i < self.edit_len {
+            let remaining = self.edit_len - i;
+            self.edit_buf.copy_within(i..self.edit_len, 0);
+            self.edit_len = remaining;
+        } else {
+            self.edit_len = 0;
+        }
         self.line_count += 1;
     }
 }
@@ -1583,6 +1600,10 @@ impl LdiscOps for LineDisc {
     #[inline]
     fn ixoff_check_xon(&mut self) -> Option<u8> {
         self.ixoff_check_xon()
+    }
+    #[inline]
+    fn input_full(&self) -> bool {
+        self.input_full()
     }
 }
 
@@ -1666,6 +1687,11 @@ impl RawDisc {
     /// Phase 27: Returns the number of bytes available for reading.
     pub fn bytes_available(&self) -> usize {
         self.count
+    }
+
+    /// Returns `true` if the raw buffer is full.
+    pub fn input_full(&self) -> bool {
+        self.count >= RAW_BUF_SIZE
     }
 
     pub fn flush_all(&mut self) {
@@ -1783,6 +1809,10 @@ impl LdiscOps for RawDisc {
     fn ixoff_check_xon(&mut self) -> Option<u8> {
         self.ixoff_check_xon()
     }
+    #[inline]
+    fn input_full(&self) -> bool {
+        self.input_full()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,5 +1878,6 @@ impl LdiscKind {
         fn process_output_byte(&mut self, c: u8) -> OutputAction;
         fn ixoff_check_xoff(&mut self) -> Option<u8>;
         fn ixoff_check_xon(&mut self) -> Option<u8>;
+        fn input_full(&self) -> bool;
     }
 }

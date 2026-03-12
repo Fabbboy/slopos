@@ -87,7 +87,8 @@ impl TtyDriverKind {
                 pty::master_write(*peer, buf);
             }
             Self::PtySlave { peer } => {
-                pty::slave_write(*peer, buf);
+                // Bytes that don't fit are dropped (no output back-pressure yet).
+                let _ = pty::slave_write(*peer, buf);
             }
             Self::None => {}
         }
@@ -208,7 +209,8 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
             pty::master_write(peer, data);
         }
         DriverId::PtySlave { peer } => {
-            pty::slave_write(peer, data);
+            // Bytes that don't fit are dropped (no output back-pressure yet).
+            let _ = pty::slave_write(peer, data);
         }
         DriverId::None => {}
     }

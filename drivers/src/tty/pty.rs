@@ -274,35 +274,45 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
 /// Phase 26: validates the peer handle's generation before writing.
 /// If the peer slot was freed and potentially reused, the write is
 /// silently discarded.
-pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) {
+///
+/// Returns the number of bytes successfully pushed into the master's
+/// buffer.  Stops early when the master's input buffer is full,
+/// preventing silent data loss from overflow.
+pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     if !validate_peer(&peer) {
-        return;
+        return 0;
     }
     let slot = peer.idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return 0;
     }
 
-    let should_wake = {
+    let (written, should_wake) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let Some(master) = guard.as_mut() else {
-            return;
+            return 0;
         };
 
         if master.peer_closed || master.hung_up {
-            return;
+            return 0;
         }
 
+        let mut count = 0usize;
         for &byte in data {
-            let _ = master.ldisc.input_char(byte);
+            if master.ldisc.input_full() {
+                break; // master buffer full — return short write
+            }
+            master.ldisc.input_char(byte);
+            count += 1;
         }
 
-        master.ldisc.has_data()
+        (count, master.ldisc.has_data())
     };
 
     if should_wake {
         TTY_INPUT_WAITERS[slot].wake_all();
     }
+    written
 }
 
 // ---------------------------------------------------------------------------
