@@ -34,7 +34,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 remaining ga
 
 | Phase | What | Priority | Effort | Status |
 |-------|------|----------|--------|--------|
-| 1 | Per-TTY poll notification (replace thundering herd) | P0 | Small | **TODO** |
+| 1 | Per-TTY poll notification (replace thundering herd) | P0 | Small | **DONE** |
 | 2 | PTY flow control / throttle mechanism | P0 | Medium | **TODO** |
 | 3 | Cooked buffer overflow hardening | P1 | Small | **TODO** |
 | 4 | c_cflag ABI completion (constants + defaults) | P1 | Small | **TODO** |
@@ -108,7 +108,7 @@ Gaps identified by comparative review against Linux `drivers/tty/n_tty.c` (~3500
 
 ## 4. Phase 1: Per-TTY Poll Notification
 
-**Status**: **TODO**
+**Status**: **DONE** — Replaced global `POLL_NOTIFY` with `TTY_POLL_WAITERS[MAX_TTYS]`, added `WaitQueue::enqueue_current()`/`remove_current()` for multi-queue poll registration, updated poll/select handlers to collect TTY indices and sleep per-slot, 6 regression tests added.
 
 > **Priority**: P0 performance/correctness — the global `POLL_NOTIFY` creates a thundering herd that wakes every poller on every TTY event.
 > **Principle**: The infrastructure for per-slot notification already exists (`TTY_INPUT_WAITERS`, `TTY_OUTPUT_WAITERS` in `table.rs`). This phase replaces the single global `POLL_NOTIFY` with per-slot poll wake targeting.

@@ -34,6 +34,7 @@ crate::define_service! {
         detach_session_by_id(session_id: u32);
         poll_events(tty_index: slopos_abi::syscall::TtyIndex, requested: u16) -> u16;
         poll_sleep();
+        poll_sleep_on(slots: *const u8, count: usize);
         detach_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, caller_sid: u32, caller_is_session_leader: bool) -> i32;
         bytes_available(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         set_pty_lock(tty_index: slopos_abi::syscall::TtyIndex, locked: bool) -> i32;

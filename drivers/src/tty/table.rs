@@ -68,11 +68,13 @@ pub static TTY_INPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() 
 /// woken when output is resumed (Ctrl+Q or any key with IXON set).
 pub static TTY_OUTPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
 
-/// Global poll/select notification queue.  Tasks blocked in `poll()` or
-/// `select()` sleep on this queue instead of busy-waiting with
-/// `sleep_current_task_ms(1)`.  Any event that could change poll readiness
-/// (input arrival, hangup, IXON resume) wakes all waiters.
-pub static POLL_NOTIFY: WaitQueue = WaitQueue::new();
+/// Per-TTY poll/select notification queues.  Tasks blocked in `poll()` or
+/// `select()` register on the specific slot's queue instead of a single
+/// global `WaitQueue`.  Any event that could change poll readiness (input
+/// arrival, hangup, IXON resume, peer close) wakes only the waiters on
+/// the affected slot — eliminating the thundering-herd problem of the old
+/// global `POLL_NOTIFY`.
+pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
 
 /// Per-TTY output-in-flight counter.  Tracks the number of `write()`
 /// operations that have processed output through the line discipline but

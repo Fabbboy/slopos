@@ -53,7 +53,7 @@ use self::driver::{TtyDriverKind, write_driver_unlocked};
 use self::ldisc::{InputAction, LdiscKind, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
 use self::table::{
-    POLL_NOTIFY, TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_SLOTS,
+    TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
 };
 
 // ---------------------------------------------------------------------------
@@ -283,7 +283,7 @@ pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
     set_active_tty(idx);
     if scheduler_is_enabled() != 0 {
         TTY_INPUT_WAITERS[slot].wake_all();
-        POLL_NOTIFY.wake_all();
+        TTY_POLL_WAITERS[slot].wake_all();
     }
     Ok(())
 }
@@ -392,7 +392,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 // Even on signal path, wake output waiters if resumed.
                 if output_resumed {
                     TTY_OUTPUT_WAITERS[slot].wake_all();
-                    POLL_NOTIFY.wake_all();
+                    TTY_POLL_WAITERS[slot].wake_all();
                 }
                 // Phase 39: Deliver deferred packet event.
                 if deferred_pkt_event != 0 {
@@ -435,7 +435,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     // Phase 21: Wake blocked writers and poll waiters on IXON resume.
     if output_resumed {
         TTY_OUTPUT_WAITERS[slot].wake_all();
-        POLL_NOTIFY.wake_all();
+        TTY_POLL_WAITERS[slot].wake_all();
     }
 }
 
@@ -449,8 +449,8 @@ fn notify_input_ready(idx: TtyIndex) {
         return;
     }
     TTY_INPUT_WAITERS[slot].wake_one();
-    // Phase 21: Also wake poll/select sleepers so they can re-check readiness.
-    POLL_NOTIFY.wake_all();
+    // Phase 21 + Finishing Phase 1: Wake per-slot poll sleepers.
+    TTY_POLL_WAITERS[slot].wake_all();
 }
 
 pub use self::pty::{
@@ -1771,10 +1771,10 @@ pub fn hangup(idx: TtyIndex) {
 
     if scheduler_is_enabled() != 0 {
         TTY_INPUT_WAITERS[slot].wake_all();
-        // Phase 21: Wake output waiters (write may be blocked on IXON) and
-        // poll sleepers so they see POLLHUP.
+        // Finishing Phase 1: Wake output waiters and per-slot poll sleepers
+        // so they see POLLHUP.
         TTY_OUTPUT_WAITERS[slot].wake_all();
-        POLL_NOTIFY.wake_all();
+        TTY_POLL_WAITERS[slot].wake_all();
     }
 }
 
@@ -1875,19 +1875,70 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
     revents
 }
 
-/// Sleep until a TTY poll-relevant event occurs, or fall back to a short
-/// busy-wait if the scheduler is not yet enabled.
+/// Sleep until a poll-relevant event occurs on one of the given TTY slots,
+/// or fall back to a short busy-wait if the scheduler is not yet enabled.
 ///
-/// This replaces the `sleep_current_task_ms(1)` busy-wait loop in the
-/// poll/select syscall handlers.  The caller's own timeout logic handles
-/// deadline checking after wakeup.
-pub fn poll_sleep() {
-    if scheduler_is_enabled() != 0 {
-        POLL_NOTIFY.wait_once();
-    } else {
+/// Finishing Phase 1: Per-slot registration.  The caller provides the set
+/// of TTY indices it is currently monitoring.  The current task is enqueued
+/// on each slot's `TTY_POLL_WAITERS` entry, then blocked exactly once.
+/// When *any* of the registered slots fires a wake, the task resumes and
+/// is cleaned up from all queues.
+///
+/// If `slots` is empty, falls back to a 1 ms delay (timer poll).
+pub fn poll_sleep_on(slots: &[u8]) {
+    if scheduler_is_enabled() == 0 {
         // Pre-scheduler fallback: yield briefly.
         slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        return;
     }
+
+    if slots.is_empty() {
+        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        return;
+    }
+
+    // Enqueue the current task on each slot's poll waiter.
+    let mut registered = 0usize;
+    for &slot in slots {
+        let s = slot as usize;
+        if s < MAX_TTYS && TTY_POLL_WAITERS[s].enqueue_current() {
+            registered += 1;
+        }
+    }
+
+    if registered == 0 {
+        // Could not enqueue on any queue — fall back to brief delay.
+        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        return;
+    }
+
+    // Block once — any wake from any registered queue unblocks us.
+    slopos_lib::kernel_services::driver_runtime::block_current_task();
+
+    // Clean up: remove ourselves from all registered queues.
+    for &slot in slots {
+        let s = slot as usize;
+        if s < MAX_TTYS {
+            TTY_POLL_WAITERS[s].remove_current();
+        }
+    }
+}
+
+/// Legacy poll_sleep with no slot information — falls back to sleeping on
+/// ALL active TTY poll waiters.  Retained for backward compatibility with
+/// code paths that do not yet pass slot indices.
+pub fn poll_sleep() {
+    // Collect all active TTY indices.
+    let mut slots = [0u8; MAX_TTYS];
+    let mut count = 0;
+    for i in 0..MAX_TTYS {
+        let guard = TTY_SLOTS[i].lock();
+        if guard.is_some() {
+            slots[count] = i as u8;
+            count += 1;
+        }
+    }
+    poll_sleep_on(&slots[..count]);
 }
 
 // ---------------------------------------------------------------------------

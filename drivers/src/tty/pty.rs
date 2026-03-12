@@ -538,6 +538,6 @@ pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
 
     if should_wake {
         TTY_INPUT_WAITERS[master_slot].wake_all();
-        super::table::POLL_NOTIFY.wake_all();
+        super::table::TTY_POLL_WAITERS[master_slot].wake_all();
     }
 }

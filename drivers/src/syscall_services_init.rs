@@ -297,6 +297,16 @@ fn tty_poll_sleep_adapter() {
     tty::poll_sleep()
 }
 
+fn tty_poll_sleep_on_adapter(slots: *const u8, count: usize) {
+    if slots.is_null() || count == 0 {
+        tty::poll_sleep();
+        return;
+    }
+    // SAFETY: The caller guarantees `slots` points to `count` valid bytes.
+    let slot_slice = unsafe { core::slice::from_raw_parts(slots, count) };
+    tty::poll_sleep_on(slot_slice);
+}
+
 fn tty_detach_controlling_terminal_adapter(
     tty_index: TtyIndex,
     caller_sid: u32,
@@ -371,6 +381,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     open_pty_slave: tty_open_pty_slave_adapter,
     poll_events: tty_poll_events_adapter,
     poll_sleep: tty_poll_sleep_adapter,
+    poll_sleep_on: tty_poll_sleep_on_adapter,
     detach_controlling_terminal: tty_detach_controlling_terminal_adapter,
     bytes_available: tty_bytes_available_adapter,
     set_pty_lock: tty_set_pty_lock_adapter,

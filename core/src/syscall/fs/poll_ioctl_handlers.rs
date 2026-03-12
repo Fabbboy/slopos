@@ -66,6 +66,9 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
     loop {
         let mut ready_count = 0u64;
+        // Finishing Phase 1: Collect TTY slot indices for per-slot poll sleep.
+        let mut poll_tty_slots = [0u8; 32];
+        let mut poll_tty_count = 0usize;
         for idx in 0..nfds {
             let user_ptr = try_or_err!(
                 ctx,
@@ -80,6 +83,17 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
                 pfd.revents = file_poll_fd(pid, pfd.fd as c_int, pfd.events);
                 if pfd.revents != 0 {
                     ready_count += 1;
+                }
+                // Track TTY indices for per-slot poll sleep.
+                if let Some(tty_idx) = file_get_tty_index(pid, pfd.fd as c_int) {
+                    let s = tty_idx.0;
+                    // Deduplicate: only add if not already present.
+                    if poll_tty_count < poll_tty_slots.len()
+                        && !poll_tty_slots[..poll_tty_count].contains(&s)
+                    {
+                        poll_tty_slots[poll_tty_count] = s;
+                        poll_tty_count += 1;
+                    }
                 }
             }
             try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
@@ -99,8 +113,15 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        // Phase 21: Event-driven sleep instead of busy-wait.
-        tty::poll_sleep();
+        // Finishing Phase 1: Per-slot poll sleep instead of global wake.
+        if poll_tty_count > 0 {
+            tty::poll_sleep_on(
+                poll_tty_slots[..poll_tty_count].as_ptr(),
+                poll_tty_count,
+            );
+        } else {
+            tty::poll_sleep();
+        }
     }
 });
 
@@ -159,6 +180,9 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         write_out[..bytes_len].fill(0);
         except_out[..bytes_len].fill(0);
         let mut ready = 0u64;
+        // Finishing Phase 1: Collect TTY slot indices for per-slot poll sleep.
+        let mut poll_tty_slots = [0u8; 32];
+        let mut poll_tty_count = 0usize;
 
         for fd in 0..nfds {
             let want_r = args.arg1 != 0 && fdset_test(&read_in[..bytes_len], fd);
@@ -192,6 +216,17 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             if rdy_e {
                 fdset_set(&mut except_out[..bytes_len], fd);
                 ready += 1;
+            }
+
+            // Track TTY indices for per-slot poll sleep.
+            if let Some(tty_idx) = file_get_tty_index(pid, fd as c_int) {
+                let s = tty_idx.0;
+                if poll_tty_count < poll_tty_slots.len()
+                    && !poll_tty_slots[..poll_tty_count].contains(&s)
+                {
+                    poll_tty_slots[poll_tty_count] = s;
+                    poll_tty_count += 1;
+                }
             }
         }
 
@@ -245,8 +280,15 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        // Phase 21: Event-driven sleep instead of busy-wait.
-        tty::poll_sleep();
+        // Finishing Phase 1: Per-slot poll sleep instead of global wake.
+        if poll_tty_count > 0 {
+            tty::poll_sleep_on(
+                poll_tty_slots[..poll_tty_count].as_ptr(),
+                poll_tty_count,
+            );
+        } else {
+            tty::poll_sleep();
+        }
     }
 });
 

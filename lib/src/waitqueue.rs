@@ -236,6 +236,42 @@ impl WaitQueue {
         true
     }
 
+    /// Enqueue the current task on this wait queue without blocking.
+    ///
+    /// Used for multi-queue poll registration: the caller enqueues on several
+    /// wait queues, then calls `block_current_task()` once.  On wakeup, the
+    /// caller must call [`remove_current`] on every queue it registered on.
+    ///
+    /// Returns `true` if the task was successfully enqueued, `false` if the
+    /// runtime is not initialized, the task handle is null, or the queue is full.
+    pub fn enqueue_current(&self) -> bool {
+        if !driver_runtime::is_driver_runtime_initialized() {
+            return false;
+        }
+
+        let task = current_task();
+        if task.is_null() {
+            return false;
+        }
+
+        let mut inner = self.inner.lock();
+        inner.enqueue(task)
+    }
+
+    /// Remove the current task from this wait queue.
+    ///
+    /// Counterpart to [`enqueue_current`].  Safe to call even if the task
+    /// was already removed by a `wake_one` / `wake_all` call (no-op in that
+    /// case).
+    pub fn remove_current(&self) {
+        let task = current_task();
+        if task.is_null() {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        inner.remove_task(task);
+    }
+
     /// Block the current task until `condition()` returns `true` or
     /// `timeout_ms` milliseconds elapse.
     ///
