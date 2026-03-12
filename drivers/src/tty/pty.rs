@@ -320,7 +320,8 @@ pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
             count += 1;
         }
 
-        (count, master.ldisc.has_data())
+        // Finishing Phase 10: Use batched wake policy.
+        (count, master.ldisc.should_wake_reader())
     };
 
     if should_wake {

@@ -45,6 +45,13 @@ const IXOFF_TOTAL_CAPACITY: usize = EDIT_BUF_SIZE + COOKED_BUF_SIZE;
 const IXOFF_HIGH_WATER: usize = (IXOFF_TOTAL_CAPACITY * 4) / 5; // 80%
 const IXOFF_LOW_WATER: usize = IXOFF_TOTAL_CAPACITY / 5; // 20%
 
+// Finishing Phase 10: Input wake batching threshold.
+// In non-canonical mode, wake readers only when this many bytes have
+// accumulated since the last wakeup (or a near-full / hangup / signal
+// condition occurs).  Canonical mode always wakes immediately on line
+// completion.  Matches Linux's WAKEUP_CHARS semantics from n_tty.c.
+pub(crate) const WAKEUP_CHARS: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Action enums returned to the caller
 // ---------------------------------------------------------------------------
@@ -114,6 +121,7 @@ pub(crate) trait LdiscOps {
     fn ixoff_check_xoff(&mut self) -> Option<u8>;
     fn ixoff_check_xon(&mut self) -> Option<u8>;
     fn input_full(&self) -> bool;
+    fn should_wake_reader(&mut self) -> bool;
 }
 
 /// Generates delegating `impl LdiscKind` methods that forward to the inner
@@ -392,6 +400,13 @@ pub struct LineDisc {
     /// When `true`, we are inside a `\...` erase sequence (ECHOPRT).  The
     /// next non-erase input closes the sequence by emitting `/`.
     in_erase_seq: bool,
+
+    // -- Finishing Phase 10: Input wake batching --
+    /// Number of bytes pushed to the cooked buffer since the last time
+    /// we woke readers.  In non-canonical mode, we suppress wakeups until
+    /// this counter crosses `WAKEUP_CHARS` (or an immediate-wake condition
+    /// such as buffer-near-full or canonical line completion applies).
+    wake_chars_pending: usize,
 }
 
 impl LineDisc {
@@ -451,6 +466,7 @@ impl LineDisc {
             xoff_sent: false,
             pending_reprint: false,
             in_erase_seq: false,
+            wake_chars_pending: 0,
         }
     }
 
@@ -580,6 +596,44 @@ impl LineDisc {
         self.cooked_count >= COOKED_BUF_SIZE && self.edit_len >= EDIT_BUF_SIZE
     }
 
+    /// Finishing Phase 10: Decide whether the caller should wake readers.
+    ///
+    /// In **canonical mode**, returns `true` when at least one complete line
+    /// is available (`line_count > 0`) — matching existing immediate-wake
+    /// semantics.
+    ///
+    /// In **non-canonical mode**, batches wakeups: returns `true` only when
+    /// `wake_chars_pending` crosses `WAKEUP_CHARS` or the cooked buffer is
+    /// nearly full (within 64 bytes of capacity).  This reduces scheduler
+    /// churn on high-rate input streams while guaranteeing no starvation.
+    ///
+    /// Resets `wake_chars_pending` when returning `true`.
+    pub fn should_wake_reader(&mut self) -> bool {
+        let canonical =
+            self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
+        if canonical {
+            // Canonical mode: wake immediately when a complete line is ready.
+            if self.line_count > 0 {
+                self.wake_chars_pending = 0;
+                return true;
+            }
+            return false;
+        }
+
+        // Non-canonical mode: batch wakeups.
+        if self.cooked_count == 0 {
+            return false;
+        }
+
+        let near_full = self.cooked_count >= COOKED_BUF_SIZE.saturating_sub(64);
+        if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
+            self.wake_chars_pending = 0;
+            return true;
+        }
+
+        false
+    }
+
     pub fn flush_all(&mut self) {
         self.edit_len = 0;
         self.cooked_head = 0;
@@ -593,6 +647,7 @@ impl LineDisc {
         self.xoff_sent = false;
         self.pending_reprint = false;
         self.in_erase_seq = false;
+        self.wake_chars_pending = 0;
     }
 
     pub fn flush_input(&mut self) {
@@ -606,6 +661,7 @@ impl LineDisc {
         self.xoff_sent = false;
         self.pending_reprint = false;
         self.in_erase_seq = false;
+        self.wake_chars_pending = 0;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -1487,6 +1543,7 @@ impl LineDisc {
         self.cooked[self.cooked_head] = c;
         self.cooked_head = (self.cooked_head + 1) % COOKED_BUF_SIZE;
         self.cooked_count += 1;
+        self.wake_chars_pending += 1;
         true
     }
 
@@ -1626,6 +1683,10 @@ impl LdiscOps for LineDisc {
     fn input_full(&self) -> bool {
         self.input_full()
     }
+    #[inline]
+    fn should_wake_reader(&mut self) -> bool {
+        self.should_wake_reader()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1645,6 +1706,8 @@ pub struct RawDisc {
     head: usize,
     tail: usize,
     count: usize,
+    // Finishing Phase 10: Input wake batching (same as LineDisc).
+    wake_chars_pending: usize,
 }
 
 impl RawDisc {
@@ -1668,6 +1731,7 @@ impl RawDisc {
             head: 0,
             tail: 0,
             count: 0,
+            wake_chars_pending: 0,
         }
     }
 
@@ -1715,16 +1779,35 @@ impl RawDisc {
         self.count >= RAW_BUF_SIZE
     }
 
+    /// Finishing Phase 10: Decide whether the caller should wake readers.
+    ///
+    /// RawDisc is always non-canonical.  Batches wakeups: returns `true`
+    /// only when `wake_chars_pending` crosses `WAKEUP_CHARS` or the buffer
+    /// is nearly full.
+    pub fn should_wake_reader(&mut self) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        let near_full = self.count >= RAW_BUF_SIZE.saturating_sub(64);
+        if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
+            self.wake_chars_pending = 0;
+            return true;
+        }
+        false
+    }
+
     pub fn flush_all(&mut self) {
         self.head = 0;
         self.tail = 0;
         self.count = 0;
+        self.wake_chars_pending = 0;
     }
 
     pub fn flush_input(&mut self) {
         self.head = 0;
         self.tail = 0;
         self.count = 0;
+        self.wake_chars_pending = 0;
     }
 
     pub fn edit_content(&self) -> &[u8] {
@@ -1746,6 +1829,7 @@ impl RawDisc {
             self.buf[self.head] = c;
             self.head = (self.head + 1) % RAW_BUF_SIZE;
             self.count += 1;
+            self.wake_chars_pending += 1;
         }
         InputAction::None
     }
@@ -1834,6 +1918,10 @@ impl LdiscOps for RawDisc {
     fn input_full(&self) -> bool {
         self.input_full()
     }
+    #[inline]
+    fn should_wake_reader(&mut self) -> bool {
+        self.should_wake_reader()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,5 +1988,6 @@ impl LdiscKind {
         fn ixoff_check_xoff(&mut self) -> Option<u8>;
         fn ixoff_check_xon(&mut self) -> Option<u8>;
         fn input_full(&self) -> bool;
+        fn should_wake_reader(&mut self) -> bool;
     }
 }

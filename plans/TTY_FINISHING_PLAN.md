@@ -732,7 +732,7 @@ All of these should return `-ERESTARTSYS` when interrupted by a restartable sign
 
 ## 13. Phase 10: Input Wake Batching (WAKEUP_CHARS-style) (Tier 2)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅
 
 > **Priority**: P1 throughput/perf — current implementation wakes poll/read waiters per input event aggressively.
 > **Principle**: Adopt Linux's batching spirit (`WAKEUP_CHARS = 256`) while preserving SlopOS simplicity and correctness.
@@ -757,14 +757,14 @@ On high-rate input streams, frequent `wake_all` behavior can produce avoidable s
 - Regression: poll/read correctness unchanged.
 - `just build` + `just test` gate.
 
-### 13.4 Files expected to change
+### 13.4 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Apply batched wake policy in input path |
-| `drivers/src/tty/ldisc.rs` | Expose counters/signals needed for batching decisions |
-| `drivers/src/tty_tests.rs` | Add wake batching and no-starvation tests |
-
+| `drivers/src/tty/ldisc.rs` | Added `WAKEUP_CHARS = 256` constant, `wake_chars_pending` counter to `LineDisc` and `RawDisc`, `should_wake_reader()` method to `LdiscOps` trait + both impls + `dispatch_ldisc!` macro, counter reset in `flush_input()`/`flush_all()`, increment in `push_cooked()`/`input_char()` |
+| `drivers/src/tty/mod.rs` | Replaced per-byte `has_data` wake in `push_input()` with batched `should_wake_reader()` policy |
+| `drivers/src/tty/pty.rs` | Applied batched wake policy in `slave_write()` |
+| `drivers/src/tty_tests.rs` | Added 10 regression tests: constant value, canonical immediate wake, non-canonical batching, near-full wake, flush resets, RawDisc batching, counter reset, EOF wake |
 ---
 
 ## 14. Phase 11: TABDLY/XTABS Output Compatibility (Tier 2)

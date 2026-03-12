@@ -106,6 +106,13 @@ pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }
 /// - TTY 0  → SerialConsoleDriver (COM1)
 /// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
 pub fn tty_table_init() {
+    // Clear all slots first so that tests calling tty_table_init() get a
+    // clean table regardless of prior test state (e.g. leftover PTY pairs).
+    for i in 0..MAX_TTYS {
+        let mut slot = TTY_SLOTS[i].lock();
+        *slot = None;
+    }
+
     {
         let mut slot = TTY_SLOTS[0].lock();
         *slot = Some(Tty::new(

@@ -350,7 +350,6 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         let was_stopped = tty.ldisc.is_stopped();
 
         let action = tty.ldisc.input_char(c);
-        let has_data = tty.ldisc.has_data();
         if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
             ixoff_byte_out = Some((tty.driver.id(), xoff));
         }
@@ -381,7 +380,6 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 let mut out = [0u8; 1025];
                 out[..len as usize].copy_from_slice(&buf[..len as usize]);
                 route = Some((tty.driver.id(), out, len as usize));
-                has_data
             }
             InputAction::ReprintLine => {
                 let mut out = [0u8; 1025];
@@ -390,7 +388,6 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 let copy_len = core::cmp::min(content.len(), out.len().saturating_sub(1));
                 out[1..1 + copy_len].copy_from_slice(&content[..copy_len]);
                 route = Some((tty.driver.id(), out, copy_len + 1));
-                has_data
             }
             InputAction::KillLineEcho { columns } => {
                 // Phase 27: Build BS-SP-BS triples for visual line erase.
@@ -402,7 +399,6 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                     out[i * 3 + 2] = 0x08;
                 }
                 route = Some((tty.driver.id(), out, triples * 3));
-                has_data
             }
             InputAction::Signal(sig) => {
                 let pgid = tty.session.fg_pgrp_raw();
@@ -429,10 +425,15 @@ pub fn push_input(idx: TtyIndex, c: u8) {
                 let mut out = [0u8; 1025];
                 out[0] = 0x07;
                 route = Some((tty.driver.id(), out, 1));
-                has_data
             }
-            InputAction::None => has_data,
+            InputAction::None => {}
         }
+
+        // Finishing Phase 10: Use batched wake policy instead of waking
+        // on every byte.  `should_wake_reader()` coalesces non-canonical
+        // mode wakeups behind the WAKEUP_CHARS threshold while preserving
+        // immediate wake on canonical line boundaries.
+        tty.ldisc.should_wake_reader()
     };
 
     // Phase 39: Deliver deferred packet event now that the slot lock is released.

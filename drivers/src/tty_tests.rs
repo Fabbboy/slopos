@@ -14067,6 +14067,262 @@ pub fn test_fp9_output_queued_vconsole() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 10: Input Wake Batching (WAKEUP_CHARS) tests
+// ===========================================================================
+
+/// Finishing Phase 10: WAKEUP_CHARS constant has expected value.
+pub fn test_fp10_wakeup_chars_constant() -> TestResult {
+    use crate::tty::ldisc::WAKEUP_CHARS;
+    if WAKEUP_CHARS != 256 {
+        klog_info!(
+            "TTY_TEST: BUG - WAKEUP_CHARS = {}, expected 256",
+            WAKEUP_CHARS
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: Canonical mode wakes immediately on line boundary.
+pub fn test_fp10_canonical_wake_on_newline() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type chars without newline — should_wake_reader must return false.
+    for &c in b"hello" {
+        ld.input_char(c);
+    }
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - canonical wake before newline");
+        return TestResult::Fail;
+    }
+
+    // Newline completes the line — should_wake_reader must return true.
+    ld.input_char(b'\n');
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - canonical no wake after newline");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: Non-canonical mode does NOT wake on every byte.
+pub fn test_fp10_noncanonical_no_wake_per_byte() -> TestResult {
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    // Switch to non-canonical mode.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Push a few bytes — well below WAKEUP_CHARS threshold.
+    for _ in 0..10 {
+        ld.input_char(b'x');
+    }
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - noncanonical wake after only 10 bytes");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: Non-canonical mode wakes at WAKEUP_CHARS threshold.
+pub fn test_fp10_noncanonical_wake_at_threshold() -> TestResult {
+    use crate::tty::ldisc::WAKEUP_CHARS;
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    // Switch to non-canonical mode.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Push exactly WAKEUP_CHARS bytes.
+    for _ in 0..WAKEUP_CHARS {
+        ld.input_char(b'a');
+    }
+    if !ld.should_wake_reader() {
+        klog_info!(
+            "TTY_TEST: BUG - noncanonical no wake after {} bytes",
+            WAKEUP_CHARS
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: Non-canonical mode wakes when buffer is nearly full.
+pub fn test_fp10_noncanonical_wake_near_full() -> TestResult {
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    // Switch to non-canonical mode.
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Fill cooked buffer to near capacity (4096 - 64 = 4032 bytes).
+    // Push in batches, draining the wake flag each time.
+    let target = 4096 - 64;
+    let mut pushed = 0usize;
+    while pushed < target {
+        ld.input_char(b'z');
+        pushed += 1;
+        // Drain any intermediate wake triggers.
+        if pushed % 256 == 0 && pushed < target {
+            let _ = ld.should_wake_reader();
+        }
+    }
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - noncanonical no wake when near full");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: flush_input resets wake_chars_pending counter.
+pub fn test_fp10_flush_input_resets_wake_counter() -> TestResult {
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Push some bytes (below threshold).
+    for _ in 0..100 {
+        ld.input_char(b'q');
+    }
+    // Flush — counter should reset.
+    ld.flush_input();
+
+    // Push another batch below threshold — should NOT wake.
+    for _ in 0..100 {
+        ld.input_char(b'q');
+    }
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - wake triggered after flush_input + partial refill");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: flush_all resets wake_chars_pending counter.
+pub fn test_fp10_flush_all_resets_wake_counter() -> TestResult {
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Push some bytes.
+    for _ in 0..100 {
+        ld.input_char(b'w');
+    }
+    ld.flush_all();
+
+    // Push another batch below threshold.
+    for _ in 0..100 {
+        ld.input_char(b'w');
+    }
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - wake triggered after flush_all + partial refill");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: RawDisc also batches wakeups.
+pub fn test_fp10_rawdisc_wake_batching() -> TestResult {
+    use crate::tty::ldisc::WAKEUP_CHARS;
+    let mut rd = RawDisc::new();
+    // Enable CREAD so input is accepted.
+    let mut t = *rd.termios();
+    t.c_cflag |= slopos_abi::syscall::CREAD;
+    rd.set_termios(&t);
+
+    // Push a few bytes — should NOT wake.
+    for _ in 0..10 {
+        rd.input_char(b'r');
+    }
+    if rd.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - RawDisc wake after only 10 bytes");
+        return TestResult::Fail;
+    }
+
+    // Push up to threshold.
+    for _ in 10..WAKEUP_CHARS {
+        rd.input_char(b'r');
+    }
+    if !rd.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - RawDisc no wake at threshold");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: should_wake_reader resets counter on wake.
+pub fn test_fp10_wake_resets_counter() -> TestResult {
+    use crate::tty::ldisc::WAKEUP_CHARS;
+    use slopos_abi::syscall::LocalFlags;
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag &= !LocalFlags::ICANON.bits();
+    ld.set_termios(&t);
+
+    // Push WAKEUP_CHARS to trigger first wake.
+    for _ in 0..WAKEUP_CHARS {
+        ld.input_char(b'a');
+    }
+    let first_wake = ld.should_wake_reader();
+    if !first_wake {
+        klog_info!("TTY_TEST: BUG - first wake did not fire");
+        return TestResult::Fail;
+    }
+
+    // Counter was reset.  Push a few more — should NOT wake yet.
+    for _ in 0..10 {
+        ld.input_char(b'b');
+    }
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - spurious wake after counter reset");
+        return TestResult::Fail;
+    }
+
+    // Push up to the next threshold boundary.
+    for _ in 10..WAKEUP_CHARS {
+        ld.input_char(b'c');
+    }
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - second wake did not fire");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Finishing Phase 10: Canonical mode EOF (Ctrl+D) still wakes immediately.
+pub fn test_fp10_canonical_eof_wakes() -> TestResult {
+    let mut ld = LineDisc::new();
+
+    // Type chars then Ctrl+D (VEOF = 0x04).
+    for &c in b"data" {
+        ld.input_char(c);
+    }
+    ld.input_char(0x04); // EOF
+
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - canonical EOF did not wake");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -14633,5 +14889,16 @@ slopos_lib::define_test_suite!(
         test_fp9_output_queued_invalid_index,
         test_fp9_fionread_unchanged,
         test_fp9_output_queued_vconsole,
+        // Finishing Phase 10: Input Wake Batching (WAKEUP_CHARS)
+        test_fp10_wakeup_chars_constant,
+        test_fp10_canonical_wake_on_newline,
+        test_fp10_noncanonical_no_wake_per_byte,
+        test_fp10_noncanonical_wake_at_threshold,
+        test_fp10_noncanonical_wake_near_full,
+        test_fp10_flush_input_resets_wake_counter,
+        test_fp10_flush_all_resets_wake_counter,
+        test_fp10_rawdisc_wake_batching,
+        test_fp10_wake_resets_counter,
+        test_fp10_canonical_eof_wakes,
     ]
 );
