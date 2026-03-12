@@ -1148,6 +1148,8 @@ pub const ERRNO_EOPNOTSUPP: u64 = (-95i64) as u64;
 pub const ERRNO_EPIPE: u64 = (-32i64) as u64;
 pub const ERRNO_EPERM: u64 = (-1i64) as u64;
 pub const ERRNO_EINTR: u64 = (-4i64) as u64;
+pub const ERRNO_EIO: u64 = (-5i64) as u64;
+pub const ERRNO_ENXIO: u64 = (-6i64) as u64;
 
 /// Internal-only error code for restartable syscalls.  MUST NEVER reach
 /// userland — the syscall return path converts it to `ERRNO_EINTR` or
