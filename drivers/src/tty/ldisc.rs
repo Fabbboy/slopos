@@ -1450,13 +1450,17 @@ impl LineDisc {
     }
 
     /// Push a single byte into the cooked ring buffer.
-    pub(crate) fn push_cooked(&mut self, c: u8) {
+    ///
+    /// Returns `true` if the byte was enqueued, `false` if the buffer
+    /// was full and the byte was dropped (Finishing Phase 3 hardening).
+    pub(crate) fn push_cooked(&mut self, c: u8) -> bool {
         if self.cooked_count >= COOKED_BUF_SIZE {
-            return;
+            return false;
         }
         self.cooked[self.cooked_head] = c;
         self.cooked_head = (self.cooked_head + 1) % COOKED_BUF_SIZE;
         self.cooked_count += 1;
+        true
     }
 
     /// Phase 36: IXOFF — check if input buffer exceeds high-water mark.
@@ -1496,10 +1500,17 @@ impl LineDisc {
     }
 
     /// Move everything in the edit buffer into the cooked ring buffer.
+    ///
+    /// Finishing Phase 3: Uses the `bool` return from `push_cooked()` to
+    /// stop early if the cooked buffer fills up.  In practice the edit
+    /// buffer (1024) always fits in the cooked buffer (4096), so this
+    /// branch is a defensive guard only.
     fn flush_edit_to_cooked(&mut self) {
         let mut i = 0usize;
         while i < self.edit_len {
-            self.push_cooked(self.edit_buf[i]);
+            if !self.push_cooked(self.edit_buf[i]) {
+                break; // cooked buffer full — stop flushing
+            }
             i += 1;
         }
         self.edit_len = 0;

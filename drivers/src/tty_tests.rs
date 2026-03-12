@@ -11673,6 +11673,190 @@ pub fn test_fp2_master_write_full_when_not_throttled() -> TestResult {
     TestResult::Pass
 }
 
+// ---------------------------------------------------------------------------
+// Finishing Phase 3: Cooked Buffer Overflow Hardening tests
+// ---------------------------------------------------------------------------
+
+/// Finishing Phase 3: push_cooked returns false when buffer is full.
+pub fn test_fp3_push_cooked_returns_false_when_full() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    // Fill the cooked buffer to capacity (4096 bytes).
+    for _ in 0..4096 {
+        if !ld.push_cooked(b'X') {
+            klog_info!("TTY_TEST: BUG - push_cooked returned false before buffer full");
+            return TestResult::Fail;
+        }
+    }
+    // Next push should fail.
+    if ld.push_cooked(b'Y') {
+        klog_info!("TTY_TEST: BUG - push_cooked returned true when buffer is full");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 3: push_cooked returns true when buffer has space.
+pub fn test_fp3_push_cooked_returns_true_when_space() -> TestResult {
+    use crate::tty::ldisc::LineDisc;
+    let mut ld = LineDisc::new();
+    if !ld.push_cooked(b'A') {
+        klog_info!("TTY_TEST: BUG - push_cooked returned false on empty buffer");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Finishing Phase 3: canonical flush_edit_to_cooked fits (edit < cooked).
+pub fn test_fp3_canonical_flush_fits_in_cooked() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+
+    // Type a full edit buffer worth of characters + newline.
+    // Edit buffer is 1024, cooked is 4096, so it always fits.
+    for _ in 0..1020 {
+        tty::push_input(idx, b'Z');
+    }
+    tty::push_input(idx, b'\n');
+
+    // Read it all back.
+    let mut buf = [0u8; 2048];
+    match tty::read(idx, &mut buf, true) {
+        Ok(n) if n > 0 => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - canonical flush read failed: {:?}", other);
+            drain_tty_nonblock(idx);
+            return TestResult::Fail;
+        }
+    }
+
+    drain_tty_nonblock(idx);
+    TestResult::Pass
+}
+
+/// Finishing Phase 3: IMAXBEL rings bell on raw-mode cooked overflow.
+pub fn test_fp3_imaxbel_bell_on_cooked_overflow() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Put slave in raw mode with IMAXBEL enabled.
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON);
+    raw.c_lflag &= !(slopos_abi::syscall::ECHO);
+    raw.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Fill the cooked buffer to capacity.
+    for _ in 0..4096 {
+        tty::push_input(slave, b'F');
+    }
+
+    // One more byte should trigger IMAXBEL bell (InputAction::Bell).
+    // The bell emits BEL (0x07) to the output which goes to master's
+    // read buffer.  Drain the slave to verify the data went in,
+    // and read the master to check for the BEL character.
+    // First, drain any data on the master's read side.
+    let mut mbuf = [0u8; 8192];
+    let mut found_bel = false;
+    // Push the overflowing byte.
+    tty::push_input(slave, b'G');
+
+    // Read master output to find the BEL.
+    match tty::read(master, &mut mbuf, true) {
+        Ok(n) => {
+            for i in 0..n {
+                if mbuf[i] == 0x07 {
+                    found_bel = true;
+                    break;
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    if !found_bel {
+        klog_info!("TTY_TEST: BUG - IMAXBEL did not produce BEL on cooked overflow");
+        tty::set_termios(slave, &saved).unwrap();
+        let _ = tty::close_ref(slave);
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Finishing Phase 3: No IMAXBEL — silent drop on cooked overflow.
+pub fn test_fp3_no_imaxbel_silent_drop() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Raw mode WITHOUT IMAXBEL.
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_iflag &= !slopos_abi::syscall::IMAXBEL;
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Fill the cooked buffer.
+    for _ in 0..4096 {
+        tty::push_input(slave, b'F');
+    }
+
+    // Overflow byte — should be silently dropped, no BEL.
+    tty::push_input(slave, b'G');
+
+    // Master read should NOT contain BEL.
+    let mut mbuf = [0u8; 4096];
+    match tty::read(master, &mut mbuf, true) {
+        Ok(n) => {
+            for i in 0..n {
+                if mbuf[i] == 0x07 {
+                    klog_info!("TTY_TEST: BUG - BEL found without IMAXBEL on overflow");
+                    tty::set_termios(slave, &saved).unwrap();
+                    let _ = tty::close_ref(slave);
+                    let _ = tty::close_ref(master);
+                    return TestResult::Fail;
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
 // ===========================================================================
 // Test suite registration
 // ===========================================================================
@@ -12158,5 +12342,11 @@ slopos_lib::define_test_suite!(
         test_fp2_throttle_cycle_no_data_loss,
         test_fp2_console_not_throttled,
         test_fp2_master_write_full_when_not_throttled,
+        // Finishing Phase 3: Cooked Buffer Overflow Hardening
+        test_fp3_push_cooked_returns_false_when_full,
+        test_fp3_push_cooked_returns_true_when_space,
+        test_fp3_canonical_flush_fits_in_cooked,
+        test_fp3_imaxbel_bell_on_cooked_overflow,
+        test_fp3_no_imaxbel_silent_drop,
     ]
 );

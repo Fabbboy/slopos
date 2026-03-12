@@ -253,7 +253,7 @@ Both can coexist. The IXOFF watermarks (80%/20%) may be aligned with throttle wa
 
 ## 6. Phase 3: Cooked Buffer Overflow Hardening
 
-**Status**: **TODO**
+**Status**: **DONE** ✅
 
 > **Priority**: P1 correctness — even with Phase 2's throttle mechanism, the cooked buffer overflow path should be explicitly safe rather than silently dropping.
 > **Principle**: Defense in depth. The throttle prevents overflow under normal conditions, but the overflow path itself should be hardened for edge cases (race conditions, non-PTY sources, direct `push_input` callers).
