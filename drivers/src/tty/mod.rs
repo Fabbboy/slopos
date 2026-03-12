@@ -1152,6 +1152,79 @@ fn cflag_to_speed(cflag: u32) -> u32 {
     }
 }
 
+/// Reverse of `cflag_to_speed`: map a numeric baud rate to the `c_cflag`
+/// baud-rate bits (`CBAUD` mask).  Returns `None` for unrecognised speeds,
+/// in which case the caller should leave `c_cflag` unchanged (Linux
+/// `termios2` semantics).
+///
+/// This enables the `c_ispeed`/`c_ospeed` → `c_cflag` round-trip required
+/// by programs that set speed via the speed fields instead of manipulating
+/// `c_cflag` bits directly (e.g. `cfsetispeed()`/`cfsetospeed()` in glibc).
+fn speed_to_cflag_bits(speed: u32) -> Option<u32> {
+    use slopos_abi::syscall::*;
+    let bits = match speed {
+        0 => B0,
+        50 => B50,
+        75 => B75,
+        110 => B110,
+        134 => B134,
+        150 => B150,
+        200 => B200,
+        300 => B300,
+        600 => B600,
+        1200 => B1200,
+        1800 => B1800,
+        2400 => B2400,
+        4800 => B4800,
+        9600 => B9600,
+        19200 => B19200,
+        38400 => B38400,
+        57600 => B57600,
+        115200 => B115200,
+        230400 => B230400,
+        460800 => B460800,
+        500000 => B500000,
+        576000 => B576000,
+        921600 => B921600,
+        1000000 => B1000000,
+        1152000 => B1152000,
+        1500000 => B1500000,
+        2000000 => B2000000,
+        2500000 => B2500000,
+        3000000 => B3000000,
+        3500000 => B3500000,
+        4000000 => B4000000,
+        _ => return None,
+    };
+    Some(bits)
+}
+
+/// Merge user-provided `c_ispeed`/`c_ospeed` into `c_cflag` baud-rate bits.
+///
+/// If `c_ospeed` (or `c_ispeed`, if `c_ospeed` is zero) encodes a recognised
+/// baud rate that differs from the rate already in `c_cflag`, the `CBAUD`
+/// bits of `c_cflag` are updated to match.  If neither speed field is set
+/// (both zero), `c_cflag` is returned unchanged.
+///
+/// This matches the Linux `termios2` behaviour where the speed fields take
+/// precedence over the `c_cflag` encoding when both are present.
+fn merge_speed_into_cflag(t: &mut UserTermios) {
+    use slopos_abi::syscall::CBAUD;
+    // Prefer c_ospeed; fall back to c_ispeed.
+    let speed = if t.c_ospeed != 0 {
+        t.c_ospeed
+    } else if t.c_ispeed != 0 {
+        t.c_ispeed
+    } else {
+        return; // no speed override
+    };
+
+    if let Some(bits) = speed_to_cflag_bits(speed) {
+        // Replace only the CBAUD portion, preserving all other c_cflag bits.
+        t.c_cflag = (t.c_cflag & !CBAUD) | bits;
+    }
+}
+
 /// Get termios for a specific TTY.
 ///
 /// Finishing Phase 4: Populates `c_ispeed`/`c_ospeed` from the baud rate
@@ -1261,6 +1334,12 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 /// process group is orphaned, `EIO` is returned instead (there is no
 /// parent to continue a stopped group).
 fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
+    // Review fix: merge c_ispeed/c_ospeed into c_cflag baud-rate bits
+    // before applying, so programs that set speed via the speed fields
+    // (Linux termios2 style) have the correct CBAUD bits stored.
+    let mut merged = *t;
+    merge_speed_into_cflag(&mut merged);
+    let t = &merged;
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
@@ -1910,8 +1989,15 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
 /// Flush TTY queues (implements `tcflush()` / `TCFLSH` ioctl).
 ///
 /// `queue` values:
-///   - `TCIFLUSH` (0): flush input (edit + cooked buffers).
-///   - `TCOFLUSH` (1): flush output (reset inflight counter).
+///   - `TCIFLUSH` (0): flush input (edit + cooked buffers).  Also clears
+///     the PTY throttle flag (matching Linux's `n_tty_flush_buffer()` →
+///     `tty_unthrottle()` pattern) so a blocked master writer is woken.
+///   - `TCOFLUSH` (1): flush output (reset inflight counter).  Note: this
+///     only resets the in-flight tracking counter — it does not flush any
+///     driver-level hardware TX FIFO.  For synchronous backends (serial,
+///     vconsole) this is a no-op since output completes inline.  Future
+///     async/interrupt-driven drivers must implement `flush_output()` on
+///     `TtyDriverKind` and call it here.
 ///   - `TCIOFLUSH` (2): flush both.
 pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
     use slopos_abi::syscall::{TCIFLUSH, TCIOFLUSH, TCOFLUSH};
@@ -1919,23 +2005,51 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
+
+    // Peer slot to wake after unthrottling (resolved inside the lock,
+    // wake delivered outside to respect lock ordering).
+    let mut unthrottled_peer: Option<usize> = None;
+
     match queue {
         TCIFLUSH | TCIOFLUSH => {
-            let mut guard = TTY_SLOTS[slot].lock();
-            if let Some(tty) = guard.as_mut() {
-                tty.ldisc.flush_input();
-            } else {
-                return Err(TtyError::NotAllocated);
+            {
+                let mut guard = TTY_SLOTS[slot].lock();
+                if let Some(tty) = guard.as_mut() {
+                    tty.ldisc.flush_input();
+
+                    // Linux: n_tty_flush_buffer() calls tty_unthrottle().
+                    // After flushing all input the buffer is empty, so the
+                    // throttle condition is no longer true.  Clear it and
+                    // resolve the peer to wake.
+                    if tty.throttled {
+                        tty.throttled = false;
+                        if let TtyDriverKind::PtySlave { ref peer } = tty.driver {
+                            unthrottled_peer = Some(peer.idx.0 as usize);
+                        }
+                    }
+                } else {
+                    return Err(TtyError::NotAllocated);
+                }
             }
             if queue == TCIOFLUSH {
                 TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
             }
         }
         TCOFLUSH => {
+            // See doc comment above — only resets the in-flight counter.
             TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
         }
         _ => return Err(TtyError::InvalidArg),
     }
+
+    // Wake the master-side writer now that the lock is released.
+    if let Some(peer_slot) = unthrottled_peer {
+        if peer_slot < MAX_TTYS {
+            TTY_OUTPUT_WAITERS[peer_slot].wake_all();
+            TTY_POLL_WAITERS[peer_slot].wake_all();
+        }
+    }
+
     Ok(())
 }
 
@@ -2050,13 +2164,16 @@ pub fn vhangup(idx: TtyIndex) {
 /// - `POLLIN`  — cooked data available for reading
 /// - `POLLOUT` — output is NOT stopped by IXON flow control
 /// - `POLLHUP` — TTY is hung up (or peer closed with no remaining data)
+/// - `POLLERR` — TTY is hung up (write would return EIO); matches Linux
+///   `tty_poll()` which reports `POLLERR` alongside `POLLHUP` so programs
+///   that check write-readiness via `POLLERR` detect the error condition.
 ///
 /// Phase 23: Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 ///
 /// Only events that are both requested and ready are returned.
 pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
-    use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
+    use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -2087,11 +2204,13 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         }
 
         // Phase 33: Post-hangup I/O hardening — a hung-up or peer-closed
-        // (with no remaining data) TTY reports both POLLHUP and POLLIN.
+        // (with no remaining data) TTY reports POLLHUP, POLLIN, and POLLERR.
         // POLLIN is set because a subsequent read() will return immediately
         // with EOF (0 bytes), making the fd "readable".
+        // POLLERR is set because a subsequent write() will return -EIO,
+        // matching Linux's tty_poll() behaviour.
         if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
-            revents |= POLLHUP;
+            revents |= POLLHUP | POLLERR;
             if (requested & POLLIN) != 0 {
                 revents |= POLLIN;
             }

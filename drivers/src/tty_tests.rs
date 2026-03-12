@@ -12484,6 +12484,410 @@ pub fn test_fp7_read_with_data_succeeds() -> TestResult {
 }
 
 // ===========================================================================
+// Review Fix Regression Tests
+// ===========================================================================
+
+/// Review fix regression: tcflush(TCIFLUSH) clears throttle on a PTY slave.
+///
+/// Before the fix, flushing input via tcflush did not clear the throttle
+/// flag, leaving the master-side writer permanently blocked.  This matches
+/// Linux's n_tty_flush_buffer() → tty_unthrottle() pattern.
+pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Raw mode so every byte goes straight to cooked buffer.
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Fill past high-water to activate throttle.
+    for _ in 0..(THROTTLE_HIGH_WATER + 64) {
+        tty::push_input(slave, b'X');
+    }
+
+    // Confirm throttled.
+    {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        if !guard.as_ref().map(|t| t.throttled).unwrap_or(false) {
+            klog_info!("TTY_TEST: BUG - slave not throttled after fill");
+            tty::set_termios(slave, &saved).unwrap();
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    // Flush input via tcflush — should clear the throttle.
+    match tty::tcflush(slave, slopos_abi::syscall::TCIFLUSH) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - tcflush TCIFLUSH failed: {:?}", e);
+            tty::set_termios(slave, &saved).unwrap();
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    // Verify unthrottled.
+    let still_throttled = {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+    };
+    if still_throttled {
+        klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIFLUSH)");
+        tty::set_termios(slave, &saved).unwrap();
+        let _ = tty::close_ref(slave);
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Review fix regression: TCIOFLUSH also clears throttle (via input flush path).
+///
+/// tcflush(TCIOFLUSH) flushes both input and output.  The throttle should
+/// be cleared by the input-flush branch, same as TCIFLUSH.
+pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Throttle the slave.
+    for _ in 0..(THROTTLE_HIGH_WATER + 64) {
+        tty::push_input(slave, b'Y');
+    }
+
+    // Flush both.
+    tty::tcflush(slave, slopos_abi::syscall::TCIOFLUSH).unwrap();
+
+    // Verify unthrottled.
+    let still_throttled = {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+    };
+    if still_throttled {
+        klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIOFLUSH)");
+        tty::set_termios(slave, &saved).unwrap();
+        let _ = tty::close_ref(slave);
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Review fix regression: master_write processes full 64-byte batches before
+/// checking throttle, returning a batch-aligned count.
+///
+/// Before the fix, throttle was checked per-byte (O(n) lock acquisitions).
+/// After the fix, throttle is checked once per 64-byte batch.  When throttle
+/// activates mid-batch, the full batch is completed before master_write
+/// returns, so the accepted count is a multiple of the batch size.
+pub fn test_review_master_write_batch_boundary() -> TestResult {
+    use crate::tty::ldisc::THROTTLE_HIGH_WATER;
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Raw mode.
+    let saved = tty::get_termios(slave).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    tty::set_termios(slave, &raw).unwrap();
+
+    // Fill slave to THROTTLE_HIGH_WATER - 10.  Only 10 more bytes until
+    // throttle activates, but the batch (64 bytes) completes fully.
+    let prefill = THROTTLE_HIGH_WATER - 10;
+    for _ in 0..prefill {
+        tty::push_input(slave, b'P');
+    }
+
+    // Verify not yet throttled.
+    {
+        let guard = TTY_SLOTS[slave.0 as usize].lock();
+        if guard.as_ref().map(|t| t.throttled).unwrap_or(true) {
+            klog_info!("TTY_TEST: BUG - slave throttled before master_write burst");
+            tty::set_termios(slave, &saved).unwrap();
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    }
+
+    // Get master's peer handle.
+    let peer = {
+        let guard = TTY_SLOTS[master.0 as usize].lock();
+        match guard.as_ref().unwrap().driver {
+            TtyDriverKind::PtyMaster { ref peer } => peer.clone(),
+            _ => {
+                klog_info!("TTY_TEST: BUG - master is not PtyMaster");
+                return TestResult::Fail;
+            }
+        }
+    };
+
+    // Write 256 bytes.  Throttle activates at byte ~10 within the first
+    // batch, but the full 64-byte batch completes before the check.
+    let burst = [b'Q'; 256];
+    let accepted = crate::tty::pty::master_write(peer, &burst);
+
+    // With BATCH_SIZE=64, the first batch pushes all 64 bytes (throttle
+    // activates at ~byte 10 but isn't checked until after the batch).
+    // The post-batch check sees throttled=true and returns 64.
+    if accepted != 64 {
+        klog_info!(
+            "TTY_TEST: BUG - master_write returned {} (expected 64 for batch boundary)",
+            accepted
+        );
+        tty::set_termios(slave, &saved).unwrap();
+        let _ = tty::close_ref(slave);
+        let _ = tty::close_ref(master);
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(slave, &saved).unwrap();
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+/// Review fix regression: c_ospeed field merges into c_cflag CBAUD bits.
+///
+/// Before the fix, setting termios with c_ospeed=9600 while c_cflag had
+/// B38400 would keep the old B38400 bits.  After the fix,
+/// merge_speed_into_cflag() updates the CBAUD portion of c_cflag to match
+/// the speed field, enabling cfsetospeed()/cfsetispeed() round-trips.
+pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    // Start with B38400 in c_cflag, then override via c_ospeed=9600.
+    let mut t = saved;
+    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_ospeed = 9600;
+    t.c_ispeed = 0;
+    tty::set_termios(idx, &t).unwrap();
+
+    let got = tty::get_termios(idx).unwrap();
+    let got_baud_bits = got.c_cflag & CBAUD;
+    if got_baud_bits != B9600 {
+        klog_info!(
+            "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B9600=0o{:o}",
+            got_baud_bits,
+            B9600
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    // Speed fields should also reflect 9600.
+    if got.c_ospeed != 9600 || got.c_ispeed != 9600 {
+        klog_info!(
+            "TTY_TEST: BUG - speed fields {}/{}, expected 9600/9600",
+            got.c_ispeed,
+            got.c_ospeed
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+/// Review fix regression: c_ispeed fallback when c_ospeed is zero.
+///
+/// merge_speed_into_cflag prefers c_ospeed; falls back to c_ispeed.
+pub fn test_review_speed_ispeed_fallback() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    let mut t = saved;
+    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_ospeed = 0;
+    t.c_ispeed = 115200;
+    tty::set_termios(idx, &t).unwrap();
+
+    let got = tty::get_termios(idx).unwrap();
+    let got_baud_bits = got.c_cflag & CBAUD;
+    if got_baud_bits != B115200 {
+        klog_info!(
+            "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B115200=0o{:o}",
+            got_baud_bits,
+            B115200
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+/// Review fix regression: unrecognised speed leaves c_cflag unchanged.
+///
+/// When c_ospeed is an unrecognised baud rate, CBAUD bits stay as-is.
+pub fn test_review_speed_unrecognised_noop() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    let mut t = saved;
+    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_ospeed = 12345;
+    t.c_ispeed = 0;
+    tty::set_termios(idx, &t).unwrap();
+
+    let got = tty::get_termios(idx).unwrap();
+    let got_baud_bits = got.c_cflag & CBAUD;
+    if got_baud_bits != B38400 {
+        klog_info!(
+            "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B38400=0o{:o} (unrecognised speed)",
+            got_baud_bits,
+            B38400
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+/// Review fix regression: poll_events returns POLLERR on hung-up TTY.
+///
+/// Before the fix, poll on a hung-up TTY returned POLLHUP | POLLIN but
+/// not POLLERR.  Programs that detect write errors via POLLERR would miss
+/// the hang-up.  Matches Linux tty_poll() behaviour.
+pub fn test_review_pollerr_on_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    drain_tty_nonblock(idx);
+    tty::hangup(idx);
+
+    let revents = tty::poll_events(
+        idx,
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+
+    tty::table::tty_table_init();
+
+    let has_pollerr = (revents & slopos_abi::syscall::POLLERR) != 0;
+    let has_pollhup = (revents & slopos_abi::syscall::POLLHUP) != 0;
+
+    if !has_pollerr {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLERR on hung-up TTY");
+        return TestResult::Fail;
+    }
+    if !has_pollhup {
+        klog_info!("TTY_TEST: BUG - poll_events should report POLLHUP alongside POLLERR");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// Review fix regression: PTY peer_closed also sets POLLERR.
+///
+/// When the slave side of a PTY is closed and all data is drained, the
+/// master should see POLLERR alongside POLLHUP.
+pub fn test_review_pollerr_on_peer_closed() -> TestResult {
+    tty::table::tty_table_init();
+
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::open_ref(master);
+    let slave_num = tty::get_pty_number(master).unwrap();
+    let slave = TtyIndex(slave_num as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    tty::pty_open_slave(slave).unwrap();
+
+    // Close slave side.
+    let _ = tty::close_ref(slave);
+
+    // Poll master — should see POLLHUP and POLLERR.
+    let revents = tty::poll_events(
+        master,
+        slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
+    );
+
+    let has_pollerr = (revents & slopos_abi::syscall::POLLERR) != 0;
+    let has_pollhup = (revents & slopos_abi::syscall::POLLHUP) != 0;
+
+    let _ = tty::close_ref(master);
+
+    if !has_pollhup {
+        klog_info!("TTY_TEST: BUG - PTY master poll should return POLLHUP after slave close");
+        return TestResult::Fail;
+    }
+    if !has_pollerr {
+        klog_info!("TTY_TEST: BUG - PTY master poll should return POLLERR after slave close");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
 // Test suite registration
@@ -13005,5 +13409,14 @@ slopos_lib::define_test_suite!(
         test_fp7_all_error_variants_preserved,
         test_fp7_nonblock_empty_returns_wouldblock,
         test_fp7_read_with_data_succeeds,
+        // Review Fix Regression Tests
+        test_review_tcflush_unthrottles_pty,
+        test_review_tcflush_both_unthrottles_pty,
+        test_review_master_write_batch_boundary,
+        test_review_speed_fields_merge_into_cflag,
+        test_review_speed_ispeed_fallback,
+        test_review_speed_unrecognised_noop,
+        test_review_pollerr_on_hangup,
+        test_review_pollerr_on_peer_closed,
     ]
 );
