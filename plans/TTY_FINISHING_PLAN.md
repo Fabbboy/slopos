@@ -1,6 +1,6 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-7 complete, Phases 8-13 queued
+> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-8 complete, Phases 9-13 queued
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
@@ -47,7 +47,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 5 | Missing ioctls (TCFLSH, TCSBRK, TCXONC) | P1 | Small | **DONE** ✅ |
 | 6 | Edit buffer expansion (1024 → 4096) | P2 | Trivial | **DONE** ✅ |
 | 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **DONE** ✅ |
-| 8 | TCXONC behavioral completion (real flow control semantics) | P0 | Medium | **TODO** |
+| 8 | TCXONC behavioral completion (real flow control semantics) | P0 | Medium | **DONE** ✅ |
 | 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **TODO** |
 | 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **TODO** |
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **TODO** |
@@ -649,7 +649,7 @@ All of these should return `-ERESTARTSYS` when interrupted by a restartable sign
 
 ## 11. Phase 8: TCXONC Behavioral Completion (Tier 1)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅ — Added `output_stopped: bool` to `Tty` struct with `TCOOFF`/`TCOON` setting/clearing the flag and blocking/resuming the write path. `TCIOFF`/`TCION` transmit `VSTOP`/`VSTART` control bytes to the terminal device. Write path enforces both ldisc `is_stopped()` (IXON keyboard flow control) and `output_stopped` (TCXONC ioctl flow control) independently. Packet mode events (`TIOCPKT_STOP`/`TIOCPKT_START`) emitted on transitions. Hangup clears `output_stopped` to unblock waiters. 12 regression tests added.
 
 > **Priority**: P0 compatibility/correctness — `tcxonc()` currently validates action codes but performs no behavioral change, so userspace receives success for operations that did not happen.
 > **Principle**: Keep SlopOS's simple architecture, but make `TCXONC` semantically honest and useful (Linux-inspired behavior, no copy-paste).
