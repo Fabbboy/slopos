@@ -1,6 +1,6 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-8 complete, Phases 9-13 queued
+> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-9 complete, Phases 10-13 queued
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
@@ -48,7 +48,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 6 | Edit buffer expansion (1024 → 4096) | P2 | Trivial | **DONE** ✅ |
 | 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **DONE** ✅ |
 | 8 | TCXONC behavioral completion (real flow control semantics) | P0 | Medium | **DONE** ✅ |
-| 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **TODO** |
+| 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **DONE** ✅ |
 | 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **TODO** |
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **TODO** |
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **TODO** |
@@ -83,7 +83,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | c_lflag | **15/15** | All flags including IUTF8, EXTPROC, ECHOPRT. Missing only FLUSHO (deprecated in Linux) |
 | c_cflag | **Expanded** | Character size/parity/baud/modem-control constants added in Phase 4 |
 | c_cc | **17/17** | All control character indices implemented |
-| Ioctls | **High coverage** | Missing `TIOCSTI` (deferred) and `TIOCOUTQ` (queued in Phase 9) |
+| Ioctls | **Full coverage** | Missing only `TIOCSTI` (deferred for security reasons). `TIOCOUTQ` added in Phase 9. |
 
 ---
 
@@ -694,7 +694,7 @@ All of these should return `-ERESTARTSYS` when interrupted by a restartable sign
 
 ## 12. Phase 9: Output Queue Visibility (TIOCOUTQ) (Tier 1)
 
-**Status**: **TODO** 🟨
+**Status**: **DONE** ✅ — Added `TIOCOUTQ` constant (0x5411) to ABI, implemented `output_queued_bytes()` helper combining `TTY_OUTPUT_INFLIGHT` counter with driver `output_pending()` state, wired through the full ioctl dispatch chain (service bridge → adapter → poll_ioctl_handlers dispatch), 8 regression tests added covering: ABI constant value, idle/inflight/post-flush queue depth, unallocated/invalid index error paths, FIONREAD unchanged regression, and vconsole driver behavior.
 
 > **Priority**: P0 observability/compatibility — `TIOCOUTQ` is expected by terminal tooling and multiplexers for back-pressure-aware writes.
 > **Principle**: Linux returns queued output bytes via `tty_chars_in_buffer()`. SlopOS should expose equivalent queue depth using existing counters.
