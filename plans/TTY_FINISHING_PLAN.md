@@ -1,6 +1,6 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 📋 All 7 phases planned — post-overhaul hardening & gold-standard completion
+> **Status**: 📋 13-phase gold-standard roadmap — Phases 1-7 complete, Phases 8-13 queued
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
@@ -19,8 +19,14 @@
 8. [Phase 5: Missing Ioctls (TCFLSH, TCSBRK, TCXONC)](#8-phase-5-missing-ioctls-tcflsh-tcsbrk-tcxonc)
 9. [Phase 6: Edit Buffer Expansion](#9-phase-6-edit-buffer-expansion)
 10. [Phase 7: Signal Restart Infrastructure (ERESTARTSYS)](#10-phase-7-signal-restart-infrastructure-erestartsys)
-11. [File Inventory](#11-file-inventory)
-12. [Appendix: Review Findings Reference](#12-appendix-review-findings-reference)
+11. [Phase 8: TCXONC Behavioral Completion (Tier 1)](#11-phase-8-tcxonc-behavioral-completion-tier-1)
+12. [Phase 9: Output Queue Visibility (TIOCOUTQ) (Tier 1)](#12-phase-9-output-queue-visibility-tiocoutq-tier-1)
+13. [Phase 10: Input Wake Batching (WAKEUP_CHARS-style) (Tier 2)](#13-phase-10-input-wake-batching-wakeup_chars-style-tier-2)
+14. [Phase 11: TABDLY/XTABS Output Compatibility (Tier 2)](#14-phase-11-tabdlyxtabs-output-compatibility-tier-2)
+15. [Phase 12: no_room-style Overflow Recovery (Tier 3)](#15-phase-12-no_room-style-overflow-recovery-tier-3)
+16. [Phase 13: Output Drain Semantics Hardening (Tier 3)](#16-phase-13-output-drain-semantics-hardening-tier-3)
+17. [File Inventory](#17-file-inventory)
+18. [Appendix: Review Findings Reference](#18-appendix-review-findings-reference)
 
 ---
 
@@ -28,19 +34,25 @@
 
 The 42-phase TTY overhaul transformed SlopOS from a global singleton line discipline behind a single `IrqMutex` into a proper per-terminal subsystem with PTY support, session/job control, VT100 emulation, and near-complete POSIX termios coverage. The subsystem is genuinely well-engineered — generation-tagged PTY peer handles, type-safe bitflags, deferred signal delivery outside locks, and a clean split-write pattern are all production-quality patterns.
 
-A comparative review against Linux N_TTY and RedoxOS identified **7 remaining gaps** ranging from critical (silent data loss on PTY overflow) to architectural (signal restart). This plan addresses each gap as an independent phase, ordered by priority.
+A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps**, all addressed in Phases 1-7. A follow-up gold-standard pass identified **6 additional Tier 1-3 gaps** focused on behavior parity, queue visibility, and throughput/recovery hardening. This plan now captures all 13 phases in priority order.
 
 ### Summary of phases
 
 | Phase | What | Priority | Effort | Status |
 |-------|------|----------|--------|--------|
 | 1 | Per-TTY poll notification (replace thundering herd) | P0 | Small | **DONE** |
-| 2 | PTY flow control / throttle mechanism | P0 | Medium | **TODO** |
-| 3 | Cooked buffer overflow hardening | P1 | Small | **TODO** |
-| 4 | c_cflag ABI completion (constants + defaults) | P1 | Small | **TODO** |
-| 5 | Missing ioctls (TCFLSH, TCSBRK, TCXONC) | P1 | Small | **TODO** |
-| 6 | Edit buffer expansion (1024 → 4096) | P2 | Trivial | **TODO** |
+| 2 | PTY flow control / throttle mechanism | P0 | Medium | **DONE** ✅ |
+| 3 | Cooked buffer overflow hardening | P1 | Small | **DONE** ✅ |
+| 4 | c_cflag ABI completion (constants + defaults) | P1 | Small | **DONE** ✅ |
+| 5 | Missing ioctls (TCFLSH, TCSBRK, TCXONC) | P1 | Small | **DONE** ✅ |
+| 6 | Edit buffer expansion (1024 → 4096) | P2 | Trivial | **DONE** ✅ |
 | 7 | Signal restart infrastructure (ERESTARTSYS) | P2 | Large | **DONE** ✅ |
+| 8 | TCXONC behavioral completion (real flow control semantics) | P0 | Medium | **TODO** |
+| 9 | Output queue visibility (`TIOCOUTQ`) | P0 | Small | **TODO** |
+| 10 | Input wake batching (`WAKEUP_CHARS`-style) | P1 | Medium | **TODO** |
+| 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **TODO** |
+| 12 | `no_room`-style overflow recovery | P1 | Medium | **TODO** |
+| 13 | Output drain semantics hardening | P2 | Small | **TODO** |
 
 ---
 
@@ -69,9 +81,9 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 remaining ga
 | c_iflag | **14/14** | All POSIX input flags implemented |
 | c_oflag | **6/6 core** | OPOST, ONLCR, OCRNL, ONOCR, ONLRET, OLCUC. Missing only legacy delay flags (OFILL/OFDEL) |
 | c_lflag | **15/15** | All flags including IUTF8, EXTPROC, ECHOPRT. Missing only FLUSHO (deprecated in Linux) |
-| c_cflag | **1/30+** | ⚠️ Only CREAD defined — biggest ABI gap |
+| c_cflag | **Expanded** | Character size/parity/baud/modem-control constants added in Phase 4 |
 | c_cc | **17/17** | All control character indices implemented |
-| Ioctls | **21/25** | Missing TCFLSH, TCSBRK, TCXONC, TIOCSTI |
+| Ioctls | **High coverage** | Missing `TIOCSTI` (deferred) and `TIOCOUTQ` (queued in Phase 9) |
 
 ---
 
@@ -635,20 +647,250 @@ All of these should return `-ERESTARTSYS` when interrupted by a restartable sign
 
 ---
 
-## 11. File Inventory
+## 11. Phase 8: TCXONC Behavioral Completion (Tier 1)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P0 compatibility/correctness — `tcxonc()` currently validates action codes but performs no behavioral change, so userspace receives success for operations that did not happen.
+> **Principle**: Keep SlopOS's simple architecture, but make `TCXONC` semantically honest and useful (Linux-inspired behavior, no copy-paste).
+
+### 11.1 Problem statement
+
+`tcxonc()` in `drivers/src/tty/mod.rs` accepts `TCOOFF`, `TCOON`, `TCIOFF`, `TCION` and returns `Ok(())`, but does not actually pause output, resume output, or inject STOP/START signaling.
+
+### 11.2 Behavioral target
+
+- `TCOOFF`: suspend output writes for the TTY.
+- `TCOON`: resume suspended output writes.
+- `TCIOFF`: send STOP control byte (software flow-control signal path).
+- `TCION`: send START control byte.
+- Invalid action: return `InvalidArg` (already implemented, preserve).
+
+### 11.3 Implementation outline
+
+- Add explicit output-stop state to `Tty` (`output_stopped: bool` or equivalent).
+- In write path, block (or `EAGAIN` for nonblocking) while `output_stopped` is true.
+- Wire `TCIOFF`/`TCION` to existing line-discipline control-byte path (reuse `VSTOP`/`VSTART` handling semantics).
+- Wake waiters (`TTY_OUTPUT_WAITERS`, poll waiters) when `TCOON` clears the stop state.
+
+### 11.4 Verification
+
+- Test: `tcxonc(TCOOFF)` pauses writes; blocking writer sleeps.
+- Test: `tcxonc(TCOON)` resumes blocked writer.
+- Test: nonblocking writer under `TCOOFF` returns `-EAGAIN`.
+- Test: `TCIOFF`/`TCION` trigger control-byte behavior path.
+- Regression: existing TCXONC argument-validation tests continue to pass.
+- `just build` + `just test` gate.
+
+### 11.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Implement real `TCXONC` behavior and write-path stop/resume handling |
+| `drivers/src/tty/ldisc.rs` | Expose/control START/STOP byte integration hooks if needed |
+| `drivers/src/tty_tests.rs` | Add behavioral TCXONC tests (pause/resume/nonblocking) |
+
+---
+
+## 12. Phase 9: Output Queue Visibility (TIOCOUTQ) (Tier 1)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P0 observability/compatibility — `TIOCOUTQ` is expected by terminal tooling and multiplexers for back-pressure-aware writes.
+> **Principle**: Linux returns queued output bytes via `tty_chars_in_buffer()`. SlopOS should expose equivalent queue depth using existing counters.
+
+### 12.1 Problem statement
+
+`TIOCOUTQ` is not currently exposed in ABI or ioctl dispatch path. SlopOS already tracks output inflight state (`TTY_OUTPUT_INFLIGHT`) and driver pending state, but userspace cannot query it.
+
+### 12.2 Implementation outline
+
+- Add `TIOCOUTQ` constant to `abi/src/syscall.rs` (Linux-compatible value `0x5411`).
+- Add `tty::get_output_queued_bytes(idx)` helper.
+- Return queue depth primarily from `TTY_OUTPUT_INFLIGHT[slot]`, with driver pending integration as available.
+- Wire ioctl in `core/src/syscall/fs/poll_ioctl_handlers.rs`.
+
+### 12.3 Verification
+
+- Test: immediately after write, `TIOCOUTQ > 0` until drain completes.
+- Test: after drain, `TIOCOUTQ == 0`.
+- Test: invalid pointer returns `-EFAULT`.
+- Test: non-TTY FD returns `-ENOTTY`.
+- Regression: `FIONREAD`/`TIOCINQ` behavior unchanged.
+- `just build` + `just test` gate.
+
+### 12.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `TIOCOUTQ` constant |
+| `drivers/src/tty/mod.rs` | Add output-queued query helper |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add `TIOCOUTQ` ioctl handling |
+| `drivers/src/tty_tests.rs` | Add output queue depth ioctl tests |
+
+---
+
+## 13. Phase 10: Input Wake Batching (WAKEUP_CHARS-style) (Tier 2)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P1 throughput/perf — current implementation wakes poll/read waiters per input event aggressively.
+> **Principle**: Adopt Linux's batching spirit (`WAKEUP_CHARS = 256`) while preserving SlopOS simplicity and correctness.
+
+### 13.1 Problem statement
+
+On high-rate input streams, frequent `wake_all` behavior can produce avoidable scheduler churn. Linux coalesces wakeups based on queued thresholds.
+
+### 13.2 Implementation outline
+
+- Add an input wake batching threshold constant (e.g., `WAKEUP_CHARS = 256`).
+- Track pending unread input delta between wakeups.
+- In non-canonical mode, wake readers when threshold is crossed, buffer nears full, timeout mode requires it, or hangup/signal occurs.
+- In canonical mode, preserve immediate wake on line-completion events.
+
+### 13.3 Verification
+
+- Test: canonical mode still wakes immediately at line boundary.
+- Test: non-canonical bulk input wakes at batching threshold, not per-byte.
+- Test: no starvation — readers eventually wake under sustained input.
+- Benchmark: reduced wake count under large paste/stream workload.
+- Regression: poll/read correctness unchanged.
+- `just build` + `just test` gate.
+
+### 13.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Apply batched wake policy in input path |
+| `drivers/src/tty/ldisc.rs` | Expose counters/signals needed for batching decisions |
+| `drivers/src/tty_tests.rs` | Add wake batching and no-starvation tests |
+
+---
+
+## 14. Phase 11: TABDLY/XTABS Output Compatibility (Tier 2)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P1 compatibility — many terminal stacks assume standard tab-delay flag behavior even if only `XTABS` is used in practice.
+> **Principle**: Implement the practical subset (`TAB0`/`TAB3`/`XTABS`) and keep legacy delay complexity out.
+
+### 14.1 Problem statement
+
+Current output processing already converts `\t` to spaces, but does not gate behavior through explicit `TABDLY`/`XTABS` flag semantics at ABI/termios level.
+
+### 14.2 Implementation outline
+
+- Add `TABDLY`, `TAB0`, `TAB3`, `XTABS` constants in `abi/src/syscall.rs` (aligned with Linux termbits values used in SlopOS ABI policy).
+- In line discipline output processing, apply `TABDLY` mask:
+  - `TAB0`: default tab behavior path.
+  - `TAB3`/`XTABS`: expand tab to spaces using column tracking.
+- Keep `OFILL`/`OFDEL` and other legacy delays out of scope.
+
+### 14.3 Verification
+
+- Test: `OPOST|XTABS` expands tab to expected number of spaces.
+- Test: column tracking remains correct across CR/LF/TAB mixes.
+- Test: toggling `TABDLY` bits roundtrips through termios get/set.
+- Regression: existing output processing tests pass.
+- `just build` + `just test` gate.
+
+### 14.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add TABDLY/TAB0/TAB3/XTABS constants |
+| `drivers/src/tty/ldisc.rs` | Gate tab expansion behavior through TABDLY/XTABS flags |
+| `drivers/src/tty_tests.rs` | Add tab flag compatibility tests |
+
+---
+
+## 15. Phase 12: no_room-style Overflow Recovery (Tier 3)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P1 resilience — IMAXBEL + throttle prevent most loss, but explicit "buffer has no room" state improves recovery clarity and behavior under sustained pressure.
+> **Principle**: Follow Linux's `no_room` concept, adapted to SlopOS's per-slot lock model.
+
+### 15.1 Problem statement
+
+When cooked input is full, bytes are dropped with IMAXBEL feedback. There is no explicit sticky recovery state that records overflow pressure and triggers deterministic recovery wakeup behavior after drain.
+
+### 15.2 Implementation outline
+
+- Add `no_room`-style flag in line discipline or `Tty` state.
+- Set flag when cooked queue hits full/drop condition.
+- Clear flag when occupancy falls below recovery threshold (aligned with unthrottle low-water).
+- On clear, wake relevant waiters and re-arm producer path.
+- Add optional overflow counter for diagnostics.
+
+### 15.3 Verification
+
+- Test: full cooked buffer sets `no_room` state.
+- Test: drain below threshold clears state and resumes producer progress.
+- Test: repeated fill/drain cycles avoid lockup and preserve existing throttle semantics.
+- Regression: IMAXBEL behavior preserved.
+- `just build` + `just test` gate.
+
+### 15.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/ldisc.rs` | Add no_room-style state and recovery logic |
+| `drivers/src/tty/mod.rs` | Integrate no_room transitions with wake/unthrottle points |
+| `drivers/src/tty_tests.rs` | Add overflow recovery tests |
+
+---
+
+## 16. Phase 13: Output Drain Semantics Hardening (Tier 3)
+
+**Status**: **TODO** 🟨
+
+> **Priority**: P2 semantic clarity — `wait_output_idle()` exists and is strong, but this phase codifies strict `tcdrain`/`tcsbrk` behavior across edge conditions and drivers.
+> **Principle**: Keep existing design, tighten guarantees and tests.
+
+### 16.1 Problem statement
+
+Drain logic currently combines `TTY_OUTPUT_INFLIGHT` and `driver.output_pending()`. This is good, but edge-case semantics (hangup/signal races, slot teardown, partial write timing) should be explicitly contract-tested.
+
+### 16.2 Implementation outline
+
+- Document drain contract in `wait_output_idle()` comments (what "idle" means).
+- Ensure `tcsbrk(arg>0)` and termios wait modes share one authoritative drain path.
+- Add explicit race tests: wake-before-block, hangup during drain, and signal interruption behavior.
+- If needed, add helper to expose stronger per-driver pending-byte semantics.
+
+### 16.3 Verification
+
+- Test: `tcsbrk(arg>0)` blocks until inflight + pending are both clear.
+- Test: hangup while draining returns expected error and unblocks waiters.
+- Test: signal interruption behavior matches tty read/write policy.
+- Regression: existing Phase 25/29 drain tests pass unchanged.
+- `just build` + `just test` gate.
+
+### 16.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Harden/document drain semantics and shared wait path |
+| `drivers/src/tty/driver.rs` | Optional stronger pending-state contract |
+| `drivers/src/tty_tests.rs` | Add edge/race drain tests |
+
+---
+
+## 17. File Inventory
 
 ### Files to modify
 
 | File | Phases | Nature of change |
 |------|--------|-----------------|
-| `drivers/src/tty/mod.rs` | 1, 2, 3, 4, 5, 7 | Poll wake targeting, throttle state + checks, push_cooked caller updates, c_ispeed/c_ospeed population, ioctl wiring, ERESTARTSYS |
-| `drivers/src/tty/table.rs` | 1, 2 | Replace POLL_NOTIFY with per-slot poll waiters, potential throttle waitqueue |
-| `drivers/src/tty/ldisc.rs` | 2, 3, 4, 6 | Expose cooked buffer occupancy, push_cooked return value + IMAXBEL, default c_cflag update, EDIT_BUF_SIZE change |
-| `drivers/src/tty/pty.rs` | 1, 2 | PTY cross-wake per-slot targeting, master write back-pressure |
-| `drivers/src/tty_tests.rs` | 1–7 | New regression tests for every phase |
-| `abi/src/syscall.rs` | 4, 5, 7 | c_cflag constants, ioctl constants, ERESTARTSYS |
+| `drivers/src/tty/mod.rs` | 1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13 | Poll wake targeting, throttle state + checks, push_cooked caller updates, c_ispeed/c_ospeed population, ioctl wiring, ERESTARTSYS, TCXONC behavior, output queue query, wake batching, no_room recovery, drain hardening |
+| `drivers/src/tty/table.rs` | 1, 2, 9, 13 | Replace POLL_NOTIFY with per-slot poll waiters, potential throttle waitqueue, output queue accounting hardening |
+| `drivers/src/tty/ldisc.rs` | 2, 3, 4, 6, 10, 11, 12 | Expose cooked buffer occupancy, push_cooked return value + IMAXBEL, default c_cflag update, EDIT_BUF_SIZE change, wake batching support, TABDLY/XTABS handling, no_room recovery hooks |
+| `drivers/src/tty/pty.rs` | 1, 2, 8, 13 | PTY cross-wake per-slot targeting, master write back-pressure, TCXONC stop/start integration, drain semantics audit |
+| `drivers/src/tty_tests.rs` | 1–13 | New regression tests for every phase, including Tier 1-3 additions |
+| `abi/src/syscall.rs` | 4, 5, 7, 9, 11 | c_cflag constants, ioctl constants, ERESTARTSYS, TIOCOUTQ, TABDLY/XTABS constants |
 | `abi/src/signal.rs` | 7 | Ensure SA_RESTART defined |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | 1, 5 | Per-slot poll registration, TCFLSH/TCSBRK/TCXONC dispatch |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | 1, 5, 9 | Per-slot poll registration, TCFLSH/TCSBRK/TCXONC dispatch, TIOCOUTQ dispatch |
 | `fs/src/fileio.rs` | 1 | Poll routing with TTY index for per-slot registration |
 | `lib/src/kernel_services/syscall_services/tty.rs` | 5 | Service bridge for new ioctls |
 | `drivers/src/syscall_services_init.rs` | 5 | Register new ioctl service methods |
@@ -661,7 +903,7 @@ All changes are modifications to existing files. The TTY module structure is com
 
 ---
 
-## 12. Appendix: Review Findings Reference
+## 18. Appendix: Review Findings Reference
 
 ### Comparative review methodology
 
