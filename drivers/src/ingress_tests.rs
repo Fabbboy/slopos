@@ -1,4 +1,4 @@
-//! Tests for the ingress pipeline (Phase 1D).
+//! Tests for the ingress pipeline.
 //!
 //! Covers:
 //! - 1.T9:  Ingress pipeline correctly dispatches IPv4 frames

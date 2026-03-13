@@ -269,7 +269,7 @@ pub fn set_dst_mac_in_eth_header(pkt: &mut PacketBuf, mac: MacAddr) {
 
 /// Get our IPv4 address from the centralised [`NetStack`].
 ///
-/// Tries the NetStack first (Phase 3A); falls back to the legacy
+/// Tries the NetStack first; falls back to the legacy
 /// `virtio_net_ipv4_addr()` if the NetStack has not been configured yet.
 fn get_our_ip() -> Ipv4Addr {
     if let Some(ip) = super::netstack::NET_STACK.first_ipv4() {
@@ -280,7 +280,7 @@ fn get_our_ip() -> Ipv4Addr {
 }
 
 // =============================================================================
-// Phase 3B — Registry-based ARP send (no DeviceHandle needed)
+// Registry-based ARP send (no DeviceHandle needed)
 // =============================================================================
 
 /// Send an ARP request via the device registry (index-based TX).

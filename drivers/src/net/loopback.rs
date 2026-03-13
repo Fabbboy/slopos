@@ -1,6 +1,6 @@
 //! Loopback network device (`lo`).
 //!
-//! # Architecture (Phase 3C)
+//! # Architecture
 //!
 //! The loopback device implements [`NetDevice`] with a trivial internal queue:
 //! `tx()` pushes packets onto a [`VecDeque`], `poll_rx()` drains them back out.

@@ -10,36 +10,36 @@ use crate::net::types::{Ipv4Addr, NetError, Port, SockAddr};
 
 /// Internal storage for protocol-specific socket state.
 ///
-/// Phase 4A defines this enum; legacy syscall paths continue on `KernelSocket`
-/// until Phase 4C/4D migration activates this framework.
+/// this enum; legacy syscall paths continue on `KernelSocket`
+/// until migration activates this framework.
 pub enum SocketInner {
-    /// UDP socket state (stateless at protocol level in Phase 4A).
+    /// UDP socket state (stateless at protocol level).
     Udp(UdpSocketInner),
-    /// TCP socket state placeholder (expanded in Phase 5).
+    /// TCP socket state placeholder (expanded).
     Tcp(TcpSocketInner),
-    /// Raw socket state placeholder (expanded in Phase 9).
+    /// Raw socket state placeholder (expanded).
     Raw(RawSocketInner),
 }
 
 /// UDP protocol-specific state.
 ///
-/// Phase 4A keeps this empty because UDP per-socket protocol state is minimal.
+/// this empty because UDP per-socket protocol state is minimal.
 pub struct UdpSocketInner;
 
 /// TCP protocol-specific state placeholder.
 ///
-/// `conn_id` links the socket to a transport connection in future phases.
-/// `listen` holds the two-queue listen state for listening sockets (Phase 5B).
+/// `conn_id` links the socket to a transport connection in the future.
+/// `listen` holds the two-queue listen state for listening sockets.
 pub struct TcpSocketInner {
-    /// Optional transport connection identifier (Phase 5).
+    /// Optional transport connection identifier.
     pub conn_id: Option<u32>,
-    /// Two-queue listen state for TCP listening sockets (Phase 5B).
+    /// Two-queue listen state for TCP listening sockets.
     pub listen: Option<tcp_socket::TcpListenState>,
 }
 
 /// Raw socket protocol-specific state placeholder.
 ///
-/// This remains empty in Phase 4A and is expanded in Phase 9.
+/// This remains empty and is expanded
 pub struct RawSocketInner;
 
 /// Socket status and mode flags.
@@ -86,8 +86,8 @@ impl SocketFlags {
 
 /// Per-socket configurable options.
 ///
-/// Phase 4A defines these fields; legacy syscall paths keep their existing
-/// option storage until migration phases activate this struct.
+/// these fields; legacy syscall paths keep their existing
+/// option storage until migration activate this struct.
 pub struct SocketOptions {
     /// Allow local address reuse.
     pub reuse_addr: bool,
@@ -103,9 +103,9 @@ pub struct SocketOptions {
     pub recv_timeout: Option<u64>,
     /// Send timeout in milliseconds (`None` means infinite).
     pub send_timeout: Option<u64>,
-    /// Enable keepalive (TCP-only behavior in later phases).
+    /// Enable keepalive (TCP-only behavior in later).
     pub keepalive: bool,
-    /// Disable Nagle algorithm (TCP-only behavior in later phases).
+    /// Disable Nagle algorithm (TCP-only behavior in later).
     pub tcp_nodelay: bool,
 }
 
@@ -123,7 +123,7 @@ impl SocketOptions {
     /// Maximum allowed send buffer size in bytes.
     pub const SEND_BUF_MAX: usize = 262_144;
 
-    /// Construct options with Phase 4A defaults.
+    /// Construct options with defaults.
     pub const fn new() -> Self {
         Self {
             reuse_addr: false,
@@ -165,7 +165,7 @@ impl Default for SocketOptions {
 
 /// Fixed-capacity queue with ring-buffer semantics.
 ///
-/// Phase 4A defines this queue for per-socket packets. Push never overwrites:
+/// this queue for per-socket packets. Push never overwrites:
 /// it returns `false` when full.
 pub struct BoundedQueue<T> {
     slots: Vec<Option<T>>,
@@ -280,13 +280,13 @@ impl<T> fmt::Debug for BoundedQueue<T> {
 
 /// Next wait-queue hint used by `Socket::new` placeholders.
 ///
-/// Phase 6 replaces these indices with real queue registrations.
+/// Replaces these indices with real queue registrations.
 static SOCKET_WQ_HINT: AtomicU16 = AtomicU16::new(0);
 
 /// Unified socket object for the new framework.
 ///
-/// Phase 4A defines this object. Legacy code paths continue using
-/// `KernelSocket` until Phase 4C/4D migration.
+/// this object. Legacy code paths continue using
+/// `KernelSocket` until migration.
 pub struct Socket {
     /// Protocol-specific socket state.
     pub inner: SocketInner,
@@ -306,11 +306,11 @@ pub struct Socket {
     pub pending_error: Option<NetError>,
     /// Owning process identifier.
     pub process_id: u32,
-    /// Placeholder receive wait queue index (Phase 6 replacement planned).
+    /// Placeholder receive wait queue index.
     pub recv_wq_idx: u8,
-    /// Placeholder accept wait queue index (Phase 6 replacement planned).
+    /// Placeholder accept wait queue index.
     pub accept_wq_idx: u8,
-    /// Placeholder send wait queue index (Phase 6 replacement planned).
+    /// Placeholder send wait queue index.
     pub send_wq_idx: u8,
 }
 
@@ -318,7 +318,7 @@ impl Socket {
     /// Default receive queue capacity in packets.
     pub const RECV_QUEUE_DEFAULT_CAPACITY: usize = 16;
 
-    /// Create a new socket object with Phase 4A defaults.
+    /// Create a new socket object with defaults.
     pub fn new(inner: SocketInner) -> Self {
         let wq_idx = (SOCKET_WQ_HINT.fetch_add(1, Ordering::Relaxed) & 0x00FF) as u8;
         Self {
@@ -369,8 +369,8 @@ impl Socket {
 
 /// Slab-like socket table with freelist allocation.
 ///
-/// Phase 4A defines this table. Syscall handlers still use the legacy table
-/// until Phase 4C/4D migration.
+/// this table. Syscall handlers still use the legacy table
+/// until migration.
 pub struct SlabSocketTable {
     slots: Vec<Option<Socket>>,
     freelist: Vec<usize>,
@@ -501,7 +501,7 @@ impl SlabSocketTable {
 
 /// Ephemeral port allocator for dynamic local port selection.
 ///
-/// Phase 4A defines this allocator and both old/new socket paths may use it.
+/// this allocator and both old/new socket paths may use it.
 /// Access must be serialized by the outer lock (no internal atomics).
 pub struct EphemeralPortAllocator {
     bitmap: [u8; Self::BITMAP_SIZE],
@@ -614,23 +614,23 @@ impl Default for EphemeralPortAllocator {
     }
 }
 
-/// New slab-based socket table (Phase 4A).
+/// New slab-based socket table.
 ///
-/// Initially unused by legacy socket syscalls. Migration occurs in Phase 4C/4D.
+/// Initially unused by legacy socket syscalls. Migration occurs/4D.
 pub static NEW_SOCKET_TABLE: slopos_lib::IrqMutex<SlabSocketTable> =
     slopos_lib::IrqMutex::new(SlabSocketTable::empty());
 
-/// Ephemeral port allocator (Phase 4A).
+/// Ephemeral port allocator.
 ///
 /// Shared infrastructure for both legacy and future socket paths.
 pub static EPHEMERAL_PORTS: slopos_lib::IrqMutex<EphemeralPortAllocator> =
     slopos_lib::IrqMutex::new(EphemeralPortAllocator::new());
 
 // =============================================================================
-// LEGACY: Existing socket infrastructure (pre-Phase 4A)
+// LEGACY: Existing socket infrastructure (legacy)
 //
 // The code below implements the current socket functionality using KernelSocket
-// and a fixed-size SocketTable. Phase 4C/4D will migrate this to use the new
+// and a fixed-size SocketTable. Future migration will move this to use the new
 // Socket framework above. Until then, both coexist.
 // =============================================================================
 
@@ -928,7 +928,7 @@ fn socket_notify_accept_waiters() {
         if sock.state != SocketState::Listening {
             continue;
         }
-        // Phase 5C: Check accept queue in TcpListenState.
+        // Check accept queue in TcpListenState.
         let has_pending = if let SocketInner::Tcp(ref tcp_inner) = sock.inner {
             tcp_inner
                 .listen
@@ -948,7 +948,7 @@ pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
     if let Some(tcp_idx) = result.conn_idx {
         socket_notify_tcp_idx_waiters(tcp_idx);
 
-        // Phase 5B: When a connection transitions to Established, register it
+        // When a connection transitions to Established, register it
         // in the TCP demux table for fast 4-tuple lookup.
         if result.new_state == Some(TcpState::Established) {
             if let Some(conn) = tcp::tcp_get_connection(tcp_idx) {
@@ -960,7 +960,7 @@ pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
                     tcp_idx as u32,
                 );
 
-                // Phase 5C: Wire completed 3WHS into the listener's accept queue.
+                // Wire completed 3WHS into the listener's accept queue.
                 // When a server-side child connection transitions SYN_RECEIVED -> Established,
                 // find the parent listener and push an AcceptedConn to its accept queue.
                 let listener_sock_idx = tcp_socket::TCP_DEMUX
@@ -1332,17 +1332,17 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
         Ok(tcp_idx) => {
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
                 tcp_inner.conn_id = Some(tcp_idx as u32);
-                // Phase 5C: Create TcpListenState with two-queue model.
+                // Create TcpListenState with two-queue model.
                 tcp_inner.listen = Some(tcp_socket::TcpListenState::new(backlog as usize, local));
             }
             sock.state = SocketState::Listening;
 
-            // Phase 5B: Register listener in TCP demux table.
+            // Register listener in TCP demux table.
             let _ = tcp_socket::TCP_DEMUX
                 .lock()
                 .register_listener(local.ip, local.port, sock_idx);
 
-            // Phase 5B: Set bidirectional link on the connection.
+            // Set bidirectional link on the connection.
             tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
 
             0
@@ -1384,7 +1384,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             };
             let is_nonblocking = listen_sock.is_nonblocking();
 
-            // Phase 5C: Dequeue from the TcpListenState accept queue.
+            // Dequeue from the TcpListenState accept queue.
             let accepted = if let SocketInner::Tcp(ref mut tcp_inner) = listen_sock.inner {
                 tcp_inner.listen.as_mut().and_then(|ls| ls.accept())
             } else {
@@ -1428,7 +1428,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                     }
                 }
 
-                // Phase 5B: Set bidirectional socket↔connection link.
+                // Set bidirectional socket↔connection link.
                 if let Some(tcp_idx) = tcp_idx {
                     tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
                 }
@@ -1441,7 +1441,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             return errno_i32(ERRNO_EAGAIN);
         }
 
-        // Phase 5C: Wait for accept queue to become non-empty.
+        // Wait for accept queue to become non-empty.
         let wait_ok = if timeout_ms > 0 {
             ACCEPT_WQS[wq_slot(accept_hint)].wait_event_timeout(
                 || {
@@ -1520,7 +1520,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                     tcp_inner.conn_id = Some(tcp_idx as u32);
                     sock.state = SocketState::Connecting;
 
-                    // Phase 5B: Set bidirectional socket↔connection link.
+                    // Set bidirectional socket↔connection link.
                     tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
                     0
                 }
@@ -1942,7 +1942,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         let accept_hint = sock.accept_wq_idx;
         sock.recv_queue.clear();
 
-        // Phase 5C: Clean up TcpListenState (cancels SYN-ACK retransmit timers).
+        // Clean up TcpListenState (cancels SYN-ACK retransmit timers).
         if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner {
             if let Some(ref mut listen_state) = tcp_inner.listen {
                 listen_state.clear();
@@ -1961,7 +1961,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         )
     };
 
-    // Phase 5B: Unregister from TCP demux table.
+    // Unregister from TCP demux table.
     if was_listener {
         tcp_socket::TCP_DEMUX.lock().unregister_listener(sock_idx);
     }
@@ -2013,7 +2013,7 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     if state == SocketState::Listening {
-        // Phase 5C: Check accept queue in TcpListenState.
+        // Check accept queue in TcpListenState.
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return 0;

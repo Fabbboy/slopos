@@ -49,7 +49,7 @@ enum PacketBufInner {
         pool: &'static PacketPool,
         slot: u16,
     },
-    /// Heap-allocated fallback for oversized reassembly buffers (Phase 8).
+    /// Heap-allocated fallback for oversized reassembly buffers.
     Oversized { data: Vec<u8> },
 }
 
@@ -170,7 +170,7 @@ impl PacketBuf {
 
     /// Allocate an oversized buffer from the heap.
     ///
-    /// Used **only** for IP reassembly buffers (Phase 8) that exceed the pool's
+    /// Used **only** for IP reassembly buffers that exceed the pool's
     /// `BUF_SIZE`.  Normal packet allocation should always use [`alloc`](Self::alloc).
     pub fn oversized(capacity: usize) -> Self {
         Self {

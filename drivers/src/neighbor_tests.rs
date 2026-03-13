@@ -1,4 +1,4 @@
-//! Tests for the ARP neighbor cache (Phase 2B).
+//! Tests for the ARP neighbor cache.
 //!
 //! Covers:
 //! - 2.T1: `lookup` on empty cache returns `None`

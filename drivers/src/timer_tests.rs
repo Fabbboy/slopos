@@ -1,4 +1,4 @@
-//! Tests for the data-driven timer wheel (Phase 2A).
+//! Tests for the data-driven timer wheel.
 //!
 //! Covers: schedule + tick dispatch, cancellation, MAX_TIMERS_PER_TICK bound,
 //! advance_to catch-up, and edge cases (empty wheel, cancelled cleanup).

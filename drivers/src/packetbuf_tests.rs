@@ -1,4 +1,4 @@
-//! Tests for PacketBuf and PacketPool (Phase 1B).
+//! Tests for PacketBuf and PacketPool.
 //!
 //! Covers: pool alloc/release lifecycle, PacketBuf constructors, push/pull
 //! header operations, from_raw_copy, drop-returns-to-pool, layer offset

@@ -1,13 +1,13 @@
 //! IPv4 ingress and egress handlers.
 //!
-//! # Ingress (Phase 1D)
+//! # Ingress
 //!
 //! [`handle_rx`] is the single entry point for all received IPv4 packets after
 //! Ethernet demux.  It validates the IP header (version, length, checksum, TTL),
 //! sets the L4 layer offset on the [`PacketBuf`], and dispatches to the
 //! appropriate protocol handler (TCP, UDP, ICMP).
 //!
-//! # Egress (Phase 3B)
+//! # Egress
 //!
 //! [`send`] is the route-aware egress entry point.  It performs a routing table
 //! lookup to determine the outgoing device and next hop, then either transmits
@@ -17,7 +17,7 @@
 //! [`send_via`] is the lower-level egress path for callers that already have a
 //! [`DeviceHandle`] and know the next hop (e.g., timer-driven retransmits).
 //!
-//! # Phase 1D scope
+//! # Scope
 //!
 //! - Full IPv4 header validation
 //! - Protocol dispatch to existing TCP/UDP handlers via the socket layer
@@ -141,7 +141,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
 
 /// Dispatch a TCP segment to the TCP state machine and socket layer.
 ///
-/// Uses the [`TcpDemuxTable`] for fast 4-tuple / 2-tuple lookup (Phase 5B),
+/// Uses the [`TcpDemuxTable`] for fast 4-tuple / 2-tuple lookup,
 /// then delegates to `tcp_input()` for full state-machine processing.
 fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     let ip_payload = pkt.payload();
@@ -157,7 +157,7 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     let payload = &ip_payload[hdr_len..];
     let now_ms = slopos_lib::clock::uptime_ms();
 
-    // Phase 5B: Demux table pre-lookup for debug/fast-path validation.
+    // Demux table pre-lookup for debug/fast-path validation.
     // The demux table provides O(n) lookup by 4-tuple (established) or
     // 2-tuple (listener). The actual state machine processing still goes
     // through tcp_input() which uses TcpConnectionTable internally.
@@ -207,7 +207,7 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
 }
 
 // =============================================================================
-// Phase 3B — Route-aware IPv4 egress
+// Route-aware IPv4 egress
 // =============================================================================
 
 /// Route-aware IPv4 send.
@@ -216,7 +216,7 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
 /// hop, selects the source IP from the outgoing interface, then sends through
 /// the neighbor cache (or directly for loopback/broadcast/multicast).
 ///
-/// This is the primary egress entry point for the socket layer (Phase 4+).
+/// This is the primary egress entry point for the socket layer.
 /// For callers that already hold a [`DeviceHandle`], use [`send_via`] instead.
 pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError> {
     use super::netdev::DEVICE_REGISTRY;
@@ -243,7 +243,7 @@ pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetErr
 
 /// Send an IPv4 packet through a specific device via neighbor cache.
 ///
-/// This is the handle-based egress path from Phase 2C.3, preserved for callers
+/// This is the handle-based egress path, preserved for callers
 /// that already have a [`DeviceHandle`] (e.g., timer-driven ARP retransmit).
 /// For route-aware sending, prefer [`send`].
 pub fn send_via(

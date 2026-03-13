@@ -1,4 +1,4 @@
-//! Phase 5A/5B integration tests — Two-Queue Listen Model & TCP Demux Table.
+//! Integration tests — Two-Queue Listen Model & TCP Demux Table.
 //!
 //! Tests the SYN queue, accept queue, SYN-ACK retransmission, overflow
 //! behavior of [`TcpListenState`], and the [`TcpDemuxTable`] for fast
@@ -218,7 +218,7 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — established connection lookup
+// TcpDemuxTable — established connection lookup
 // =============================================================================
 
 pub fn test_demux_register_established_lookup() -> TestResult {
@@ -261,7 +261,7 @@ pub fn test_demux_register_established_lookup() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — duplicate established registration rejected
+// TcpDemuxTable — duplicate established registration rejected
 // =============================================================================
 
 pub fn test_demux_established_duplicate_rejected() -> TestResult {
@@ -282,7 +282,7 @@ pub fn test_demux_established_duplicate_rejected() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — unregister established
+// TcpDemuxTable — unregister established
 // =============================================================================
 
 pub fn test_demux_unregister_established() -> TestResult {
@@ -318,7 +318,7 @@ pub fn test_demux_unregister_established() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — listener registration and lookup
+// TcpDemuxTable — listener registration and lookup
 // =============================================================================
 
 pub fn test_demux_register_listener_lookup() -> TestResult {
@@ -347,7 +347,7 @@ pub fn test_demux_register_listener_lookup() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — listener wildcard (0.0.0.0) fallback
+// TcpDemuxTable — listener wildcard (0.0.0.0) fallback
 // =============================================================================
 
 pub fn test_demux_listener_wildcard_fallback() -> TestResult {
@@ -392,7 +392,7 @@ pub fn test_demux_listener_wildcard_fallback() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — unregister listener
+// TcpDemuxTable — unregister listener
 // =============================================================================
 
 pub fn test_demux_unregister_listener() -> TestResult {
@@ -420,7 +420,7 @@ pub fn test_demux_unregister_listener() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5B: TcpDemuxTable — clear wipes all entries
+// TcpDemuxTable — clear wipes all entries
 // =============================================================================
 
 pub fn test_demux_clear() -> TestResult {
@@ -459,7 +459,7 @@ pub fn test_demux_clear() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5C: TcpListenState — push_accepted enqueues completed connections
+// TcpListenState — push_accepted enqueues completed connections
 // =============================================================================
 
 pub fn test_push_accepted_basic() -> TestResult {
@@ -509,7 +509,7 @@ pub fn test_push_accepted_basic() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5C: TcpListenState — push_accepted respects backlog
+// TcpListenState — push_accepted respects backlog
 // =============================================================================
 
 pub fn test_push_accepted_respects_backlog() -> TestResult {
@@ -582,7 +582,7 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5C: TcpListenState — backlog clamping
+// TcpListenState — backlog clamping
 // =============================================================================
 
 pub fn test_listen_state_backlog_clamping() -> TestResult {
@@ -616,7 +616,7 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5C: TcpListenState — accept returns FIFO order
+// TcpListenState — accept returns FIFO order
 // =============================================================================
 
 pub fn test_accept_fifo_order() -> TestResult {
@@ -658,7 +658,7 @@ pub fn test_accept_fifo_order() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5C: TcpListenState — clear wipes both queues
+// TcpListenState — clear wipes both queues
 // =============================================================================
 
 pub fn test_listen_state_clear() -> TestResult {
@@ -693,7 +693,7 @@ pub fn test_listen_state_clear() -> TestResult {
 }
 
 // =============================================================================
-// Phase 5D: TCP Send/Recv/Shutdown — FIN handling and shutdown semantics
+// TCP Send/Recv/Shutdown — FIN handling and shutdown semantics
 // =============================================================================
 
 use super::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_SYN, TcpHeader, TcpState};
@@ -1098,12 +1098,12 @@ pub fn test_fin_full_teardown() -> TestResult {
 slopos_lib::define_test_suite!(
     tcp_socket,
     [
-        // Phase 5A tests
+        // tests
         test_syn_queue_overflow,
         test_accept_queue_overflow,
         test_syn_ack_retransmit_exhaustion,
         test_duplicate_syn_retransmits,
-        // Phase 5B tests
+        // tests
         test_demux_register_established_lookup,
         test_demux_established_duplicate_rejected,
         test_demux_unregister_established,
@@ -1111,13 +1111,13 @@ slopos_lib::define_test_suite!(
         test_demux_listener_wildcard_fallback,
         test_demux_unregister_listener,
         test_demux_clear,
-        // Phase 5C tests
+        // tests
         test_push_accepted_basic,
         test_push_accepted_respects_backlog,
         test_listen_state_backlog_clamping,
         test_accept_fifo_order,
         test_listen_state_clear,
-        // Phase 5D tests
+        // tests
         test_fin_handling_eof,
         test_shutdown_write_sends_fin,
         test_shutdown_read_discards_buffer,

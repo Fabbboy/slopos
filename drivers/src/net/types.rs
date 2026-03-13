@@ -510,7 +510,7 @@ impl fmt::Display for IpProtocol {
 /// Immutable scatter-gather I/O slice.
 ///
 /// Wraps a `&[u8]` reference.  All internal send/recv protocol APIs will
-/// accept `&[IoSlice<'_>]` starting from Phase 4, enabling vectored I/O and
+/// accept `&[IoSlice<'_>]` starting, enabling vectored I/O and
 /// future zero-copy paths without rewriting protocol code.
 pub struct IoSlice<'a> {
     /// The underlying byte slice.

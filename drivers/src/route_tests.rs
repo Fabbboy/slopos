@@ -1,4 +1,4 @@
-//! Tests for the prefix-length-bucketed routing table (Phase 3B).
+//! Tests for the prefix-length-bucketed routing table.
 //!
 //! Covers:
 //! - 3.T1: `RouteTable::lookup` with connected route returns correct DevIndex

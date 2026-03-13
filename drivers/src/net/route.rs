@@ -1,6 +1,6 @@
 //! Prefix-length-bucketed routing table for IPv4.
 //!
-//! # Architecture (Phase 3B — CAD-5)
+//! # Architecture
 //!
 //! Routes are stored in a fixed-size array of 33 buckets (one per possible
 //! prefix length, /0 through /32).  Lookup iterates from the longest prefix

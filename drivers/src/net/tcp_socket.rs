@@ -1,4 +1,4 @@
-//! TCP socket layer — Two-Queue Listen Model (Phase 5A).
+//! TCP socket layer — Two-Queue Listen Model.
 //!
 //! Implements the SYN queue / accept queue split for TCP listening sockets,
 //! following the Linux two-queue model that prevents SYN floods from blocking
@@ -173,7 +173,7 @@ impl core::fmt::Debug for SynRecvEntry {
 
 /// Information about a completed TCP connection (three-way handshake done).
 ///
-/// This is what [`TcpListenState::accept`] returns.  Phase 5B will use this
+/// This is what [`TcpListenState::accept`] returns.  The socket layer will use this
 /// to create a full [`TcpConnection`] in the connection table and bind it to
 /// a socket.
 #[derive(Clone, Copy, Debug)]
@@ -446,7 +446,7 @@ impl TcpListenState {
         self.accept_queue.pop_front()
     }
 
-    /// Push a completed connection directly into the accept queue (Phase 5C).
+    /// Push a completed connection directly into the accept queue.
     ///
     /// Used by `socket_notify_tcp_activity()` when a server-side child connection
     /// completes the 3WHS (SYN_RECEIVED → Established) in the TCP state machine.
@@ -550,7 +550,7 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
 }
 
 // =============================================================================
-// Phase 5B — TCP Demux Table
+// TCP Demux Table
 // =============================================================================
 
 /// Entry in the established-connection demux table.
@@ -737,5 +737,5 @@ impl TcpDemuxTable {
     }
 }
 
-/// Global TCP demux table (Phase 5B).
+/// Global TCP demux table.
 pub static TCP_DEMUX: IrqMutex<TcpDemuxTable> = IrqMutex::new(TcpDemuxTable::new());

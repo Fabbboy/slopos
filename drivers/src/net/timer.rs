@@ -420,8 +420,8 @@ pub static NET_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::new();
 /// - The NAPI poll loop (fires during active networking)
 /// - The idle wakeup callback (fires during idle periods)
 ///
-/// Dispatch is currently stubbed — Phase 2B will add neighbor cache dispatch,
-/// Phase 5 will add TCP engine dispatch, Phase 8 will add reassembly dispatch.
+/// Dispatch is currently stubbed — TODO: add neighbor cache dispatch,
+/// TODO: add TCP engine dispatch, TODO: add reassembly dispatch.
 pub fn net_timer_process() {
     use slopos_lib::kernel_services::platform;
 
@@ -435,9 +435,9 @@ pub fn net_timer_process() {
 
 /// Dispatch a single fired timer to the appropriate subsystem.
 ///
-/// ARP timers (Phase 2B) call into the [`NeighborCache`] and execute any
+/// ARP timers call into the [`NeighborCache`] and execute any
 /// returned I/O actions via the single VirtIO-net device handle.  TCP and
-/// reassembly dispatch remain stubbed for Phases 5 and 8.
+/// reassembly dispatch remain stubbed for the corresponding.
 fn dispatch_fired_timer(timer: &FiredTimer) {
     match timer.kind {
         TimerKind::ArpExpire => {
@@ -449,7 +449,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             let (action, _dropped) = super::neighbor::NEIGHBOR_CACHE.on_retransmit(timer.key);
             if let Some(act) = action {
                 // Execute the returned action (send ARP request).
-                // Phase 9 (multi-NIC) will need per-device handle lookup.
+                // multi-NIC support will need per-device handle lookup.
                 if let Some(handle) = crate::virtio_net::get_device_handle() {
                     super::arp::execute_neighbor_action(handle, act);
                 }
@@ -464,7 +464,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
-            // Phase 5: tcp_engine.on_delayed_ack(timer.key)
+            // tcp_engine.on_delayed_ack(timer.key)
         }
         TimerKind::TcpTimeWait => {
             klog_debug!("net_timer: TCP TIME_WAIT expired, key={}", timer.key);
@@ -472,11 +472,11 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpKeepalive => {
             klog_debug!("net_timer: TCP keepalive fired, key={}", timer.key);
-            // Phase 5: tcp_engine.on_keepalive(timer.key)
+            // tcp_engine.on_keepalive(timer.key)
         }
         TimerKind::ReassemblyTimeout => {
             klog_debug!("net_timer: reassembly timeout fired, key={}", timer.key);
-            // Phase 8: reassembly.on_timeout(timer.key)
+            // reassembly.on_timeout(timer.key)
         }
     }
 }

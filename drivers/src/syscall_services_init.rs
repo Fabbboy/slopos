@@ -410,7 +410,7 @@ fn tty_set_packet_mode_adapter(tty_index: TtyIndex, enable: bool) -> i32 {
     }
 }
 
-// Finishing Phase 5: Missing ioctls (TCFLSH, TCSBRK, TCXONC) adapters.
+// Missing ioctls (TCFLSH, TCSBRK, TCXONC) adapters.
 fn tty_tcflush_adapter(tty_index: TtyIndex, queue: i32) -> i32 {
     match tty::tcflush(tty_index, queue) {
         Ok(()) => 0,
@@ -432,7 +432,7 @@ fn tty_tcxonc_adapter(tty_index: TtyIndex, action: i32) -> i32 {
     }
 }
 
-// Finishing Phase 9: Output queue visibility (TIOCOUTQ) adapter.
+// Output queue visibility (TIOCOUTQ) adapter.
 fn tty_output_queued_bytes_adapter(tty_index: TtyIndex) -> i32 {
     match tty::output_queued_bytes(tty_index) {
         Ok(n) => n as i32,

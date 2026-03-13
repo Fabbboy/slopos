@@ -1,4 +1,4 @@
-//! Tests for the loopback device and route/netstack integration (Phase 3C).
+//! Tests for the loopback device and route/netstack integration.
 //!
 //! Covers:
 //! - 3.T6: Loopback device tx/poll_rx delivery without VirtIO

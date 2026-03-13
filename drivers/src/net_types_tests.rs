@@ -1,4 +1,4 @@
-//! Tests for network type-safe primitives (Phase 1A).
+//! Tests for network type-safe primitives.
 //!
 //! Covers: Ipv4Addr methods, Port byte-order conversions, MacAddr properties,
 //! DevIndex identity, NetError errno mapping, SockAddr user conversion,

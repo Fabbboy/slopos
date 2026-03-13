@@ -1,4 +1,4 @@
-//! DNS client test suite (Phase 5F).
+//! DNS client test suite.
 
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};

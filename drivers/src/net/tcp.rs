@@ -5,7 +5,7 @@
 //! handshake (active and passive open), and connection teardown.
 //!
 //! This module is purely protocol logic — it does **not** drive the NIC
-//! directly.  Higher layers (Phase 5B+) wire it into the VirtIO net driver
+//! directly.  Higher layers wire it into the VirtIO net driver
 //! for actual packet I/O.
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
@@ -527,19 +527,19 @@ pub struct TcpConnection {
     /// Retransmit counter.
     pub retransmits: u8,
 
-    /// Timer token for the pending retransmit timer (Phase 5E).
+    /// Timer token for the pending retransmit timer.
     pub retransmit_timer_token: Option<TimerToken>,
 
     /// Timestamp (ms) when TIME_WAIT entered (for 2×MSL expiry).
     pub time_wait_start_ms: u64,
 
-    /// Timer token for the TIME_WAIT 2×MSL timer (Phase 5E).
+    /// Timer token for the TIME_WAIT 2×MSL timer.
     pub time_wait_timer_token: Option<TimerToken>,
 
     /// Whether the connection slot is in use.
     pub active: bool,
 
-    /// Socket table index that owns this connection (Phase 5B bidirectional link).
+    /// Socket table index that owns this connection.
     pub socket_idx: Option<usize>,
 }
 
@@ -2180,7 +2180,7 @@ pub fn tcp_find(tuple: &TcpTuple) -> Option<usize> {
     TCP_TABLE.lock().find(tuple)
 }
 
-/// Set or clear the socket_idx on a connection (Phase 5B bidirectional link).
+/// Set or clear the socket_idx on a connection.
 pub fn tcp_set_socket_idx(idx: usize, socket_idx: Option<usize>) {
     let mut table = TCP_TABLE.lock();
     if let Some(conn) = table.get_mut(idx) {
@@ -2420,7 +2420,7 @@ pub fn tcp_reset_all() {
     let mut table = TCP_TABLE.lock();
     for i in 0..MAX_CONNECTIONS {
         // Cancel any outstanding timer tokens before overwriting the connection.
-        // Without this, timers scheduled by Phase 5E (retransmit, TIME_WAIT)
+        // Without this, timers scheduled (retransmit, TIME_WAIT)
         // remain in the wheel and fire during later test suites.
         if let Some(token) = table.connections[i].retransmit_timer_token.take() {
             NET_TIMER_WHEEL.cancel(token);

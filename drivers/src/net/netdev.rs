@@ -4,7 +4,7 @@
 //! and the protocol stack (which understands protocols).  Only [`PacketBuf`] crosses
 //! this boundary.
 //!
-//! # Architecture (Phase 1C)
+//! # Architecture
 //!
 //! - **[`NetDevice`] trait**: Implemented by every network driver (VirtIO-net, loopback, etc.)
 //! - **[`NetDeviceRegistry`]**: `IrqMutex`-protected storage, accessed only on the control plane
@@ -443,7 +443,7 @@ impl NetDeviceRegistry {
     ///
     /// Returns a list of `(DevIndex, MacAddr, is_up)` tuples.  Currently
     /// `is_up` is always `true` for registered devices (link-state tracking
-    /// is deferred to Phase 3).
+    /// is deferred).
     pub fn enumerate(&self) -> Vec<(DevIndex, MacAddr, bool)> {
         let inner = self.inner.lock();
         let mut result = Vec::new();

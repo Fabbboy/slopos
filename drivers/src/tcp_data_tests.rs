@@ -1,4 +1,4 @@
-//! TCP data transfer regression tests (Phase 5B).
+//! TCP data transfer regression tests.
 //!
 //! Covers: ring buffer operations, send/receive buffers, data transfer through
 //! the TCP state machine, delayed ACK, retransmission, flow control, and

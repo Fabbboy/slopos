@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use slopos_abi::net::{AF_INET, SOCK_DGRAM};
-use slopos_abi::syscall::{ERRNO_EAGAIN, SHUT_RD, SO_RCVBUF, SO_REUSEADDR, SOL_SOCKET};
+use slopos_abi::syscall::{ERRNO_EAGAIN, SHUT_RD, SOL_SOCKET, SO_RCVBUF, SO_REUSEADDR};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
@@ -277,7 +277,7 @@ pub fn test_shutdown_read_behavior() -> TestResult {
 }
 
 slopos_lib::define_test_suite!(
-    phase4d,
+    socket_framework,
     [
         test_slab_alloc_free_cycle,
         test_ephemeral_port_exhaustion,

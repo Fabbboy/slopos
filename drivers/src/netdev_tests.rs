@@ -1,5 +1,5 @@
 //! Tests for NetDevice trait, NetDeviceStats, NetDeviceFeatures, DeviceHandle,
-//! and NetDeviceRegistry (Phase 1C).
+//! and NetDeviceRegistry.
 //!
 //! Covers:
 //! - 1.T8:  NetDeviceStats accumulation (increment fields, verify reads)

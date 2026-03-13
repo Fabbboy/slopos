@@ -5,10 +5,10 @@
 //! state through the RFC 4861–inspired lifecycle: `Incomplete` → `Reachable` →
 //! `Stale` → (re-probe or expire).
 //!
-//! # Architecture (Phase 2B — CAD-5)
+//! # Architecture
 //!
 //! The cache is keyed by `(DevIndex, Ipv4Addr)` — per-interface from day one so
-//! that Phase 9 (multi-NIC) is an extension, not a rewrite.  Fixed capacity of
+//! that multi-NIC support is an extension, not a rewrite.  Fixed capacity of
 //! 256 entries with LRU eviction (oldest `Stale` first, then oldest `Reachable`).
 //!
 //! # Timer Integration

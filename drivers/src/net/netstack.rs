@@ -1,6 +1,6 @@
 //! Per-interface IPv4 configuration and centralised network stack state.
 //!
-//! # Architecture (Phase 3A)
+//! # Architecture
 //!
 //! Every registered network device gets an [`IfaceConfig`] describing its IPv4
 //! address, netmask, gateway, and DNS servers.  The [`NetStack`] struct
@@ -19,15 +19,15 @@
 //! - **ARP**: calls [`NetStack::our_ip`] to decide whether to respond to
 //!   requests.
 //! - **Socket layer**: calls [`NetStack::our_ip`] for source address selection.
-//! - **Phase 3B**: will add routing table updates triggered by `configure()`.
+//! - TODO: add routing table updates triggered by `configure()`.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_lib::IrqMutex;
 use slopos_lib::klog_debug;
+use slopos_lib::IrqMutex;
 
 use super::types::{DevIndex, Ipv4Addr};
 
@@ -161,7 +161,7 @@ impl NetStack {
     /// Called by DHCP on lease acquisition or by static configuration.
     /// If the device already has a config, it is updated in place.
     ///
-    /// Phase 3B will also trigger route table updates here.
+    /// This will also trigger route table updates here.
     pub fn configure(
         &self,
         dev: DevIndex,
@@ -208,7 +208,7 @@ impl NetStack {
             inner.ifaces.push(config);
         }
 
-        // Phase 3B: trigger route table update.
+        // trigger route table update.
         // Drop the inner lock first — route_table.add() takes its own lock.
         drop(inner);
 
@@ -257,7 +257,7 @@ impl NetStack {
     /// Check if `ip` is assigned to any of our configured interfaces.
     ///
     /// Used by the RX path to decide whether a packet is addressed to us.
-    /// Returns `true` for loopback (127.0.0.0/8) unconditionally once Phase 3C
+    /// Returns `true` for loopback (127.0.0.0/8) unconditionally
     /// adds the loopback device.
     pub fn is_our_addr(&self, ip: Ipv4Addr) -> bool {
         let inner = self.inner.lock();

@@ -1,4 +1,4 @@
-//! Tests for the per-interface IPv4 configuration and NetStack (Phase 3A).
+//! Tests for the per-interface IPv4 configuration and NetStack.
 //!
 //! Covers:
 //! - 3A.T1: `IfaceConfig::broadcast()` returns correct broadcast address

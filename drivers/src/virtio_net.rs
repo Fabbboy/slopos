@@ -990,7 +990,7 @@ fn virtnet_napi_poll_loop() {
     }
     NAPI_CONTEXT.add_processed(processed as u32);
 
-    // Phase 3C: also poll the loopback device.  Packets sent to 127.0.0.0/8
+    // also poll the loopback device.  Packets sent to 127.0.0.0/8
     // are queued internally by LoopbackDev::tx() and need to be drained back
     // through the ingress pipeline.
     poll_loopback();
@@ -1009,7 +1009,7 @@ fn virtnet_napi_poll_loop() {
     }
 
     // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
-    // (Phase 2A wiring; dispatch stubs filled in by subsequent phases.)
+    //
     crate::net::timer::net_timer_process();
 
     if (processed as u32) >= NAPI_CONTEXT.budget() {
@@ -1018,7 +1018,7 @@ fn virtnet_napi_poll_loop() {
     }
 }
 
-/// Phase 3C: Poll the loopback device and feed packets through ingress.
+/// Poll the loopback device and feed packets through ingress.
 ///
 /// Called from the NAPI loop and idle wakeup.  The loopback device (DevIndex 0)
 /// stores TX'd packets internally; this function drains them back through
@@ -1231,10 +1231,10 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
                 lease.dns[3]
             );
 
-            // Phase 3A: propagate DHCP lease to the centralised NetStack.
+            // propagate DHCP lease to the centralised NetStack.
             // The DeviceHandle hasn't been created yet, but we know VirtIO-net
             // will get the next available slot.  We read the current count
-            // from the registry to predict the DevIndex.  (After Phase 3C adds
+            // from the registry to predict the DevIndex.  (After
             // loopback at index 0, VirtIO-net will be index 1.)
             {
                 use crate::net::netstack::NET_STACK;
@@ -1406,7 +1406,7 @@ pub fn virtio_net_get_info(out: &mut UserNetInfo) {
     out.mac = state.device.mac;
     out.mtu = state.device.mtu;
 
-    // Phase 3A: prefer NetStack as the source of truth for IP config.
+    // prefer NetStack as the source of truth for IP config.
     if let Some(iface) = crate::net::netstack::NET_STACK.first_iface() {
         out.ipv4 = iface.ipv4_addr.0;
         out.subnet_mask = iface.netmask.0;
