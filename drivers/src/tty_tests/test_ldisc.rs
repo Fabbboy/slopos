@@ -3,11 +3,10 @@
 //! Tests the `LineDisc`, `TtyDriverKind`, `TtyIndex`, TTY table, and
 //! the per-TTY public API (compositor focus, foreground pgrp, active TTY).
 //!
-//! Phase 2 additions: input flag processing, output processing, signal
-//! generation, flow control, VLNEXT, VWERASE, ECHOCTL.
-//!
-//! Phase 6 additions: compositor focus / fg_pgrp split, check_read() as sole
-//! read gate, TtyIndex type safety, signal constant verification.
+//! Coverage includes input flag processing, output processing, signal
+//! generation, flow control, VLNEXT, VWERASE, ECHOCTL, compositor focus /
+//! fg_pgrp split, check_read() as sole read gate, TtyIndex type safety,
+//! and signal constant verification.
 
 extern crate alloc;
 
@@ -21,19 +20,19 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use crate::tty;
-use crate::tty::TtyError;
-use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, InputEvent, InputStatus, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
-    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
+    ForegroundCheck, ProcessGroupId, SessionId, NO_FOREGROUND_PGRP, NO_SESSION,
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
+    CellAttributes, CursorAttributes, VConsoleState, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use crate::tty::TtyError;
+use crate::tty::TtyIndex;
 
 use crate::tty::pty::PtyPeerHandle;
 
@@ -512,7 +511,7 @@ pub fn test_session_check_write_tostop_background() -> TestResult {
     }
 }
 
-/// Phase 6: check_read replaces task_has_access — foreground task allowed.
+/// check_read replaces task_has_access — foreground task allowed.
 pub fn test_session_check_read_replaces_task_has_access_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
@@ -528,7 +527,7 @@ pub fn test_session_check_read_replaces_task_has_access_foreground() -> TestResu
     }
 }
 
-/// Phase 6: check_read replaces task_has_access — background task gets BackgroundRead.
+/// check_read replaces task_has_access — background task gets BackgroundRead.
 pub fn test_session_check_read_replaces_task_has_access_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
@@ -545,7 +544,7 @@ pub fn test_session_check_read_replaces_task_has_access_background() -> TestResu
     }
 }
 
-/// Phase 6: check_read replaces task_has_access — permissive when no session.
+/// check_read replaces task_has_access — permissive when no session.
 pub fn test_session_check_read_replaces_task_has_access_permissive() -> TestResult {
     let s = TtySession::new();
     match s.check_read(999, 0) {
@@ -680,7 +679,7 @@ pub fn test_tty_detach_session_by_id() -> TestResult {
 
 /// Per-TTY API: set_foreground_pgrp_checked with session validation.
 ///
-/// Phase 24 update: the outer API now validates that the target pgrp has
+/// The outer API now validates that the target pgrp has
 /// living members in the session.  For the "same-session allows" case we
 /// use pgid=0 (clear foreground group) which bypasses pgrp existence.
 /// The cross-session case uses a synthetic pgid that doesn't exist, which
@@ -926,7 +925,7 @@ pub fn test_foreground_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 6: set_compositor_focus / get_compositor_focus round-trip.
+/// set_compositor_focus / get_compositor_focus round-trip.
 ///
 /// Verifies that compositor focus only sets `focused_task_id`, NOT `fg_pgrp`.
 pub fn test_compositor_focus() -> TestResult {
@@ -1091,7 +1090,7 @@ pub fn test_ldisc_backspace_empty() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: Input flag processing tests
+// Input flag processing tests
 // ===========================================================================
 
 /// ICRNL: CR (0x0D) is mapped to NL (0x0A) when ICRNL is set.
@@ -1190,7 +1189,7 @@ pub fn test_ldisc_istrip() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: Output processing tests
+// Output processing tests
 // ===========================================================================
 
 /// OPOST+ONLCR: NL is converted to CR+NL on output.
@@ -1240,7 +1239,7 @@ pub fn test_ldisc_opost_ocrnl() -> TestResult {
 /// No OPOST: bytes pass through unmodified.
 pub fn test_ldisc_output_raw() -> TestResult {
     let mut ld = LineDisc::new();
-    // Explicitly disable OPOST (default now has OPOST|ONLCR since Phase 12).
+    // Explicitly disable OPOST (default now has OPOST|ONLCR).
     let mut t = *ld.termios();
     t.c_oflag = 0;
     ld.set_termios(&t);
@@ -1265,7 +1264,7 @@ pub fn test_ldisc_output_raw() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: Signal generation tests
+// Signal generation tests
 // ===========================================================================
 
 /// SIGQUIT: Ctrl+\ generates SIGQUIT (signal 3).
@@ -1312,7 +1311,7 @@ pub fn test_ldisc_signal_ctrl_z() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: Flow control tests
+// Flow control tests
 // ===========================================================================
 
 /// IXON: Ctrl+S stops output, Ctrl+Q resumes.
@@ -1339,7 +1338,7 @@ pub fn test_ldisc_flow_control_ixon() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: ECHOCTL tests
+// ECHOCTL tests
 // ===========================================================================
 
 /// ECHOCTL: control characters are echoed as ^X.
@@ -1374,7 +1373,7 @@ pub fn test_ldisc_echoctl() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: VLNEXT (literal next) tests
+// VLNEXT (literal next) tests
 // ===========================================================================
 
 /// VLNEXT: Ctrl+V makes the next character literal.
@@ -1414,7 +1413,7 @@ pub fn test_ldisc_vlnext() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: VWERASE (word erase) tests
+// VWERASE (word erase) tests
 // ===========================================================================
 
 /// VWERASE: Ctrl+W erases the previous word.
@@ -1450,7 +1449,7 @@ pub fn test_ldisc_vwerase() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: edit_content() for ReprintLine
+// edit_content() for ReprintLine
 // ===========================================================================
 
 /// edit_content returns current edit buffer contents.
@@ -1468,7 +1467,7 @@ pub fn test_ldisc_edit_content() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 2: Output processing via TTY write
+// Output processing via TTY write
 // ===========================================================================
 
 /// TTY write with OPOST+ONLCR: verify data.len() is returned (bytes consumed).
@@ -1495,10 +1494,10 @@ pub fn test_tty_write_returns_input_len() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 3: Input pipeline cleanup tests
+// Input pipeline cleanup tests
 // ===========================================================================
 
-/// Phase 3: Keyboard events no longer routed to the input_event compositor queue.
+/// Keyboard events no longer routed to the input_event compositor queue.
 /// After pressing a key, the compositor event queue should remain empty.
 pub fn test_keyboard_no_input_event_delivery() -> TestResult {
     tty::table::tty_table_init();
@@ -1526,7 +1525,7 @@ pub fn test_keyboard_no_input_event_delivery() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: Break codes (key release) do not produce TTY input.
+/// Break codes (key release) do not produce TTY input.
 pub fn test_keyboard_break_code_no_input() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
@@ -1556,7 +1555,7 @@ pub fn test_keyboard_break_code_no_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: Modifier key presses (shift, ctrl, alt, caps lock) do not produce
+/// Modifier key presses (shift, ctrl, alt, caps lock) do not produce
 /// TTY input.
 pub fn test_keyboard_modifier_no_input() -> TestResult {
     tty::table::tty_table_init();
@@ -1594,7 +1593,7 @@ pub fn test_keyboard_modifier_no_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: Press + release produces exactly one character (no duplication).
+/// Press + release produces exactly one character (no duplication).
 pub fn test_keyboard_press_release_single_char() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
@@ -1625,7 +1624,7 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: VConsole driver drain_input returns 0 via drain_hw_input_locked (interrupt-driven).
+/// VConsole driver drain_input returns 0 via drain_hw_input_locked (interrupt-driven).
 pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1650,7 +1649,7 @@ pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 3: Multiple key presses produce correct sequence in active TTY.
+/// Multiple key presses produce correct sequence in active TTY.
 pub fn test_keyboard_multi_key_sequence() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
@@ -1683,10 +1682,10 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 5: FD integration tests
+// FD integration tests
 // ===========================================================================
 
-/// Phase 5: tty::write routes bytes through output processing.
+/// tty::write routes bytes through output processing.
 /// With OPOST+ONLCR enabled, writing "\n" should produce 2 bytes on the wire
 /// (CR+LF), but write() must return the *input* byte count.
 pub fn test_tty_write_output_processing() -> TestResult {
@@ -1714,7 +1713,7 @@ pub fn test_tty_write_output_processing() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: tty::write with output processing disabled passes bytes through.
+/// tty::write with output processing disabled passes bytes through.
 pub fn test_tty_write_raw_passthrough() -> TestResult {
     tty::table::tty_table_init();
     // Ensure c_oflag is 0 (no output processing — default).
@@ -1738,7 +1737,7 @@ pub fn test_tty_write_raw_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: tty::write to non-existent slot returns NotAllocated.
+/// tty::write to non-existent slot returns NotAllocated.
 pub fn test_tty_write_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let data = b"nothing";
@@ -1753,7 +1752,7 @@ pub fn test_tty_write_invalid_index() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: Per-TTY termios isolation — changing TTY 0's termios does not
+/// Per-TTY termios isolation — changing TTY 0's termios does not
 /// affect TTY 1.
 pub fn test_tty_per_tty_termios_isolation() -> TestResult {
     tty::table::tty_table_init();
@@ -1784,7 +1783,7 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: Per-TTY winsize isolation — setting winsize on TTY 0 does not
+/// Per-TTY winsize isolation — setting winsize on TTY 0 does not
 /// affect TTY 1.
 pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     tty::table::tty_table_init();
@@ -1820,7 +1819,7 @@ pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: Per-TTY foreground pgrp isolation.
+/// Per-TTY foreground pgrp isolation.
 pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1846,7 +1845,7 @@ pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: Per-TTY has_data isolation — data pushed to TTY 0 does not
+/// Per-TTY has_data isolation — data pushed to TTY 0 does not
 /// appear on TTY 1.
 pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
     tty::table::tty_table_init();
@@ -1874,7 +1873,7 @@ pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: Per-TTY session isolation — attaching session to TTY 0 does not
+/// Per-TTY session isolation — attaching session to TTY 0 does not
 /// affect TTY 1's session.
 pub fn test_tty_per_tty_session_isolation() -> TestResult {
     tty::table::tty_table_init();
@@ -1900,7 +1899,7 @@ pub fn test_tty_per_tty_session_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 5: tty::read on non-existent TTY returns -1.
+/// tty::read on non-existent TTY returns -1.
 pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let mut buf = [0u8; 8];
@@ -1916,10 +1915,10 @@ pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 6: Control-Plane Correctness regression tests
+// Control-Plane Correctness regression tests
 // ===========================================================================
 
-/// Phase 6: TtyIndex from ABI crate is the same type used in drivers.
+/// TtyIndex from ABI crate is the same type used in drivers.
 pub fn test_tty_index_abi_type() -> TestResult {
     let idx: slopos_abi::syscall::TtyIndex = slopos_abi::syscall::TtyIndex(3);
     let idx2: TtyIndex = TtyIndex(3);
@@ -1934,7 +1933,7 @@ pub fn test_tty_index_abi_type() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 6: Signal constants from ABI match expected POSIX values.
+/// Signal constants from ABI match expected POSIX values.
 pub fn test_signal_constants() -> TestResult {
     if SIGINT != 2 {
         klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
@@ -1951,7 +1950,7 @@ pub fn test_signal_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 6: set_compositor_focus does NOT modify fg_pgrp.
+/// set_compositor_focus does NOT modify fg_pgrp.
 pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
     // Set a known fg_pgrp first.
@@ -1978,7 +1977,7 @@ pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 6: check_read is the sole read gate — BackgroundRead for non-fg pgrp.
+/// check_read is the sole read gate — BackgroundRead for non-fg pgrp.
 pub fn test_check_read_sole_gate_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
@@ -1986,7 +1985,7 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
 
     // Even though task 42 has compositor focus, if its pgid (99) is NOT
     // in the foreground pgrp (10), check_read must return BackgroundRead.
-    // This is the key Phase 6 semantic: compositor focus != POSIX foreground.
+    // This is the key semantic: compositor focus != POSIX foreground.
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -2094,7 +2093,7 @@ pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase9_tty_error_variants() -> TestResult {
+pub fn test_tty_error_variants() -> TestResult {
     let e1 = TtyError::InvalidIndex;
     let e2 = TtyError::NotAllocated;
     let e3 = TtyError::WouldBlock;
@@ -2109,7 +2108,7 @@ pub fn test_phase9_tty_error_variants() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase9_read_returns_result() -> TestResult {
+pub fn test_read_returns_result() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2127,7 +2126,7 @@ pub fn test_phase9_read_returns_result() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase9_read_invalid_index_error() -> TestResult {
+pub fn test_read_invalid_index_error() -> TestResult {
     let mut buf = [0u8; 8];
     match tty::read(TtyIndex(99), &mut buf, true) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -2138,7 +2137,7 @@ pub fn test_phase9_read_invalid_index_error() -> TestResult {
     }
 }
 
-pub fn test_phase9_read_not_allocated_error() -> TestResult {
+pub fn test_read_not_allocated_error() -> TestResult {
     tty::table::tty_table_init();
     let mut buf = [0u8; 8];
     match tty::read(TtyIndex(5), &mut buf, true) {
@@ -2150,7 +2149,7 @@ pub fn test_phase9_read_not_allocated_error() -> TestResult {
     }
 }
 
-pub fn test_phase9_write_returns_result() -> TestResult {
+pub fn test_write_returns_result() -> TestResult {
     tty::table::tty_table_init();
     match tty::write(TtyIndex(0), b"hello", false) {
         Ok(5) => TestResult::Pass,
@@ -2161,7 +2160,7 @@ pub fn test_phase9_write_returns_result() -> TestResult {
     }
 }
 
-pub fn test_phase9_get_termios_returns_result() -> TestResult {
+pub fn test_get_termios_returns_result() -> TestResult {
     tty::table::tty_table_init();
     match tty::get_termios(TtyIndex(0)) {
         Ok(t) => {
@@ -2178,7 +2177,7 @@ pub fn test_phase9_get_termios_returns_result() -> TestResult {
     }
 }
 
-pub fn test_phase9_vmin0_vtime0_immediate_return() -> TestResult {
+pub fn test_vmin0_vtime0_immediate_return() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2205,7 +2204,7 @@ pub fn test_phase9_vmin0_vtime0_immediate_return() -> TestResult {
     }
 }
 
-pub fn test_phase9_vmin_enforcement() -> TestResult {
+pub fn test_vmin_enforcement() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2236,7 +2235,7 @@ pub fn test_phase9_vmin_enforcement() -> TestResult {
     }
 }
 
-pub fn test_phase9_set_fg_pgrp_checked_permission_denied() -> TestResult {
+pub fn test_set_fg_pgrp_checked_permission_denied() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 10, 10);
     match tty::set_foreground_pgrp_checked(TtyIndex(0), 20, 99) {
@@ -2252,7 +2251,7 @@ pub fn test_phase9_set_fg_pgrp_checked_permission_denied() -> TestResult {
     }
 }
 
-pub fn test_phase9_hangup_read_returns_hung_up() -> TestResult {
+pub fn test_hangup_read_returns_hung_up() -> TestResult {
     tty::table::tty_table_init();
     let _ = tty::open_ref(TtyIndex(0));
     tty::hangup(TtyIndex(0));
@@ -2263,7 +2262,7 @@ pub fn test_phase9_hangup_read_returns_hung_up() -> TestResult {
     let _ = tty::open_ref(TtyIndex(0));
     let _ = tty::close_ref(TtyIndex(0));
 
-    // Phase 33: hung-up TTY reads now always return EOF (Ok(0)),
+    // hung-up TTY reads now always return EOF (Ok(0)),
     // regardless of blocking mode.  Previously nonblock returned
     // Err(HungUp) but POSIX requires EOF for reads after hangup.
     match result {
@@ -2279,12 +2278,12 @@ pub fn test_phase9_hangup_read_returns_hung_up() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 8: Per-TTY Locking & Performance regression tests
+// Per-TTY Locking & Performance regression tests
 // ===========================================================================
 
-/// Phase 8: Per-TTY slots are independently lockable — locking slot 0 does
+/// Per-TTY slots are independently lockable — locking slot 0 does
 /// not prevent access to slot 1.
-pub fn test_phase8_per_tty_lock_independence() -> TestResult {
+pub fn test_per_tty_lock_independence() -> TestResult {
     tty::table::tty_table_init();
 
     // Lock slot 0 and, while holding it, verify we can lock slot 1.
@@ -2303,9 +2302,9 @@ pub fn test_phase8_per_tty_lock_independence() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: DriverId round-trip — TtyDriverKind::id() returns the matching
+/// DriverId round-trip — TtyDriverKind::id() returns the matching
 /// DriverId variant for each driver kind.
-pub fn test_phase8_driver_id_round_trip() -> TestResult {
+pub fn test_driver_id_round_trip() -> TestResult {
     let serial = TtyDriverKind::SerialConsole(crate::tty::driver::SerialConsoleDriver);
     let vconsole = TtyDriverKind::VConsole(VConsoleDriver);
     let none = TtyDriverKind::None;
@@ -2325,9 +2324,9 @@ pub fn test_phase8_driver_id_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: Split-write returns correct byte count (input length, not output
+/// Split-write returns correct byte count (input length, not output
 /// expansion) through the per-slot locking path.
-pub fn test_phase8_split_write_returns_input_len() -> TestResult {
+pub fn test_split_write_returns_input_len() -> TestResult {
     tty::table::tty_table_init();
 
     // Enable OPOST+ONLCR on TTY 0 so NL expands to CR+NL.
@@ -2351,10 +2350,10 @@ pub fn test_phase8_split_write_returns_input_len() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: Idle callback iterates all active TTYs (not just TTY 0).
+/// Idle callback iterates all active TTYs (not just TTY 0).
 /// Push data to TTY 1 and verify has_data reports it after the idle-loop
 /// path runs (via has_data which calls drain_hw_input_locked internally).
-pub fn test_phase8_idle_cb_iterates_all_ttys() -> TestResult {
+pub fn test_idle_cb_iterates_all_ttys() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(1));
@@ -2374,10 +2373,10 @@ pub fn test_phase8_idle_cb_iterates_all_ttys() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: Merged drain+read in a single lock acquisition — verify that
+/// Merged drain+read in a single lock acquisition — verify that
 /// read() returns data that was pushed to the serial TTY (TTY 0) without
 /// requiring multiple separate lock acquisitions.
-pub fn test_phase8_merged_drain_read() -> TestResult {
+pub fn test_merged_drain_read() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2399,9 +2398,9 @@ pub fn test_phase8_merged_drain_read() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: TTY_SLOTS uses per-slot locking — with_tty operates on the
+/// TTY_SLOTS uses per-slot locking — with_tty operates on the
 /// correct slot without holding a global lock.
-pub fn test_phase8_with_tty_per_slot() -> TestResult {
+pub fn test_with_tty_per_slot() -> TestResult {
     tty::table::tty_table_init();
 
     // Verify with_tty returns the correct index for each allocated slot.
@@ -2424,9 +2423,9 @@ pub fn test_phase8_with_tty_per_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 8: DriverId is Copy + Clone + Eq — verify that the derive attributes
+/// DriverId is Copy + Clone + Eq — verify that the derive attributes
 /// work correctly for the lock-free I/O dispatch identifier.
-pub fn test_phase8_driver_id_traits() -> TestResult {
+pub fn test_driver_id_traits() -> TestResult {
     let id = DriverId::SerialConsole;
     let id_copy = id; // Copy
     let id_clone = id.clone(); // Clone
@@ -2443,11 +2442,11 @@ pub fn test_phase8_driver_id_traits() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 10: Job Control Correctness regression tests
+// Job Control Correctness regression tests
 // ===========================================================================
 
-/// Phase 10: SIGTTOU constant is defined and has correct POSIX value (22).
-pub fn test_phase10_sigttou_constant() -> TestResult {
+/// SIGTTOU constant is defined and has correct POSIX value (22).
+pub fn test_sigttou_constant() -> TestResult {
     if SIGTTOU != 22 {
         klog_info!("TTY_TEST: BUG - SIGTTOU should be 22, got {}", SIGTTOU);
         return TestResult::Fail;
@@ -2455,12 +2454,12 @@ pub fn test_phase10_sigttou_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 10: check_write with TOSTOP and background caller returns BackgroundWrite.
+/// check_write with TOSTOP and background caller returns BackgroundWrite.
 /// This verifies the session-level check_write logic directly.
-pub fn test_phase10_check_write_tostop_blocks_background() -> TestResult {
+pub fn test_check_write_tostop_blocks_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Background process (pgid=99), TOSTOP enabled.
+                      // Background process (pgid=99), TOSTOP enabled.
     match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -2473,8 +2472,8 @@ pub fn test_phase10_check_write_tostop_blocks_background() -> TestResult {
     }
 }
 
-/// Phase 10: check_write without TOSTOP always allows writes (even from background).
-pub fn test_phase10_check_write_no_tostop_allows_background() -> TestResult {
+/// check_write without TOSTOP always allows writes (even from background).
+pub fn test_check_write_no_tostop_allows_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Background process (pgid=99), TOSTOP not set.
@@ -2490,11 +2489,11 @@ pub fn test_phase10_check_write_no_tostop_allows_background() -> TestResult {
     }
 }
 
-/// Phase 10: check_write with TOSTOP allows foreground process.
-pub fn test_phase10_check_write_tostop_allows_foreground() -> TestResult {
+/// check_write with TOSTOP allows foreground process.
+pub fn test_check_write_tostop_allows_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // fg_pgrp=10
-    // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
+                      // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -2507,11 +2506,11 @@ pub fn test_phase10_check_write_tostop_allows_foreground() -> TestResult {
     }
 }
 
-/// Phase 10: check_read rejects cross-session reads (DeniedCrossSession).
-pub fn test_phase10_check_read_cross_session_rejected() -> TestResult {
+/// check_read rejects cross-session reads (DeniedCrossSession).
+pub fn test_check_read_cross_session_rejected() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Caller from a different session (sid=99) — should be rejected.
+                      // Caller from a different session (sid=99) — should be rejected.
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -2524,8 +2523,8 @@ pub fn test_phase10_check_read_cross_session_rejected() -> TestResult {
     }
 }
 
-/// Phase 10: check_read still allows same-session foreground reads.
-pub fn test_phase10_check_read_same_session_foreground() -> TestResult {
+/// check_read still allows same-session foreground reads.
+pub fn test_check_read_same_session_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     match s.check_read(10, 10) {
@@ -2540,8 +2539,8 @@ pub fn test_phase10_check_read_same_session_foreground() -> TestResult {
     }
 }
 
-/// Phase 10: check_read still allows kernel tasks (pgid=0, sid=0).
-pub fn test_phase10_check_read_kernel_task_allowed() -> TestResult {
+/// check_read still allows kernel tasks (pgid=0, sid=0).
+pub fn test_check_read_kernel_task_allowed() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Kernel task with pgid=0, sid=0 — should be allowed.
@@ -2557,8 +2556,8 @@ pub fn test_phase10_check_read_kernel_task_allowed() -> TestResult {
     }
 }
 
-/// Phase 10: TTY write succeeds for foreground process even with TOSTOP.
-pub fn test_phase10_tty_write_foreground_with_tostop() -> TestResult {
+/// TTY write succeeds for foreground process even with TOSTOP.
+pub fn test_tty_write_foreground_with_tostop() -> TestResult {
     tty::table::tty_table_init();
     // This test verifies write() returns Ok even when TOSTOP is set,
     // because in the test harness task_id=0 (kernel), which skips the
@@ -2586,12 +2585,12 @@ pub fn test_phase10_tty_write_foreground_with_tostop() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 11: Non-Canonical Timing Fix regression tests
+// Non-Canonical Timing Fix regression tests
 // ===========================================================================
 
-/// Phase 11: VMIN>0/VTIME>0 — returns immediately when VMIN bytes are
+/// VMIN>0/VTIME>0 — returns immediately when VMIN bytes are
 /// already available (no timeout needed).
-pub fn test_phase11_vmin_vtime_enough_data_returns_immediately() -> TestResult {
+pub fn test_vmin_vtime_enough_data_returns_immediately() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2623,9 +2622,9 @@ pub fn test_phase11_vmin_vtime_enough_data_returns_immediately() -> TestResult {
     }
 }
 
-/// Phase 11: VMIN>0/VTIME>0 — with partial data available (less than VMIN),
+/// VMIN>0/VTIME>0 — with partial data available (less than VMIN),
 /// a nonblocking read returns what is available (WouldBlock if nothing).
-pub fn test_phase11_vmin_vtime_partial_nonblock() -> TestResult {
+pub fn test_vmin_vtime_partial_nonblock() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2668,9 +2667,9 @@ pub fn test_phase11_vmin_vtime_partial_nonblock() -> TestResult {
     }
 }
 
-/// Phase 11: VMIN>0/VTIME>0 — with no data, nonblocking read returns
+/// VMIN>0/VTIME>0 — with no data, nonblocking read returns
 /// WouldBlock (timer does NOT start without first byte).
-pub fn test_phase11_vmin_vtime_no_data_nonblock() -> TestResult {
+pub fn test_vmin_vtime_no_data_nonblock() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2697,11 +2696,11 @@ pub fn test_phase11_vmin_vtime_no_data_nonblock() -> TestResult {
     }
 }
 
-/// Phase 11: VMIN>0/VTIME>0 — inter-byte timeout returns partial data.
+/// VMIN>0/VTIME>0 — inter-byte timeout returns partial data.
 /// Push 1 byte (less than VMIN=3), then do a blocking read with a short
 /// VTIME.  The read should return the 1 byte after the inter-byte timeout
 /// expires (not block indefinitely waiting for VMIN).
-pub fn test_phase11_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
+pub fn test_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -2743,9 +2742,9 @@ pub fn test_phase11_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult
     }
 }
 
-/// Phase 11: Verify that the ldisc vmin_vtime() helper returns correct values
+/// Verify that the ldisc vmin_vtime() helper returns correct values
 /// after setting non-canonical parameters.
-pub fn test_phase11_ldisc_vmin_vtime_helper() -> TestResult {
+pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
     let mut ld = LineDisc::new();
     // Default: VMIN=1, VTIME=0.
     let (vmin, vtime) = ld.vmin_vtime();
@@ -2776,11 +2775,11 @@ pub fn test_phase11_ldisc_vmin_vtime_helper() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 12: Sane Defaults & Output Column Tracking
+// Sane Defaults & Output Column Tracking
 // ===========================================================================
 
-/// Phase 12: Verify default termios c_iflag contains ICRNL.
-pub fn test_phase12_default_termios_has_icrnl() -> TestResult {
+/// Verify default termios c_iflag contains ICRNL.
+pub fn test_default_termios_has_icrnl() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
     if (t.c_iflag & slopos_abi::syscall::ICRNL) == 0 {
@@ -2793,8 +2792,8 @@ pub fn test_phase12_default_termios_has_icrnl() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Verify default termios c_oflag contains OPOST | ONLCR.
-pub fn test_phase12_default_termios_has_opost_onlcr() -> TestResult {
+/// Verify default termios c_oflag contains OPOST | ONLCR.
+pub fn test_default_termios_has_opost_onlcr() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
     let expected = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
@@ -2808,8 +2807,8 @@ pub fn test_phase12_default_termios_has_opost_onlcr() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Verify default termios c_lflag contains ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE.
-pub fn test_phase12_default_termios_has_full_lflag() -> TestResult {
+/// Verify default termios c_lflag contains ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE.
+pub fn test_default_termios_has_full_lflag() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
     let expected = slopos_abi::syscall::ISIG
@@ -2830,8 +2829,8 @@ pub fn test_phase12_default_termios_has_full_lflag() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Output column advances by 1 for each printable ASCII character.
-pub fn test_phase12_output_column_tracking_printable() -> TestResult {
+/// Output column advances by 1 for each printable ASCII character.
+pub fn test_output_column_tracking_printable() -> TestResult {
     let mut ld = LineDisc::new();
     // Defaults have OPOST|ONLCR which is fine — printable chars just advance column.
     for ch in b"Hello" {
@@ -2857,8 +2856,8 @@ pub fn test_phase12_output_column_tracking_printable() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Newline with ONLCR resets column to 0.
-pub fn test_phase12_output_column_tracking_newline() -> TestResult {
+/// Newline with ONLCR resets column to 0.
+pub fn test_output_column_tracking_newline() -> TestResult {
     let mut ld = LineDisc::new();
     // Print 5 chars, then newline (ONLCR expands to CR+NL which resets column).
     for ch in b"Hello" {
@@ -2881,8 +2880,8 @@ pub fn test_phase12_output_column_tracking_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: CR resets column to 0.
-pub fn test_phase12_output_column_tracking_cr() -> TestResult {
+/// CR resets column to 0.
+pub fn test_output_column_tracking_cr() -> TestResult {
     let mut ld = LineDisc::new();
     // Disable ONLCR so CR is not suppressed/converted.
     let mut t = *ld.termios();
@@ -2909,8 +2908,8 @@ pub fn test_phase12_output_column_tracking_cr() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Tab expands to correct number of spaces (8-column tab stops).
-pub fn test_phase12_output_column_tracking_tab() -> TestResult {
+/// Tab expands to correct number of spaces (8-column tab stops).
+pub fn test_output_column_tracking_tab() -> TestResult {
     let mut ld = LineDisc::new();
     // At column 0, tab should produce 8 spaces.
     match ld.process_output_byte(b'\t') {
@@ -2944,8 +2943,8 @@ pub fn test_phase12_output_column_tracking_tab() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Backspace decrements column (but not below 0).
-pub fn test_phase12_output_column_tracking_backspace() -> TestResult {
+/// Backspace decrements column (but not below 0).
+pub fn test_output_column_tracking_backspace() -> TestResult {
     let mut ld = LineDisc::new();
     for ch in b"AB" {
         ld.process_output_byte(*ch);
@@ -2986,8 +2985,8 @@ pub fn test_phase12_output_column_tracking_backspace() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: ONOCR suppresses CR when column is 0.
-pub fn test_phase12_onocr_at_column_zero() -> TestResult {
+/// ONOCR suppresses CR when column is 0.
+pub fn test_onocr_at_column_zero() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONOCR;
@@ -3020,8 +3019,8 @@ pub fn test_phase12_onocr_at_column_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 12: Default ONLCR correctly expands NL to CR+NL.
-pub fn test_phase12_default_onlcr_newline_expands() -> TestResult {
+/// Default ONLCR correctly expands NL to CR+NL.
+pub fn test_default_onlcr_newline_expands() -> TestResult {
     let mut ld = LineDisc::new();
     // With defaults (OPOST|ONLCR), NL should expand to CR+NL.
     match ld.process_output_byte(b'\n') {
@@ -3043,13 +3042,13 @@ pub fn test_phase12_default_onlcr_newline_expands() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 13: ABI Signal Constant Unification
+// ABI Signal Constant Unification
 // ===========================================================================
 
-/// Phase 13: All signal constants come from `abi/src/signal.rs` with correct
+/// All signal constants come from `abi/src/signal.rs` with correct
 /// POSIX-compatible values.  This test verifies every signal used by the TTY
 /// subsystem matches its expected numeric value.
-pub fn test_phase13_signal_values_from_signal_module() -> TestResult {
+pub fn test_signal_values_from_signal_module() -> TestResult {
     // These are now imported from slopos_abi::signal (the canonical source).
     if SIGINT != 2 {
         klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
@@ -3082,10 +3081,10 @@ pub fn test_phase13_signal_values_from_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 13: LineDisc signal generation uses constants from `signal.rs`.
+/// LineDisc signal generation uses constants from `signal.rs`.
 /// Verifies that ISIG + Ctrl+C still produces the correct signal number after
 /// the import migration.
-pub fn test_phase13_ldisc_signal_uses_signal_module() -> TestResult {
+pub fn test_ldisc_signal_uses_signal_module() -> TestResult {
     let mut ld = LineDisc::new();
     // Default termios has ISIG enabled.
     match ld.input_char(3) {
@@ -3115,11 +3114,11 @@ pub fn test_phase13_ldisc_signal_uses_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 13: SIGHUP and SIGCONT are used by the hangup path.  Verify the
+/// SIGHUP and SIGCONT are used by the hangup path.  Verify the
 /// constants are accessible from the signal module and have correct values
 /// (these were previously only imported in `mod.rs` from `signal` — now they
 /// are the sole definition).
-pub fn test_phase13_hangup_signals_from_signal_module() -> TestResult {
+pub fn test_hangup_signals_from_signal_module() -> TestResult {
     // SIGHUP is sent to the foreground pgrp on TTY hangup.
     if SIGHUP != 1 {
         klog_info!("TTY_TEST: BUG - SIGHUP should be 1, got {}", SIGHUP);
@@ -3133,9 +3132,9 @@ pub fn test_phase13_hangup_signals_from_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 13: Background-read and background-write signals (SIGTTIN, SIGTTOU)
+/// Background-read and background-write signals (SIGTTIN, SIGTTOU)
 /// are now sourced from `signal.rs` exclusively.  Verify values.
-pub fn test_phase13_job_control_signals_from_signal_module() -> TestResult {
+pub fn test_job_control_signals_from_signal_module() -> TestResult {
     if SIGTTIN != 21 {
         klog_info!("TTY_TEST: BUG - SIGTTIN should be 21, got {}", SIGTTIN);
         return TestResult::Fail;
@@ -3148,13 +3147,13 @@ pub fn test_phase13_job_control_signals_from_signal_module() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 14: Responsibility Split — PTY Foundation
+// Responsibility Split — PTY Foundation
 // ===========================================================================
 
 // -- 18.4: SessionId / ProcessGroupId newtype tests --
 
 /// SessionId::new(0) returns None (zero is the "no session" sentinel).
-pub fn test_phase14_session_id_zero_is_none() -> TestResult {
+pub fn test_session_id_zero_is_none() -> TestResult {
     if SessionId::new(0).is_some() {
         klog_info!("TTY_TEST: BUG - SessionId::new(0) should be None");
         return TestResult::Fail;
@@ -3163,7 +3162,7 @@ pub fn test_phase14_session_id_zero_is_none() -> TestResult {
 }
 
 /// SessionId::new(non-zero) returns Some and round-trips through get().
-pub fn test_phase14_session_id_round_trip() -> TestResult {
+pub fn test_session_id_round_trip() -> TestResult {
     match SessionId::new(42) {
         Some(sid) => {
             if sid.get() != 42 {
@@ -3183,7 +3182,7 @@ pub fn test_phase14_session_id_round_trip() -> TestResult {
 }
 
 /// ProcessGroupId::new(0) returns None.
-pub fn test_phase14_pgrp_id_zero_is_none() -> TestResult {
+pub fn test_pgrp_id_zero_is_none() -> TestResult {
     if ProcessGroupId::new(0).is_some() {
         klog_info!("TTY_TEST: BUG - ProcessGroupId::new(0) should be None");
         return TestResult::Fail;
@@ -3192,7 +3191,7 @@ pub fn test_phase14_pgrp_id_zero_is_none() -> TestResult {
 }
 
 /// ProcessGroupId::new(non-zero) round-trips through get().
-pub fn test_phase14_pgrp_id_round_trip() -> TestResult {
+pub fn test_pgrp_id_round_trip() -> TestResult {
     match ProcessGroupId::new(99) {
         Some(pgid) => {
             if pgid.get() != 99 {
@@ -3212,7 +3211,7 @@ pub fn test_phase14_pgrp_id_round_trip() -> TestResult {
 }
 
 /// TtySession uses Option-based fields: new() has None for all IDs.
-pub fn test_phase14_session_option_fields() -> TestResult {
+pub fn test_session_option_fields() -> TestResult {
     let s = TtySession::new();
     if s.session_leader.is_some() || s.session_id.is_some() || s.fg_pgrp.is_some() {
         klog_info!("TTY_TEST: BUG - new TtySession should have None for all Option fields");
@@ -3222,7 +3221,7 @@ pub fn test_phase14_session_option_fields() -> TestResult {
 }
 
 /// After attach(), Option fields are Some; after detach(), they are None.
-pub fn test_phase14_session_option_attach_detach() -> TestResult {
+pub fn test_session_option_attach_detach() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 20);
     if s.session_leader.is_none() || s.session_id.is_none() || s.fg_pgrp.is_none() {
@@ -3240,7 +3239,7 @@ pub fn test_phase14_session_option_attach_detach() -> TestResult {
 // -- 18.2: RawDisc / LdiscKind tests --
 
 /// RawDisc: new instance has no data.
-pub fn test_phase14_raw_disc_new_empty() -> TestResult {
+pub fn test_raw_disc_new_empty() -> TestResult {
     let rd = RawDisc::new();
     if rd.has_data() {
         klog_info!("TTY_TEST: BUG - new RawDisc has data");
@@ -3262,7 +3261,7 @@ pub fn test_phase14_raw_disc_new_empty() -> TestResult {
 }
 
 /// RawDisc: input_char pushes byte, read retrieves it.
-pub fn test_phase14_raw_disc_input_read() -> TestResult {
+pub fn test_raw_disc_input_read() -> TestResult {
     let mut rd = RawDisc::new();
     let _ = rd.input_char(b'A');
     let _ = rd.input_char(b'B');
@@ -3289,7 +3288,7 @@ pub fn test_phase14_raw_disc_input_read() -> TestResult {
 }
 
 /// RawDisc: process_output_byte passes through unchanged.
-pub fn test_phase14_raw_disc_output_passthrough() -> TestResult {
+pub fn test_raw_disc_output_passthrough() -> TestResult {
     let mut rd = RawDisc::new();
     match rd.process_output_byte(b'\n') {
         OutputAction::Emit { buf, len } => {
@@ -3311,7 +3310,7 @@ pub fn test_phase14_raw_disc_output_passthrough() -> TestResult {
 }
 
 /// RawDisc: flush_all clears buffer.
-pub fn test_phase14_raw_disc_flush() -> TestResult {
+pub fn test_raw_disc_flush() -> TestResult {
     let mut rd = RawDisc::new();
     let _ = rd.input_char(b'X');
     rd.flush_all();
@@ -3323,7 +3322,7 @@ pub fn test_phase14_raw_disc_flush() -> TestResult {
 }
 
 /// LdiscKind::NTty delegates to LineDisc correctly.
-pub fn test_phase14_ldisc_kind_ntty_delegation() -> TestResult {
+pub fn test_ldisc_kind_ntty_delegation() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
     // NTty should be canonical by default.
     if !lk.is_canonical() {
@@ -3352,7 +3351,7 @@ pub fn test_phase14_ldisc_kind_ntty_delegation() -> TestResult {
 }
 
 /// LdiscKind::Raw delegates to RawDisc correctly.
-pub fn test_phase14_ldisc_kind_raw_delegation() -> TestResult {
+pub fn test_ldisc_kind_raw_delegation() -> TestResult {
     let mut lk = LdiscKind::Raw(RawDisc::new());
     // Raw should NOT be canonical.
     if lk.is_canonical() {
@@ -3381,7 +3380,7 @@ pub fn test_phase14_ldisc_kind_raw_delegation() -> TestResult {
 // -- 18.3: PTY driver stub tests --
 
 /// PtyMaster and PtySlave DriverId variants exist and are distinct.
-pub fn test_phase14_pty_driver_id_variants() -> TestResult {
+pub fn test_pty_driver_id_variants() -> TestResult {
     let master_id = DriverId::PtyMaster {
         peer: PtyPeerHandle::new(TtyIndex(2), 0),
     };
@@ -3411,7 +3410,7 @@ pub fn test_phase14_pty_driver_id_variants() -> TestResult {
 }
 
 /// PtyMaster driver kind returns correct DriverId.
-pub fn test_phase14_pty_master_driver_kind() -> TestResult {
+pub fn test_pty_master_driver_kind() -> TestResult {
     let drv = TtyDriverKind::PtyMaster {
         peer: PtyPeerHandle::new(TtyIndex(2), 0),
     };
@@ -3427,7 +3426,7 @@ pub fn test_phase14_pty_master_driver_kind() -> TestResult {
 }
 
 /// PtySlave driver kind returns correct DriverId.
-pub fn test_phase14_pty_slave_driver_kind() -> TestResult {
+pub fn test_pty_slave_driver_kind() -> TestResult {
     let drv = TtyDriverKind::PtySlave {
         peer: PtyPeerHandle::new(TtyIndex(3), 0),
     };
@@ -3443,11 +3442,11 @@ pub fn test_phase14_pty_slave_driver_kind() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 15: POSIX Quick Wins — Line Boundaries, SIGWINCH, Word Erase
+// POSIX Quick Wins — Line Boundaries, SIGWINCH, Word Erase
 // ===========================================================================
 
-/// Phase 15: Canonical mode read returns at most one line per call.
-pub fn test_phase15_canonical_one_line_per_read() -> TestResult {
+/// Canonical mode read returns at most one line per call.
+pub fn test_canonical_one_line_per_read() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type two lines: "abc\n" and "def\n".
@@ -3489,8 +3488,8 @@ pub fn test_phase15_canonical_one_line_per_read() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: has_data in canonical mode is gated by line_count.
-pub fn test_phase15_canonical_has_data_line_count() -> TestResult {
+/// has_data in canonical mode is gated by line_count.
+pub fn test_canonical_has_data_line_count() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type characters without newline — has_data should be false.
@@ -3519,8 +3518,8 @@ pub fn test_phase15_canonical_has_data_line_count() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: EOF flush (Ctrl+D) counts as a line boundary.
-pub fn test_phase15_canonical_eof_line_boundary() -> TestResult {
+/// EOF flush (Ctrl+D) counts as a line boundary.
+pub fn test_canonical_eof_line_boundary() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "abc" then EOF (Ctrl+D = 0x04).
@@ -3551,8 +3550,8 @@ pub fn test_phase15_canonical_eof_line_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: SIGWINCH constant has the correct value.
-pub fn test_phase15_sigwinch_constant() -> TestResult {
+/// SIGWINCH constant has the correct value.
+pub fn test_sigwinch_constant() -> TestResult {
     if SIGWINCH != 28 {
         klog_info!("TTY_TEST: BUG - SIGWINCH should be 28, got {}", SIGWINCH);
         return TestResult::Fail;
@@ -3560,8 +3559,8 @@ pub fn test_phase15_sigwinch_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: Word erase with path boundaries (slashes are non-word chars).
-pub fn test_phase15_word_erase_path_boundary() -> TestResult {
+/// Word erase with path boundaries (slashes are non-word chars).
+pub fn test_word_erase_path_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= slopos_abi::syscall::IEXTEN;
@@ -3591,8 +3590,8 @@ pub fn test_phase15_word_erase_path_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: Word erase with mixed word/non-word boundaries.
-pub fn test_phase15_word_erase_mixed_boundary() -> TestResult {
+/// Word erase with mixed word/non-word boundaries.
+pub fn test_word_erase_mixed_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= slopos_abi::syscall::IEXTEN;
@@ -3622,8 +3621,8 @@ pub fn test_phase15_word_erase_mixed_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: Word erase skips trailing non-word chars then deletes word.
-pub fn test_phase15_word_erase_trailing_spaces() -> TestResult {
+/// Word erase skips trailing non-word chars then deletes word.
+pub fn test_word_erase_trailing_spaces() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= slopos_abi::syscall::IEXTEN;
@@ -3634,7 +3633,7 @@ pub fn test_phase15_word_erase_trailing_spaces() -> TestResult {
         ld.input_char(c);
     }
 
-    // Ctrl+W: Phase 1 skips 3 spaces (non-word), Phase 2 deletes "hello".
+    // Ctrl+W: First pass skips 3 spaces (non-word), second pass deletes "hello".
     ld.input_char(0x17);
 
     // Press Enter and read.
@@ -3653,8 +3652,8 @@ pub fn test_phase15_word_erase_trailing_spaces() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 15: Canonical mode small-buffer read does not lose data.
-pub fn test_phase15_canonical_small_buffer_read() -> TestResult {
+/// Canonical mode small-buffer read does not lose data.
+pub fn test_canonical_small_buffer_read() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "abcdefgh\n" (9 bytes).
@@ -3696,7 +3695,7 @@ pub fn test_phase15_canonical_small_buffer_read() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase16_tcsetsw_preserves_pending_input() -> TestResult {
+pub fn test_tcsetsw_preserves_pending_input() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -3729,7 +3728,7 @@ pub fn test_phase16_tcsetsw_preserves_pending_input() -> TestResult {
     }
 }
 
-pub fn test_phase16_tcsetsf_flushes_pending_input() -> TestResult {
+pub fn test_tcsetsf_flushes_pending_input() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -3762,7 +3761,7 @@ pub fn test_phase16_tcsetsf_flushes_pending_input() -> TestResult {
     }
 }
 
-pub fn test_phase16_read_with_attach_false_skips_auto_attach() -> TestResult {
+pub fn test_read_with_attach_false_skips_auto_attach() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
@@ -3794,7 +3793,7 @@ pub fn test_phase16_read_with_attach_false_skips_auto_attach() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase18_read_with_attach_true_skips_durable_attach() -> TestResult {
+pub fn test_read_with_attach_true_skips_durable_attach() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
@@ -3826,7 +3825,7 @@ pub fn test_phase18_read_with_attach_true_skips_durable_attach() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase18_acquire_and_release_controlling_terminal() -> TestResult {
+pub fn test_acquire_and_release_controlling_terminal() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
 
@@ -3850,7 +3849,7 @@ pub fn test_phase18_acquire_and_release_controlling_terminal() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase18_release_wrong_session_is_noop() -> TestResult {
+pub fn test_release_wrong_session_is_noop() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
     tty::acquire_controlling_terminal(TtyIndex(0), 88, 88).unwrap();
@@ -3871,7 +3870,7 @@ pub fn test_phase18_release_wrong_session_is_noop() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase16_get_ldisc_default_is_ntty() -> TestResult {
+pub fn test_get_ldisc_default_is_ntty() -> TestResult {
     tty::table::tty_table_init();
 
     match tty::get_ldisc(TtyIndex(0)) {
@@ -3886,7 +3885,7 @@ pub fn test_phase16_get_ldisc_default_is_ntty() -> TestResult {
     }
 }
 
-pub fn test_phase16_set_ldisc_round_trip_preserves_termios() -> TestResult {
+pub fn test_set_ldisc_round_trip_preserves_termios() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -3935,7 +3934,7 @@ pub fn test_phase16_set_ldisc_round_trip_preserves_termios() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase16_set_ldisc_invalid_id_rejected() -> TestResult {
+pub fn test_set_ldisc_invalid_id_rejected() -> TestResult {
     tty::table::tty_table_init();
 
     match tty::set_ldisc(TtyIndex(0), 99) {
@@ -3950,7 +3949,7 @@ pub fn test_phase16_set_ldisc_invalid_id_rejected() -> TestResult {
     }
 }
 
-pub fn test_phase17_pty_alloc_returns_master_and_slave() -> TestResult {
+pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -3992,7 +3991,7 @@ pub fn test_phase17_pty_alloc_returns_master_and_slave() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase17_pty_master_to_slave_flow() -> TestResult {
+pub fn test_pty_master_to_slave_flow() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4026,7 +4025,7 @@ pub fn test_phase17_pty_master_to_slave_flow() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase17_pty_slave_to_master_flow() -> TestResult {
+pub fn test_pty_slave_to_master_flow() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4054,7 +4053,7 @@ pub fn test_phase17_pty_slave_to_master_flow() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase17_master_close_hangs_up_slave() -> TestResult {
+pub fn test_master_close_hangs_up_slave() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4082,7 +4081,7 @@ pub fn test_phase17_master_close_hangs_up_slave() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase17_slave_close_returns_master_eof() -> TestResult {
+pub fn test_slave_close_returns_master_eof() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4108,7 +4107,7 @@ pub fn test_phase17_slave_close_returns_master_eof() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase17_pty_canonical_editing_on_slave() -> TestResult {
+pub fn test_pty_canonical_editing_on_slave() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4144,11 +4143,11 @@ pub fn test_phase17_pty_canonical_editing_on_slave() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 19: Strict Session Gates & Foreground Outcomes
+// Strict Session Gates & Foreground Outcomes
 // ===========================================================================
 
-/// Phase 19: No session attached — check_read returns BootstrapAllowed.
-pub fn test_phase19_bootstrap_allowed_no_session_read() -> TestResult {
+/// No session attached — check_read returns BootstrapAllowed.
+pub fn test_bootstrap_allowed_no_session_read() -> TestResult {
     let s = TtySession::new();
     match s.check_read(42, 42) {
         ForegroundCheck::BootstrapAllowed => TestResult::Pass,
@@ -4162,8 +4161,8 @@ pub fn test_phase19_bootstrap_allowed_no_session_read() -> TestResult {
     }
 }
 
-/// Phase 19: Session attached but no fg_pgrp — check_read returns BootstrapAllowed.
-pub fn test_phase19_bootstrap_allowed_no_fg_pgrp() -> TestResult {
+/// Session attached but no fg_pgrp — check_read returns BootstrapAllowed.
+pub fn test_bootstrap_allowed_no_fg_pgrp() -> TestResult {
     let mut s = TtySession::new();
     s.session_leader = SessionId::new(10);
     s.session_id = SessionId::new(10);
@@ -4180,11 +4179,11 @@ pub fn test_phase19_bootstrap_allowed_no_fg_pgrp() -> TestResult {
     }
 }
 
-/// Phase 19: Cross-session read — DeniedCrossSession.
-pub fn test_phase19_denied_cross_session_read() -> TestResult {
+/// Cross-session read — DeniedCrossSession.
+pub fn test_denied_cross_session_read() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Caller from different session (sid=99).
+                      // Caller from different session (sid=99).
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -4197,8 +4196,8 @@ pub fn test_phase19_denied_cross_session_read() -> TestResult {
     }
 }
 
-/// Phase 19: Cross-session write with TOSTOP — DeniedCrossSession (not BackgroundWrite).
-pub fn test_phase19_denied_cross_session_write_tostop() -> TestResult {
+/// Cross-session write with TOSTOP — DeniedCrossSession (not BackgroundWrite).
+pub fn test_denied_cross_session_write_tostop() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Cross-session (sid=99) + TOSTOP: cross-session takes priority.
@@ -4214,8 +4213,8 @@ pub fn test_phase19_denied_cross_session_write_tostop() -> TestResult {
     }
 }
 
-/// Phase 19: Cross-session write without TOSTOP — still DeniedCrossSession.
-pub fn test_phase19_cross_session_write_no_tostop_still_denied() -> TestResult {
+/// Cross-session write without TOSTOP — still DeniedCrossSession.
+pub fn test_cross_session_write_no_tostop_still_denied() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Cross-session (sid=99), no TOSTOP: still denied.
@@ -4231,8 +4230,8 @@ pub fn test_phase19_cross_session_write_no_tostop_still_denied() -> TestResult {
     }
 }
 
-/// Phase 19: Kernel task (sid=0) is exempted from cross-session denial on read.
-pub fn test_phase19_kernel_task_exempted_cross_session_read() -> TestResult {
+/// Kernel task (sid=0) is exempted from cross-session denial on read.
+pub fn test_kernel_task_exempted_cross_session_read() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Kernel task: pgid=0, sid=0 — should be Allowed, not DeniedCrossSession.
@@ -4248,8 +4247,8 @@ pub fn test_phase19_kernel_task_exempted_cross_session_read() -> TestResult {
     }
 }
 
-/// Phase 19: Kernel task (sid=0) is exempted from cross-session denial on write.
-pub fn test_phase19_kernel_task_exempted_cross_session_write() -> TestResult {
+/// Kernel task (sid=0) is exempted from cross-session denial on write.
+pub fn test_kernel_task_exempted_cross_session_write() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Kernel task: pgid=0, sid=0, TOSTOP=true — should be Allowed.
@@ -4265,11 +4264,11 @@ pub fn test_phase19_kernel_task_exempted_cross_session_write() -> TestResult {
     }
 }
 
-/// Phase 19: Same-session background read — BackgroundRead (not DeniedCrossSession).
-pub fn test_phase19_same_session_background_read_sigttin() -> TestResult {
+/// Same-session background read — BackgroundRead (not DeniedCrossSession).
+pub fn test_same_session_background_read_sigttin() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
+                      // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -4282,8 +4281,8 @@ pub fn test_phase19_same_session_background_read_sigttin() -> TestResult {
     }
 }
 
-/// Phase 19: Same-session background write with TOSTOP — BackgroundWrite.
-pub fn test_phase19_same_session_background_write_sigttou() -> TestResult {
+/// Same-session background write with TOSTOP — BackgroundWrite.
+pub fn test_same_session_background_write_sigttou() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Same session (sid=10), background (pgid=99), TOSTOP=true — SIGTTOU path.
@@ -4299,9 +4298,9 @@ pub fn test_phase19_same_session_background_write_sigttou() -> TestResult {
     }
 }
 
-/// Phase 19: check_write with no session returns Allowed (not BootstrapAllowed).
+/// check_write with no session returns Allowed (not BootstrapAllowed).
 /// The write path uses a simpler model: no session = Allowed, not BootstrapAllowed.
-pub fn test_phase19_check_write_no_session_allowed() -> TestResult {
+pub fn test_check_write_no_session_allowed() -> TestResult {
     let s = TtySession::new();
     match s.check_write(42, 42, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
@@ -4315,8 +4314,8 @@ pub fn test_phase19_check_write_no_session_allowed() -> TestResult {
     }
 }
 
-/// Phase 19: TtyError::CrossSessionDenied is a distinct error variant.
-pub fn test_phase19_cross_session_denied_error_variant() -> TestResult {
+/// TtyError::CrossSessionDenied is a distinct error variant.
+pub fn test_cross_session_denied_error_variant() -> TestResult {
     let err = TtyError::CrossSessionDenied;
     // Verify it is distinguishable from other error variants.
     if err == TtyError::BackgroundRead
@@ -4330,11 +4329,11 @@ pub fn test_phase19_cross_session_denied_error_variant() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 20: PTY Pair Atomicity & Lifecycle Hardening
+// PTY Pair Atomicity & Lifecycle Hardening
 // ===========================================================================
 
-/// Phase 20: pty_alloc initialises both master and slave slots atomically.
-pub fn test_phase20_pty_alloc_pair_both_initialized() -> TestResult {
+/// pty_alloc initialises both master and slave slots atomically.
+pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -4375,8 +4374,8 @@ pub fn test_phase20_pty_alloc_pair_both_initialized() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: closing master then slave frees both slots.
-pub fn test_phase20_pty_close_master_first_frees_pair() -> TestResult {
+/// closing master then slave frees both slots.
+pub fn test_pty_close_master_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4403,8 +4402,8 @@ pub fn test_phase20_pty_close_master_first_frees_pair() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: closing slave then master frees both slots (order independence).
-pub fn test_phase20_pty_close_slave_first_frees_pair() -> TestResult {
+/// closing slave then master frees both slots (order independence).
+pub fn test_pty_close_slave_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4430,8 +4429,8 @@ pub fn test_phase20_pty_close_slave_first_frees_pair() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: freed pair can be reallocated with fresh state.
-pub fn test_phase20_pty_reallocation_after_free() -> TestResult {
+/// freed pair can be reallocated with fresh state.
+pub fn test_pty_reallocation_after_free() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate + open + close a pair to return slots to the free pool.
@@ -4473,8 +4472,8 @@ pub fn test_phase20_pty_reallocation_after_free() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: pty_open_slave validates that the slot is actually a PTY slave.
-pub fn test_phase20_pty_open_slave_validates_type() -> TestResult {
+/// pty_open_slave validates that the slot is actually a PTY slave.
+pub fn test_pty_open_slave_validates_type() -> TestResult {
     tty::table::tty_table_init();
 
     // Try to open a serial console slot (index 0) as a PTY slave — should fail.
@@ -4496,15 +4495,15 @@ pub fn test_phase20_pty_open_slave_validates_type() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: pty_open_slave increments open_count, preventing pair free.
-pub fn test_phase20_pty_open_slave_prevents_free() -> TestResult {
+/// pty_open_slave increments open_count, preventing pair free.
+pub fn test_pty_open_slave_prevents_free() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::open_ref(master).unwrap();
 
-    // Unlock slave so it can be opened (Phase 38 lock guard).
+    // Unlock slave so it can be opened (lock guard).
     tty::set_pty_lock(master, false).unwrap();
 
     // Open slave via the validated path.
@@ -4530,8 +4529,8 @@ pub fn test_phase20_pty_open_slave_prevents_free() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: free_pair_if_unused does not free when one side has open_count > 0.
-pub fn test_phase20_partial_open_no_free() -> TestResult {
+/// free_pair_if_unused does not free when one side has open_count > 0.
+pub fn test_partial_open_no_free() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4566,8 +4565,8 @@ pub fn test_phase20_partial_open_no_free() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: rapid allocate/free/reallocate cycles produce valid pairs.
-pub fn test_phase20_rapid_alloc_free_realloc() -> TestResult {
+/// rapid allocate/free/reallocate cycles produce valid pairs.
+pub fn test_rapid_alloc_free_realloc() -> TestResult {
     tty::table::tty_table_init();
 
     for i in 0..3u8 {
@@ -4610,8 +4609,8 @@ pub fn test_phase20_rapid_alloc_free_realloc() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 20: pty_open_slave on a freed slave returns NotAllocated.
-pub fn test_phase20_pty_open_slave_after_free() -> TestResult {
+/// pty_open_slave on a freed slave returns NotAllocated.
+pub fn test_pty_open_slave_after_free() -> TestResult {
     tty::table::tty_table_init();
 
     let master = tty::pty_alloc().unwrap();
@@ -4638,11 +4637,11 @@ pub fn test_phase20_pty_open_slave_after_free() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 21: Event-Driven Readiness & IXON Completion
+// Event-Driven Readiness & IXON Completion
 // ===========================================================================
 
-/// Phase 21: poll_events returns POLLIN when cooked data is available.
-pub fn test_phase21_poll_events_pollin_with_data() -> TestResult {
+/// poll_events returns POLLIN when cooked data is available.
+pub fn test_poll_events_pollin_with_data() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4661,8 +4660,8 @@ pub fn test_phase21_poll_events_pollin_with_data() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events returns 0 for POLLIN when no cooked data.
-pub fn test_phase21_poll_events_no_pollin_without_data() -> TestResult {
+/// poll_events returns 0 for POLLIN when no cooked data.
+pub fn test_poll_events_no_pollin_without_data() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4676,8 +4675,8 @@ pub fn test_phase21_poll_events_no_pollin_without_data() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events returns POLLOUT when output is not stopped.
-pub fn test_phase21_poll_events_pollout_when_not_stopped() -> TestResult {
+/// poll_events returns POLLOUT when output is not stopped.
+pub fn test_poll_events_pollout_when_not_stopped() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4691,8 +4690,8 @@ pub fn test_phase21_poll_events_pollout_when_not_stopped() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events returns 0 for POLLOUT when IXON-stopped.
-pub fn test_phase21_poll_events_no_pollout_when_stopped() -> TestResult {
+/// poll_events returns 0 for POLLOUT when IXON-stopped.
+pub fn test_poll_events_no_pollout_when_stopped() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4721,8 +4720,8 @@ pub fn test_phase21_poll_events_no_pollout_when_stopped() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events returns POLLHUP when TTY is hung up.
-pub fn test_phase21_poll_events_pollhup_on_hangup() -> TestResult {
+/// poll_events returns POLLHUP when TTY is hung up.
+pub fn test_poll_events_pollhup_on_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4745,8 +4744,8 @@ pub fn test_phase21_poll_events_pollhup_on_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events returns 0 for invalid index.
-pub fn test_phase21_poll_events_invalid_index_returns_zero() -> TestResult {
+/// poll_events returns 0 for invalid index.
+pub fn test_poll_events_invalid_index_returns_zero() -> TestResult {
     let revents = tty::poll_events(
         TtyIndex(255),
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
@@ -4758,8 +4757,8 @@ pub fn test_phase21_poll_events_invalid_index_returns_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: IXON stopped state is tracked in ldisc via push_input.
-pub fn test_phase21_ixon_stopped_state_via_push_input() -> TestResult {
+/// IXON stopped state is tracked in ldisc via push_input.
+pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4808,8 +4807,8 @@ pub fn test_phase21_ixon_stopped_state_via_push_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: IXON resume clears stopped and any character resumes.
-pub fn test_phase21_ixon_any_char_resumes() -> TestResult {
+/// IXON resume clears stopped and any character resumes.
+pub fn test_ixon_any_char_resumes() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4844,8 +4843,8 @@ pub fn test_phase21_ixon_any_char_resumes() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: poll_events only returns events that are requested.
-pub fn test_phase21_poll_events_respects_requested_mask() -> TestResult {
+/// poll_events only returns events that are requested.
+pub fn test_poll_events_respects_requested_mask() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4872,8 +4871,8 @@ pub fn test_phase21_poll_events_respects_requested_mask() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: POLLHUP is always returned even if not requested (POSIX).
-pub fn test_phase21_pollhup_always_reported() -> TestResult {
+/// POLLHUP is always returned even if not requested (POSIX).
+pub fn test_pollhup_always_reported() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -4891,8 +4890,8 @@ pub fn test_phase21_pollhup_always_reported() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 21: PTY peer_closed sets POLLHUP when no data remains.
-pub fn test_phase21_poll_events_peer_closed_pollhup() -> TestResult {
+/// PTY peer_closed sets POLLHUP when no data remains.
+pub fn test_poll_events_peer_closed_pollhup() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -4923,7 +4922,7 @@ pub fn test_phase21_poll_events_peer_closed_pollhup() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_default_console_tty_initial_value() -> TestResult {
+pub fn test_default_console_tty_initial_value() -> TestResult {
     if tty::default_console_tty() != TtyIndex(0) {
         klog_info!(
             "TTY_TEST: BUG - default_console_tty should start at 0, got {:?}",
@@ -4934,7 +4933,7 @@ pub fn test_phase22_default_console_tty_initial_value() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_set_default_console_tty() -> TestResult {
+pub fn test_set_default_console_tty() -> TestResult {
     tty::set_default_console_tty(TtyIndex(1));
     let updated = tty::default_console_tty();
     tty::set_default_console_tty(TtyIndex(0));
@@ -4949,7 +4948,7 @@ pub fn test_phase22_set_default_console_tty() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_switch_active_tty_valid() -> TestResult {
+pub fn test_switch_active_tty_valid() -> TestResult {
     tty::table::tty_table_init();
     let original = tty::active_tty();
     let switched = tty::switch_active_tty(TtyIndex(1));
@@ -4963,7 +4962,7 @@ pub fn test_phase22_switch_active_tty_valid() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_switch_active_tty_invalid_index() -> TestResult {
+pub fn test_switch_active_tty_invalid_index() -> TestResult {
     match tty::switch_active_tty(TtyIndex(tty::MAX_TTYS as u8)) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
         other => {
@@ -4976,7 +4975,7 @@ pub fn test_phase22_switch_active_tty_invalid_index() -> TestResult {
     }
 }
 
-pub fn test_phase22_switch_active_tty_unallocated() -> TestResult {
+pub fn test_switch_active_tty_unallocated() -> TestResult {
     tty::table::tty_table_init();
     match tty::switch_active_tty(TtyIndex(5)) {
         Err(TtyError::NotAllocated) => TestResult::Pass,
@@ -4990,7 +4989,7 @@ pub fn test_phase22_switch_active_tty_unallocated() -> TestResult {
     }
 }
 
-pub fn test_phase22_vconsole_state_initial() -> TestResult {
+pub fn test_vconsole_state_initial() -> TestResult {
     let state = boxed_vconsole_state();
     if state.cursor_row != 0 || state.cursor_col != 0 || state.rows != 25 || state.cols != 80 {
         klog_info!(
@@ -5005,7 +5004,7 @@ pub fn test_phase22_vconsole_state_initial() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
+pub fn test_vconsole_write_byte_printable() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     if state.cells[0][0] != b'A' as u32 || state.cursor_row != 0 || state.cursor_col != 1 {
@@ -5015,7 +5014,7 @@ pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_write_byte_newline() -> TestResult {
+pub fn test_vconsole_write_byte_newline() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'\n');
     if state.cursor_row != 1 || state.cursor_col != 0 {
@@ -5029,7 +5028,7 @@ pub fn test_phase22_vconsole_write_byte_newline() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_write_byte_cr() -> TestResult {
+pub fn test_vconsole_write_byte_cr() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     state.write_byte(b'B');
@@ -5041,7 +5040,7 @@ pub fn test_phase22_vconsole_write_byte_cr() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
+pub fn test_vconsole_write_byte_backspace() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
     state.write_byte(b'B');
@@ -5053,7 +5052,7 @@ pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_scroll_at_bottom() -> TestResult {
+pub fn test_vconsole_scroll_at_bottom() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.rows = 2;
     state.cols = 4;
@@ -5072,7 +5071,7 @@ pub fn test_phase22_vconsole_scroll_at_bottom() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_active_tty_independent_of_fg_pgrp() -> TestResult {
+pub fn test_active_tty_independent_of_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
     let _ = tty::set_foreground_pgrp(TtyIndex(0), 100);
     let _ = tty::set_foreground_pgrp(TtyIndex(1), 200);
@@ -5093,7 +5092,7 @@ pub fn test_phase22_active_tty_independent_of_fg_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase22_vconsole_has_framebuffer_default_false() -> TestResult {
+pub fn test_vconsole_has_framebuffer_default_false() -> TestResult {
     tty::vconsole::reset_for_tests();
     if tty::vconsole::has_framebuffer() {
         klog_info!("TTY_TEST: BUG - vconsole framebuffer should be absent by default");
@@ -5103,13 +5102,13 @@ pub fn test_phase22_vconsole_has_framebuffer_default_false() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 23: Canonical EOF, ISIG Flush & Signal Integrity
+// Canonical EOF, ISIG Flush & Signal Integrity
 // ===========================================================================
 
-/// Phase 23: Ctrl+D on empty buffer produces EOF (0 bytes) without phantom
+/// Ctrl+D on empty buffer produces EOF (0 bytes) without phantom
 /// has_data state.  Previously, flush_edit_to_cooked incremented line_count
 /// on empty buffer, leaving has_data() stuck true.
-pub fn test_phase23_canonical_eof_empty_no_phantom() -> TestResult {
+pub fn test_canonical_eof_empty_no_phantom() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Press Ctrl+D (VEOF = 0x04) with empty edit buffer.
@@ -5138,8 +5137,8 @@ pub fn test_phase23_canonical_eof_empty_no_phantom() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: Ctrl+D after text returns text without newline, then no phantom.
-pub fn test_phase23_canonical_eof_with_pending_text_no_phantom() -> TestResult {
+/// Ctrl+D after text returns text without newline, then no phantom.
+pub fn test_canonical_eof_with_pending_text_no_phantom() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "abc" then Ctrl+D.
@@ -5171,8 +5170,8 @@ pub fn test_phase23_canonical_eof_with_pending_text_no_phantom() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: ISIG flush — Ctrl+C without NOFLSH clears edit and cooked buffers.
-pub fn test_phase23_isig_flush_no_noflsh() -> TestResult {
+/// ISIG flush — Ctrl+C without NOFLSH clears edit and cooked buffers.
+pub fn test_isig_flush_no_noflsh() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "abc" into edit buffer (canonical mode, no newline yet).
@@ -5211,8 +5210,8 @@ pub fn test_phase23_isig_flush_no_noflsh() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: ISIG with NOFLSH set — Ctrl+C does NOT flush buffers.
-pub fn test_phase23_isig_flush_with_noflsh() -> TestResult {
+/// ISIG with NOFLSH set — Ctrl+C does NOT flush buffers.
+pub fn test_isig_flush_with_noflsh() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Set NOFLSH flag.
@@ -5247,8 +5246,8 @@ pub fn test_phase23_isig_flush_with_noflsh() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: After Ctrl+C (without NOFLSH), subsequent newline produces empty line.
-pub fn test_phase23_isig_ctrl_c_clears_edit_buffer() -> TestResult {
+/// After Ctrl+C (without NOFLSH), subsequent newline produces empty line.
+pub fn test_isig_ctrl_c_clears_edit_buffer() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "abc", then Ctrl+C (flushes), then newline.
@@ -5279,8 +5278,8 @@ pub fn test_phase23_isig_ctrl_c_clears_edit_buffer() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: ISIG flush works for SIGQUIT (Ctrl+\\) too.
-pub fn test_phase23_isig_flush_sigquit() -> TestResult {
+/// ISIG flush works for SIGQUIT (Ctrl+\\) too.
+pub fn test_isig_flush_sigquit() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "xyz" then Ctrl+\\ (VQUIT = 0x1C).
@@ -5309,8 +5308,8 @@ pub fn test_phase23_isig_flush_sigquit() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: ISIG flush works for SIGTSTP (Ctrl+Z) too.
-pub fn test_phase23_isig_flush_sigtstp() -> TestResult {
+/// ISIG flush works for SIGTSTP (Ctrl+Z) too.
+pub fn test_isig_flush_sigtstp() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type "xyz" then Ctrl+Z (VSUSP = 0x1A).
@@ -5339,8 +5338,8 @@ pub fn test_phase23_isig_flush_sigtstp() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 23: Double Ctrl+D does not accumulate phantom line_count.
-pub fn test_phase23_double_eof_no_phantom_accumulation() -> TestResult {
+/// Double Ctrl+D does not accumulate phantom line_count.
+pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Two consecutive Ctrl+D on empty buffer.
@@ -5378,15 +5377,15 @@ pub fn test_phase23_double_eof_no_phantom_accumulation() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 24: Job Control & Controlling TTY Hardening
+// Job Control & Controlling TTY Hardening
 // ===========================================================================
 
-/// Phase 24: set_fg_pgrp_checked on the per-TTY API denies non-existent pgrp.
+/// set_fg_pgrp_checked on the per-TTY API denies non-existent pgrp.
 ///
 /// With a session attached (sid=600), attempting to set a foreground pgrp that
 /// has no living members in the session should fail.  The pgrp_exists_in_session
 /// service iterates the scheduler's task list and won't find pgid=99999.
-pub fn test_phase24_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
+pub fn test_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
 
@@ -5409,8 +5408,8 @@ pub fn test_phase24_set_fg_pgrp_checked_nonexistent_pgrp() -> TestResult {
     }
 }
 
-/// Phase 24: set_fg_pgrp_checked still allows clearing (pgid == 0).
-pub fn test_phase24_set_fg_pgrp_checked_clear_allowed() -> TestResult {
+/// set_fg_pgrp_checked still allows clearing (pgid == 0).
+pub fn test_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
 
@@ -5438,8 +5437,8 @@ pub fn test_phase24_set_fg_pgrp_checked_clear_allowed() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 24: set_fg_pgrp_checked skips pgrp validation when no session attached.
-pub fn test_phase24_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
+/// set_fg_pgrp_checked skips pgrp validation when no session attached.
+pub fn test_set_fg_pgrp_checked_no_session_skips_validation() -> TestResult {
     tty::table::tty_table_init();
 
     // No session attached — any pgid should be allowed (pre-session path).
@@ -5463,11 +5462,11 @@ pub fn test_phase24_set_fg_pgrp_checked_no_session_skips_validation() -> TestRes
     TestResult::Pass
 }
 
-/// Phase 24: detach_controlling_terminal (non-leader) returns Ok(false).
+/// detach_controlling_terminal (non-leader) returns Ok(false).
 ///
 /// When a non-session-leader calls TIOCNOTTY, the TTY session state is
 /// unchanged — only the caller's controlling_tty is cleared (by the ioctl handler).
-pub fn test_phase24_detach_ctty_non_leader() -> TestResult {
+pub fn test_detach_ctty_non_leader() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
 
@@ -5500,11 +5499,11 @@ pub fn test_phase24_detach_ctty_non_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 24: detach_controlling_terminal (session leader) detaches session.
+/// detach_controlling_terminal (session leader) detaches session.
 ///
 /// When the session leader issues TIOCNOTTY, the TTY's session state is
 /// fully cleared and SIGHUP+SIGCONT would be sent to the foreground pgrp.
-pub fn test_phase24_detach_ctty_session_leader() -> TestResult {
+pub fn test_detach_ctty_session_leader() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
 
@@ -5534,10 +5533,10 @@ pub fn test_phase24_detach_ctty_session_leader() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 24: detach_controlling_terminal denies cross-session detach.
+/// detach_controlling_terminal denies cross-session detach.
 ///
 /// A session leader from a different session cannot detach someone else's TTY.
-pub fn test_phase24_detach_ctty_cross_session_denied() -> TestResult {
+pub fn test_detach_ctty_cross_session_denied() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 600, 600);
 
@@ -5570,8 +5569,8 @@ pub fn test_phase24_detach_ctty_cross_session_denied() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 24: TIOCNOTTY constant has the correct value.
-pub fn test_phase24_tiocnotty_constant() -> TestResult {
+/// TIOCNOTTY constant has the correct value.
+pub fn test_tiocnotty_constant() -> TestResult {
     use slopos_abi::syscall::TIOCNOTTY;
     if TIOCNOTTY != 0x5422 {
         klog_info!(
@@ -5584,14 +5583,14 @@ pub fn test_phase24_tiocnotty_constant() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 25: Real TCSETSW/TCSETSF Drain Semantics
+// Real TCSETSW/TCSETSF Drain Semantics
 // ===========================================================================
 
-/// Phase 25: The `is_output_idle` function returns `true` when no output
+/// The `is_output_idle` function returns `true` when no output
 /// is in flight and the driver reports no pending output.  For synchronous
 /// backends (serial, vconsole) this should always be `true` when no write
 /// is in progress.
-pub fn test_phase25_is_output_idle_initially_true() -> TestResult {
+pub fn test_is_output_idle_initially_true() -> TestResult {
     tty::table::tty_table_init();
     match tty::is_output_idle(TtyIndex(0)) {
         Ok(true) => TestResult::Pass,
@@ -5605,8 +5604,8 @@ pub fn test_phase25_is_output_idle_initially_true() -> TestResult {
     }
 }
 
-/// Phase 25: The inflight counter starts at zero for all TTY slots.
-pub fn test_phase25_inflight_counter_initial_zero() -> TestResult {
+/// The inflight counter starts at zero for all TTY slots.
+pub fn test_inflight_counter_initial_zero() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     for i in 0..crate::tty::MAX_TTYS {
@@ -5623,9 +5622,9 @@ pub fn test_phase25_inflight_counter_initial_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 25: After a write completes, the inflight counter is back to zero
+/// After a write completes, the inflight counter is back to zero
 /// and `is_output_idle` returns true.
-pub fn test_phase25_write_updates_inflight_counter() -> TestResult {
+pub fn test_write_updates_inflight_counter() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -5667,9 +5666,9 @@ pub fn test_phase25_write_updates_inflight_counter() -> TestResult {
     }
 }
 
-/// Phase 25: `TCSETSW` (set_termios_wait) applies termios after drain and
+/// `TCSETSW` (set_termios_wait) applies termios after drain and
 /// preserves pending input (does not flush).
-pub fn test_phase25_tcsetsw_preserves_input_after_drain() -> TestResult {
+pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -5707,9 +5706,9 @@ pub fn test_phase25_tcsetsw_preserves_input_after_drain() -> TestResult {
     }
 }
 
-/// Phase 25: `TCSETSF` (set_termios_flush) applies termios after drain and
+/// `TCSETSF` (set_termios_flush) applies termios after drain and
 /// flushes pending input.
-pub fn test_phase25_tcsetsf_flushes_input_after_drain() -> TestResult {
+pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -5746,8 +5745,8 @@ pub fn test_phase25_tcsetsf_flushes_input_after_drain() -> TestResult {
     }
 }
 
-/// Phase 25: `is_output_idle` returns an error for an invalid index.
-pub fn test_phase25_is_output_idle_invalid_index() -> TestResult {
+/// `is_output_idle` returns an error for an invalid index.
+pub fn test_is_output_idle_invalid_index() -> TestResult {
     match tty::is_output_idle(TtyIndex(255)) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
         other => {
@@ -5760,8 +5759,8 @@ pub fn test_phase25_is_output_idle_invalid_index() -> TestResult {
     }
 }
 
-/// Phase 25: `is_output_idle` returns an error for an unallocated slot.
-pub fn test_phase25_is_output_idle_unallocated() -> TestResult {
+/// `is_output_idle` returns an error for an unallocated slot.
+pub fn test_is_output_idle_unallocated() -> TestResult {
     tty::table::tty_table_init();
     // Slot 7 is never allocated by default.
     match tty::is_output_idle(TtyIndex(7)) {
@@ -5776,9 +5775,9 @@ pub fn test_phase25_is_output_idle_unallocated() -> TestResult {
     }
 }
 
-/// Phase 25: `wait_output_idle` (via `set_termios_wait`) returns an error
+/// `wait_output_idle` (via `set_termios_wait`) returns an error
 /// for an invalid TTY index.
-pub fn test_phase25_drain_invalid_index_error() -> TestResult {
+pub fn test_drain_invalid_index_error() -> TestResult {
     let t = slopos_abi::syscall::UserTermios::default();
     match tty::set_termios_wait(TtyIndex(255), &t) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -5792,8 +5791,8 @@ pub fn test_phase25_drain_invalid_index_error() -> TestResult {
     }
 }
 
-/// Phase 25: The `TtyDriver` trait default `output_pending()` returns `false`.
-pub fn test_phase25_driver_output_pending_default_false() -> TestResult {
+/// The `TtyDriver` trait default `output_pending()` returns `false`.
+pub fn test_driver_output_pending_default_false() -> TestResult {
     use crate::tty::driver::TtyDriver;
 
     // SerialConsoleDriver uses the default implementation.
@@ -5813,9 +5812,9 @@ pub fn test_phase25_driver_output_pending_default_false() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 25: `TtyDriverKind::output_pending()` dispatches correctly for all
+/// `TtyDriverKind::output_pending()` dispatches correctly for all
 /// driver variants.
-pub fn test_phase25_driver_kind_output_pending_dispatch() -> TestResult {
+pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
     use crate::tty::driver::SerialConsoleDriver;
 
     let serial_kind = TtyDriverKind::SerialConsole(SerialConsoleDriver);
@@ -5855,9 +5854,9 @@ pub fn test_phase25_driver_kind_output_pending_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 25: PTY drain is immediate — `is_output_idle` returns `true` right
+/// PTY drain is immediate — `is_output_idle` returns `true` right
 /// after writing to a PTY master/slave pair.
-pub fn test_phase25_pty_drain_immediate() -> TestResult {
+pub fn test_pty_output_idle_immediate() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate a PTY pair.
@@ -5918,9 +5917,9 @@ pub fn test_phase25_pty_drain_immediate() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 25: `TCSETSW` on console completes immediately because the serial
+/// `TCSETSW` on console completes immediately because the serial
 /// driver is synchronous (all output is "drained" instantly).
-pub fn test_phase25_console_drain_immediate() -> TestResult {
+pub fn test_console_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -5953,9 +5952,9 @@ pub fn test_phase25_console_drain_immediate() -> TestResult {
     }
 }
 
-/// Phase 25: `set_termios_mode` with `Now` does NOT call `wait_output_idle`
+/// `set_termios_mode` with `Now` does NOT call `wait_output_idle`
 /// — it applies termios immediately regardless of pending output.
-pub fn test_phase25_tcsets_now_skips_drain() -> TestResult {
+pub fn test_tcsets_now_skips_drain() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -5991,11 +5990,11 @@ pub fn test_phase25_tcsets_now_skips_drain() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 26: PTY Lifetime Safety & Scalable Capacity
+// PTY Lifetime Safety & Scalable Capacity
 // ===========================================================================
 
-/// MAX_TTYS is now 32 (Phase 26 capacity scaling).
-pub fn test_phase26_max_ttys_is_32() -> TestResult {
+/// MAX_TTYS is now 32.
+pub fn test_max_ttys_is_32() -> TestResult {
     if crate::tty::MAX_TTYS != 32 {
         klog_info!(
             "TTY_TEST: BUG - MAX_TTYS should be 32, got {}",
@@ -6007,7 +6006,7 @@ pub fn test_phase26_max_ttys_is_32() -> TestResult {
 }
 
 /// PtyPeerHandle stores index and generation.
-pub fn test_phase26_pty_peer_handle_creation() -> TestResult {
+pub fn test_pty_peer_handle_creation() -> TestResult {
     let handle = PtyPeerHandle::new(TtyIndex(5), 42);
     if handle.idx != TtyIndex(5) {
         klog_info!("TTY_TEST: BUG - PtyPeerHandle idx mismatch");
@@ -6021,7 +6020,7 @@ pub fn test_phase26_pty_peer_handle_creation() -> TestResult {
 }
 
 /// PtyPeerHandle::snapshot captures the current generation from TTY_GENERATIONS.
-pub fn test_phase26_pty_peer_handle_snapshot() -> TestResult {
+pub fn test_pty_peer_handle_snapshot() -> TestResult {
     use core::sync::atomic::Ordering;
     // Use a high slot unlikely to be in use (slot 30).
     let test_slot: usize = 30;
@@ -6039,7 +6038,7 @@ pub fn test_phase26_pty_peer_handle_snapshot() -> TestResult {
 }
 
 /// Generation counter is bumped when a PTY pair is freed.
-pub fn test_phase26_generation_bumped_on_free() -> TestResult {
+pub fn test_generation_bumped_on_free() -> TestResult {
     use core::sync::atomic::Ordering;
     // Allocate a PTY pair.
     let master_idx = match tty::pty_alloc() {
@@ -6089,7 +6088,7 @@ pub fn test_phase26_generation_bumped_on_free() -> TestResult {
 }
 
 /// Stale PtyPeerHandle is detected by validate_peer.
-pub fn test_phase26_stale_handle_detected() -> TestResult {
+pub fn test_stale_handle_detected() -> TestResult {
     // Allocate a PTY pair.
     // Allocate a PTY pair.
     let master_idx = match tty::pty_alloc() {
@@ -6129,7 +6128,7 @@ pub fn test_phase26_stale_handle_detected() -> TestResult {
 }
 
 /// PTY alloc captures the correct generation in peer handles.
-pub fn test_phase26_pty_alloc_captures_generation() -> TestResult {
+pub fn test_pty_alloc_captures_generation() -> TestResult {
     use core::sync::atomic::Ordering;
     let master_idx = match tty::pty_alloc() {
         Ok(idx) => idx,
@@ -6184,7 +6183,7 @@ pub fn test_phase26_pty_alloc_captures_generation() -> TestResult {
 }
 
 /// Stale master write after free/realloc is a safe no-op.
-pub fn test_phase26_stale_write_safe_noop() -> TestResult {
+pub fn test_stale_write_safe_noop() -> TestResult {
     // Allocate pair A.
     let master_a = match tty::pty_alloc() {
         Ok(idx) => idx,
@@ -6253,7 +6252,7 @@ pub fn test_phase26_stale_write_safe_noop() -> TestResult {
 }
 
 /// Rapid alloc/free/realloc stress: generations increase monotonically.
-pub fn test_phase26_rapid_alloc_free_stress() -> TestResult {
+pub fn test_rapid_alloc_free_stress() -> TestResult {
     use core::sync::atomic::Ordering;
     for _ in 0..10 {
         let master_idx = match tty::pty_alloc() {
@@ -6290,7 +6289,7 @@ pub fn test_phase26_rapid_alloc_free_stress() -> TestResult {
 }
 
 /// Data flow still works correctly through generation-tagged handles.
-pub fn test_phase26_data_flow_with_generation() -> TestResult {
+pub fn test_data_flow_with_generation() -> TestResult {
     let master_idx = match tty::pty_alloc() {
         Ok(idx) => idx,
         Err(_) => {
@@ -6332,7 +6331,7 @@ pub fn test_phase26_data_flow_with_generation() -> TestResult {
 }
 
 /// validate_peer returns false for out-of-range index.
-pub fn test_phase26_validate_peer_out_of_range() -> TestResult {
+pub fn test_validate_peer_out_of_range() -> TestResult {
     let handle = PtyPeerHandle::new(TtyIndex(255), 0);
     if crate::tty::pty::validate_peer(&handle) {
         klog_info!("TTY_TEST: BUG - validate_peer should reject out-of-range index");
@@ -6342,7 +6341,7 @@ pub fn test_phase26_validate_peer_out_of_range() -> TestResult {
 }
 
 /// Multiple PTY pairs can be allocated with 32 slots available.
-pub fn test_phase26_multiple_pty_pairs() -> TestResult {
+pub fn test_multiple_pty_pairs() -> TestResult {
     // With 32 slots and 2 reserved (serial + vconsole), we should be able
     // to allocate up to 15 pairs (30 slots / 2).
     let mut pairs: [(TtyIndex, TtyIndex); 10] = [(TtyIndex(0), TtyIndex(0)); 10];
@@ -6378,11 +6377,11 @@ pub fn test_phase26_multiple_pty_pairs() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 27: POSIX Completion Set
+// POSIX Completion Set
 // ===========================================================================
 
-/// Phase 27: IGNBRK discards NUL (break condition).
-pub fn test_phase27_ignbrk_discards_break() -> TestResult {
+/// IGNBRK discards NUL (break condition).
+pub fn test_ignbrk_discards_break() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = slopos_abi::syscall::IGNBRK;
@@ -6401,8 +6400,8 @@ pub fn test_phase27_ignbrk_discards_break() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: BRKINT on NUL generates SIGINT and flushes input.
-pub fn test_phase27_brkint_generates_sigint() -> TestResult {
+/// BRKINT on NUL generates SIGINT and flushes input.
+pub fn test_brkint_generates_sigint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = slopos_abi::syscall::BRKINT;
@@ -6429,8 +6428,8 @@ pub fn test_phase27_brkint_generates_sigint() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: PARMRK on NUL inserts \xff \x00 \x00 sequence.
-pub fn test_phase27_parmrk_inserts_marker() -> TestResult {
+/// PARMRK on NUL inserts \xff \x00 \x00 sequence.
+pub fn test_parmrk_inserts_marker() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = slopos_abi::syscall::PARMRK;
@@ -6451,8 +6450,8 @@ pub fn test_phase27_parmrk_inserts_marker() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: NUL without any break flags passes through as regular byte.
-pub fn test_phase27_nul_without_break_flags_passes_through() -> TestResult {
+/// NUL without any break flags passes through as regular byte.
+pub fn test_nul_without_break_flags_passes_through() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = 0; // No break flags set.
@@ -6471,8 +6470,8 @@ pub fn test_phase27_nul_without_break_flags_passes_through() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: ECHOKE visually erases the line (returns KillLineEcho).
-pub fn test_phase27_echoke_visual_erase() -> TestResult {
+/// ECHOKE visually erases the line (returns KillLineEcho).
+pub fn test_echoke_visual_erase() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = 0;
@@ -6498,8 +6497,8 @@ pub fn test_phase27_echoke_visual_erase() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: ECHOK (without ECHOKE) echoes newline on kill.
-pub fn test_phase27_echok_newline_on_kill() -> TestResult {
+/// ECHOK (without ECHOKE) echoes newline on kill.
+pub fn test_echok_newline_on_kill() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = 0;
@@ -6522,8 +6521,8 @@ pub fn test_phase27_echok_newline_on_kill() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: ECHOCTL erase produces KillLineEcho with 2 columns for a control char.
-pub fn test_phase27_echoctl_erase_two_columns() -> TestResult {
+/// ECHOCTL erase produces KillLineEcho with 2 columns for a control char.
+pub fn test_echoctl_erase_two_columns() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = 0;
@@ -6539,7 +6538,7 @@ pub fn test_phase27_echoctl_erase_two_columns() -> TestResult {
     // Type Ctrl+V first to enter literal mode, then Ctrl+A.
     ld.input_char(0x16); // VLNEXT (Ctrl+V)
     ld.input_char(0x01); // Ctrl+A - inserted literally
-    // Now erase it (VERASE = DEL = 0x7F).
+                         // Now erase it (VERASE = DEL = 0x7F).
     let action = ld.input_char(0x7F);
     match action {
         InputAction::KillLineEcho { columns } if columns == 2 => {}
@@ -6554,8 +6553,8 @@ pub fn test_phase27_echoctl_erase_two_columns() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: bytes_available returns correct count.
-pub fn test_phase27_bytes_available() -> TestResult {
+/// bytes_available returns correct count.
+pub fn test_bytes_available() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = 0; // non-canonical
@@ -6587,8 +6586,8 @@ pub fn test_phase27_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: RawDisc bytes_available works.
-pub fn test_phase27_raw_disc_bytes_available() -> TestResult {
+/// RawDisc bytes_available works.
+pub fn test_raw_disc_bytes_available() -> TestResult {
     let mut rd = RawDisc::new();
     if rd.bytes_available() != 0 {
         klog_info!("TTY_TEST: BUG - fresh RawDisc should have 0 bytes available");
@@ -6606,8 +6605,8 @@ pub fn test_phase27_raw_disc_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: LdiscKind bytes_available dispatches correctly.
-pub fn test_phase27_ldisc_kind_bytes_available() -> TestResult {
+/// LdiscKind bytes_available dispatches correctly.
+pub fn test_ldisc_kind_bytes_available() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
     {
         let mut t = *lk.termios();
@@ -6627,8 +6626,8 @@ pub fn test_phase27_ldisc_kind_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: FIONREAD constant is defined.
-pub fn test_phase27_fionread_constant() -> TestResult {
+/// FIONREAD constant is defined.
+pub fn test_fionread_constant() -> TestResult {
     if slopos_abi::syscall::FIONREAD != 0x541B {
         klog_info!("TTY_TEST: BUG - FIONREAD should be 0x541B");
         return TestResult::Fail;
@@ -6636,8 +6635,8 @@ pub fn test_phase27_fionread_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: KillLineEcho on empty edit buffer returns None.
-pub fn test_phase27_kill_empty_line_no_echo() -> TestResult {
+/// KillLineEcho on empty edit buffer returns None.
+pub fn test_kill_empty_line_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = 0;
@@ -6656,8 +6655,8 @@ pub fn test_phase27_kill_empty_line_no_echo() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 27: BRKINT + IGNBRK — IGNBRK takes priority.
-pub fn test_phase27_ignbrk_takes_priority_over_brkint() -> TestResult {
+/// BRKINT + IGNBRK — IGNBRK takes priority.
+pub fn test_ignbrk_takes_priority_over_brkint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = slopos_abi::syscall::IGNBRK | slopos_abi::syscall::BRKINT;
@@ -6671,7 +6670,7 @@ pub fn test_phase27_ignbrk_takes_priority_over_brkint() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_input_flags_from_bits() -> TestResult {
+pub fn test_input_flags_from_bits() -> TestResult {
     let flags = InputFlags::from_bits_truncate(0x100);
     if !flags.contains(InputFlags::ICRNL) {
         klog_info!("TTY_TEST: BUG - InputFlags::from_bits_truncate(0x100) missing ICRNL");
@@ -6680,7 +6679,7 @@ pub fn test_phase28_input_flags_from_bits() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_output_flags_from_bits() -> TestResult {
+pub fn test_output_flags_from_bits() -> TestResult {
     let flags = OutputFlags::from_bits_truncate(0x05);
     if !flags.contains(OutputFlags::OPOST | OutputFlags::ONLCR) {
         klog_info!("TTY_TEST: BUG - OutputFlags::from_bits_truncate(0x05) missing OPOST|ONLCR");
@@ -6689,7 +6688,7 @@ pub fn test_phase28_output_flags_from_bits() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_local_flags_from_bits() -> TestResult {
+pub fn test_local_flags_from_bits() -> TestResult {
     let raw = (LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG).bits();
     let flags = LocalFlags::from_bits_truncate(raw);
     if flags != (LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG) {
@@ -6699,7 +6698,7 @@ pub fn test_phase28_local_flags_from_bits() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_cc_index_values() -> TestResult {
+pub fn test_cc_index_values() -> TestResult {
     if CcIndex::Vintr.as_usize() != 0
         || CcIndex::Veof.as_usize() != 4
         || CcIndex::Vtime.as_usize() != 5
@@ -6712,7 +6711,7 @@ pub fn test_phase28_cc_index_values() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_posix_vdisable() -> TestResult {
+pub fn test_posix_vdisable() -> TestResult {
     if POSIX_VDISABLE != 0 {
         klog_info!(
             "TTY_TEST: BUG - POSIX_VDISABLE should be 0, got {}",
@@ -6723,7 +6722,7 @@ pub fn test_phase28_posix_vdisable() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_tty_error_to_errno() -> TestResult {
+pub fn test_tty_error_to_errno() -> TestResult {
     let pairs = [
         (TtyError::InvalidIndex, -22),
         (TtyError::NotAllocated, -6),
@@ -6751,7 +6750,7 @@ pub fn test_phase28_tty_error_to_errno() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_tty_error_signal_interrupt() -> TestResult {
+pub fn test_tty_error_signal_interrupt() -> TestResult {
     if TtyError::SignalInterrupt.to_errno() != -4 {
         klog_info!("TTY_TEST: BUG - SignalInterrupt should map to -4 (EINTR)");
         return TestResult::Fail;
@@ -6759,7 +6758,7 @@ pub fn test_phase28_tty_error_signal_interrupt() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_user_termios_typed_accessors() -> TestResult {
+pub fn test_user_termios_typed_accessors() -> TestResult {
     let mut t = slopos_abi::syscall::UserTermios::default();
     t.c_iflag = slopos_abi::syscall::ICRNL;
     t.c_lflag = LocalFlags::ECHO.bits();
@@ -6775,7 +6774,7 @@ pub fn test_phase28_user_termios_typed_accessors() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_ldisc_typed_flags_behavioral_equivalence() -> TestResult {
+pub fn test_ldisc_typed_flags_behavioral_equivalence() -> TestResult {
     let mut ld = LineDisc::new();
     for &c in b"abc\n" {
         ld.input_char(c);
@@ -6789,7 +6788,7 @@ pub fn test_phase28_ldisc_typed_flags_behavioral_equivalence() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase28_control_flags_empty() -> TestResult {
+pub fn test_control_flags_empty() -> TestResult {
     if !ControlFlags::empty().is_empty() || ControlFlags::empty().bits() != 0 {
         klog_info!("TTY_TEST: BUG - ControlFlags::empty is not zero/empty");
         return TestResult::Fail;
@@ -6798,12 +6797,12 @@ pub fn test_phase28_control_flags_empty() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 29: LdiscKind Dispatch Consolidation
+// LdiscKind Dispatch Consolidation
 // ===========================================================================
 
-/// Phase 29: The `LdiscOps` trait is implemented for `LineDisc` and the trait
+/// The `LdiscOps` trait is implemented for `LineDisc` and the trait
 /// methods delegate to the inherent methods (no infinite recursion).
-pub fn test_phase29_ldisc_ops_linedisc_trait_delegation() -> TestResult {
+pub fn test_ldisc_ops_linedisc_trait_delegation() -> TestResult {
     let mut ld = LineDisc::new();
     // Use the trait methods explicitly via UFCS to prove the trait impls exist
     // and delegate correctly to the inherent methods.
@@ -6839,8 +6838,8 @@ pub fn test_phase29_ldisc_ops_linedisc_trait_delegation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: The `LdiscOps` trait is implemented for `RawDisc`.
-pub fn test_phase29_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
+/// The `LdiscOps` trait is implemented for `RawDisc`.
+pub fn test_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
     let mut rd = RawDisc::new();
     let t = <RawDisc as LdiscOps>::termios(&rd);
     if t.c_line != slopos_abi::syscall::N_RAW as u8 {
@@ -6877,9 +6876,9 @@ pub fn test_phase29_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
+/// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
 /// Verifies NTty variant routing.
-pub fn test_phase29_dispatch_macro_ntty_routing() -> TestResult {
+pub fn test_dispatch_macro_ntty_routing() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
     // id() is manually implemented, not via macro.
     if lk.id() != slopos_abi::syscall::N_TTY {
@@ -6916,9 +6915,9 @@ pub fn test_phase29_dispatch_macro_ntty_routing() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
+/// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
 /// Verifies Raw variant routing.
-pub fn test_phase29_dispatch_macro_raw_routing() -> TestResult {
+pub fn test_dispatch_macro_raw_routing() -> TestResult {
     let mut lk = LdiscKind::Raw(RawDisc::new());
     if lk.id() != slopos_abi::syscall::N_RAW {
         klog_info!("TTY_TEST: BUG - LdiscKind::Raw id() wrong");
@@ -6952,8 +6951,8 @@ pub fn test_phase29_dispatch_macro_raw_routing() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: `LdiscKind::from_id` still works after dispatch refactor.
-pub fn test_phase29_from_id_still_works() -> TestResult {
+/// `LdiscKind::from_id` still works after dispatch refactor.
+pub fn test_from_id_still_works() -> TestResult {
     let default_termios = LineDisc::new().termios().clone();
     // N_TTY
     let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios);
@@ -6983,8 +6982,8 @@ pub fn test_phase29_from_id_still_works() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: Output processing via macro-dispatched `process_output_byte`.
-pub fn test_phase29_process_output_byte_dispatch() -> TestResult {
+/// Output processing via macro-dispatched `process_output_byte`.
+pub fn test_process_output_byte_dispatch() -> TestResult {
     // NTty with OPOST+ONLCR: '\n' should produce CR+LF.
     let mut ntty = LdiscKind::NTty(LineDisc::new());
     let action = ntty.process_output_byte(b'\n');
@@ -7018,8 +7017,8 @@ pub fn test_phase29_process_output_byte_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 29: `edit_content` dispatch works for both variants.
-pub fn test_phase29_edit_content_dispatch() -> TestResult {
+/// `edit_content` dispatch works for both variants.
+pub fn test_edit_content_dispatch() -> TestResult {
     // NTty: type some chars (no newline), edit_content should show them.
     let mut ntty = LdiscKind::NTty(LineDisc::new());
     let _ = ntty.input_char(b'h');
@@ -7039,13 +7038,13 @@ pub fn test_phase29_edit_content_dispatch() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 30: /dev/tty Controlling Terminal Device
+// /dev/tty Controlling Terminal Device
 // ===========================================================================
 
-/// Phase 30: `open_ref` increments open count for the same TTY slot — this is
+/// `open_ref` increments open count for the same TTY slot — this is
 /// the mechanism that `/dev/tty` relies on (a second FD referencing the same
 /// TTY index via the caller's controlling terminal).
-pub fn test_phase30_open_ref_second_fd_increments_count() -> TestResult {
+pub fn test_open_ref_second_fd_increments_count() -> TestResult {
     let idx = TtyIndex(0);
     // Read initial open_count.
     let initial = {
@@ -7080,10 +7079,10 @@ pub fn test_phase30_open_ref_second_fd_increments_count() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: After `open_ref` (simulating `/dev/tty` open), read/write/termios
+/// After `open_ref` (simulating `/dev/tty` open), read/write/termios
 /// operations work identically on the same TTY index — the FD created by
 /// `/dev/tty` is indistinguishable from one opened on the actual device path.
-pub fn test_phase30_dev_tty_operations_identical_to_direct() -> TestResult {
+pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
     let idx = TtyIndex(0);
     // open_ref simulates /dev/tty open.
     let _ = tty::open_ref(idx);
@@ -7133,9 +7132,9 @@ pub fn test_phase30_dev_tty_operations_identical_to_direct() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: `open_ref` on a TTY does NOT modify session state — opening
+/// `open_ref` on a TTY does NOT modify session state — opening
 /// `/dev/tty` only accesses an existing controlling terminal, never acquires one.
-pub fn test_phase30_open_ref_does_not_modify_session() -> TestResult {
+pub fn test_open_ref_does_not_modify_session() -> TestResult {
     let idx = TtyIndex(0);
     // Snapshot session state before open_ref.
     let (sid_before, fg_before) = {
@@ -7181,9 +7180,9 @@ pub fn test_phase30_open_ref_does_not_modify_session() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: `open_ref` on an invalid TTY index returns `InvalidIndex` error,
+/// `open_ref` on an invalid TTY index returns `InvalidIndex` error,
 /// matching the ENXIO semantics when `/dev/tty` resolution fails.
-pub fn test_phase30_open_ref_invalid_index_returns_error() -> TestResult {
+pub fn test_open_ref_invalid_index_returns_error() -> TestResult {
     let bad = TtyIndex(u8::MAX);
     match tty::open_ref(bad) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -7197,9 +7196,9 @@ pub fn test_phase30_open_ref_invalid_index_returns_error() -> TestResult {
     }
 }
 
-/// Phase 30: `close_ref` correctly decrements the open count — ensures the
+/// `close_ref` correctly decrements the open count — ensures the
 /// `/dev/tty` FD lifecycle is properly paired with the direct device FD.
-pub fn test_phase30_close_ref_decrements_after_open() -> TestResult {
+pub fn test_close_ref_decrements_after_open() -> TestResult {
     let idx = TtyIndex(0);
     let before = {
         let guard = TTY_SLOTS[0].lock();
@@ -7222,9 +7221,9 @@ pub fn test_phase30_close_ref_decrements_after_open() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: Multiple `open_ref` calls (simulating multiple `/dev/tty` opens)
+/// Multiple `open_ref` calls (simulating multiple `/dev/tty` opens)
 /// all succeed and increment sequentially.
-pub fn test_phase30_multiple_open_ref_sequential() -> TestResult {
+pub fn test_multiple_open_ref_sequential() -> TestResult {
     let idx = TtyIndex(0);
     let base = match tty::open_ref(idx) {
         Ok(c) => c,
@@ -7256,9 +7255,9 @@ pub fn test_phase30_multiple_open_ref_sequential() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: `get_winsize` works identically regardless of whether the FD was
+/// `get_winsize` works identically regardless of whether the FD was
 /// obtained via `/dev/tty` or direct device open (both use the same TTY index).
-pub fn test_phase30_dev_tty_winsize_matches_direct() -> TestResult {
+pub fn test_dev_tty_winsize_matches_direct() -> TestResult {
     let idx = TtyIndex(0);
     let ws_before = match tty::get_winsize(idx) {
         Ok(ws) => ws,
@@ -7290,15 +7289,15 @@ pub fn test_phase30_dev_tty_winsize_matches_direct() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 31: Background Write Protection (SIGTTOU on tcsetattr)
+// Background Write Protection (SIGTTOU on tcsetattr)
 // ===========================================================================
 
-/// Phase 31: check_write with tostop=true (simulating tcsetattr foreground
+/// check_write with tostop=true (simulating tcsetattr foreground
 /// check) blocks background processes with BackgroundWrite.
-pub fn test_phase31_tcsetattr_background_blocked() -> TestResult {
+pub fn test_tcsetattr_background_blocked() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Background process (pgid=50), tostop=true (tcsetattr always uses this).
+                      // Background process (pgid=50), tostop=true (tcsetattr always uses this).
     match s.check_write(50, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -7311,11 +7310,11 @@ pub fn test_phase31_tcsetattr_background_blocked() -> TestResult {
     }
 }
 
-/// Phase 31: Foreground process tcsetattr proceeds normally (no signal).
-pub fn test_phase31_tcsetattr_foreground_allowed() -> TestResult {
+/// Foreground process tcsetattr proceeds normally (no signal).
+pub fn test_tcsetattr_foreground_allowed() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-    // Foreground process (pgid=10), tostop=true.
+                      // Foreground process (pgid=10), tostop=true.
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -7328,8 +7327,8 @@ pub fn test_phase31_tcsetattr_foreground_allowed() -> TestResult {
     }
 }
 
-/// Phase 31: tcsetattr with no session attached is allowed (bootstrap path).
-pub fn test_phase31_tcsetattr_no_session_allowed() -> TestResult {
+/// tcsetattr with no session attached is allowed (bootstrap path).
+pub fn test_tcsetattr_no_session_allowed() -> TestResult {
     let s = TtySession::new();
     // No session — should allow.
     match s.check_write(50, 50, true) {
@@ -7344,8 +7343,8 @@ pub fn test_phase31_tcsetattr_no_session_allowed() -> TestResult {
     }
 }
 
-/// Phase 31: tcsetattr from a different session returns DeniedCrossSession.
-pub fn test_phase31_tcsetattr_cross_session_denied() -> TestResult {
+/// tcsetattr from a different session returns DeniedCrossSession.
+pub fn test_tcsetattr_cross_session_denied() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     // Cross-session caller (sid=99) — hard denial.
@@ -7361,8 +7360,8 @@ pub fn test_phase31_tcsetattr_cross_session_denied() -> TestResult {
     }
 }
 
-/// Phase 31: TtyError::OrphanedProcessGroup maps to EIO (-5).
-pub fn test_phase31_orphaned_pgrp_errno() -> TestResult {
+/// TtyError::OrphanedProcessGroup maps to EIO (-5).
+pub fn test_orphaned_pgrp_errno() -> TestResult {
     let errno = TtyError::OrphanedProcessGroup.to_errno();
     if errno != -5 {
         klog_info!(
@@ -7374,10 +7373,10 @@ pub fn test_phase31_orphaned_pgrp_errno() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 31: Kernel task (task_id=0) bypasses tcsetattr foreground check.
+/// Kernel task (task_id=0) bypasses tcsetattr foreground check.
 /// In the test harness, task_id is always 0, so set_termios should succeed
 /// even if the TTY has a session with a different foreground group.
-pub fn test_phase31_tcsetattr_kernel_task_bypass() -> TestResult {
+pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // Attach a session with fg_pgrp=10.
@@ -7408,9 +7407,9 @@ pub fn test_phase31_tcsetattr_kernel_task_bypass() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 31: set_termios_wait and set_termios_flush also have the foreground
+/// set_termios_wait and set_termios_flush also have the foreground
 /// check (kernel task bypass verifies the path doesn't crash).
-pub fn test_phase31_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
+pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     tty::attach_session(idx, 10, 10);
@@ -7451,14 +7450,14 @@ pub fn test_phase31_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 31: TOSTOP + background write with SIGTTOU blocked/ignored bypass.
+/// TOSTOP + background write with SIGTTOU blocked/ignored bypass.
 /// Exercises the check_write path with tostop=true, verifying the session-level
 /// check correctly identifies background writers. The signal bypass logic itself
 /// is tested at the driver_hooks level.
-pub fn test_phase31_tostop_background_write_check() -> TestResult {
+pub fn test_tostop_background_write_check() -> TestResult {
     let mut s = TtySession::new();
     s.attach(20, 20); // session=20, fg_pgrp=20
-    // Background writer (pgid=30) with TOSTOP enabled.
+                      // Background writer (pgid=30) with TOSTOP enabled.
     match s.check_write(30, 20, true) {
         ForegroundCheck::BackgroundWrite => {}
         other => {
@@ -7483,9 +7482,9 @@ pub fn test_phase31_tostop_background_write_check() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 31: Kernel task (pgid=0) is always allowed through check_write,
+/// Kernel task (pgid=0) is always allowed through check_write,
 /// even with tostop=true.
-pub fn test_phase31_kernel_task_check_write_allowed() -> TestResult {
+pub fn test_kernel_task_check_write_allowed() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     match s.check_write(0, 0, true) {
@@ -7501,11 +7500,11 @@ pub fn test_phase31_kernel_task_check_write_allowed() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 32: Controlling Terminal Lifecycle Integrity
+// Controlling Terminal Lifecycle Integrity
 // ===========================================================================
 
-/// Phase 32: acquire_controlling_terminal succeeds for a fresh (no-session) TTY.
-pub fn test_phase32_acquire_ctty_fresh_tty() -> TestResult {
+/// acquire_controlling_terminal succeeds for a fresh (no-session) TTY.
+pub fn test_acquire_ctty_fresh_tty() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     match tty::acquire_controlling_terminal(idx, 100, 100) {
@@ -7529,9 +7528,9 @@ pub fn test_phase32_acquire_ctty_fresh_tty() -> TestResult {
     }
 }
 
-/// Phase 32: acquire_controlling_terminal is a no-op when called by the same
+/// acquire_controlling_terminal is a no-op when called by the same
 /// session that already owns the TTY (idempotent / TIOCSCTTY same-session).
-pub fn test_phase32_acquire_ctty_same_session_idempotent() -> TestResult {
+pub fn test_acquire_ctty_same_session_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // First acquire.
@@ -7552,9 +7551,9 @@ pub fn test_phase32_acquire_ctty_same_session_idempotent() -> TestResult {
     }
 }
 
-/// Phase 32: acquire_controlling_terminal fails with PermissionDenied when a
+/// acquire_controlling_terminal fails with PermissionDenied when a
 /// different session already owns the TTY.
-pub fn test_phase32_acquire_ctty_different_session_denied() -> TestResult {
+pub fn test_acquire_ctty_different_session_denied() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // Session 10 owns the TTY.
@@ -7576,8 +7575,8 @@ pub fn test_phase32_acquire_ctty_different_session_denied() -> TestResult {
     }
 }
 
-/// Phase 32: release_controlling_terminal succeeds for the owning session.
-pub fn test_phase32_release_ctty_owning_session() -> TestResult {
+/// release_controlling_terminal succeeds for the owning session.
+pub fn test_release_ctty_owning_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     if let Err(e) = tty::acquire_controlling_terminal(idx, 30, 30) {
@@ -7608,9 +7607,9 @@ pub fn test_phase32_release_ctty_owning_session() -> TestResult {
     }
 }
 
-/// Phase 32: release_controlling_terminal is a no-op (returns Ok(false)) when
+/// release_controlling_terminal is a no-op (returns Ok(false)) when
 /// called by a session that does not own the TTY.
-pub fn test_phase32_release_ctty_wrong_session_noop() -> TestResult {
+pub fn test_release_ctty_wrong_session_noop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // Session 10 owns the TTY.
@@ -7643,9 +7642,9 @@ pub fn test_phase32_release_ctty_wrong_session_noop() -> TestResult {
     }
 }
 
-/// Phase 32: hangup sets hung_up flag and detaches the session, verifying the
+/// hangup sets hung_up flag and detaches the session, verifying the
 /// session-leader exit → hangup → session detach chain.
-pub fn test_phase32_hangup_detaches_session() -> TestResult {
+pub fn test_hangup_detaches_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     tty::attach_session(idx, 40, 40);
@@ -7685,11 +7684,11 @@ pub fn test_phase32_hangup_detaches_session() -> TestResult {
     }
 }
 
-/// Phase 32: O_NOCTTY suppresses auto-acquire — verifying that a session leader
+/// O_NOCTTY suppresses auto-acquire — verifying that a session leader
 /// opening a TTY with O_NOCTTY does NOT become the controlling process.
 /// We verify this by calling acquire with an existing session and checking
 /// that a second session cannot steal it (i.e., the first acquire "stuck").
-pub fn test_phase32_o_noctty_suppresses_acquire() -> TestResult {
+pub fn test_o_noctty_suppresses_acquire() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // A session that already owns the TTY.
@@ -7713,9 +7712,9 @@ pub fn test_phase32_o_noctty_suppresses_acquire() -> TestResult {
     }
 }
 
-/// Phase 32: detach_controlling_terminal for a non-leader returns Ok(false)
+/// detach_controlling_terminal for a non-leader returns Ok(false)
 /// and does NOT detach the session from the TTY.
-pub fn test_phase32_detach_ctty_non_leader_preserves_session() -> TestResult {
+pub fn test_detach_ctty_non_leader_preserves_session() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     tty::attach_session(idx, 60, 60);
@@ -7744,9 +7743,9 @@ pub fn test_phase32_detach_ctty_non_leader_preserves_session() -> TestResult {
     }
 }
 
-/// Phase 32: detach_controlling_terminal for the session leader detaches the
+/// detach_controlling_terminal for the session leader detaches the
 /// session and returns Ok(true).
-pub fn test_phase32_detach_ctty_session_leader_detaches() -> TestResult {
+pub fn test_detach_ctty_session_leader_detaches() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     tty::attach_session(idx, 70, 70);
@@ -7777,9 +7776,9 @@ pub fn test_phase32_detach_ctty_session_leader_detaches() -> TestResult {
     }
 }
 
-/// Phase 32: Full lifecycle chain — acquire → release → re-acquire by a
+/// Full lifecycle chain — acquire → release → re-acquire by a
 /// different session. Verifies that the TTY can be re-used after release.
-pub fn test_phase32_full_lifecycle_acquire_release_reacquire() -> TestResult {
+pub fn test_full_lifecycle_acquire_release_reacquire() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // Session 1 acquires.
@@ -7816,9 +7815,9 @@ pub fn test_phase32_full_lifecycle_acquire_release_reacquire() -> TestResult {
     }
 }
 
-/// Phase 32: Double acquire to the same TTY from two different sessions —
+/// Double acquire to the same TTY from two different sessions —
 /// the second must fail with PermissionDenied (race guard).
-pub fn test_phase32_double_acquire_race_guard() -> TestResult {
+pub fn test_double_acquire_race_guard() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // Session A wins.
@@ -7840,8 +7839,8 @@ pub fn test_phase32_double_acquire_race_guard() -> TestResult {
     }
 }
 
-/// Phase 32: hangup on a TTY with no session is a safe no-op.
-pub fn test_phase32_hangup_no_session_safe() -> TestResult {
+/// hangup on a TTY with no session is a safe no-op.
+pub fn test_hangup_no_session_safe() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // No session attached — hangup should not panic.
@@ -7853,9 +7852,9 @@ pub fn test_phase32_hangup_no_session_safe() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 32: Rapid acquire/release stress — cycle through several sessions
+/// Rapid acquire/release stress — cycle through several sessions
 /// on the same TTY to verify no state leaks between owners.
-pub fn test_phase32_rapid_acquire_release_stress() -> TestResult {
+pub fn test_rapid_acquire_release_stress() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     for sid in 1u32..=20 {
@@ -7899,8 +7898,8 @@ pub fn test_phase32_rapid_acquire_release_stress() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 32: acquire on an invalid TTY index returns InvalidIndex.
-pub fn test_phase32_acquire_invalid_index() -> TestResult {
+/// acquire on an invalid TTY index returns InvalidIndex.
+pub fn test_acquire_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::acquire_controlling_terminal(bad_idx, 1, 1) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -7914,8 +7913,8 @@ pub fn test_phase32_acquire_invalid_index() -> TestResult {
     }
 }
 
-/// Phase 32: release on an invalid TTY index returns InvalidIndex.
-pub fn test_phase32_release_invalid_index() -> TestResult {
+/// release on an invalid TTY index returns InvalidIndex.
+pub fn test_release_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::release_controlling_terminal(bad_idx, 1) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -7929,9 +7928,9 @@ pub fn test_phase32_release_invalid_index() -> TestResult {
     }
 }
 
-/// Phase 32: detach_controlling_terminal on an invalid TTY index returns
+/// detach_controlling_terminal on an invalid TTY index returns
 /// InvalidIndex.
-pub fn test_phase32_detach_invalid_index() -> TestResult {
+pub fn test_detach_invalid_index() -> TestResult {
     let bad_idx = TtyIndex(255);
     match tty::detach_controlling_terminal(bad_idx, 1, true) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -7946,12 +7945,12 @@ pub fn test_phase32_detach_invalid_index() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 33: Post-Hangup I/O Hardening regression tests
+// Post-Hangup I/O Hardening regression tests
 // ===========================================================================
 
-/// Phase 33: read() on a hung-up TTY with no buffered data returns EOF (0
+/// read() on a hung-up TTY with no buffered data returns EOF (0
 /// bytes), regardless of blocking/nonblock mode.
-pub fn test_phase33_hangup_read_returns_eof() -> TestResult {
+pub fn test_hangup_read_returns_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -7976,8 +7975,8 @@ pub fn test_phase33_hangup_read_returns_eof() -> TestResult {
     }
 }
 
-/// Phase 33: write() on a hung-up TTY returns Err(HungUp) which maps to EIO.
-pub fn test_phase33_hangup_write_returns_eio() -> TestResult {
+/// write() on a hung-up TTY returns Err(HungUp) which maps to EIO.
+pub fn test_hangup_write_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -7999,8 +7998,8 @@ pub fn test_phase33_hangup_write_returns_eio() -> TestResult {
     }
 }
 
-/// Phase 33: poll_events() on a hung-up TTY returns POLLHUP | POLLIN.
-pub fn test_phase33_hangup_poll_returns_pollhup_pollin() -> TestResult {
+/// poll_events() on a hung-up TTY returns POLLHUP | POLLIN.
+pub fn test_hangup_poll_returns_pollhup_pollin() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -8029,8 +8028,8 @@ pub fn test_phase33_hangup_poll_returns_pollhup_pollin() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 33: set_termios on a hung-up TTY returns Err(HungUp) / EIO.
-pub fn test_phase33_hangup_set_termios_returns_eio() -> TestResult {
+/// set_termios on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -8061,8 +8060,8 @@ pub fn test_phase33_hangup_set_termios_returns_eio() -> TestResult {
     }
 }
 
-/// Phase 33: set_winsize on a hung-up TTY returns Err(HungUp) / EIO.
-pub fn test_phase33_hangup_set_winsize_returns_eio() -> TestResult {
+/// set_winsize on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -8090,8 +8089,8 @@ pub fn test_phase33_hangup_set_winsize_returns_eio() -> TestResult {
     }
 }
 
-/// Phase 33: set_ldisc on a hung-up TTY returns Err(HungUp) / EIO.
-pub fn test_phase33_hangup_set_ldisc_returns_eio() -> TestResult {
+/// set_ldisc on a hung-up TTY returns Err(HungUp) / EIO.
+pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -8113,9 +8112,9 @@ pub fn test_phase33_hangup_set_ldisc_returns_eio() -> TestResult {
     }
 }
 
-/// Phase 33: get_foreground_pgrp is a hangup-safe ioctl — still works after
+/// get_foreground_pgrp is a hangup-safe ioctl — still works after
 /// hangup so shells can query job control state during session cleanup.
-pub fn test_phase33_hangup_get_fg_pgrp_still_works() -> TestResult {
+pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -8140,9 +8139,9 @@ pub fn test_phase33_hangup_get_fg_pgrp_still_works() -> TestResult {
     }
 }
 
-/// Phase 33: PTY master close → slave read returns EOF, slave write returns
+/// PTY master close → slave read returns EOF, slave write returns
 /// EIO.  Validates cross-end hangup propagation.
-pub fn test_phase33_pty_master_close_slave_eof_eio() -> TestResult {
+pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate a PTY pair.
@@ -8175,7 +8174,7 @@ pub fn test_phase33_pty_master_close_slave_eof_eio() -> TestResult {
         }
     };
 
-    // Unlock slave so it can be opened (Phase 38 lock guard).
+    // Unlock slave so it can be opened (lock guard).
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
     // Open slave.
@@ -8217,9 +8216,9 @@ pub fn test_phase33_pty_master_close_slave_eof_eio() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 33: hung_up flag is never cleared — a hung-up TTY is permanently dead
+/// hung_up flag is never cleared — a hung-up TTY is permanently dead
 /// until the slot is reclaimed.  Verify multiple reads all return EOF.
-pub fn test_phase33_hangup_permanent_eof() -> TestResult {
+pub fn test_hangup_permanent_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::open_ref(idx);
@@ -8245,8 +8244,8 @@ pub fn test_phase33_hangup_permanent_eof() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 33: PTY slave poll returns POLLHUP after master closes.
-pub fn test_phase33_pty_slave_poll_pollhup_after_master_close() -> TestResult {
+/// PTY slave poll returns POLLHUP after master closes.
+pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     tty::table::tty_table_init();
 
     let master_idx = match crate::tty::pty::pty_alloc() {
@@ -8271,7 +8270,7 @@ pub fn test_phase33_pty_slave_poll_pollhup_after_master_close() -> TestResult {
         }
     };
 
-    // Unlock slave so it can be opened (Phase 38 lock guard).
+    // Unlock slave so it can be opened (lock guard).
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
     if let Err(_) = crate::tty::pty::pty_open_slave(slave_idx) {
@@ -8296,8 +8295,8 @@ pub fn test_phase33_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 33: TtyError::HungUp maps to errno -5 (EIO).
-pub fn test_phase33_hungup_errno_is_eio() -> TestResult {
+/// TtyError::HungUp maps to errno -5 (EIO).
+pub fn test_hungup_errno_is_eio() -> TestResult {
     let errno = TtyError::HungUp.to_errno();
     if errno == -5 {
         TestResult::Pass
@@ -8311,11 +8310,11 @@ pub fn test_phase33_hungup_errno_is_eio() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 34: Extended Line Boundaries (VEOL, VEOL2)
+// Extended Line Boundaries (VEOL, VEOL2)
 // ===========================================================================
 
 /// VEOL character completes a canonical line.
-pub fn test_phase34_veol_completes_line() -> TestResult {
+pub fn test_veol_completes_line() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable canonical + echo, set VEOL to ';'.
     let mut t = *ld.termios();
@@ -8353,7 +8352,7 @@ pub fn test_phase34_veol_completes_line() -> TestResult {
 }
 
 /// VEOL2 character completes a canonical line.
-pub fn test_phase34_veol2_completes_line() -> TestResult {
+pub fn test_veol2_completes_line() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8380,7 +8379,7 @@ pub fn test_phase34_veol2_completes_line() -> TestResult {
 }
 
 /// VEOL disabled (value 0 / POSIX_VDISABLE) has no effect.
-pub fn test_phase34_veol_disabled_no_effect() -> TestResult {
+pub fn test_veol_disabled_no_effect() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8402,7 +8401,7 @@ pub fn test_phase34_veol_disabled_no_effect() -> TestResult {
 }
 
 /// VEOL and newline both work simultaneously as independent terminators.
-pub fn test_phase34_veol_and_newline_coexist() -> TestResult {
+pub fn test_veol_and_newline_coexist() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8440,7 +8439,7 @@ pub fn test_phase34_veol_and_newline_coexist() -> TestResult {
 }
 
 /// VEOL echo behavior: character is echoed normally when ECHO is set.
-pub fn test_phase34_veol_echo_behavior() -> TestResult {
+pub fn test_veol_echo_behavior() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8468,7 +8467,7 @@ pub fn test_phase34_veol_echo_behavior() -> TestResult {
 }
 
 /// VEOL with no ECHO set: no echo produced.
-pub fn test_phase34_veol_no_echo() -> TestResult {
+pub fn test_veol_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits(); // ECHO off
@@ -8494,7 +8493,7 @@ pub fn test_phase34_veol_no_echo() -> TestResult {
 }
 
 /// VEOL2 CcIndex exists and maps to index 16.
-pub fn test_phase34_veol2_cc_index() -> TestResult {
+pub fn test_veol2_cc_index() -> TestResult {
     if CcIndex::Veol2.as_usize() != 16 {
         klog_info!(
             "TTY_TEST: BUG - CcIndex::Veol2 expected 16, got {}",
@@ -8506,7 +8505,7 @@ pub fn test_phase34_veol2_cc_index() -> TestResult {
 }
 
 /// Both VEOL and VEOL2 can be set simultaneously to different characters.
-pub fn test_phase34_veol_veol2_both_active() -> TestResult {
+pub fn test_veol_veol2_both_active() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8538,7 +8537,7 @@ pub fn test_phase34_veol_veol2_both_active() -> TestResult {
 }
 
 /// VEOL does not interfere with VEOF behavior.
-pub fn test_phase34_veol_and_eof_coexist() -> TestResult {
+pub fn test_veol_and_eof_coexist() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -8574,11 +8573,11 @@ pub fn test_phase34_veol_and_eof_coexist() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 35: UTF-8 Aware Editing (IUTF8)
+// UTF-8 Aware Editing (IUTF8)
 // ===========================================================================
 
 /// utf8_char_width: ASCII = 1, CJK = 2, emoji = 2.
-pub fn test_phase35_utf8_char_width() -> TestResult {
+pub fn test_utf8_char_width() -> TestResult {
     use crate::tty::ldisc::utf8_char_width;
     if utf8_char_width(b'A' as u32) != 1 {
         klog_info!("TTY_TEST: BUG - ASCII 'A' should be width 1");
@@ -8608,7 +8607,7 @@ pub fn test_phase35_utf8_char_width() -> TestResult {
 }
 
 /// IUTF8 backspace on ASCII erases 1 byte, clears 1 column.
-pub fn test_phase35_iutf8_backspace_ascii() -> TestResult {
+pub fn test_iutf8_backspace_ascii() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
@@ -8640,7 +8639,7 @@ pub fn test_phase35_iutf8_backspace_ascii() -> TestResult {
 
 /// IUTF8 backspace on 2-byte UTF-8 (é = U+00E9 = 0xC3 0xA9) erases 2 bytes,
 /// clears 1 column.
-pub fn test_phase35_iutf8_backspace_2byte() -> TestResult {
+pub fn test_iutf8_backspace_2byte() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
@@ -8676,7 +8675,7 @@ pub fn test_phase35_iutf8_backspace_2byte() -> TestResult {
 
 /// IUTF8 backspace on 3-byte CJK (中 = U+4E2D = 0xE4 0xB8 0xAD) erases 3 bytes,
 /// clears 2 columns.
-pub fn test_phase35_iutf8_backspace_3byte_cjk() -> TestResult {
+pub fn test_iutf8_backspace_3byte_cjk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
@@ -8715,7 +8714,7 @@ pub fn test_phase35_iutf8_backspace_3byte_cjk() -> TestResult {
 
 /// IUTF8 backspace on 4-byte emoji (😀 = U+1F600 = 0xF0 0x9F 0x98 0x80)
 /// erases 4 bytes, clears 2 columns.
-pub fn test_phase35_iutf8_backspace_4byte_emoji() -> TestResult {
+pub fn test_iutf8_backspace_4byte_emoji() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
@@ -8749,7 +8748,7 @@ pub fn test_phase35_iutf8_backspace_4byte_emoji() -> TestResult {
 }
 
 /// Without IUTF8, backspace on multi-byte erases only 1 byte (legacy).
-pub fn test_phase35_no_iutf8_backspace_multibyte() -> TestResult {
+pub fn test_no_iutf8_backspace_multibyte() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
@@ -8778,7 +8777,7 @@ pub fn test_phase35_no_iutf8_backspace_multibyte() -> TestResult {
 
 /// IUTF8 column tracking: inserting a 2-byte char adds 1 column,
 /// inserting a 3-byte CJK adds 2 columns.
-pub fn test_phase35_iutf8_insert_column_tracking() -> TestResult {
+pub fn test_iutf8_insert_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits()
@@ -8810,7 +8809,7 @@ pub fn test_phase35_iutf8_insert_column_tracking() -> TestResult {
 }
 
 /// IUTF8 word erase on mixed ASCII + UTF-8 content.
-pub fn test_phase35_iutf8_word_erase_mixed() -> TestResult {
+pub fn test_iutf8_word_erase_mixed() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::IEXTEN.bits();
@@ -8850,7 +8849,7 @@ pub fn test_phase35_iutf8_word_erase_mixed() -> TestResult {
 }
 
 /// IUTF8 word erase preserves preceding content.
-pub fn test_phase35_iutf8_word_erase_preserves_prefix() -> TestResult {
+pub fn test_iutf8_word_erase_preserves_prefix() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::IEXTEN.bits();
@@ -8882,7 +8881,7 @@ pub fn test_phase35_iutf8_word_erase_preserves_prefix() -> TestResult {
 }
 
 /// IUTF8 flag constant is 0x4000.
-pub fn test_phase35_iutf8_flag_value() -> TestResult {
+pub fn test_iutf8_flag_value() -> TestResult {
     if InputFlags::IUTF8.bits() != 0x4000 {
         klog_info!("TTY_TEST: BUG - IUTF8 should be 0x4000");
         return TestResult::Fail;
@@ -8891,11 +8890,11 @@ pub fn test_phase35_iutf8_flag_value() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 36: Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
+// Input Buffer Policy (IMAXBEL, IXOFF, CREAD)
 // ===========================================================================
 
 /// CREAD enabled (default) — input bytes are processed normally.
-pub fn test_phase36_cread_enabled_input_processed() -> TestResult {
+pub fn test_cread_enabled_input_processed() -> TestResult {
     let mut ld = LineDisc::new();
     // CREAD is set by default in LineDisc::new().
     let action = ld.input_char(b'a');
@@ -8909,7 +8908,7 @@ pub fn test_phase36_cread_enabled_input_processed() -> TestResult {
 }
 
 /// CREAD cleared — all input is silently discarded.
-pub fn test_phase36_cread_disabled_input_discarded() -> TestResult {
+pub fn test_cread_disabled_input_discarded() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Clear CREAD in c_cflag.
@@ -8930,7 +8929,7 @@ pub fn test_phase36_cread_disabled_input_discarded() -> TestResult {
 }
 
 /// CREAD gate in RawDisc — discard input when receiver disabled.
-pub fn test_phase36_cread_disabled_rawdisc() -> TestResult {
+pub fn test_cread_disabled_rawdisc() -> TestResult {
     let mut rd = RawDisc::new();
     let mut t = *rd.termios();
     t.c_cflag |= ControlFlags::CREAD.bits();
@@ -8962,14 +8961,14 @@ pub fn test_phase36_cread_disabled_rawdisc() -> TestResult {
 }
 
 /// IMAXBEL set + edit buffer full → InputAction::Bell.
-pub fn test_phase36_imaxbel_buffer_full_rings_bell() -> TestResult {
+pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
     t.c_iflag |= InputFlags::IMAXBEL.bits();
     ld.set_termios(&t);
 
-    // Fill the edit buffer (4096 bytes after Phase 6 expansion).
+    // Fill the edit buffer (4096 bytes after expansion).
     for _ in 0..4096 {
         ld.input_char(b'x');
     }
@@ -8984,7 +8983,7 @@ pub fn test_phase36_imaxbel_buffer_full_rings_bell() -> TestResult {
 }
 
 /// IMAXBEL not set + edit buffer full → silent discard (InputAction::None).
-pub fn test_phase36_imaxbel_not_set_buffer_full_silent() -> TestResult {
+pub fn test_imaxbel_not_set_buffer_full_silent() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -9007,7 +9006,7 @@ pub fn test_phase36_imaxbel_not_set_buffer_full_silent() -> TestResult {
 }
 
 /// IMAXBEL set but buffer NOT full — normal echo.
-pub fn test_phase36_imaxbel_buffer_not_full_normal() -> TestResult {
+pub fn test_imaxbel_buffer_not_full_normal() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -9024,7 +9023,7 @@ pub fn test_phase36_imaxbel_buffer_not_full_normal() -> TestResult {
 }
 
 /// IMAXBEL in non-canonical (raw) mode — bell when cooked buffer full.
-pub fn test_phase36_imaxbel_raw_mode_buffer_full() -> TestResult {
+pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Non-canonical mode with ECHO + IMAXBEL.
@@ -9047,7 +9046,7 @@ pub fn test_phase36_imaxbel_raw_mode_buffer_full() -> TestResult {
 }
 
 /// IXOFF high-water: after enough input, ixoff_check_xoff returns VSTOP byte.
-pub fn test_phase36_ixoff_high_water_sends_xoff() -> TestResult {
+pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Use canonical mode: input fills the edit buffer first, then cooked
@@ -9088,7 +9087,7 @@ pub fn test_phase36_ixoff_high_water_sends_xoff() -> TestResult {
 }
 
 /// IXOFF low-water: after consuming enough input, ixoff_check_xon returns VSTART.
-pub fn test_phase36_ixoff_low_water_sends_xon() -> TestResult {
+pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits(); // canonical, no echo
@@ -9156,7 +9155,7 @@ pub fn test_phase36_ixoff_low_water_sends_xon() -> TestResult {
 }
 
 /// IXOFF not set — flow control methods always return None.
-pub fn test_phase36_ixoff_not_set_no_flow_control() -> TestResult {
+pub fn test_ixoff_not_set_no_flow_control() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = 0; // non-canonical
@@ -9180,7 +9179,7 @@ pub fn test_phase36_ixoff_not_set_no_flow_control() -> TestResult {
 }
 
 /// CREAD constant value is 0x80.
-pub fn test_phase36_cread_flag_value() -> TestResult {
+pub fn test_cread_flag_value() -> TestResult {
     if ControlFlags::CREAD.bits() != 0x80 {
         klog_info!("TTY_TEST: BUG - CREAD should be 0x80");
         return TestResult::Fail;
@@ -9189,7 +9188,7 @@ pub fn test_phase36_cread_flag_value() -> TestResult {
 }
 
 /// IMAXBEL constant value is 0x2000.
-pub fn test_phase36_imaxbel_flag_value() -> TestResult {
+pub fn test_imaxbel_flag_value() -> TestResult {
     if InputFlags::IMAXBEL.bits() != 0x2000 {
         klog_info!("TTY_TEST: BUG - IMAXBEL should be 0x2000");
         return TestResult::Fail;
@@ -9198,11 +9197,11 @@ pub fn test_phase36_imaxbel_flag_value() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 37: Deferred Reprint (PENDIN)
+// Deferred Reprint (PENDIN)
 // ===========================================================================
 
 /// PENDIN constant value is 0x4000.
-pub fn test_phase37_pendin_flag_value() -> TestResult {
+pub fn test_pendin_flag_value() -> TestResult {
     if LocalFlags::PENDIN.bits() != 0x4000 {
         klog_info!("TTY_TEST: BUG - PENDIN should be 0x4000");
         return TestResult::Fail;
@@ -9212,7 +9211,7 @@ pub fn test_phase37_pendin_flag_value() -> TestResult {
 
 /// Changing an echo-affecting lflag sets PENDIN; the next input_char()
 /// returns ReprintLine instead of processing the byte.
-pub fn test_phase37_pendin_auto_set_on_echo_change() -> TestResult {
+pub fn test_pendin_auto_set_on_echo_change() -> TestResult {
     let mut ld = LineDisc::new();
     // Insert some content into the edit buffer so PENDIN triggers.
     ld.input_char(b'h');
@@ -9233,7 +9232,7 @@ pub fn test_phase37_pendin_auto_set_on_echo_change() -> TestResult {
 }
 
 /// PENDIN triggers ReprintLine once, then the next input is processed normally.
-pub fn test_phase37_pendin_one_shot() -> TestResult {
+pub fn test_pendin_one_shot() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
@@ -9259,7 +9258,7 @@ pub fn test_phase37_pendin_one_shot() -> TestResult {
 }
 
 /// Explicit VREPRINT (Ctrl+R) clears PENDIN so we don't double-reprint.
-pub fn test_phase37_vreprint_clears_pendin() -> TestResult {
+pub fn test_vreprint_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'z');
 
@@ -9288,7 +9287,7 @@ pub fn test_phase37_vreprint_clears_pendin() -> TestResult {
 }
 
 /// Changing non-echo-affecting flags (e.g., ISIG, NOFLSH) does NOT set PENDIN.
-pub fn test_phase37_pendin_not_set_for_non_echo_flags() -> TestResult {
+pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'q');
 
@@ -9307,7 +9306,7 @@ pub fn test_phase37_pendin_not_set_for_non_echo_flags() -> TestResult {
 }
 
 /// PENDIN is not set when the edit buffer is empty (nothing to reprint).
-pub fn test_phase37_pendin_empty_edit_buffer() -> TestResult {
+pub fn test_pendin_empty_edit_buffer() -> TestResult {
     let mut ld = LineDisc::new();
     // Don't type anything — edit buffer is empty.
 
@@ -9326,7 +9325,7 @@ pub fn test_phase37_pendin_empty_edit_buffer() -> TestResult {
 }
 
 /// flush_all() clears PENDIN state.
-pub fn test_phase37_flush_clears_pendin() -> TestResult {
+pub fn test_flush_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
@@ -9348,7 +9347,7 @@ pub fn test_phase37_flush_clears_pendin() -> TestResult {
 }
 
 /// flush_input() clears PENDIN state.
-pub fn test_phase37_flush_input_clears_pendin() -> TestResult {
+pub fn test_flush_input_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
@@ -9370,11 +9369,11 @@ pub fn test_phase37_flush_input_clears_pendin() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 38: PTY Namespace & Device Nodes
+// PTY Namespace & Device Nodes
 // ===========================================================================
 
-/// Phase 38: TIOCSPTLCK and TIOCGPTLCK ioctl constants match Linux values.
-pub fn test_phase38_ioctl_constants() -> TestResult {
+/// TIOCSPTLCK and TIOCGPTLCK ioctl constants match Linux values.
+pub fn test_pty_lock_ioctl_constants() -> TestResult {
     use slopos_abi::syscall::{TIOCGPTLCK, TIOCSPTLCK};
     if TIOCSPTLCK != 0x4004_5431 {
         klog_info!(
@@ -9393,8 +9392,8 @@ pub fn test_phase38_ioctl_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: New PTY slaves are locked by default.
-pub fn test_phase38_slave_locked_by_default() -> TestResult {
+/// New PTY slaves are locked by default.
+pub fn test_slave_locked_by_default() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9424,8 +9423,8 @@ pub fn test_phase38_slave_locked_by_default() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: Locked slave cannot be opened via pty_open_slave.
-pub fn test_phase38_locked_slave_open_rejected() -> TestResult {
+/// Locked slave cannot be opened via pty_open_slave.
+pub fn test_locked_slave_open_rejected() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9455,8 +9454,8 @@ pub fn test_phase38_locked_slave_open_rejected() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: set_pty_lock unlocks the slave, enabling open.
-pub fn test_phase38_unlock_enables_open() -> TestResult {
+/// set_pty_lock unlocks the slave, enabling open.
+pub fn test_unlock_enables_open() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9491,8 +9490,8 @@ pub fn test_phase38_unlock_enables_open() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: get_pty_lock reads back the lock state.
-pub fn test_phase38_get_lock_round_trip() -> TestResult {
+/// get_pty_lock reads back the lock state.
+pub fn test_get_lock_round_trip() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9550,8 +9549,8 @@ pub fn test_phase38_get_lock_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: set_pty_lock on non-master returns NotAllocated.
-pub fn test_phase38_set_lock_non_master_rejected() -> TestResult {
+/// set_pty_lock on non-master returns NotAllocated.
+pub fn test_set_lock_non_master_rejected() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9581,8 +9580,8 @@ pub fn test_phase38_set_lock_non_master_rejected() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: Data flow through unlocked PTY device node FDs.
-pub fn test_phase38_data_flow_after_unlock() -> TestResult {
+/// Data flow through unlocked PTY device node FDs.
+pub fn test_data_flow_after_unlock() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9628,8 +9627,8 @@ pub fn test_phase38_data_flow_after_unlock() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: Master close -> slave hangup still works with lock semantics.
-pub fn test_phase38_master_close_slave_hangup() -> TestResult {
+/// Master close -> slave hangup still works with lock semantics.
+pub fn test_master_close_slave_hangup() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -9666,8 +9665,8 @@ pub fn test_phase38_master_close_slave_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: Multiple simultaneous PTY pairs via /dev/ptmx.
-pub fn test_phase38_multiple_pairs_with_locks() -> TestResult {
+/// Multiple simultaneous PTY pairs via /dev/ptmx.
+pub fn test_multiple_pairs_with_locks() -> TestResult {
     tty::table::tty_table_init();
 
     let mut pairs: [(TtyIndex, TtyIndex); 5] = [(TtyIndex(0), TtyIndex(0)); 5];
@@ -9731,8 +9730,8 @@ pub fn test_phase38_multiple_pairs_with_locks() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: is_slave_locked returns false for non-PTY TTYs.
-pub fn test_phase38_non_pty_not_locked() -> TestResult {
+/// is_slave_locked returns false for non-PTY TTYs.
+pub fn test_non_pty_not_locked() -> TestResult {
     tty::table::tty_table_init();
 
     // TTY 0 (serial console) should not report as locked.
@@ -9753,8 +9752,8 @@ pub fn test_phase38_non_pty_not_locked() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 38: get_pty_lock on non-master returns error.
-pub fn test_phase38_get_lock_non_master_error() -> TestResult {
+/// get_pty_lock on non-master returns error.
+pub fn test_get_lock_non_master_error() -> TestResult {
     tty::table::tty_table_init();
 
     // Serial console is not a PTY master.
@@ -9784,11 +9783,11 @@ pub fn test_phase38_get_lock_non_master_error() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 39: PTY Packet Mode (TIOCPKT)
+// PTY Packet Mode (TIOCPKT)
 // ===========================================================================
 
-/// Phase 39: Verify TIOCPKT and TIOCPKT_* ABI constant values.
-pub fn test_phase39_abi_constants() -> TestResult {
+/// Verify TIOCPKT and TIOCPKT_* ABI constant values.
+pub fn test_abi_constants() -> TestResult {
     use slopos_abi::syscall::{
         TIOCPKT, TIOCPKT_DATA, TIOCPKT_DOSTOP, TIOCPKT_FLUSHREAD, TIOCPKT_FLUSHWRITE,
         TIOCPKT_NOSTOP, TIOCPKT_START, TIOCPKT_STOP,
@@ -9827,7 +9826,7 @@ pub fn test_phase39_abi_constants() -> TestResult {
 /// Helper: allocate a PTY pair, unlock the slave, open both ends,
 /// and set the slave to raw mode for clean data flow.
 /// Returns (master, slave, saved_termios) or None on failure.
-fn phase39_setup_pty() -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::UserTermios)> {
+fn packet_mode_setup_pty() -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::UserTermios)> {
     tty::table::tty_table_init();
     let master = tty::pty_alloc().ok()?;
     let _ = tty::open_ref(master);
@@ -9844,7 +9843,7 @@ fn phase39_setup_pty() -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::UserT
 }
 
 /// Helper: tear down a PTY pair.
-fn phase39_teardown_pty(
+fn packet_mode_teardown_pty(
     master: TtyIndex,
     slave: TtyIndex,
     saved: &slopos_abi::syscall::UserTermios,
@@ -9854,17 +9853,17 @@ fn phase39_teardown_pty(
     let _ = tty::close_ref(master);
 }
 
-/// Phase 39: With packet mode ON, master read gets TIOCPKT_DATA prefix.
-pub fn test_phase39_tiocpkt_on_data_prefixed() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// With packet mode ON, master read gets TIOCPKT_DATA prefix.
+pub fn test_tiocpkt_on_data_prefixed() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
     // Enable packet mode on the master.
     if let Err(e) = tty::set_packet_mode(master, true) {
         klog_info!("TTY_TEST: BUG - set_packet_mode failed: {:?}", e);
-        phase39_teardown_pty(master, slave, &saved);
+        packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
@@ -9884,20 +9883,20 @@ pub fn test_phase39_tiocpkt_on_data_prefixed() -> TestResult {
                 &buf[..8]
             );
             let _ = tty::set_packet_mode(master, false);
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
 
     let _ = tty::set_packet_mode(master, false);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: With packet mode OFF, master read has no prefix.
-pub fn test_phase39_tiocpkt_off_normal_read() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// With packet mode OFF, master read has no prefix.
+pub fn test_tiocpkt_off_normal_read() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -9912,19 +9911,19 @@ pub fn test_phase39_tiocpkt_off_normal_read() -> TestResult {
                 other,
                 &buf[..4]
             );
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
 
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: Slave input flush sets TIOCPKT_FLUSHREAD on master.
-pub fn test_phase39_tiocpkt_slave_flush_read() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// Slave input flush sets TIOCPKT_FLUSHREAD on master.
+pub fn test_tiocpkt_slave_flush_read() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -9945,20 +9944,20 @@ pub fn test_phase39_tiocpkt_slave_flush_read() -> TestResult {
                 buf[0]
             );
             let _ = tty::set_packet_mode(master, false);
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
 
     let _ = tty::set_packet_mode(master, false);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: Slave IXON toggle triggers TIOCPKT_DOSTOP / TIOCPKT_NOSTOP.
-pub fn test_phase39_tiocpkt_ixon_toggle() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// Slave IXON toggle triggers TIOCPKT_DOSTOP / TIOCPKT_NOSTOP.
+pub fn test_tiocpkt_ixon_toggle() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -9979,7 +9978,7 @@ pub fn test_phase39_tiocpkt_ixon_toggle() -> TestResult {
                 buf[0]
             );
             let _ = tty::set_packet_mode(master, false);
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
@@ -9997,20 +9996,20 @@ pub fn test_phase39_tiocpkt_ixon_toggle() -> TestResult {
                 buf[0]
             );
             let _ = tty::set_packet_mode(master, false);
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
 
     let _ = tty::set_packet_mode(master, false);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: Disabling packet mode clears pending events.
-pub fn test_phase39_tiocpkt_disable_clears_events() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// Disabling packet mode clears pending events.
+pub fn test_tiocpkt_disable_clears_events() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -10039,20 +10038,20 @@ pub fn test_phase39_tiocpkt_disable_clears_events() -> TestResult {
                 &buf[..4]
             );
             let _ = tty::set_packet_mode(master, false);
-            phase39_teardown_pty(master, slave, &saved);
+            packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
         }
     }
 
     let _ = tty::set_packet_mode(master, false);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: poll_events reports POLLIN when packet events are pending.
-pub fn test_phase39_poll_packet_events_pollin() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+/// poll_events reports POLLIN when packet events are pending.
+pub fn test_poll_packet_events_pollin() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -10063,7 +10062,7 @@ pub fn test_phase39_poll_packet_events_pollin() -> TestResult {
     if (revents & slopos_abi::syscall::POLLIN) != 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should not be set with no data and no events");
         let _ = tty::set_packet_mode(master, false);
-        phase39_teardown_pty(master, slave, &saved);
+        packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
@@ -10077,7 +10076,7 @@ pub fn test_phase39_poll_packet_events_pollin() -> TestResult {
     if (revents & slopos_abi::syscall::POLLIN) == 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should be set with pending packet events");
         let _ = tty::set_packet_mode(master, false);
-        phase39_teardown_pty(master, slave, &saved);
+        packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
@@ -10090,17 +10089,17 @@ pub fn test_phase39_poll_packet_events_pollin() -> TestResult {
     if (revents & slopos_abi::syscall::POLLIN) != 0 {
         klog_info!("TTY_TEST: BUG - POLLIN should not be set after consuming events");
         let _ = tty::set_packet_mode(master, false);
-        phase39_teardown_pty(master, slave, &saved);
+        packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
     let _ = tty::set_packet_mode(master, false);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
 }
 
-/// Phase 39: set_packet_mode on non-master returns error.
-pub fn test_phase39_set_packet_mode_non_master() -> TestResult {
+/// set_packet_mode on non-master returns error.
+pub fn test_set_packet_mode_non_master() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -10144,11 +10143,11 @@ pub fn test_phase39_set_packet_mode_non_master() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 40: VT100/ANSI Terminal Emulation
+// VT100/ANSI Terminal Emulation
 // ===========================================================================
 
-/// Phase 40: Parser starts in ground state, printable ASCII → Print.
-pub fn test_phase40_parser_print_ascii() -> TestResult {
+/// Parser starts in ground state, printable ASCII → Print.
+pub fn test_parser_print_ascii() -> TestResult {
     let mut parser = VtParser::new();
     let action = parser.advance(b'A');
     if action != VtAction::Print(b'A' as u32) {
@@ -10158,8 +10157,8 @@ pub fn test_phase40_parser_print_ascii() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Control characters produce Execute.
-pub fn test_phase40_parser_execute_control() -> TestResult {
+/// Control characters produce Execute.
+pub fn test_parser_execute_control() -> TestResult {
     let mut parser = VtParser::new();
     for &ctrl in &[b'\n', b'\r', 0x08u8, b'\t', 0x07] {
         let action = parser.advance(ctrl);
@@ -10175,8 +10174,8 @@ pub fn test_phase40_parser_execute_control() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: ESC [ 2 J → EraseDisplay(All).
-pub fn test_phase40_clear_screen() -> TestResult {
+/// ESC [ 2 J → EraseDisplay(All).
+pub fn test_clear_screen() -> TestResult {
     let mut parser = VtParser::new();
     // Feed ESC [ 2 J
     let _ = parser.advance(0x1B);
@@ -10193,8 +10192,8 @@ pub fn test_phase40_clear_screen() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: ESC [ 10 ; 20 H → SetCursorPos { row: 9, col: 19 } (0-based).
-pub fn test_phase40_cursor_position() -> TestResult {
+/// ESC [ 10 ; 20 H → SetCursorPos { row: 9, col: 19 } (0-based).
+pub fn test_cursor_position() -> TestResult {
     let mut parser = VtParser::new();
     for &b in b"\x1b[10;20H" {
         let action = parser.advance(b);
@@ -10211,8 +10210,8 @@ pub fn test_phase40_cursor_position() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: ESC [ 31 m → SetAttribute(ForegroundColor(1)) (red).
-pub fn test_phase40_sgr_red_foreground() -> TestResult {
+/// ESC [ 31 m → SetAttribute(ForegroundColor(1)) (red).
+pub fn test_sgr_red_foreground() -> TestResult {
     let mut parser = VtParser::new();
     for &b in b"\x1b[31m" {
         let action = parser.advance(b);
@@ -10229,8 +10228,8 @@ pub fn test_phase40_sgr_red_foreground() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: ESC [ 0 m → SetAttribute(Reset).
-pub fn test_phase40_sgr_reset() -> TestResult {
+/// ESC [ 0 m → SetAttribute(Reset).
+pub fn test_sgr_reset() -> TestResult {
     let mut parser = VtParser::new();
     for &b in b"\x1b[0m" {
         let action = parser.advance(b);
@@ -10244,8 +10243,8 @@ pub fn test_phase40_sgr_reset() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: ESC [ A → MoveCursor { Up, 1 }.
-pub fn test_phase40_cursor_up() -> TestResult {
+/// ESC [ A → MoveCursor { Up, 1 }.
+pub fn test_cursor_up() -> TestResult {
     let mut parser = VtParser::new();
     let _ = parser.advance(0x1B);
     let _ = parser.advance(b'[');
@@ -10262,8 +10261,8 @@ pub fn test_phase40_cursor_up() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Malformed sequences return to ground without crash.
-pub fn test_phase40_malformed_sequence_resilience() -> TestResult {
+/// Malformed sequences return to ground without crash.
+pub fn test_malformed_sequence_resilience() -> TestResult {
     let mut parser = VtParser::new();
     // Incomplete ESC [ then immediately a printable char
     let _ = parser.advance(0x1B);
@@ -10289,8 +10288,8 @@ pub fn test_phase40_malformed_sequence_resilience() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Multi-param SGR (e.g. ESC[1;31m) queues both actions.
-pub fn test_phase40_sgr_multi_param() -> TestResult {
+/// Multi-param SGR (e.g. ESC[1;31m) queues both actions.
+pub fn test_sgr_multi_param() -> TestResult {
     let mut parser = VtParser::new();
     // Feed ESC [ 1 ; 31 m → Bold + ForegroundColor(1)
     for &b in b"\x1b[1;31" {
@@ -10320,8 +10319,8 @@ pub fn test_phase40_sgr_multi_param() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: VConsoleState processes ESC[2J to clear screen.
-pub fn test_phase40_vconsole_clear_screen() -> TestResult {
+/// VConsoleState processes ESC[2J to clear screen.
+pub fn test_vconsole_clear_screen() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Write some chars first.
     state.process_byte(b'H');
@@ -10345,8 +10344,8 @@ pub fn test_phase40_vconsole_clear_screen() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: VConsoleState processes ESC[10;20H to move cursor.
-pub fn test_phase40_vconsole_cursor_pos() -> TestResult {
+/// VConsoleState processes ESC[10;20H to move cursor.
+pub fn test_vconsole_cursor_pos() -> TestResult {
     let mut state = boxed_vconsole_state();
     for &b in b"\x1b[10;20H" {
         state.process_byte(b);
@@ -10362,8 +10361,8 @@ pub fn test_phase40_vconsole_cursor_pos() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: SGR red foreground changes cursor_attrs.fg.
-pub fn test_phase40_vconsole_sgr_color() -> TestResult {
+/// SGR red foreground changes cursor_attrs.fg.
+pub fn test_vconsole_sgr_color() -> TestResult {
     let mut state = boxed_vconsole_state();
     // ESC[31m = red foreground
     for &b in b"\x1b[31m" {
@@ -10389,8 +10388,8 @@ pub fn test_phase40_vconsole_sgr_color() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: SGR reset restores default colors.
-pub fn test_phase40_vconsole_sgr_reset() -> TestResult {
+/// SGR reset restores default colors.
+pub fn test_vconsole_sgr_reset() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Set red fg, then reset
     for &b in b"\x1b[31m" {
@@ -10413,8 +10412,8 @@ pub fn test_phase40_vconsole_sgr_reset() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Save/restore cursor (ESC 7 / ESC 8).
-pub fn test_phase40_vconsole_save_restore_cursor() -> TestResult {
+/// Save/restore cursor (ESC 7 / ESC 8).
+pub fn test_vconsole_save_restore_cursor() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Move to (5,10)
     for &b in b"\x1b[6;11H" {
@@ -10445,8 +10444,8 @@ pub fn test_phase40_vconsole_save_restore_cursor() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Fuzz the parser with random-ish byte sequences — no panic.
-pub fn test_phase40_parser_fuzz_no_panic() -> TestResult {
+/// Fuzz the parser with random-ish byte sequences — no panic.
+pub fn test_parser_fuzz_no_panic() -> TestResult {
     let mut parser = VtParser::new();
     // Feed every possible byte value through the parser.
     for b in 0u8..=255 {
@@ -10461,8 +10460,8 @@ pub fn test_phase40_parser_fuzz_no_panic() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Erase line (EL) modes work correctly.
-pub fn test_phase40_vconsole_erase_line() -> TestResult {
+/// Erase line (EL) modes work correctly.
+pub fn test_vconsole_erase_line() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Write "ABCDE" at row 0
     for &b in b"ABCDE" {
@@ -10491,8 +10490,8 @@ pub fn test_phase40_vconsole_erase_line() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Cursor movement clamping (ESC[A at row 0 stays at row 0).
-pub fn test_phase40_cursor_movement_clamping() -> TestResult {
+/// Cursor movement clamping (ESC[A at row 0 stays at row 0).
+pub fn test_cursor_movement_clamping() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Cursor starts at (0,0), move up — should stay at 0
     for &b in b"\x1b[5A" {
@@ -10519,8 +10518,8 @@ pub fn test_phase40_cursor_movement_clamping() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 40: Scroll up via ESC[S.
-pub fn test_phase40_vconsole_scroll_up() -> TestResult {
+/// Scroll up via ESC[S.
+pub fn test_vconsole_scroll_up() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Write 'A' at row 0 col 0, 'B' at row 1 col 0
     state.process_byte(b'A');
@@ -10544,11 +10543,11 @@ pub fn test_phase40_vconsole_scroll_up() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 41: Advanced PTY & Session Control (EXTPROC, vhangup)
+// Advanced PTY & Session Control (EXTPROC, vhangup)
 // ===========================================================================
 
-/// Phase 41: EXTPROC flag constant has the expected value (0x10000).
-pub fn test_phase41_extproc_flag_value() -> TestResult {
+/// EXTPROC flag constant has the expected value (0x10000).
+pub fn test_extproc_flag_value() -> TestResult {
     if LocalFlags::EXTPROC.bits() != 0x10000 {
         klog_info!(
             "TTY_TEST: BUG - EXTPROC is {:#x}, expected 0x10000",
@@ -10559,8 +10558,8 @@ pub fn test_phase41_extproc_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC set → no echo, input goes directly to cooked buffer.
-pub fn test_phase41_extproc_no_echo() -> TestResult {
+/// EXTPROC set → no echo, input goes directly to cooked buffer.
+pub fn test_extproc_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO.
     let mut t = *ld.termios();
@@ -10591,8 +10590,8 @@ pub fn test_phase41_extproc_no_echo() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC set → canonical editing (VERASE/VKILL) is bypassed.
-pub fn test_phase41_extproc_no_canonical_editing() -> TestResult {
+/// EXTPROC set → canonical editing (VERASE/VKILL) is bypassed.
+pub fn test_extproc_no_canonical_editing() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO + ECHOE.
     let mut t = *ld.termios();
@@ -10629,8 +10628,8 @@ pub fn test_phase41_extproc_no_canonical_editing() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC set + ISIG → signals are still delivered.
-pub fn test_phase41_extproc_signals_still_delivered() -> TestResult {
+/// EXTPROC set + ISIG → signals are still delivered.
+pub fn test_extproc_signals_still_delivered() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ISIG.
     let mut t = *ld.termios();
@@ -10681,8 +10680,8 @@ pub fn test_phase41_extproc_signals_still_delivered() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC cleared → normal canonical/echo behavior resumes.
-pub fn test_phase41_extproc_cleared_resumes_normal() -> TestResult {
+/// EXTPROC cleared → normal canonical/echo behavior resumes.
+pub fn test_extproc_cleared_resumes_normal() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC first.
     let mut t = *ld.termios();
@@ -10708,8 +10707,8 @@ pub fn test_phase41_extproc_cleared_resumes_normal() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC bypasses VLNEXT, VWERASE, VREPRINT.
-pub fn test_phase41_extproc_bypasses_iexten_editing() -> TestResult {
+/// EXTPROC bypasses VLNEXT, VWERASE, VREPRINT.
+pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO + IEXTEN.
     let mut t = *ld.termios();
@@ -10753,8 +10752,8 @@ pub fn test_phase41_extproc_bypasses_iexten_editing() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC + IXON → flow control still works.
-pub fn test_phase41_extproc_flow_control_works() -> TestResult {
+/// EXTPROC + IXON → flow control still works.
+pub fn test_extproc_flow_control_works() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + IXON.
     let mut t = *ld.termios();
@@ -10780,8 +10779,8 @@ pub fn test_phase41_extproc_flow_control_works() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC with buffer full + IMAXBEL rings bell.
-pub fn test_phase41_extproc_imaxbel() -> TestResult {
+/// EXTPROC with buffer full + IMAXBEL rings bell.
+pub fn test_extproc_imaxbel() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::EXTPROC.bits();
@@ -10806,8 +10805,8 @@ pub fn test_phase41_extproc_imaxbel() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: SYSCALL_VHANGUP constant has expected value.
-pub fn test_phase41_vhangup_syscall_constant() -> TestResult {
+/// SYSCALL_VHANGUP constant has expected value.
+pub fn test_vhangup_syscall_constant() -> TestResult {
     if slopos_abi::syscall::SYSCALL_VHANGUP != 139 {
         klog_info!(
             "TTY_TEST: BUG - SYSCALL_VHANGUP is {}, expected 139",
@@ -10818,8 +10817,8 @@ pub fn test_phase41_vhangup_syscall_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: vhangup() on a TTY triggers hangup (reuses existing hangup infra).
-pub fn test_phase41_vhangup_triggers_hangup() -> TestResult {
+/// vhangup() on a TTY triggers hangup (reuses existing hangup infra).
+pub fn test_vhangup_triggers_hangup() -> TestResult {
     tty::table::tty_table_init();
 
     // Verify TTY 0 is not hung up initially.
@@ -10843,9 +10842,9 @@ pub fn test_phase41_vhangup_triggers_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: EXTPROC does not affect raw (non-canonical) mode —
+/// EXTPROC does not affect raw (non-canonical) mode —
 /// both paths push to cooked without echo.
-pub fn test_phase41_extproc_raw_mode_same_behavior() -> TestResult {
+pub fn test_extproc_raw_mode_same_behavior() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Non-canonical, no echo, EXTPROC.
@@ -10870,11 +10869,11 @@ pub fn test_phase41_extproc_raw_mode_same_behavior() -> TestResult {
 }
 
 // ===========================================================================
-// Phase 42: Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
+// Legacy Termios Completion (ECHOPRT, IUCLC, OLCUC)
 // ===========================================================================
 
 /// ECHOPRT: first erase produces `\` then erased char.
-pub fn test_phase42_echoprt_erase_format() -> TestResult {
+pub fn test_echoprt_erase_format() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
@@ -10932,7 +10931,7 @@ pub fn test_phase42_echoprt_erase_format() -> TestResult {
 }
 
 /// ECHOPRT: non-erase input closes the erase sequence with `/`.
-pub fn test_phase42_echoprt_close_on_input() -> TestResult {
+pub fn test_echoprt_close_on_input() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
@@ -10967,7 +10966,7 @@ pub fn test_phase42_echoprt_close_on_input() -> TestResult {
 }
 
 /// IUCLC maps A-Z to a-z in input.
-pub fn test_phase42_iuclc_maps_upper_to_lower() -> TestResult {
+pub fn test_iuclc_maps_upper_to_lower() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -11009,7 +11008,7 @@ pub fn test_phase42_iuclc_maps_upper_to_lower() -> TestResult {
 }
 
 /// IUCLC does not affect non-alpha or already-lowercase characters.
-pub fn test_phase42_iuclc_no_effect_non_alpha() -> TestResult {
+pub fn test_iuclc_no_effect_non_alpha() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
@@ -11050,7 +11049,7 @@ pub fn test_phase42_iuclc_no_effect_non_alpha() -> TestResult {
 }
 
 /// OLCUC maps a-z to A-Z in output.
-pub fn test_phase42_olcuc_maps_lower_to_upper() -> TestResult {
+pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_oflag = OutputFlags::OPOST.bits() | OutputFlags::OLCUC.bits();
@@ -11109,7 +11108,7 @@ pub fn test_phase42_olcuc_maps_lower_to_upper() -> TestResult {
 }
 
 /// All three flags disabled by default (no effect in default termios).
-pub fn test_phase42_flags_disabled_by_default() -> TestResult {
+pub fn test_flags_disabled_by_default() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
 
@@ -11135,11 +11134,11 @@ pub fn test_phase42_flags_disabled_by_default() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 1: Per-TTY Poll Notification tests
+// Per-TTY Poll Notification tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 1: TTY_POLL_WAITERS array exists and has the right size.
-pub fn test_fp1_poll_waiters_exist() -> TestResult {
+/// TTY_POLL_WAITERS array exists and has the right size.
+pub fn test_poll_waiters_exist() -> TestResult {
     use crate::tty::table::TTY_POLL_WAITERS;
     // Simply verify we can access each element without panic.
     for i in 0..crate::tty::MAX_TTYS {
@@ -11148,9 +11147,9 @@ pub fn test_fp1_poll_waiters_exist() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 1: push_input on slot 0 targets TTY_POLL_WAITERS[0].
+/// push_input on slot 0 targets TTY_POLL_WAITERS[0].
 /// Verifies the per-slot wake path executes without panic.
-pub fn test_fp1_push_input_wakes_correct_poll_waiter() -> TestResult {
+pub fn test_push_input_wakes_correct_poll_waiter() -> TestResult {
     use crate::tty::table::TTY_POLL_WAITERS;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -11169,10 +11168,10 @@ pub fn test_fp1_push_input_wakes_correct_poll_waiter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 1: push_input on slot 0 does NOT wake TTY_POLL_WAITERS[1].
+/// push_input on slot 0 does NOT wake TTY_POLL_WAITERS[1].
 /// The old global POLL_NOTIFY would have woken ALL slots. Per-slot targeting
 /// means only the affected slot’s waiter is touched.
-pub fn test_fp1_push_input_does_not_wake_other_slot() -> TestResult {
+pub fn test_push_input_does_not_wake_other_slot() -> TestResult {
     use crate::tty::table::TTY_POLL_WAITERS;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -11194,8 +11193,8 @@ pub fn test_fp1_push_input_does_not_wake_other_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 1: hangup on a slot wakes that slot's poll waiter.
-pub fn test_fp1_hangup_wakes_correct_poll_waiter() -> TestResult {
+/// hangup on a slot wakes that slot's poll waiter.
+pub fn test_hangup_wakes_correct_poll_waiter() -> TestResult {
     use crate::tty::table::TTY_POLL_WAITERS;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -11218,8 +11217,8 @@ pub fn test_fp1_hangup_wakes_correct_poll_waiter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 1: PTY packet event wakes master's poll waiter, not others.
-pub fn test_fp1_pty_packet_event_wakes_master_poll_waiter() -> TestResult {
+/// PTY packet event wakes master's poll waiter, not others.
+pub fn test_pty_packet_event_wakes_master_poll_waiter() -> TestResult {
     use crate::tty::table::TTY_POLL_WAITERS;
     tty::table::tty_table_init();
 
@@ -11268,8 +11267,8 @@ pub fn test_fp1_pty_packet_event_wakes_master_poll_waiter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 1: poll_sleep_on with empty slot list does not panic.
-pub fn test_fp1_poll_sleep_on_empty_slots_does_not_panic() -> TestResult {
+/// poll_sleep_on with empty slot list does not panic.
+pub fn test_poll_sleep_on_empty_slots_does_not_panic() -> TestResult {
     // Calling poll_sleep_on with an empty slice should be a no-op (timer fallback).
     // We can't easily test the actual sleep behavior without multitasking,
     // but we verify it doesn't panic.
@@ -11278,11 +11277,11 @@ pub fn test_fp1_poll_sleep_on_empty_slots_does_not_panic() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 2: PTY Flow Control (Throttle Mechanism) tests
+// PTY Flow Control (Throttle Mechanism) tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 2: Throttle watermark constants are sane.
-pub fn test_fp2_throttle_watermark_constants() -> TestResult {
+/// Throttle watermark constants are sane.
+pub fn test_throttle_watermark_constants() -> TestResult {
     use crate::tty::ldisc::{THROTTLE_HIGH_WATER, THROTTLE_LOW_WATER};
     // High-water must be greater than low-water for hysteresis to work.
     if THROTTLE_HIGH_WATER <= THROTTLE_LOW_WATER {
@@ -11304,8 +11303,8 @@ pub fn test_fp2_throttle_watermark_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: A freshly allocated PTY slave starts unthrottled.
-pub fn test_fp2_pty_initially_unthrottled() -> TestResult {
+/// A freshly allocated PTY slave starts unthrottled.
+pub fn test_pty_initially_unthrottled() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -11339,8 +11338,8 @@ pub fn test_fp2_pty_initially_unthrottled() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: Flooding a PTY slave with push_input activates throttle.
-pub fn test_fp2_throttle_activates_at_high_water() -> TestResult {
+/// Flooding a PTY slave with push_input activates throttle.
+pub fn test_throttle_activates_at_high_water() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
@@ -11386,8 +11385,8 @@ pub fn test_fp2_throttle_activates_at_high_water() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: master_write returns short write when slave is throttled.
-pub fn test_fp2_master_write_short_write_when_throttled() -> TestResult {
+/// master_write returns short write when slave is throttled.
+pub fn test_master_write_short_write_when_throttled() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
@@ -11472,8 +11471,8 @@ pub fn test_fp2_master_write_short_write_when_throttled() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: Reading from a throttled slave unthrottles it.
-pub fn test_fp2_read_unthrottles_slave() -> TestResult {
+/// Reading from a throttled slave unthrottles it.
+pub fn test_read_unthrottles_slave() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
@@ -11555,8 +11554,8 @@ pub fn test_fp2_read_unthrottles_slave() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: Throttle/unthrottle cycle preserves data integrity.
-pub fn test_fp2_throttle_cycle_no_data_loss() -> TestResult {
+/// Throttle/unthrottle cycle preserves data integrity.
+pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -11625,8 +11624,8 @@ pub fn test_fp2_throttle_cycle_no_data_loss() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: Console TTY (non-PTY) is never affected by throttle.
-pub fn test_fp2_console_not_throttled() -> TestResult {
+/// Console TTY (non-PTY) is never affected by throttle.
+pub fn test_console_not_throttled() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -11655,8 +11654,8 @@ pub fn test_fp2_console_not_throttled() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 2: master_write returns full length when slave is not throttled.
-pub fn test_fp2_master_write_full_when_not_throttled() -> TestResult {
+/// master_write returns full length when slave is not throttled.
+pub fn test_master_write_full_when_not_throttled() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -11710,11 +11709,11 @@ pub fn test_fp2_master_write_full_when_not_throttled() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 3: Cooked Buffer Overflow Hardening tests
+// Cooked Buffer Overflow Hardening tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 3: push_cooked returns false when buffer is full.
-pub fn test_fp3_push_cooked_returns_false_when_full() -> TestResult {
+/// push_cooked returns false when buffer is full.
+pub fn test_push_cooked_returns_false_when_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     // Fill the cooked buffer to capacity (4096 bytes).
@@ -11732,8 +11731,8 @@ pub fn test_fp3_push_cooked_returns_false_when_full() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 3: push_cooked returns true when buffer has space.
-pub fn test_fp3_push_cooked_returns_true_when_space() -> TestResult {
+/// push_cooked returns true when buffer has space.
+pub fn test_push_cooked_returns_true_when_space() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     if !ld.push_cooked(b'A') {
@@ -11743,8 +11742,8 @@ pub fn test_fp3_push_cooked_returns_true_when_space() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 3: canonical flush_edit_to_cooked fits (edit < cooked).
-pub fn test_fp3_canonical_flush_fits_in_cooked() -> TestResult {
+/// canonical flush_edit_to_cooked fits (edit < cooked).
+pub fn test_canonical_flush_fits_in_cooked() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -11771,8 +11770,8 @@ pub fn test_fp3_canonical_flush_fits_in_cooked() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 3: IMAXBEL rings bell on raw-mode cooked overflow.
-pub fn test_fp3_imaxbel_bell_on_cooked_overflow() -> TestResult {
+/// IMAXBEL rings bell on raw-mode cooked overflow.
+pub fn test_imaxbel_bell_on_cooked_overflow() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -11838,8 +11837,8 @@ pub fn test_fp3_imaxbel_bell_on_cooked_overflow() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 3: No IMAXBEL — silent drop on cooked overflow.
-pub fn test_fp3_no_imaxbel_silent_drop() -> TestResult {
+/// No IMAXBEL — silent drop on cooked overflow.
+pub fn test_no_imaxbel_silent_drop() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -11894,11 +11893,11 @@ pub fn test_fp3_no_imaxbel_silent_drop() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 4: c_cflag ABI Completion tests
+// c_cflag ABI Completion tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 4: ControlFlags constants have correct octal values.
-pub fn test_fp4_control_flag_values() -> TestResult {
+/// ControlFlags constants have correct octal values.
+pub fn test_control_flag_values() -> TestResult {
     use slopos_abi::syscall::*;
     // Character size.
     if CS5 != 0o000000 || CS6 != 0o000020 || CS7 != 0o000040 || CS8 != 0o000060 {
@@ -11936,8 +11935,8 @@ pub fn test_fp4_control_flag_values() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 4: Default termios c_cflag contains CS8|CREAD|HUPCL|B38400.
-pub fn test_fp4_default_cflag() -> TestResult {
+/// Default termios c_cflag contains CS8|CREAD|HUPCL|B38400.
+pub fn test_default_cflag() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let t = tty::get_termios(TtyIndex(0)).unwrap();
@@ -11953,8 +11952,8 @@ pub fn test_fp4_default_cflag() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 4: tcsetattr with CS7|PARENB roundtrips through tcgetattr.
-pub fn test_fp4_cflag_roundtrip() -> TestResult {
+/// tcsetattr with CS7|PARENB roundtrips through tcgetattr.
+pub fn test_cflag_roundtrip() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -11979,8 +11978,8 @@ pub fn test_fp4_cflag_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 4: c_ispeed/c_ospeed populated from default baud (38400).
-pub fn test_fp4_speed_fields_populated() -> TestResult {
+/// c_ispeed/c_ospeed populated from default baud (38400).
+pub fn test_speed_fields_populated() -> TestResult {
     tty::table::tty_table_init();
     let t = tty::get_termios(TtyIndex(0)).unwrap();
     if t.c_ispeed != 38400 {
@@ -11994,8 +11993,8 @@ pub fn test_fp4_speed_fields_populated() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 4: Changing baud rate updates c_ispeed/c_ospeed.
-pub fn test_fp4_speed_follows_baud_change() -> TestResult {
+/// Changing baud rate updates c_ispeed/c_ospeed.
+pub fn test_speed_follows_baud_change() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -12021,8 +12020,8 @@ pub fn test_fp4_speed_follows_baud_change() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 4: CREAD value preserved after ABI update.
-pub fn test_fp4_cread_value_preserved() -> TestResult {
+/// CREAD value preserved after ABI update.
+pub fn test_cread_value_preserved() -> TestResult {
     // CREAD was 0x80 before, now 0o000200 = 128 = 0x80. Same value.
     use slopos_abi::syscall::ControlFlags;
     let cread = ControlFlags::CREAD;
@@ -12037,11 +12036,11 @@ pub fn test_fp4_cread_value_preserved() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 5: Missing Ioctls (TCFLSH, TCSBRK, TCXONC) tests
+// Missing Ioctls (TCFLSH, TCSBRK, TCXONC) tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 5: ABI constants have correct values.
-pub fn test_fp5_ioctl_constants() -> TestResult {
+/// ABI constants have correct values.
+pub fn test_flush_flow_ioctl_constants() -> TestResult {
     use slopos_abi::syscall::*;
     if TCSBRK != 0x5409 {
         klog_info!("TTY_TEST: BUG - TCSBRK=0x{:x}", TCSBRK);
@@ -12066,8 +12065,8 @@ pub fn test_fp5_ioctl_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 5: TCFLSH with TCIFLUSH clears input.
-pub fn test_fp5_tcflush_input() -> TestResult {
+/// TCFLSH with TCIFLUSH clears input.
+pub fn test_tcflush_input() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -12109,8 +12108,8 @@ pub fn test_fp5_tcflush_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 5: TCFLSH with TCOFLUSH resets output inflight.
-pub fn test_fp5_tcflush_output() -> TestResult {
+/// TCFLSH with TCOFLUSH resets output inflight.
+pub fn test_tcflush_output() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -12130,8 +12129,8 @@ pub fn test_fp5_tcflush_output() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 5: TCFLSH with TCIOFLUSH clears both input and output.
-pub fn test_fp5_tcflush_both() -> TestResult {
+/// TCFLSH with TCIOFLUSH clears both input and output.
+pub fn test_tcflush_both() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -12170,8 +12169,8 @@ pub fn test_fp5_tcflush_both() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 5: TCFLSH with invalid argument returns error.
-pub fn test_fp5_tcflush_invalid_arg() -> TestResult {
+/// TCFLSH with invalid argument returns error.
+pub fn test_tcflush_invalid_arg() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     match tty::tcflush(idx, 99) {
@@ -12186,8 +12185,8 @@ pub fn test_fp5_tcflush_invalid_arg() -> TestResult {
     }
 }
 
-/// Finishing Phase 5: TCSBRK with arg=0 returns success (no-op).
-pub fn test_fp5_tcsbrk_noop() -> TestResult {
+/// TCSBRK with arg=0 returns success (no-op).
+pub fn test_tcsbrk_noop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     match tty::tcsbrk(idx, 0) {
@@ -12199,8 +12198,8 @@ pub fn test_fp5_tcsbrk_noop() -> TestResult {
     }
 }
 
-/// Finishing Phase 5: TCSBRK with arg>0 drains output (succeeds).
-pub fn test_fp5_tcsbrk_drain() -> TestResult {
+/// TCSBRK with arg>0 drains output (succeeds).
+pub fn test_tcsbrk_drain() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     match tty::tcsbrk(idx, 1) {
@@ -12212,8 +12211,8 @@ pub fn test_fp5_tcsbrk_drain() -> TestResult {
     }
 }
 
-/// Finishing Phase 5: TCXONC with all four actions returns success.
-pub fn test_fp5_tcxonc_all_actions() -> TestResult {
+/// TCXONC with all four actions returns success.
+pub fn test_tcxonc_all_actions() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     for action in 0..4 {
@@ -12229,11 +12228,11 @@ pub fn test_fp5_tcxonc_all_actions() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 6: Edit Buffer Expansion (1024 → 4096) tests
+// Edit Buffer Expansion (1024 → 4096) tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 6: Canonical input longer than 1024 bytes works.
-pub fn test_fp6_canonical_input_over_1024() -> TestResult {
+/// Canonical input longer than 1024 bytes works.
+pub fn test_canonical_input_over_1024() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -12265,8 +12264,8 @@ pub fn test_fp6_canonical_input_over_1024() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 6: Large paste (~3000 bytes) in canonical mode.
-pub fn test_fp6_large_paste_canonical() -> TestResult {
+/// Large paste (~3000 bytes) in canonical mode.
+pub fn test_large_paste_canonical() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -12303,8 +12302,8 @@ pub fn test_fp6_large_paste_canonical() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 6: Backspace still works with expanded edit buffer.
-pub fn test_fp6_backspace_in_expanded_buffer() -> TestResult {
+/// Backspace still works with expanded edit buffer.
+pub fn test_backspace_in_expanded_buffer() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -12332,11 +12331,11 @@ pub fn test_fp6_backspace_in_expanded_buffer() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 7: Signal Restart Infrastructure (ERESTARTSYS)
+// Signal Restart Infrastructure (ERESTARTSYS)
 // ===========================================================================
 
-/// Finishing Phase 7: TtyError::Restart maps to -512 (ERESTARTSYS).
-pub fn test_fp7_restart_error_to_errno() -> TestResult {
+/// TtyError::Restart maps to -512 (ERESTARTSYS).
+pub fn test_restart_error_to_errno() -> TestResult {
     if TtyError::Restart.to_errno() != -512 {
         klog_info!(
             "TTY_TEST: BUG - TtyError::Restart.to_errno()={} expected -512",
@@ -12347,8 +12346,8 @@ pub fn test_fp7_restart_error_to_errno() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: TtyError::Restart is distinct from SignalInterrupt.
-pub fn test_fp7_restart_distinct_from_signal_interrupt() -> TestResult {
+/// TtyError::Restart is distinct from SignalInterrupt.
+pub fn test_restart_distinct_from_signal_interrupt() -> TestResult {
     if TtyError::Restart.to_errno() == TtyError::SignalInterrupt.to_errno() {
         klog_info!("TTY_TEST: BUG - Restart and SignalInterrupt map to same errno");
         return TestResult::Fail;
@@ -12356,8 +12355,8 @@ pub fn test_fp7_restart_distinct_from_signal_interrupt() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: ERESTARTSYS constant value matches Linux convention.
-pub fn test_fp7_erestartsys_constant_value() -> TestResult {
+/// ERESTARTSYS constant value matches Linux convention.
+pub fn test_erestartsys_constant_value() -> TestResult {
     if slopos_abi::syscall::ERRNO_ERESTARTSYS != (-512i64) as u64 {
         klog_info!("TTY_TEST: BUG - ERRNO_ERESTARTSYS is not -512");
         return TestResult::Fail;
@@ -12365,8 +12364,8 @@ pub fn test_fp7_erestartsys_constant_value() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: ERRNO_EINTR constant value matches Linux convention.
-pub fn test_fp7_eintr_constant_value() -> TestResult {
+/// ERRNO_EINTR constant value matches Linux convention.
+pub fn test_eintr_constant_value() -> TestResult {
     if slopos_abi::syscall::ERRNO_EINTR != (-4i64) as u64 {
         klog_info!("TTY_TEST: BUG - ERRNO_EINTR is not -4");
         return TestResult::Fail;
@@ -12374,8 +12373,8 @@ pub fn test_fp7_eintr_constant_value() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: SA_RESTART flag has correct Linux-compatible value.
-pub fn test_fp7_sa_restart_flag_value() -> TestResult {
+/// SA_RESTART flag has correct Linux-compatible value.
+pub fn test_sa_restart_flag_value() -> TestResult {
     if slopos_abi::signal::SA_RESTART != 0x10000000 {
         klog_info!(
             "TTY_TEST: BUG - SA_RESTART=0x{:08X} expected 0x10000000",
@@ -12386,8 +12385,8 @@ pub fn test_fp7_sa_restart_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: SA_RESTART is distinct from other SA_ flags.
-pub fn test_fp7_sa_restart_distinct() -> TestResult {
+/// SA_RESTART is distinct from other SA_ flags.
+pub fn test_sa_restart_distinct() -> TestResult {
     use slopos_abi::signal::*;
     let sa_restart = SA_RESTART;
     if (sa_restart & SA_RESTORER) != 0
@@ -12401,9 +12400,9 @@ pub fn test_fp7_sa_restart_distinct() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: SignalInterrupt still maps to EINTR (-4).
+/// SignalInterrupt still maps to EINTR (-4).
 /// Regression: ensure existing behavior is preserved.
-pub fn test_fp7_signal_interrupt_still_eintr() -> TestResult {
+pub fn test_signal_interrupt_still_eintr() -> TestResult {
     if TtyError::SignalInterrupt.to_errno() != -4 {
         klog_info!(
             "TTY_TEST: BUG - SignalInterrupt.to_errno()={} expected -4",
@@ -12414,9 +12413,9 @@ pub fn test_fp7_signal_interrupt_still_eintr() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: All existing TtyError variants preserve their errno mappings.
-/// Regression test: ensure Phase 7 changes don't alter existing error codes.
-pub fn test_fp7_all_error_variants_preserved() -> TestResult {
+/// All existing TtyError variants preserve their errno mappings.
+/// Regression test: ensure existing error codes are preserved.
+pub fn test_all_error_variants_preserved() -> TestResult {
     let pairs: &[(TtyError, i32)] = &[
         (TtyError::InvalidIndex, -22),
         (TtyError::NotAllocated, -6),
@@ -12446,8 +12445,8 @@ pub fn test_fp7_all_error_variants_preserved() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: Non-blocking read on empty TTY returns WouldBlock, not Restart.
-pub fn test_fp7_nonblock_empty_returns_wouldblock() -> TestResult {
+/// Non-blocking read on empty TTY returns WouldBlock, not Restart.
+pub fn test_nonblock_empty_returns_wouldblock() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -12470,8 +12469,8 @@ pub fn test_fp7_nonblock_empty_returns_wouldblock() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 7: Read with available data succeeds normally (no ERESTARTSYS).
-pub fn test_fp7_read_with_data_succeeds() -> TestResult {
+/// Read with available data succeeds normally (no ERESTARTSYS).
+pub fn test_read_with_data_succeeds() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13513,12 +13512,12 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 8: TCXONC Behavioral Completion tests
+// TCXONC Behavioral Completion tests
 // ===========================================================================
 
-/// Finishing Phase 8: TCOOFF sets output_stopped, nonblocking write returns
+/// TCOOFF sets output_stopped, nonblocking write returns
 /// WouldBlock on a console TTY.
-pub fn test_fp8_tcooff_blocks_nonblock_write() -> TestResult {
+pub fn test_tcooff_blocks_nonblock_write() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13548,9 +13547,9 @@ pub fn test_fp8_tcooff_blocks_nonblock_write() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCOON clears output_stopped, nonblocking write
+/// TCOON clears output_stopped, nonblocking write
 /// succeeds after resume.
-pub fn test_fp8_tcoon_resumes_write() -> TestResult {
+pub fn test_tcoon_resumes_write() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13589,8 +13588,8 @@ pub fn test_fp8_tcoon_resumes_write() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: Double TCOOFF is idempotent (does not error).
-pub fn test_fp8_tcooff_idempotent() -> TestResult {
+/// Double TCOOFF is idempotent (does not error).
+pub fn test_tcooff_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -13615,8 +13614,8 @@ pub fn test_fp8_tcooff_idempotent() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: Double TCOON is idempotent (does not error).
-pub fn test_fp8_tcoon_idempotent() -> TestResult {
+/// Double TCOON is idempotent (does not error).
+pub fn test_tcoon_idempotent() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -13640,8 +13639,8 @@ pub fn test_fp8_tcoon_idempotent() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCOOFF then TCOON cycle — write works after resume.
-pub fn test_fp8_stop_resume_cycle() -> TestResult {
+/// TCOOFF then TCOON cycle — write works after resume.
+pub fn test_stop_resume_cycle() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13675,8 +13674,8 @@ pub fn test_fp8_stop_resume_cycle() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCIOFF and TCION succeed (control-byte path).
-pub fn test_fp8_tcioff_tcion_succeed() -> TestResult {
+/// TCIOFF and TCION succeed (control-byte path).
+pub fn test_tcioff_tcion_succeed() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -13695,8 +13694,8 @@ pub fn test_fp8_tcioff_tcion_succeed() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCIOFF/TCION do not affect output_stopped state.
-pub fn test_fp8_tcioff_tcion_no_output_stop() -> TestResult {
+/// TCIOFF/TCION do not affect output_stopped state.
+pub fn test_tcioff_tcion_no_output_stop() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13733,9 +13732,9 @@ pub fn test_fp8_tcioff_tcion_no_output_stop() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: Invalid TCXONC actions still return InvalidArg.
-/// (Regression test for Phase 5 validation preservation.)
-pub fn test_fp8_invalid_action_still_errors() -> TestResult {
+/// Invalid TCXONC actions still return InvalidArg.
+/// (Regression test for validation preservation.)
+pub fn test_invalid_action_still_errors() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -13756,9 +13755,9 @@ pub fn test_fp8_invalid_action_still_errors() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCOOFF on a PTY slave stops nonblocking writes to that
+/// TCOOFF on a PTY slave stops nonblocking writes to that
 /// slave.
-pub fn test_fp8_tcooff_pty_slave_write() -> TestResult {
+pub fn test_tcooff_pty_slave_write() -> TestResult {
     tty::table::tty_table_init();
 
     let master = match tty::pty_alloc() {
@@ -13812,8 +13811,8 @@ pub fn test_fp8_tcooff_pty_slave_write() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: output_stopped is independent of ldisc IXON stopped.
-pub fn test_fp8_output_stopped_independent_of_ixon() -> TestResult {
+/// output_stopped is independent of ldisc IXON stopped.
+pub fn test_output_stopped_independent_of_ixon() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -13841,8 +13840,8 @@ pub fn test_fp8_output_stopped_independent_of_ixon() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCXONC on unallocated slot returns NotAllocated.
-pub fn test_fp8_tcxonc_unallocated_slot() -> TestResult {
+/// TCXONC on unallocated slot returns NotAllocated.
+pub fn test_tcxonc_unallocated_slot() -> TestResult {
     tty::table::tty_table_init();
     // Slot 30 should not be allocated after init.
     let idx = TtyIndex(30);
@@ -13864,8 +13863,8 @@ pub fn test_fp8_tcxonc_unallocated_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 8: TCXONC on out-of-range index returns InvalidIndex.
-pub fn test_fp8_tcxonc_invalid_index() -> TestResult {
+/// TCXONC on out-of-range index returns InvalidIndex.
+pub fn test_tcxonc_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(255);
 
@@ -13887,11 +13886,11 @@ pub fn test_fp8_tcxonc_invalid_index() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 9: Output Queue Visibility (TIOCOUTQ) tests
+// Output Queue Visibility (TIOCOUTQ) tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 9: TIOCOUTQ ABI constant is correct.
-pub fn test_fp9_tiocoutq_abi_constant() -> TestResult {
+/// TIOCOUTQ ABI constant is correct.
+pub fn test_tiocoutq_abi_constant() -> TestResult {
     if slopos_abi::syscall::TIOCOUTQ != 0x5411 {
         klog_info!(
             "TTY_TEST: BUG - TIOCOUTQ should be 0x5411, got 0x{:X}",
@@ -13902,8 +13901,8 @@ pub fn test_fp9_tiocoutq_abi_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 9: output_queued_bytes returns 0 when idle.
-pub fn test_fp9_output_queued_zero_when_idle() -> TestResult {
+/// output_queued_bytes returns 0 when idle.
+pub fn test_output_queued_zero_when_idle() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -13924,8 +13923,8 @@ pub fn test_fp9_output_queued_zero_when_idle() -> TestResult {
     }
 }
 
-/// Finishing Phase 9: output_queued_bytes reflects TTY_OUTPUT_INFLIGHT.
-pub fn test_fp9_output_queued_reflects_inflight() -> TestResult {
+/// output_queued_bytes reflects TTY_OUTPUT_INFLIGHT.
+pub fn test_output_queued_reflects_inflight() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -13952,8 +13951,8 @@ pub fn test_fp9_output_queued_reflects_inflight() -> TestResult {
     }
 }
 
-/// Finishing Phase 9: output_queued_bytes returns 0 after TCOFLUSH.
-pub fn test_fp9_output_queued_zero_after_flush() -> TestResult {
+/// output_queued_bytes returns 0 after TCOFLUSH.
+pub fn test_output_queued_zero_after_flush() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -13982,8 +13981,8 @@ pub fn test_fp9_output_queued_zero_after_flush() -> TestResult {
     }
 }
 
-/// Finishing Phase 9: output_queued_bytes on unallocated slot returns error.
-pub fn test_fp9_output_queued_unallocated() -> TestResult {
+/// output_queued_bytes on unallocated slot returns error.
+pub fn test_output_queued_unallocated() -> TestResult {
     tty::table::tty_table_init();
     // Slot 5 is never allocated by tty_table_init().
     let idx = TtyIndex(5);
@@ -14000,8 +13999,8 @@ pub fn test_fp9_output_queued_unallocated() -> TestResult {
     }
 }
 
-/// Finishing Phase 9: output_queued_bytes on invalid index returns error.
-pub fn test_fp9_output_queued_invalid_index() -> TestResult {
+/// output_queued_bytes on invalid index returns error.
+pub fn test_output_queued_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(255);
 
@@ -14017,8 +14016,8 @@ pub fn test_fp9_output_queued_invalid_index() -> TestResult {
     }
 }
 
-/// Finishing Phase 9: FIONREAD behavior is unchanged by TIOCOUTQ addition.
-pub fn test_fp9_fionread_unchanged() -> TestResult {
+/// FIONREAD behavior is unchanged by TIOCOUTQ addition.
+pub fn test_fionread_unchanged() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -14045,8 +14044,8 @@ pub fn test_fp9_fionread_unchanged() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 9: output_queued_bytes on console TTY 1 works.
-pub fn test_fp9_output_queued_vconsole() -> TestResult {
+/// output_queued_bytes on console TTY 1 works.
+pub fn test_output_queued_vconsole() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(1);
 
@@ -14071,11 +14070,11 @@ pub fn test_fp9_output_queued_vconsole() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 10: Input Wake Batching (WAKEUP_CHARS) tests
+// Input Wake Batching (WAKEUP_CHARS) tests
 // ===========================================================================
 
-/// Finishing Phase 10: WAKEUP_CHARS constant has expected value.
-pub fn test_fp10_wakeup_chars_constant() -> TestResult {
+/// WAKEUP_CHARS constant has expected value.
+pub fn test_wakeup_chars_constant() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     if WAKEUP_CHARS != 256 {
         klog_info!(
@@ -14087,8 +14086,8 @@ pub fn test_fp10_wakeup_chars_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: Canonical mode wakes immediately on line boundary.
-pub fn test_fp10_canonical_wake_on_newline() -> TestResult {
+/// Canonical mode wakes immediately on line boundary.
+pub fn test_canonical_wake_on_newline() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type chars without newline — should_wake_reader must return false.
@@ -14110,8 +14109,8 @@ pub fn test_fp10_canonical_wake_on_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: Non-canonical mode does NOT wake on every byte.
-pub fn test_fp10_noncanonical_no_wake_per_byte() -> TestResult {
+/// Non-canonical mode does NOT wake on every byte.
+pub fn test_noncanonical_no_wake_per_byte() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     // Switch to non-canonical mode.
@@ -14131,8 +14130,8 @@ pub fn test_fp10_noncanonical_no_wake_per_byte() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: Non-canonical mode wakes at WAKEUP_CHARS threshold.
-pub fn test_fp10_noncanonical_wake_at_threshold() -> TestResult {
+/// Non-canonical mode wakes at WAKEUP_CHARS threshold.
+pub fn test_noncanonical_wake_at_threshold() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -14156,8 +14155,8 @@ pub fn test_fp10_noncanonical_wake_at_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: Non-canonical mode wakes when buffer is nearly full.
-pub fn test_fp10_noncanonical_wake_near_full() -> TestResult {
+/// Non-canonical mode wakes when buffer is nearly full.
+pub fn test_noncanonical_wake_near_full() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     // Switch to non-canonical mode.
@@ -14185,8 +14184,8 @@ pub fn test_fp10_noncanonical_wake_near_full() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: flush_input resets wake_chars_pending counter.
-pub fn test_fp10_flush_input_resets_wake_counter() -> TestResult {
+/// flush_input resets wake_chars_pending counter.
+pub fn test_flush_input_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -14212,8 +14211,8 @@ pub fn test_fp10_flush_input_resets_wake_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: flush_all resets wake_chars_pending counter.
-pub fn test_fp10_flush_all_resets_wake_counter() -> TestResult {
+/// flush_all resets wake_chars_pending counter.
+pub fn test_flush_all_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -14238,8 +14237,8 @@ pub fn test_fp10_flush_all_resets_wake_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: RawDisc also batches wakeups.
-pub fn test_fp10_rawdisc_wake_batching() -> TestResult {
+/// RawDisc also batches wakeups.
+pub fn test_rawdisc_wake_batching() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     let mut rd = RawDisc::new();
     // Enable CREAD so input is accepted.
@@ -14268,8 +14267,8 @@ pub fn test_fp10_rawdisc_wake_batching() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: should_wake_reader resets counter on wake.
-pub fn test_fp10_wake_resets_counter() -> TestResult {
+/// should_wake_reader resets counter on wake.
+pub fn test_wake_resets_counter() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -14308,8 +14307,8 @@ pub fn test_fp10_wake_resets_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 10: Canonical mode EOF (Ctrl+D) still wakes immediately.
-pub fn test_fp10_canonical_eof_wakes() -> TestResult {
+/// Canonical mode EOF (Ctrl+D) still wakes immediately.
+pub fn test_canonical_eof_wakes() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Type chars then Ctrl+D (VEOF = 0x04).
@@ -14327,11 +14326,11 @@ pub fn test_fp10_canonical_eof_wakes() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 11: TABDLY/XTABS Output Compatibility
+// TABDLY/XTABS Output Compatibility
 // ===========================================================================
 
-/// Finishing Phase 11: ABI constants have correct Linux-compatible values.
-pub fn test_fp11_tabdly_abi_constants() -> TestResult {
+/// ABI constants have correct Linux-compatible values.
+pub fn test_tabdly_abi_constants() -> TestResult {
     use slopos_abi::syscall::{TAB0, TAB3, TABDLY, XTABS};
 
     if TABDLY != 0x1800 {
@@ -14368,8 +14367,8 @@ pub fn test_fp11_tabdly_abi_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: Default termios c_oflag includes XTABS.
-pub fn test_fp11_default_oflag_includes_xtabs() -> TestResult {
+/// Default termios c_oflag includes XTABS.
+pub fn test_default_oflag_includes_xtabs() -> TestResult {
     let ld = LineDisc::new();
     let oflag = ld.termios().output_flags();
 
@@ -14389,8 +14388,8 @@ pub fn test_fp11_default_oflag_includes_xtabs() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: OPOST|XTABS expands tab to expected number of spaces.
-pub fn test_fp11_xtabs_expands_tab_to_spaces() -> TestResult {
+/// OPOST|XTABS expands tab to expected number of spaces.
+pub fn test_xtabs_expands_tab_to_spaces() -> TestResult {
     let mut ld = LineDisc::new();
     // Default has OPOST|XTABS. Tab at column 0 => 8 spaces.
     match ld.process_output_byte(b'\t') {
@@ -14426,8 +14425,8 @@ pub fn test_fp11_xtabs_expands_tab_to_spaces() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: OPOST without XTABS passes literal tab through.
-pub fn test_fp11_tab0_passes_literal_tab() -> TestResult {
+/// OPOST without XTABS passes literal tab through.
+pub fn test_tab0_passes_literal_tab() -> TestResult {
     let mut ld = LineDisc::new();
     // Clear TABDLY bits (set TAB0) while keeping OPOST.
     let mut t = *ld.termios();
@@ -14459,8 +14458,8 @@ pub fn test_fp11_tab0_passes_literal_tab() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: TAB0 still tracks column correctly for echo accuracy.
-pub fn test_fp11_tab0_column_tracking() -> TestResult {
+/// TAB0 still tracks column correctly for echo accuracy.
+pub fn test_tab0_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
     // Set TAB0 (clear TABDLY bits).
     let mut t = *ld.termios();
@@ -14518,8 +14517,8 @@ pub fn test_fp11_tab0_column_tracking() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: Column tracking correct across CR/LF/TAB with XTABS.
-pub fn test_fp11_xtabs_column_tracking_mixed() -> TestResult {
+/// Column tracking correct across CR/LF/TAB with XTABS.
+pub fn test_xtabs_column_tracking_mixed() -> TestResult {
     let mut ld = LineDisc::new();
     // Default: OPOST | ONLCR | XTABS
 
@@ -14562,8 +14561,8 @@ pub fn test_fp11_xtabs_column_tracking_mixed() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: TABDLY bits roundtrip through termios get/set.
-pub fn test_fp11_tabdly_termios_roundtrip() -> TestResult {
+/// TABDLY bits roundtrip through termios get/set.
+pub fn test_tabdly_termios_roundtrip() -> TestResult {
     let mut ld = LineDisc::new();
 
     // Set TAB0 (clear XTABS).
@@ -14591,8 +14590,8 @@ pub fn test_fp11_tabdly_termios_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: No OPOST means tab passes through regardless of TABDLY.
-pub fn test_fp11_no_opost_tab_passthrough() -> TestResult {
+/// No OPOST means tab passes through regardless of TABDLY.
+pub fn test_no_opost_tab_passthrough() -> TestResult {
     let mut ld = LineDisc::new();
     // Disable OPOST entirely.
     let mut t = *ld.termios();
@@ -14619,8 +14618,8 @@ pub fn test_fp11_no_opost_tab_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 11: Existing output processing tests still pass with XTABS default.
-pub fn test_fp11_existing_output_unaffected() -> TestResult {
+/// Existing output processing tests still pass with XTABS default.
+pub fn test_existing_output_unaffected() -> TestResult {
     let mut ld = LineDisc::new();
     // Default: OPOST | ONLCR | XTABS
 
@@ -14656,11 +14655,11 @@ pub fn test_fp11_existing_output_unaffected() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 12: no_room-style Overflow Recovery
+// no_room-style Overflow Recovery
 // ===========================================================================
 
-/// Finishing Phase 12: A fresh LineDisc has no_room = false.
-pub fn test_fp12_no_room_initially_false() -> TestResult {
+/// A fresh LineDisc has no_room = false.
+pub fn test_no_room_initially_false() -> TestResult {
     let ld = LineDisc::new();
     if ld.no_room() {
         klog_info!("TTY_TEST: BUG - fresh LineDisc has no_room=true");
@@ -14673,8 +14672,8 @@ pub fn test_fp12_no_room_initially_false() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: Filling cooked buffer then pushing sets no_room.
-pub fn test_fp12_no_room_set_on_cooked_full() -> TestResult {
+/// Filling cooked buffer then pushing sets no_room.
+pub fn test_no_room_set_on_cooked_full() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill to capacity.
     for _ in 0..4096 {
@@ -14700,8 +14699,8 @@ pub fn test_fp12_no_room_set_on_cooked_full() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: no_room not set when buffer is not full.
-pub fn test_fp12_no_room_not_set_before_full() -> TestResult {
+/// no_room not set when buffer is not full.
+pub fn test_no_room_not_set_before_full() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..100 {
         ld.push_cooked(b'A');
@@ -14713,8 +14712,8 @@ pub fn test_fp12_no_room_not_set_before_full() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: overflow_count increments on each dropped byte.
-pub fn test_fp12_overflow_count_increments() -> TestResult {
+/// overflow_count increments on each dropped byte.
+pub fn test_overflow_count_increments() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill to capacity.
     for _ in 0..4096 {
@@ -14734,8 +14733,8 @@ pub fn test_fp12_overflow_count_increments() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: overflow_count saturates instead of wrapping.
-pub fn test_fp12_overflow_count_saturates() -> TestResult {
+/// overflow_count saturates instead of wrapping.
+pub fn test_overflow_count_saturates() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill buffer.
     for _ in 0..4096 {
@@ -14763,8 +14762,8 @@ pub fn test_fp12_overflow_count_saturates() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: Draining below low-water clears no_room.
-pub fn test_fp12_no_room_clears_on_drain_below_threshold() -> TestResult {
+/// Draining below low-water clears no_room.
+pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
     // Fill to capacity and trigger no_room.
@@ -14815,8 +14814,8 @@ pub fn test_fp12_no_room_clears_on_drain_below_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: no_room stays set when still above threshold.
-pub fn test_fp12_no_room_stays_above_threshold() -> TestResult {
+/// no_room stays set when still above threshold.
+pub fn test_no_room_stays_above_threshold() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..4096 {
         ld.push_cooked(b'X');
@@ -14836,8 +14835,8 @@ pub fn test_fp12_no_room_stays_above_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: flush_input clears no_room and overflow_count.
-pub fn test_fp12_flush_input_clears_no_room() -> TestResult {
+/// flush_input clears no_room and overflow_count.
+pub fn test_flush_input_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..4096 {
         ld.push_cooked(b'X');
@@ -14859,8 +14858,8 @@ pub fn test_fp12_flush_input_clears_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: flush_all clears no_room and overflow_count.
-pub fn test_fp12_flush_all_clears_no_room() -> TestResult {
+/// flush_all clears no_room and overflow_count.
+pub fn test_flush_all_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..4096 {
         ld.push_cooked(b'X');
@@ -14878,8 +14877,8 @@ pub fn test_fp12_flush_all_clears_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: Fill/drain cycle with no_room preserves throttle.
-pub fn test_fp12_fill_drain_cycle_preserves_throttle() -> TestResult {
+/// Fill/drain cycle with no_room preserves throttle.
+pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
     // Cycle 1: fill → overflow → drain → recovery.
@@ -14917,8 +14916,8 @@ pub fn test_fp12_fill_drain_cycle_preserves_throttle() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: RawDisc also tracks no_room on overflow.
-pub fn test_fp12_rawdisc_no_room() -> TestResult {
+/// RawDisc also tracks no_room on overflow.
+pub fn test_rawdisc_no_room() -> TestResult {
     let mut rd = RawDisc::new();
     // RawDisc buffer is 4096 bytes.
     for _ in 0..4096 {
@@ -14947,8 +14946,8 @@ pub fn test_fp12_rawdisc_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: IMAXBEL bell still works when no_room is set.
-pub fn test_fp12_imaxbel_preserved_with_no_room() -> TestResult {
+/// IMAXBEL bell still works when no_room is set.
+pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     // Put into raw mode with IMAXBEL.
     let mut t = *ld.termios();
@@ -14973,8 +14972,8 @@ pub fn test_fp12_imaxbel_preserved_with_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: RawDisc check_no_room_recovery works.
-pub fn test_fp12_rawdisc_recovery() -> TestResult {
+/// RawDisc check_no_room_recovery works.
+pub fn test_rawdisc_recovery() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut rd = RawDisc::new();
     // Fill and overflow.
@@ -15005,8 +15004,8 @@ pub fn test_fp12_rawdisc_recovery() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 12: LdiscKind dispatch forwards no_room/overflow_count.
-pub fn test_fp12_ldisc_kind_dispatch() -> TestResult {
+/// LdiscKind dispatch forwards no_room/overflow_count.
+pub fn test_ldisc_kind_dispatch() -> TestResult {
     use crate::tty::ldisc::LdiscKind;
     let mut lk = LdiscKind::NTty(LineDisc::new());
     if lk.no_room() {
@@ -15037,12 +15036,12 @@ pub fn test_fp12_ldisc_kind_dispatch() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 13: Output Drain Semantics Hardening tests
+// Output Drain Semantics Hardening tests
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 13: wait_output_idle (via is_output_idle) returns true
+/// wait_output_idle (via is_output_idle) returns true
 /// when no output is in-flight and driver has no pending output (fast path).
-pub fn test_fp13_drain_idle_fast_path() -> TestResult {
+pub fn test_drain_idle_fast_path() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -15062,8 +15061,8 @@ pub fn test_fp13_drain_idle_fast_path() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: Drain on a hung-up TTY is vacuously complete.
-pub fn test_fp13_drain_hangup_vacuously_complete() -> TestResult {
+/// Drain on a hung-up TTY is vacuously complete.
+pub fn test_drain_hangup_vacuously_complete() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -15083,8 +15082,8 @@ pub fn test_fp13_drain_hangup_vacuously_complete() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: tcsbrk(arg>0) on a hung-up TTY returns HungUp error.
-pub fn test_fp13_tcsbrk_hangup_returns_error() -> TestResult {
+/// tcsbrk(arg>0) on a hung-up TTY returns HungUp error.
+pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -15104,8 +15103,8 @@ pub fn test_fp13_tcsbrk_hangup_returns_error() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: tcsbrk(0) on a hung-up TTY also returns HungUp (break is an ioctl).
-pub fn test_fp13_tcsbrk_zero_hangup_returns_error() -> TestResult {
+/// tcsbrk(0) on a hung-up TTY also returns HungUp (break is an ioctl).
+pub fn test_tcsbrk_zero_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     tty::hangup(idx);
@@ -15122,8 +15121,8 @@ pub fn test_fp13_tcsbrk_zero_hangup_returns_error() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: tcsbrk(0) on a healthy TTY returns success (no-op break).
-pub fn test_fp13_tcsbrk_zero_healthy_succeeds() -> TestResult {
+/// tcsbrk(0) on a healthy TTY returns success (no-op break).
+pub fn test_tcsbrk_zero_healthy_succeeds() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
@@ -15136,9 +15135,9 @@ pub fn test_fp13_tcsbrk_zero_healthy_succeeds() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: tcsbrk(arg>0) and TCSETSW share the same drain path.
+/// tcsbrk(arg>0) and TCSETSW share the same drain path.
 /// Verify behavioral parity: both succeed immediately on a synchronous backend.
-pub fn test_fp13_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
+pub fn test_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -15163,8 +15162,8 @@ pub fn test_fp13_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 13: drain on an invalid TTY index returns InvalidIndex.
-pub fn test_fp13_drain_invalid_index() -> TestResult {
+/// drain on an invalid TTY index returns InvalidIndex.
+pub fn test_drain_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     match tty::tcsbrk(TtyIndex(255), 1) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -15178,8 +15177,8 @@ pub fn test_fp13_drain_invalid_index() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: drain on an unallocated TTY slot returns NotAllocated.
-pub fn test_fp13_drain_unallocated_slot() -> TestResult {
+/// drain on an unallocated TTY slot returns NotAllocated.
+pub fn test_drain_unallocated_slot() -> TestResult {
     tty::table::tty_table_init();
     // Slot 7 is not allocated after init.
     match tty::tcsbrk(TtyIndex(7), 1) {
@@ -15194,8 +15193,8 @@ pub fn test_fp13_drain_unallocated_slot() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: PTY drain is always immediate (no hardware latency).
-pub fn test_fp13_pty_drain_immediate() -> TestResult {
+/// PTY drain is always immediate (no hardware latency).
+pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
 
     let master_idx = match tty::pty_alloc() {
@@ -15241,8 +15240,8 @@ pub fn test_fp13_pty_drain_immediate() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: Console drain is immediate (synchronous serial driver).
-pub fn test_fp13_console_drain_synchronous() -> TestResult {
+/// Console drain is immediate (synchronous serial driver).
+pub fn test_console_drain_synchronous() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -15270,9 +15269,9 @@ pub fn test_fp13_console_drain_synchronous() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: output_pending_bytes returns 0 for all current driver kinds
+/// output_pending_bytes returns 0 for all current driver kinds
 /// (all backends are synchronous).
-pub fn test_fp13_output_pending_bytes_all_drivers() -> TestResult {
+pub fn test_output_pending_bytes_all_drivers() -> TestResult {
     use crate::tty::driver::SerialConsoleDriver;
 
     let serial = TtyDriverKind::SerialConsole(SerialConsoleDriver);
@@ -15312,9 +15311,9 @@ pub fn test_fp13_output_pending_bytes_all_drivers() -> TestResult {
     TestResult::Pass
 }
 
-/// Finishing Phase 13: output_queued_bytes uses output_pending_bytes.
+/// output_queued_bytes uses output_pending_bytes.
 /// After a completed write, queued bytes should be 0 for synchronous drivers.
-pub fn test_fp13_output_queued_uses_pending_bytes() -> TestResult {
+pub fn test_output_queued_uses_pending_bytes() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
@@ -15336,9 +15335,9 @@ pub fn test_fp13_output_queued_uses_pending_bytes() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: TCSETSW on a hung-up TTY returns HungUp (the
+/// TCSETSW on a hung-up TTY returns HungUp (the
 /// set_termios_mode hangup guard fires before the drain path).
-pub fn test_fp13_tcsetsw_hangup_returns_error() -> TestResult {
+pub fn test_tcsetsw_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -15358,8 +15357,8 @@ pub fn test_fp13_tcsetsw_hangup_returns_error() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: TCSETSF on a hung-up TTY returns HungUp.
-pub fn test_fp13_tcsetsf_hangup_returns_error() -> TestResult {
+/// TCSETSF on a hung-up TTY returns HungUp.
+pub fn test_tcsetsf_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -15379,9 +15378,9 @@ pub fn test_fp13_tcsetsf_hangup_returns_error() -> TestResult {
     }
 }
 
-/// Finishing Phase 13: Inflight counter starts at 0, bumps during write,
+/// Inflight counter starts at 0, bumps during write,
 /// returns to 0 after write completes.  Verifies the split-write accounting.
-pub fn test_fp13_inflight_accounting_round_trip() -> TestResult {
+pub fn test_inflight_accounting_round_trip() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -15412,7 +15411,7 @@ pub fn test_fp13_inflight_accounting_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_input_event_normal_behavior() -> TestResult {
+pub fn test_input_event_normal_behavior() -> TestResult {
     let mut legacy = LineDisc::new();
     let mut typed = LineDisc::new();
     let mut t = *legacy.termios();
@@ -15434,7 +15433,7 @@ pub fn test_fp14_input_event_normal_behavior() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_input_event_break_brkint() -> TestResult {
+pub fn test_input_event_break_brkint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag |= slopos_abi::syscall::BRKINT;
@@ -15455,7 +15454,7 @@ pub fn test_fp14_input_event_break_brkint() -> TestResult {
     }
 }
 
-pub fn test_fp14_input_event_break_ignbrk() -> TestResult {
+pub fn test_input_event_break_ignbrk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag |= slopos_abi::syscall::IGNBRK;
@@ -15471,7 +15470,7 @@ pub fn test_fp14_input_event_break_ignbrk() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_input_event_parity_parmrk() -> TestResult {
+pub fn test_input_event_parity_parmrk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
@@ -15495,7 +15494,7 @@ pub fn test_fp14_input_event_parity_parmrk() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_input_event_parity_ignpar() -> TestResult {
+pub fn test_input_event_parity_ignpar() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag |= slopos_abi::syscall::IGNPAR;
@@ -15511,7 +15510,7 @@ pub fn test_fp14_input_event_parity_ignpar() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_input_event_overrun_noop() -> TestResult {
+pub fn test_input_event_overrun_noop() -> TestResult {
     let mut ld = LineDisc::new();
     let _ = ld.input_char(InputEvent {
         byte: b'X',
@@ -15524,7 +15523,7 @@ pub fn test_fp14_input_event_overrun_noop() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_poll_output_stopped_masks_pollout() -> TestResult {
+pub fn test_poll_output_stopped_masks_pollout() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOOFF as i32);
@@ -15537,7 +15536,7 @@ pub fn test_fp14_poll_output_stopped_masks_pollout() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_poll_output_not_stopped_has_pollout() -> TestResult {
+pub fn test_poll_output_not_stopped_has_pollout() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON as i32);
@@ -15549,7 +15548,7 @@ pub fn test_fp14_poll_output_not_stopped_has_pollout() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_grantpt_unlocks_slave() -> TestResult {
+pub fn test_grantpt_unlocks_slave() -> TestResult {
     use slopos_lib::kernel_services::syscall_services::tty::tty_services;
 
     tty::table::tty_table_init();
@@ -15573,7 +15572,7 @@ pub fn test_fp14_grantpt_unlocks_slave() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_b0_hangup() -> TestResult {
+pub fn test_b0_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let mut t = tty::get_termios(idx).unwrap();
@@ -15592,7 +15591,7 @@ pub fn test_fp14_b0_hangup() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_speed_roundtrip() -> TestResult {
+pub fn test_speed_roundtrip() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -15622,7 +15621,7 @@ pub fn test_fp14_speed_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_batched_ingress_no_data_loss() -> TestResult {
+pub fn test_batched_ingress_no_data_loss() -> TestResult {
     let mut ld = LineDisc::new();
     {
         let mut t = *ld.termios();
@@ -15667,9 +15666,9 @@ pub fn test_fp14_batched_ingress_no_data_loss() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_batched_ingress_signal_in_middle() -> TestResult {
-    let Some((master, slave, saved)) = phase39_setup_pty() else {
-        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+pub fn test_batched_ingress_signal_in_middle() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
 
@@ -15678,7 +15677,7 @@ pub fn test_fp14_batched_ingress_signal_in_middle() -> TestResult {
     t.c_lflag |= slopos_abi::syscall::ISIG;
     t.c_lflag &= !slopos_abi::syscall::NOFLSH;
     if tty::set_termios(slave, &t).is_err() {
-        phase39_teardown_pty(master, slave, &saved);
+        packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
     }
 
@@ -15686,7 +15685,7 @@ pub fn test_fp14_batched_ingress_signal_in_middle() -> TestResult {
     let _ = tty::write(master, &payload, false);
     let mut out = [0u8; 8];
     let n = tty::read(slave, &mut out, true).unwrap_or(0);
-    phase39_teardown_pty(master, slave, &saved);
+    packet_mode_teardown_pty(master, slave, &saved);
     if n != 0 {
         klog_info!(
             "TTY_TEST: BUG - signal in batch should flush/discard trailing bytes, got {:?}",
@@ -15697,7 +15696,7 @@ pub fn test_fp14_batched_ingress_signal_in_middle() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_background_read_sigttin_blocked_eio() -> TestResult {
+pub fn test_background_read_sigttin_blocked_eio() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10);
     if !matches!(s.check_read(99, 10), ForegroundCheck::BackgroundRead) {
@@ -15711,7 +15710,7 @@ pub fn test_fp14_background_read_sigttin_blocked_eio() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp14_receive_buf_accumulates_echo() -> TestResult {
+pub fn test_receive_buf_accumulates_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let events = [
         InputEvent::normal(b'a'),
@@ -15727,10 +15726,10 @@ pub fn test_fp14_receive_buf_accumulates_echo() -> TestResult {
 }
 
 // ===========================================================================
-// Finishing Phase 16: mod.rs Module Decomposition — Regression Tests
+// mod.rs Module Decomposition — Regression Tests
 // ===========================================================================
 
-pub fn test_fp16_mod_reexports_io_functions() -> TestResult {
+pub fn test_mod_reexports_io_functions() -> TestResult {
     // Verify I/O functions are accessible through crate::tty::*
     let _: fn(TtyIndex, &mut [u8], bool) -> Result<usize, TtyError> = tty::read;
     let _: fn(TtyIndex, &[u8], bool) -> Result<usize, TtyError> = tty::write;
@@ -15740,7 +15739,7 @@ pub fn test_fp16_mod_reexports_io_functions() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_mod_reexports_termios_functions() -> TestResult {
+pub fn test_mod_reexports_termios_functions() -> TestResult {
     use slopos_abi::syscall::{UserTermios, UserWinsize};
     let _: fn(TtyIndex) -> Result<UserTermios, TtyError> = tty::get_termios;
     let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios;
@@ -15757,7 +15756,7 @@ pub fn test_fp16_mod_reexports_termios_functions() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_mod_reexports_job_control_functions() -> TestResult {
+pub fn test_mod_reexports_job_control_functions() -> TestResult {
     let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_foreground_pgrp;
     let _: fn(TtyIndex, u32) -> Result<(), TtyError> = tty::set_foreground_pgrp;
     let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_session_id;
@@ -15766,7 +15765,7 @@ pub fn test_fp16_mod_reexports_job_control_functions() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_mod_reexports_lifecycle_functions() -> TestResult {
+pub fn test_mod_reexports_lifecycle_functions() -> TestResult {
     let _: fn() -> TtyIndex = tty::active_tty;
     let _: fn(TtyIndex) = tty::set_active_tty;
     let _: fn(TtyIndex) -> Result<(), TtyError> = tty::switch_active_tty;
@@ -15781,7 +15780,7 @@ pub fn test_fp16_mod_reexports_lifecycle_functions() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_mod_reexports_poll_functions() -> TestResult {
+pub fn test_mod_reexports_poll_functions() -> TestResult {
     let _: fn(TtyIndex, u16) -> u16 = tty::poll_events;
     let _: fn(&[u8]) = tty::poll_sleep_on;
     let _: fn() = tty::poll_sleep;
@@ -15790,13 +15789,13 @@ pub fn test_fp16_mod_reexports_poll_functions() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_mod_reexports_pty_functions() -> TestResult {
+pub fn test_mod_reexports_pty_functions() -> TestResult {
     let _: fn(TtyIndex) -> bool = tty::is_pty_slave;
     let _: fn(TtyIndex) -> bool = tty::is_slave_locked;
     TestResult::Pass
 }
 
-pub fn test_fp16_tty_struct_fields_accessible() -> TestResult {
+pub fn test_tty_struct_fields_accessible() -> TestResult {
     use slopos_abi::syscall::UserWinsize;
     let guard = crate::tty::table::TTY_SLOTS[0].lock();
     if let Some(tty) = guard.as_ref() {
@@ -15815,7 +15814,7 @@ pub fn test_fp16_tty_struct_fields_accessible() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_tty_error_variants_unchanged() -> TestResult {
+pub fn test_tty_error_variants_unchanged() -> TestResult {
     let errors = [
         (TtyError::InvalidIndex, -22),
         (TtyError::NotAllocated, -6),
@@ -15839,7 +15838,7 @@ pub fn test_fp16_tty_error_variants_unchanged() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_max_ttys_constant() -> TestResult {
+pub fn test_max_ttys_constant() -> TestResult {
     if tty::MAX_TTYS != 32 {
         klog_info!(
             "TTY_TEST: BUG - MAX_TTYS changed from 32 to {}",
@@ -15850,7 +15849,7 @@ pub fn test_fp16_max_ttys_constant() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp16_existing_api_smoke_test() -> TestResult {
+pub fn test_existing_api_smoke_test() -> TestResult {
     let idx = tty::active_tty();
     let _ = tty::get_termios(idx);
     let _ = tty::get_foreground_pgrp(idx);

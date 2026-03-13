@@ -1,10 +1,10 @@
 use super::*;
 
 // ===========================================================================
-// Phase 15: VConsole Unicode & Broadened Xterm Emulation
+// VConsole Unicode & Broadened Xterm Emulation
 // ===========================================================================
 
-pub fn test_fp15_utf8_2byte_renders_codepoint() -> TestResult {
+pub fn test_utf8_2byte_renders_codepoint() -> TestResult {
     let mut parser = VtParser::new();
     // é = U+00E9 = 0xC3 0xA9
     let a1 = parser.advance(0xC3);
@@ -19,7 +19,7 @@ pub fn test_fp15_utf8_2byte_renders_codepoint() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_utf8_3byte_renders_codepoint() -> TestResult {
+pub fn test_utf8_3byte_renders_codepoint() -> TestResult {
     let mut parser = VtParser::new();
     // 中 = U+4E2D = 0xE4 0xB8 0xAD
     let a1 = parser.advance(0xE4);
@@ -35,7 +35,7 @@ pub fn test_fp15_utf8_3byte_renders_codepoint() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_utf8_4byte_renders_codepoint() -> TestResult {
+pub fn test_utf8_4byte_renders_codepoint() -> TestResult {
     let mut parser = VtParser::new();
     // 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80
     let _ = parser.advance(0xF0);
@@ -49,7 +49,7 @@ pub fn test_fp15_utf8_4byte_renders_codepoint() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_utf8_invalid_byte_emits_replacement() -> TestResult {
+pub fn test_utf8_invalid_byte_emits_replacement() -> TestResult {
     let mut parser = VtParser::new();
     // 0xFF is an invalid UTF-8 lead byte.
     let a = parser.advance(0xFF);
@@ -60,7 +60,7 @@ pub fn test_fp15_utf8_invalid_byte_emits_replacement() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_utf8_truncated_sequence_emits_replacement() -> TestResult {
+pub fn test_utf8_truncated_sequence_emits_replacement() -> TestResult {
     let mut parser = VtParser::new();
     // Start a 2-byte sequence but send ASCII instead of continuation.
     let a1 = parser.advance(0xC3);
@@ -83,7 +83,7 @@ pub fn test_fp15_utf8_truncated_sequence_emits_replacement() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_utf8_overlong_rejected() -> TestResult {
+pub fn test_utf8_overlong_rejected() -> TestResult {
     let mut parser = VtParser::new();
     // Overlong encoding of '/' (U+002F): 0xC0 0xAF
     // 0xC0 is an invalid lead byte (overlong), should emit replacement.
@@ -95,7 +95,7 @@ pub fn test_fp15_utf8_overlong_rejected() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_ascii_still_works() -> TestResult {
+pub fn test_ascii_still_works() -> TestResult {
     let mut parser = VtParser::new();
     let a = parser.advance(b'Z');
     if a != VtAction::Print(b'Z' as u32) {
@@ -105,7 +105,7 @@ pub fn test_fp15_ascii_still_works() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_sgr_256_foreground() -> TestResult {
+pub fn test_sgr_256_foreground() -> TestResult {
     let mut p = VtParser::new();
     let mut last = VtAction::Nop;
     for &b in b"\x1b[38;5;196m" {
@@ -121,7 +121,7 @@ pub fn test_fp15_sgr_256_foreground() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_sgr_256_background() -> TestResult {
+pub fn test_sgr_256_background() -> TestResult {
     let mut p = VtParser::new();
     let mut last = VtAction::Nop;
     for &b in b"\x1b[48;5;232m" {
@@ -137,7 +137,7 @@ pub fn test_fp15_sgr_256_background() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_sgr_truecolor_foreground() -> TestResult {
+pub fn test_sgr_truecolor_foreground() -> TestResult {
     let mut p = VtParser::new();
     let mut last = VtAction::Nop;
     for &b in b"\x1b[38;2;255;128;0m" {
@@ -156,7 +156,7 @@ pub fn test_fp15_sgr_truecolor_foreground() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_sgr_truecolor_background() -> TestResult {
+pub fn test_sgr_truecolor_background() -> TestResult {
     let mut p = VtParser::new();
     let mut last = VtAction::Nop;
     for &b in b"\x1b[48;2;10;20;30m" {
@@ -172,7 +172,7 @@ pub fn test_fp15_sgr_truecolor_background() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_vconsole_256_color_sets_fg() -> TestResult {
+pub fn test_vconsole_256_color_sets_fg() -> TestResult {
     let mut state = boxed_vconsole_state();
     // ESC[38;5;1m then write 'X'
     for &b in b"\x1b[38;5;1m" {
@@ -190,7 +190,7 @@ pub fn test_fp15_vconsole_256_color_sets_fg() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_vconsole_truecolor_sets_fg() -> TestResult {
+pub fn test_vconsole_truecolor_sets_fg() -> TestResult {
     let mut state = boxed_vconsole_state();
     for &b in b"\x1b[38;2;255;128;0m" {
         state.process_byte(b);
@@ -208,7 +208,7 @@ pub fn test_fp15_vconsole_truecolor_sets_fg() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_bracketed_paste_enable_disable() -> TestResult {
+pub fn test_bracketed_paste_enable_disable() -> TestResult {
     let mut p = VtParser::new();
     if p.bracketed_paste {
         return TestResult::Fail;
@@ -230,7 +230,7 @@ pub fn test_fp15_bracketed_paste_enable_disable() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_decawm_default_on() -> TestResult {
+pub fn test_decawm_default_on() -> TestResult {
     let p = VtParser::new();
     if !p.auto_wrap {
         klog_info!("TTY_TEST: auto_wrap should default to true");
@@ -239,7 +239,7 @@ pub fn test_fp15_decawm_default_on() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_decawm_toggle() -> TestResult {
+pub fn test_decawm_toggle() -> TestResult {
     let mut p = VtParser::new();
     // Disable DECAWM: ESC[?7l
     for &b in b"\x1b[?7l" {
@@ -258,7 +258,7 @@ pub fn test_fp15_decawm_toggle() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_decckm_toggle() -> TestResult {
+pub fn test_decckm_toggle() -> TestResult {
     let mut p = VtParser::new();
     if p.cursor_key_mode {
         return TestResult::Fail;
@@ -278,7 +278,7 @@ pub fn test_fp15_decckm_toggle() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_decom_toggle() -> TestResult {
+pub fn test_decom_toggle() -> TestResult {
     let mut p = VtParser::new();
     if p.origin_mode {
         return TestResult::Fail;
@@ -298,7 +298,7 @@ pub fn test_fp15_decom_toggle() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_dectcem_still_works() -> TestResult {
+pub fn test_dectcem_still_works() -> TestResult {
     let mut state = boxed_vconsole_state();
     if !state.cursor_visible {
         return TestResult::Fail;
@@ -318,7 +318,7 @@ pub fn test_fp15_dectcem_still_works() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_alt_screen_still_works() -> TestResult {
+pub fn test_alt_screen_still_works() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.process_byte(b'Z');
     if state.cells[0][0] != b'Z' as u32 {
@@ -339,7 +339,7 @@ pub fn test_fp15_alt_screen_still_works() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_cell_model_u32() -> TestResult {
+pub fn test_cell_model_u32() -> TestResult {
     let state = boxed_vconsole_state();
     // Verify cells are u32 by checking a space is stored as u32.
     if state.cells[0][0] != 0x20 {
@@ -348,7 +348,7 @@ pub fn test_fp15_cell_model_u32() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_vconsole_utf8_hello_renders() -> TestResult {
+pub fn test_vconsole_utf8_hello_renders() -> TestResult {
     let mut state = boxed_vconsole_state();
     // "Héllo" = H é l l o
     // H = 0x48, é = 0xC3 0xA9, l = 0x6C, l = 0x6C, o = 0x6F
@@ -377,7 +377,7 @@ pub fn test_fp15_vconsole_utf8_hello_renders() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_double_width_cjk() -> TestResult {
+pub fn test_double_width_cjk() -> TestResult {
     let mut state = boxed_vconsole_state();
     // 中 = U+4E2D = 0xE4 0xB8 0xAD — double-width CJK character
     for &b in &[0xE4u8, 0xB8, 0xAD] {
@@ -406,7 +406,7 @@ pub fn test_fp15_double_width_cjk() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_invalid_utf8_in_vconsole() -> TestResult {
+pub fn test_invalid_utf8_in_vconsole() -> TestResult {
     let mut state = boxed_vconsole_state();
     // 0xFF is invalid — should render replacement character (U+FFFD).
     state.process_byte(0xFF);
@@ -420,7 +420,7 @@ pub fn test_fp15_invalid_utf8_in_vconsole() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_mixed_ascii_utf8_escapes() -> TestResult {
+pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Write "A", then ESC[31m (red), then "é", then ESC[0m (reset), then "B"
     state.process_byte(b'A');
@@ -460,7 +460,7 @@ pub fn test_fp15_mixed_ascii_utf8_escapes() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_256color_cube_mapping() -> TestResult {
+pub fn test_256color_cube_mapping() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Index 16 = rgb(0,0,0), index 21 = rgb(0,0,255), index 196 = rgb(255,0,0)
     // Test index 21: 16 + 36*0 + 6*0 + 5 = 21 → b=5*51=255, g=0, r=0
@@ -480,7 +480,7 @@ pub fn test_fp15_256color_cube_mapping() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_256color_grayscale_mapping() -> TestResult {
+pub fn test_256color_grayscale_mapping() -> TestResult {
     let mut state = boxed_vconsole_state();
     // Index 232 = first grayscale = 8 + 10*0 = 8 → rgb(8,8,8)
     for &b in b"\x1b[38;5;232m" {
@@ -500,7 +500,7 @@ pub fn test_fp15_256color_grayscale_mapping() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_is_double_width_ranges() -> TestResult {
+pub fn test_is_double_width_ranges() -> TestResult {
     use slopos_abi::font::is_double_width;
     // CJK Unified Ideographs
     if !is_double_width(0x4E2D) {
@@ -525,7 +525,7 @@ pub fn test_fp15_is_double_width_ranges() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_sgr_standard_colors_unaffected() -> TestResult {
+pub fn test_sgr_standard_colors_unaffected() -> TestResult {
     let mut p = VtParser::new();
     let mut last = VtAction::Nop;
     for &b in b"\x1b[31m" {
@@ -541,7 +541,7 @@ pub fn test_fp15_sgr_standard_colors_unaffected() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_parser_fuzz_utf8_no_panic() -> TestResult {
+pub fn test_parser_fuzz_utf8_no_panic() -> TestResult {
     let mut parser = VtParser::new();
     // Feed a mix of valid/invalid UTF-8, escape sequences, and random bytes.
     let chaos: [u8; 30] = [
@@ -566,8 +566,8 @@ pub fn test_fp15_parser_fuzz_utf8_no_panic() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_replacement_glyph_exists() -> TestResult {
-    use slopos_abi::font::{FONT_CHAR_HEIGHT, get_glyph_for_codepoint};
+pub fn test_replacement_glyph_exists() -> TestResult {
+    use slopos_abi::font::{get_glyph_for_codepoint, FONT_CHAR_HEIGHT};
     let glyph = get_glyph_for_codepoint(0xFFFD);
     // The replacement glyph should not be all zeros (it's a filled diamond).
     let mut has_nonzero = false;
@@ -584,7 +584,7 @@ pub fn test_fp15_replacement_glyph_exists() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_fp15_get_glyph_for_codepoint_ascii() -> TestResult {
+pub fn test_get_glyph_for_codepoint_ascii() -> TestResult {
     use slopos_abi::font::{get_glyph_for_codepoint, get_glyph_or_space};
     // For ASCII chars, get_glyph_for_codepoint should return same as get_glyph_or_space
     let cp_glyph = get_glyph_for_codepoint(b'A' as u32);
