@@ -1,9 +1,10 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: ✅ 13-phase gold-standard roadmap — ALL PHASES COMPLETE
+> **Status**: 16-phase gold-standard roadmap — Phases 1–13 COMPLETE, Phases 14–16 PENDING
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
-> **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 8 files, ~6000 lines. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
+> **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
+> **Current**: `drivers/src/tty/` — 9 files, ~7700 lines, ~630 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
+> **Phases 14–16**: Post-completion gold-standard audit identified three remaining semantic gaps separating "excellent hobby OS TTY" from "production-grade Rust kernel TTY": input status modeling + interruptible blocking + job control edges (Phase 14), VConsole Unicode + broader xterm emulation (Phase 15), and mod.rs module decomposition (Phase 16). These phases are independent and can be implemented in separate sessions.
 
 ---
 
@@ -25,8 +26,11 @@
 14. [Phase 11: TABDLY/XTABS Output Compatibility (Tier 2)](#14-phase-11-tabdlyxtabs-output-compatibility-tier-2)
 15. [Phase 12: no_room-style Overflow Recovery (Tier 3)](#15-phase-12-no_room-style-overflow-recovery-tier-3)
 16. [Phase 13: Output Drain Semantics Hardening (Tier 3)](#16-phase-13-output-drain-semantics-hardening-tier-3)
-17. [File Inventory](#17-file-inventory)
-18. [Appendix: Review Findings Reference](#18-appendix-review-findings-reference)
+17. [Phase 14: Core Semantic Correctness (Gold Standard Audit)](#17-phase-14-core-semantic-correctness-gold-standard-audit)
+18. [Phase 15: VConsole Unicode & Broadened Xterm Emulation](#18-phase-15-vconsole-unicode--broadened-xterm-emulation)
+19. [Phase 16: mod.rs Module Decomposition](#19-phase-16-modrs-module-decomposition)
+20. [File Inventory](#20-file-inventory)
+21. [Appendix: Review Findings Reference](#21-appendix-review-findings-reference)
 
 ---
 
@@ -53,6 +57,9 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **DONE** ✅ |
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **DONE** ✅ |
 | 13 | Output drain semantics hardening | P2 | Small | **DONE** ✅ |
+| 14 | Core semantic correctness (typed input, interruptible waits, job control, PTY ABI, batched ingress) | P0 | Large | Pending |
+| 15 | VConsole Unicode & broadened xterm emulation | P1 | Medium-Large | Pending |
+| 16 | `mod.rs` module decomposition | P2 | Medium | Pending |
 
 ---
 
@@ -877,9 +884,392 @@ Drain logic currently combines `TTY_OUTPUT_INFLIGHT` and `driver.output_pending(
 
 ---
 
-## 17. File Inventory
+## 17. Phase 14: Core Semantic Correctness (Gold Standard Audit)
 
-### Files to modify
+**Status**: Pending
+
+> **Priority**: P0 — these are the semantic gaps where real programs (bash, vim, tmux, ssh) will break. Identified by a comparative audit against Linux N_TTY, RedoxOS, and Asterinas TTY implementations.
+> **Principle**: Fix the places where real software breaks first: input status modeling, signal interruptibility, job control edge semantics, PTY allocation ABI, and per-byte lock churn. Keep all existing architectural strengths (per-slot locking, generation-tagged handles, split-write, deferred signals).
+
+This phase bundles five interconnected improvements that share the same code paths and should land together for coherent testing.
+
+### 14.1 Typed Input Status Record
+
+**Problem**: `ldisc.input_char(c: u8)` can only receive raw bytes. Real serial hardware delivers break/parity/framing status alongside data. Without this, `IGNPAR`, `INPCK`, `PARMRK`, and true `BRKINT` semantics are best-effort approximations based on NUL byte heuristics — not POSIX-correct.
+
+**What Linux does**: `receive_buf(const u8 *cp, const u8 *fp, size_t count)` — separate byte and flag buffers where `fp` carries `TTY_NORMAL`, `TTY_BREAK`, `TTY_PARITY`, `TTY_OVERRUN` per byte.
+
+**Rust-native solution**:
+
+```rust
+/// Typed input event replacing raw u8 in the driver→ldisc interface.
+/// Carries line-status metadata alongside the data byte so that
+/// BRKINT, PARMRK, IGNPAR, and INPCK can be handled correctly.
+#[derive(Clone, Copy, Debug)]
+pub struct InputEvent {
+    pub byte: u8,
+    pub status: InputStatus,
+}
+
+/// Line status for a received byte.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputStatus {
+    /// Normal data byte — no error condition.
+    Normal = 0,
+    /// Break condition detected by hardware.
+    Break = 1,
+    /// Parity error detected by hardware.
+    ParityError = 2,
+    /// Framing error detected by hardware.
+    FrameError = 3,
+    /// Hardware overrun — bytes were lost.
+    Overrun = 4,
+}
+```
+
+**Changes required**:
+
+- Add `InputEvent` and `InputStatus` to `drivers/src/tty/driver.rs`.
+- Change `TtyDriver::drain_input()` signature: `fn drain_input(&self, out: &mut [InputEvent]) -> usize` (or keep `u8` buffer + separate status buffer for zero-copy).
+- Change `push_input(idx, c: u8)` → `push_input(idx, event: InputEvent)`. Callers that don't have status info (keyboard ISR, PTY master write) construct `InputEvent { byte, status: Normal }`.
+- Change `LdiscOps::input_char(c: u8)` → `input_char(event: InputEvent)`. The line discipline can now branch on `event.status` for correct `BRKINT`/`PARMRK`/`IGNPAR`/`INPCK` handling instead of NUL-byte heuristics.
+- Update `LineDisc::input_char()` and `RawDisc::input_char()` to handle `InputStatus::Break` (true BRKINT → SIGINT, not guessing from NUL), `InputStatus::ParityError` (IGNPAR → discard, INPCK + PARMRK → 0xFF 0x00 prefix), and `InputStatus::Overrun` (increment diagnostic counter).
+- All existing callers that pass raw `u8` wrap it: `InputEvent { byte: c, status: InputStatus::Normal }`.
+
+### 14.2 Interruptible Blocking for Write/Drain Paths
+
+**Problem**: Currently only `tty_read()` returns `ERESTARTSYS` on signal. Several other blocking paths silently hang on signals:
+
+| Blocking path | Current behavior | Correct behavior |
+|---|---|---|
+| Write throttle wait (PTY back-pressure) | Hangs on signal | Return `ERESTARTSYS` |
+| `wait_output_idle()` / `tcdrain()` | Non-interruptible | Return `ERESTARTSYS` |
+| `TCSETSW` / `TCSETSF` drain waits | Non-interruptible | Return `ERESTARTSYS` |
+| PTY master write when slave throttled | Hangs on signal | Return `ERESTARTSYS` |
+
+Without this, a `SIGWINCH` during `tcdrain()` hangs the process forever. Any interactive program (vim, less, bash) that receives signals while writing will hang.
+
+**Changes required**:
+
+- Audit every `wait_event` / busy-wait loop in `mod.rs` and `pty.rs`.
+- Each must check for pending signals in the wait condition.
+- Return `TtyError::Restart` (mapping to `ERESTARTSYS`) when interrupted.
+- The existing syscall dispatch restart logic (Phase 7) handles `SA_RESTART` vs `EINTR` conversion — no changes needed there.
+- Specifically: `wait_output_idle()`, the IXON stopped-output wait in `write()`, the PTY throttle wait in `pty::master_write()`, and the `TCSETSW`/`TCSETSF` drain in `set_termios_wait()`/`set_termios_flush()`.
+
+### 14.3 Job Control Edge Cases
+
+**Problem**: Three POSIX job control edge cases are missing:
+
+**a) Background read when SIGTTIN is blocked/ignored:**
+POSIX says: if SIGTTIN is blocked or ignored, or the process group is orphaned, return `EIO` instead of sending the signal. Currently SlopOS always sends `SIGTTIN` regardless.
+
+```rust
+// In session.rs check_read() — after determining BackgroundRead:
+// Check if SIGTTIN is blocked/ignored for the caller.
+// If so, or if the caller's pgrp is orphaned, return DeniedEIO instead.
+```
+
+**b) `TIOCSPGRP` / `tcsetpgrp()` from background process:**
+POSIX requires sending `SIGTTOU` to the calling process group when a background process tries to set the foreground group. The write-side `SIGTTOU` handling already does this correctly, but `TIOCSPGRP` bypasses it. Fix: apply the same background-write check before `set_foreground_pgrp_checked()` in the ioctl handler.
+
+**c) `poll_events()` ignores `output_stopped`:**
+`TCXONC(TCOOFF)` stops output, and `write()` correctly blocks on `output_stopped`, but `poll_events()` still reports `POLLOUT` — misleading userland into thinking the TTY is writable. Fix: mask `POLLOUT` when `output_stopped` is true, matching the IXON `is_stopped()` check already present.
+
+### 14.4 PTY Userland ABI Completeness
+
+**Problem**: The `grantpt()` adapter in `syscall_services_init.rs` is a no-op stub. PTY slaves start locked (correct), but the standard `posix_openpt()` → `grantpt()` → `unlockpt()` → `ptsname()` flow used by tmux, screen, ssh, and the `script` utility expects `grantpt()` to at minimum unlock the slave.
+
+**Changes required**:
+
+- `grantpt()` implementation: at minimum, call `set_pty_lock(master_idx, false)` to unlock the slave. Full ownership/permission semantics are deferred until SlopOS has a permission model — document this explicitly.
+- Verify `ptsname()` / `TIOCGPTN` returns a path that `open()` can resolve (i.e., `/dev/pts/N` path resolution works end-to-end).
+- Consider adding `TIOCGPTPEER` (Linux 4.13+) — opens the slave FD directly from the master without path resolution. Low priority but modern tmux uses it.
+
+### 14.5 Batched PTY Ingress
+
+**Problem**: `pty::master_write()` pushes byte-by-byte through `push_input()`, taking the slave's slot lock per byte. For high-volume PTY traffic (compiling, log tailing, large outputs), this creates significant lock churn.
+
+**What Linux does**: `receive_buf(const u8 *cp, const u8 *fp, size_t count)` processes an entire buffer under one lock acquisition with one wake decision at the end.
+
+**Rust-native solution**:
+
+```rust
+// In ldisc.rs — new batched ingress method on LdiscOps:
+fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+    // Process all bytes under one logical operation.
+    // Accumulate echo actions, signals, and wake decisions.
+    // Return a summary of what the caller needs to do after dropping the lock.
+}
+
+pub struct BatchResult {
+    pub echo: ArrayVec<u8, 256>,  // Or a small fixed buffer
+    pub signal: Option<u8>,
+    pub should_wake: bool,
+    pub throttle: bool,
+}
+```
+
+**Changes required**:
+
+- Add `receive_buf()` to `LdiscOps` trait and implement for `LineDisc` and `RawDisc`.
+- In `mod.rs`, add `push_input_batch(idx, events: &[InputEvent])` that acquires the lock once, calls `ldisc.receive_buf()`, and performs one wake decision.
+- Update `pty::master_write()` to use the batched path: construct `InputEvent` slice from the write buffer, call `push_input_batch()`.
+- Keep the existing `push_input(idx, event)` for single-byte sources (keyboard ISR, serial polling) — it can internally delegate to the batch path with a 1-element slice.
+- Pairs naturally with 14.1 (InputEvent) since the batch buffer is typed.
+
+### 14.6 Additional Fixes (Small)
+
+These are small targeted fixes that naturally land alongside the above:
+
+- **`B0` baud rate hangup**: When `c_cflag` baud is set to `B0`, POSIX requires the modem control lines to be deasserted (effectively a hangup). Currently `B0` is decoded but has no hangup semantics. Fix: in `set_termios()`, check for `B0` and call `hangup()`.
+- **`set_termios()` ignores `c_ispeed`/`c_ospeed`**: The get path correctly synthesizes speed fields from `c_cflag`, but the set path ignores incoming speed fields. Fix: merge `c_ispeed`/`c_ospeed` back into `c_cflag` baud bits when they're non-zero, matching Linux `termios2` behavior. This makes `cfsetispeed()`/`cfsetospeed()` roundtrip correctly.
+
+### 14.7 Verification
+
+- Test: `InputEvent` with `InputStatus::Break` + `BRKINT` set → `SIGINT` delivered (not NUL heuristic).
+- Test: `InputEvent` with `InputStatus::ParityError` + `PARMRK` + `INPCK` → 0xFF 0x00 prefix marker inserted.
+- Test: `InputEvent` with `InputStatus::ParityError` + `IGNPAR` → byte discarded.
+- Test: `InputEvent` with `InputStatus::Normal` → identical to current `u8` behavior (regression).
+- Test: `SIGWINCH` during `tcdrain()` → returns `-EINTR` (not hang).
+- Test: `SIGWINCH` during PTY master write (throttled) → returns `-EINTR`.
+- Test: `TCSETSW` interrupted by signal → returns `-EINTR` or restarts (per `SA_RESTART`).
+- Test: Background process `tcsetpgrp()` → receives `SIGTTOU`.
+- Test: Background read with `SIGTTIN` blocked → returns `-EIO` (not signal).
+- Test: `poll_events()` with `output_stopped` set → `POLLOUT` NOT reported.
+- Test: `grantpt()` unlocks slave → subsequent `open("/dev/pts/N")` succeeds.
+- Test: `B0` in `tcsetattr()` → triggers hangup.
+- Test: `cfsetospeed()` roundtrip — set speed via `c_ospeed` field, read back via `c_cflag` baud bits.
+- Test: batched PTY ingress — master writes 1000 bytes, slave reads all 1000 (no loss, same as current).
+- Test: batched ingress with mixed signals — `SIGINT` char in middle of batch → signal delivered, remaining bytes after signal char discarded (ISIG+!NOFLSH behavior).
+- Regression: all existing 630+ TTY tests pass unchanged.
+- `just build` + `just test` gate.
+
+### 14.8 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/driver.rs` | Add `InputEvent`, `InputStatus` types. Update `TtyDriver::drain_input()` signature or add `drain_input_events()` variant. Update `TtyDriverKind` dispatch. |
+| `drivers/src/tty/ldisc.rs` | Change `input_char(u8)` → `input_char(InputEvent)` on `LdiscOps` + both impls. Add `receive_buf()` batched method. Update BRKINT/PARMRK/IGNPAR/INPCK handling to use typed status. |
+| `drivers/src/tty/mod.rs` | Change `push_input(idx, u8)` → `push_input(idx, InputEvent)`. Add `push_input_batch()`. Make `wait_output_idle()`, write throttle wait, IXON wait interruptible. Fix `poll_events()` to mask `POLLOUT` when `output_stopped`. Add `B0` hangup in `set_termios()`. Fix `c_ispeed`/`c_ospeed` merge in set path. |
+| `drivers/src/tty/pty.rs` | Update `master_write()` to use batched ingress path. Update `push_input` calls to use `InputEvent`. Make throttle wait interruptible. |
+| `drivers/src/tty/session.rs` | Add `DeniedEIO` variant to `ForegroundCheck` for blocked/ignored SIGTTIN case. Update `check_read()` to accept signal-blocked info. |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add SIGTTOU check before `TIOCSPGRP` dispatch. |
+| `drivers/src/syscall_services_init.rs` | Implement real `grantpt()` (unlock slave). |
+| `drivers/src/tty_tests/` | Tests for all items: typed input status, interruptible waits, job control edges, grantpt, batched ingress, B0 hangup, speed field roundtrip. |
+
+---
+
+## 18. Phase 15: VConsole Unicode & Broadened Xterm Emulation
+
+**Status**: Pending
+
+> **Priority**: P1 usability — the local framebuffer console currently handles only ASCII printable bytes and basic SGR (8+8 colors). Modern terminal programs (vim, tmux, bat, delta, less) depend on UTF-8 rendering, 256-color/truecolor, and several DEC private modes.
+> **Principle**: Upgrade from "basic VGA terminal" to "usable xterm-class console". NOT a full xterm reimplementation — focus on the subset that real programs actually use. If SlopOS eventually gets a full userland terminal emulator, the kernel PTY/TTY path stays byte-transport focused while the compositor owns "full xterm" behavior.
+
+### 15.1 Design Decision: Cell Model
+
+**Must decide before implementation**: What does one "cell" in the VConsole grid represent?
+
+| Model | Pros | Cons |
+|---|---|---|
+| **Byte** (current) | Simple, fast | Can't render any non-ASCII |
+| **Codepoint** (recommended) | Handles ~99% of real-world Unicode | Doesn't handle grapheme clusters (flag emoji, ZWJ sequences) |
+| **Grapheme cluster** | Fully correct | Complex, needs Unicode segmentation tables (~20KB data) |
+
+**Recommendation**: Codepoint model with `u32` cells. Store one Unicode codepoint per cell. Characters wider than one cell (CJK, some emoji) occupy two cells with a "continuation" marker in the second. This is what Linux's fbcon, xterm, and most terminal emulators use.
+
+```rust
+// Replace current u8 cell with:
+#[derive(Clone, Copy)]
+pub(crate) struct Cell {
+    pub codepoint: u32,       // Unicode codepoint (0 = empty, 0xFFFF_FFFF = continuation)
+    pub attrs: CellAttributes,
+}
+```
+
+**Memory impact**: Each cell grows from 1 byte (`u8`) + 8 bytes (`CellAttributes`) = 9 bytes to 4 bytes (`u32`) + 8 bytes = 12 bytes. For 240×80 grid: 230 KB → 230 KB (negligible — `CellAttributes` already dominates).
+
+### 15.2 UTF-8 Decode in VtParser Ground State
+
+Currently `vtparser.rs` ignores bytes > 127 in ground state (`VtAction::None` for non-ASCII). Need a UTF-8 decoder:
+
+- Add a small UTF-8 accumulator to `VtParser` (4-byte buffer + byte count + expected length).
+- When a byte with high bit set arrives in ground state, start accumulating.
+- When the codepoint is complete, emit `VtAction::Print(codepoint)` (change `Print(u8)` to `Print(u32)` or `PrintUnicode(u32)`).
+- Invalid sequences: emit U+FFFD (replacement character) and re-sync.
+
+### 15.3 256-Color and Truecolor SGR
+
+Modern SGR sequences used by vim, bat, delta, and most colorized CLI tools:
+
+| Sequence | Meaning | Priority |
+|---|---|---|
+| `\e[38;5;Nm` | 256-color foreground | High — vim, bat, ls --color |
+| `\e[48;5;Nm` | 256-color background | High |
+| `\e[38;2;R;G;Bm` | Truecolor (24-bit) foreground | Medium — delta, bat |
+| `\e[48;2;R;G;Bm` | Truecolor (24-bit) background | Medium |
+
+Changes to `vtparser.rs`:
+- In SGR parsing, handle `38;5;N` and `48;5;N` (consume 3 params).
+- Handle `38;2;R;G;B` and `48;2;R;G;B` (consume 5 params).
+- Map 256-color indices 0–7 → standard colors, 8–15 → bright colors, 16–231 → 6×6×6 cube, 232–255 → grayscale ramp.
+- Add `SgrAttr::Foreground256(u8)`, `SgrAttr::Background256(u8)`, `SgrAttr::ForegroundRgb(u8,u8,u8)`, `SgrAttr::BackgroundRgb(u8,u8,u8)`.
+
+Changes to `vconsole.rs`:
+- Map 256-color to nearest RGB for framebuffer.
+- Store truecolor directly in `CellAttributes` (already `u32` RGB).
+
+### 15.4 Bracketed Paste Mode
+
+Used by bash 5+, fish, zsh, vim to distinguish typed input from pasted text:
+
+- `\e[?2004h` — enable bracketed paste mode.
+- `\e[?2004l` — disable bracketed paste mode.
+- When enabled, paste events are wrapped in `\e[200~` ... `\e[201~` markers.
+
+This is a DEC private mode. Add a `bracketed_paste: bool` flag to `VtParser` or `VConsoleState`. The TTY input path checks this flag when injecting paste data.
+
+### 15.5 Additional DEC Private Modes
+
+Modes used by vim, tmux, less, and similar programs:
+
+| Mode | Sequence | Used by | Priority |
+|---|---|---|---|
+| DECCKM (cursor key mode) | `\e[?1h/l` | vim, tmux | High |
+| DECOM (origin mode) | `\e[?6h/l` | less, vim | Medium |
+| DECAWM (auto-wrap) | `\e[?7h/l` | most programs | High |
+| DECTCEM (cursor visibility) | `\e[?25h/l` | vim, tmux | High (may already exist) |
+| Alt screen buffer | `\e[?1049h/l` | vim, tmux, less | High (may already exist) |
+| Mouse tracking (basic) | `\e[?1000h/l` | tmux | Low |
+
+Audit `vtparser.rs` for which are already implemented, add the missing ones.
+
+### 15.6 Double-Width Character Handling
+
+CJK characters (U+2E80–U+9FFF, U+F900–U+FAFF, etc.) and some emoji are "fullwidth" — they occupy 2 cell columns. When rendering:
+- The left cell stores the codepoint.
+- The right cell stores a continuation marker (e.g., `codepoint = 0xFFFF_FFFF`).
+- Cursor advances by 2 columns.
+- Backspace over a double-width char erases both cells.
+
+Use a lookup table or Unicode `East_Asian_Width` property to determine width. The `unicode-width` crate pattern (a ~2KB bitset lookup) can be embedded in `no_std`.
+
+### 15.7 Verification
+
+- Test: UTF-8 "Héllo" renders correctly (é = 2-byte sequence).
+- Test: CJK character "中" occupies 2 cells, cursor advances by 2.
+- Test: 256-color SGR `\e[38;5;196m` sets foreground to red.
+- Test: Truecolor SGR `\e[38;2;255;128;0m` sets foreground to orange.
+- Test: Bracketed paste mode enable/disable roundtrip.
+- Test: DECAWM on → line wraps at column limit; DECAWM off → cursor stays at last column.
+- Test: DECTCEM hide/show cursor.
+- Test: Alt screen switch and restore.
+- Test: Invalid UTF-8 byte → U+FFFD replacement character.
+- Test: Mixed ASCII + UTF-8 + escape sequences in one write → all render correctly.
+- Regression: all existing VT100 parser tests pass (ASCII behavior unchanged).
+- `just build` + `just test` gate.
+
+### 15.8 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/vtparser.rs` | Add UTF-8 decoder in ground state, 256-color/truecolor SGR parsing, bracketed paste mode, additional DEC private modes, `VtAction::Print` widened to `u32` |
+| `drivers/src/tty/vconsole.rs` | Change cell model from `u8` to `Cell { codepoint: u32, attrs }`, add font glyph lookup for codepoints > 127 (or replacement char), double-width cell handling, 256-color→RGB mapping |
+| `abi/src/font.rs` | Potentially extend font data for Latin-1/Basic Latin supplement glyphs, or add fallback glyph logic |
+| `drivers/src/tty_tests/test_vconsole.rs` | UTF-8 rendering tests, 256-color SGR tests, truecolor tests, double-width tests, bracketed paste tests |
+| `drivers/src/tty_tests/test_ldisc.rs` | Verify vtparser changes don't affect ldisc behavior (ldisc operates on bytes, not codepoints) |
+
+---
+
+## 19. Phase 16: mod.rs Module Decomposition
+
+**Status**: Pending
+
+> **Priority**: P2 maintainability — `mod.rs` at 2,596 lines mixes core I/O, termios policy, job control, lifecycle, hangup, and poll in one file. The code is correct, but navigation and future changes are harder than they need to be.
+> **Principle**: Split into focused modules with clear responsibilities. No behavioral changes — pure refactor. **Do this AFTER Phases 14 and 15**, since those phases modify `mod.rs` heavily. Refactoring code that's about to change wastes effort.
+
+### 19.1 Problem statement
+
+`mod.rs` is the largest file in the TTY subsystem (2,596 lines as of Phase 13 completion, likely ~2,800+ after Phase 14). It contains:
+
+- The `Tty` struct definition and field access helpers
+- `TtyError` enum and `to_errno()` mapping
+- `TtyIndex` re-export and `MAX_TTYS` constant
+- Read path (~400 lines including VMIN/VTIME, canonical/non-canonical, packet mode)
+- Write path (~200 lines including split-write, IXON check, output processing)
+- `push_input()` and hardware drain logic (~150 lines)
+- Termios get/set/wait/flush (~200 lines)
+- Window size management (~50 lines)
+- Line discipline get/set (~50 lines)
+- Job control (foreground pgrp, session attach/detach, SIGTTIN/SIGTTOU, controlling terminal acquire/release/detach) (~300 lines)
+- Lifecycle (open_ref, close_ref, hangup, vhangup) (~200 lines)
+- Poll events and poll sleep (~100 lines)
+- Active TTY management and compositor focus (~100 lines)
+- Miscellaneous ioctls (tcflush, tcsbrk, tcxonc, FIONREAD, TIOCOUTQ) (~150 lines)
+
+### 19.2 Proposed module split
+
+```
+drivers/src/tty/
+├── mod.rs          (~200 lines)  — Tty struct, TtyError, TtyIndex, MAX_TTYS, re-exports
+├── io.rs           (~600 lines)  — read(), write(), push_input(), push_input_batch(),
+│                                   drain_hw_input_locked(), split-write helpers
+├── termios.rs      (~400 lines)  — get/set_termios, set_termios_wait/flush,
+│                                   winsize, line discipline, tcflush, tcsbrk, tcxonc,
+│                                   FIONREAD, TIOCOUTQ, wait_output_idle
+├── job_control.rs  (~300 lines)  — session attach/detach, foreground pgrp,
+│                                   controlling terminal acquire/release/detach,
+│                                   SIGTTIN/SIGTTOU enforcement, detach_session_by_id
+├── lifecycle.rs    (~200 lines)  — open_ref, close_ref, hangup, vhangup,
+│                                   is_hung_up, active TTY management
+├── poll.rs         (~150 lines)  — poll_events, poll_sleep_on, poll_sleep,
+│                                   compositor focus
+├── ldisc.rs        (unchanged)
+├── driver.rs       (unchanged)
+├── pty.rs          (unchanged)
+├── session.rs      (unchanged)
+├── table.rs        (unchanged)
+├── vconsole.rs     (unchanged)
+├── vtparser.rs     (unchanged)
+└── ringbuf.rs      (unchanged)
+```
+
+### 19.3 Implementation guidelines
+
+- **Pure refactor**: no behavioral changes, no API changes, no new features.
+- Use `pub(crate)` for internal functions that are only called within the `tty` module.
+- Keep all `pub` functions accessible from the same path (`crate::tty::read`, etc.) via re-exports in `mod.rs`.
+- The `Tty` struct stays in `mod.rs` since every sub-module needs it.
+- Helper methods on `Tty` move to the module that owns their concern (e.g., `Tty::check_fg_read()` → `job_control.rs`).
+- Each new module gets a doc comment explaining its responsibility.
+- Run `just build` after each file move to catch import issues immediately.
+
+### 19.4 Verification
+
+- `just build` compiles cleanly (this is the primary gate — it's a pure refactor).
+- `just test` — all 630+ existing tests pass unchanged.
+- No `pub` API changes visible to code outside the `tty` module.
+- Grep confirms no function moved between files has a changed signature.
+- Each new file has a module doc comment.
+
+### 19.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Slim to ~200 lines: Tty struct, TtyError, constants, re-exports from sub-modules |
+| `drivers/src/tty/io.rs` | **NEW** — read, write, push_input, push_input_batch, drain, split-write |
+| `drivers/src/tty/termios.rs` | **NEW** — termios get/set/wait/flush, winsize, ldisc, ioctls, drain |
+| `drivers/src/tty/job_control.rs` | **NEW** — session, foreground pgrp, controlling terminal, SIGTTIN/SIGTTOU |
+| `drivers/src/tty/lifecycle.rs` | **NEW** — open/close ref counting, hangup, vhangup, active TTY |
+| `drivers/src/tty/poll.rs` | **NEW** — poll_events, poll_sleep, compositor focus |
+
+---
+
+## 20. File Inventory (Phases 1–13)
+
+### Files modified (all complete)
 
 | File | Phases | Nature of change |
 |------|--------|-----------------|
@@ -903,7 +1293,7 @@ All changes are modifications to existing files. The TTY module structure is com
 
 ---
 
-## 18. Appendix: Review Findings Reference
+## 21. Appendix: Review Findings Reference
 
 ### Comparative review methodology
 
