@@ -1,9 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 22-phase gold-standard roadmap — Phases 1–20 COMPLETE, Phases 21–22 pending (post-audit hardening)
+> **Status**: 22-phase gold-standard roadmap — Phases 1–21 COMPLETE, Phase 22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 14 files, ~8100 lines, ~1616 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~242 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, TIOCGSID ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed. Exclusive mode (TIOCEXCL/TIOCNXCL/TIOCGEXCL) and HUPCL enforcement on last close. Rust encapsulation hardened — `TtyFlags` bitflags, `PacketEvents` typed bitflags, all `Tty`/`TtySession` fields `pub(crate)`, `TtyDriverKind::None` and redundant `active` field removed.
+> **Current**: `drivers/src/tty/` — 14 files, ~8100 lines, ~1629 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~242 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, TIOCGSID ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed. Exclusive mode (TIOCEXCL/TIOCNXCL/TIOCGEXCL) and HUPCL enforcement on last close. Rust encapsulation hardened — `TtyFlags` bitflags, `PacketEvents` typed bitflags, all `Tty`/`TtySession` fields `pub(crate)`, `TtyDriverKind::None` and redundant `active` field removed. Deferred actions consolidated into `PostLockWork` RAII struct, write path lock acquisition consolidated (2→1), `LdiscOps` trait forwarding boilerplate reduced via `forward_ldisc_ops!` macro.
 > **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
@@ -72,7 +72,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | **DONE** ✅ |
 | 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | **DONE** ✅ |
 | 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | **DONE** ✅ |
-| 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | Pending |
+| 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | **DONE** ✅ |
 | 22 | Forward-looking: TIOCGPTPEER & flip-buffer architecture | P3 | Medium-Large | Pending |
 
 ---
@@ -1633,7 +1633,7 @@ This phase is a pure refactor — no behavioral changes, no new features.
 
 ## 24. Phase 21: Deferred Actions RAII & Boilerplate Reduction
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Added `PostLockWork` RAII struct to `mod.rs` that accumulates deferred signals, IXOFF bytes, packet events, and waiter wakes for batch execution after lock release. Refactored `io.rs` (push_input_batch, read path ~8 sites, has_data, bytes_available, input_available_cb), `poll.rs` (poll_events), and `termios.rs` (set_winsize, set_termios_mode) to use `PostLockWork` instead of manual deferred delivery. Consolidated write path peer slot resolution from 2 lock acquisitions to 1 (PTY peer relationships are immutable). Added `forward_ldisc_ops!` macro replacing ~180 lines of pure-forwarding `impl LdiscOps for LineDisc/RawDisc` boilerplate — only `receive_buf` remains manually implemented per variant. 13 regression tests added.
 
 > **Priority**: P2 — ergonomics and maintainability. The repeated "capture signal inside lock → deliver after lock drop" pattern appears ~8 times in `io.rs` alone. The `LdiscOps` trait has ~200 lines of pure forwarding boilerplate. The write path acquires the slot lock 3-4 separate times per iteration.
 > **Principle**: Use Rust RAII patterns to eliminate error-prone manual deferred-action sequences. Reduce trait boilerplate without losing the enum dispatch advantage. Cache invariant values to reduce redundant lock acquisitions.
@@ -1719,6 +1719,18 @@ Recommendation: **Option B** — it's the simplest reduction and stays idiomatic
 | `drivers/src/tty/termios.rs` | Use `PostLockWork` where applicable |
 | `drivers/src/tty/ldisc.rs` | Reduce `LdiscOps` boilerplate (Option A, B, or C) |
 | `drivers/src/tty_tests.rs` | Regression tests, optional throughput benchmark |
+
+### 21.6 Implementation summary
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Added `PostLockWork` struct with `add_signal()`, `add_ixoff_byte()`, `add_packet_event()` (with merge), `wake_input_slot/output_slot/poll_slot`, convenience `wake_output_and_poll/input_and_poll`, and `execute()`. Imported `DriverId`, `write_driver_unlocked`, waiter arrays. |
+| `drivers/src/tty/io.rs` | Refactored `push_input_batch()` (replaced 5 manual deferred vars with `PostLockWork`), `read_with_attach()` (replaced ~8 inline deferred-delivery blocks across all early-return sites + wait condition closure), `has_data()`, `bytes_available()`, `input_available_cb()`. Consolidated write path peer slot resolution from 2 lock acquisitions to 1. Removed unused `use super::pty` import. |
+| `drivers/src/tty/poll.rs` | Refactored `poll_events()` to use `PostLockWork` for deferred signal delivery from `drain_hw_input_locked()`. |
+| `drivers/src/tty/termios.rs` | Refactored `set_winsize()` (SIGWINCH delivery) and `set_termios_mode()` (packet events + B0 hangup) to use `PostLockWork`. |
+| `drivers/src/tty/ldisc.rs` | Added `forward_ldisc_ops!` macro generating 21 pure-forwarding trait methods. Replaced ~90-line `impl LdiscOps for LineDisc` and ~90-line `impl LdiscOps for RawDisc` forwarding blocks with `forward_ldisc_ops!(T)` + manual `receive_buf` only. Net reduction: ~160 lines of boilerplate. |
+| `drivers/src/tty_tests/test_ldisc.rs` | Added 13 tests (`test_p21_*`): PostLockWork default empty, signal non-empty, execute completes, ixoff byte, packet event, packet event merge, wake helpers, zero pgid ignored, zero event bits ignored, write path peer cache consolidation, forward_ldisc_ops LineDisc, forward_ldisc_ops RawDisc, existing API smoke test. |
+| `drivers/src/tty_tests/mod.rs` | Registered 13 new `test_p21_*` tests in suite. |
 
 ---
 
