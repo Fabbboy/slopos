@@ -2,7 +2,7 @@
 //! controlling terminal acquire/release/detach, and SIGTTIN/SIGTTOU
 //! enforcement.
 //!
-//! Phase 16 decomposition: extracted from `mod.rs` to isolate POSIX
+//! decomposition: extracted from `mod.rs` to isolate POSIX
 //! job control operations from the I/O and termios paths.
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
@@ -52,7 +52,7 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
 /// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
 ///
 /// Only processes in the same session as the TTY's controlling session may
-/// change the foreground pgrp.  Phase 24 additionally validates that the
+/// change the foreground pgrp.  Additionally validates that the
 /// target process group actually has living members in the session.
 ///
 /// Returns `Ok(())` on success, `Err(PermissionDenied)` on validation failure.
@@ -66,7 +66,7 @@ pub fn set_foreground_pgrp_checked(
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 24: Before acquiring the per-TTY lock, validate that the target
+    // Before acquiring the per-TTY lock, validate that the target
     // pgrp actually exists within the session.  This uses the scheduler's
     // task iterator and must be done outside the TTY lock.  Clearing the
     // foreground group (pgid == 0) is always allowed.
@@ -197,7 +197,7 @@ pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bo
     Ok(true)
 }
 
-/// Phase 24: Detach the calling process from its controlling terminal
+/// Detach the calling process from its controlling terminal
 /// (TIOCNOTTY semantics).
 ///
 /// If the caller is the session leader, the entire session loses the

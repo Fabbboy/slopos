@@ -4,7 +4,7 @@
 //! the virtual console renderer.  Parsing is fully separated from rendering
 //! so that the state machine can be tested independently.
 //!
-//! Phase 15: UTF-8 decoding in ground state, 256-color/truecolor SGR,
+//! UTF-8 decoding in ground state, 256-color/truecolor SGR,
 //! bracketed paste mode, additional DEC private modes (DECCKM, DECOM, DECAWM).
 
 const MAX_PARAMS: usize = 16;
@@ -120,11 +120,11 @@ pub(crate) struct VtParser {
     pending: [VtAction; MAX_PARAMS],
     pending_count: usize,
     pending_idx: usize,
-    // UTF-8 accumulator (Phase 15)
+    // UTF-8 accumulator
     utf8_buf: [u8; 4],
     utf8_len: u8,
     utf8_expected: u8,
-    // DEC mode state (Phase 15)
+    // DEC mode state
     pub(crate) bracketed_paste: bool,
     pub(crate) cursor_key_mode: bool,
     pub(crate) origin_mode: bool,

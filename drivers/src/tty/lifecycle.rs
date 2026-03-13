@@ -1,7 +1,7 @@
 //! TTY lifecycle management — allocation, open/close reference counting,
 //! hangup, vhangup, active TTY routing, and subsystem initialization.
 //!
-//! Phase 16 decomposition: extracted from `mod.rs` to isolate lifecycle
+//! decomposition: extracted from `mod.rs` to isolate lifecycle
 //! operations that control a TTY's existence and state transitions.
 
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -177,23 +177,23 @@ pub fn hangup(idx: TtyIndex) {
         };
         let sid = tty.session.session_id_raw();
         tty.ldisc.flush_all();
-        // Finishing Phase 8: Clear output stop so blocked writers unblock
+        // Clear output stop so blocked writers unblock
         // and see the hung_up flag on re-check.
         tty.output_stopped = false;
-        // Phase 39: full flush → both FLUSHREAD + FLUSHWRITE packet events.
+        // full flush → both FLUSHREAD + FLUSHWRITE packet events.
         // Deferred until after lock is dropped to avoid self-deadlock.
         tty.session.detach();
         tty.hung_up = true;
         sid
     };
 
-    // Phase 39: Deliver deferred packet events now that the slot lock is released.
+    // Deliver deferred packet events now that the slot lock is released.
     pty::queue_packet_event(
         idx,
         slopos_abi::syscall::TIOCPKT_FLUSHREAD | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
     );
 
-    // Phase 15: Signal the entire session (not just fg_pgrp) so that all
+    // Signal the entire session (not just fg_pgrp) so that all
     // processes in the session receive SIGHUP + SIGCONT on hangup.
     if session_id != 0 {
         let _ = clear_session_controlling_tty(session_id, idx);
@@ -203,7 +203,7 @@ pub fn hangup(idx: TtyIndex) {
 
     if scheduler_is_enabled() != 0 {
         TTY_INPUT_WAITERS[slot].wake_all();
-        // Finishing Phase 1: Wake output waiters and per-slot poll sleepers
+        // Wake output waiters and per-slot poll sleepers
         // so they see POLLHUP.
         TTY_OUTPUT_WAITERS[slot].wake_all();
         TTY_POLL_WAITERS[slot].wake_all();
@@ -222,10 +222,10 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
     }
 }
 
-/// Phase 41: Revoke access to the caller's controlling terminal.
+/// Revoke access to the caller's controlling terminal.
 ///
 /// This is the kernel-side implementation of the `vhangup()` syscall.
-/// It reuses the existing hangup infrastructure (Phase 7/33) to:
+/// It reuses the existing hangup infrastructure to:
 /// - Flush buffers and detach the session
 /// - Mark the TTY as hung up so subsequent I/O returns EIO
 /// - Signal the session with SIGHUP + SIGCONT

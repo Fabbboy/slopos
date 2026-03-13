@@ -1,7 +1,7 @@
 //! TTY I/O paths — read, write, push_input, hardware drain, data queries,
 //! and the idle-loop input callback.
 //!
-//! Phase 16 decomposition: extracted from `mod.rs` to isolate the hot data
+//! decomposition: extracted from `mod.rs` to isolate the hot data
 //! paths (read/write/push_input) from termios configuration, lifecycle
 //! management, job control, and poll readiness.
 
@@ -17,14 +17,14 @@ use slopos_lib::kernel_services::driver_runtime::{
     scheduler_is_enabled, signal_process_group,
 };
 
-use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
+use super::driver::{write_driver_unlocked, InputEvent, TtyDriverKind};
 use super::ldisc::{self, BatchResult, OutputAction};
 use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
 };
-use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
+use super::{Tty, TtyError, TtyIndex, MAX_TTYS};
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain
@@ -110,7 +110,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             return;
         }
 
-        // Phase 21: Track stopped state before input processing so we
+        // Track stopped state before input processing so we
         // can detect stopped→resumed transitions for IXON wakeup.
         let was_stopped = tty.ldisc.is_stopped();
 
@@ -119,13 +119,13 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             ixoff_byte_out = Some((tty.driver.id(), xoff));
         }
 
-        // Phase 21: If output transitioned from stopped to resumed,
+        // If output transitioned from stopped to resumed,
         // wake blocked writers and poll waiters.
         if was_stopped && !tty.ldisc.is_stopped() {
             output_resumed = true;
         }
 
-        // Phase 39: Track flow-control transitions for packet mode.
+        // Track flow-control transitions for packet mode.
         // Deferred: queue_packet_event acquires its own TTY slot lock,
         // so we must not call it while holding `guard`.
         if !was_stopped && tty.ldisc.is_stopped() {
@@ -134,7 +134,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             deferred_pkt_event = slopos_abi::syscall::TIOCPKT_START;
         }
 
-        // Finishing Phase 2: Activate throttle when cooked buffer fills.
+        // Activate throttle when cooked buffer fills.
         if batch.throttle_check
             && !tty.throttled
             && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER
@@ -155,20 +155,20 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         batch.should_wake
     };
 
-    // Phase 39: Deliver deferred packet event now that the slot lock is released.
+    // Deliver deferred packet event now that the slot lock is released.
     if deferred_pkt_event != 0 {
         pty::queue_packet_event(idx, deferred_pkt_event);
     }
 
     if let Some((driver_id, out, out_len)) = route {
-        // Phase 25: Track in-flight echo output for drain semantics.
+        // Track in-flight echo output for drain semantics.
         TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
         write_driver_unlocked(driver_id, &out[..out_len]);
         TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
-    // Phase 36: IXOFF — send XOFF byte to terminal if high-water exceeded.
+    // IXOFF — send XOFF byte to terminal if high-water exceeded.
     if let Some((driver_id, xoff)) = ixoff_byte_out {
         write_driver_unlocked(driver_id, &[xoff]);
     }
@@ -183,7 +183,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         notify_input_ready(idx);
     }
 
-    // Phase 21: Wake blocked writers and poll waiters on IXON resume.
+    // Wake blocked writers and poll waiters on IXON resume.
     if output_resumed {
         TTY_OUTPUT_WAITERS[slot].wake_all();
         TTY_POLL_WAITERS[slot].wake_all();
@@ -200,7 +200,7 @@ fn notify_input_ready(idx: TtyIndex) {
         return;
     }
     TTY_INPUT_WAITERS[slot].wake_one();
-    // Phase 21 + Finishing Phase 1: Wake per-slot poll sleepers.
+    // Wake per-slot poll sleepers.
     TTY_POLL_WAITERS[slot].wake_all();
 }
 
@@ -213,15 +213,15 @@ fn notify_input_ready(idx: TtyIndex) {
 /// Uses `TtySession::check_read()` as the sole read-side gate.  Background
 /// processes receive `SIGTTIN` instead of silently blocking.
 ///
-/// Phase 8: drain + foreground check + read are merged into a single per-TTY
+/// drain + foreground check + read are merged into a single per-TTY
 /// lock acquisition per loop iteration (previously 5–6 separate locks).
 #[must_use]
 pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
     read_with_attach(idx, buf, nonblock, true)
 }
 
-/// Phase 23 note: `_auto_attach` is intentionally dead.  Phase 18 removed
-/// durable read-side ownership mutation, so reads no longer claim controlling
+/// Note: `_auto_attach` is intentionally dead.  Durable read-side ownership
+/// mutation has been removed, so reads no longer claim controlling
 /// terminal regardless of this flag.  The parameter is preserved to maintain
 /// ABI compatibility with the kernel services trait (`read_cooked_with_attach`).
 
@@ -253,10 +253,10 @@ pub fn read_with_attach(
         let mut should_wait = false;
         let mut wait_timeout_ms: Option<u64> = None;
         let mut ixoff_xon = None;
-        // Finishing Phase 2: Track if this read unthrottled the TTY so we
+        // Track if this read unthrottled the TTY so we
         // can wake the master-side writer after releasing the lock.
         let mut unthrottled_peer: Option<usize> = None;
-        // Finishing Phase 12: Track if no_room recovery happened so we
+        // Track if no_room recovery happened so we
         // can wake producers after releasing the lock.
         let mut no_room_recovered = false;
         {
@@ -266,7 +266,7 @@ pub fn read_with_attach(
                 None => return Err(TtyError::NotAllocated),
             };
 
-            // Phase 33: Post-hangup I/O hardening — a hung-up TTY is
+            // Post-hangup I/O hardening — a hung-up TTY is
             // permanently dead.  Reads always return EOF (0 bytes) once
             // any buffered data has been consumed, regardless of whether
             // the read is blocking or non-blocking.
@@ -306,7 +306,7 @@ pub fn read_with_attach(
             // Drain hardware input (merged — single lock for drain + read).
             deferred_signal = tty.drain_hw_input_locked();
 
-            // Phase 39: PTY packet mode — if this master has pending
+            // PTY packet mode — if this master has pending
             // packet events, return a single-byte read with the event
             // bitmask (consuming the events).  If no events but data is
             // available, prefix the read with TIOCPKT_DATA (0x00).
@@ -335,7 +335,7 @@ pub fn read_with_attach(
                             .ldisc
                             .ixoff_check_xon()
                             .map(|xon| (tty.driver.id(), xon));
-                        // Finishing Phase 2: Unthrottle after packet-mode read.
+                        // Unthrottle after packet-mode read.
                         let mut pkt_unthrottled_peer = if tty.throttled
                             && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                         {
@@ -347,7 +347,7 @@ pub fn read_with_attach(
                         } else {
                             None
                         };
-                        // Finishing Phase 12: No-room recovery after packet-mode drain.
+                        // No-room recovery after packet-mode drain.
                         let pkt_no_room_recovered = tty.ldisc.check_no_room_recovery();
                         if pkt_no_room_recovered && pkt_unthrottled_peer.is_none() {
                             if let TtyDriverKind::PtySlave { peer } = &tty.driver {
@@ -364,14 +364,14 @@ pub fn read_with_attach(
                                 let _ = signal_process_group(pgid, sig);
                             }
                         }
-                        // Finishing Phase 2: Wake master-side writer after unthrottle.
+                        // Wake master-side writer after unthrottle.
                         if let Some(ps) = pkt_unthrottled_peer {
                             if ps < MAX_TTYS {
                                 TTY_OUTPUT_WAITERS[ps].wake_all();
                                 TTY_POLL_WAITERS[ps].wake_all();
                             }
                         }
-                        // Finishing Phase 12: Wake local waiters on no_room recovery.
+                        // Wake local waiters on no_room recovery.
                         if pkt_no_room_recovered {
                             TTY_INPUT_WAITERS[slot].wake_all();
                             TTY_POLL_WAITERS[slot].wake_all();
@@ -390,7 +390,7 @@ pub fn read_with_attach(
                         .ixoff_check_xon()
                         .map(|xon| (tty.driver.id(), xon));
                 }
-                // Finishing Phase 2: Unthrottle if occupancy dropped below low-water.
+                // Unthrottle if occupancy dropped below low-water.
                 if got > 0
                     && tty.throttled
                     && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
@@ -400,7 +400,7 @@ pub fn read_with_attach(
                         unthrottled_peer = Some(peer.idx.0 as usize);
                     }
                 }
-                // Finishing Phase 12: No-room recovery after normal drain.
+                // No-room recovery after normal drain.
                 if got > 0 && tty.ldisc.check_no_room_recovery() {
                     no_room_recovered = true;
                     if unthrottled_peer.is_none() {
@@ -428,14 +428,14 @@ pub fn read_with_attach(
                             let _ = signal_process_group(pgid, sig);
                         }
                     }
-                    // Finishing Phase 2: Wake master after unthrottle.
+                    // Wake master after unthrottle.
                     if let Some(ps) = unthrottled_peer {
                         if ps < MAX_TTYS {
                             TTY_OUTPUT_WAITERS[ps].wake_all();
                             TTY_POLL_WAITERS[ps].wake_all();
                         }
                     }
-                    // Finishing Phase 12: Wake local waiters on no_room recovery.
+                    // Wake local waiters on no_room recovery.
                     if no_room_recovered {
                         TTY_INPUT_WAITERS[slot].wake_all();
                         TTY_POLL_WAITERS[slot].wake_all();
@@ -504,9 +504,9 @@ pub fn read_with_attach(
                             return Ok(total);
                         }
                         should_wait = true;
-                        // Phase 1: no bytes yet — wait indefinitely for
+                        // no bytes yet — wait indefinitely for
                         // the first byte (timeout = None).
-                        // Phase 2: at least one byte received — start the
+                        // at least one byte received — start the
                         // inter-byte timer for the remaining bytes.
                         if total > 0 {
                             wait_timeout_ms = Some(vtime_ms);
@@ -516,7 +516,7 @@ pub fn read_with_attach(
                 }
             }
 
-            // Phase 33: Check hung-up after drain (data may have been
+            // Check hung-up after drain (data may have been
             // flushed by hangup).  Always EOF regardless of blocking mode.
             if tty.peer_closed && !tty.ldisc.has_data() {
                 return Ok(0);
@@ -554,7 +554,7 @@ pub fn read_with_attach(
             }
         }
 
-        // Finishing Phase 2: Wake master-side writer if this read unthrottled.
+        // Wake master-side writer if this read unthrottled.
         if let Some(ps) = unthrottled_peer {
             if ps < MAX_TTYS {
                 TTY_OUTPUT_WAITERS[ps].wake_all();
@@ -562,7 +562,7 @@ pub fn read_with_attach(
             }
         }
 
-        // Finishing Phase 12: Wake local waiters on no_room recovery.
+        // Wake local waiters on no_room recovery.
         if no_room_recovered {
             TTY_INPUT_WAITERS[slot].wake_all();
             TTY_POLL_WAITERS[slot].wake_all();
@@ -578,7 +578,7 @@ pub fn read_with_attach(
 
         // Block on per-TTY wait queue.
         let wait_condition = || {
-            // Finishing Phase 7: Check for pending signals so the wait
+            // Check for pending signals so the wait
             // breaks out and the read can return ERESTARTSYS.
             if has_pending_signal() {
                 return true;
@@ -622,7 +622,7 @@ pub fn read_with_attach(
             return if total > 0 { Ok(total) } else { Ok(0) };
         }
 
-        // Finishing Phase 7: If the wait was broken by a pending signal
+        // If the wait was broken by a pending signal
         // rather than data arrival, return partial data (if any) or
         // ERESTARTSYS so the syscall return path can handle SA_RESTART.
         if has_pending_signal() {
@@ -644,17 +644,17 @@ pub fn read_with_attach(
 /// Applies output processing (`c_oflag`) — e.g. OPOST + ONLCR converts
 /// `\n` to `\r\n` before sending to the driver.
 ///
-/// Phase 8: split-write pattern — output is processed through the line
+/// split-write pattern — output is processed through the line
 /// discipline under the per-TTY lock into a local stack buffer, the lock is
 /// dropped, and the buffered bytes are written to the hardware without
 /// holding any TTY lock.  This prevents slow serial I/O from blocking
 /// operations on other TTYs.
 ///
-/// Phase 10: write-side foreground check — when `TOSTOP` is set in the
+/// write-side foreground check — when `TOSTOP` is set in the
 /// TTY's `c_lflag`, background processes receive `SIGTTOU` instead of
 /// being silently allowed to write.  This matches POSIX job control.
 ///
-/// Phase 31: TOSTOP audit — added SIGTTOU blocked/ignored bypass and
+/// TOSTOP audit — added SIGTTOU blocked/ignored bypass and
 /// orphaned process group → EIO handling to match `tcsetattr` semantics.
 #[must_use]
 pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyError> {
@@ -663,7 +663,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 33: Post-hangup I/O hardening — writes to a hung-up TTY
+    // Post-hangup I/O hardening — writes to a hung-up TTY
     // always return EIO.  The data has nowhere to go.
     {
         let guard = TTY_SLOTS[slot].lock();
@@ -674,9 +674,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         }
     }
 
-    // Phase 10 + Phase 19 + Phase 31: Write-side foreground check.
-    // Enforce cross-session denial (Phase 19) and TOSTOP (Phase 10).
-    // Phase 31: bypass if SIGTTOU is blocked/ignored; return EIO for
+    // Write-side foreground check.
+    // Enforce cross-session denial and TOSTOP.
+    // bypass if SIGTTOU is blocked/ignored; return EIO for
     // orphaned background process groups.
     // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
     let task_id = current_task_id();
@@ -699,9 +699,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
 
         match check_result {
             Some(ForegroundCheck::BackgroundWrite) => {
-                // Phase 31: if SIGTTOU is blocked or ignored, proceed silently.
+                // if SIGTTOU is blocked or ignored, proceed silently.
                 if !is_current_signal_blocked_or_ignored(SIGTTOU) {
-                    // Phase 31: orphaned pgrp → EIO.
+                    // orphaned pgrp → EIO.
                     if is_pgrp_orphaned(caller_pgid, caller_sid) {
                         return Err(TtyError::OrphanedProcessGroup);
                     }
@@ -724,7 +724,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     // for expansion while keeping the stack buffer small.
     const OUT_BUF_CAP: usize = 256;
 
-    // Finishing Phase 2: Determine if this TTY is a PTY master so we can
+    // Determine if this TTY is a PTY master so we can
     // apply slave-side throttle back-pressure in the write loop.
     let peer_slave_slot: Option<usize> = {
         let guard = TTY_SLOTS[slot].lock();
@@ -748,7 +748,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     };
     let mut pos = 0;
     while pos < data.len() {
-        // Finishing Phase 2: PTY master throttle back-pressure.
+        // PTY master throttle back-pressure.
         // If the peer slave is throttled, block until the slave reader
         // drains enough data to unthrottle.  Non-blocking writes return
         // a short write (or EAGAIN if no bytes written yet) instead of
@@ -840,7 +840,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             }
         }
 
-        // Phase 21 + Finishing Phase 8: Output-stop enforcement.
+        // Output-stop enforcement.
         // Block the writer when EITHER the line discipline is stopped
         // (IXON: Ctrl+S / VSTOP) OR the TTY has been explicitly stopped
         // via tcxonc(TCOOFF).  Non-blocking writes return a short write
@@ -883,7 +883,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         let mut out_len = 0;
         let driver_id;
 
-        // Phase 1: Process output under per-TTY lock (fast — pure computation).
+        // Process output under per-TTY lock (fast — pure computation).
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -921,8 +921,8 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         }
         // Per-TTY lock dropped.
 
-        // Phase 2: Driver I/O without any TTY lock (slow — hardware).
-        // Phase 25: Track in-flight output for drain semantics.
+        // Driver I/O without any TTY lock (slow — hardware).
+        // Track in-flight output for drain semantics.
         TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
         let driver_written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
         TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
@@ -943,7 +943,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
 
 /// Check if a TTY has cooked data available for reading.
 ///
-/// Phase 23: Properly captures and delivers deferred signals from
+/// Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 pub fn has_data(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
@@ -969,7 +969,7 @@ pub fn has_data(idx: TtyIndex) -> bool {
     result
 }
 
-/// Phase 27: Get the number of bytes available for reading from a TTY.
+/// Get the number of bytes available for reading from a TTY.
 ///
 /// Used by the FIONREAD / TIOCINQ ioctl.  Drains pending hardware input
 /// first to ensure the count is up-to-date.
@@ -997,7 +997,7 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     Ok(count)
 }
 
-/// Finishing Phase 9: Get the number of bytes queued for output on a TTY.
+/// Get the number of bytes queued for output on a TTY.
 ///
 /// Used by the `TIOCOUTQ` ioctl.  Returns the sum of:
 ///   1. The per-TTY inflight counter (`TTY_OUTPUT_INFLIGHT`) — bytes that
@@ -1019,7 +1019,7 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     let driver_pending = {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            // Phase 13: use output_pending_bytes() for finer-grained
+            // use output_pending_bytes() for finer-grained
             // queue depth reporting (defaults to 0/1 for bool-only drivers).
             tty.driver.output_pending_bytes()
         } else {
@@ -1030,15 +1030,15 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Idle callback (Phase 8: iterates ALL active TTYs)
+// Idle callback
 // ---------------------------------------------------------------------------
 
 /// Idle-loop callback: drain hardware input and wake blocked readers.
 ///
-/// Phase 8: now iterates all active TTYs instead of only TTY 0.  Each
+/// now iterates all active TTYs instead of only TTY 0.  Each
 /// per-TTY lock is acquired and released individually.
 ///
-/// Phase 23: Properly captures and delivers deferred signals from
+/// Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
     let mut any_data = false;
@@ -1057,7 +1057,7 @@ fn input_available_cb() -> c_int {
                 (None, false)
             }
         };
-        // Phase 23: Deliver deferred signal outside lock.
+        // Deliver deferred signal outside lock.
         if let Some((pgid, sig)) = deferred_signal {
             if pgid != 0 {
                 let _ = signal_process_group(pgid, sig);

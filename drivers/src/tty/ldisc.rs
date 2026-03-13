@@ -1,7 +1,7 @@
-//! Enhanced line discipline for the TTY subsystem (Phase 2+).
+//! Enhanced line discipline for the TTY subsystem.
 //!
 //! This module implements a simplified but fairly complete N_TTY-style line
-//! discipline.  Compared to the Phase 1 stub it adds:
+//! discipline.  Compared to the original stub it adds:
 //!
 //! - **Input flag processing** (`c_iflag`): ICRNL, INLCR, IGNCR, ISTRIP,
 //!   IGNBRK, BRKINT, PARMRK
@@ -27,12 +27,12 @@ use slopos_abi::syscall::{
 
 use super::driver::{InputEvent, InputStatus};
 
-// Finishing Phase 6: Expanded from 1024 to 4096 to match Linux/RedoxOS.
+// Expanded from 1024 to 4096 to match Linux/RedoxOS.
 // Handles long pastes, history expansion, and heredoc input gracefully.
 const EDIT_BUF_SIZE: usize = 4096;
 const COOKED_BUF_SIZE: usize = 4096;
 
-// Finishing Phase 2: PTY throttle water marks for back-pressure.
+// PTY throttle water marks for back-pressure.
 // When the cooked buffer occupancy hits high-water, the slave sets
 // `throttled = true` on the TTY, signalling the master to stop writing.
 // When a read drains occupancy to the low-water mark, the slave clears
@@ -40,14 +40,14 @@ const COOKED_BUF_SIZE: usize = 4096;
 pub(crate) const THROTTLE_HIGH_WATER: usize = COOKED_BUF_SIZE * 3 / 4; // 3072
 pub(crate) const THROTTLE_LOW_WATER: usize = COOKED_BUF_SIZE / 4; // 1024
 
-// Phase 36: IXOFF flow-control water marks.
+// IXOFF flow-control water marks.
 // High-water: send XOFF when combined pending input exceeds this.
 // Low-water: send XON when combined pending input drops below this.
 const IXOFF_TOTAL_CAPACITY: usize = EDIT_BUF_SIZE + COOKED_BUF_SIZE;
 const IXOFF_HIGH_WATER: usize = (IXOFF_TOTAL_CAPACITY * 4) / 5; // 80%
 const IXOFF_LOW_WATER: usize = IXOFF_TOTAL_CAPACITY / 5; // 20%
 
-// Finishing Phase 10: Input wake batching threshold.
+// Input wake batching threshold.
 // In non-canonical mode, wake readers only when this many bytes have
 // accumulated since the last wakeup (or a near-full / hangup / signal
 // condition occurs).  Canonical mode always wakes immediately on line
@@ -72,12 +72,12 @@ pub enum InputAction {
     /// The caller should write a newline followed by the contents returned
     /// by [`LineDisc::edit_content()`].
     ReprintLine,
-    /// Phase 27: Kill-line visual erase (ECHOKE).
+    /// Kill-line visual erase (ECHOKE).
     ///
     /// The caller should emit `columns` BS-SPACE-BS triples to erase the
     /// line visually.  This replaces the old pragmatic newline-only echo.
     KillLineEcho { columns: u16 },
-    /// Phase 36: Ring the terminal bell (BEL, `\x07`).
+    /// Ring the terminal bell (BEL, `\x07`).
     ///
     /// Returned when IMAXBEL is set and the input buffer is full.
     /// The caller should send BEL to the output driver.
@@ -95,7 +95,7 @@ pub enum OutputAction {
 }
 
 // ---------------------------------------------------------------------------
-// LdiscOps — shared contract for line discipline variants (Phase 29)
+// LdiscOps — shared contract for line discipline variants
 // ---------------------------------------------------------------------------
 
 /// Trait formalising the shared API surface of every line-discipline variant.
@@ -243,7 +243,7 @@ macro_rules! dispatch_ldisc {
 }
 
 // ---------------------------------------------------------------------------
-// UTF-8 helpers (Phase 35: IUTF8)
+// UTF-8 helpers
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if `b` is a UTF-8 continuation byte (`10xxxxxx`).
@@ -403,7 +403,7 @@ pub struct LineDisc {
     // -- Cooked output ring buffer (ready for userland read) --
     cooked: super::ringbuf::RingBuf<COOKED_BUF_SIZE>,
 
-    // -- Canonical line boundary tracking (Phase 15) --
+    // -- Canonical line boundary tracking --
     /// Number of complete lines in the cooked buffer (delimited by newline or
     /// EOF flush).  In canonical mode `has_data()` checks this instead of
     /// `cooked_count` so that `read()` blocks until a full line is available.
@@ -418,36 +418,36 @@ pub struct LineDisc {
     // -- Column tracking (for ECHOKE / backspace echo) --
     column: usize,
 
-    // -- UTF-8 multi-byte tracking (Phase 35: IUTF8) --
+    // -- UTF-8 multi-byte tracking --
     /// Number of UTF-8 continuation bytes still expected for the current
     /// multi-byte character being inserted.  0 = not in a multi-byte sequence.
     /// Only meaningful when IUTF8 is set in `c_iflag`.
     utf8_remaining: u8,
 
-    // -- Phase 36: IXOFF flow-control state --
+    // -- IXOFF flow-control state --
     /// Whether an XOFF has been sent to the terminal (via IXOFF).
     /// When `true`, a subsequent low-water condition triggers XON.
     xoff_sent: bool,
 
-    // -- Phase 37: Deferred reprint (PENDIN) --
+    // -- Deferred reprint (PENDIN) --
     /// When `true`, the next `input_char()` call triggers an automatic
     /// reprint of the edit buffer before processing the new byte.  Set
     /// by `set_termios()` when echo-affecting flags change.
     pending_reprint: bool,
 
-    // -- Phase 42: ECHOPRT hardcopy erase sequence --
+    // -- ECHOPRT hardcopy erase sequence --
     /// When `true`, we are inside a `\...` erase sequence (ECHOPRT).  The
     /// next non-erase input closes the sequence by emitting `/`.
     in_erase_seq: bool,
 
-    // -- Finishing Phase 10: Input wake batching --
+    // -- Input wake batching --
     /// Number of bytes pushed to the cooked buffer since the last time
     /// we woke readers.  In non-canonical mode, we suppress wakeups until
     /// this counter crosses `WAKEUP_CHARS` (or an immediate-wake condition
     /// such as buffer-near-full or canonical line completion applies).
     wake_chars_pending: usize,
 
-    // -- Finishing Phase 12: no_room-style overflow recovery --
+    // -- no_room-style overflow recovery --
     /// Sticky overflow flag.  Set when `push_cooked()` fails because the
     /// cooked buffer is completely full.  Cleared when a read drains
     /// occupancy below `THROTTLE_LOW_WATER` (via `check_no_room_recovery()`)
@@ -551,7 +551,7 @@ impl LineDisc {
         let new_lflag = LocalFlags::from_bits_truncate(t.c_lflag);
         let is_canon = new_lflag.contains(LocalFlags::ICANON);
 
-        // Phase 37: Detect echo-affecting flag changes and set PENDIN so
+        // Detect echo-affecting flag changes and set PENDIN so
         // the next input_char() reprints the edit buffer under the new
         // settings.  Only meaningful when there is content to reprint.
         const ECHO_MASK: LocalFlags = LocalFlags::ECHO
@@ -579,7 +579,7 @@ impl LineDisc {
     /// line has been committed (newline pressed or EOF flush).  This prevents
     /// `read()` from returning partial lines.
     pub fn has_data(&self) -> bool {
-        // Phase 41: EXTPROC bypasses canonical line buffering, so treat
+        // EXTPROC bypasses canonical line buffering, so treat
         // it like non-canonical mode for readiness checks.
         let canonical =
             self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
@@ -592,11 +592,11 @@ impl LineDisc {
 
     /// Read cooked bytes into `out`, returning the number of bytes copied.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
-        // Phase 41: EXTPROC bypasses canonical line buffering.
+        // EXTPROC bypasses canonical line buffering.
         let canonical =
             self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
 
-        // Phase 23: Canonical EOF on empty buffer.  When VEOF (Ctrl+D) is
+        // Canonical EOF on empty buffer.  When VEOF (Ctrl+D) is
         // pressed with an empty edit buffer, `flush_edit_to_cooked()` bumps
         // `line_count` but pushes zero bytes.  Without this guard, `has_data()`
         // keeps returning true (line_count > 0) and `read()` returns 0 bytes
@@ -618,7 +618,7 @@ impl LineDisc {
 
             // In canonical mode, stop after consuming one complete line.
             // A line boundary is marked by a newline or an enabled
-            // VEOL/VEOL2 character (Phase 34).
+            // VEOL/VEOL2 character.
             if canonical && (byte == b'\n' || self.is_veol(byte)) {
                 self.line_count = self.line_count.saturating_sub(1);
                 return copied;
@@ -636,7 +636,7 @@ impl LineDisc {
         copied
     }
 
-    /// Phase 27: Returns the number of bytes available for reading.
+    /// Returns the number of bytes available for reading.
     /// Used by the FIONREAD / TIOCINQ ioctl.
     pub fn bytes_available(&self) -> usize {
         self.cooked.count()
@@ -650,19 +650,19 @@ impl LineDisc {
         self.cooked.is_full() && self.edit_len >= EDIT_BUF_SIZE
     }
 
-    /// Finishing Phase 12: Returns `true` if the cooked buffer has
+    /// Returns `true` if the cooked buffer has
     /// entered overflow state (at least one byte was dropped).
     pub fn no_room(&self) -> bool {
         self.no_room
     }
 
-    /// Finishing Phase 12: Returns the cumulative count of bytes
+    /// Returns the cumulative count of bytes
     /// dropped due to cooked buffer overflow.
     pub fn overflow_count(&self) -> u32 {
         self.overflow_count
     }
 
-    /// Finishing Phase 12: Check and clear no-room recovery condition.
+    /// Check and clear no-room recovery condition.
     ///
     /// Returns `true` if `no_room` was set and occupancy has dropped
     /// below `THROTTLE_LOW_WATER`, clearing the flag.  The caller
@@ -676,7 +676,7 @@ impl LineDisc {
         }
     }
 
-    /// Finishing Phase 10: Decide whether the caller should wake readers.
+    /// Decide whether the caller should wake readers.
     ///
     /// In **canonical mode**, returns `true` when at least one complete line
     /// is available (`line_count > 0`) — matching existing immediate-wake
@@ -762,13 +762,13 @@ impl LineDisc {
     /// signal, reprint, or nothing).
     pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
         let event = event.into();
-        // Phase 36: CREAD gate — if the receiver is disabled in c_cflag,
+        // CREAD gate — if the receiver is disabled in c_cflag,
         // silently discard all input.
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
         }
 
-        // Phase 37: Deferred reprint (PENDIN) — if echo-affecting flags
+        // Deferred reprint (PENDIN) — if echo-affecting flags
         // changed since the last input, reprint the edit buffer *before*
         // processing this byte so the user sees up-to-date echo output.
         if self.pending_reprint {
@@ -832,7 +832,7 @@ impl LineDisc {
             }
         }
 
-        // Phase 27: Break handling.  A NUL byte (0x00) is treated as a
+        // Break handling.  A NUL byte (0x00) is treated as a
         // break condition when any of IGNBRK/BRKINT/PARMRK is set.
         if apply_break_heuristic
             && c == 0x00
@@ -861,7 +861,7 @@ impl LineDisc {
             return self.insert_char(c, lflag, close_erase);
         }
 
-        // 3. Signal generation (ISIG) + Phase 23 NOFLSH flush.
+        // 3. Signal generation (ISIG).
         if lflag.contains(LocalFlags::ISIG) {
             let sig = if c == self.cc(CcIndex::Vintr) {
                 Some(SIGINT)
@@ -897,7 +897,7 @@ impl LineDisc {
             }
         }
 
-        // 5. EXTPROC bypass (Phase 41): when EXTPROC is set, the line
+        // 5. EXTPROC bypass: when EXTPROC is set, the line
         //    discipline passes input directly to the read buffer without
         //    canonical editing or echo.  Signal processing (ISIG, step 3)
         //    and flow control (IXON, step 4) are already handled above.
@@ -923,7 +923,7 @@ impl LineDisc {
                     return self.word_erase(lflag);
                 }
                 if c == self.cc(CcIndex::Vreprint) {
-                    // Phase 37: An explicit VREPRINT also clears any
+                    // An explicit VREPRINT also clears any
                     // pending deferred-reprint so we don't double-echo.
                     self.pending_reprint = false;
                     return InputAction::ReprintLine;
@@ -954,7 +954,7 @@ impl LineDisc {
                 len: 1,
             };
         }
-        // Phase 42: OLCUC — map lowercase output to uppercase.
+        // OLCUC — map lowercase output to uppercase.
         let c = if oflag.contains(OutputFlags::OLCUC) && c.is_ascii_lowercase() {
             c.to_ascii_uppercase()
         } else {
@@ -1005,7 +1005,7 @@ impl LineDisc {
                 }
             }
             b'\t' => {
-                // Finishing Phase 11: Gate tab expansion through TABDLY/XTABS.
+                // Gate tab expansion through TABDLY/XTABS.
                 // TAB3/XTABS: expand tab to spaces using column tracking.
                 // TAB0 (no TABDLY bits set): pass literal tab to terminal.
                 let tab_advance = 8 - (self.column % 8);
@@ -1074,7 +1074,7 @@ impl LineDisc {
             c = b'\r'; // Map NL → CR.
         }
 
-        // Phase 42: IUCLC — map uppercase input to lowercase.
+        // IUCLC — map uppercase input to lowercase.
         if iflag.contains(InputFlags::IUCLC) && c.is_ascii_uppercase() {
             c = c.to_ascii_lowercase();
         }
@@ -1082,7 +1082,7 @@ impl LineDisc {
         Some(c)
     }
 
-    /// Phase 27: Handle a NUL byte (break condition).
+    /// Handle a NUL byte (break condition).
     ///
     /// In real serial hardware, a break is signalled by holding the line low
     /// for longer than a frame.  The driver delivers it as a NUL (0x00).
@@ -1130,7 +1130,7 @@ impl LineDisc {
             return self.erase_char(lflag);
         }
 
-        // Phase 42: Close any active ECHOPRT erase sequence. Every
+        // Close any active ECHOPRT erase sequence. Every
         // non-erase input that reaches canonical processing ends the
         // `\...` sequence by emitting `/`.
         let close_erase = self.in_erase_seq;
@@ -1155,7 +1155,7 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // Phase 34: VEOL / VEOL2 — additional configurable line terminators.
+        // VEOL / VEOL2 — additional configurable line terminators.
         // The character is added to the edit buffer (unlike VEOF) and then
         // flushed, completing a canonical line.  Echoed normally — no ECHOCTL.
         if self.is_veol(c) {
@@ -1225,7 +1225,7 @@ impl LineDisc {
     /// `close_erase`: when `true`, a `/` is prepended to the echo output to
     /// close an active ECHOPRT `\...` erase sequence.
     fn insert_char(&mut self, c: u8, lflag: LocalFlags, close_erase: bool) -> InputAction {
-        // Phase 36: IMAXBEL — if the edit buffer is full, ring the bell
+        // IMAXBEL — if the edit buffer is full, ring the bell
         // instead of silently discarding.  Without IMAXBEL, discard silently.
         if self.edit_len >= EDIT_BUF_SIZE {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
@@ -1237,7 +1237,7 @@ impl LineDisc {
         self.edit_buf[self.edit_len] = c;
         self.edit_len += 1;
 
-        // Phase 35: IUTF8 multi-byte column tracking.
+        // IUTF8 multi-byte column tracking.
         let iutf8 = self.termios.input_flags().contains(InputFlags::IUTF8);
         if iutf8 && c >= 0x80 {
             return self.insert_char_utf8(c, lflag);
@@ -1296,7 +1296,7 @@ impl LineDisc {
         InputAction::None
     }
 
-    /// Phase 35: Insert a multi-byte UTF-8 byte (>= 0x80) with proper column
+    /// Insert a multi-byte UTF-8 byte (>= 0x80) with proper column
     /// tracking.  Continuation bytes do not advance the column; the column is
     /// incremented by the codepoint's display width only when the final
     /// continuation byte completes the sequence.
@@ -1340,14 +1340,14 @@ impl LineDisc {
         }
     }
 
-    /// Phase 41: EXTPROC mode — push input directly to the cooked buffer
+    /// EXTPROC mode — push input directly to the cooked buffer
     /// without any canonical editing or echo.  Used by network terminal
     /// protocols (ssh, telnet) where the remote side handles line editing.
     ///
     /// ISIG signal processing and IXON flow control are already handled
     /// upstream in `input_char()` before this method is called.
     fn extproc_input(&mut self, c: u8) -> InputAction {
-        // Finishing Phase 12: Overflow tracking centralised in push_cooked().
+        // Overflow tracking centralised in push_cooked().
         if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
                 return InputAction::Bell;
@@ -1360,7 +1360,7 @@ impl LineDisc {
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.
     fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
-        // Finishing Phase 12: Overflow tracking centralised in push_cooked().
+        // Overflow tracking centralised in push_cooked().
         if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
                 return InputAction::Bell;
@@ -1393,7 +1393,7 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // Phase 35: IUTF8 multi-byte erase.
+        // IUTF8 multi-byte erase.
         if self.termios.input_flags().contains(InputFlags::IUTF8) {
             return self.erase_char_utf8(lflag);
         }
@@ -1402,7 +1402,7 @@ impl LineDisc {
         let erased = self.edit_buf[self.edit_len - 1];
         self.edit_len -= 1;
 
-        // Phase 42: ECHOPRT — hardcopy erase style (\chars/).
+        // ECHOPRT — hardcopy erase style (\chars/).
         // Takes priority over ECHOE when both ECHOPRT and ECHO are set.
         if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
             if self.in_erase_seq {
@@ -1422,7 +1422,7 @@ impl LineDisc {
         }
 
         if lflag.contains(LocalFlags::ECHOE) {
-            // Phase 27: If the erased character was a control char echoed as
+            // If the erased character was a control char echoed as
             // ^X via ECHOCTL, erase two columns with two BS-SP-BS triples.
             if lflag.contains(LocalFlags::ECHOCTL)
                 && erased < 0x20
@@ -1443,7 +1443,7 @@ impl LineDisc {
         InputAction::None
     }
 
-    /// Phase 35: UTF-8 aware backspace — erases the full trailing codepoint.
+    /// UTF-8 aware backspace — erases the full trailing codepoint.
     fn erase_char_utf8(&mut self, lflag: LocalFlags) -> InputAction {
         let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
         if cp_len == 0 {
@@ -1458,7 +1458,7 @@ impl LineDisc {
         self.edit_len = cp_start;
         self.utf8_remaining = 0;
 
-        // Phase 42: ECHOPRT — hardcopy erase style for UTF-8 codepoints.
+        // ECHOPRT — hardcopy erase style for UTF-8 codepoints.
         // Echo the first byte of the erased codepoint as a representative.
         if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
             let representative = self.edit_buf[cp_start];
@@ -1501,7 +1501,7 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // Phase 27: ECHOKE — erase the line visually by backspacing over
+        // ECHOKE — erase the line visually by backspacing over
         // every character.  We compute the total column width to erase and
         // return a `KillLineEcho` action so the caller can emit the
         // appropriate number of BS-SP-BS triples.
@@ -1541,19 +1541,19 @@ impl LineDisc {
             return InputAction::None;
         }
 
-        // Phase 35: IUTF8 codepoint-aware word erase.
+        // IUTF8 codepoint-aware word erase.
         if self.termios.input_flags().contains(InputFlags::IUTF8) {
             return self.word_erase_utf8(lflag);
         }
 
         let mut erased = 0usize;
 
-        // Phase 1: skip trailing non-word characters (whitespace, punctuation).
+        // skip trailing non-word characters (whitespace, punctuation).
         while self.edit_len > 0 && !Self::is_word_char(self.edit_buf[self.edit_len - 1]) {
             self.edit_len -= 1;
             erased += 1;
         }
-        // Phase 2: delete word characters (alphanumeric + underscore).
+        // delete word characters (alphanumeric + underscore).
         while self.edit_len > 0 && Self::is_word_char(self.edit_buf[self.edit_len - 1]) {
             self.edit_len -= 1;
             erased += 1;
@@ -1580,12 +1580,12 @@ impl LineDisc {
         InputAction::None
     }
 
-    /// Phase 35: UTF-8 aware word erase — erases full codepoints until a word
+    /// UTF-8 aware word erase — erases full codepoints until a word
     /// boundary, tracking column width per codepoint.
     fn word_erase_utf8(&mut self, lflag: LocalFlags) -> InputAction {
         let mut columns_erased: usize = 0;
 
-        // Phase 1: skip trailing non-word codepoints (whitespace, punctuation,
+        // skip trailing non-word codepoints (whitespace, punctuation,
         // CJK characters, etc.).
         while self.edit_len > 0 {
             let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
@@ -1601,7 +1601,7 @@ impl LineDisc {
             self.edit_len = cp_start;
         }
 
-        // Phase 2: erase word codepoints (ASCII alphanumeric + underscore).
+        // erase word codepoints (ASCII alphanumeric + underscore).
         while self.edit_len > 0 {
             let cp_len = utf8_trailing_codepoint_len(&self.edit_buf[..self.edit_len]);
             if cp_len == 0 {
@@ -1643,7 +1643,7 @@ impl LineDisc {
         self.termios.c_cc[idx.as_usize()]
     }
 
-    /// Phase 34: Returns `true` if `c` matches an enabled VEOL or VEOL2
+    /// Returns `true` if `c` matches an enabled VEOL or VEOL2
     /// control character.  A value of `POSIX_VDISABLE` (0) means disabled.
     fn is_veol(&self, c: u8) -> bool {
         let veol = self.cc(CcIndex::Veol);
@@ -1678,9 +1678,9 @@ impl LineDisc {
     /// Push a single byte into the cooked ring buffer.
     ///
     /// Returns `true` if the byte was enqueued, `false` if the buffer
-    /// was full and the byte was dropped (Finishing Phase 3 hardening).
+    /// was full and the byte was dropped.
     ///
-    /// Finishing Phase 12: On failure, sets the `no_room` sticky flag and
+    /// On failure, sets the `no_room` sticky flag and
     /// increments `overflow_count` for diagnostics.
     pub(crate) fn push_cooked(&mut self, c: u8) -> bool {
         if self.cooked.is_full() {
@@ -1701,7 +1701,7 @@ impl LineDisc {
         self.cooked.free()
     }
 
-    /// Phase 36: IXOFF — check if input buffer exceeds high-water mark.
+    /// IXOFF — check if input buffer exceeds high-water mark.
     /// Returns the XOFF byte (VSTOP) if IXOFF is enabled and we should send XOFF.
     pub fn ixoff_check_xoff(&mut self) -> Option<u8> {
         if !self.termios.input_flags().contains(InputFlags::IXOFF) {
@@ -1719,7 +1719,7 @@ impl LineDisc {
         }
     }
 
-    /// Phase 36: IXOFF — check if input buffer dropped below low-water mark.
+    /// IXOFF — check if input buffer dropped below low-water mark.
     /// Returns the XON byte (VSTART) if IXOFF is enabled and we should send XON.
     pub fn ixoff_check_xon(&mut self) -> Option<u8> {
         if !self.termios.input_flags().contains(InputFlags::IXOFF) {
@@ -1884,7 +1884,7 @@ impl LdiscOps for LineDisc {
 }
 
 // ---------------------------------------------------------------------------
-// RawDisc — minimal passthrough line discipline (Phase 14)
+// RawDisc — minimal passthrough line discipline
 // ---------------------------------------------------------------------------
 
 const RAW_BUF_SIZE: usize = 4096;
@@ -1897,10 +1897,10 @@ const RAW_BUF_SIZE: usize = 4096;
 pub struct RawDisc {
     termios: UserTermios,
     buf: super::ringbuf::RingBuf<RAW_BUF_SIZE>,
-    // Finishing Phase 10: Input wake batching (same as LineDisc).
+    // Input wake batching (same as LineDisc).
     wake_chars_pending: usize,
 
-    // -- Finishing Phase 12: no_room-style overflow recovery --
+    // -- no_room-style overflow recovery --
     /// Sticky overflow flag (see `LineDisc::no_room` for full docs).
     no_room: bool,
     /// Cumulative overflow byte count (see `LineDisc::overflow_count`).
@@ -1958,7 +1958,7 @@ impl RawDisc {
         self.buf.read(out)
     }
 
-    /// Phase 27: Returns the number of bytes available for reading.
+    /// Returns the number of bytes available for reading.
     pub fn bytes_available(&self) -> usize {
         self.buf.count()
     }
@@ -1968,17 +1968,17 @@ impl RawDisc {
         self.buf.is_full()
     }
 
-    /// Finishing Phase 12: Returns `true` if overflow state is active.
+    /// Returns `true` if overflow state is active.
     pub fn no_room(&self) -> bool {
         self.no_room
     }
 
-    /// Finishing Phase 12: Returns cumulative overflow byte count.
+    /// Returns cumulative overflow byte count.
     pub fn overflow_count(&self) -> u32 {
         self.overflow_count
     }
 
-    /// Finishing Phase 12: Check and clear no-room recovery condition.
+    /// Check and clear no-room recovery condition.
     pub fn check_no_room_recovery(&mut self) -> bool {
         if self.no_room && self.buf.count() <= THROTTLE_LOW_WATER {
             self.no_room = false;
@@ -1988,7 +1988,7 @@ impl RawDisc {
         }
     }
 
-    /// Finishing Phase 10: Decide whether the caller should wake readers.
+    /// Decide whether the caller should wake readers.
     ///
     /// RawDisc is always non-canonical.  Batches wakeups: returns `true`
     /// only when `wake_chars_pending` crosses `WAKEUP_CHARS` or the buffer
@@ -2031,14 +2031,14 @@ impl RawDisc {
     /// Raw input: push byte directly to buffer, no processing.
     pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
         let event = event.into();
-        // Phase 36: CREAD gate — discard input when receiver disabled.
+        // CREAD gate — discard input when receiver disabled.
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
         }
         if self.buf.push(event.byte) {
             self.wake_chars_pending += 1;
         } else {
-            // Finishing Phase 12: Record overflow state.
+            // Record overflow state.
             self.no_room = true;
             self.overflow_count = self.overflow_count.saturating_add(1);
         }
@@ -2053,12 +2053,12 @@ impl RawDisc {
         }
     }
 
-    /// Phase 36: IXOFF — RawDisc does not implement IXOFF flow control.
+    /// IXOFF — RawDisc does not implement IXOFF flow control.
     pub fn ixoff_check_xoff(&mut self) -> Option<u8> {
         None
     }
 
-    /// Phase 36: IXOFF — RawDisc does not implement IXOFF flow control.
+    /// IXOFF — RawDisc does not implement IXOFF flow control.
     pub fn ixoff_check_xon(&mut self) -> Option<u8> {
         None
     }
@@ -2158,7 +2158,7 @@ impl LdiscOps for RawDisc {
 }
 
 // ---------------------------------------------------------------------------
-// LdiscKind — swappable line discipline abstraction (Phase 14)
+// LdiscKind — swappable line discipline abstraction
 // ---------------------------------------------------------------------------
 
 /// Swappable line discipline — each TTY owns one `LdiscKind`.
@@ -2213,7 +2213,7 @@ impl LdiscKind {
         }
     }
 
-    // --- Dispatched methods (Phase 29) ---
+    // --- Dispatched methods ---
     // All methods below are generated by the `dispatch_ldisc!` macro, which
     // delegates to the inner variant via matching.  Adding a new shared method
     // only requires a single signature line here and `impl LdiscOps` entries

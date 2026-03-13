@@ -1,6 +1,6 @@
 //! Global TTY table — the central registry of all terminal instances.
 //!
-//! # Lock Architecture (Phase 8)
+//! # Lock Architecture
 //!
 //! Each TTY slot has its own `IrqMutex`, enabling fully independent
 //! operations on different TTYs.  There is no global table lock — each slot
@@ -79,7 +79,7 @@ pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }
 /// Per-TTY output-in-flight counter.  Tracks the number of `write()`
 /// operations that have processed output through the line discipline but
 /// have not yet completed the unlocked hardware write.  Used by
-/// `wait_output_idle()` (Phase 25 drain semantics) to block `TCSETSW` /
+/// `wait_output_idle()` to block `TCSETSW` /
 /// `TCSETSF` until all in-flight output reaches the hardware.
 ///
 /// Increment **before** `write_driver_unlocked`, decrement **after**,

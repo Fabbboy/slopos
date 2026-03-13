@@ -8,11 +8,11 @@
 //! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer text output
 //! - `PtyMaster` / `PtySlave` — pseudo-terminal pair endpoints
 //!
-//! Phase 8 adds `DriverId` for lock-free I/O dispatch: the TTY core copies
+//! adds `DriverId` for lock-free I/O dispatch: the TTY core copies
 //! the driver identifier while holding the per-TTY lock, drops the lock, and
 //! then writes the processed output via `write_driver_unlocked`.
 //!
-//! Phase 26 replaces plain `TtyIndex` peer references with generation-tagged
+//! replaces plain `TtyIndex` peer references with generation-tagged
 //! `PtyPeerHandle`s so that stale writes after rapid PTY free/reuse are
 //! safely discarded.
 
@@ -78,7 +78,7 @@ pub trait TtyDriver {
     /// byte is on the wire.  Async / interrupt-driven drivers should return
     /// `true` while the TX FIFO is non-empty.
     ///
-    /// Used by `wait_output_idle()` drain semantics (Phase 13 contract).
+    /// Used by `wait_output_idle()` drain semantics.
     fn output_pending(&self) -> bool {
         false
     }
@@ -92,9 +92,13 @@ pub trait TtyDriver {
     /// override this to return the actual byte count for accurate
     /// `TIOCOUTQ` reporting.
     ///
-    /// Phase 13: Stronger per-driver pending-byte semantics.
+    /// Stronger per-driver pending-byte semantics.
     fn output_pending_bytes(&self) -> usize {
-        if self.output_pending() { 1 } else { 0 }
+        if self.output_pending() {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -107,7 +111,7 @@ pub trait TtyDriver {
 /// We use an enum rather than a trait object so that `Tty` can live in a
 /// `const`-initialised static array without requiring `alloc`.
 ///
-/// Phase 26: PTY variants now carry [`PtyPeerHandle`] (index + generation)
+/// PTY variants now carry [`PtyPeerHandle`] (index + generation)
 /// instead of a plain `TtyIndex`, enabling stale-slot detection.
 pub enum TtyDriverKind {
     /// COM1 serial console.
@@ -177,7 +181,7 @@ impl TtyDriverKind {
 
     /// Returns the number of bytes pending in the driver's output queue.
     ///
-    /// Phase 13: Finer-grained queue depth for `TIOCOUTQ`.  Falls back to
+    /// Finer-grained queue depth for `TIOCOUTQ`.  Falls back to
     /// `output_pending()` for bool-only drivers (returns 0 or 1).
     pub fn output_pending_bytes(&self) -> usize {
         match self {
@@ -197,7 +201,7 @@ impl TtyDriverKind {
     /// [`write_driver_unlocked`] to perform the (slow) hardware I/O without
     /// holding any TTY lock.
     ///
-    /// Phase 26: PTY variants now carry [`PtyPeerHandle`] through the
+    /// PTY variants now carry [`PtyPeerHandle`] through the
     /// `DriverId` so generation validation happens at the write site.
     pub fn id(&self) -> DriverId {
         match self {
@@ -211,7 +215,7 @@ impl TtyDriverKind {
 }
 
 // ---------------------------------------------------------------------------
-// Lock-free driver I/O (Phase 8)
+// Lock-free driver I/O
 // ---------------------------------------------------------------------------
 
 /// Lightweight driver identifier — copyable across lock boundaries.
@@ -221,7 +225,7 @@ impl TtyDriverKind {
 /// handle.  The TTY core copies it out of the per-TTY lock, drops the lock,
 /// and then calls [`write_driver_unlocked`] to perform the actual I/O.
 ///
-/// Phase 26: PTY variants carry [`PtyPeerHandle`] for generation-safe
+/// PTY variants carry [`PtyPeerHandle`] for generation-safe
 /// cross-end writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DriverId {
@@ -240,7 +244,7 @@ pub enum DriverId {
 /// Write processed output bytes to the hardware **without** holding any TTY
 /// lock.
 ///
-/// This is the second phase of the split-write pattern introduced in Phase 8:
+/// This is the second step of the split-write pattern:
 ///
 /// 1. **Under per-TTY lock** — process output through the line discipline
 ///    into a local stack buffer, copy `DriverId`, drop the lock.
@@ -250,7 +254,7 @@ pub enum DriverId {
 /// This separation ensures that slow serial I/O (~86 μs/byte at 115200 baud)
 /// does not block operations on other TTYs.
 ///
-/// Phase 26: PTY variants pass the `PtyPeerHandle` to `master_write` /
+/// PTY variants pass the `PtyPeerHandle` to `master_write` /
 /// `slave_write`, which validate the generation before touching the peer slot.
 pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
     match driver {

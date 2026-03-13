@@ -4,11 +4,11 @@
 //! for TTY 1 (the virtual console). When no framebuffer is registered
 //! (early boot or headless), output falls back to serial mirroring.
 //!
-//! Phase 40: VT100/ANSI terminal emulation — each output byte passes through
+//! VT100/ANSI terminal emulation — each output byte passes through
 //! `VtParser`; typed `VtAction` variants drive cursor movement, erase, scroll,
 //! and SGR color/attribute rendering.
 //!
-//! Phase 15: Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
+//! Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
 use core::ptr;

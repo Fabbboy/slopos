@@ -12,9 +12,9 @@
 //! The compositor still drives `focused_task_id` for window-level focus.
 //! `set_compositor_focus()` (called by the compositor) sets only
 //! `focused_task_id` — it does NOT alter `fg_pgrp`.  The two concepts are
-//! independent (Phase 6 split).
+//! independent.
 //!
-//! # Phase 14: Sentinel Newtypes
+//! # Sentinel Newtypes
 //!
 //! Raw `u32` sentinel constants (`NO_SESSION = 0`, `NO_FOREGROUND_PGRP = 0`)
 //! have been replaced with `Option<SessionId>` and `Option<ProcessGroupId>`.
@@ -27,7 +27,7 @@ use super::MAX_TTYS;
 use super::table::TTY_SLOTS;
 
 // ---------------------------------------------------------------------------
-// Sentinel newtypes (Phase 14)
+// Sentinel newtypes
 // ---------------------------------------------------------------------------
 
 /// A non-zero session identifier.
@@ -99,7 +99,7 @@ pub const NO_FOREGROUND_PGRP: u32 = 0;
 /// and within that session exactly one process group is "foreground" (allowed
 /// to read from / write to the terminal without signals).
 ///
-/// Phase 14: Fields use `Option<SessionId>` / `Option<ProcessGroupId>` instead
+/// Fields use `Option<SessionId>` / `Option<ProcessGroupId>` instead
 /// of raw `u32` with magic-zero sentinels.
 #[derive(Clone, Copy)]
 pub struct TtySession {
@@ -119,7 +119,7 @@ pub struct TtySession {
 
 /// Result of a foreground access check.
 ///
-/// Phase 19: The overloaded `NoSession` variant has been replaced with
+/// The overloaded `NoSession` variant has been replaced with
 /// explicit states that separate bootstrap permissiveness from real access
 /// denial.  This makes the control plane easy to reason about — one enum,
 /// one mapping layer at the syscall boundary, no scattered ad-hoc booleans.
@@ -226,7 +226,7 @@ impl TtySession {
         let sid_raw = self.session_id_raw();
         let fg_raw = self.fg_pgrp_raw();
 
-        // Phase 19: Cross-session access — hard denial.  A process from a
+        // Cross-session access — hard denial.  A process from a
         // different session must not read this TTY.  Kernel tasks
         // (caller_sid == 0) are exempted for early-boot permissiveness.
         if caller_sid != 0 && caller_sid != sid_raw {
@@ -267,7 +267,7 @@ impl TtySession {
 
         let sid_raw = self.session_id_raw();
 
-        // Phase 19: Cross-session write — hard denial (same rule as reads).
+        // Cross-session write — hard denial (same rule as reads).
         // Kernel tasks (caller_sid == 0) are exempted.
         if caller_sid != 0 && caller_sid != sid_raw {
             return ForegroundCheck::DeniedCrossSession;
@@ -287,7 +287,7 @@ impl TtySession {
         ForegroundCheck::BackgroundWrite
     }
 
-    // NOTE: `task_has_access()` has been removed in Phase 6.
+    // NOTE: `task_has_access()` has been removed
     // Use `check_read()` and `check_write()` directly instead.
 
     /// Set the foreground process group, with session validation.

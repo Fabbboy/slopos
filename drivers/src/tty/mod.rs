@@ -13,7 +13,7 @@
 //!
 //! The `TTY_SLOTS` array (in `table.rs`) holds up to `MAX_TTYS` terminal
 //! instances, each with its own `IrqMutex` for fully independent per-TTY
-//! locking (Phase 8).
+//! locking.
 //!
 //! # Public API
 //!
@@ -22,14 +22,14 @@
 //! `syscall_services_init.rs`) perform the `u8 → TtyIndex` conversion at the
 //! boundary.
 //!
-//! # Locking Convention (Phase 29)
+//! # Locking Convention
 //!
 //! Methods that operate on a `Tty` while the slot `IrqMutex` is already held
 //! use the `*_locked()` suffix (e.g. `drain_hw_input_locked`).  This makes the
 //! caller responsible for acquiring the lock and documents the precondition at
 //! the call site.
 //!
-//! # Module Organisation (Phase 16)
+//! # Module Organisation
 //!
 //! The implementation is decomposed into focused sub-modules:
 //!
@@ -49,7 +49,7 @@ pub mod table;
 pub mod vconsole;
 pub mod vtparser;
 
-// Phase 16: Decomposed sub-modules
+// Decomposed sub-modules
 mod io;
 mod job_control;
 mod lifecycle;
@@ -99,31 +99,31 @@ pub struct Tty {
 
     pub peer_closed: bool,
 
-    /// Phase 38: PTY slave lock state.  When `true`, the corresponding
+    /// PTY slave lock state.  When `true`, the corresponding
     /// `/dev/pts/N` device node cannot be opened.  Only meaningful for
     /// PTY slaves (always `false` for consoles and masters).  Defaults to
     /// `true` on `pty_alloc()` — the master holder must unlock via
     /// `TIOCSPTLCK` before the slave can be opened.
     pub slave_locked: bool,
 
-    /// Phase 39: PTY packet mode.  When `true` on a PTY master, every
+    /// PTY packet mode.  When `true` on a PTY master, every
     /// `read()` is prefixed with a single control byte indicating the
     /// event type (see `TIOCPKT_*` constants in `abi`).
     pub packet_mode: bool,
 
-    /// Phase 39: Pending packet-mode event bits.  Bitwise OR of
+    /// Pending packet-mode event bits.  Bitwise OR of
     /// `TIOCPKT_FLUSHREAD`, `TIOCPKT_FLUSHWRITE`, `TIOCPKT_STOP`,
     /// `TIOCPKT_START`, `TIOCPKT_NOSTOP`, `TIOCPKT_DOSTOP`.
     /// Consumed on the next master `read()` when non-zero.
     pub packet_events: u8,
 
-    /// Finishing Phase 2: PTY flow control throttle flag.  When `true`,
+    /// PTY flow control throttle flag.  When `true`,
     /// the slave's cooked buffer has exceeded `THROTTLE_HIGH_WATER` and
     /// the master-side writer must be back-pressured (blocked or EAGAIN).
     /// Cleared when a slave `read()` drains below `THROTTLE_LOW_WATER`.
     pub throttled: bool,
 
-    /// Finishing Phase 8: Explicit output-stop state for TCXONC.  When `true`,
+    /// Explicit output-stop state for TCXONC.  When `true`,
     /// `tty_write()` blocks (or returns EAGAIN for non-blocking) until output
     /// is resumed via `tcxonc(TCOON)`.  Separate from the ldisc `stopped`
     /// flag which is driven by IXON (Ctrl+S / Ctrl+Q keyboard flow control).
@@ -132,7 +132,7 @@ pub struct Tty {
 
 /// Kernel-internal error type for TTY operations.
 ///
-/// # Phase 28: `to_errno()` boundary mapping
+/// # `to_errno()` boundary mapping
 ///
 /// Each variant maps to a POSIX errno at the syscall boundary via
 /// [`TtyError::to_errno()`].  Internal code matches on variants directly;
@@ -156,16 +156,16 @@ pub enum TtyError {
     /// Unsupported line discipline ID.
     UnsupportedLineDiscipline,
     /// Caller belongs to a different session than the TTY's controlling
-    /// session — hard denial (Phase 19).
+    /// session — hard denial.
     CrossSessionDenied,
-    /// Operation was interrupted by a signal (Phase 28).
+    /// Operation was interrupted by a signal.
     SignalInterrupt,
     /// Background process in an orphaned process group tried to change
-    /// terminal settings — returns EIO instead of SIGTTOU (Phase 31).
+    /// terminal settings — returns EIO instead of SIGTTOU.
     OrphanedProcessGroup,
-    /// Invalid argument (Finishing Phase 5: bad `tcflush` queue selector).
+    /// Invalid argument.
     InvalidArg,
-    /// Finishing Phase 7: Blocking syscall was interrupted by a signal and
+    /// Blocking syscall was interrupted by a signal and
     /// may be transparently restarted.  Maps to the kernel-internal
     /// ERESTARTSYS (-512) — the syscall return path converts this to EINTR
     /// or restarts depending on SA_RESTART.  MUST NEVER reach userland.

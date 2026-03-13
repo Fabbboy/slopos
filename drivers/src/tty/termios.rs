@@ -1,7 +1,7 @@
 //! TTY termios configuration — get/set termios, window size, line discipline,
 //! output drain, and control ioctls (TCFLSH, TCSBRK, TCXONC).
 //!
-//! Phase 16 decomposition: extracted from `mod.rs` to group all terminal
+//! decomposition: extracted from `mod.rs` to group all terminal
 //! attribute management into a single focused module.
 
 use core::sync::atomic::Ordering;
@@ -38,7 +38,7 @@ pub(super) enum TermiosSetMode {
 // Baud rate mapping
 // ---------------------------------------------------------------------------
 
-/// Finishing Phase 4: Map baud rate bits from `c_cflag & CBAUD` to numeric speed.
+/// Map baud rate bits from `c_cflag & CBAUD` to numeric speed.
 fn cflag_to_speed(cflag: u32) -> u32 {
     use slopos_abi::syscall::*;
     match cflag & CBAUD {
@@ -83,7 +83,7 @@ fn cflag_to_speed(cflag: u32) -> u32 {
 
 /// Get termios for a specific TTY.
 ///
-/// Finishing Phase 4: Populates `c_ispeed`/`c_ospeed` from the baud rate
+/// Populates `c_ispeed`/`c_ospeed` from the baud rate
 /// encoded in `c_cflag` before returning to userland.
 #[must_use]
 pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
@@ -106,7 +106,7 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 
 /// Wait until all in-flight output has been transmitted to the hardware.
 ///
-/// # Drain Contract (Phase 13 — Output Drain Semantics Hardening)
+/// # Drain Contract
 ///
 /// This is the **single authoritative drain path** for the TTY subsystem.
 /// Both `tcsbrk(arg > 0)` and `set_termios_mode(Drain | DrainAndFlushInput)`
@@ -213,7 +213,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 /// Internal helper that applies termios changes with optional drain and
 /// input-flush semantics.
 ///
-/// # Phase 31: Background write protection on `tcsetattr`
+/// # Background write protection on `tcsetattr`
 ///
 /// Before applying any termios change, the function checks whether the
 /// calling process is in the foreground group of the target TTY.  Per
@@ -226,7 +226,7 @@ pub(super) fn set_termios_mode(
     t: &UserTermios,
     mode: TermiosSetMode,
 ) -> Result<(), TtyError> {
-    // Phase 14.6: c_cflag CBAUD bits are authoritative for baud rate.
+    // c_cflag CBAUD bits are authoritative for baud rate.
     // c_ispeed/c_ospeed are informational fields populated by get_termios()
     // but do NOT override c_cflag on set_termios().  This matches existing
     // POSIX semantics and the test_review_speed_fields_merge_into_cflag
@@ -238,7 +238,7 @@ pub(super) fn set_termios_mode(
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+    // Post-hangup I/O hardening — state-changing ioctls
     // on a hung-up TTY return EIO.
     {
         let guard = TTY_SLOTS[slot].lock();
@@ -249,7 +249,7 @@ pub(super) fn set_termios_mode(
         }
     }
 
-    // Phase 31: Background write protection — SIGTTOU on tcsetattr.
+    // Background write protection — SIGTTOU on tcsetattr.
     // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
     let task_id = current_task_id();
     if task_id != 0 {
@@ -305,20 +305,20 @@ pub(super) fn set_termios_mode(
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
-                // Phase 39: Capture old IXON state before applying termios.
+                // Capture old IXON state before applying termios.
                 let old_ixon = tty.ldisc.termios().c_iflag & slopos_abi::syscall::IXON;
                 let new_ixon = merged.c_iflag & slopos_abi::syscall::IXON;
 
                 if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
                     tty.ldisc.flush_input();
-                    // Phase 39: Input flush on slave → TIOCPKT_FLUSHREAD.
+                    // Input flush on slave → TIOCPKT_FLUSHREAD.
                     deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_FLUSHREAD;
                 }
                 tty.ldisc.set_termios(&merged);
                 tty.driver.set_termios(&merged);
                 defer_hangup = (merged.c_cflag & CBAUD) == B0;
 
-                // Phase 39: Track IXON toggle for packet mode.
+                // Track IXON toggle for packet mode.
                 if old_ixon == 0 && new_ixon != 0 {
                     deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_DOSTOP;
                 } else if old_ixon != 0 && new_ixon == 0 {
@@ -331,7 +331,7 @@ pub(super) fn set_termios_mode(
         }
     };
 
-    // Phase 39: Deliver deferred packet events now that the slot lock is released.
+    // Deliver deferred packet events now that the slot lock is released.
     if deferred_pkt_events != 0 {
         pty::queue_packet_event(idx, deferred_pkt_events);
     }
@@ -362,11 +362,11 @@ pub fn set_termios_flush(idx: TtyIndex, t: &UserTermios) -> Result<(), TtyError>
 /// Returns `true` if all output to the given TTY has been fully drained:
 /// no in-flight writes and no driver-level pending output.
 ///
-/// Phase 25: Exposed for test observability and `TIOCOUTQ`.  Production
+/// Exposed for test observability and `TIOCOUTQ`.  Production
 /// callers that need to *block* until drain completes should use
 /// `wait_output_idle()` (via `TCSETSW` / `TCSETSF` / `tcsbrk(arg>0)`).
 ///
-/// Phase 13: A hung-up TTY is considered idle (drain is vacuously
+/// A hung-up TTY is considered idle (drain is vacuously
 /// complete because hangup discards all pending output).
 #[must_use]
 pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
@@ -417,7 +417,7 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
             None => return Err(TtyError::NotAllocated),
         };
 
-        // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+        // Post-hangup I/O hardening — state-changing ioctls
         // on a hung-up TTY return EIO.
         if tty.hung_up {
             return Err(TtyError::HungUp);
@@ -444,7 +444,7 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
         Ok(())
     };
 
-    // Phase 39: ldisc switch flush → TIOCPKT_FLUSHREAD (after lock released).
+    // ldisc switch flush → TIOCPKT_FLUSHREAD (after lock released).
     if did_flush {
         pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHREAD);
     }
@@ -481,7 +481,7 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 33: Post-hangup I/O hardening — state-changing ioctls
+    // Post-hangup I/O hardening — state-changing ioctls
     // on a hung-up TTY return EIO.
     {
         let guard = TTY_SLOTS[slot].lock();
@@ -519,7 +519,7 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 5: Missing ioctls (TCFLSH, TCSBRK, TCXONC)
+// Missing ioctls (TCFLSH, TCSBRK, TCXONC)
 // ---------------------------------------------------------------------------
 
 /// Flush TTY queues (implements `tcflush()` / `TCFLSH` ioctl).
@@ -591,7 +591,7 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
 
 /// Send break / drain output (implements `tcsendbreak()` / `TCSBRK` ioctl).
 ///
-/// # Drain contract (Phase 13)
+/// # Drain contract
 ///
 /// `arg > 0` delegates to [`wait_output_idle`] — the single authoritative
 /// drain path shared with `TCSETSW` / `TCSETSF`.  See its doc comment for
@@ -612,7 +612,7 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Phase 13: Hangup guard — state-changing ioctls on a hung-up TTY
+    // Hangup guard — state-changing ioctls on a hung-up TTY
     // return EIO (matching Linux and the set_termios_mode pattern).
     {
         let guard = TTY_SLOTS[slot].lock();
@@ -632,7 +632,7 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
 
 /// Start/stop I/O (implements `tcflow()` / `TCXONC` ioctl).
 ///
-/// Finishing Phase 8: Full behavioral implementation replacing the Phase 5
+/// Full behavioral implementation replacing the original
 /// validation-only stub.
 ///
 /// - `TCOOFF`: suspend output — sets `output_stopped = true` so the write
@@ -663,7 +663,7 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
                 tty.output_stopped = true;
                 prev
             };
-            // Phase 39: Notify master of flow-control stop transition.
+            // Notify master of flow-control stop transition.
             if !was_stopped {
                 pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_STOP);
             }
@@ -683,7 +683,7 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
             // spurious wake, and it keeps the logic simple.
             TTY_OUTPUT_WAITERS[slot].wake_all();
             TTY_POLL_WAITERS[slot].wake_all();
-            // Phase 39: Notify master of flow-control start transition.
+            // Notify master of flow-control start transition.
             if was_stopped {
                 pty::queue_packet_event(idx, slopos_abi::syscall::TIOCPKT_START);
             }

@@ -1,6 +1,6 @@
 //! PTY pair allocation, lifecycle, and data routing.
 //!
-//! # Pair-Level Atomicity (Phase 20)
+//! # Pair-Level Atomicity
 //!
 //! PTY master/slave pairs are created and destroyed as atomic units.
 //! `PTY_ALLOC_LOCK` serialises all pair-level lifecycle transitions:
@@ -14,7 +14,7 @@
 //! `write`, `push_input`).  Per-TTY slot locks in `TTY_SLOTS` remain the
 //! fast-path protection for those.
 //!
-//! # Generation-Safe Peer Identity (Phase 26)
+//! # Generation-Safe Peer Identity
 //!
 //! PTY peer references are wrapped in [`PtyPeerHandle`], which combines a
 //! `TtyIndex` with a generation counter.  The generation counter
@@ -39,7 +39,7 @@ use super::table::{
 use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
 
 // ---------------------------------------------------------------------------
-// Generation-safe peer identity (Phase 26)
+// Generation-safe peer identity
 // ---------------------------------------------------------------------------
 
 /// A generation-tagged handle to a PTY peer slot.
@@ -114,7 +114,7 @@ static PTY_ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
 /// guaranteeing that no concurrent `pty_alloc()` or `free_pair_if_unused()`
 /// can observe a half-initialised pair.
 ///
-/// Phase 26: peer cross-references now carry generation-tagged
+/// peer cross-references now carry generation-tagged
 /// [`PtyPeerHandle`]s so that stale writes after rapid free/reuse are
 /// safely discarded.
 ///
@@ -148,7 +148,7 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Validated slave open (Phase 20, Phase 38: lock guard)
+// Validated slave open
 // ---------------------------------------------------------------------------
 
 /// Atomically validate that `idx` is still a live PTY slave, check the
@@ -159,7 +159,7 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
 /// slot as `None` (and return `NotAllocated`) or succeed and increment the
 /// open count (preventing the pair from being freed).
 ///
-/// Phase 38: Returns `TtyError::PermissionDenied` if the slave is locked.
+/// Returns `TtyError::PermissionDenied` if the slave is locked.
 /// The master holder must call `TIOCSPTLCK` with arg=0 to unlock before
 /// the slave can be opened.
 ///
@@ -180,7 +180,7 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 
         match tty.driver {
             TtyDriverKind::PtySlave { ref peer } => {
-                // Phase 38: Locked slaves cannot be opened.
+                // Locked slaves cannot be opened.
                 if tty.slave_locked {
                     return Err(TtyError::PermissionDenied);
                 }
@@ -203,16 +203,16 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Data routing (Phase 26: generation-validated)
+// Data routing
 // ---------------------------------------------------------------------------
 
 /// Master write → push bytes into the slave's line discipline input.
 ///
-/// Phase 26: validates the peer handle's generation before writing.
+/// validates the peer handle's generation before writing.
 /// If the peer slot was freed and potentially reused, the write is
 /// silently discarded.
 ///
-/// Finishing Phase 2: Returns the number of bytes successfully pushed.
+/// Returns the number of bytes successfully pushed.
 /// Stops early when the slave's cooked buffer hits the throttle
 /// high-water mark (`throttled == true`), enabling short writes and
 /// back-pressure.  The caller is responsible for retrying the remainder.
@@ -287,7 +287,7 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
 
 /// Slave write → push bytes into the master's raw read buffer.
 ///
-/// Phase 26: validates the peer handle's generation before writing.
+/// validates the peer handle's generation before writing.
 /// If the peer slot was freed and potentially reused, the write is
 /// silently discarded.
 ///
@@ -322,7 +322,7 @@ pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
             count += 1;
         }
 
-        // Finishing Phase 10: Use batched wake policy.
+        // Use batched wake policy.
         (count, master.ldisc.should_wake_reader())
     };
 
@@ -394,7 +394,7 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
 }
 
 // ---------------------------------------------------------------------------
-// Pair lifecycle (Phase 20: atomic check-and-free, Phase 26: generation bump)
+// Pair lifecycle
 // ---------------------------------------------------------------------------
 
 /// Free both sides of a PTY pair if both have `open_count == 0`.
@@ -403,7 +403,7 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
 /// no concurrent `pty_alloc()` or `pty_open_slave()` can observe a
 /// partially freed pair (TOCTOU prevention).
 ///
-/// Phase 26: increments `TTY_GENERATIONS` for each freed slot so that
+/// increments `TTY_GENERATIONS` for each freed slot so that
 /// any stale `PtyPeerHandle` referencing the old incarnation will fail
 /// generation validation on subsequent writes.
 pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
@@ -444,7 +444,7 @@ pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 38: PTY slave lock management
+// PTY slave lock management
 // ---------------------------------------------------------------------------
 
 /// Set the PTY slave lock state.
@@ -527,7 +527,7 @@ pub fn is_slave_locked(idx: TtyIndex) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 39: PTY packet mode
+// PTY packet mode
 // ---------------------------------------------------------------------------
 
 /// Enable or disable packet mode on a PTY master.

@@ -1,6 +1,6 @@
 //! TTY poll readiness and compositor focus management.
 //!
-//! Phase 16 decomposition: extracted from `mod.rs` to isolate event-driven
+//! decomposition: extracted from `mod.rs` to isolate event-driven
 //! poll readiness computation (`poll_events`), multi-slot poll sleep
 //! (`poll_sleep_on`, `poll_sleep`), and compositor-level focus tracking
 //! (`set_compositor_focus`, `get_compositor_focus`).
@@ -67,7 +67,7 @@ pub fn get_compositor_focus() -> Result<u32, TtyError> {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 21: Event-driven poll readiness
+// Event-driven poll readiness
 // ---------------------------------------------------------------------------
 
 /// Compute poll readiness events for a TTY file descriptor.
@@ -80,7 +80,7 @@ pub fn get_compositor_focus() -> Result<u32, TtyError> {
 ///   `tty_poll()` which reports `POLLERR` alongside `POLLHUP` so programs
 ///   that check write-readiness via `POLLERR` detect the error condition.
 ///
-/// Phase 23: Properly captures and delivers deferred signals from
+/// Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 ///
 /// Only events that are both requested and ready are returned.
@@ -102,7 +102,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
 
         let mut revents = 0u16;
 
-        // Phase 39: Packet events also make the master readable.
+        // Packet events also make the master readable.
         if (requested & POLLIN) != 0
             && (tty.ldisc.has_data() || (tty.packet_mode && tty.packet_events != 0))
         {
@@ -113,7 +113,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             revents |= POLLOUT;
         }
 
-        // Phase 33: Post-hangup I/O hardening — a hung-up or peer-closed
+        // Post-hangup I/O hardening — a hung-up or peer-closed
         // (with no remaining data) TTY reports POLLHUP, POLLIN, and POLLERR.
         // POLLIN is set because a subsequent read() will return immediately
         // with EOF (0 bytes), making the fd "readable".
@@ -129,7 +129,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         (sig, revents)
     };
 
-    // Phase 23: Deliver deferred signal outside lock to avoid deadlock.
+    // Deliver deferred signal outside lock to avoid deadlock.
     if let Some((pgid, sig)) = deferred_signal {
         if pgid != 0 {
             let _ = slopos_lib::kernel_services::driver_runtime::signal_process_group(pgid, sig);
@@ -142,7 +142,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
 /// Sleep until a poll-relevant event occurs on one of the given TTY slots,
 /// or fall back to a short busy-wait if the scheduler is not yet enabled.
 ///
-/// Finishing Phase 1: Per-slot registration.  The caller provides the set
+/// Per-slot registration.  The caller provides the set
 /// of TTY indices it is currently monitoring.  The current task is enqueued
 /// on each slot's `TTY_POLL_WAITERS` entry, then blocked exactly once.
 /// When *any* of the registered slots fires a wake, the task resumes and
