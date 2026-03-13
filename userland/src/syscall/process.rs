@@ -100,6 +100,11 @@ pub fn fork() -> i32 {
 }
 
 #[inline(always)]
+pub fn setsid() -> i32 {
+    unsafe { syscall0(SYSCALL_SETSID) as i32 }
+}
+
+#[inline(always)]
 pub fn setpgid(pid: u32, pgid: u32) -> i32 {
     unsafe { syscall2(SYSCALL_SETPGID, pid as u64, pgid as u64) as i32 }
 }

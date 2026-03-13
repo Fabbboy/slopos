@@ -107,7 +107,13 @@ pub fn clear_foreground_pgid() {
 }
 
 pub fn initialize_job_control() {
+    let _ = process::setsid();
     let _ = fs::tiocsctty(0);
+
+    process::ignore_signal(slopos_abi::signal::SIGTTOU);
+    process::ignore_signal(slopos_abi::signal::SIGTTIN);
+    process::ignore_signal(slopos_abi::signal::SIGTSTP);
+
     let _ = process::setpgid(0, 0);
     let shell_pgid = process::getpgid(0);
     if shell_pgid > 0 {
