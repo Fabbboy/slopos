@@ -128,6 +128,12 @@ pub struct Tty {
     /// is resumed via `tcxonc(TCOON)`.  Separate from the ldisc `stopped`
     /// flag which is driven by IXON (Ctrl+S / Ctrl+Q keyboard flow control).
     pub output_stopped: bool,
+
+    /// Exclusive mode flag.  When `true`, subsequent `open_ref()` calls
+    /// return `DeviceBusy` unless `open_count` is still zero (the exclusive
+    /// holder itself).  Set via `TIOCEXCL`, cleared via `TIOCNXCL`, queried
+    /// via `TIOCGEXCL`.  Matches Linux `TTY_EXCLUSIVE` semantics.
+    pub exclusive: bool,
 }
 
 /// Kernel-internal error type for TTY operations.
@@ -165,6 +171,8 @@ pub enum TtyError {
     OrphanedProcessGroup,
     /// Invalid argument.
     InvalidArg,
+    /// Device is in exclusive mode and already open.
+    DeviceBusy,
     /// Blocking syscall was interrupted by a signal and
     /// may be transparently restarted.  Maps to the kernel-internal
     /// ERESTARTSYS (-512) — the syscall return path converts this to EINTR
@@ -190,6 +198,7 @@ impl TtyError {
             TtyError::SignalInterrupt => ERRNO_EINTR as i32,
             TtyError::OrphanedProcessGroup => ERRNO_EIO as i32,
             TtyError::InvalidArg => ERRNO_EINVAL as i32,
+            TtyError::DeviceBusy => ERRNO_EBUSY as i32,
             TtyError::Restart => ERRNO_ERESTARTSYS as i32,
         }
     }
@@ -224,10 +233,10 @@ pub use self::job_control::{
     set_foreground_pgrp_checked,
 };
 
-// lifecycle.rs: open/close, hangup, active TTY, init
+// lifecycle.rs: open/close, hangup, active TTY, init, exclusive mode
 pub use self::lifecycle::{
-    active_tty, close_ref, default_console_tty, hangup, init, is_hung_up, open_ref, set_active_tty,
-    set_default_console_tty, switch_active_tty, vhangup,
+    active_tty, close_ref, default_console_tty, get_exclusive, hangup, init, is_hung_up, open_ref,
+    set_active_tty, set_default_console_tty, set_exclusive, switch_active_tty, vhangup,
 };
 
 // poll.rs: poll readiness and compositor focus

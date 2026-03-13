@@ -93,6 +93,10 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
+        // TIOCEXCL: reject opens when exclusive mode is set and TTY already open.
+        if tty.exclusive && tty.open_count > 0 {
+            return Err(TtyError::DeviceBusy);
+        }
         let peer_to_reopen = match tty.driver {
             TtyDriverKind::PtySlave { ref peer } => Some(peer.idx),
             _ => None,
@@ -147,10 +151,22 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
                 TtyDriverKind::SerialConsole(_)
                 | TtyDriverKind::VConsole(_)
                 | TtyDriverKind::None => {
+                    let hupcl = tty
+                        .ldisc
+                        .termios()
+                        .control_flags()
+                        .contains(slopos_abi::syscall::ControlFlags::HUPCL);
+                    let sid = tty.session.session_id_raw();
                     tty.ldisc.flush_all();
                     tty.session.detach();
                     tty.hung_up = false;
                     tty.peer_closed = false;
+                    tty.exclusive = false;
+                    if hupcl && sid != 0 {
+                        drop(guard);
+                        hangup(idx);
+                        return Ok(0);
+                    }
                 }
             }
         }
@@ -235,4 +251,37 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
 /// checks (caller has a ctty) are enforced by the syscall handler.
 pub fn vhangup(idx: TtyIndex) {
     hangup(idx);
+}
+
+// ---------------------------------------------------------------------------
+// Exclusive mode (TIOCEXCL / TIOCNXCL / TIOCGEXCL)
+// ---------------------------------------------------------------------------
+
+#[must_use]
+pub fn set_exclusive(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    match guard.as_mut() {
+        Some(tty) => {
+            tty.exclusive = enable;
+            Ok(())
+        }
+        None => Err(TtyError::NotAllocated),
+    }
+}
+
+#[must_use]
+pub fn get_exclusive(idx: TtyIndex) -> Result<bool, TtyError> {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+    let guard = TTY_SLOTS[slot].lock();
+    match guard.as_ref() {
+        Some(tty) => Ok(tty.exclusive),
+        None => Err(TtyError::NotAllocated),
+    }
 }
