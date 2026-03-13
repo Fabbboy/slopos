@@ -1,10 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 16-phase gold-standard roadmap — Phases 1–15 COMPLETE, Phase 16 PENDING
+> **Status**: 16-phase gold-standard roadmap — ALL 16 PHASES COMPLETE
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 9 files, ~7900 lines, ~1556 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
-> **Phase 16**: The only remaining phase is `mod.rs` module decomposition — a pure refactor with no behavioral changes. Should be done AFTER all functional changes are complete.
+> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1566 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll.
 
 ---
 
@@ -57,9 +56,9 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 11 | `TABDLY`/`XTABS` output compatibility | P1 | Small | **DONE** ✅ |
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **DONE** ✅ |
 | 13 | Output drain semantics hardening | P2 | Small | **DONE** ✅ |
-| 14 | Core semantic correctness (typed input, interruptible waits, job control, PTY ABI, batched ingress) | P0 | Large | Pending |
+| 14 | Core semantic correctness (typed input, interruptible waits, job control, PTY ABI, batched ingress) | P0 | Large | **DONE** ✅ |
 | 15 | VConsole Unicode & broadened xterm emulation | P1 | Medium-Large | **DONE** ✅ |
-| 16 | `mod.rs` module decomposition | P2 | Medium | Pending |
+| 16 | `mod.rs` module decomposition | P2 | Medium | **DONE** ✅ |
 
 ---
 
@@ -1186,7 +1185,7 @@ Use a lookup table or Unicode `East_Asian_Width` property to determine width. Th
 
 ## 19. Phase 16: mod.rs Module Decomposition
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Decomposed `mod.rs` from 2543 lines into 5 focused sub-modules: `io.rs` (~1073 lines: read, write, push_input, drain, data queries, idle callback), `termios.rs` (~722 lines: termios get/set, winsize, ldisc, ioctls, drain), `job_control.rs` (~259 lines: session, foreground pgrp, controlling terminal), `lifecycle.rs` (~238 lines: open/close, hangup, active TTY, init), `poll.rs` (~205 lines: poll readiness, poll sleep, compositor focus). `mod.rs` slimmed to ~239 lines (struct, error enum, re-exports). Pure refactor with zero behavioral changes. All 1556 pre-existing tests pass unchanged. 10 new regression tests added verifying public API surface preservation (function signature checks, error variant stability, constant value checks, smoke tests). `cargo fmt` applied.
 
 > **Priority**: P2 maintainability — `mod.rs` at 2,596 lines mixes core I/O, termios policy, job control, lifecycle, hangup, and poll in one file. The code is correct, but navigation and future changes are harder than they need to be.
 > **Principle**: Split into focused modules with clear responsibilities. No behavioral changes — pure refactor. **Do this AFTER Phases 14 and 15**, since those phases modify `mod.rs` heavily. Refactoring code that's about to change wastes effort.
@@ -1255,16 +1254,18 @@ drivers/src/tty/
 - Grep confirms no function moved between files has a changed signature.
 - Each new file has a module doc comment.
 
-### 19.5 Files expected to change
+### 19.5 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/mod.rs` | Slim to ~200 lines: Tty struct, TtyError, constants, re-exports from sub-modules |
-| `drivers/src/tty/io.rs` | **NEW** — read, write, push_input, push_input_batch, drain, split-write |
-| `drivers/src/tty/termios.rs` | **NEW** — termios get/set/wait/flush, winsize, ldisc, ioctls, drain |
-| `drivers/src/tty/job_control.rs` | **NEW** — session, foreground pgrp, controlling terminal, SIGTTIN/SIGTTOU |
-| `drivers/src/tty/lifecycle.rs` | **NEW** — open/close ref counting, hangup, vhangup, active TTY |
-| `drivers/src/tty/poll.rs` | **NEW** — poll_events, poll_sleep, compositor focus |
+| `drivers/src/tty/mod.rs` | Slimmed from 2543 to ~239 lines: Tty struct, TtyError enum, MAX_TTYS constant, module declarations, re-exports preserving full public API surface |
+| `drivers/src/tty/io.rs` | **NEW** (~1073 lines) — `impl Tty { drain_hw_input_locked }`, push_input/push_input_batch, read/read_with_attach, write, has_data, bytes_available, output_queued_bytes, input_available_cb, register_idle_callback, PTY re-exports |
+| `drivers/src/tty/termios.rs` | **NEW** (~722 lines) — TermiosSetMode enum, cflag_to_speed, get/set_termios, set_termios_wait/flush, wait_output_idle, is_output_idle, get/set_ldisc, get/set_winsize, tcflush, tcsbrk, tcxonc |
+| `drivers/src/tty/job_control.rs` | **NEW** (~259 lines) — get/set_foreground_pgrp, set_foreground_pgrp_checked, get_session_id, attach_session, acquire/release/detach_controlling_terminal, detach_session |
+| `drivers/src/tty/lifecycle.rs` | **NEW** (~238 lines) — ACTIVE_TTY/DEFAULT_CONSOLE_TTY statics, active_tty, set_active_tty, switch_active_tty, set_default_console_tty, default_console_tty, init, open_ref, close_ref, hangup, is_hung_up, vhangup |
+| `drivers/src/tty/poll.rs` | **NEW** (~205 lines) — set/get_compositor_focus, poll_events, poll_sleep_on, poll_sleep |
+| `drivers/src/tty_tests/test_ldisc.rs` | Added 10 regression tests (`test_fp16_*`): API re-export verification (io, termios, job_control, lifecycle, poll, pty), struct field accessibility, error variant stability, MAX_TTYS constant check, smoke test |
+| `drivers/src/tty_tests/mod.rs` | Registered 10 new `test_fp16_*` tests in suite |
 
 ---
 
