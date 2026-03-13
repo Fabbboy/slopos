@@ -649,6 +649,16 @@ pub const TIOCPKT_NOSTOP: u8 = 0x10;
 /// `IXON` set on slave termios.
 pub const TIOCPKT_DOSTOP: u8 = 0x20;
 
+/// Set exclusive mode on a TTY — prevents other opens.
+/// Linux value: 0x540C.
+pub const TIOCEXCL: u64 = 0x540C;
+/// Clear exclusive mode on a TTY — allows other opens.
+/// Linux value: 0x540D.
+pub const TIOCNXCL: u64 = 0x540D;
+/// Get exclusive mode state (0 or 1).
+/// Linux value: 0x80045440.
+pub const TIOCGEXCL: u64 = 0x8004_5440;
+
 pub const N_TTY: u32 = 0;
 pub const N_RAW: u32 = 1;
 
@@ -1167,6 +1177,7 @@ pub const ERRNO_EPERM: u64 = (-1i64) as u64;
 pub const ERRNO_EINTR: u64 = (-4i64) as u64;
 pub const ERRNO_EIO: u64 = (-5i64) as u64;
 pub const ERRNO_ENXIO: u64 = (-6i64) as u64;
+pub const ERRNO_EBUSY: u64 = (-16i64) as u64;
 
 /// Internal-only error code for restartable syscalls.  MUST NEVER reach
 /// userland — the syscall return path converts it to `ERRNO_EINTR` or
