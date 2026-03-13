@@ -16453,5 +16453,276 @@ pub fn test_echo_inflight_byte_granularity() -> TestResult {
 }
 
 // ===========================================================================
+// TIOCGSID, TIOCEXCL/TIOCNXCL/TIOCGEXCL & HUPCL Enforcement
+// ===========================================================================
+
+pub fn test_excl_hupcl_tiocgsid_abi_constant() -> TestResult {
+    if slopos_abi::syscall::TIOCGSID != 0x5429 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_tiocexcl_abi_constants() -> TestResult {
+    if slopos_abi::syscall::TIOCEXCL != 0x540C {
+        return TestResult::Fail;
+    }
+    if slopos_abi::syscall::TIOCNXCL != 0x540D {
+        return TestResult::Fail;
+    }
+    if slopos_abi::syscall::TIOCGEXCL != 0x8004_5440 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_errno_ebusy_value() -> TestResult {
+    if slopos_abi::syscall::ERRNO_EBUSY != (-16i64) as u64 {
+        return TestResult::Fail;
+    }
+    if TtyError::DeviceBusy.to_errno() != slopos_abi::syscall::ERRNO_EBUSY as i32 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_get_session_id_returns_correct_sid() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    tty::attach_session(idx, 500, 500);
+    match tty::get_session_id(idx) {
+        Ok(500) => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected sid 500, got {:?}", other);
+            tty::detach_session(idx);
+            return TestResult::Fail;
+        }
+    }
+    tty::detach_session(idx);
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_get_session_id_unallocated() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::get_session_id(TtyIndex(31)) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - expected NotAllocated, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_excl_hupcl_exclusive_initially_false() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::get_exclusive(TtyIndex(0)) {
+        Ok(false) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - expected false, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_excl_hupcl_set_exclusive_roundtrip() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::set_exclusive(idx, true).is_err() {
+        return TestResult::Fail;
+    }
+    match tty::get_exclusive(idx) {
+        Ok(true) => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected true after set, got {:?}", other);
+            let _ = tty::set_exclusive(idx, false);
+            return TestResult::Fail;
+        }
+    }
+    if tty::set_exclusive(idx, false).is_err() {
+        return TestResult::Fail;
+    }
+    match tty::get_exclusive(idx) {
+        Ok(false) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected false after clear, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_excl_hupcl_exclusive_blocks_second_open() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::open_ref(idx).is_err() {
+        return TestResult::Fail;
+    }
+    if tty::set_exclusive(idx, true).is_err() {
+        let _ = tty::close_ref(idx);
+        return TestResult::Fail;
+    }
+    match tty::open_ref(idx) {
+        Err(TtyError::DeviceBusy) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - expected DeviceBusy on second open, got {:?}",
+                other
+            );
+            let _ = tty::set_exclusive(idx, false);
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    }
+    let _ = tty::set_exclusive(idx, false);
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_nxcl_allows_second_open() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::open_ref(idx).is_err() {
+        return TestResult::Fail;
+    }
+    let _ = tty::set_exclusive(idx, true);
+    let _ = tty::set_exclusive(idx, false);
+    match tty::open_ref(idx) {
+        Ok(_) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - second open after NXCL should succeed, got {:?}",
+                e
+            );
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    }
+    let _ = tty::close_ref(idx);
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_exclusive_unallocated_slot() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::set_exclusive(TtyIndex(31), true) {
+        Err(TtyError::NotAllocated) => {}
+        other => {
+            klog_info!("TTY_TEST: BUG - expected NotAllocated, got {:?}", other);
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_exclusive(TtyIndex(31)) {
+        Err(TtyError::NotAllocated) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - expected NotAllocated, got {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::open_ref(idx).is_err() {
+        return TestResult::Fail;
+    }
+    tty::attach_session(idx, 600, 600);
+    let mut t = match tty::get_termios(idx) {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    };
+    t.c_cflag |= slopos_abi::syscall::HUPCL;
+    let _ = tty::set_termios(idx, &t);
+    let _ = tty::close_ref(idx);
+    let hung = tty::is_hung_up(idx);
+    if !hung {
+        klog_info!("TTY_TEST: BUG - expected hung_up after HUPCL close");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::open_ref(idx).is_err() {
+        return TestResult::Fail;
+    }
+    tty::attach_session(idx, 700, 700);
+    let mut t = match tty::get_termios(idx) {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = tty::close_ref(idx);
+            return TestResult::Fail;
+        }
+    };
+    t.c_cflag &= !slopos_abi::syscall::HUPCL;
+    let _ = tty::set_termios(idx, &t);
+    let _ = tty::close_ref(idx);
+    let hung = tty::is_hung_up(idx);
+    if hung {
+        klog_info!("TTY_TEST: BUG - should NOT be hung_up without HUPCL");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_hupcl_pty_no_double_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => return TestResult::Fail,
+    };
+    let slave = match tty::get_pty_number(master) {
+        Ok(n) => TtyIndex(n as u8),
+        Err(_) => return TestResult::Fail,
+    };
+    let _ = tty::set_pty_lock(master, false);
+    let _ = tty::open_ref(master);
+    let _ = tty::open_ref(slave);
+
+    let mut t = match tty::get_termios(slave) {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = tty::close_ref(slave);
+            let _ = tty::close_ref(master);
+            return TestResult::Fail;
+        }
+    };
+    t.c_cflag |= slopos_abi::syscall::HUPCL;
+    let _ = tty::set_termios(slave, &t);
+
+    let _ = tty::close_ref(slave);
+    let _ = tty::close_ref(master);
+    TestResult::Pass
+}
+
+pub fn test_excl_hupcl_close_clears_exclusive() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    if tty::open_ref(idx).is_err() {
+        return TestResult::Fail;
+    }
+    let _ = tty::set_exclusive(idx, true);
+    let _ = tty::close_ref(idx);
+
+    match tty::get_exclusive(idx) {
+        Ok(false) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - exclusive should be cleared after last close, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================

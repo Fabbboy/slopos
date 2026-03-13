@@ -833,5 +833,20 @@ slopos_lib::define_test_suite!(
         test_tiocoutq_byte_accounting_regression_idle,
         test_packet_mode_data_prefix_regression,
         test_echo_inflight_byte_granularity,
+        // Missing Ioctls (TIOCGSID, TIOCEXCL) & HUPCL Enforcement
+        test_excl_hupcl_tiocgsid_abi_constant,
+        test_excl_hupcl_tiocexcl_abi_constants,
+        test_excl_hupcl_errno_ebusy_value,
+        test_excl_hupcl_get_session_id_returns_correct_sid,
+        test_excl_hupcl_get_session_id_unallocated,
+        test_excl_hupcl_exclusive_initially_false,
+        test_excl_hupcl_set_exclusive_roundtrip,
+        test_excl_hupcl_exclusive_blocks_second_open,
+        test_excl_hupcl_nxcl_allows_second_open,
+        test_excl_hupcl_exclusive_unallocated_slot,
+        test_excl_hupcl_hupcl_last_close_triggers_hangup,
+        test_excl_hupcl_no_hupcl_last_close_no_hangup,
+        test_excl_hupcl_hupcl_pty_no_double_hangup,
+        test_excl_hupcl_close_clears_exclusive,
     ]
 );
