@@ -19,20 +19,20 @@ use crate::syscall::signal::{
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::USER_FS_OPEN_READ;
 use slopos_abi::signal::{
-    SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
+    sig_bit, SigSet, SignalFrame, UserSigaction, SIGCHLD, SIGUSR1, SIG_SETMASK, SIG_UNBLOCK,
 };
 use slopos_abi::syscall::{
-    ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
-    F_GETFL, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY, O_NONBLOCK, POLLIN,
-    SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID, SYSCALL_IOCTL, SYSCALL_KILL,
-    SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
-    SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
-    SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
+    TtyIndex, ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
+    ERRNO_EAGAIN, FUTEX_WAIT, FUTEX_WAKE, F_GETFL, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY,
+    O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID,
+    SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL,
+    SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT,
+    SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY,
 };
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
+use slopos_abi::task::{TaskStatus, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE};
 use slopos_lib::InterruptFrame;
 use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
-use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
+use slopos_mm::page_alloc::{alloc_page_frame, ALLOC_FLAG_ZERO};
 use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
@@ -218,7 +218,7 @@ pub fn test_syscall_lookup_valid() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_phase56_syscall_lookup_valid() -> TestResult {
+pub fn test_process_syscall_lookup_valid() -> TestResult {
     let required = [
         SYSCALL_CLONE,
         SYSCALL_ARCH_PRCTL,
@@ -231,17 +231,17 @@ pub fn test_phase56_syscall_lookup_valid() -> TestResult {
 
     for sysno in required {
         let entry = syscall_lookup(sysno);
-        assert_not_null!(entry, "required phase5/6 syscall missing from table");
+        assert_not_null!(entry, "required syscall missing from table");
         assert_test!(
             unsafe { (*entry).handler.is_some() },
-            "required phase5/6 syscall has no handler"
+            "required syscall has no handler"
         );
     }
 
     TestResult::Pass
 }
 
-pub fn test_phase7_syscall_lookup_valid() -> TestResult {
+pub fn test_io_syscall_lookup_valid() -> TestResult {
     let required = [
         SYSCALL_POLL,
         SYSCALL_SELECT,
@@ -255,10 +255,10 @@ pub fn test_phase7_syscall_lookup_valid() -> TestResult {
 
     for sysno in required {
         let entry = syscall_lookup(sysno);
-        assert_not_null!(entry, "required phase7 syscall missing from table");
+        assert_not_null!(entry, "required syscall missing from dispatch table");
         assert_test!(
             unsafe { (*entry).handler.is_some() },
-            "required phase7 syscall has no handler"
+            "required syscall has no handler in dispatch table"
         );
     }
 
@@ -683,7 +683,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
         }
     };
 
-    // Unlock slave so /dev/pts/N open succeeds (Phase 38 lock guard).
+    // Unlock slave so /dev/pts/N open succeeds.
     slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
@@ -734,7 +734,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
         }
     };
 
-    // Unlock slave so /dev/pts/N open succeeds (Phase 38 lock guard).
+    // Unlock slave so /dev/pts/N open succeeds.
     slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
@@ -1127,7 +1127,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     }
 
     use slopos_abi::addr::PhysAddr;
-    use slopos_mm::page_alloc::{ALLOC_FLAG_NO_PCP, alloc_page_frame, free_page_frame};
+    use slopos_mm::page_alloc::{alloc_page_frame, free_page_frame, ALLOC_FLAG_NO_PCP};
 
     let mut stress_pages: [PhysAddr; 128] = [PhysAddr::NULL; 128];
     let mut stress_count = 0usize;
@@ -2201,12 +2201,12 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
 }
 
 // =============================================================================
-// Phase 30: /dev/tty Controlling Terminal Device
+// /dev/tty Controlling Terminal Device
 // =============================================================================
 
-/// Phase 30: A freshly created task with no controlling terminal cannot open
+/// A freshly created task with no controlling terminal cannot open
 /// `/dev/tty` — the open must return ENXIO (-6).
-pub fn test_phase30_dev_tty_no_ctty_returns_enxio() -> TestResult {
+pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let task_id = create_test_user_task();
@@ -2238,9 +2238,9 @@ pub fn test_phase30_dev_tty_no_ctty_returns_enxio() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: After acquiring a controlling terminal via TIOCSCTTY, opening
+/// After acquiring a controlling terminal via TIOCSCTTY, opening
 /// `/dev/tty` succeeds and returns a valid FD that can be used for read/write.
-pub fn test_phase30_dev_tty_with_ctty_succeeds() -> TestResult {
+pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let task_id = create_test_user_task();
@@ -2279,9 +2279,9 @@ pub fn test_phase30_dev_tty_with_ctty_succeeds() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: After `setsid()`, the controlling terminal is cleared, so opening
+/// After `setsid()`, the controlling terminal is cleared, so opening
 /// `/dev/tty` must return ENXIO.
-pub fn test_phase30_setsid_then_dev_tty_returns_enxio() -> TestResult {
+pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
@@ -2339,9 +2339,9 @@ pub fn test_phase30_setsid_then_dev_tty_returns_enxio() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 30: A forked child inherits the parent's controlling terminal, so
+/// A forked child inherits the parent's controlling terminal, so
 /// `/dev/tty` resolves to the same TTY index as the parent.
-pub fn test_phase30_fork_child_inherits_dev_tty() -> TestResult {
+pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
@@ -2391,8 +2391,8 @@ pub fn test_phase30_fork_child_inherits_dev_tty() -> TestResult {
     TestResult::Pass
 }
 
-/// Phase 41: SYSCALL_VHANGUP is registered in the dispatch table.
-pub fn test_phase41_vhangup_syscall_in_dispatch_table() -> TestResult {
+/// SYSCALL_VHANGUP is registered in the dispatch table.
+pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     let entry = syscall_lookup(SYSCALL_VHANGUP);
     assert_not_null!(entry, "SYSCALL_VHANGUP lookup returned null");
     let entry_ref = unsafe { &*entry };
@@ -2409,8 +2409,8 @@ slopos_lib::define_test_suite!(
         test_syscall_lookup_invalid_number,
         test_syscall_lookup_empty_slot,
         test_syscall_lookup_valid,
-        test_phase56_syscall_lookup_valid,
-        test_phase7_syscall_lookup_valid,
+        test_process_syscall_lookup_valid,
+        test_io_syscall_lookup_valid,
         test_net_scan_syscall_lookup_valid,
         test_fork_null_parent,
         test_fork_kernel_task,
@@ -2456,21 +2456,21 @@ slopos_lib::define_test_suite!(
         test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
         test_vm_mmap_munmap_stress_baseline,
         test_spawn_path_stale_argv_regression,
-        // Phase 30: /dev/tty Controlling Terminal Device
-        test_phase30_dev_tty_no_ctty_returns_enxio,
-        test_phase30_dev_tty_with_ctty_succeeds,
-        test_phase30_setsid_then_dev_tty_returns_enxio,
-        test_phase30_fork_child_inherits_dev_tty,
-        // Phase 41: EXTPROC & vhangup
-        test_phase41_vhangup_syscall_in_dispatch_table,
+        // /dev/tty Controlling Terminal Device
+        test_dev_tty_no_ctty_returns_enxio,
+        test_dev_tty_with_ctty_succeeds,
+        test_setsid_then_dev_tty_returns_enxio,
+        test_fork_child_inherits_dev_tty,
+        // EXTPROC & vhangup
+        test_vhangup_syscall_in_dispatch_table,
     ]
 );
 
 slopos_lib::define_test_suite!(
     syscall_compat_smoke,
     [
-        test_phase56_syscall_lookup_valid,
-        test_phase7_syscall_lookup_valid,
+        test_syscall_lookup_valid,
+        test_process_syscall_lookup_valid,
         test_net_scan_syscall_lookup_valid,
         test_pipe_poll_eof_baseline,
         test_pipe_write_read_basic,
@@ -2494,12 +2494,12 @@ slopos_lib::define_test_suite!(
         test_futex_wait_mismatch_and_wake_no_waiters,
         test_arch_prctl_set_get_fs_roundtrip,
         test_spawn_path_stale_argv_regression,
-        // Phase 30: /dev/tty Controlling Terminal Device
-        test_phase30_dev_tty_no_ctty_returns_enxio,
-        test_phase30_dev_tty_with_ctty_succeeds,
-        test_phase30_setsid_then_dev_tty_returns_enxio,
-        test_phase30_fork_child_inherits_dev_tty,
-        // Phase 41: EXTPROC & vhangup
-        test_phase41_vhangup_syscall_in_dispatch_table,
+        // /dev/tty Controlling Terminal Device
+        test_dev_tty_no_ctty_returns_enxio,
+        test_dev_tty_with_ctty_succeeds,
+        test_setsid_then_dev_tty_returns_enxio,
+        test_fork_child_inherits_dev_tty,
+        // EXTPROC & vhangup
+        test_vhangup_syscall_in_dispatch_table,
     ]
 );

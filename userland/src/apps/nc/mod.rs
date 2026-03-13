@@ -1,8 +1,8 @@
-//! nc — SlopOS network Swiss army knife (Phase A+B: UDP + TCP)
+//! nc — SlopOS network Swiss army knife (UDP + TCP)
 //!
 //! Exercises the full socket lifecycle: socket() → bind()/connect() → send/recv → shutdown().
-//! Phase A supports UDP client and listen modes with half-duplex I/O.
-//! Phase B adds TCP client, listen (with `-k` keep-listening), and makes TCP the default.
+//! Supports UDP client and listen modes with half-duplex I/O, TCP client and
+//! listen (with `-k` keep-listening), and defaults to TCP.
 
 pub mod tcp;
 pub mod udp;
@@ -583,7 +583,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Helper function tests (carried forward from Phase A)
+    // Helper function tests (carried forward)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Argument parsing tests (Phase B additions)
+    // Argument parsing tests 
     // -----------------------------------------------------------------------
     //
     // These test `parse_args_from_slices` which takes clean `&[&[u8]]` slices

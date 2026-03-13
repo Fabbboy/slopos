@@ -70,7 +70,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
     loop {
         let mut ready_count = 0u64;
-        // Finishing Phase 1: Collect TTY slot indices for per-slot poll sleep.
+        // Collect TTY slot indices for per-slot poll sleep.
         let mut poll_tty_slots = [0u8; 32];
         let mut poll_tty_count = 0usize;
         for idx in 0..nfds {
@@ -117,7 +117,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        // Finishing Phase 1: Per-slot poll sleep instead of global wake.
+        // Per-slot poll sleep instead of global wake.
         if poll_tty_count > 0 {
             tty::poll_sleep_on(
                 poll_tty_slots[..poll_tty_count].as_ptr(),
@@ -184,7 +184,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         write_out[..bytes_len].fill(0);
         except_out[..bytes_len].fill(0);
         let mut ready = 0u64;
-        // Finishing Phase 1: Collect TTY slot indices for per-slot poll sleep.
+        // Collect TTY slot indices for per-slot poll sleep.
         let mut poll_tty_slots = [0u8; 32];
         let mut poll_tty_count = 0usize;
 
@@ -284,7 +284,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        // Finishing Phase 1: Per-slot poll sleep instead of global wake.
+        // Per-slot poll sleep instead of global wake.
         if poll_tty_count > 0 {
             tty::poll_sleep_on(
                 poll_tty_slots[..poll_tty_count].as_ptr(),
@@ -308,7 +308,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         None => return ctx.err(), // ENOTTY
     };
 
-    // Phase 33: Post-hangup I/O hardening — most ioctls return EIO on a
+    // Post-hangup I/O hardening — most ioctls return EIO on a
     // hung-up TTY.  Exceptions (POSIX-mandated): TIOCGPGRP, TIOCSPGRP,
     // TIOCGSID must remain functional for job control cleanup after hangup.
     let hangup_safe = matches!(cmd, TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY);
@@ -470,7 +470,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             ctx.ok(0)
         }
         TIOCNOTTY => {
-            // Phase 24: Detach calling process from its controlling terminal.
+            // Detach calling process from its controlling terminal.
             //
             // If the caller has no controlling TTY, or the TTY doesn't match,
             // return ENOTTY.
@@ -509,7 +509,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 ctx.ok(0)
             }
         }
-        // Phase 38: PTY slave lock ioctls.
+        // PTY slave lock ioctls.
         TIOCSPTLCK => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
@@ -533,7 +533,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 ctx.ok(0)
             }
         }
-        // Phase 39: PTY packet mode.
+        // PTY packet mode.
         TIOCPKT => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
@@ -545,7 +545,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 ctx.err()
             }
         }
-        // Finishing Phase 5: Missing ioctls.
+        // Missing ioctls.
         TCFLSH => {
             let queue = arg as i32;
             let rc = tty::tcflush(tty_idx, queue);
@@ -561,7 +561,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let rc = tty::tcxonc(tty_idx, action);
             if rc == 0 { ctx.ok(0) } else { ctx.err() }
         }
-        // Finishing Phase 9: Output queue visibility.
+        // Output queue visibility.
         TIOCOUTQ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));

@@ -91,7 +91,7 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
             func(task, frame);
 
             // ---------------------------------------------------------------
-            // Finishing Phase 7: ERESTARTSYS signal restart logic.
+            // ERESTARTSYS signal restart logic.
             //
             // If the handler returned ERESTARTSYS (-512), the blocking
             // syscall (typically a TTY read) was interrupted by a signal.
@@ -136,7 +136,7 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 7: ERESTARTSYS restart handling
+// ERESTARTSYS restart handling
 //
 // When a blocking syscall (currently TTY read) is interrupted by a signal,
 // it returns ERESTARTSYS (-512) instead of EINTR.  This function inspects

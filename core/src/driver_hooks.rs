@@ -167,7 +167,7 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 24: Check if a process group exists within a given session.
+// Check if a process group exists within a given session.
 // ---------------------------------------------------------------------------
 
 struct PgrpExistsContext {
@@ -211,7 +211,7 @@ fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 31: Check if the current task has a signal blocked or set to SIG_IGN.
+// Check if the current task has a signal blocked or set to SIG_IGN.
 // ---------------------------------------------------------------------------
 
 fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
@@ -238,7 +238,7 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Finishing Phase 7: Check if the current task has any deliverable (pending
+// Check if the current task has any deliverable (pending
 // and not blocked) signals.  Used by the TTY read path to detect signal
 // interruption and return ERESTARTSYS.
 // ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ fn runtime_has_pending_signal() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 31: Check if a process group is orphaned within a session.
+// Check if a process group is orphaned within a session.
 //
 // A process group is orphaned if no member of the group has a parent that is
 // in a *different* process group within the *same* session.  When an orphaned

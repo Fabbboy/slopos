@@ -223,7 +223,7 @@ fn boot_step_lapic_timer_start_fn() {
 }
 
 fn boot_step_pci_init_fn() {
-    // Phase 3C: register the loopback device BEFORE any physical NIC so it
+    // register the loopback device BEFORE any physical NIC so it
     // gets DevIndex(0) by convention.  This must happen before pci_init()
     // triggers VirtIO-net probe.
     slopos_drivers::net::loopback::init_loopback();

@@ -592,7 +592,7 @@ pub const TCGETS: u64 = 0x5401;
 pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
-// Finishing Phase 5: Missing ioctls.
+// Missing ioctls.
 pub const TCSBRK: u64 = 0x5409;
 pub const TCXONC: u64 = 0x540A;
 pub const TCFLSH: u64 = 0x540B;
@@ -617,23 +617,23 @@ pub const TIOCSCTTY: u64 = 0x540E;
 /// Detach the calling process from its controlling terminal.
 /// Linux value: 0x5422.
 pub const TIOCNOTTY: u64 = 0x5422;
-/// Phase 27: Get the number of bytes available for reading.
+/// Get the number of bytes available for reading.
 /// Linux value: 0x541B (same as TIOCINQ).
 pub const FIONREAD: u64 = 0x541B;
-/// Finishing Phase 9: Get the number of bytes in the output queue.
+/// Get the number of bytes in the output queue.
 /// Linux value: 0x5411.
 pub const TIOCOUTQ: u64 = 0x5411;
-/// Phase 38: Set PTY slave lock state (0=unlock, 1=lock). Master FD only.
+/// Set PTY slave lock state (0=unlock, 1=lock). Master FD only.
 /// Linux value: 0x40045431.
 pub const TIOCSPTLCK: u64 = 0x4004_5431;
-/// Phase 38: Get PTY slave lock state. Returns 0 (unlocked) or 1 (locked).
+/// Get PTY slave lock state. Returns 0 (unlocked) or 1 (locked).
 /// Linux value: 0x80045439.
 pub const TIOCGPTLCK: u64 = 0x8004_5439;
-/// Phase 39: Enable/disable PTY packet mode on a master FD.
+/// Enable/disable PTY packet mode on a master FD.
 /// Linux value: 0x5420.
 pub const TIOCPKT: u64 = 0x5420;
 
-/// Phase 39: Packet mode control byte constants.
+/// Packet mode control byte constants.
 /// Normal data follows — no special event.
 pub const TIOCPKT_DATA: u8 = 0x00;
 /// Slave input queue was flushed.
@@ -698,7 +698,7 @@ pub const ONOCR: u32 = 0x10;
 pub const ONLRET: u32 = 0x20;
 pub const OLCUC: u32 = 0x02;
 
-// Finishing Phase 11: Tab delay output flags
+// Tab delay output flags
 pub const TABDLY: u32 = 0x1800;
 pub const TAB0: u32 = 0x0000;
 pub const TAB3: u32 = 0x1800;
@@ -778,7 +778,7 @@ pub const VLNEXT: usize = 15;
 pub const VEOL2: usize = 16;
 
 // =============================================================================
-// Phase 28: Type-safe termios flag types
+// Type-safe termios flag types
 // =============================================================================
 
 bitflags::bitflags! {
@@ -816,7 +816,7 @@ bitflags::bitflags! {
         const ONLRET = 0x20;
         const OLCUC  = 0x02;
 
-        // Finishing Phase 11: Tab delay flags (TABDLY/XTABS).
+        // Tab delay flags (TABDLY/XTABS).
         // TABDLY is a 2-bit mask; only TAB0 (no expansion) and
         // TAB3/XTABS (expand to spaces) are implemented.
         const TABDLY = 0x1800;
@@ -850,7 +850,7 @@ bitflags::bitflags! {
 bitflags::bitflags! {
     /// Type-safe wrapper for `c_cflag` — control (hardware) flags.
     ///
-    /// Finishing Phase 4: Full c_cflag ABI with character size, parity,
+    /// Full c_cflag ABI with character size, parity,
     /// stop bits, modem control, baud rates, and hardware flow control.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ControlFlags: u32 {
@@ -870,7 +870,7 @@ bitflags::bitflags! {
 }
 
 // =============================================================================
-// Phase 28: Strongly-typed c_cc index enum
+// Strongly-typed c_cc index enum
 // =============================================================================
 
 /// Strongly-typed index into the `c_cc` control character array.
@@ -909,7 +909,7 @@ impl CcIndex {
 pub const POSIX_VDISABLE: u8 = 0;
 
 // =============================================================================
-// Phase 28: UserTermios typed accessors
+// UserTermios typed accessors
 // =============================================================================
 
 impl UserTermios {

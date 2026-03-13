@@ -3,22 +3,22 @@ use core::slice;
 
 use slopos_lib::{InitFlag, IrqMutex};
 
-use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
+use slopos_abi::fs::{UserFsEntry, UserFsStat, FS_TYPE_FILE, USER_FS_OPEN_CREAT};
 use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
-    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
+    TtyIndex, FD_CLOEXEC, F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, O_CLOEXEC, O_NOCTTY,
+    O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
-    DriverTaskHandle, block_current_task, current_task, current_task_controlling_tty,
-    current_task_id, current_task_pgid, current_task_sid, scheduler_is_enabled,
-    set_current_task_controlling_tty, unblock_task,
+    block_current_task, current_task, current_task_controlling_tty, current_task_id,
+    current_task_pgid, current_task_sid, scheduler_is_enabled, set_current_task_controlling_tty,
+    unblock_task, DriverTaskHandle,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
 
-use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
+use crate::vfs::{vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink, FileSystem, InodeId};
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -807,9 +807,9 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
     }
 
     if let Some(slave_idx) = parse_pts_path(path_bytes) {
-        // Phase 20: use open_pty_slave() which atomically validates the
-        // slot is still a live PTY slave AND increments its open count,
-        // preventing races with concurrent pair teardown.
+        // open_pty_slave() atomically validates the slot is still a live
+        // PTY slave AND increments its open count, preventing races with
+        // concurrent pair teardown.
         return with_tables(|kernel, processes| {
             let kernel_ptr = kernel as *mut FileTableSlot;
             let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
@@ -835,8 +835,8 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
                 return -1;
             };
 
-            // Phase 20: Atomically validate + open the slave before populating the FD.
-            // Phase 38: open_pty_slave now also rejects locked slaves (EIO).
+            // Atomically validate + open the slave before populating the FD.
+            // open_pty_slave also rejects locked slaves (EIO).
             if tty::open_pty_slave(slave_idx) < 0 {
                 drop(guard);
                 return -1;
@@ -1409,7 +1409,11 @@ pub fn file_mkdir_path(path: *const c_char) -> c_int {
         Some(p) => p,
         None => return -1,
     };
-    if vfs_mkdir(path_bytes).is_ok() { 0 } else { -1 }
+    if vfs_mkdir(path_bytes).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
@@ -1641,8 +1645,8 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
         }
 
         if let Some(tty_idx) = desc.tty_index {
-            // Phase 21: Use tty::poll_events() which drains hw input,
-            // checks IXON stopped state for POLLOUT, and peer/hangup for POLLHUP.
+            // tty::poll_events() drains hw input, checks IXON stopped
+            // state for POLLOUT, and peer/hangup for POLLHUP.
             let revents = tty::poll_events(tty_idx, events);
             drop(guard);
             return revents;
@@ -1727,7 +1731,11 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let valid = unsafe { get_descriptor(&mut *table_ptr, old_fd) }.is_some();
             drop(guard);
-            if valid { new_fd } else { -1 }
+            if valid {
+                new_fd
+            } else {
+                -1
+            }
         });
     }
 

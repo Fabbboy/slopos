@@ -1,8 +1,8 @@
-use crate::syscall::{SockAddrIn, UserPollFd, core::get_time_ms, fs, net};
+use crate::syscall::{core::get_time_ms, fs, net, SockAddrIn, UserPollFd};
 use slopos_abi::syscall::POLLIN;
 
 use super::{
-    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv, write_out,
+    verbose_addr, verbose_bytes, verbose_msg, verbose_recv, write_out, NcConfig, StdinResult,
 };
 
 pub(super) fn udp_client(config: &NcConfig) -> u8 {

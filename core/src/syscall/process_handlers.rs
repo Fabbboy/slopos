@@ -613,7 +613,7 @@ define_syscall!(syscall_vhangup(ctx, args) requires(let task_id) {
         }
     };
     // Delegate to the TTY subsystem's existing hangup infrastructure
-    // (Phases 7 + 33).  This flushes buffers, detaches the session,
+    //.  This flushes buffers, detaches the session,
     // signals SIGHUP + SIGCONT, and wakes all blocked readers/writers.
     slopos_lib::kernel_services::syscall_services::tty::hangup(ctty);
     ctx.ok(0)

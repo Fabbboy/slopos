@@ -1,11 +1,10 @@
 use crate::syscall::{
-    SockAddrIn, UserPollFd,
     core::{get_time_ms, sleep_ms},
-    fs, net,
+    fs, net, SockAddrIn, UserPollFd,
 };
 use slopos_abi::syscall::POLLIN;
 
-use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, write_out};
+use super::{verbose_addr, verbose_bytes, verbose_msg, write_out, NcConfig, StdinResult};
 
 pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0) {
