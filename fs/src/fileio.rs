@@ -3,22 +3,22 @@ use core::slice;
 
 use slopos_lib::{InitFlag, IrqMutex};
 
-use slopos_abi::fs::{UserFsEntry, UserFsStat, FS_TYPE_FILE, USER_FS_OPEN_CREAT};
+use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
 use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
-    TtyIndex, FD_CLOEXEC, F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, O_CLOEXEC, O_NOCTTY,
-    O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET,
+    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
+    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
-    block_current_task, current_task, current_task_controlling_tty, current_task_id,
-    current_task_pgid, current_task_sid, scheduler_is_enabled, set_current_task_controlling_tty,
-    unblock_task, DriverTaskHandle,
+    DriverTaskHandle, block_current_task, current_task, current_task_controlling_tty,
+    current_task_id, current_task_pgid, current_task_sid, scheduler_is_enabled,
+    set_current_task_controlling_tty, unblock_task,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
 
-use crate::vfs::{vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink, FileSystem, InodeId};
+use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -1409,11 +1409,7 @@ pub fn file_mkdir_path(path: *const c_char) -> c_int {
         Some(p) => p,
         None => return -1,
     };
-    if vfs_mkdir(path_bytes).is_ok() {
-        0
-    } else {
-        -1
-    }
+    if vfs_mkdir(path_bytes).is_ok() { 0 } else { -1 }
 }
 
 pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
@@ -1731,11 +1727,7 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let valid = unsafe { get_descriptor(&mut *table_ptr, old_fd) }.is_some();
             drop(guard);
-            if valid {
-                new_fd
-            } else {
-                -1
-            }
+            if valid { new_fd } else { -1 }
         });
     }
 

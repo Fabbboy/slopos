@@ -94,11 +94,7 @@ pub trait TtyDriver {
     ///
     /// Stronger per-driver pending-byte semantics.
     fn output_pending_bytes(&self) -> usize {
-        if self.output_pending() {
-            1
-        } else {
-            0
-        }
+        if self.output_pending() { 1 } else { 0 }
     }
 }
 

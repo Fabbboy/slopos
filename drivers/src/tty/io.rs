@@ -17,14 +17,14 @@ use slopos_lib::kernel_services::driver_runtime::{
     scheduler_is_enabled, signal_process_group,
 };
 
-use super::driver::{write_driver_unlocked, InputEvent, TtyDriverKind};
+use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
 use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
 };
-use super::{Tty, TtyError, TtyIndex, MAX_TTYS};
+use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain

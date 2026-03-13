@@ -22,20 +22,20 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use crate::tty;
+use crate::tty::TtyError;
+use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::ringbuf::RingBuf;
 use crate::tty::session::TtySession;
 use crate::tty::session::{
-    ForegroundCheck, ProcessGroupId, SessionId, NO_FOREGROUND_PGRP, NO_SESSION,
+    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    CellAttributes, CursorAttributes, VConsoleState, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
+    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
-use crate::tty::TtyError;
-use crate::tty::TtyIndex;
 
 use crate::tty::pty::PtyPeerHandle;
 

@@ -718,7 +718,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Argument parsing tests 
+    // Argument parsing tests
     // -----------------------------------------------------------------------
     //
     // These test `parse_args_from_slices` which takes clean `&[&[u8]]` slices

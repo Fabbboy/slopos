@@ -20,19 +20,19 @@ use slopos_lib::klog_info;
 use slopos_lib::testing::TestResult;
 
 use crate::tty;
+use crate::tty::TtyError;
+use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, InputEvent, InputStatus, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
-    ForegroundCheck, ProcessGroupId, SessionId, NO_FOREGROUND_PGRP, NO_SESSION,
+    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    CellAttributes, CursorAttributes, VConsoleState, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
+    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
-use crate::tty::TtyError;
-use crate::tty::TtyIndex;
 
 use crate::tty::pty::PtyPeerHandle;
 
@@ -2459,7 +2459,7 @@ pub fn test_sigttou_constant() -> TestResult {
 pub fn test_check_write_tostop_blocks_background() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Background process (pgid=99), TOSTOP enabled.
+    // Background process (pgid=99), TOSTOP enabled.
     match s.check_write(99, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -2493,7 +2493,7 @@ pub fn test_check_write_no_tostop_allows_background() -> TestResult {
 pub fn test_check_write_tostop_allows_foreground() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // fg_pgrp=10
-                      // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
+    // Foreground process (pgid=10), TOSTOP enabled — should still be allowed.
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -2510,7 +2510,7 @@ pub fn test_check_write_tostop_allows_foreground() -> TestResult {
 pub fn test_check_read_cross_session_rejected() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Caller from a different session (sid=99) — should be rejected.
+    // Caller from a different session (sid=99) — should be rejected.
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -4183,7 +4183,7 @@ pub fn test_bootstrap_allowed_no_fg_pgrp() -> TestResult {
 pub fn test_denied_cross_session_read() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Caller from different session (sid=99).
+    // Caller from different session (sid=99).
     match s.check_read(10, 99) {
         ForegroundCheck::DeniedCrossSession => TestResult::Pass,
         other => {
@@ -4268,7 +4268,7 @@ pub fn test_kernel_task_exempted_cross_session_write() -> TestResult {
 pub fn test_same_session_background_read_sigttin() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
+    // Same session (sid=10) but background (pgid=99) — SIGTTIN path.
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -6538,7 +6538,7 @@ pub fn test_echoctl_erase_two_columns() -> TestResult {
     // Type Ctrl+V first to enter literal mode, then Ctrl+A.
     ld.input_char(0x16); // VLNEXT (Ctrl+V)
     ld.input_char(0x01); // Ctrl+A - inserted literally
-                         // Now erase it (VERASE = DEL = 0x7F).
+    // Now erase it (VERASE = DEL = 0x7F).
     let action = ld.input_char(0x7F);
     match action {
         InputAction::KillLineEcho { columns } if columns == 2 => {}
@@ -7297,7 +7297,7 @@ pub fn test_dev_tty_winsize_matches_direct() -> TestResult {
 pub fn test_tcsetattr_background_blocked() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Background process (pgid=50), tostop=true (tcsetattr always uses this).
+    // Background process (pgid=50), tostop=true (tcsetattr always uses this).
     match s.check_write(50, 10, true) {
         ForegroundCheck::BackgroundWrite => TestResult::Pass,
         other => {
@@ -7314,7 +7314,7 @@ pub fn test_tcsetattr_background_blocked() -> TestResult {
 pub fn test_tcsetattr_foreground_allowed() -> TestResult {
     let mut s = TtySession::new();
     s.attach(10, 10); // session=10, fg_pgrp=10
-                      // Foreground process (pgid=10), tostop=true.
+    // Foreground process (pgid=10), tostop=true.
     match s.check_write(10, 10, true) {
         ForegroundCheck::Allowed => TestResult::Pass,
         other => {
@@ -7457,7 +7457,7 @@ pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
 pub fn test_tostop_background_write_check() -> TestResult {
     let mut s = TtySession::new();
     s.attach(20, 20); // session=20, fg_pgrp=20
-                      // Background writer (pgid=30) with TOSTOP enabled.
+    // Background writer (pgid=30) with TOSTOP enabled.
     match s.check_write(30, 20, true) {
         ForegroundCheck::BackgroundWrite => {}
         other => {

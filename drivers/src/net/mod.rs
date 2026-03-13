@@ -16,10 +16,10 @@ pub mod loopback;
 pub mod napi;
 pub mod neighbor;
 pub mod netstack;
-#[cfg(feature = "itests")]
-pub mod socket_framework_tests;
 pub mod route;
 pub mod socket;
+#[cfg(feature = "itests")]
+pub mod socket_framework_tests;
 #[cfg(feature = "itests")]
 pub mod socket_option_tests;
 pub mod tcp;
