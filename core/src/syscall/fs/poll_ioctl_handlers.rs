@@ -405,6 +405,18 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         }
         TIOCSPGRP => {
             require_nonzero!(ctx, arg);
+
+            // POSIX: tcsetpgrp() only works on the caller's controlling terminal.
+            let task_ptr = crate::task::task_find_by_id(task_id);
+            if task_ptr.is_null() {
+                return ctx.err();
+            }
+            let task = unsafe { &*task_ptr };
+            match task.controlling_tty {
+                Some(ctty) if ctty == tty_idx => {}
+                _ => return ctx.err(), // ENOTTY
+            }
+
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let pgrp = try_or_err!(ctx, copy_from_user(ptr));
             let caller_pgid = current_task_pgid();

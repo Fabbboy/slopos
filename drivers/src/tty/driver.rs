@@ -190,6 +190,13 @@ impl TtyDriverKind {
         }
     }
 
+    /// POSIX: only real terminals and PTY slaves may become a controlling
+    /// terminal.  PTY masters are excluded — `TIOCSCTTY` on a master FD
+    /// would break shell session management.
+    pub fn can_be_controlling_terminal(&self) -> bool {
+        !matches!(self, Self::PtyMaster { .. })
+    }
+
     /// Return a lightweight, copyable identifier for this driver variant.
     ///
     /// Used by the split-write path: the caller copies the `DriverId` while

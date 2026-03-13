@@ -8,10 +8,10 @@
 use slopos_abi::signal::{SIGCONT, SIGHUP};
 
 use slopos_lib::kernel_services::driver_runtime::{
-    clear_session_controlling_tty, signal_process_group,
+    clear_session_controlling_tty, scheduler_is_enabled, signal_process_group,
 };
 
-use super::table::TTY_SLOTS;
+use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
 use super::{MAX_TTYS, TtyError, TtyIndex};
 
 // ---------------------------------------------------------------------------
@@ -33,20 +33,30 @@ pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
 }
 
 /// Set the foreground process group for a specific TTY.
+///
+/// Wakes blocked readers so they re-evaluate foreground status and receive
+/// `SIGTTIN` if they are now in the background.
 #[must_use]
 pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let mut guard = TTY_SLOTS[slot].lock();
-    match guard.as_mut() {
-        Some(tty) => {
-            tty.session.set_fg_pgrp_raw(pgid);
-            Ok(())
+    {
+        let mut guard = TTY_SLOTS[slot].lock();
+        match guard.as_mut() {
+            Some(tty) => {
+                tty.session.set_fg_pgrp_raw(pgid);
+            }
+            None => return Err(TtyError::NotAllocated),
         }
-        None => Err(TtyError::NotAllocated),
     }
+
+    if scheduler_is_enabled() != 0 {
+        TTY_INPUT_WAITERS[slot].wake_all();
+        TTY_POLL_WAITERS[slot].wake_all();
+    }
+    Ok(())
 }
 
 /// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
@@ -87,17 +97,25 @@ pub fn set_foreground_pgrp_checked(
         }
     }
 
-    let mut guard = TTY_SLOTS[slot].lock();
-    match guard.as_mut() {
-        Some(tty) => {
-            if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
-                Ok(())
-            } else {
-                Err(TtyError::PermissionDenied)
+    let changed = {
+        let mut guard = TTY_SLOTS[slot].lock();
+        match guard.as_mut() {
+            Some(tty) => {
+                if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
+                    true
+                } else {
+                    return Err(TtyError::PermissionDenied);
+                }
             }
+            None => return Err(TtyError::NotAllocated),
         }
-        None => Err(TtyError::NotAllocated),
+    };
+
+    if changed && scheduler_is_enabled() != 0 {
+        TTY_INPUT_WAITERS[slot].wake_all();
+        TTY_POLL_WAITERS[slot].wake_all();
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +166,11 @@ pub fn acquire_controlling_terminal(
         Some(tty) => tty,
         None => return Err(TtyError::NotAllocated),
     };
+
+    // POSIX: PTY masters cannot become controlling terminals.
+    if !tty.driver.can_be_controlling_terminal() {
+        return Err(TtyError::PermissionDenied);
+    }
 
     let current_sid = tty.session.session_id_raw();
     if current_sid != 0 && current_sid != session_leader {

@@ -807,5 +807,19 @@ slopos_lib::define_test_suite!(
         test_tty_error_variants_unchanged,
         test_max_ttys_constant,
         test_existing_api_smoke_test,
+        // POSIX Controlling Terminal Semantics
+        test_ctty_can_be_ctty_serial,
+        test_ctty_can_be_ctty_vconsole,
+        test_ctty_can_be_ctty_pty_slave,
+        test_ctty_cannot_be_ctty_pty_master,
+        test_ctty_acquire_ctty_pty_master_rejected,
+        test_ctty_acquire_ctty_pty_slave_succeeds,
+        test_ctty_acquire_ctty_serial_console_succeeds,
+        test_ctty_acquire_ctty_vconsole_succeeds,
+        test_ctty_o_noctty_constant_value,
+        test_ctty_set_fg_pgrp_completes_without_deadlock,
+        test_ctty_set_fg_pgrp_checked_completes_without_deadlock,
+        test_ctty_pty_master_ctty_does_not_attach_session,
+        test_ctty_can_be_ctty_none_driver,
     ]
 );

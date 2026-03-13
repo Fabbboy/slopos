@@ -15865,5 +15865,279 @@ pub fn test_existing_api_smoke_test() -> TestResult {
 }
 
 // ===========================================================================
+// POSIX Controlling Terminal Semantics
+// ===========================================================================
+
+pub fn test_ctty_can_be_ctty_serial() -> TestResult {
+    use crate::tty::driver::{SerialConsoleDriver, TtyDriverKind};
+    let driver = TtyDriverKind::SerialConsole(SerialConsoleDriver);
+    if !driver.can_be_controlling_terminal() {
+        klog_info!("TTY_TEST: BUG - SerialConsole should be a valid ctty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_can_be_ctty_vconsole() -> TestResult {
+    let driver = TtyDriverKind::VConsole(VConsoleDriver);
+    if !driver.can_be_controlling_terminal() {
+        klog_info!("TTY_TEST: BUG - VConsole should be a valid ctty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_can_be_ctty_pty_slave() -> TestResult {
+    let peer = PtyPeerHandle {
+        idx: TtyIndex(2),
+        generation: 0,
+    };
+    let driver = TtyDriverKind::PtySlave { peer };
+    if !driver.can_be_controlling_terminal() {
+        klog_info!("TTY_TEST: BUG - PtySlave should be a valid ctty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_cannot_be_ctty_pty_master() -> TestResult {
+    let peer = PtyPeerHandle {
+        idx: TtyIndex(3),
+        generation: 0,
+    };
+    let driver = TtyDriverKind::PtyMaster { peer };
+    if driver.can_be_controlling_terminal() {
+        klog_info!("TTY_TEST: BUG - PtyMaster must NOT be a valid ctty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    match tty::acquire_controlling_terminal(master, 100, 100) {
+        Err(TtyError::PermissionDenied) => {}
+        Ok(()) => {
+            klog_info!("TTY_TEST: BUG - acquire on PTY master should fail");
+            return TestResult::Fail;
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - expected PermissionDenied, got {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave = match tty::get_pty_number(master) {
+        Ok(n) => TtyIndex(n as u8),
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_pty_number failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    // Unlock the slave first.
+    let _ = tty::set_pty_lock(master, false);
+    match tty::acquire_controlling_terminal(slave, 200, 200) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - acquire on PTY slave should succeed, got {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_session_id(slave) {
+        Ok(200) => TestResult::Pass,
+        Ok(other) => {
+            klog_info!(
+                "TTY_TEST: BUG - slave session_id expected 200, got {}",
+                other
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_session_id failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_acquire_ctty_serial_console_succeeds() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    match tty::acquire_controlling_terminal(idx, 300, 300) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - acquire on serial console should succeed, got {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_session_id(idx) {
+        Ok(300) => TestResult::Pass,
+        Ok(other) => {
+            klog_info!(
+                "TTY_TEST: BUG - serial session_id expected 300, got {}",
+                other
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_session_id failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_acquire_ctty_vconsole_succeeds() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(1);
+    match tty::acquire_controlling_terminal(idx, 400, 400) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - acquire on vconsole should succeed, got {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_session_id(idx) {
+        Ok(400) => TestResult::Pass,
+        Ok(other) => {
+            klog_info!(
+                "TTY_TEST: BUG - vconsole session_id expected 400, got {}",
+                other
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_session_id failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_o_noctty_constant_value() -> TestResult {
+    use slopos_abi::syscall::O_NOCTTY;
+    if O_NOCTTY != 0x100 {
+        klog_info!(
+            "TTY_TEST: BUG - O_NOCTTY should be 0x100, got 0x{:x}",
+            O_NOCTTY
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ctty_set_fg_pgrp_completes_without_deadlock() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    tty::attach_session(idx, 500, 500);
+    match tty::set_foreground_pgrp(idx, 501) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - set_foreground_pgrp failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_foreground_pgrp(idx) {
+        Ok(501) => TestResult::Pass,
+        Ok(other) => {
+            klog_info!("TTY_TEST: BUG - fg_pgrp expected 501, got {}", other);
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_foreground_pgrp failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_set_fg_pgrp_checked_completes_without_deadlock() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    tty::attach_session(idx, 600, 600);
+    // Use pgid=0 (clear) since non-zero pgids are validated against
+    // the scheduler's task list, which has no real tasks in unit tests.
+    match tty::set_foreground_pgrp_checked(idx, 0, 600) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - set_foreground_pgrp_checked failed: {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    }
+    match tty::get_foreground_pgrp(idx) {
+        Ok(0) => TestResult::Pass,
+        Ok(other) => {
+            klog_info!("TTY_TEST: BUG - fg_pgrp expected 0, got {}", other);
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_foreground_pgrp failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_pty_master_ctty_does_not_attach_session() -> TestResult {
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let _ = tty::acquire_controlling_terminal(master, 700, 700);
+    match tty::get_session_id(master) {
+        Ok(0) => TestResult::Pass,
+        Ok(sid) => {
+            klog_info!(
+                "TTY_TEST: BUG - master should have no session after rejected acquire, got {}",
+                sid
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - get_session_id failed: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_ctty_can_be_ctty_none_driver() -> TestResult {
+    let driver = TtyDriverKind::None;
+    if !driver.can_be_controlling_terminal() {
+        klog_info!("TTY_TEST: BUG - None driver should allow ctty (vacuously)");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
