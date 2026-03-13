@@ -1,9 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 22-phase gold-standard roadmap — Phases 1–19 COMPLETE, Phases 20–22 pending (post-audit hardening)
+> **Status**: 22-phase gold-standard roadmap — Phases 1–20 COMPLETE, Phases 21–22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 14 files, ~8100 lines, ~1604 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~248 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, TIOCGSID ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed. Exclusive mode (TIOCEXCL/TIOCNXCL/TIOCGEXCL) and HUPCL enforcement on last close.
+> **Current**: `drivers/src/tty/` — 14 files, ~8100 lines, ~1616 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~242 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, TIOCGSID ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed. Exclusive mode (TIOCEXCL/TIOCNXCL/TIOCGEXCL) and HUPCL enforcement on last close. Rust encapsulation hardened — `TtyFlags` bitflags, `PacketEvents` typed bitflags, all `Tty`/`TtySession` fields `pub(crate)`, `TtyDriverKind::None` and redundant `active` field removed.
 > **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
@@ -71,7 +71,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | **DONE** ✅ |
 | 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | **DONE** ✅ |
 | 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | **DONE** ✅ |
-| 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | Pending |
+| 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | **DONE** ✅ |
 | 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | Pending |
 | 22 | Forward-looking: TIOCGPTPEER & flip-buffer architecture | P3 | Medium-Large | Pending |
 
@@ -1500,7 +1500,7 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 
 ## 23. Phase 20: Rust Encapsulation & Type Safety
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Consolidated 7 boolean fields (`hung_up`, `peer_closed`, `slave_locked`, `packet_mode`, `throttled`, `output_stopped`, `exclusive`) into `TtyFlags` bitflags. Replaced raw `packet_events: u8` with typed `PacketEvents` bitflags (values match `TIOCPKT_*` constants). All `Tty` and `TtySession` fields privatized to `pub(crate)`. Added `mark_hung_up()` domain method that enforces the HUNG_UP→clears OUTPUT_STOPPED invariant. Removed `TtyDriverKind::None` variant and `DriverId::None` — a `Tty` always has a real driver; the `Option<Tty>` in `TTY_SLOTS` is the sole empty-state encoding. Removed redundant `active: bool` field. 12 regression tests added.
 
 > **Priority**: P2 — no runtime bugs, but the current `pub` field exposure makes invariant violations trivial to introduce. Rust's type system should enforce state-transition correctness.
 > **Principle**: Make invalid states unrepresentable. Use `pub(crate)` + domain methods instead of raw field access. Consolidate scattered boolean flags into a typed flags type. Remove redundant state modeling.
@@ -1612,6 +1612,22 @@ This phase is a pure refactor — no behavioral changes, no new features.
 | `drivers/src/tty/pty.rs` | Update field access for `TtyFlags`, `PacketEvents` |
 | `drivers/src/tty/table.rs` | Remove any `TtyDriverKind::None` init patterns |
 | `drivers/src/tty_tests.rs` | Update direct field access in tests to use `pub(crate)` access patterns, update flag comparisons |
+
+### 20.8 Implementation summary
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Defined `TtyFlags` (u16, 7 flags) and `PacketEvents` (u8, 6 events) bitflags. Replaced 7 booleans + `active: bool` + `packet_events: u8` with `flags: TtyFlags` + `packet_events: PacketEvents`. All fields `pub(crate)`. Added `mark_hung_up()` domain method. |
+| `drivers/src/tty/table.rs` | Updated `Tty::new()`, `new_pty_master()`, `new_pty_slave()` constructors to use `TtyFlags`/`PacketEvents`. Removed `active` field. Slave starts with `TtyFlags::SLAVE_LOCKED`. |
+| `drivers/src/tty/driver.rs` | Removed `TtyDriverKind::None` variant and all its match arms. Removed `DriverId::None` and its `write_driver_unlocked` arm. |
+| `drivers/src/tty/session.rs` | All `TtySession` fields changed from `pub` to `pub(crate)`. |
+| `drivers/src/tty/io.rs` | All boolean field reads → `flags.contains(TtyFlags::*)`, writes → `flags.insert/remove`. Packet events → `.bits()`, `.is_empty()`, `PacketEvents::from_bits_truncate()`. Removed `tty.active` check in idle callback. |
+| `drivers/src/tty/lifecycle.rs` | Hangup uses `mark_hung_up()`. Open/close use `flags.insert/remove`. `switch_active_tty` uses `Some(_)` instead of `tty.active`. Removed `TtyDriverKind::None` match arm in `close_ref`. |
+| `drivers/src/tty/poll.rs` | All field reads → `flags.contains()`. Packet events → `.is_empty()`. |
+| `drivers/src/tty/termios.rs` | All field reads/writes → `flags.contains/insert/remove`. |
+| `drivers/src/tty/pty.rs` | All field reads/writes → `flags.contains/insert/remove/set`. Packet events → `PacketEvents::from_bits_truncate()`. |
+| `drivers/src/tty_tests/test_ldisc.rs` | All 20 field access sites updated. `TtyDriverKind::None` → `SerialConsoleDriver`. `DriverId::None` → `DriverId::SerialConsole`. 12 new regression tests (`test_p20_*`). |
+| `drivers/src/tty_tests/mod.rs` | Registered 12 Phase 20 tests. |
 
 ---
 
