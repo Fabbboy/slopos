@@ -1,9 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 22-phase gold-standard roadmap — Phases 1–16 COMPLETE, Phases 17–22 pending (post-audit hardening)
+> **Status**: 22-phase gold-standard roadmap — Phases 1–17 COMPLETE, Phases 18–22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1566 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll.
+> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1579 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, fg_pgrp change wake).
 > **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
@@ -68,7 +68,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 16 | `mod.rs` module decomposition | P2 | Medium | **DONE** ✅ |
 | | | | | |
 | **Post-Audit Hardening (Phases 17–22)** | | | | |
-| 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | Pending |
+| 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | **DONE** ✅ |
 | 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | Pending |
 | 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | Pending |
 | 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | Pending |
@@ -1286,7 +1286,7 @@ drivers/src/tty/
 
 ## 20. Phase 17: POSIX Controlling Terminal Semantics
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Added `can_be_controlling_terminal()` to `TtyDriverKind` rejecting PTY masters from becoming controlling terminals. Guarded `acquire_controlling_terminal()` with the new check so `TIOCSCTTY` on a master FD returns `PermissionDenied`. O_NOCTTY enforcement was already implemented in `fileio.rs::maybe_acquire_controlling_tty_on_open()` (verified). Added POSIX controlling-terminal check in `TIOCSPGRP` ioctl handler — the FD's TTY index must match the caller's `controlling_tty` or the ioctl returns `ENOTTY`. Added wake calls in `set_foreground_pgrp()` and `set_foreground_pgrp_checked()` — after changing `fg_pgrp`, both `TTY_INPUT_WAITERS[slot]` and `TTY_POLL_WAITERS[slot]` are woken so blocked readers re-evaluate foreground status and receive `SIGTTIN` promptly. 13 regression tests added.
 
 > **Priority**: P0 — these are POSIX semantic bugs that will break real shell programs (bash, tmux, ssh, daemon processes). Bundled because all four fixes share the same code paths (session management, job control, ioctl dispatch) and should land together for coherent testing.
 > **Principle**: Fix the places where POSIX programs will break. Do not redesign — harden the existing architecture with precise, minimal guards.
@@ -1357,16 +1357,17 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 - Regression: all existing session/job-control/PTY tests pass unchanged.
 - `just build` + `just test` gate.
 
-### 17.6 Files expected to change
+### 17.6 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/driver.rs` | Add `can_be_controlling_terminal()` method to `TtyDriverKind` |
-| `drivers/src/tty/job_control.rs` | Guard `acquire_controlling_terminal()` with ctty check; wake `TTY_INPUT_WAITERS`/`TTY_POLL_WAITERS` in `set_foreground_pgrp*()` |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add ctty guard on `TIOCSCTTY`, add controlling-terminal check on `TIOCSPGRP`, thread `O_NOCTTY` through open path |
-| `abi/src/syscall.rs` | Add `O_NOCTTY` constant |
-| `fs/src/fileio.rs` | Thread open flags to TTY open path for `O_NOCTTY` enforcement |
-| `drivers/src/tty_tests.rs` | PTY master ctty rejection, O_NOCTTY, TIOCSPGRP controlling-tty check, fg_pgrp change wake tests |
+| `drivers/src/tty/driver.rs` | Added `can_be_controlling_terminal()` method to `TtyDriverKind` — returns `false` for `PtyMaster`, `true` for all others |
+| `drivers/src/tty/job_control.rs` | Guarded `acquire_controlling_terminal()` with `can_be_controlling_terminal()` check. Added `TTY_INPUT_WAITERS[slot].wake_all()` + `TTY_POLL_WAITERS[slot].wake_all()` in both `set_foreground_pgrp()` and `set_foreground_pgrp_checked()` after fg_pgrp change. Imported `scheduler_is_enabled`, `TTY_INPUT_WAITERS`, `TTY_POLL_WAITERS`. |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Added controlling-terminal validation in `TIOCSPGRP` handler — checks `task.controlling_tty == Some(tty_idx)` before allowing the operation, returns `ENOTTY` otherwise |
+| `abi/src/syscall.rs` | `O_NOCTTY` already present (`0x100`) — no change needed |
+| `fs/src/fileio.rs` | `O_NOCTTY` enforcement already implemented in `maybe_acquire_controlling_tty_on_open()` — no change needed |
+| `drivers/src/tty_tests/test_ldisc.rs` | Added 13 tests (`test_ctty_*`): `can_be_controlling_terminal` for all 5 driver kinds, acquire ctty on PTY master/slave/serial/vconsole, O_NOCTTY constant value, set_foreground_pgrp wake (both direct and checked variants), PTY master no session attachment after rejected acquire |
+| `drivers/src/tty_tests/mod.rs` | Registered 13 new `test_ctty_*` tests in suite |
 
 ---
 
