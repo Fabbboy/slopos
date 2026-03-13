@@ -7,10 +7,15 @@
 //! Phase 40: VT100/ANSI terminal emulation — each output byte passes through
 //! `VtParser`; typed `VtAction` variants drive cursor movement, erase, scroll,
 //! and SGR color/attribute rendering.
+//!
+//! Phase 15: Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
+//! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
 use core::ptr;
 
-use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_or_space};
+use slopos_abi::font::{
+    FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_for_codepoint, get_glyph_or_space, is_double_width,
+};
 use slopos_lib::IrqMutex;
 
 use crate::serial::serial_putc_com1;
@@ -23,6 +28,9 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 25;
 const FG_COLOR: u32 = 0x00AAAAAA;
 const BG_COLOR: u32 = 0x00000000;
+
+/// Continuation marker for the right half of a double-width character.
+const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
 
 // ---------------------------------------------------------------------------
 // ANSI color tables (standard 8 + bright 8)
@@ -89,19 +97,16 @@ impl CursorAttributes {
         }
     }
 
-    /// Effective foreground color (handles bold → bright and inverse swap).
     fn effective_fg(&self) -> u32 {
         if self.inverse {
             self.bg
         } else if self.bold {
-            // Promote standard colors to bright when bold is active.
             self.brighten(self.fg)
         } else {
             self.fg
         }
     }
 
-    /// Effective background color (handles inverse swap).
     fn effective_bg(&self) -> u32 {
         if self.inverse {
             if self.bold {
@@ -114,7 +119,6 @@ impl CursorAttributes {
         }
     }
 
-    /// If color matches a standard ANSI color, return its bright variant.
     fn brighten(&self, color: u32) -> u32 {
         let mut i = 0;
         while i < 8 {
@@ -124,6 +128,30 @@ impl CursorAttributes {
             i += 1;
         }
         color
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 256-color → RGB mapping
+// ---------------------------------------------------------------------------
+
+fn color256_to_rgb(idx: u8) -> u32 {
+    match idx {
+        0..=7 => ANSI_COLORS[idx as usize],
+        8..=15 => ANSI_BRIGHT_COLORS[(idx - 8) as usize],
+        16..=231 => {
+            // 6×6×6 color cube: index = 16 + 36*r + 6*g + b (each 0–5)
+            let n = (idx - 16) as u32;
+            let b = (n % 6) * 51;
+            let g = ((n / 6) % 6) * 51;
+            let r = (n / 36) * 51;
+            (r << 16) | (g << 8) | b
+        }
+        232..=255 => {
+            // Grayscale ramp: 24 shades from 8 to 238
+            let v = (8 + 10 * (idx - 232) as u32) & 0xFF;
+            (v << 16) | (v << 8) | v
+        }
     }
 }
 
@@ -152,8 +180,7 @@ pub(crate) struct VConsoleState {
     pub(crate) rows: u16,
     pub(crate) cols: u16,
     pub(crate) fb: Option<VConsoleFbInfo>,
-    pub(crate) cells: [[u8; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
-    // Phase 40: VT parser + per-cell color attributes
+    pub(crate) cells: [[u32; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
     pub(crate) parser: VtParser,
     pub(crate) cell_attrs: [[CellAttributes; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
     pub(crate) cursor_attrs: CursorAttributes,
@@ -161,7 +188,7 @@ pub(crate) struct VConsoleState {
     pub(crate) saved_cursor_col: u16,
     pub(crate) saved_cursor_attrs: CursorAttributes,
     pub(crate) cursor_visible: bool,
-    pub(crate) alt_screen_cells: [[u8; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+    pub(crate) alt_screen_cells: [[u32; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
     pub(crate) alt_screen_attrs: [[CellAttributes; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
     pub(crate) alt_screen_cursor_row: u16,
     pub(crate) alt_screen_cursor_col: u16,
@@ -176,7 +203,7 @@ impl VConsoleState {
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
             fb: None,
-            cells: [[b' '; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+            cells: [[b' ' as u32; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
             parser: VtParser::new(),
             cell_attrs: [[CellAttributes::default_colors(); VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
             cursor_attrs: CursorAttributes::default_attrs(),
@@ -184,7 +211,7 @@ impl VConsoleState {
             saved_cursor_col: 0,
             saved_cursor_attrs: CursorAttributes::default_attrs(),
             cursor_visible: true,
-            alt_screen_cells: [[b' '; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+            alt_screen_cells: [[b' ' as u32; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
             alt_screen_attrs: [[CellAttributes::default_colors(); VCONSOLE_MAX_COLS];
                 VCONSOLE_MAX_ROWS],
             alt_screen_cursor_row: 0,
@@ -194,10 +221,9 @@ impl VConsoleState {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 40: VT-parser-driven byte processing
+    // VT-parser-driven byte processing
     // -----------------------------------------------------------------------
 
-    /// Feed one byte through the VT parser and execute the resulting action.
     pub(crate) fn process_byte(&mut self, b: u8) {
         let action = self.parser.advance(b);
         self.execute_action(action);
@@ -205,7 +231,7 @@ impl VConsoleState {
 
     fn execute_action(&mut self, action: VtAction) {
         match action {
-            VtAction::Print(ch) => self.print_char(ch),
+            VtAction::Print(cp) => self.print_codepoint(cp),
             VtAction::Execute(ctrl) => self.execute_control(ctrl),
             VtAction::MoveCursor { direction, count } => self.move_cursor(direction, count),
             VtAction::SetCursorPos { row, col } => self.set_cursor_pos(row, col),
@@ -226,15 +252,39 @@ impl VConsoleState {
     // Action handlers
     // -----------------------------------------------------------------------
 
-    fn print_char(&mut self, ch: u8) {
+    fn print_codepoint(&mut self, cp: u32) {
         let row = self.cursor_row as usize;
         let col = self.cursor_col as usize;
-        if row < self.rows as usize && col < self.cols as usize {
-            self.cells[row][col] = ch;
-            self.cell_attrs[row][col] = CellAttributes {
-                fg: self.cursor_attrs.effective_fg(),
-                bg: self.cursor_attrs.effective_bg(),
-            };
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+
+        if row >= rows || col >= cols {
+            return;
+        }
+
+        let wide = is_double_width(cp);
+        let cell_attr = CellAttributes {
+            fg: self.cursor_attrs.effective_fg(),
+            bg: self.cursor_attrs.effective_bg(),
+        };
+
+        if wide && col + 1 < cols {
+            self.cells[row][col] = cp;
+            self.cell_attrs[row][col] = cell_attr;
+            self.cells[row][col + 1] = CONTINUATION_CODEPOINT;
+            self.cell_attrs[row][col + 1] = cell_attr;
+            self.render_cell(self.cursor_row, self.cursor_col);
+            self.render_cell(self.cursor_row, self.cursor_col + 1);
+            self.cursor_col = self.cursor_col.saturating_add(2);
+        } else if wide {
+            // At last column — no room for double-width; render replacement.
+            self.cells[row][col] = b' ' as u32;
+            self.cell_attrs[row][col] = cell_attr;
+            self.render_cell(self.cursor_row, self.cursor_col);
+            self.cursor_col = self.cursor_col.saturating_add(1);
+        } else {
+            self.cells[row][col] = cp;
+            self.cell_attrs[row][col] = cell_attr;
             self.render_cell(self.cursor_row, self.cursor_col);
             self.cursor_col = self.cursor_col.saturating_add(1);
         }
@@ -244,7 +294,6 @@ impl VConsoleState {
     fn execute_control(&mut self, ctrl: u8) {
         match ctrl {
             b'\n' | 0x0B | 0x0C => {
-                // LF, VT, FF — all advance one line.
                 self.cursor_row = self.cursor_row.saturating_add(1);
                 self.cursor_col = 0;
             }
@@ -252,13 +301,18 @@ impl VConsoleState {
                 self.cursor_col = 0;
             }
             0x08 => {
-                // BS
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                     let row = self.cursor_row as usize;
                     let col = self.cursor_col as usize;
                     if row < self.rows as usize && col < self.cols as usize {
-                        self.cells[row][col] = b' ';
+                        // If erasing a continuation cell, also clear the lead cell.
+                        if self.cells[row][col] == CONTINUATION_CODEPOINT && col > 0 {
+                            self.cells[row][col - 1] = b' ' as u32;
+                            self.cell_attrs[row][col - 1] = CellAttributes::default_colors();
+                            self.render_cell(self.cursor_row, (col - 1) as u16);
+                        }
+                        self.cells[row][col] = b' ' as u32;
                         self.cell_attrs[row][col] = CellAttributes::default_colors();
                         self.render_cell(self.cursor_row, self.cursor_col);
                     }
@@ -268,9 +322,7 @@ impl VConsoleState {
                 let next = (self.cursor_col / 8 + 1) * 8;
                 self.cursor_col = next;
             }
-            0x07 => {
-                // BEL — no-op for now (no speaker).
-            }
+            0x07 => {}
             _ => {}
         }
         self.check_wrap_and_scroll();
@@ -326,29 +378,25 @@ impl VConsoleState {
 
         match mode {
             EraseMode::ToEnd => {
-                // Cursor to end of line.
                 if cr < rows {
                     for c in cc..cols {
-                        self.cells[cr][c] = b' ';
+                        self.cells[cr][c] = b' ' as u32;
                         self.cell_attrs[cr][c] = clear_attr;
                     }
                     self.render_row_range(cr, cc, cols);
                 }
-                // All lines below.
                 for r in (cr + 1)..rows {
                     self.clear_row_with_attr(r, clear_attr);
                 }
             }
             EraseMode::ToStart => {
-                // All lines above.
                 for r in 0..cr {
                     self.clear_row_with_attr(r, clear_attr);
                 }
-                // Start of line to cursor.
                 if cr < rows {
                     let end = if cc < cols { cc + 1 } else { cols };
                     for c in 0..end {
-                        self.cells[cr][c] = b' ';
+                        self.cells[cr][c] = b' ' as u32;
                         self.cell_attrs[cr][c] = clear_attr;
                     }
                     self.render_row_range(cr, 0, end);
@@ -379,7 +427,7 @@ impl VConsoleState {
         match mode {
             EraseMode::ToEnd => {
                 for c in cc..cols {
-                    self.cells[cr][c] = b' ';
+                    self.cells[cr][c] = b' ' as u32;
                     self.cell_attrs[cr][c] = clear_attr;
                 }
                 self.render_row_range(cr, cc, cols);
@@ -387,7 +435,7 @@ impl VConsoleState {
             EraseMode::ToStart => {
                 let end = if cc < cols { cc + 1 } else { cols };
                 for c in 0..end {
-                    self.cells[cr][c] = b' ';
+                    self.cells[cr][c] = b' ' as u32;
                     self.cell_attrs[cr][c] = clear_attr;
                 }
                 self.render_row_range(cr, 0, end);
@@ -412,8 +460,6 @@ impl VConsoleState {
         }
         let shift = core::cmp::min(n as usize, rows);
 
-        // Shift rows downward (iterate from bottom to avoid overwrite).
-        // We must copy through a temp buffer to satisfy the borrow checker.
         if shift < rows {
             let mut row = rows - 1;
             loop {
@@ -421,11 +467,9 @@ impl VConsoleState {
                     break;
                 }
                 let src = row - shift;
-                // Copy cells through stack buffer.
-                let mut tmp_cells = [b' '; VCONSOLE_MAX_COLS];
+                let mut tmp_cells = [b' ' as u32; VCONSOLE_MAX_COLS];
                 tmp_cells[..cols].copy_from_slice(&self.cells[src][..cols]);
                 self.cells[row][..cols].copy_from_slice(&tmp_cells[..cols]);
-                // Copy attrs through stack buffer.
                 let mut tmp_attrs = [CellAttributes::default_colors(); VCONSOLE_MAX_COLS];
                 tmp_attrs[..cols].copy_from_slice(&self.cell_attrs[src][..cols]);
                 self.cell_attrs[row][..cols].copy_from_slice(&tmp_attrs[..cols]);
@@ -436,15 +480,13 @@ impl VConsoleState {
             }
         }
 
-        // Clear the top `shift` rows.
         for r in 0..shift {
-            self.cells[r][..cols].fill(b' ');
             for c in 0..cols {
+                self.cells[r][c] = b' ' as u32;
                 self.cell_attrs[r][c] = CellAttributes::default_colors();
             }
         }
 
-        // Re-render entire screen.
         for r in 0..rows {
             for c in 0..cols {
                 self.render_cell(r as u16, c as u16);
@@ -483,6 +525,14 @@ impl VConsoleState {
             }
             SgrAttr::DefaultForeground => self.cursor_attrs.fg = FG_COLOR,
             SgrAttr::DefaultBackground => self.cursor_attrs.bg = BG_COLOR,
+            SgrAttr::Foreground256(n) => self.cursor_attrs.fg = color256_to_rgb(n),
+            SgrAttr::Background256(n) => self.cursor_attrs.bg = color256_to_rgb(n),
+            SgrAttr::ForegroundRgb(r, g, b) => {
+                self.cursor_attrs.fg = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            }
+            SgrAttr::BackgroundRgb(r, g, b) => {
+                self.cursor_attrs.bg = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            }
         }
     }
 
@@ -528,24 +578,21 @@ impl VConsoleState {
         }
         let rows = self.rows as usize;
         let cols = self.cols as usize;
-        // Save main screen.
         for r in 0..rows {
             self.alt_screen_cells[r][..cols].copy_from_slice(&self.cells[r][..cols]);
             self.alt_screen_attrs[r][..cols].copy_from_slice(&self.cell_attrs[r][..cols]);
         }
         self.alt_screen_cursor_row = self.cursor_row;
         self.alt_screen_cursor_col = self.cursor_col;
-        // Clear screen.
         for r in 0..rows {
-            self.cells[r][..cols].fill(b' ');
             for c in 0..cols {
+                self.cells[r][c] = b' ' as u32;
                 self.cell_attrs[r][c] = CellAttributes::default_colors();
             }
         }
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.in_alt_screen = true;
-        // Re-render.
         for r in 0..rows {
             for c in 0..cols {
                 self.render_cell(r as u16, c as u16);
@@ -559,7 +606,6 @@ impl VConsoleState {
         }
         let rows = self.rows as usize;
         let cols = self.cols as usize;
-        // Restore main screen.
         for r in 0..rows {
             self.cells[r][..cols].copy_from_slice(&self.alt_screen_cells[r][..cols]);
             self.cell_attrs[r][..cols].copy_from_slice(&self.alt_screen_attrs[r][..cols]);
@@ -567,7 +613,6 @@ impl VConsoleState {
         self.cursor_row = self.alt_screen_cursor_row;
         self.cursor_col = self.alt_screen_cursor_col;
         self.in_alt_screen = false;
-        // Re-render.
         for r in 0..rows {
             for c in 0..cols {
                 self.render_cell(r as u16, c as u16);
@@ -595,8 +640,8 @@ impl VConsoleState {
             return;
         }
         let cols = self.cols as usize;
-        self.cells[row][..cols].fill(b' ');
         for c in 0..cols {
+            self.cells[row][c] = b' ' as u32;
             self.cell_attrs[row][c] = attr;
         }
         for c in 0..cols {
@@ -614,7 +659,7 @@ impl VConsoleState {
     // Simple byte-level output (used by integration tests)
     // -----------------------------------------------------------------------
 
-    #[allow(dead_code)] // Called by tty_tests — not visible to the lib build.
+    #[allow(dead_code)]
     pub(crate) fn write_byte(&mut self, b: u8) {
         match b {
             b'\n' => {
@@ -630,7 +675,7 @@ impl VConsoleState {
                     let row = self.cursor_row as usize;
                     let col = self.cursor_col as usize;
                     if row < self.rows as usize && col < self.cols as usize {
-                        self.cells[row][col] = b' ';
+                        self.cells[row][col] = b' ' as u32;
                         self.cell_attrs[row][col] = CellAttributes::default_colors();
                         self.render_cell(self.cursor_row, self.cursor_col);
                     }
@@ -644,7 +689,7 @@ impl VConsoleState {
                 let row = self.cursor_row as usize;
                 let col = self.cursor_col as usize;
                 if row < self.rows as usize && col < self.cols as usize {
-                    self.cells[row][col] = b;
+                    self.cells[row][col] = b as u32;
                     self.cell_attrs[row][col] = CellAttributes {
                         fg: self.cursor_attrs.effective_fg(),
                         bg: self.cursor_attrs.effective_bg(),
@@ -674,9 +719,10 @@ impl VConsoleState {
             let (head, tail) = self.cells.split_at_mut(row);
             head[row - 1][..cols].copy_from_slice(&tail[0][..cols]);
         }
-        self.cells[rows - 1][..cols].fill(b' ');
+        for c in 0..cols {
+            self.cells[rows - 1][c] = b' ' as u32;
+        }
 
-        // Shift cell_attrs the same way.
         for row in 1..rows {
             let (head, tail) = self.cell_attrs.split_at_mut(row);
             head[row - 1][..cols].copy_from_slice(&tail[0][..cols]);
@@ -719,7 +765,14 @@ impl VConsoleState {
         }
 
         let attrs = &self.cell_attrs[row_usize][col_usize];
-        let glyph = get_glyph_or_space(self.cells[row_usize][col_usize]);
+        let cp = self.cells[row_usize][col_usize];
+        let glyph = if cp == CONTINUATION_CODEPOINT {
+            get_glyph_or_space(b' ')
+        } else if cp <= 0x7E {
+            get_glyph_or_space(cp as u8)
+        } else {
+            get_glyph_for_codepoint(cp)
+        };
         let x0 = col_usize.saturating_mul(FONT_CHAR_WIDTH as usize);
         let y0 = row_usize.saturating_mul(FONT_CHAR_HEIGHT as usize);
 
@@ -743,8 +796,8 @@ impl VConsoleState {
             return;
         }
         let cols = self.cols as usize;
-        self.cells[row_usize][..cols].fill(b' ');
         for c in 0..cols {
+            self.cells[row_usize][c] = b' ' as u32;
             self.cell_attrs[row_usize][c] = CellAttributes::default_colors();
         }
         for col in 0..cols {
@@ -872,8 +925,8 @@ pub(crate) fn reset_for_tests() {
     state.cols = DEFAULT_COLS;
     state.fb = None;
     for r in 0..VCONSOLE_MAX_ROWS {
-        state.cells[r].fill(b' ');
         for c in 0..VCONSOLE_MAX_COLS {
+            state.cells[r][c] = b' ' as u32;
             state.cell_attrs[r][c] = CellAttributes::default_colors();
         }
     }
@@ -884,8 +937,8 @@ pub(crate) fn reset_for_tests() {
     state.saved_cursor_attrs = CursorAttributes::default_attrs();
     state.cursor_visible = true;
     for r in 0..VCONSOLE_MAX_ROWS {
-        state.alt_screen_cells[r].fill(b' ');
         for c in 0..VCONSOLE_MAX_COLS {
+            state.alt_screen_cells[r][c] = b' ' as u32;
             state.alt_screen_attrs[r][c] = CellAttributes::default_colors();
         }
     }

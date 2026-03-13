@@ -3,8 +3,14 @@
 //! Pure `no_std`, no-alloc parser that produces typed `VtAction` values for
 //! the virtual console renderer.  Parsing is fully separated from rendering
 //! so that the state machine can be tested independently.
+//!
+//! Phase 15: UTF-8 decoding in ground state, 256-color/truecolor SGR,
+//! bracketed paste mode, additional DEC private modes (DECCKM, DECOM, DECAWM).
 
 const MAX_PARAMS: usize = 16;
+
+/// Unicode replacement character — emitted for invalid UTF-8 sequences.
+const REPLACEMENT_CHAR: u32 = 0xFFFD;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -40,12 +46,20 @@ pub(crate) enum SgrAttr {
     BrightBackground(u8),
     DefaultForeground,
     DefaultBackground,
+    /// 256-color foreground (index 0–255).
+    Foreground256(u8),
+    /// 256-color background (index 0–255).
+    Background256(u8),
+    /// Truecolor (24-bit) foreground.
+    ForegroundRgb(u8, u8, u8),
+    /// Truecolor (24-bit) background.
+    BackgroundRgb(u8, u8, u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VtAction {
-    /// Printable ASCII character.
-    Print(u8),
+    /// Printable character (Unicode codepoint).
+    Print(u32),
     /// Control character (CR, LF, BS, TAB, BEL, VT, FF).
     Execute(u8),
     /// Cursor movement (CUU/CUD/CUF/CUB).
@@ -89,6 +103,8 @@ enum State {
     OscString,
     /// Sub-state for detecting ESC \ (ST) inside an OSC string.
     OscEscape,
+    /// Accumulating a multi-byte UTF-8 sequence in ground state.
+    Utf8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +120,15 @@ pub(crate) struct VtParser {
     pending: [VtAction; MAX_PARAMS],
     pending_count: usize,
     pending_idx: usize,
+    // UTF-8 accumulator (Phase 15)
+    utf8_buf: [u8; 4],
+    utf8_len: u8,
+    utf8_expected: u8,
+    // DEC mode state (Phase 15)
+    pub(crate) bracketed_paste: bool,
+    pub(crate) cursor_key_mode: bool,
+    pub(crate) origin_mode: bool,
+    pub(crate) auto_wrap: bool,
 }
 
 impl VtParser {
@@ -118,6 +143,13 @@ impl VtParser {
             pending: [VtAction::Nop; MAX_PARAMS],
             pending_count: 0,
             pending_idx: 0,
+            utf8_buf: [0; 4],
+            utf8_len: 0,
+            utf8_expected: 0,
+            bracketed_paste: false,
+            cursor_key_mode: false,
+            origin_mode: false,
+            auto_wrap: true,
         }
     }
 
@@ -148,6 +180,7 @@ impl VtParser {
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
             State::OscEscape => self.osc_escape(byte),
+            State::Utf8 => self.utf8_continue(byte),
         }
     }
 
@@ -164,10 +197,111 @@ impl VtParser {
             // Other C0 controls → silently ignored.
             0x00..=0x1F => VtAction::Nop,
             // Printable ASCII.
-            0x20..=0x7E => VtAction::Print(byte),
-            // DEL + high bytes → ignored this phase.
-            _ => VtAction::Nop,
+            0x20..=0x7E => VtAction::Print(byte as u32),
+            // DEL → ignored.
+            0x7F => VtAction::Nop,
+            // UTF-8 lead bytes → start accumulation.
+            0xC2..=0xDF => {
+                // 2-byte sequence (U+0080..U+07FF)
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 2;
+                self.state = State::Utf8;
+                VtAction::Nop
+            }
+            0xE0..=0xEF => {
+                // 3-byte sequence (U+0800..U+FFFF)
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 3;
+                self.state = State::Utf8;
+                VtAction::Nop
+            }
+            0xF0..=0xF4 => {
+                // 4-byte sequence (U+10000..U+10FFFF)
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 4;
+                self.state = State::Utf8;
+                VtAction::Nop
+            }
+            // Invalid lead bytes (0x80..=0xBF are continuation bytes without
+            // a lead, 0xC0..=0xC1 are overlong, 0xF5..=0xFF are invalid).
+            _ => VtAction::Print(REPLACEMENT_CHAR),
         }
+    }
+
+    /// Continue accumulating a UTF-8 multi-byte sequence.
+    fn utf8_continue(&mut self, byte: u8) -> VtAction {
+        // Check for valid continuation byte (10xxxxxx).
+        if byte & 0xC0 != 0x80 {
+            // Invalid continuation — emit replacement and re-process this byte
+            // from ground state.
+            self.state = State::Ground;
+            self.utf8_len = 0;
+            // The current byte might be a new lead byte or control char.
+            // Queue a replacement char and re-process.
+            if self.pending_count == 0 {
+                self.pending[0] = self.ground(byte);
+                if self.pending[0] != VtAction::Nop {
+                    self.pending_count = 1;
+                    self.pending_idx = 0;
+                }
+            }
+            return VtAction::Print(REPLACEMENT_CHAR);
+        }
+
+        self.utf8_buf[self.utf8_len as usize] = byte;
+        self.utf8_len += 1;
+
+        if self.utf8_len < self.utf8_expected {
+            // Need more bytes.
+            return VtAction::Nop;
+        }
+
+        // Sequence complete — decode the codepoint.
+        self.state = State::Ground;
+        let cp = match self.utf8_expected {
+            2 => {
+                let b0 = self.utf8_buf[0] as u32;
+                let b1 = self.utf8_buf[1] as u32;
+                ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+            }
+            3 => {
+                let b0 = self.utf8_buf[0] as u32;
+                let b1 = self.utf8_buf[1] as u32;
+                let b2 = self.utf8_buf[2] as u32;
+                ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+            }
+            4 => {
+                let b0 = self.utf8_buf[0] as u32;
+                let b1 = self.utf8_buf[1] as u32;
+                let b2 = self.utf8_buf[2] as u32;
+                let b3 = self.utf8_buf[3] as u32;
+                ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+            }
+            _ => REPLACEMENT_CHAR,
+        };
+        self.utf8_len = 0;
+
+        // Validate: reject overlong encodings and surrogates.
+        if cp > 0x10FFFF || (0xD800..=0xDFFF).contains(&cp) {
+            return VtAction::Print(REPLACEMENT_CHAR);
+        }
+        // Reject overlong 2-byte (< U+0080).
+        if self.utf8_expected == 2 && cp < 0x80 {
+            return VtAction::Print(REPLACEMENT_CHAR);
+        }
+        // Reject overlong 3-byte (< U+0800).
+        if self.utf8_expected == 3 && cp < 0x800 {
+            return VtAction::Print(REPLACEMENT_CHAR);
+        }
+        // Reject overlong 4-byte (< U+10000).
+        if self.utf8_expected == 4 && cp < 0x10000 {
+            return VtAction::Print(REPLACEMENT_CHAR);
+        }
+
+        VtAction::Print(cp)
     }
 
     fn escape(&mut self, byte: u8) -> VtAction {
@@ -361,6 +495,15 @@ impl VtParser {
         }
     }
 
+    #[allow(dead_code)]
+    fn param_raw(&self, idx: usize) -> u16 {
+        if idx < self.param_count {
+            self.params[idx]
+        } else {
+            0
+        }
+    }
+
     // -- CSI dispatch -------------------------------------------------------
 
     fn dispatch_csi(&mut self, final_byte: u8) -> VtAction {
@@ -407,19 +550,45 @@ impl VtParser {
             b'm' => self.dispatch_sgr(),
             b'h' => {
                 if self.private_mode {
-                    VtAction::SetMode(self.param(0, 0))
+                    let mode = self.param(0, 0);
+                    self.handle_set_mode(mode);
+                    VtAction::SetMode(mode)
                 } else {
                     VtAction::Nop
                 }
             }
             b'l' => {
                 if self.private_mode {
-                    VtAction::ResetMode(self.param(0, 0))
+                    let mode = self.param(0, 0);
+                    self.handle_reset_mode(mode);
+                    VtAction::ResetMode(mode)
                 } else {
                     VtAction::Nop
                 }
             }
             _ => VtAction::Nop,
+        }
+    }
+
+    // -- DEC private mode tracking ------------------------------------------
+
+    fn handle_set_mode(&mut self, mode: u16) {
+        match mode {
+            1 => self.cursor_key_mode = true,
+            6 => self.origin_mode = true,
+            7 => self.auto_wrap = true,
+            2004 => self.bracketed_paste = true,
+            _ => {}
+        }
+    }
+
+    fn handle_reset_mode(&mut self, mode: u16) {
+        match mode {
+            1 => self.cursor_key_mode = false,
+            6 => self.origin_mode = false,
+            7 => self.auto_wrap = false,
+            2004 => self.bracketed_paste = false,
+            _ => {}
         }
     }
 
@@ -449,28 +618,42 @@ impl VtParser {
                 27 => VtAction::SetAttribute(SgrAttr::NoInverse),
                 30..=37 => VtAction::SetAttribute(SgrAttr::ForegroundColor((p - 30) as u8)),
                 38 => {
-                    // 256-color / truecolor — skip sub-params.
-                    // Skip the entire 38;5;N or 38;2;R;G;B sub-sequence.
-                    if i + 1 < count && self.params[i + 1] == 5 {
-                        i += 3; // skip 38;5;N
-                    } else if i + 1 < count && self.params[i + 1] == 2 {
-                        i += 5; // skip 38;2;R;G;B
+                    // 256-color foreground: 38;5;N
+                    // Truecolor foreground: 38;2;R;G;B
+                    if i + 2 < count && self.params[i + 1] == 5 {
+                        let n = self.params[i + 2] as u8;
+                        i += 3;
+                        VtAction::SetAttribute(SgrAttr::Foreground256(n))
+                    } else if i + 4 < count && self.params[i + 1] == 2 {
+                        let r = self.params[i + 2] as u8;
+                        let g = self.params[i + 3] as u8;
+                        let b = self.params[i + 4] as u8;
+                        i += 5;
+                        VtAction::SetAttribute(SgrAttr::ForegroundRgb(r, g, b))
                     } else {
                         i += 1;
+                        continue;
                     }
-                    continue;
                 }
                 39 => VtAction::SetAttribute(SgrAttr::DefaultForeground),
                 40..=47 => VtAction::SetAttribute(SgrAttr::BackgroundColor((p - 40) as u8)),
                 48 => {
-                    if i + 1 < count && self.params[i + 1] == 5 {
+                    // 256-color background: 48;5;N
+                    // Truecolor background: 48;2;R;G;B
+                    if i + 2 < count && self.params[i + 1] == 5 {
+                        let n = self.params[i + 2] as u8;
                         i += 3;
-                    } else if i + 1 < count && self.params[i + 1] == 2 {
+                        VtAction::SetAttribute(SgrAttr::Background256(n))
+                    } else if i + 4 < count && self.params[i + 1] == 2 {
+                        let r = self.params[i + 2] as u8;
+                        let g = self.params[i + 3] as u8;
+                        let b = self.params[i + 4] as u8;
                         i += 5;
+                        VtAction::SetAttribute(SgrAttr::BackgroundRgb(r, g, b))
                     } else {
                         i += 1;
+                        continue;
                     }
-                    continue;
                 }
                 49 => VtAction::SetAttribute(SgrAttr::DefaultBackground),
                 90..=97 => VtAction::SetAttribute(SgrAttr::BrightForeground((p - 90) as u8)),
@@ -485,7 +668,11 @@ impl VtParser {
                 self.pending[total] = action;
                 total += 1;
             }
-            i += 1;
+            // Only increment i for non-extended-color cases (38/48 already
+            // advanced i inside their branches above).
+            if p != 38 && p != 48 {
+                i += 1;
+            }
         }
 
         // Return the first action directly; queue the rest.

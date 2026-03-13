@@ -58,7 +58,7 @@ fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).cols = 80;
         (*state_ref).fb = None;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).cells[r].fill(b' ');
+            (*state_ref).cells[r].fill(b' ' as u32);
             for c in 0..VCONSOLE_MAX_COLS {
                 (*state_ref).cell_attrs[r][c] = default_cell;
             }
@@ -70,7 +70,7 @@ fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).saved_cursor_attrs = default_cursor;
         (*state_ref).cursor_visible = true;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).alt_screen_cells[r].fill(b' ');
+            (*state_ref).alt_screen_cells[r].fill(b' ' as u32);
             for c in 0..VCONSOLE_MAX_COLS {
                 (*state_ref).alt_screen_attrs[r][c] = default_cell;
             }
@@ -5008,7 +5008,7 @@ pub fn test_phase22_vconsole_state_initial() -> TestResult {
 pub fn test_phase22_vconsole_write_byte_printable() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
-    if state.cells[0][0] != b'A' || state.cursor_row != 0 || state.cursor_col != 1 {
+    if state.cells[0][0] != b'A' as u32 || state.cursor_row != 0 || state.cursor_col != 1 {
         klog_info!("TTY_TEST: BUG - printable write did not update vconsole state");
         return TestResult::Fail;
     }
@@ -5046,7 +5046,7 @@ pub fn test_phase22_vconsole_write_byte_backspace() -> TestResult {
     state.write_byte(b'A');
     state.write_byte(b'B');
     state.write_byte(0x08);
-    if state.cursor_col != 1 || state.cells[0][1] != b' ' {
+    if state.cursor_col != 1 || state.cells[0][1] != b' ' as u32 {
         klog_info!("TTY_TEST: BUG - backspace did not erase previous column");
         return TestResult::Fail;
     }
@@ -5057,14 +5057,15 @@ pub fn test_phase22_vconsole_scroll_at_bottom() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.rows = 2;
     state.cols = 4;
-    state.cells[0][0] = b'A';
-    state.cells[1][0] = b'B';
+    state.cells[0][0] = b'A' as u32;
+    state.cells[1][0] = b'B' as u32;
     state.cursor_row = 1;
     state.cursor_col = 0;
 
     state.write_byte(b'\n');
 
-    if state.cells[0][0] != b'B' || state.cells[1][0] != b' ' || state.cursor_row != 1 {
+    if state.cells[0][0] != b'B' as u32 || state.cells[1][0] != b' ' as u32 || state.cursor_row != 1
+    {
         klog_info!("TTY_TEST: BUG - vconsole scroll did not shift/clear rows correctly");
         return TestResult::Fail;
     }
@@ -10150,7 +10151,7 @@ pub fn test_phase39_set_packet_mode_non_master() -> TestResult {
 pub fn test_phase40_parser_print_ascii() -> TestResult {
     let mut parser = VtParser::new();
     let action = parser.advance(b'A');
-    if action != VtAction::Print(b'A') {
+    if action != VtAction::Print(b'A' as u32) {
         klog_info!("TTY_TEST: BUG - expected Print('A'), got {:?}", action);
         return TestResult::Fail;
     }
@@ -10278,7 +10279,7 @@ pub fn test_phase40_malformed_sequence_resilience() -> TestResult {
     }
     // Parser should be back in Ground — next printable should work
     let action = parser.advance(b'X');
-    if action != VtAction::Print(b'X') {
+    if action != VtAction::Print(b'X' as u32) {
         klog_info!(
             "TTY_TEST: BUG - expected Print('X') after malformed, got {:?}",
             action
@@ -10312,7 +10313,7 @@ pub fn test_phase40_sgr_multi_param() -> TestResult {
     }
     // After pending is drained, the 'A' should produce Print('A').
     let third = parser.advance(b'B');
-    if third != VtAction::Print(b'B') {
+    if third != VtAction::Print(b'B' as u32) {
         klog_info!("TTY_TEST: BUG - expected Print('B'), got {:?}", third);
         return TestResult::Fail;
     }
@@ -10325,7 +10326,7 @@ pub fn test_phase40_vconsole_clear_screen() -> TestResult {
     // Write some chars first.
     state.process_byte(b'H');
     state.process_byte(b'i');
-    if state.cells[0][0] != b'H' || state.cells[0][1] != b'i' {
+    if state.cells[0][0] != b'H' as u32 || state.cells[0][1] != b'i' as u32 {
         klog_info!("TTY_TEST: BUG - chars not written");
         return TestResult::Fail;
     }
@@ -10333,7 +10334,7 @@ pub fn test_phase40_vconsole_clear_screen() -> TestResult {
     for &b in b"\x1b[2J" {
         state.process_byte(b);
     }
-    if state.cells[0][0] != b' ' || state.cells[0][1] != b' ' {
+    if state.cells[0][0] != b' ' as u32 || state.cells[0][1] != b' ' as u32 {
         klog_info!("TTY_TEST: BUG - screen not cleared");
         return TestResult::Fail;
     }
@@ -10476,11 +10477,14 @@ pub fn test_phase40_vconsole_erase_line() -> TestResult {
         state.process_byte(b);
     }
     // Cols 0,1 should still have A,B; cols 2+ should be spaces
-    if state.cells[0][0] != b'A' || state.cells[0][1] != b'B' {
+    if state.cells[0][0] != b'A' as u32 || state.cells[0][1] != b'B' as u32 {
         klog_info!("TTY_TEST: BUG - A/B were erased");
         return TestResult::Fail;
     }
-    if state.cells[0][2] != b' ' || state.cells[0][3] != b' ' || state.cells[0][4] != b' ' {
+    if state.cells[0][2] != b' ' as u32
+        || state.cells[0][3] != b' ' as u32
+        || state.cells[0][4] != b' ' as u32
+    {
         klog_info!("TTY_TEST: BUG - cols 2-4 not cleared");
         return TestResult::Fail;
     }
@@ -10529,10 +10533,10 @@ pub fn test_phase40_vconsole_scroll_up() -> TestResult {
         state.process_byte(b);
     }
     // Row 0 should now have 'B' (shifted from row 1)
-    if state.cells[0][0] != b'B' {
+    if state.cells[0][0] != b'B' as u32 {
         klog_info!(
             "TTY_TEST: BUG - row 0 col 0 is '{}', expected 'B'",
-            state.cells[0][0] as char
+            char::from_u32(state.cells[0][0]).unwrap_or('?')
         );
         return TestResult::Fail;
     }

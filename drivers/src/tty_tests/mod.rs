@@ -61,7 +61,7 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).cols = 80;
         (*state_ref).fb = None;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).cells[r].fill(b' ');
+            (*state_ref).cells[r].fill(b' ' as u32);
             for c in 0..VCONSOLE_MAX_COLS {
                 (*state_ref).cell_attrs[r][c] = default_cell;
             }
@@ -73,7 +73,7 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).saved_cursor_attrs = default_cursor;
         (*state_ref).cursor_visible = true;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).alt_screen_cells[r].fill(b' ');
+            (*state_ref).alt_screen_cells[r].fill(b' ' as u32);
             for c in 0..VCONSOLE_MAX_COLS {
                 (*state_ref).alt_screen_attrs[r][c] = default_cell;
             }
@@ -764,5 +764,38 @@ slopos_lib::define_test_suite!(
         test_fp14_batched_ingress_signal_in_middle,
         test_fp14_background_read_sigttin_blocked_eio,
         test_fp14_receive_buf_accumulates_echo,
+        // Finishing Phase 15: VConsole Unicode & Broadened Xterm Emulation
+        test_fp15_utf8_2byte_renders_codepoint,
+        test_fp15_utf8_3byte_renders_codepoint,
+        test_fp15_utf8_4byte_renders_codepoint,
+        test_fp15_utf8_invalid_byte_emits_replacement,
+        test_fp15_utf8_truncated_sequence_emits_replacement,
+        test_fp15_utf8_overlong_rejected,
+        test_fp15_ascii_still_works,
+        test_fp15_sgr_256_foreground,
+        test_fp15_sgr_256_background,
+        test_fp15_sgr_truecolor_foreground,
+        test_fp15_sgr_truecolor_background,
+        test_fp15_vconsole_256_color_sets_fg,
+        test_fp15_vconsole_truecolor_sets_fg,
+        test_fp15_bracketed_paste_enable_disable,
+        test_fp15_decawm_default_on,
+        test_fp15_decawm_toggle,
+        test_fp15_decckm_toggle,
+        test_fp15_decom_toggle,
+        test_fp15_dectcem_still_works,
+        test_fp15_alt_screen_still_works,
+        test_fp15_cell_model_u32,
+        test_fp15_vconsole_utf8_hello_renders,
+        test_fp15_double_width_cjk,
+        test_fp15_invalid_utf8_in_vconsole,
+        test_fp15_mixed_ascii_utf8_escapes,
+        test_fp15_256color_cube_mapping,
+        test_fp15_256color_grayscale_mapping,
+        test_fp15_is_double_width_ranges,
+        test_fp15_sgr_standard_colors_unaffected,
+        test_fp15_parser_fuzz_utf8_no_panic,
+        test_fp15_replacement_glyph_exists,
+        test_fp15_get_glyph_for_codepoint_ascii,
     ]
 );
