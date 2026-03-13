@@ -1,9 +1,10 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 16-phase gold-standard roadmap — ALL 16 PHASES COMPLETE
+> **Status**: 22-phase gold-standard roadmap — Phases 1–16 COMPLETE, Phases 17–22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
 > **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1566 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll.
+> **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
 
@@ -28,8 +29,14 @@
 17. [Phase 14: Core Semantic Correctness (Gold Standard Audit)](#17-phase-14-core-semantic-correctness-gold-standard-audit)
 18. [Phase 15: VConsole Unicode & Broadened Xterm Emulation](#18-phase-15-vconsole-unicode--broadened-xterm-emulation)
 19. [Phase 16: mod.rs Module Decomposition](#19-phase-16-modrs-module-decomposition)
-20. [File Inventory](#20-file-inventory)
-21. [Appendix: Review Findings Reference](#21-appendix-review-findings-reference)
+20. [Phase 17: POSIX Controlling Terminal Semantics](#20-phase-17-posix-controlling-terminal-semantics)
+21. [Phase 18: TIOCOUTQ Byte Accounting & Packet Mode Edge Fix](#21-phase-18-tiocoutq-byte-accounting--packet-mode-edge-fix)
+22. [Phase 19: Missing Ioctls (TIOCGSID, TIOCEXCL) & HUPCL Enforcement](#22-phase-19-missing-ioctls-tiocgsid-tiocexcl--hupcl-enforcement)
+23. [Phase 20: Rust Encapsulation & Type Safety](#23-phase-20-rust-encapsulation--type-safety)
+24. [Phase 21: Deferred Actions RAII & Boilerplate Reduction](#24-phase-21-deferred-actions-raii--boilerplate-reduction)
+25. [Phase 22: Forward-Looking — TIOCGPTPEER & Flip-Buffer Architecture](#25-phase-22-forward-looking--tiocgptpeer--flip-buffer-architecture)
+26. [File Inventory](#26-file-inventory)
+27. [Appendix: Review Findings Reference](#27-appendix-review-findings-reference)
 
 ---
 
@@ -37,7 +44,7 @@
 
 The 42-phase TTY overhaul transformed SlopOS from a global singleton line discipline behind a single `IrqMutex` into a proper per-terminal subsystem with PTY support, session/job control, VT100 emulation, and near-complete POSIX termios coverage. The subsystem is genuinely well-engineered — generation-tagged PTY peer handles, type-safe bitflags, deferred signal delivery outside locks, and a clean split-write pattern are all production-quality patterns.
 
-A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps**, all addressed in Phases 1-7. A follow-up gold-standard pass identified **6 additional Tier 1-3 gaps** focused on behavior parity, queue visibility, and throughput/recovery hardening. This plan now captures all 13 phases in priority order.
+A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps**, all addressed in Phases 1-7. A follow-up gold-standard pass identified **6 additional Tier 1-3 gaps** focused on behavior parity, queue visibility, and throughput/recovery hardening (Phases 8-16). A comprehensive post-audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024 identified **6 more improvement areas** focused on POSIX semantic correctness, Rust idiomaticity, and forward-looking architecture (Phases 17-22).
 
 ### Summary of phases
 
@@ -59,6 +66,14 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 14 | Core semantic correctness (typed input, interruptible waits, job control, PTY ABI, batched ingress) | P0 | Large | **DONE** ✅ |
 | 15 | VConsole Unicode & broadened xterm emulation | P1 | Medium-Large | **DONE** ✅ |
 | 16 | `mod.rs` module decomposition | P2 | Medium | **DONE** ✅ |
+| | | | | |
+| **Post-Audit Hardening (Phases 17–22)** | | | | |
+| 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | Pending |
+| 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | Pending |
+| 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | Pending |
+| 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | Pending |
+| 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | Pending |
+| 22 | Forward-looking: TIOCGPTPEER & flip-buffer architecture | P3 | Medium-Large | Pending |
 
 ---
 
@@ -1269,7 +1284,491 @@ drivers/src/tty/
 
 ---
 
-## 20. File Inventory (Phases 1–13)
+## 20. Phase 17: POSIX Controlling Terminal Semantics
+
+**Status**: Pending
+
+> **Priority**: P0 — these are POSIX semantic bugs that will break real shell programs (bash, tmux, ssh, daemon processes). Bundled because all four fixes share the same code paths (session management, job control, ioctl dispatch) and should land together for coherent testing.
+> **Principle**: Fix the places where POSIX programs will break. Do not redesign — harden the existing architecture with precise, minimal guards.
+
+This phase bundles four interconnected controlling terminal / job control fixes.
+
+### 17.1 PTY master cannot become controlling terminal
+
+**Problem**: `acquire_controlling_terminal()` in `job_control.rs:136` does not check whether the TTY is a PTY master. POSIX says only the **slave** side of a PTY pair (or a real terminal) should become a controlling terminal. If a terminal emulator (or `ssh`) calls `TIOCSCTTY` on the master FD, it gets a controlling terminal on the wrong end — breaking shell session management.
+
+**What Linux does**: Linux's `tiocsctty()` in `tty_jobctrl.c` has an explicit check: the `tty->driver->type` must not be `TTY_DRIVER_TYPE_PTY` with `subtype == PTY_TYPE_MASTER`.
+
+**Fix**:
+- Add a `can_be_controlling_terminal()` method to `TtyDriverKind`:
+  ```rust
+  impl TtyDriverKind {
+      pub fn can_be_controlling_terminal(&self) -> bool {
+          !matches!(self, TtyDriverKind::PtyMaster { .. })
+      }
+  }
+  ```
+- Guard `acquire_controlling_terminal()`: return `Err(TtyError::PermissionDenied)` if `!tty.driver.can_be_controlling_terminal()`.
+- Guard the `TIOCSCTTY` ioctl path in `poll_ioctl_handlers.rs` to also check this before calling `acquire_controlling_terminal`.
+
+### 17.2 O_NOCTTY enforcement in open path
+
+**Problem**: POSIX requires that opening a terminal device with `O_NOCTTY` prevents it from becoming the controlling terminal. Currently there is no evidence of `O_NOCTTY` checking in the TTY open path. Every `open("/dev/pts/N")` by a session leader without a controlling terminal would automatically acquire it — breaking daemon processes that deliberately avoid controlling terminals via `O_NOCTTY`.
+
+**What Linux does**: `tty_open()` in `tty_io.c` checks `filp->f_flags & O_NOCTTY` and skips controlling terminal assignment if set.
+
+**Fix**:
+- Add `O_NOCTTY` constant to `abi/src/syscall.rs` (value `0o400`, matching Linux).
+- Thread the open flags through to the TTY open path (likely via `fileio.rs` → `open_ref` or a new `open_with_flags` variant).
+- When `O_NOCTTY` is set, skip the controlling terminal auto-acquisition step.
+- Ensure existing daemon/service startup paths that set `O_NOCTTY` work correctly.
+
+### 17.3 TIOCSPGRP must verify controlling terminal
+
+**Problem**: POSIX requires that `tcsetpgrp()` (via `TIOCSPGRP`) only works on the caller's **controlling terminal**. Currently `set_foreground_pgrp_checked()` only checks session match, but does not verify that the FD refers to the caller's actual controlling terminal. A process could change the foreground group on any TTY in its session, not just its controlling terminal.
+
+**What Linux does**: `tty_check_change()` and the `TIOCSPGRP` handler in `tty_jobctrl.c` verify that `tty == current->signal->tty` (the calling process's controlling terminal).
+
+**Fix**:
+- The `TIOCSPGRP` ioctl handler in `poll_ioctl_handlers.rs` must compare the TTY index from the FD with the caller's `controlling_tty` from the task struct.
+- If they don't match, return `-ENOTTY` (POSIX: "The file is not the controlling terminal of the calling process").
+- This requires the ioctl handler to have access to the current task's controlling terminal index.
+
+### 17.4 Foreground pgrp changes must wake blocked readers
+
+**Problem**: In `io.rs`, the blocking read wait loop uses `wait_event` which only rechecks on TTY events (input arrival, hangup). If a process gets moved to background via `tcsetpgrp()` while blocked in read, it won't receive `SIGTTIN` until the next TTY event. POSIX says background processes should receive `SIGTTIN` promptly when they lose the foreground.
+
+**What Linux does**: `__proc_set_tty()` and `tiocspgrp()` call `tty_pgrp_notified = true` and wake the read waiters so they re-evaluate their foreground status.
+
+**Fix**:
+- In `set_foreground_pgrp()` and `set_foreground_pgrp_checked()` (both in `job_control.rs`), after changing `fg_pgrp`, wake `TTY_INPUT_WAITERS[slot]` and `TTY_POLL_WAITERS[slot]`.
+- This causes blocked readers to re-check `check_read()` and either continue (if still foreground) or get `SIGTTIN` (if now background).
+
+### 17.5 Verification
+
+- Test: `TIOCSCTTY` on PTY master returns `-EPERM` / `PermissionDenied`.
+- Test: `TIOCSCTTY` on PTY slave succeeds (regression — existing behavior preserved).
+- Test: `TIOCSCTTY` on serial/vconsole succeeds.
+- Test: `open("/dev/pts/N", O_NOCTTY)` does not acquire controlling terminal.
+- Test: `open("/dev/pts/N", 0)` by session leader DOES acquire controlling terminal (regression).
+- Test: `TIOCSPGRP` on a TTY that is not the caller's controlling terminal returns `-ENOTTY`.
+- Test: `TIOCSPGRP` on the caller's controlling terminal succeeds (regression).
+- Test: blocked read + `tcsetpgrp(other_pgrp)` → reader receives `SIGTTIN` promptly (not stuck until next input).
+- Regression: all existing session/job-control/PTY tests pass unchanged.
+- `just build` + `just test` gate.
+
+### 17.6 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/driver.rs` | Add `can_be_controlling_terminal()` method to `TtyDriverKind` |
+| `drivers/src/tty/job_control.rs` | Guard `acquire_controlling_terminal()` with ctty check; wake `TTY_INPUT_WAITERS`/`TTY_POLL_WAITERS` in `set_foreground_pgrp*()` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Add ctty guard on `TIOCSCTTY`, add controlling-terminal check on `TIOCSPGRP`, thread `O_NOCTTY` through open path |
+| `abi/src/syscall.rs` | Add `O_NOCTTY` constant |
+| `fs/src/fileio.rs` | Thread open flags to TTY open path for `O_NOCTTY` enforcement |
+| `drivers/src/tty_tests.rs` | PTY master ctty rejection, O_NOCTTY, TIOCSPGRP controlling-tty check, fg_pgrp change wake tests |
+
+---
+
+## 21. Phase 18: TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
+
+**Status**: Pending
+
+> **Priority**: P1 — `TIOCOUTQ` currently returns wrong values (counts operations, not bytes). Packet mode has an edge case with 1-byte read buffers. Both are bugs that will confuse programs but won't crash them.
+> **Principle**: Fix two distinct output/read accounting bugs. Bundled because both are small, self-contained fixes in `io.rs` / `table.rs`.
+
+### 18.1 TIOCOUTQ returns operations, not bytes
+
+**Problem**: `TTY_OUTPUT_INFLIGHT` in `table.rs:79` is incremented/decremented per `write_driver_unlocked()` **call**, not per byte. A single `write()` of 256 bytes registers as `inflight = 1`, not `256`. `output_queued_bytes()` in `io.rs:1013` treats this count as bytes, so `TIOCOUTQ` returns `1` instead of `256`. Programs using `TIOCOUTQ` for back-pressure (tmux, screen) get incorrect queue depth.
+
+**What Linux does**: `tty_chars_in_buffer()` calls the driver's `chars_in_buffer()` method which returns the actual number of queued bytes.
+
+**Fix**:
+- Change `TTY_OUTPUT_INFLIGHT` from a "number of active writes" counter to a **byte counter**.
+- When entering the split-write path, increment by the number of bytes being written (not `+= 1`).
+- When the write completes, decrement by the actual bytes consumed.
+- Alternatively, remove `TTY_OUTPUT_INFLIGHT` entirely and make `output_queued_bytes()` query the driver directly via `output_pending_bytes()` (the Phase 13 addition), which already exists as a trait method on `TtyDriver`.
+- The second approach is cleaner — it eliminates the redundant counter and relies on the authoritative source (the driver) for queue depth.
+
+### 18.2 Packet mode read with buf.len() == 1
+
+**Problem**: In `io.rs:325`, when packet mode is active and the caller's buffer is exactly 1 byte, the code reserves space for the packet-mode prefix byte plus payload. With `buf.len() == 1`, there's only room for the prefix byte — no room for any payload. The code falls through to the wait logic despite potentially having pending packet events that could be returned as a 1-byte prefix-only read.
+
+**What Linux does**: `n_tty_read()` returns just the packet-mode status byte when there are pending events, even if the user buffer is exactly 1 byte.
+
+**Fix**:
+- When `buf.len() == 1` and there are pending `packet_events`, return the packet event byte immediately (consume the events, write the status byte to `buf[0]`, return 1).
+- When `buf.len() == 1` and there are no pending packet events but there is data, return 0 bytes with a comment explaining that the buffer is too small for prefix+payload.
+- Add explicit documentation for this edge case in the packet-mode read path.
+
+### 18.3 Verification
+
+- Test: `TIOCOUTQ` returns byte count, not operation count — write 256 bytes, query immediately, get ≥ 256 (or driver-reported queue depth).
+- Test: `TIOCOUTQ` returns 0 after drain completes.
+- Test: packet mode read with `buf.len() == 1` and pending events → returns 1 byte (status byte).
+- Test: packet mode read with `buf.len() == 1` and no events → correct behavior (wait or return 0).
+- Regression: all existing TIOCOUTQ and packet mode tests pass.
+- `just build` + `just test` gate.
+
+### 18.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/table.rs` | Change `TTY_OUTPUT_INFLIGHT` to byte-granularity (or remove entirely if driver-based approach used) |
+| `drivers/src/tty/io.rs` | Update `write_driver_unlocked` to track bytes not calls; fix packet mode `buf.len() == 1` edge case in read path |
+| `drivers/src/tty/termios.rs` | Update `output_queued_bytes()` if switching to pure driver-based accounting |
+| `drivers/src/tty_tests.rs` | Byte-granularity TIOCOUTQ tests, packet mode 1-byte buffer tests |
+
+---
+
+## 22. Phase 19: Missing Ioctls (TIOCGSID, TIOCEXCL) & HUPCL Enforcement
+
+**Status**: Pending
+
+> **Priority**: P1 — `TIOCGSID` is POSIX-required. `TIOCEXCL` is used by serial tools (minicom, screen). `HUPCL` enforcement is expected by POSIX but currently not enforced. Bundled because all three are small, independent additions with no shared code paths.
+> **Principle**: Add the missing ioctl support and enforce `HUPCL` semantics. Each sub-item is self-contained — the phase bundles them to avoid plan sprawl.
+
+### 19.1 TIOCGSID — Get session ID
+
+**Problem**: `tcgetsid()` in libc requires `TIOCGSID` to return the session ID for the controlling terminal. Currently not in the ioctl dispatch. Programs that call `tcgetsid()` get `-ENOTTY` or `-EINVAL`.
+
+**What Linux does**: `tiocgsid()` in `tty_jobctrl.c` returns `tty->session->pid` after verifying the TTY is the caller's controlling terminal.
+
+**Fix**:
+- Add `TIOCGSID` constant to `abi/src/syscall.rs` (value `0x5429`, matching Linux).
+- Add handler in ioctl dispatch that calls `tty::get_session_id(idx)`.
+- Verify the TTY is the caller's controlling terminal before returning (POSIX requirement: `ENOTTY` if not).
+- Wire through service bridge.
+
+### 19.2 TIOCEXCL / TIOCNXCL / TIOCGEXCL — Exclusive mode
+
+**Problem**: Serial terminal programs like `minicom`, `screen`, and `picocom` use `TIOCEXCL` to prevent other processes from opening the same TTY. Without it, multiple processes can fight over a serial port.
+
+**What Linux does**: Sets `TTY_EXCLUSIVE` flag on `tty_struct.flags`. `tty_open()` checks this flag and returns `-EBUSY` for non-root opens.
+
+**Fix**:
+- Add `exclusive: bool` field to `Tty` struct (or include in the `TtyFlags` bitflags from Phase 20).
+- Add `TIOCEXCL` (`0x540C`), `TIOCNXCL` (`0x540D`), `TIOCGEXCL` (`0x80045440`) constants to ABI.
+- `TIOCEXCL`: set `exclusive = true` (no arguments, no privilege check — matches Linux).
+- `TIOCNXCL`: clear `exclusive = false`.
+- `TIOCGEXCL`: return `exclusive` as `i32` (0 or 1).
+- In `open_ref()`, check `exclusive` and return `TtyError::DeviceBusy` for opens when `exclusive == true` and `open_count > 0` (exempt root/CAP_SYS_ADMIN if capability system exists, otherwise just first opener holds exclusive).
+
+### 19.3 HUPCL enforcement on last close
+
+**Problem**: POSIX says: when `HUPCL` is set in `c_cflag` and the last process closes the terminal, the modem control lines should be deasserted (triggering hangup). Currently `close_ref()` in `lifecycle.rs` doesn't check `HUPCL`. For PTYs, this means the slave should get a hangup when `HUPCL` is set and the last FD closes — important for `ssh` session cleanup.
+
+**What Linux does**: `tty_port_close_start()` checks `HUPCL | CLOCAL` and calls `tty_port_lower_dtr_rts()` and `tty_port_shutdown()` on last close.
+
+**Fix**:
+- In `close_ref()` (lifecycle.rs), after `open_count` reaches 0 for non-PTY terminals:
+  - Check `tty.ldisc.termios().control_flags().contains(ControlFlags::HUPCL)`.
+  - If set, call `hangup(idx)` to assert hangup semantics.
+- For PTY slave: the existing master-close → slave-hangup path already handles this. Verify HUPCL doesn't double-hangup.
+- For serial/vconsole: the HUPCL hangup is the new behavior — flush buffers, detach session, signal.
+
+### 19.4 Verification
+
+- Test: `TIOCGSID` returns correct session ID for controlling terminal.
+- Test: `TIOCGSID` on non-controlling TTY returns `-ENOTTY`.
+- Test: `TIOCGSID` on unallocated slot returns error.
+- Test: `TIOCEXCL` prevents second open (returns `-EBUSY`).
+- Test: `TIOCNXCL` clears exclusive mode, second open succeeds.
+- Test: `TIOCGEXCL` returns correct exclusive state.
+- Test: console TTY with `HUPCL` set, last close → session receives `SIGHUP`.
+- Test: console TTY without `HUPCL`, last close → no hangup (buffers flushed, session detached, but no signal).
+- Test: PTY slave close with `HUPCL` → no double hangup (master-close path already handles it).
+- Regression: all existing lifecycle/ioctl tests pass.
+- `just build` + `just test` gate.
+
+### 19.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `TIOCGSID`, `TIOCEXCL`, `TIOCNXCL`, `TIOCGEXCL` constants |
+| `drivers/src/tty/mod.rs` | Add `exclusive: bool` field to `Tty` struct (or defer to Phase 20 `TtyFlags`) |
+| `drivers/src/tty/lifecycle.rs` | Add HUPCL check in `close_ref()` for non-PTY terminals; add exclusive check in `open_ref()` |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Wire `TIOCGSID`, `TIOCEXCL`, `TIOCNXCL`, `TIOCGEXCL` through ioctl dispatch |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Add service bridge for new ioctls |
+| `drivers/src/tty_tests.rs` | TIOCGSID, exclusive mode, HUPCL enforcement tests |
+
+---
+
+## 23. Phase 20: Rust Encapsulation & Type Safety
+
+**Status**: Pending
+
+> **Priority**: P2 — no runtime bugs, but the current `pub` field exposure makes invariant violations trivial to introduce. Rust's type system should enforce state-transition correctness.
+> **Principle**: Make invalid states unrepresentable. Use `pub(crate)` + domain methods instead of raw field access. Consolidate scattered boolean flags into a typed flags type. Remove redundant state modeling.
+
+This phase is a pure refactor — no behavioral changes, no new features.
+
+### 20.1 Privatize `Tty` struct fields
+
+**Problem**: Every field on `Tty` is `pub`, meaning any code in the crate can mutate `hung_up`, `open_count`, `throttled`, etc. without going through proper state transition methods. This makes invariant violations easy to introduce (e.g., setting `hung_up = true` without flushing buffers or signaling the session).
+
+**Fix**:
+- Change all fields on `Tty` to `pub(crate)` (they're only accessed within the `drivers` crate).
+- For fields that represent state transitions with side effects (`hung_up`, `throttled`, `output_stopped`, `peer_closed`), add domain methods that enforce the required side effects:
+  ```rust
+  impl Tty {
+      /// Mark this TTY as hung up. Clears output_stopped so blocked
+      /// writers unblock and see the hung_up flag. Does NOT flush
+      /// buffers or signal — caller must do that outside the lock.
+      pub(crate) fn mark_hung_up(&mut self) {
+          self.hung_up = true;
+          self.output_stopped = false;
+      }
+  }
+  ```
+- **Do NOT** create a sea of trivial getters/setters. Only add methods where state transitions have invariants to enforce.
+
+### 20.2 Privatize `TtySession` fields
+
+**Problem**: `TtySession` in `session.rs` has public fields that allow bypass of session management invariants. Code outside the module can set `session_id` without going through `attach()`/`detach()`.
+
+**Fix**: Change `TtySession` fields to `pub(crate)` and ensure all access goes through the existing methods (`attach`, `detach`, `session_id_raw`, `fg_pgrp_raw`, etc.).
+
+### 20.3 Consolidate boolean flags into `TtyFlags` bitflags
+
+**Problem**: The six boolean fields on `Tty` (`hung_up`, `peer_closed`, `slave_locked`, `packet_mode`, `throttled`, `output_stopped`) are scattered state that's easy to get into invalid combinations. For example, a TTY should never be both `hung_up` and `output_stopped` (hangup clears output_stopped).
+
+**Fix**:
+- Define a `TtyFlags` bitflags type:
+  ```rust
+  bitflags! {
+      #[derive(Clone, Copy, Debug, Default)]
+      pub(crate) struct TtyFlags: u16 {
+          const HUNG_UP        = 1 << 0;
+          const PEER_CLOSED    = 1 << 1;
+          const SLAVE_LOCKED   = 1 << 2;
+          const PACKET_MODE    = 1 << 3;
+          const THROTTLED      = 1 << 4;
+          const OUTPUT_STOPPED = 1 << 5;
+          const EXCLUSIVE      = 1 << 6;  // from Phase 19
+      }
+  }
+  ```
+- Replace the six `bool` fields with a single `flags: TtyFlags` field.
+- State transitions use `.insert()`, `.remove()`, `.contains()` — same semantics, better ergonomics.
+- Add a compile-time assertion or runtime debug check: `HUNG_UP` and `OUTPUT_STOPPED` are mutually exclusive.
+
+### 20.4 Convert `packet_events` to bitflags
+
+**Problem**: `packet_events: u8` uses raw `|=` operations with `TIOCPKT_*` constants. No type safety — invalid combinations or wrong constants could be OR'd in silently.
+
+**Fix**:
+- Define `PacketEvents` bitflags type wrapping the `TIOCPKT_*` constants:
+  ```rust
+  bitflags! {
+      #[derive(Clone, Copy, Debug, Default)]
+      pub(crate) struct PacketEvents: u8 {
+          const FLUSHREAD   = TIOCPKT_FLUSHREAD as u8;
+          const FLUSHWRITE  = TIOCPKT_FLUSHWRITE as u8;
+          const STOP        = TIOCPKT_STOP as u8;
+          const START       = TIOCPKT_START as u8;
+          const NOSTOP      = TIOCPKT_NOSTOP as u8;
+          const DOSTOP      = TIOCPKT_DOSTOP as u8;
+          const IOCTL       = TIOCPKT_IOCTL as u8;
+      }
+  }
+  ```
+- Replace `packet_events: u8` with `packet_events: PacketEvents`.
+
+### 20.5 Remove `TtyDriverKind::None` + `active` redundancy
+
+**Problem**: `TTY_SLOTS` is `[IrqMutex<Option<Tty>>; MAX_TTYS]` — the `Option` already encodes "slot is empty." But `TtyDriverKind::None` at `driver.rs:125` and `active: bool` at `mod.rs:94` redundantly encode the same thing. This is more C-like than Rust-like — in Rust, `Option` **is** the empty state.
+
+**Fix**:
+- Remove `TtyDriverKind::None` variant. A `Tty` always has a real driver.
+- Remove `active: bool` field. If a slot contains `Some(tty)`, it's active. If `None`, it's not.
+- Audit all code that checks `tty.active` or matches `TtyDriverKind::None` and replace with `Option` pattern matching on the slot itself.
+- If `TtyDriverKind::None` is used as a placeholder during construction, use a builder pattern or two-phase init instead.
+
+### 20.6 Verification
+
+- `just build` — primary gate (this is a pure refactor, no behavioral changes).
+- `just test` — all existing tests pass unchanged.
+- Grep confirms no `pub` fields remain on `Tty` or `TtySession` (only `pub(crate)` or private).
+- Grep confirms no raw `packet_events |=` operations remain (all through `PacketEvents` methods).
+- Grep confirms no `TtyDriverKind::None` or `tty.active` references remain.
+- Regression: zero behavioral changes — only visibility and type changes.
+
+### 20.7 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Privatize all `Tty` fields to `pub(crate)`, replace booleans with `TtyFlags`, replace `packet_events: u8` with `PacketEvents`, remove `active: bool`, add state-transition domain methods |
+| `drivers/src/tty/session.rs` | Privatize `TtySession` fields to `pub(crate)` |
+| `drivers/src/tty/driver.rs` | Remove `TtyDriverKind::None` variant |
+| `drivers/src/tty/io.rs` | Update field access to use `pub(crate)` methods / `TtyFlags` / `PacketEvents` |
+| `drivers/src/tty/lifecycle.rs` | Update `active` checks to use `Option` presence, update hangup to use `TtyFlags` |
+| `drivers/src/tty/poll.rs` | Update field access for `TtyFlags` |
+| `drivers/src/tty/termios.rs` | Update field access for `TtyFlags` |
+| `drivers/src/tty/pty.rs` | Update field access for `TtyFlags`, `PacketEvents` |
+| `drivers/src/tty/table.rs` | Remove any `TtyDriverKind::None` init patterns |
+| `drivers/src/tty_tests.rs` | Update direct field access in tests to use `pub(crate)` access patterns, update flag comparisons |
+
+---
+
+## 24. Phase 21: Deferred Actions RAII & Boilerplate Reduction
+
+**Status**: Pending
+
+> **Priority**: P2 — ergonomics and maintainability. The repeated "capture signal inside lock → deliver after lock drop" pattern appears ~8 times in `io.rs` alone. The `LdiscOps` trait has ~200 lines of pure forwarding boilerplate. The write path acquires the slot lock 3-4 separate times per iteration.
+> **Principle**: Use Rust RAII patterns to eliminate error-prone manual deferred-action sequences. Reduce trait boilerplate without losing the enum dispatch advantage. Cache invariant values to reduce redundant lock acquisitions.
+
+This phase is a pure refactor — no behavioral changes.
+
+### 21.1 `PostLockWork` RAII helper for deferred actions
+
+**Problem**: The pattern of "capture signal/IXOFF/packet-event inside lock → deliver after lock drop" is repeated ~8 times in `io.rs` and appears in `poll.rs`, `lifecycle.rs`, and `termios.rs`. Each instance has identical boilerplate:
+```rust
+let deferred_signal = { /* ... work under lock ... */ };
+// Deliver outside lock:
+if let Some((pgid, sig)) = deferred_signal {
+    if pgid != 0 {
+        let _ = signal_process_group(pgid, sig);
+    }
+}
+```
+
+This is error-prone — it's easy to forget the post-lock delivery, or to add a new deferred action without updating all sites.
+
+**Fix**:
+- Define a `PostLockWork` struct that accumulates deferred work:
+  ```rust
+  #[derive(Default)]
+  pub(crate) struct PostLockWork {
+      signal: Option<(u32, u8)>,          // (pgid, signum)
+      ixoff_byte: Option<(TtyIndex, u8)>, // (target_idx, xoff/xon byte)
+      packet_event: Option<(TtyIndex, u8)>,
+      wake_slots: [bool; MAX_TTYS],       // slots to wake
+  }
+
+  impl PostLockWork {
+      /// Execute all accumulated deferred work. Call AFTER dropping locks.
+      pub fn execute(self) {
+          if let Some((pgid, sig)) = self.signal {
+              if pgid != 0 {
+                  let _ = signal_process_group(pgid, sig);
+              }
+          }
+          // ... ixoff, packet events, wakes ...
+      }
+  }
+  ```
+- All code that currently does manual deferred delivery instead builds a `PostLockWork`, and calls `.execute()` after the lock drops.
+- This is a Rust RAII pattern that C kernels can't easily replicate — it's one of the places where Rust genuinely improves over Linux's approach.
+
+### 21.2 Write path lock consolidation
+
+**Problem**: In `io.rs:write()`, each iteration of the write loop acquires the slot lock separately for: (a) peer slot resolution for throttle check, (b) output-stop check, (c) output processing via ldisc, plus potentially the peer slot lock for throttle check. For high-throughput PTY traffic (tmux rendering, compilation output), this creates measurable overhead.
+
+**Fix**:
+- Cache `peer_slave_slot` / `peer_master_slot` once at the start of the write function. PTY peer relationships don't change for the lifetime of the FD — they're set at allocation and fixed until the pair is freed.
+- Merge the output-stop check and ldisc output processing into a single lock acquisition per loop iteration (they both operate on the same slot lock).
+- The throttle check on the peer slot is a separate lock — that remains separate but uses the cached peer index.
+
+### 21.3 `LdiscOps` trait boilerplate reduction
+
+**Problem**: The `LdiscOps` trait has 20+ methods, and both `LineDisc` and `RawDisc` have manual `impl LdiscOps for ...` blocks that forward to identically-named inherent methods — lines 1767-1884 and 2067-2158 in `ldisc.rs` (~200 lines of pure `#[inline] fn foo(&self) -> T { self.foo() }` forwarding).
+
+**Fix options** (choose one):
+- **Option A — Derive macro**: Write a simple `#[derive(LdiscOps)]` proc macro that generates the forwarding impls. More complex to build but zero ongoing maintenance.
+- **Option B — Remove inherent methods**: Move the logic directly into the `impl LdiscOps` blocks and delete the inherent methods. This means the implementations live in the trait impl, not in `impl LineDisc`. Slightly less ergonomic for internal callers but eliminates all forwarding.
+- **Option C — Accept the boilerplate**: The `dispatch_ldisc!` macro already handles `LdiscKind → variant` dispatch. The trait forwarding is verbose but not wrong. Mark it with a `// Forwarding boilerplate — see LdiscOps trait` comment block and move on.
+
+Recommendation: **Option B** — it's the simplest reduction and stays idiomatic. The inherent methods don't add value when the trait impls are the actual interface.
+
+### 21.4 Verification
+
+- `just build` + `just test` — primary gate (pure refactor).
+- Benchmark: write throughput on PTY path should improve measurably (fewer lock acquisitions per iteration).
+- Code review: grep for manual `signal_process_group` calls outside `PostLockWork::execute()` — should be zero after migration.
+- Regression: all existing tests pass unchanged.
+
+### 21.5 Files expected to change
+
+| File | Change |
+|------|--------|
+| `drivers/src/tty/mod.rs` | Define `PostLockWork` struct |
+| `drivers/src/tty/io.rs` | Refactor all deferred-action patterns to use `PostLockWork`; cache peer slot index in write path |
+| `drivers/src/tty/poll.rs` | Use `PostLockWork` for deferred signal delivery in `poll_events()` |
+| `drivers/src/tty/lifecycle.rs` | Use `PostLockWork` in hangup path |
+| `drivers/src/tty/termios.rs` | Use `PostLockWork` where applicable |
+| `drivers/src/tty/ldisc.rs` | Reduce `LdiscOps` boilerplate (Option A, B, or C) |
+| `drivers/src/tty_tests.rs` | Regression tests, optional throughput benchmark |
+
+---
+
+## 25. Phase 22: Forward-Looking — TIOCGPTPEER & Flip-Buffer Architecture
+
+**Status**: Pending
+
+> **Priority**: P3 — nice-to-have improvements that prepare the TTY subsystem for future growth (modern terminal emulators, async serial drivers). Neither is needed for current functionality.
+> **Principle**: Build the foundation now so future work (USB-serial, real UART interrupts, modern tmux) doesn't require architectural rework.
+
+### 22.1 TIOCGPTPEER ioctl
+
+**Problem**: `TIOCGPTPEER` (added in Linux 4.13) allows opening the slave side of a PTY directly from the master's file descriptor, without needing to resolve the `/dev/pts/N` path. Modern `tmux` and container runtimes use this for race-free PTY slave opens.
+
+**What Linux does**: `ioctl(master_fd, TIOCGPTPEER, flags)` → returns an open file descriptor to the corresponding slave, equivalent to `open(ptsname(master_fd), flags)` but atomic.
+
+**Fix**:
+- Add `TIOCGPTPEER` constant to ABI (`0x5441`, matching Linux).
+- In the ioctl handler, verify the FD is a PTY master.
+- Resolve the peer slave index via the existing `PtyPeerHandle`.
+- Allocate a new file descriptor for the slave and return it.
+- Apply `flags` argument (O_RDWR, O_NOCTTY, etc.) to the new FD.
+- This requires the ioctl handler to be able to create file descriptors — check if the existing SlopOS syscall infrastructure supports this.
+
+### 22.2 Flip-buffer architecture for interrupt-driven input
+
+**Problem**: Currently `drain_hw_input_locked()` uses a 64-byte stack buffer and synchronous polling. When SlopOS adds real UART interrupt-driven serial or USB-serial, the ISR can't call `input_char()` directly (it holds the interrupt lock, and `input_char()` needs the slot lock — deadlock). Linux solves this with `tty_flip_buffer_push()` — a lock-free producer/consumer buffer between ISR context and process context.
+
+**Current state**: The current drivers (PS/2 keyboard, QEMU serial via port I/O) are polling-based, so this isn't needed today. But adding USB-serial or real UART interrupts will require this infrastructure.
+
+**Design sketch** (do not implement until needed):
+- Define a `FlipBuf` per-TTY: a lock-free single-producer single-consumer ring buffer.
+- ISR path (producer): push raw `InputEvent`s into `FlipBuf` without any locks.
+- `drain_hw_input_locked()` path (consumer): drain `FlipBuf` into the line discipline under the slot lock.
+- The `FlipBuf` size should be at least 512 bytes (Linux uses `TTY_FLIPBUF_SIZE = 512`).
+- Use `core::sync::atomic` for the producer/consumer indices — no locks needed.
+
+**Implementation approach**:
+- Add a `FlipBuf<const N: usize>` struct to a new `drivers/src/tty/flipbuf.rs` module.
+- Each `Tty` optionally holds a `FlipBuf` (only for interrupt-driven drivers, not for PTYs or polling drivers).
+- The `TtyDriver` trait gains a `uses_flip_buffer() -> bool` method (default: `false`).
+- `drain_hw_input_locked()` checks if the driver uses flip buffers and drains from there instead of calling `driver.read()`.
+
+### 22.3 Verification
+
+- Test: `TIOCGPTPEER` on PTY master returns valid slave FD.
+- Test: `TIOCGPTPEER` on non-PTY-master returns `-ENOTTY`.
+- Test: slave FD from `TIOCGPTPEER` is usable for read/write.
+- Test: `TIOCGPTPEER` with `O_NOCTTY` does not acquire controlling terminal.
+- Test: FlipBuf producer/consumer correctness under concurrent access (unit test, not full kernel test).
+- Test: FlipBuf overflow behavior (oldest data dropped or producer blocks).
+- Regression: all existing PTY tests pass.
+- `just build` + `just test` gate.
+
+### 22.4 Files expected to change
+
+| File | Change |
+|------|--------|
+| `abi/src/syscall.rs` | Add `TIOCGPTPEER` constant |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Wire `TIOCGPTPEER` with FD allocation |
+| `drivers/src/tty/pty.rs` | Helper for peer-FD creation from master |
+| `drivers/src/tty/flipbuf.rs` | **NEW** — Lock-free SPSC ring buffer for ISR→ldisc data flow |
+| `drivers/src/tty/mod.rs` | Optional `FlipBuf` field on `Tty`, module declaration |
+| `drivers/src/tty/driver.rs` | `uses_flip_buffer()` method on `TtyDriver` trait |
+| `drivers/src/tty/io.rs` | `drain_hw_input_locked()` flip-buffer drain path |
+| `drivers/src/tty_tests.rs` | TIOCGPTPEER tests, FlipBuf unit tests |
+
+---
+
+## 26. File Inventory (Phases 1–16)
 
 ### Files modified (all complete)
 
@@ -1295,7 +1794,7 @@ All changes are modifications to existing files. The TTY module structure is com
 
 ---
 
-## 21. Appendix: Review Findings Reference
+## 27. Appendix: Review Findings Reference
 
 ### Comparative review methodology
 
