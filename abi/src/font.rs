@@ -499,9 +499,11 @@ pub static FONT_DATA: [[u8; FONT_CHAR_HEIGHT as usize]; FONT_CHAR_COUNT] = [
     ],
 ];
 
-/// Get the glyph data for a character.
-///
-/// Returns `None` if the character is outside the printable ASCII range (32-126).
+// U+FFFD REPLACEMENT CHARACTER glyph (8x16 bitmap — filled diamond shape).
+static REPLACEMENT_GLYPH: [u8; FONT_CHAR_HEIGHT as usize] = [
+    0x00, 0x00, 0x00, 0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00, 0x00, 0x00, 0x00,
+];
+
 #[inline]
 pub fn get_glyph(ch: u8) -> Option<&'static [u8; FONT_CHAR_HEIGHT as usize]> {
     if ch < FONT_FIRST_CHAR || ch > FONT_LAST_CHAR {
@@ -511,8 +513,39 @@ pub fn get_glyph(ch: u8) -> Option<&'static [u8; FONT_CHAR_HEIGHT as usize]> {
     Some(&FONT_DATA[idx])
 }
 
-/// Get the glyph data for a character, returning space glyph for invalid chars.
 #[inline]
 pub fn get_glyph_or_space(ch: u8) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
-    get_glyph(ch).unwrap_or(&FONT_DATA[0]) // Index 0 is space
+    get_glyph(ch).unwrap_or(&FONT_DATA[0])
+}
+
+#[inline]
+pub fn get_glyph_for_codepoint(cp: u32) -> &'static [u8; FONT_CHAR_HEIGHT as usize] {
+    if cp >= FONT_FIRST_CHAR as u32 && cp <= FONT_LAST_CHAR as u32 {
+        let idx = (cp - FONT_FIRST_CHAR as u32) as usize;
+        &FONT_DATA[idx]
+    } else if cp == b' ' as u32 || cp == 0 {
+        &FONT_DATA[0]
+    } else {
+        &REPLACEMENT_GLYPH
+    }
+}
+
+#[inline]
+pub const fn is_double_width(cp: u32) -> bool {
+    // CJK Unified Ideographs and common fullwidth ranges.
+    matches!(cp,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2E80..=0x303E // CJK Radicals Supplement .. CJK Symbols
+        | 0x3041..=0x33BF // Hiragana .. CJK Compatibility
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xA000..=0xA4CF // Yi Syllables + Yi Radicals
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE6F // CJK Compatibility Forms
+        | 0xFF01..=0xFF60 // Fullwidth Forms
+        | 0xFFE0..=0xFFE6 // Fullwidth Signs
+        | 0x20000..=0x2FFFF // CJK Unified Ideographs Extension B+
+        | 0x30000..=0x3FFFF // CJK Extension G+
+    )
 }
