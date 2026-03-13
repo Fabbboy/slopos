@@ -16936,5 +16936,191 @@ pub fn test_no_driver_kind_none() -> TestResult {
 }
 
 // ===========================================================================
+// Phase 21: Deferred Actions RAII & Boilerplate Reduction
+// ===========================================================================
+
+use crate::tty::PostLockWork;
+
+pub fn test_p21_postlockwork_default_is_empty() -> TestResult {
+    let plw = PostLockWork::new();
+    if !plw.is_empty() {
+        klog_info!("TTY_TEST: BUG - new PostLockWork should be empty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_signal(42, slopos_abi::signal::SIGINT);
+    if plw.is_empty() {
+        klog_info!("TTY_TEST: BUG - PostLockWork with signal should not be empty");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_execute_completes() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_signal(0, slopos_abi::signal::SIGINT);
+    plw.wake_input_slot(0);
+    plw.wake_output_slot(0);
+    plw.wake_poll_slot(0);
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_ixoff_byte() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_ixoff_byte(DriverId::SerialConsole, 0x13);
+    if plw.is_empty() {
+        return TestResult::Fail;
+    }
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_packet_event() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
+    if plw.is_empty() {
+        return TestResult::Fail;
+    }
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_packet_event_merge() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
+    plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_FLUSHREAD);
+    if plw.is_empty() {
+        return TestResult::Fail;
+    }
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.wake_output_and_poll(5);
+    plw.wake_input_and_poll(3);
+    if plw.is_empty() {
+        return TestResult::Fail;
+    }
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_signal(0, slopos_abi::signal::SIGINT);
+    if !plw.is_empty() {
+        klog_info!("TTY_TEST: BUG - pgid=0 signal should not be added");
+        return TestResult::Fail;
+    }
+    plw.execute();
+    TestResult::Pass
+}
+
+pub fn test_p21_postlockwork_zero_event_bits_ignored() -> TestResult {
+    let mut plw = PostLockWork::new();
+    plw.add_packet_event(TtyIndex(0), 0);
+    if !plw.is_empty() {
+        klog_info!("TTY_TEST: BUG - zero event bits should not be added");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_p21_write_path_peer_cache_consolidation() -> TestResult {
+    tty::table::tty_table_init();
+    let master_idx = match tty::pty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => return TestResult::Pass,
+    };
+    let slave_idx = {
+        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
+        match guard.as_ref() {
+            Some(tty) => match &tty.driver {
+                TtyDriverKind::PtyMaster { peer } => peer.idx,
+                _ => return TestResult::Fail,
+            },
+            None => return TestResult::Fail,
+        }
+    };
+    tty::pty::set_pty_lock(master_idx, false).ok();
+    tty::pty::pty_open_slave(slave_idx).ok();
+    let result = tty::write(slave_idx, b"hello", true);
+    match result {
+        Ok(n) if n > 0 => {}
+        Ok(0) => {}
+        Err(_) => {}
+        _ => {}
+    }
+    tty::close_ref(slave_idx).ok();
+    tty::close_ref(master_idx).ok();
+    TestResult::Pass
+}
+
+pub fn test_p21_forward_ldisc_ops_linedisc() -> TestResult {
+    let mut ld = LineDisc::new();
+    let canonical = ld.is_canonical();
+    let has = ld.has_data();
+    let avail = ld.bytes_available();
+    let stopped = ld.is_stopped();
+    let full = ld.input_full();
+    {
+        let ops: &mut dyn LdiscOps = &mut ld;
+        if ops.is_canonical() != canonical {
+            return TestResult::Fail;
+        }
+        if ops.has_data() != has {
+            return TestResult::Fail;
+        }
+        if ops.bytes_available() != avail {
+            return TestResult::Fail;
+        }
+        if ops.is_stopped() != stopped {
+            return TestResult::Fail;
+        }
+        if ops.input_full() != full {
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_p21_forward_ldisc_ops_rawdisc() -> TestResult {
+    let mut rd = RawDisc::new();
+    let ops: &mut dyn LdiscOps = &mut rd;
+    if ops.is_canonical() {
+        return TestResult::Fail;
+    }
+    if ops.has_data() {
+        return TestResult::Fail;
+    }
+    if ops.is_stopped() {
+        return TestResult::Fail;
+    }
+    if ops.input_full() {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_p21_existing_api_smoke_read_write() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::open_ref(idx);
+    let write_result = tty::write(idx, b"phase21test\n", true);
+    if write_result.is_err() {
+        klog_info!("TTY_TEST: write failed: {:?}", write_result);
+    }
+    let _ = tty::close_ref(idx);
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================

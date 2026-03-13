@@ -860,5 +860,19 @@ slopos_lib::define_test_suite!(
         test_ttyflags_set_method,
         test_ttyflags_multi_flag_operations,
         test_no_driver_kind_none,
+        // Phase 21: Deferred Actions RAII & Boilerplate Reduction
+        test_p21_postlockwork_default_is_empty,
+        test_p21_postlockwork_signal_makes_nonempty,
+        test_p21_postlockwork_execute_completes,
+        test_p21_postlockwork_ixoff_byte,
+        test_p21_postlockwork_packet_event,
+        test_p21_postlockwork_packet_event_merge,
+        test_p21_postlockwork_wake_helpers,
+        test_p21_postlockwork_zero_pgid_signal_ignored,
+        test_p21_postlockwork_zero_event_bits_ignored,
+        test_p21_write_path_peer_cache_consolidation,
+        test_p21_forward_ldisc_ops_linedisc,
+        test_p21_forward_ldisc_ops_rawdisc,
+        test_p21_existing_api_smoke_read_write,
     ]
 );
