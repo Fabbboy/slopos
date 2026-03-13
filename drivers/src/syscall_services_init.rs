@@ -440,6 +440,20 @@ fn tty_output_queued_bytes_adapter(tty_index: TtyIndex) -> i32 {
     }
 }
 
+fn tty_set_exclusive_adapter(tty_index: TtyIndex, enable: bool) -> i32 {
+    match tty::set_exclusive(tty_index, enable) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+fn tty_get_exclusive_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::get_exclusive(tty_index) {
+        Ok(v) => i32::from(v),
+        Err(_) => -1,
+    }
+}
+
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
     read_cooked_with_attach: tty_read_with_attach_adapter,
@@ -487,6 +501,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     tcsbrk: tty_tcsbrk_adapter,
     tcxonc: tty_tcxonc_adapter,
     output_queued_bytes: tty_output_queued_bytes_adapter,
+    set_exclusive: tty_set_exclusive_adapter,
+    get_exclusive: tty_get_exclusive_adapter,
 };
 
 fn net_scan_members_adapter(

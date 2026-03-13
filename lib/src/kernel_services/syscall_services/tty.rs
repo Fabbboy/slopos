@@ -46,5 +46,7 @@ crate::define_service! {
         tcsbrk(tty_index: slopos_abi::syscall::TtyIndex, arg: i32) -> i32;
         tcxonc(tty_index: slopos_abi::syscall::TtyIndex, action: i32) -> i32;
         output_queued_bytes(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        set_exclusive(tty_index: slopos_abi::syscall::TtyIndex, enable: bool) -> i32;
+        get_exclusive(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
     }
 }

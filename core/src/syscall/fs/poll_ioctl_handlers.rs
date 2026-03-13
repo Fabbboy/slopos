@@ -4,9 +4,10 @@ use core::ffi::c_int;
 
 use slopos_abi::signal::SIGTTOU;
 use slopos_abi::syscall::{
-    FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCGETD,
-    TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCOUTQ, TIOCPKT, TIOCSCTTY,
-    TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd, UserTermios, UserTimeval, UserWinsize,
+    FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL,
+    TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY,
+    TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
+    UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
@@ -476,6 +477,16 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         }
         TIOCGSID => {
             require_nonzero!(ctx, arg);
+            // POSIX: TIOCGSID only works on the caller's controlling terminal.
+            let task_ptr = crate::task::task_find_by_id(task_id);
+            if task_ptr.is_null() {
+                return ctx.err();
+            }
+            let task = unsafe { &*task_ptr };
+            match task.controlling_tty {
+                Some(ctty) if ctty == tty_idx => {}
+                _ => return ctx.err(), // ENOTTY
+            }
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let sid = tty::get_session_id(tty_idx);
             try_or_err!(ctx, copy_to_user(ptr, &sid));
@@ -583,6 +594,24 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             } else {
                 let count = count as i32;
                 try_or_err!(ctx, copy_to_user(ptr, &count));
+                ctx.ok(0)
+            }
+        }
+        TIOCEXCL => {
+            if tty::set_exclusive(tty_idx, true) == 0 { ctx.ok(0) } else { ctx.err() }
+        }
+        TIOCNXCL => {
+            if tty::set_exclusive(tty_idx, false) == 0 { ctx.ok(0) } else { ctx.err() }
+        }
+        TIOCGEXCL => {
+            require_nonzero!(ctx, arg);
+            let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
+            let state = tty::get_exclusive(tty_idx);
+            if state < 0 {
+                ctx.err()
+            } else {
+                let state = state as i32;
+                try_or_err!(ctx, copy_to_user(ptr, &state));
                 ctx.ok(0)
             }
         }
