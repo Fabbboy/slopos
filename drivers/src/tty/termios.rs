@@ -21,7 +21,7 @@ use super::lifecycle::hangup;
 use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
+use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -304,30 +304,27 @@ pub(super) fn set_termios_mode(
         wait_output_idle(idx)?;
     }
 
-    let mut deferred_pkt_events: u8 = 0;
+    let mut deferred = PostLockWork::new();
     let mut defer_hangup = false;
     let result = {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
-                // Capture old IXON state before applying termios.
                 let old_ixon = tty.ldisc.termios().c_iflag & slopos_abi::syscall::IXON;
                 let new_ixon = merged.c_iflag & slopos_abi::syscall::IXON;
 
                 if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
                     tty.ldisc.flush_input();
-                    // Input flush on slave → TIOCPKT_FLUSHREAD.
-                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_FLUSHREAD;
+                    deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_FLUSHREAD);
                 }
                 tty.ldisc.set_termios(&merged);
                 tty.driver.set_termios(&merged);
                 defer_hangup = (merged.c_cflag & CBAUD) == B0;
 
-                // Track IXON toggle for packet mode.
                 if old_ixon == 0 && new_ixon != 0 {
-                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_DOSTOP;
+                    deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_DOSTOP);
                 } else if old_ixon != 0 && new_ixon == 0 {
-                    deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_NOSTOP;
+                    deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_NOSTOP);
                 }
 
                 Ok(())
@@ -336,10 +333,7 @@ pub(super) fn set_termios_mode(
         }
     };
 
-    // Deliver deferred packet events now that the slot lock is released.
-    if deferred_pkt_events != 0 {
-        pty::queue_packet_event(idx, deferred_pkt_events);
-    }
+    deferred.execute();
 
     if defer_hangup {
         hangup(idx);
@@ -497,29 +491,21 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
         }
     }
 
-    let signal_pgid = {
+    let mut deferred = PostLockWork::new();
+    {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
                 let old = tty.winsize;
                 tty.winsize = *ws;
-                // Only signal if dimensions actually changed.
                 if old.ws_row != ws.ws_row || old.ws_col != ws.ws_col {
-                    let pgid = tty.session.fg_pgrp_raw();
-                    if pgid != 0 { Some(pgid) } else { None }
-                } else {
-                    None
+                    deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
                 }
             }
             None => return Err(TtyError::NotAllocated),
         }
-    };
-
-    // Deliver SIGWINCH outside the lock to avoid deadlock.
-    if let Some(pgid) = signal_pgid {
-        let _ = signal_process_group(pgid, SIGWINCH);
     }
-
+    deferred.execute();
     Ok(())
 }
 

@@ -19,12 +19,11 @@ use slopos_lib::kernel_services::driver_runtime::{
 
 use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
-use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
 };
-use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex};
+use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain
@@ -94,11 +93,8 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         return;
     }
 
+    let mut deferred = PostLockWork::new();
     let mut route: Option<(super::driver::DriverId, [u8; 256], usize)> = None;
-    let mut deferred_signal = None;
-    let mut ixoff_byte_out = None;
-    let mut output_resumed = false;
-    let mut deferred_pkt_event: u8 = 0;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -110,31 +106,23 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             return;
         }
 
-        // Track stopped state before input processing so we
-        // can detect stopped→resumed transitions for IXON wakeup.
         let was_stopped = tty.ldisc.is_stopped();
 
         let batch: BatchResult = tty.ldisc.receive_buf(events);
         if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
-            ixoff_byte_out = Some((tty.driver.id(), xoff));
+            deferred.add_ixoff_byte(tty.driver.id(), xoff);
         }
 
-        // If output transitioned from stopped to resumed,
-        // wake blocked writers and poll waiters.
         if was_stopped && !tty.ldisc.is_stopped() {
-            output_resumed = true;
+            deferred.wake_output_and_poll(slot);
         }
 
-        // Track flow-control transitions for packet mode.
-        // Deferred: queue_packet_event acquires its own TTY slot lock,
-        // so we must not call it while holding `guard`.
         if !was_stopped && tty.ldisc.is_stopped() {
-            deferred_pkt_event = slopos_abi::syscall::TIOCPKT_STOP;
+            deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_STOP);
         } else if was_stopped && !tty.ldisc.is_stopped() {
-            deferred_pkt_event = slopos_abi::syscall::TIOCPKT_START;
+            deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_START);
         }
 
-        // Activate throttle when cooked buffer fills.
         if batch.throttle_check
             && !tty.flags.contains(TtyFlags::THROTTLED)
             && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER
@@ -149,16 +137,11 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         }
 
         if let Some((sig, _)) = batch.signal {
-            deferred_signal = Some((tty.session.fg_pgrp_raw(), sig));
+            deferred.add_signal(tty.session.fg_pgrp_raw(), sig);
         }
 
         batch.should_wake
     };
-
-    // Deliver deferred packet event now that the slot lock is released.
-    if deferred_pkt_event != 0 {
-        pty::queue_packet_event(idx, deferred_pkt_event);
-    }
 
     if let Some((driver_id, out, out_len)) = route {
         TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
@@ -167,26 +150,11 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
-    // IXOFF — send XOFF byte to terminal if high-water exceeded.
-    if let Some((driver_id, xoff)) = ixoff_byte_out {
-        write_driver_unlocked(driver_id, &[xoff]);
-    }
-
-    if let Some((pgid, sig)) = deferred_signal {
-        if pgid != 0 {
-            let _ = signal_process_group(pgid, sig);
-        }
-    }
-
     if wake {
         notify_input_ready(idx);
     }
 
-    // Wake blocked writers and poll waiters on IXON resume.
-    if output_resumed {
-        TTY_OUTPUT_WAITERS[slot].wake_all();
-        TTY_POLL_WAITERS[slot].wake_all();
-    }
+    deferred.execute();
 }
 
 /// Wake one task blocked on input for a specific TTY.
@@ -247,17 +215,9 @@ pub fn read_with_attach(
     let mut total = 0usize;
 
     loop {
-        // --- Single lock acquisition: state check + drain + foreground + read ---
-        let deferred_signal;
+        let mut deferred = PostLockWork::new();
         let mut should_wait = false;
         let mut wait_timeout_ms: Option<u64> = None;
-        let mut ixoff_xon = None;
-        // Track if this read unthrottled the TTY so we
-        // can wake the master-side writer after releasing the lock.
-        let mut unthrottled_peer: Option<usize> = None;
-        // Track if no_room recovery happened so we
-        // can wake producers after releasing the lock.
-        let mut no_room_recovered = false;
         {
             let mut guard = TTY_SLOTS[slot].lock();
             let tty = match guard.as_mut() {
@@ -265,10 +225,6 @@ pub fn read_with_attach(
                 None => return Err(TtyError::NotAllocated),
             };
 
-            // Post-hangup I/O hardening — a hung-up TTY is
-            // permanently dead.  Reads always return EOF (0 bytes) once
-            // any buffered data has been consumed, regardless of whether
-            // the read is blocking or non-blocking.
             if tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
@@ -277,7 +233,6 @@ pub fn read_with_attach(
                 return Ok(0);
             }
 
-            // Foreground check via check_read().
             if enforce_access {
                 match tty.session.check_read(caller_pgid, caller_sid) {
                     ForegroundCheck::BackgroundRead => {
@@ -296,128 +251,76 @@ pub fn read_with_attach(
                         return Err(TtyError::CrossSessionDenied);
                     }
                     ForegroundCheck::Allowed | ForegroundCheck::BootstrapAllowed => {}
-                    ForegroundCheck::BackgroundWrite => {
-                        // Should not happen on read path, treat as allowed.
-                    }
+                    ForegroundCheck::BackgroundWrite => {}
                 }
             }
 
-            // Drain hardware input (merged — single lock for drain + read).
-            deferred_signal = tty.drain_hw_input_locked();
+            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pgid, sig);
+            }
 
-            // PTY packet mode — if this master has pending
-            // packet events, return a single-byte read with the event
-            // bitmask (consuming the events).  If no events but data is
-            // available, prefix the read with TIOCPKT_DATA (0x00).
             if tty.flags.contains(TtyFlags::PACKET_MODE) && total == 0 {
                 if !tty.packet_events.is_empty() {
                     buf[0] = tty.packet_events.bits();
                     tty.packet_events = PacketEvents::empty();
                     drop(guard);
-                    if let Some((pgid, sig)) = deferred_signal {
-                        if pgid != 0 {
-                            let _ = signal_process_group(pgid, sig);
-                        }
-                    }
+                    deferred.execute();
                     return Ok(1);
                 }
                 if buf.len() < 2 {
-                    // Buffer too small for TIOCPKT_DATA prefix + payload.
-                    // If data is available we cannot deliver it — return 0
-                    // rather than busy-looping between the wait and this
-                    // check.  The caller must use a larger buffer.
                     if tty.ldisc.has_data() {
                         drop(guard);
-                        if let Some((pgid, sig)) = deferred_signal {
-                            if pgid != 0 {
-                                let _ = signal_process_group(pgid, sig);
-                            }
-                        }
+                        deferred.execute();
                         return Ok(0);
                     }
-                    // No data and no events — fall through to wait for
-                    // packet events (which CAN be returned in 1 byte).
                 } else {
                     let got = tty.ldisc.read(&mut buf[1..]);
                     if got > 0 {
                         buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
                         total = 1 + got;
-                        ixoff_xon = tty
-                            .ldisc
-                            .ixoff_check_xon()
-                            .map(|xon| (tty.driver.id(), xon));
-                        // Unthrottle after packet-mode read.
-                        let mut pkt_unthrottled_peer = if tty.flags.contains(TtyFlags::THROTTLED)
+                        if let Some(xon) = tty.ldisc.ixoff_check_xon() {
+                            deferred.add_ixoff_byte(tty.driver.id(), xon);
+                        }
+                        if tty.flags.contains(TtyFlags::THROTTLED)
                             && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                         {
                             tty.flags.remove(TtyFlags::THROTTLED);
-                            match &tty.driver {
-                                TtyDriverKind::PtySlave { peer } => Some(peer.idx.0 as usize),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-                        // No-room recovery after packet-mode drain.
-                        let pkt_no_room_recovered = tty.ldisc.check_no_room_recovery();
-                        if pkt_no_room_recovered && pkt_unthrottled_peer.is_none() {
                             if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                                pkt_unthrottled_peer = Some(peer.idx.0 as usize);
+                                deferred.wake_output_and_poll(peer.idx.0 as usize);
                             }
                         }
-                        // Canonical mode: return immediately with prefix.
+                        if tty.ldisc.check_no_room_recovery() {
+                            deferred.wake_input_and_poll(slot);
+                            if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                                deferred.wake_output_and_poll(peer.idx.0 as usize);
+                            }
+                        }
                         drop(guard);
-                        if let Some((driver_id, xon)) = ixoff_xon {
-                            write_driver_unlocked(driver_id, &[xon]);
-                        }
-                        if let Some((pgid, sig)) = deferred_signal {
-                            if pgid != 0 {
-                                let _ = signal_process_group(pgid, sig);
-                            }
-                        }
-                        // Wake master-side writer after unthrottle.
-                        if let Some(ps) = pkt_unthrottled_peer {
-                            if ps < MAX_TTYS {
-                                TTY_OUTPUT_WAITERS[ps].wake_all();
-                                TTY_POLL_WAITERS[ps].wake_all();
-                            }
-                        }
-                        // Wake local waiters on no_room recovery.
-                        if pkt_no_room_recovered {
-                            TTY_INPUT_WAITERS[slot].wake_all();
-                            TTY_POLL_WAITERS[slot].wake_all();
-                        }
+                        deferred.execute();
                         return Ok(total);
                     }
-                    // No data available — fall through to wait logic.
                 }
             } else {
-                // Normal (non-packet) read path.
                 let got = tty.ldisc.read(&mut buf[total..]);
                 total = total.saturating_add(got);
                 if got > 0 {
-                    ixoff_xon = tty
-                        .ldisc
-                        .ixoff_check_xon()
-                        .map(|xon| (tty.driver.id(), xon));
+                    if let Some(xon) = tty.ldisc.ixoff_check_xon() {
+                        deferred.add_ixoff_byte(tty.driver.id(), xon);
+                    }
                 }
-                // Unthrottle if occupancy dropped below low-water.
                 if got > 0
                     && tty.flags.contains(TtyFlags::THROTTLED)
                     && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                 {
                     tty.flags.remove(TtyFlags::THROTTLED);
                     if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                        unthrottled_peer = Some(peer.idx.0 as usize);
+                        deferred.wake_output_and_poll(peer.idx.0 as usize);
                     }
                 }
-                // No-room recovery after normal drain.
                 if got > 0 && tty.ldisc.check_no_room_recovery() {
-                    no_room_recovered = true;
-                    if unthrottled_peer.is_none() {
-                        if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                            unthrottled_peer = Some(peer.idx.0 as usize);
-                        }
+                    deferred.wake_input_and_poll(slot);
+                    if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+                        deferred.wake_output_and_poll(peer.idx.0 as usize);
                     }
                 }
             }
@@ -429,55 +332,21 @@ pub fn read_with_attach(
 
             if is_canonical {
                 if total > 0 {
-                    // Drop guard before delivering deferred signal.
                     drop(guard);
-                    if let Some((driver_id, xon)) = ixoff_xon {
-                        write_driver_unlocked(driver_id, &[xon]);
-                    }
-                    if let Some((pgid, sig)) = deferred_signal {
-                        if pgid != 0 {
-                            let _ = signal_process_group(pgid, sig);
-                        }
-                    }
-                    // Wake master after unthrottle.
-                    if let Some(ps) = unthrottled_peer {
-                        if ps < MAX_TTYS {
-                            TTY_OUTPUT_WAITERS[ps].wake_all();
-                            TTY_POLL_WAITERS[ps].wake_all();
-                        }
-                    }
-                    // Wake local waiters on no_room recovery.
-                    if no_room_recovered {
-                        TTY_INPUT_WAITERS[slot].wake_all();
-                        TTY_POLL_WAITERS[slot].wake_all();
-                    }
+                    deferred.execute();
                     return Ok(total);
                 }
             } else {
                 match (vmin_u8, vtime_u8) {
                     (0, 0) => {
                         drop(guard);
-                        if let Some((driver_id, xon)) = ixoff_xon {
-                            write_driver_unlocked(driver_id, &[xon]);
-                        }
-                        if let Some((pgid, sig)) = deferred_signal {
-                            if pgid != 0 {
-                                let _ = signal_process_group(pgid, sig);
-                            }
-                        }
+                        deferred.execute();
                         return Ok(total);
                     }
                     (0, _) => {
                         if total > 0 {
                             drop(guard);
-                            if let Some((driver_id, xon)) = ixoff_xon {
-                                write_driver_unlocked(driver_id, &[xon]);
-                            }
-                            if let Some((pgid, sig)) = deferred_signal {
-                                if pgid != 0 {
-                                    let _ = signal_process_group(pgid, sig);
-                                }
-                            }
+                            deferred.execute();
                             return Ok(total);
                         }
                         should_wait = true;
@@ -486,49 +355,25 @@ pub fn read_with_attach(
                     (_, 0) => {
                         if total >= vmin {
                             drop(guard);
-                            if let Some((driver_id, xon)) = ixoff_xon {
-                                write_driver_unlocked(driver_id, &[xon]);
-                            }
-                            if let Some((pgid, sig)) = deferred_signal {
-                                if pgid != 0 {
-                                    let _ = signal_process_group(pgid, sig);
-                                }
-                            }
+                            deferred.execute();
                             return Ok(total);
                         }
                         should_wait = true;
                     }
                     (_, _) => {
-                        // POSIX VMIN>0 / VTIME>0: inter-byte timeout.
-                        // The timer starts after the first byte arrives,
-                        // NOT when read() is called.
                         if total >= vmin {
                             drop(guard);
-                            if let Some((driver_id, xon)) = ixoff_xon {
-                                write_driver_unlocked(driver_id, &[xon]);
-                            }
-                            if let Some((pgid, sig)) = deferred_signal {
-                                if pgid != 0 {
-                                    let _ = signal_process_group(pgid, sig);
-                                }
-                            }
+                            deferred.execute();
                             return Ok(total);
                         }
                         should_wait = true;
-                        // no bytes yet — wait indefinitely for
-                        // the first byte (timeout = None).
-                        // at least one byte received — start the
-                        // inter-byte timer for the remaining bytes.
                         if total > 0 {
                             wait_timeout_ms = Some(vtime_ms);
                         }
-                        // else: wait_timeout_ms remains None (indefinite)
                     }
                 }
             }
 
-            // Check hung-up after drain (data may have been
-            // flushed by hangup).  Always EOF regardless of blocking mode.
             if tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
@@ -537,47 +382,14 @@ pub fn read_with_attach(
                 return Ok(0);
             }
 
-            if !is_canonical && !should_wait {
-                if total > 0 {
-                    drop(guard);
-                    if let Some((driver_id, xon)) = ixoff_xon {
-                        write_driver_unlocked(driver_id, &[xon]);
-                    }
-                    if let Some((pgid, sig)) = deferred_signal {
-                        if pgid != 0 {
-                            let _ = signal_process_group(pgid, sig);
-                        }
-                    }
-                    return Ok(total);
-                }
-            }
-        }
-        // --- Per-TTY lock dropped ---
-
-        if let Some((driver_id, xon)) = ixoff_xon {
-            write_driver_unlocked(driver_id, &[xon]);
-        }
-
-        // Deliver deferred signal from drain (e.g. Ctrl+C on serial).
-        if let Some((pgid, sig)) = deferred_signal {
-            if pgid != 0 {
-                let _ = signal_process_group(pgid, sig);
+            if !is_canonical && !should_wait && total > 0 {
+                drop(guard);
+                deferred.execute();
+                return Ok(total);
             }
         }
 
-        // Wake master-side writer if this read unthrottled.
-        if let Some(ps) = unthrottled_peer {
-            if ps < MAX_TTYS {
-                TTY_OUTPUT_WAITERS[ps].wake_all();
-                TTY_POLL_WAITERS[ps].wake_all();
-            }
-        }
-
-        // Wake local waiters on no_room recovery.
-        if no_room_recovered {
-            TTY_INPUT_WAITERS[slot].wake_all();
-            TTY_POLL_WAITERS[slot].wake_all();
-        }
+        deferred.execute();
 
         if nonblock {
             return if total > 0 {
@@ -587,14 +399,12 @@ pub fn read_with_attach(
             };
         }
 
-        // Block on per-TTY wait queue.
         let wait_condition = || {
-            // Check for pending signals so the wait
-            // breaks out and the read can return ERESTARTSYS.
             if has_pending_signal() {
                 return true;
             }
-            let (sig, result) = {
+            let mut wd = PostLockWork::new();
+            let result = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 match guard.as_mut() {
                     Some(tty) => {
@@ -607,21 +417,17 @@ pub fn read_with_attach(
                                 return false;
                             }
                         }
-                        let sig = tty.drain_hw_input_locked();
-                        let result = tty.flags.contains(TtyFlags::HUNG_UP)
+                        if let Some((pgid, signum)) = tty.drain_hw_input_locked() {
+                            wd.add_signal(pgid, signum);
+                        }
+                        tty.flags.contains(TtyFlags::HUNG_UP)
                             || tty.flags.contains(TtyFlags::PEER_CLOSED)
-                            || tty.ldisc.has_data();
-                        (sig, result)
+                            || tty.ldisc.has_data()
                     }
                     None => return true,
                 }
             };
-            // Deliver deferred signal outside lock.
-            if let Some((pgid, signum)) = sig {
-                if pgid != 0 {
-                    let _ = signal_process_group(pgid, signum);
-                }
-            }
+            wd.execute();
             result
         };
 
@@ -635,9 +441,6 @@ pub fn read_with_attach(
             return if total > 0 { Ok(total) } else { Ok(0) };
         }
 
-        // If the wait was broken by a pending signal
-        // rather than data arrival, return partial data (if any) or
-        // ERESTARTSYS so the syscall return path can handle SA_RESTART.
         if has_pending_signal() {
             return if total > 0 {
                 Ok(total)
@@ -737,26 +540,18 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     // for expansion while keeping the stack buffer small.
     const OUT_BUF_CAP: usize = 256;
 
-    // Determine if this TTY is a PTY master so we can
-    // apply slave-side throttle back-pressure in the write loop.
-    let peer_slave_slot: Option<usize> = {
+    // Cache peer slot indices once — PTY peer relationships are
+    // immutable for the lifetime of the pair, so a single lock acquisition
+    // suffices.  Previously this required two separate locks.
+    let (peer_slave_slot, peer_master_slot): (Option<usize>, Option<usize>) = {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
             Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => Some(peer.idx.0 as usize),
-                _ => None,
+                TtyDriverKind::PtyMaster { peer } => (Some(peer.idx.0 as usize), None),
+                TtyDriverKind::PtySlave { peer } => (None, Some(peer.idx.0 as usize)),
+                _ => (None, None),
             },
-            None => None,
-        }
-    };
-    let peer_master_slot: Option<usize> = {
-        let guard = TTY_SLOTS[slot].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtySlave { peer } => Some(peer.idx.0 as usize),
-                _ => None,
-            },
-            None => None,
+            None => (None, None),
         }
     };
     let mut pos = 0;
@@ -975,22 +770,19 @@ pub fn has_data(idx: TtyIndex) -> bool {
     if slot >= MAX_TTYS {
         return false;
     }
-    let (deferred_signal, result) = {
+    let mut deferred = PostLockWork::new();
+    let result = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            let sig = tty.drain_hw_input_locked();
-            let data = tty.ldisc.has_data();
-            (sig, data)
+            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pgid, sig);
+            }
+            tty.ldisc.has_data()
         } else {
             return false;
         }
     };
-    // Deliver deferred signal outside lock to avoid deadlock.
-    if let Some((pgid, sig)) = deferred_signal {
-        if pgid != 0 {
-            let _ = signal_process_group(pgid, sig);
-        }
-    }
+    deferred.execute();
     result
 }
 
@@ -1004,21 +796,19 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let (deferred_signal, count) = {
+    let mut deferred = PostLockWork::new();
+    let count = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            let sig = tty.drain_hw_input_locked();
-            let n = tty.ldisc.bytes_available();
-            (sig, n)
+            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pgid, sig);
+            }
+            tty.ldisc.bytes_available()
         } else {
             return Err(TtyError::NotAllocated);
         }
     };
-    if let Some((pgid, sig)) = deferred_signal {
-        if pgid != 0 {
-            let _ = signal_process_group(pgid, sig);
-        }
-    }
+    deferred.execute();
     Ok(count)
 }
 
@@ -1063,22 +853,19 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 fn input_available_cb() -> c_int {
     let mut any_data = false;
     for i in 0..MAX_TTYS {
-        let (deferred_signal, has_data) = {
+        let mut deferred = PostLockWork::new();
+        let has_data = {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
-                let sig = tty.drain_hw_input_locked();
-                let data = tty.ldisc.has_data();
-                (sig, data)
+                if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
+                    deferred.add_signal(pgid, sig);
+                }
+                tty.ldisc.has_data()
             } else {
-                (None, false)
+                false
             }
         };
-        // Deliver deferred signal outside lock.
-        if let Some((pgid, sig)) = deferred_signal {
-            if pgid != 0 {
-                let _ = signal_process_group(pgid, sig);
-            }
-        }
+        deferred.execute();
         if has_data {
             notify_input_ready(TtyIndex(i as u8));
             any_data = true;

@@ -10,7 +10,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_lib::kernel_services::driver_runtime::scheduler_is_enabled;
 
 use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
+use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Compositor focus
@@ -90,19 +90,20 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         return 0;
     }
 
-    let (deferred_signal, revents) = {
+    let mut deferred = PostLockWork::new();
+    let revents = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
             Some(t) => t,
             None => return 0,
         };
 
-        // Drain any pending hardware bytes so has_data() is up-to-date.
-        let sig = tty.drain_hw_input_locked();
+        if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
+            deferred.add_signal(pgid, sig);
+        }
 
         let mut revents = 0u16;
 
-        // Packet events also make the master readable.
         if (requested & POLLIN) != 0
             && (tty.ldisc.has_data()
                 || (tty.flags.contains(TtyFlags::PACKET_MODE) && !tty.packet_events.is_empty()))
@@ -117,12 +118,6 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             revents |= POLLOUT;
         }
 
-        // Post-hangup I/O hardening — a hung-up or peer-closed
-        // (with no remaining data) TTY reports POLLHUP, POLLIN, and POLLERR.
-        // POLLIN is set because a subsequent read() will return immediately
-        // with EOF (0 bytes), making the fd "readable".
-        // POLLERR is set because a subsequent write() will return -EIO,
-        // matching Linux's tty_poll() behaviour.
         if tty.flags.contains(TtyFlags::HUNG_UP)
             || (tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data())
         {
@@ -132,16 +127,10 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             }
         }
 
-        (sig, revents)
+        revents
     };
 
-    // Deliver deferred signal outside lock to avoid deadlock.
-    if let Some((pgid, sig)) = deferred_signal {
-        if pgid != 0 {
-            let _ = slopos_lib::kernel_services::driver_runtime::signal_process_group(pgid, sig);
-        }
-    }
-
+    deferred.execute();
     revents
 }
 

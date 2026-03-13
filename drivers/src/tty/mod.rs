@@ -59,9 +59,10 @@ mod termios;
 use bitflags::bitflags;
 use slopos_abi::syscall::UserWinsize;
 
-use self::driver::TtyDriverKind;
+use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
 use self::ldisc::LdiscKind;
 use self::session::TtySession;
+use self::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -127,6 +128,169 @@ impl Tty {
         self.flags.insert(TtyFlags::HUNG_UP);
         self.flags.remove(TtyFlags::OUTPUT_STOPPED);
         debug_assert!(!self.flags.contains(TtyFlags::OUTPUT_STOPPED));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PostLockWork — RAII helper for deferred actions after lock release
+// ---------------------------------------------------------------------------
+
+/// Accumulates work that must be performed **after** dropping the per-TTY
+/// lock, to avoid deadlock or lock-ordering violations.
+///
+/// The repeated pattern of "capture signal/IXOFF byte/packet event inside
+/// lock → deliver after lock drop" appears ~8 times in `io.rs` alone and
+/// in `poll.rs`, `lifecycle.rs`, and `termios.rs`.  `PostLockWork` replaces
+/// all manual deferred-delivery boilerplate with a single RAII struct:
+///
+/// ```ignore
+/// let mut deferred = PostLockWork::new();
+/// {
+///     let mut guard = TTY_SLOTS[slot].lock();
+///     // ... work under lock, accumulate into `deferred` ...
+///     deferred.add_signal(pgid, signum);
+/// }
+/// deferred.execute();  // delivers everything outside the lock
+/// ```
+#[derive(Default)]
+pub(crate) struct PostLockWork {
+    /// Deferred signal delivery: `(pgid, signum)`.
+    signal: Option<(u32, u8)>,
+    /// Deferred IXOFF/IXON byte to send to a driver.
+    ixoff_byte: Option<(DriverId, u8)>,
+    /// Deferred packet event to queue on a slave's master.
+    packet_event: Option<(TtyIndex, u8)>,
+    /// Slot indices where `TTY_INPUT_WAITERS` should be woken.
+    wake_input: [bool; MAX_TTYS],
+    /// Slot indices where `TTY_OUTPUT_WAITERS` should be woken.
+    wake_output: [bool; MAX_TTYS],
+    /// Slot indices where `TTY_POLL_WAITERS` should be woken.
+    wake_poll: [bool; MAX_TTYS],
+}
+
+impl PostLockWork {
+    /// Create a new empty deferred work accumulator.
+    pub(crate) const fn new() -> Self {
+        Self {
+            signal: None,
+            ixoff_byte: None,
+            packet_event: None,
+            wake_input: [false; MAX_TTYS],
+            wake_output: [false; MAX_TTYS],
+            wake_poll: [false; MAX_TTYS],
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.signal.is_none()
+            && self.ixoff_byte.is_none()
+            && self.packet_event.is_none()
+            && !self.wake_input.iter().any(|&x| x)
+            && !self.wake_output.iter().any(|&x| x)
+            && !self.wake_poll.iter().any(|&x| x)
+    }
+
+    /// Queue a signal for delivery to a process group.
+    #[inline]
+    pub(crate) fn add_signal(&mut self, pgid: u32, signum: u8) {
+        if pgid != 0 {
+            self.signal = Some((pgid, signum));
+        }
+    }
+
+    /// Queue an IXOFF/IXON byte to send to a driver.
+    #[inline]
+    pub(crate) fn add_ixoff_byte(&mut self, driver_id: DriverId, byte: u8) {
+        self.ixoff_byte = Some((driver_id, byte));
+    }
+
+    /// Queue a packet event to deliver to a slave's paired master.
+    #[inline]
+    pub(crate) fn add_packet_event(&mut self, slave_idx: TtyIndex, event_bits: u8) {
+        if event_bits != 0 {
+            match self.packet_event {
+                Some((idx, ref mut bits)) if idx == slave_idx => {
+                    *bits |= event_bits;
+                }
+                _ => {
+                    self.packet_event = Some((slave_idx, event_bits));
+                }
+            }
+        }
+    }
+
+    /// Mark a slot for input waiter wakeup.
+    #[inline]
+    pub(crate) fn wake_input_slot(&mut self, slot: usize) {
+        if slot < MAX_TTYS {
+            self.wake_input[slot] = true;
+        }
+    }
+
+    /// Mark a slot for output waiter wakeup.
+    #[inline]
+    pub(crate) fn wake_output_slot(&mut self, slot: usize) {
+        if slot < MAX_TTYS {
+            self.wake_output[slot] = true;
+        }
+    }
+
+    /// Mark a slot for poll waiter wakeup.
+    #[inline]
+    pub(crate) fn wake_poll_slot(&mut self, slot: usize) {
+        if slot < MAX_TTYS {
+            self.wake_poll[slot] = true;
+        }
+    }
+
+    /// Convenience: wake both output and poll waiters on a slot.
+    #[inline]
+    pub(crate) fn wake_output_and_poll(&mut self, slot: usize) {
+        self.wake_output_slot(slot);
+        self.wake_poll_slot(slot);
+    }
+
+    /// Convenience: wake input and poll waiters on a slot.
+    #[inline]
+    pub(crate) fn wake_input_and_poll(&mut self, slot: usize) {
+        self.wake_input_slot(slot);
+        self.wake_poll_slot(slot);
+    }
+
+    /// Execute all accumulated deferred work.
+    ///
+    /// **MUST be called after dropping all per-TTY locks.**
+    pub(crate) fn execute(self) {
+        use slopos_lib::kernel_services::driver_runtime::signal_process_group;
+
+        // 1. Deliver deferred signal.
+        if let Some((pgid, sig)) = self.signal {
+            let _ = signal_process_group(pgid, sig);
+        }
+
+        // 2. Send IXOFF/IXON byte to driver.
+        if let Some((driver_id, byte)) = self.ixoff_byte {
+            write_driver_unlocked(driver_id, &[byte]);
+        }
+
+        // 3. Queue packet event on master.
+        if let Some((slave_idx, event_bits)) = self.packet_event {
+            pty::queue_packet_event(slave_idx, event_bits);
+        }
+
+        // 4. Wake waiters.
+        for slot in 0..MAX_TTYS {
+            if self.wake_input[slot] {
+                TTY_INPUT_WAITERS[slot].wake_all();
+            }
+            if self.wake_output[slot] {
+                TTY_OUTPUT_WAITERS[slot].wake_all();
+            }
+            if self.wake_poll[slot] {
+                TTY_POLL_WAITERS[slot].wake_all();
+            }
+        }
     }
 }
 
