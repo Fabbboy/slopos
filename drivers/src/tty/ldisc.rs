@@ -1737,22 +1737,14 @@ impl LineDisc {
         }
     }
 
-    /// Move everything in the edit buffer into the cooked ring buffer.
-    ///
-    /// Uses the `bool` return from `push_cooked()` to stop early if the
-    /// cooked buffer fills up.  Any bytes that could not be flushed are
-    /// preserved: the unflushed tail is shifted to the front of the edit
-    /// buffer and `edit_len` is set to the remainder count.  This prevents
-    /// silent data loss when the cooked buffer is partially occupied.
     fn flush_edit_to_cooked(&mut self) {
         let mut i = 0usize;
         while i < self.edit_len {
             if !self.push_cooked(self.edit_buf[i]) {
-                break; // cooked buffer full — stop flushing
+                break;
             }
             i += 1;
         }
-        // Preserve any unflushed remainder by shifting to front of edit buffer.
         if i < self.edit_len {
             let remaining = self.edit_len - i;
             self.edit_buf.copy_within(i..self.edit_len, 0);
@@ -1764,59 +1756,99 @@ impl LineDisc {
     }
 }
 
+/// Generates the pure-forwarding `impl LdiscOps` methods that delegate to
+/// identically-named inherent methods.  Only `receive_buf` is excluded
+/// because its implementation differs between `LineDisc` and `RawDisc`.
+macro_rules! forward_ldisc_ops {
+    ($T:ty) => {
+        #[inline]
+        fn termios(&self) -> &UserTermios {
+            self.termios()
+        }
+        #[inline]
+        fn vmin_vtime(&self) -> (u8, u8) {
+            self.vmin_vtime()
+        }
+        #[inline]
+        fn is_canonical(&self) -> bool {
+            self.is_canonical()
+        }
+        #[inline]
+        fn set_termios(&mut self, t: &UserTermios) {
+            self.set_termios(t)
+        }
+        #[inline]
+        fn has_data(&self) -> bool {
+            self.has_data()
+        }
+        #[inline]
+        fn bytes_available(&self) -> usize {
+            self.bytes_available()
+        }
+        #[inline]
+        fn read(&mut self, out: &mut [u8]) -> usize {
+            self.read(out)
+        }
+        #[inline]
+        fn flush_all(&mut self) {
+            self.flush_all()
+        }
+        #[inline]
+        fn flush_input(&mut self) {
+            self.flush_input()
+        }
+        #[inline]
+        fn edit_content(&self) -> &[u8] {
+            self.edit_content()
+        }
+        #[inline]
+        fn is_stopped(&self) -> bool {
+            self.is_stopped()
+        }
+        #[inline]
+        fn input_char(&mut self, event: InputEvent) -> InputAction {
+            self.input_char(event)
+        }
+        #[inline]
+        fn process_output_byte(&mut self, c: u8) -> OutputAction {
+            self.process_output_byte(c)
+        }
+        #[inline]
+        fn ixoff_check_xoff(&mut self) -> Option<u8> {
+            self.ixoff_check_xoff()
+        }
+        #[inline]
+        fn ixoff_check_xon(&mut self) -> Option<u8> {
+            self.ixoff_check_xon()
+        }
+        #[inline]
+        fn input_full(&self) -> bool {
+            self.input_full()
+        }
+        #[inline]
+        fn should_wake_reader(&mut self) -> bool {
+            self.should_wake_reader()
+        }
+        #[inline]
+        fn no_room(&self) -> bool {
+            self.no_room()
+        }
+        #[inline]
+        fn overflow_count(&self) -> u32 {
+            self.overflow_count()
+        }
+        #[inline]
+        fn check_no_room_recovery(&mut self) -> bool {
+            self.check_no_room_recovery()
+        }
+    };
+}
+
 impl LdiscOps for LineDisc {
-    #[inline]
-    fn termios(&self) -> &UserTermios {
-        self.termios()
-    }
-    #[inline]
-    fn vmin_vtime(&self) -> (u8, u8) {
-        self.vmin_vtime()
-    }
-    #[inline]
-    fn is_canonical(&self) -> bool {
-        self.is_canonical()
-    }
-    #[inline]
-    fn set_termios(&mut self, t: &UserTermios) {
-        self.set_termios(t)
-    }
-    #[inline]
-    fn has_data(&self) -> bool {
-        self.has_data()
-    }
-    #[inline]
-    fn bytes_available(&self) -> usize {
-        self.bytes_available()
-    }
-    #[inline]
-    fn read(&mut self, out: &mut [u8]) -> usize {
-        self.read(out)
-    }
-    #[inline]
-    fn flush_all(&mut self) {
-        self.flush_all()
-    }
-    #[inline]
-    fn flush_input(&mut self) {
-        self.flush_input()
-    }
-    #[inline]
-    fn edit_content(&self) -> &[u8] {
-        self.edit_content()
-    }
-    #[inline]
-    fn is_stopped(&self) -> bool {
-        self.is_stopped()
-    }
-    #[inline]
-    fn input_char(&mut self, event: InputEvent) -> InputAction {
-        self.input_char(event)
-    }
-    #[inline]
+    forward_ldisc_ops!(LineDisc);
+
     fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         let mut result = BatchResult::new();
-
         for &event in events {
             match self.input_char(event) {
                 InputAction::Echo { buf, len } => {
@@ -1844,42 +1876,9 @@ impl LdiscOps for LineDisc {
                 InputAction::None => {}
             }
         }
-
         result.should_wake = self.should_wake_reader();
         result.throttle_check = true;
         result
-    }
-    #[inline]
-    fn process_output_byte(&mut self, c: u8) -> OutputAction {
-        self.process_output_byte(c)
-    }
-    #[inline]
-    fn ixoff_check_xoff(&mut self) -> Option<u8> {
-        self.ixoff_check_xoff()
-    }
-    #[inline]
-    fn ixoff_check_xon(&mut self) -> Option<u8> {
-        self.ixoff_check_xon()
-    }
-    #[inline]
-    fn input_full(&self) -> bool {
-        self.input_full()
-    }
-    #[inline]
-    fn should_wake_reader(&mut self) -> bool {
-        self.should_wake_reader()
-    }
-    #[inline]
-    fn no_room(&self) -> bool {
-        self.no_room()
-    }
-    #[inline]
-    fn overflow_count(&self) -> u32 {
-        self.overflow_count()
-    }
-    #[inline]
-    fn check_no_room_recovery(&mut self) -> bool {
-        self.check_no_room_recovery()
     }
 }
 
@@ -2065,55 +2064,8 @@ impl RawDisc {
 }
 
 impl LdiscOps for RawDisc {
-    #[inline]
-    fn termios(&self) -> &UserTermios {
-        self.termios()
-    }
-    #[inline]
-    fn vmin_vtime(&self) -> (u8, u8) {
-        self.vmin_vtime()
-    }
-    #[inline]
-    fn is_canonical(&self) -> bool {
-        self.is_canonical()
-    }
-    #[inline]
-    fn set_termios(&mut self, t: &UserTermios) {
-        self.set_termios(t)
-    }
-    #[inline]
-    fn has_data(&self) -> bool {
-        self.has_data()
-    }
-    #[inline]
-    fn bytes_available(&self) -> usize {
-        self.bytes_available()
-    }
-    #[inline]
-    fn read(&mut self, out: &mut [u8]) -> usize {
-        self.read(out)
-    }
-    #[inline]
-    fn flush_all(&mut self) {
-        self.flush_all()
-    }
-    #[inline]
-    fn flush_input(&mut self) {
-        self.flush_input()
-    }
-    #[inline]
-    fn edit_content(&self) -> &[u8] {
-        self.edit_content()
-    }
-    #[inline]
-    fn is_stopped(&self) -> bool {
-        self.is_stopped()
-    }
-    #[inline]
-    fn input_char(&mut self, event: InputEvent) -> InputAction {
-        self.input_char(event)
-    }
-    #[inline]
+    forward_ldisc_ops!(RawDisc);
+
     fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         for &event in events {
             let _ = self.input_char(event);
@@ -2122,38 +2074,6 @@ impl LdiscOps for RawDisc {
         result.should_wake = self.should_wake_reader();
         result.throttle_check = true;
         result
-    }
-    #[inline]
-    fn process_output_byte(&mut self, c: u8) -> OutputAction {
-        self.process_output_byte(c)
-    }
-    #[inline]
-    fn ixoff_check_xoff(&mut self) -> Option<u8> {
-        self.ixoff_check_xoff()
-    }
-    #[inline]
-    fn ixoff_check_xon(&mut self) -> Option<u8> {
-        self.ixoff_check_xon()
-    }
-    #[inline]
-    fn input_full(&self) -> bool {
-        self.input_full()
-    }
-    #[inline]
-    fn should_wake_reader(&mut self) -> bool {
-        self.should_wake_reader()
-    }
-    #[inline]
-    fn no_room(&self) -> bool {
-        self.no_room()
-    }
-    #[inline]
-    fn overflow_count(&self) -> u32 {
-        self.overflow_count()
-    }
-    #[inline]
-    fn check_no_room_recovery(&mut self) -> bool {
-        self.check_no_room_recovery()
     }
 }
 
