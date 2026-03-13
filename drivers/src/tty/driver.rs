@@ -101,7 +101,7 @@ impl TtyDriverKind {
                 pty::master_write(*peer, buf);
             }
             Self::PtySlave { peer } => {
-                // Bytes that don't fit are dropped (no output back-pressure yet).
+                // Short writes flow back through write_driver_unlocked's return value.
                 let _ = pty::slave_write(*peer, buf);
             }
             Self::None => {}
@@ -221,27 +221,24 @@ pub enum DriverId {
 ///
 /// Phase 26: PTY variants pass the `PtyPeerHandle` to `master_write` /
 /// `slave_write`, which validate the generation before touching the peer slot.
-pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) {
+pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
     match driver {
         DriverId::SerialConsole => {
             for &b in data {
                 serial::serial_putc_com1(b);
             }
+            data.len()
         }
         DriverId::VConsole => {
             super::vconsole::write(data);
             for &b in data {
                 serial::serial_putc_com1(b);
             }
+            data.len()
         }
-        DriverId::PtyMaster { peer } => {
-            pty::master_write(peer, data);
-        }
-        DriverId::PtySlave { peer } => {
-            // Bytes that don't fit are dropped (no output back-pressure yet).
-            let _ = pty::slave_write(peer, data);
-        }
-        DriverId::None => {}
+        DriverId::PtyMaster { peer } => pty::master_write(peer, data),
+        DriverId::PtySlave { peer } => pty::slave_write(peer, data),
+        DriverId::None => data.len(),
     }
 }
 

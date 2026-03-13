@@ -12,7 +12,7 @@
 //! - **Flow control**: IXON with VSTOP/VSTART (Ctrl+S / Ctrl+Q), IXOFF
 //! - **Canonical editing**: VWERASE (Ctrl+W word erase), VREPRINT (Ctrl+R
 //!   redisplay), VLNEXT (Ctrl+V literal next)
-//! - **Non-canonical mode**: VMIN/VTIME parsed (timing not yet enforced)
+//! - **Non-canonical mode**: Full VMIN/VTIME timing matrix (enforced in read path)
 //! - **Column tracking** for proper backspace/kill echo
 //!
 //! The line discipline never touches the hardware directly — it returns
@@ -362,10 +362,7 @@ pub struct LineDisc {
     edit_len: usize,
 
     // -- Cooked output ring buffer (ready for userland read) --
-    cooked: [u8; COOKED_BUF_SIZE],
-    cooked_head: usize,
-    cooked_tail: usize,
-    cooked_count: usize,
+    cooked: super::ringbuf::RingBuf<COOKED_BUF_SIZE>,
 
     // -- Canonical line boundary tracking (Phase 15) --
     /// Number of complete lines in the cooked buffer (delimited by newline or
@@ -472,10 +469,7 @@ impl LineDisc {
             },
             edit_buf: [0; EDIT_BUF_SIZE],
             edit_len: 0,
-            cooked: [0; COOKED_BUF_SIZE],
-            cooked_head: 0,
-            cooked_tail: 0,
-            cooked_count: 0,
+            cooked: super::ringbuf::RingBuf::new(),
             line_count: 0,
             stopped: false,
             literal_next: false,
@@ -553,7 +547,7 @@ impl LineDisc {
         if canonical {
             self.line_count > 0
         } else {
-            self.cooked_count > 0
+            self.cooked.count() > 0
         }
     }
 
@@ -569,17 +563,18 @@ impl LineDisc {
         // keeps returning true (line_count > 0) and `read()` returns 0 bytes
         // without decrementing, creating a phantom-readable state.  Fix: detect
         // the zero-byte line and consume it immediately.
-        if canonical && self.line_count > 0 && self.cooked_count == 0 {
+        if canonical && self.line_count > 0 && self.cooked.peek_at(0).is_none() {
             self.line_count -= 1;
             return 0;
         }
 
         let mut copied = 0usize;
-        while copied < out.len() && self.cooked_count > 0 {
-            let byte = self.cooked[self.cooked_tail];
+        while copied < out.len() {
+            let Some(byte) = self.cooked.peek() else {
+                break;
+            };
+            let _ = self.cooked.pop();
             out[copied] = byte;
-            self.cooked_tail = (self.cooked_tail + 1) % COOKED_BUF_SIZE;
-            self.cooked_count -= 1;
             copied += 1;
 
             // In canonical mode, stop after consuming one complete line.
@@ -595,7 +590,7 @@ impl LineDisc {
         // trailing newline).  Decrement line_count since the full line has
         // been consumed.  If we merely filled the caller's buffer (cooked_count
         // > 0), we are mid-line and must NOT decrement.
-        if canonical && copied > 0 && self.cooked_count == 0 && self.line_count > 0 {
+        if canonical && copied > 0 && self.cooked.count() == 0 && self.line_count > 0 {
             self.line_count -= 1;
         }
 
@@ -605,7 +600,7 @@ impl LineDisc {
     /// Phase 27: Returns the number of bytes available for reading.
     /// Used by the FIONREAD / TIOCINQ ioctl.
     pub fn bytes_available(&self) -> usize {
-        self.cooked_count
+        self.cooked.count()
     }
 
     /// Returns `true` if both the edit and cooked buffers are full.
@@ -613,7 +608,7 @@ impl LineDisc {
     /// Used by PTY slave write paths to detect back-pressure before
     /// pushing bytes that would otherwise be silently dropped.
     pub fn input_full(&self) -> bool {
-        self.cooked_count >= COOKED_BUF_SIZE && self.edit_len >= EDIT_BUF_SIZE
+        self.cooked.is_full() && self.edit_len >= EDIT_BUF_SIZE
     }
 
     /// Finishing Phase 12: Returns `true` if the cooked buffer has
@@ -634,7 +629,7 @@ impl LineDisc {
     /// below `THROTTLE_LOW_WATER`, clearing the flag.  The caller
     /// should wake relevant waiters to re-arm the producer path.
     pub fn check_no_room_recovery(&mut self) -> bool {
-        if self.no_room && self.cooked_count <= THROTTLE_LOW_WATER {
+        if self.no_room && self.cooked.count() <= THROTTLE_LOW_WATER {
             self.no_room = false;
             true
         } else {
@@ -667,11 +662,11 @@ impl LineDisc {
         }
 
         // Non-canonical mode: batch wakeups.
-        if self.cooked_count == 0 {
+        if self.cooked.count() == 0 {
             return false;
         }
 
-        let near_full = self.cooked_count >= COOKED_BUF_SIZE.saturating_sub(64);
+        let near_full = self.cooked.count() >= self.cooked.capacity().saturating_sub(64);
         if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
             self.wake_chars_pending = 0;
             return true;
@@ -682,9 +677,7 @@ impl LineDisc {
 
     pub fn flush_all(&mut self) {
         self.edit_len = 0;
-        self.cooked_head = 0;
-        self.cooked_tail = 0;
-        self.cooked_count = 0;
+        self.cooked.flush();
         self.line_count = 0;
         self.stopped = false;
         self.literal_next = false;
@@ -700,9 +693,7 @@ impl LineDisc {
 
     pub fn flush_input(&mut self) {
         self.edit_len = 0;
-        self.cooked_head = 0;
-        self.cooked_tail = 0;
-        self.cooked_count = 0;
+        self.cooked.flush();
         self.line_count = 0;
         self.literal_next = false;
         self.utf8_remaining = 0;
@@ -1598,14 +1589,12 @@ impl LineDisc {
     /// Finishing Phase 12: On failure, sets the `no_room` sticky flag and
     /// increments `overflow_count` for diagnostics.
     pub(crate) fn push_cooked(&mut self, c: u8) -> bool {
-        if self.cooked_count >= COOKED_BUF_SIZE {
+        if self.cooked.is_full() {
             self.no_room = true;
             self.overflow_count = self.overflow_count.saturating_add(1);
             return false;
         }
-        self.cooked[self.cooked_head] = c;
-        self.cooked_head = (self.cooked_head + 1) % COOKED_BUF_SIZE;
-        self.cooked_count += 1;
+        let _ = self.cooked.push(c);
         self.wake_chars_pending += 1;
         true
     }
@@ -1615,7 +1604,7 @@ impl LineDisc {
     /// Used to check whether a multi-byte sequence (e.g. PARMRK's 3-byte
     /// break encoding) can be inserted atomically without partial pushes.
     fn cooked_free(&self) -> usize {
-        COOKED_BUF_SIZE - self.cooked_count
+        self.cooked.free()
     }
 
     /// Phase 36: IXOFF — check if input buffer exceeds high-water mark.
@@ -1627,7 +1616,7 @@ impl LineDisc {
         if self.xoff_sent {
             return None;
         }
-        let pending = self.edit_len + self.cooked_count;
+        let pending = self.edit_len + self.cooked.count();
         if pending >= IXOFF_HIGH_WATER {
             self.xoff_sent = true;
             Some(self.cc(CcIndex::Vstop))
@@ -1645,7 +1634,7 @@ impl LineDisc {
         if !self.xoff_sent {
             return None;
         }
-        let pending = self.edit_len + self.cooked_count;
+        let pending = self.edit_len + self.cooked.count();
         if pending < IXOFF_LOW_WATER {
             self.xoff_sent = false;
             Some(self.cc(CcIndex::Vstart))
@@ -1777,10 +1766,7 @@ const RAW_BUF_SIZE: usize = 4096;
 /// output bytes pass through without `c_oflag` processing.
 pub struct RawDisc {
     termios: UserTermios,
-    buf: [u8; RAW_BUF_SIZE],
-    head: usize,
-    tail: usize,
-    count: usize,
+    buf: super::ringbuf::RingBuf<RAW_BUF_SIZE>,
     // Finishing Phase 10: Input wake batching (same as LineDisc).
     wake_chars_pending: usize,
 
@@ -1808,10 +1794,7 @@ impl RawDisc {
                 c_ispeed: 0,
                 c_ospeed: 0,
             },
-            buf: [0; RAW_BUF_SIZE],
-            head: 0,
-            tail: 0,
-            count: 0,
+            buf: super::ringbuf::RingBuf::new(),
             wake_chars_pending: 0,
             no_room: false,
             overflow_count: 0,
@@ -1838,28 +1821,21 @@ impl RawDisc {
     }
 
     pub fn has_data(&self) -> bool {
-        self.count > 0
+        !self.buf.is_empty()
     }
 
     pub fn read(&mut self, out: &mut [u8]) -> usize {
-        let mut copied = 0usize;
-        while copied < out.len() && self.count > 0 {
-            out[copied] = self.buf[self.tail];
-            self.tail = (self.tail + 1) % RAW_BUF_SIZE;
-            self.count -= 1;
-            copied += 1;
-        }
-        copied
+        self.buf.read(out)
     }
 
     /// Phase 27: Returns the number of bytes available for reading.
     pub fn bytes_available(&self) -> usize {
-        self.count
+        self.buf.count()
     }
 
     /// Returns `true` if the raw buffer is full.
     pub fn input_full(&self) -> bool {
-        self.count >= RAW_BUF_SIZE
+        self.buf.is_full()
     }
 
     /// Finishing Phase 12: Returns `true` if overflow state is active.
@@ -1874,7 +1850,7 @@ impl RawDisc {
 
     /// Finishing Phase 12: Check and clear no-room recovery condition.
     pub fn check_no_room_recovery(&mut self) -> bool {
-        if self.no_room && self.count <= THROTTLE_LOW_WATER {
+        if self.no_room && self.buf.count() <= THROTTLE_LOW_WATER {
             self.no_room = false;
             true
         } else {
@@ -1888,10 +1864,10 @@ impl RawDisc {
     /// only when `wake_chars_pending` crosses `WAKEUP_CHARS` or the buffer
     /// is nearly full.
     pub fn should_wake_reader(&mut self) -> bool {
-        if self.count == 0 {
+        if self.buf.is_empty() {
             return false;
         }
-        let near_full = self.count >= RAW_BUF_SIZE.saturating_sub(64);
+        let near_full = self.buf.count() >= self.buf.capacity().saturating_sub(64);
         if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
             self.wake_chars_pending = 0;
             return true;
@@ -1900,18 +1876,14 @@ impl RawDisc {
     }
 
     pub fn flush_all(&mut self) {
-        self.head = 0;
-        self.tail = 0;
-        self.count = 0;
+        self.buf.flush();
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;
     }
 
     pub fn flush_input(&mut self) {
-        self.head = 0;
-        self.tail = 0;
-        self.count = 0;
+        self.buf.flush();
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;
@@ -1932,10 +1904,7 @@ impl RawDisc {
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
         }
-        if self.count < RAW_BUF_SIZE {
-            self.buf[self.head] = c;
-            self.head = (self.head + 1) % RAW_BUF_SIZE;
-            self.count += 1;
+        if self.buf.push(c) {
             self.wake_chars_pending += 1;
         } else {
             // Finishing Phase 12: Record overflow state.

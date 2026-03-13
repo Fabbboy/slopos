@@ -32,6 +32,7 @@
 pub mod driver;
 pub mod ldisc;
 pub mod pty;
+pub mod ringbuf;
 pub mod session;
 pub mod table;
 pub mod vconsole;
@@ -174,8 +175,8 @@ impl TtyError {
         match self {
             TtyError::InvalidIndex => ERRNO_EINVAL as i32,
             TtyError::NotAllocated => ERRNO_ENXIO as i32,
-            TtyError::BackgroundRead => ERRNO_EPERM as i32,
-            TtyError::BackgroundWrite => ERRNO_EPERM as i32,
+            TtyError::BackgroundRead => ERRNO_EIO as i32,
+            TtyError::BackgroundWrite => ERRNO_EIO as i32,
             TtyError::HungUp => ERRNO_EIO as i32,
             TtyError::WouldBlock => ERRNO_EAGAIN as i32,
             TtyError::PermissionDenied => ERRNO_EPERM as i32,
@@ -213,6 +214,8 @@ impl Tty {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut deferred_signal = None;
+        let mut echo_buf = [0u8; 256];
+        let mut echo_len = 0usize;
 
         for i in 0..count {
             let mut c = scratch[i];
@@ -226,17 +229,42 @@ impl Tty {
             let action = self.ldisc.input_char(c);
             match action {
                 InputAction::Echo { buf, len } => {
-                    for j in 0..len as usize {
-                        self.driver.write_output(&[buf[j]]);
+                    let n = len as usize;
+                    if echo_len + n <= echo_buf.len() {
+                        echo_buf[echo_len..echo_len + n].copy_from_slice(&buf[..n]);
+                        echo_len += n;
+                    } else {
+                        if echo_len > 0 {
+                            self.driver.write_output(&echo_buf[..echo_len]);
+                            echo_len = 0;
+                        }
+                        self.driver.write_output(&buf[..n]);
                     }
                 }
                 InputAction::Bell => {
-                    self.driver.write_output(&[0x07]);
+                    if echo_len < echo_buf.len() {
+                        echo_buf[echo_len] = 0x07;
+                        echo_len += 1;
+                    } else {
+                        if echo_len > 0 {
+                            self.driver.write_output(&echo_buf[..echo_len]);
+                            echo_len = 0;
+                        }
+                        self.driver.write_output(&[0x07]);
+                    }
                 }
                 InputAction::Signal(sig) => {
+                    if echo_len > 0 {
+                        self.driver.write_output(&echo_buf[..echo_len]);
+                        echo_len = 0;
+                    }
                     deferred_signal = Some((self.session.fg_pgrp_raw(), sig));
                 }
                 InputAction::ReprintLine => {
+                    if echo_len > 0 {
+                        self.driver.write_output(&echo_buf[..echo_len]);
+                        echo_len = 0;
+                    }
                     self.driver.write_output(b"\n");
                     let content = self.ldisc.edit_content();
                     for &b in content {
@@ -244,6 +272,10 @@ impl Tty {
                     }
                 }
                 InputAction::KillLineEcho { columns } => {
+                    if echo_len > 0 {
+                        self.driver.write_output(&echo_buf[..echo_len]);
+                        echo_len = 0;
+                    }
                     for _ in 0..columns {
                         self.driver.write_output(&[0x08, 0x20, 0x08]);
                     }
@@ -255,6 +287,10 @@ impl Tty {
             if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
                 self.driver.write_output(&[xoff]);
             }
+        }
+
+        if echo_len > 0 {
+            self.driver.write_output(&echo_buf[..echo_len]);
         }
 
         deferred_signal
@@ -1003,6 +1039,16 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             None => None,
         }
     };
+    let peer_master_slot: Option<usize> = {
+        let guard = TTY_SLOTS[slot].lock();
+        match guard.as_ref() {
+            Some(tty) => match &tty.driver {
+                TtyDriverKind::PtySlave { peer } => Some(peer.idx.0 as usize),
+                _ => None,
+            },
+            None => None,
+        }
+    };
     let mut pos = 0;
     while pos < data.len() {
         // Finishing Phase 2: PTY master throttle back-pressure.
@@ -1035,6 +1081,44 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 });
             }
             // Re-check hangup after unblock.
+            {
+                let guard = TTY_SLOTS[slot].lock();
+                if let Some(tty) = guard.as_ref() {
+                    if tty.hung_up {
+                        return if pos > 0 {
+                            Ok(pos)
+                        } else {
+                            Err(TtyError::HungUp)
+                        };
+                    }
+                }
+            }
+        }
+
+        if let Some(master_slot) = peer_master_slot {
+            if nonblock {
+                let guard = TTY_SLOTS[master_slot].lock();
+                let is_full = match guard.as_ref() {
+                    Some(tty) => tty.ldisc.input_full(),
+                    None => false,
+                };
+                drop(guard);
+                if is_full {
+                    return if pos > 0 {
+                        Ok(pos)
+                    } else {
+                        Err(TtyError::WouldBlock)
+                    };
+                }
+            } else {
+                TTY_OUTPUT_WAITERS[master_slot].wait_event(|| {
+                    let guard = TTY_SLOTS[master_slot].lock();
+                    match guard.as_ref() {
+                        Some(tty) => !tty.ldisc.input_full() || tty.hung_up || tty.peer_closed,
+                        None => true,
+                    }
+                });
+            }
             {
                 let guard = TTY_SLOTS[slot].lock();
                 if let Some(tty) = guard.as_ref() {
@@ -1123,14 +1207,17 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         // Phase 2: Driver I/O without any TTY lock (slow — hardware).
         // Phase 25: Track in-flight output for drain semantics.
         TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
-        write_driver_unlocked(driver_id, &out_buf[..out_len]);
+        let driver_written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
         TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
+        if driver_written < out_len {
+            break;
+        }
         // Wake drain waiters (TCSETSW / TCSETSF) now that this chunk
         // has reached the hardware.
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
-    Ok(data.len())
+    Ok(pos)
 }
 
 /// Check if a TTY has cooked data available for reading.

@@ -28,6 +28,8 @@ crate::define_service! {
         hangup(tty_index: slopos_abi::syscall::TtyIndex);
         is_hung_up(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         alloc_pty() -> i32;
+        grantpt(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
+        ptsname(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, buflen: usize) -> i32;
         get_pty_number(tty_index: slopos_abi::syscall::TtyIndex) -> i32;
         is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         open_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> i32;

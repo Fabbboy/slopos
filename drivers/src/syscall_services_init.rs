@@ -264,6 +264,55 @@ fn tty_alloc_pty_adapter() -> i32 {
     }
 }
 
+fn tty_grantpt_adapter(_tty_index: TtyIndex) -> i32 {
+    0
+}
+
+fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {
+    if buf.is_null() || buflen == 0 {
+        return -1;
+    }
+
+    let pty_num = match tty::get_pty_number(tty_index) {
+        Ok(n) => n,
+        Err(_) => return -1,
+    };
+
+    let mut path = [0u8; 32];
+    let prefix = b"/dev/pts/";
+    let mut len = 0usize;
+    path[..prefix.len()].copy_from_slice(prefix);
+    len += prefix.len();
+
+    if pty_num == 0 {
+        path[len] = b'0';
+        len += 1;
+    } else {
+        let mut num = pty_num;
+        let mut rev = [0u8; 10];
+        let mut rev_len = 0usize;
+        while num > 0 {
+            rev[rev_len] = b'0' + (num % 10) as u8;
+            rev_len += 1;
+            num /= 10;
+        }
+        for i in (0..rev_len).rev() {
+            path[len] = rev[i];
+            len += 1;
+        }
+    }
+
+    if len + 1 > buflen {
+        return -1;
+    }
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), buf, len);
+        *buf.add(len) = 0;
+    }
+    0
+}
+
 fn tty_get_pty_number_adapter(tty_index: TtyIndex) -> i32 {
     match tty::get_pty_number(tty_index) {
         Ok(number) => number as i32,
@@ -418,6 +467,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     hangup: tty_hangup_adapter,
     is_hung_up: tty_is_hung_up_adapter,
     alloc_pty: tty_alloc_pty_adapter,
+    grantpt: tty_grantpt_adapter,
+    ptsname: tty_ptsname_adapter,
     get_pty_number: tty_get_pty_number_adapter,
     is_pty_slave: tty_is_pty_slave_adapter,
     open_pty_slave: tty_open_pty_slave_adapter,
