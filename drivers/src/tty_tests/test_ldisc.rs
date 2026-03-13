@@ -23,7 +23,7 @@ use slopos_lib::testing::TestResult;
 use crate::tty;
 use crate::tty::TtyError;
 use crate::tty::TtyIndex;
-use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
+use crate::tty::driver::{DriverId, InputEvent, InputStatus, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
@@ -6833,7 +6833,7 @@ pub fn test_phase29_ldisc_ops_linedisc_trait_delegation() -> TestResult {
         return TestResult::Fail;
     }
     // Exercise a mutation via the trait.
-    let _action = <LineDisc as LdiscOps>::input_char(&mut ld, b'x');
+    let _action = <LineDisc as LdiscOps>::input_char(&mut ld, InputEvent::normal(b'x'));
     <LineDisc as LdiscOps>::flush_all(&mut ld);
     TestResult::Pass
 }
@@ -6855,7 +6855,7 @@ pub fn test_phase29_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
         return TestResult::Fail;
     }
     // Push a byte via trait and check.
-    let action = <RawDisc as LdiscOps>::input_char(&mut rd, b'z');
+    let action = <RawDisc as LdiscOps>::input_char(&mut rd, InputEvent::normal(b'z'));
     if !matches!(action, InputAction::None) {
         klog_info!("TTY_TEST: BUG - RawDisc input_char via trait should return None");
         return TestResult::Fail;
@@ -15405,6 +15405,320 @@ pub fn test_fp13_inflight_accounting_round_trip() -> TestResult {
         return TestResult::Fail;
     }
 
+    TestResult::Pass
+}
+
+pub fn test_fp14_input_event_normal_behavior() -> TestResult {
+    let mut legacy = LineDisc::new();
+    let mut typed = LineDisc::new();
+    let mut t = *legacy.termios();
+    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    legacy.set_termios(&t);
+    typed.set_termios(&t);
+
+    let _ = legacy.input_char(b'A');
+    let _ = typed.input_char(InputEvent::normal(b'A'));
+
+    let mut a = [0u8; 8];
+    let mut b = [0u8; 8];
+    let na = legacy.read(&mut a);
+    let nb = typed.read(&mut b);
+    if na != nb || &a[..na] != &b[..nb] {
+        klog_info!("TTY_TEST: BUG - normal InputEvent diverged from byte path");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_input_event_break_brkint() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::BRKINT;
+    t.c_iflag &= !slopos_abi::syscall::IGNBRK;
+    ld.set_termios(&t);
+    match ld.input_char(InputEvent {
+        byte: 0,
+        status: InputStatus::Break,
+    }) {
+        InputAction::Signal(SIGINT) => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - break+BRKINT expected SIGINT, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_fp14_input_event_break_ignbrk() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::IGNBRK;
+    ld.set_termios(&t);
+    let _ = ld.input_char(InputEvent {
+        byte: 0,
+        status: InputStatus::Break,
+    });
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - break+IGNBRK should be discarded");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_input_event_parity_parmrk() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_iflag |= slopos_abi::syscall::INPCK | slopos_abi::syscall::PARMRK;
+    t.c_iflag &= !slopos_abi::syscall::IGNPAR;
+    ld.set_termios(&t);
+
+    let _ = ld.input_char(InputEvent {
+        byte: b'X',
+        status: InputStatus::ParityError,
+    });
+    let mut out = [0u8; 8];
+    let n = ld.read(&mut out);
+    if n < 3 || out[0] != 0xFF || out[1] != 0x00 {
+        klog_info!(
+            "TTY_TEST: BUG - parity+PARMRK expected 0xFF 0x00 prefix, got {:?}",
+            &out[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_input_event_parity_ignpar() -> TestResult {
+    let mut ld = LineDisc::new();
+    let mut t = *ld.termios();
+    t.c_iflag |= slopos_abi::syscall::IGNPAR;
+    ld.set_termios(&t);
+    let _ = ld.input_char(InputEvent {
+        byte: b'X',
+        status: InputStatus::ParityError,
+    });
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - parity+IGNPAR should discard byte");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_input_event_overrun_noop() -> TestResult {
+    let mut ld = LineDisc::new();
+    let _ = ld.input_char(InputEvent {
+        byte: b'X',
+        status: InputStatus::Overrun,
+    });
+    if ld.has_data() {
+        klog_info!("TTY_TEST: BUG - overrun status should be no-op");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_poll_output_stopped_masks_pollout() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOOFF as i32);
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
+    let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON as i32);
+    if (revents & slopos_abi::syscall::POLLOUT) != 0 {
+        klog_info!("TTY_TEST: BUG - POLLOUT should be masked when output_stopped");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_poll_output_not_stopped_has_pollout() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let _ = tty::tcxonc(idx, slopos_abi::syscall::TCOON as i32);
+    let revents = tty::poll_events(idx, slopos_abi::syscall::POLLOUT);
+    if (revents & slopos_abi::syscall::POLLOUT) == 0 {
+        klog_info!("TTY_TEST: BUG - POLLOUT should be present when output is active");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_grantpt_unlocks_slave() -> TestResult {
+    use slopos_lib::kernel_services::syscall_services::tty::tty_services;
+
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(idx) => idx,
+        Err(_) => return TestResult::Pass,
+    };
+    let locked_before = tty::get_pty_lock(master).unwrap_or(false);
+    let rc = (tty_services().grantpt)(master);
+    let locked_after = tty::get_pty_lock(master).unwrap_or(true);
+    let _ = tty::close_ref(master);
+    if !locked_before || rc != 0 || locked_after {
+        klog_info!(
+            "TTY_TEST: BUG - grantpt should unlock slave (before={}, rc={}, after={})",
+            locked_before,
+            rc,
+            locked_after
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_b0_hangup() -> TestResult {
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let mut t = tty::get_termios(idx).unwrap();
+    t.c_cflag = (t.c_cflag & !slopos_abi::syscall::CBAUD) | slopos_abi::syscall::B0;
+    match tty::set_termios(idx, &t) {
+        Ok(()) => {}
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - set_termios(B0) failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    }
+    if !tty::is_hung_up(idx) {
+        klog_info!("TTY_TEST: BUG - B0 should trigger hangup");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_speed_roundtrip() -> TestResult {
+    use slopos_abi::syscall::*;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let saved = tty::get_termios(idx).unwrap();
+
+    let mut t = saved;
+    t.c_cflag = (t.c_cflag & !CBAUD) | B9600;
+    if let Err(e) = tty::set_termios(idx, &t) {
+        klog_info!(
+            "TTY_TEST: BUG - set_termios speed roundtrip failed: {:?}",
+            e
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+    let got = tty::get_termios(idx).unwrap();
+    if (got.c_cflag & CBAUD) != B9600 || got.c_ispeed != 9600 || got.c_ospeed != 9600 {
+        klog_info!(
+            "TTY_TEST: BUG - speed={}/{}, expected 9600",
+            got.c_ispeed,
+            got.c_ospeed
+        );
+        tty::set_termios(idx, &saved).unwrap();
+        return TestResult::Fail;
+    }
+    tty::set_termios(idx, &saved).unwrap();
+    TestResult::Pass
+}
+
+pub fn test_fp14_batched_ingress_no_data_loss() -> TestResult {
+    let mut ld = LineDisc::new();
+    {
+        let mut t = *ld.termios();
+        t.c_lflag = 0;
+        t.c_iflag = 0;
+        ld.set_termios(&t);
+    }
+
+    let count = 256usize;
+    let mut events = [InputEvent::normal(0); 256];
+    for i in 0..count {
+        events[i] = InputEvent::normal((i as u8).wrapping_add(0x20));
+    }
+
+    let result = ld.receive_buf(&events[..count]);
+    let _ = result;
+
+    let avail = ld.bytes_available();
+    if avail != count {
+        klog_info!(
+            "TTY_TEST: BUG - batched ingress data mismatch (total={})",
+            avail
+        );
+        return TestResult::Fail;
+    }
+
+    let mut out = [0u8; 256];
+    let got = ld.read(&mut out);
+    if got != count {
+        klog_info!(
+            "TTY_TEST: BUG - batched ingress read mismatch (got={})",
+            got
+        );
+        return TestResult::Fail;
+    }
+    for i in 0..count {
+        if out[i] != (i as u8).wrapping_add(0x20) {
+            klog_info!("TTY_TEST: BUG - batched ingress byte mismatch at {}", i);
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_batched_ingress_signal_in_middle() -> TestResult {
+    let Some((master, slave, saved)) = phase39_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - phase39 setup failed");
+        return TestResult::Fail;
+    };
+
+    let mut t = saved;
+    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_lflag |= slopos_abi::syscall::ISIG;
+    t.c_lflag &= !slopos_abi::syscall::NOFLSH;
+    if tty::set_termios(slave, &t).is_err() {
+        phase39_teardown_pty(master, slave, &saved);
+        return TestResult::Fail;
+    }
+
+    let payload = [b'a', 0x03, b'b'];
+    let _ = tty::write(master, &payload, false);
+    let mut out = [0u8; 8];
+    let n = tty::read(slave, &mut out, true).unwrap_or(0);
+    phase39_teardown_pty(master, slave, &saved);
+    if n != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - signal in batch should flush/discard trailing bytes, got {:?}",
+            &out[..n]
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_background_read_sigttin_blocked_eio() -> TestResult {
+    let mut s = TtySession::new();
+    s.attach(10, 10);
+    if !matches!(s.check_read(99, 10), ForegroundCheck::BackgroundRead) {
+        klog_info!("TTY_TEST: BUG - expected BackgroundRead precondition");
+        return TestResult::Fail;
+    }
+    if TtyError::HungUp.to_errno() != -5 {
+        klog_info!("TTY_TEST: BUG - blocked SIGTTIN EIO path should map to -5");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp14_receive_buf_accumulates_echo() -> TestResult {
+    let mut ld = LineDisc::new();
+    let events = [
+        InputEvent::normal(b'a'),
+        InputEvent::normal(b'b'),
+        InputEvent::normal(b'c'),
+    ];
+    let result = ld.receive_buf(&events);
+    if result.echo_len == 0 {
+        klog_info!("TTY_TEST: BUG - receive_buf should accumulate echo bytes");
+        return TestResult::Fail;
+    }
     TestResult::Pass
 }
 

@@ -25,6 +25,8 @@ use slopos_abi::syscall::{
     UserTermios,
 };
 
+use super::driver::{InputEvent, InputStatus};
+
 // Finishing Phase 6: Expanded from 1024 to 4096 to match Linux/RedoxOS.
 // Handles long pastes, history expansion, and heredoc input gracefully.
 const EDIT_BUF_SIZE: usize = 4096;
@@ -116,7 +118,8 @@ pub(crate) trait LdiscOps {
     fn flush_input(&mut self);
     fn edit_content(&self) -> &[u8];
     fn is_stopped(&self) -> bool;
-    fn input_char(&mut self, c: u8) -> InputAction;
+    fn input_char(&mut self, event: InputEvent) -> InputAction;
+    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult;
     fn process_output_byte(&mut self, c: u8) -> OutputAction;
     fn ixoff_check_xoff(&mut self) -> Option<u8>;
     fn ixoff_check_xon(&mut self) -> Option<u8>;
@@ -125,6 +128,42 @@ pub(crate) trait LdiscOps {
     fn no_room(&self) -> bool;
     fn overflow_count(&self) -> u32;
     fn check_no_room_recovery(&mut self) -> bool;
+}
+
+pub struct BatchResult {
+    pub echo: [u8; 256],
+    pub echo_len: usize,
+    pub signal: Option<(u8, bool)>,
+    pub should_wake: bool,
+    pub throttle_check: bool,
+}
+
+impl BatchResult {
+    const fn new() -> Self {
+        Self {
+            echo: [0; 256],
+            echo_len: 0,
+            signal: None,
+            should_wake: false,
+            throttle_check: false,
+        }
+    }
+
+    fn push_echo(&mut self, byte: u8) {
+        if self.echo_len < self.echo.len() {
+            self.echo[self.echo_len] = byte;
+            self.echo_len += 1;
+        }
+    }
+
+    fn push_echo_slice(&mut self, bytes: &[u8]) {
+        let remaining = self.echo.len().saturating_sub(self.echo_len);
+        let copy_len = core::cmp::min(remaining, bytes.len());
+        if copy_len > 0 {
+            self.echo[self.echo_len..self.echo_len + copy_len].copy_from_slice(&bytes[..copy_len]);
+            self.echo_len += copy_len;
+        }
+    }
 }
 
 /// Generates delegating `impl LdiscKind` methods that forward to the inner
@@ -721,7 +760,8 @@ impl LineDisc {
     ///
     /// Returns an [`InputAction`] indicating what the caller should do (echo,
     /// signal, reprint, or nothing).
-    pub fn input_char(&mut self, c: u8) -> InputAction {
+    pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
+        let event = event.into();
         // Phase 36: CREAD gate — if the receiver is disabled in c_cflag,
         // silently discard all input.
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
@@ -739,9 +779,63 @@ impl LineDisc {
         let iflag = self.termios.input_flags();
         let lflag = self.termios.local_flags();
 
+        let mut c = event.byte;
+        let mut apply_break_heuristic = true;
+
+        match event.status {
+            InputStatus::Normal => {}
+            InputStatus::Break => {
+                if iflag.contains(InputFlags::IGNBRK) {
+                    return InputAction::None;
+                }
+                if iflag.contains(InputFlags::BRKINT) {
+                    self.flush_input();
+                    return InputAction::Signal(SIGINT);
+                }
+                if iflag.contains(InputFlags::PARMRK) {
+                    if self.cooked_free() < 3 {
+                        if iflag.contains(InputFlags::IMAXBEL) {
+                            return InputAction::Bell;
+                        }
+                        return InputAction::None;
+                    }
+                    self.push_cooked(0xFF);
+                    self.push_cooked(0x00);
+                    self.push_cooked(0x00);
+                    return InputAction::None;
+                }
+                c = 0x00;
+                apply_break_heuristic = false;
+            }
+            InputStatus::ParityError | InputStatus::FrameError => {
+                if iflag.contains(InputFlags::IGNPAR) {
+                    return InputAction::None;
+                }
+                if iflag.contains(InputFlags::INPCK) {
+                    if iflag.contains(InputFlags::PARMRK) {
+                        if self.cooked_free() < 2 {
+                            if iflag.contains(InputFlags::IMAXBEL) {
+                                return InputAction::Bell;
+                            }
+                            return InputAction::None;
+                        }
+                        self.push_cooked(0xFF);
+                        self.push_cooked(0x00);
+                    } else {
+                        c = 0x00;
+                    }
+                }
+                apply_break_heuristic = false;
+            }
+            InputStatus::Overrun => {
+                return InputAction::None;
+            }
+        }
+
         // Phase 27: Break handling.  A NUL byte (0x00) is treated as a
         // break condition when any of IGNBRK/BRKINT/PARMRK is set.
-        if c == 0x00
+        if apply_break_heuristic
+            && c == 0x00
             && iflag.intersects(InputFlags::IGNBRK | InputFlags::BRKINT | InputFlags::PARMRK)
         {
             return self.handle_break(iflag);
@@ -1716,8 +1810,44 @@ impl LdiscOps for LineDisc {
         self.is_stopped()
     }
     #[inline]
-    fn input_char(&mut self, c: u8) -> InputAction {
-        self.input_char(c)
+    fn input_char(&mut self, event: InputEvent) -> InputAction {
+        self.input_char(event)
+    }
+    #[inline]
+    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+        let mut result = BatchResult::new();
+
+        for &event in events {
+            match self.input_char(event) {
+                InputAction::Echo { buf, len } => {
+                    result.push_echo_slice(&buf[..len as usize]);
+                }
+                InputAction::Bell => {
+                    result.push_echo(0x07);
+                }
+                InputAction::Signal(sig) => {
+                    result.signal = Some((
+                        sig,
+                        !self.termios.local_flags().contains(LocalFlags::NOFLSH),
+                    ));
+                    break;
+                }
+                InputAction::ReprintLine => {
+                    result.push_echo(b'\n');
+                    result.push_echo_slice(self.edit_content());
+                }
+                InputAction::KillLineEcho { columns } => {
+                    for _ in 0..columns {
+                        result.push_echo_slice(&[0x08, 0x20, 0x08]);
+                    }
+                }
+                InputAction::None => {}
+            }
+        }
+
+        result.should_wake = self.should_wake_reader();
+        result.throttle_check = true;
+        result
     }
     #[inline]
     fn process_output_byte(&mut self, c: u8) -> OutputAction {
@@ -1899,12 +2029,13 @@ impl RawDisc {
     }
 
     /// Raw input: push byte directly to buffer, no processing.
-    pub fn input_char(&mut self, c: u8) -> InputAction {
+    pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
+        let event = event.into();
         // Phase 36: CREAD gate — discard input when receiver disabled.
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
         }
-        if self.buf.push(c) {
+        if self.buf.push(event.byte) {
             self.wake_chars_pending += 1;
         } else {
             // Finishing Phase 12: Record overflow state.
@@ -1979,8 +2110,18 @@ impl LdiscOps for RawDisc {
         self.is_stopped()
     }
     #[inline]
-    fn input_char(&mut self, c: u8) -> InputAction {
-        self.input_char(c)
+    fn input_char(&mut self, event: InputEvent) -> InputAction {
+        self.input_char(event)
+    }
+    #[inline]
+    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+        for &event in events {
+            let _ = self.input_char(event);
+        }
+        let mut result = BatchResult::new();
+        result.should_wake = self.should_wake_reader();
+        result.throttle_check = true;
+        result
     }
     #[inline]
     fn process_output_byte(&mut self, c: u8) -> OutputAction {
@@ -2057,6 +2198,21 @@ impl LdiscKind {
         }
     }
 
+    pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
+        let event = event.into();
+        match self {
+            LdiscKind::NTty(inner) => inner.input_char(event),
+            LdiscKind::Raw(inner) => inner.input_char(event),
+        }
+    }
+
+    pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+        match self {
+            LdiscKind::NTty(inner) => inner.receive_buf(events),
+            LdiscKind::Raw(inner) => inner.receive_buf(events),
+        }
+    }
+
     // --- Dispatched methods (Phase 29) ---
     // All methods below are generated by the `dispatch_ldisc!` macro, which
     // delegates to the inner variant via matching.  Adding a new shared method
@@ -2075,7 +2231,6 @@ impl LdiscKind {
         fn flush_input(&mut self);
         fn edit_content(&self) -> &[u8];
         fn is_stopped(&self) -> bool;
-        fn input_char(&mut self, c: u8) -> InputAction;
         fn process_output_byte(&mut self, c: u8) -> OutputAction;
         fn ixoff_check_xoff(&mut self) -> Option<u8>;
         fn ixoff_check_xon(&mut self) -> Option<u8>;

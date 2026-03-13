@@ -43,15 +43,15 @@ use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGTTIN, SIGTTOU, SIGWINCH};
-use slopos_abi::syscall::{LocalFlags, UserTermios, UserWinsize};
+use slopos_abi::syscall::{B0, CBAUD, LocalFlags, UserTermios, UserWinsize};
 use slopos_lib::kernel_services::driver_runtime::{
     clear_session_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
     has_pending_signal, is_current_signal_blocked_or_ignored, is_pgrp_orphaned,
     register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group, signal_session,
 };
 
-use self::driver::{TtyDriverKind, write_driver_unlocked};
-use self::ldisc::{InputAction, LdiscKind, OutputAction};
+use self::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
+use self::ldisc::{BatchResult, LdiscKind, OutputAction};
 use self::session::{ForegroundCheck, TtySession};
 use self::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
@@ -213,87 +213,27 @@ impl Tty {
     fn drain_hw_input_locked(&mut self) -> Option<(u32, u8)> {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
-        let mut deferred_signal = None;
-        let mut echo_buf = [0u8; 256];
-        let mut echo_len = 0usize;
-
+        let mut events = [InputEvent::normal(0); 64];
         for i in 0..count {
             let mut c = scratch[i];
-            // Serial terminals send CR for Enter and DEL (0x7F) for backspace.
             if c == b'\r' {
                 c = b'\n';
             } else if c == 0x7F {
                 c = 0x08;
             }
-
-            let action = self.ldisc.input_char(c);
-            match action {
-                InputAction::Echo { buf, len } => {
-                    let n = len as usize;
-                    if echo_len + n <= echo_buf.len() {
-                        echo_buf[echo_len..echo_len + n].copy_from_slice(&buf[..n]);
-                        echo_len += n;
-                    } else {
-                        if echo_len > 0 {
-                            self.driver.write_output(&echo_buf[..echo_len]);
-                            echo_len = 0;
-                        }
-                        self.driver.write_output(&buf[..n]);
-                    }
-                }
-                InputAction::Bell => {
-                    if echo_len < echo_buf.len() {
-                        echo_buf[echo_len] = 0x07;
-                        echo_len += 1;
-                    } else {
-                        if echo_len > 0 {
-                            self.driver.write_output(&echo_buf[..echo_len]);
-                            echo_len = 0;
-                        }
-                        self.driver.write_output(&[0x07]);
-                    }
-                }
-                InputAction::Signal(sig) => {
-                    if echo_len > 0 {
-                        self.driver.write_output(&echo_buf[..echo_len]);
-                        echo_len = 0;
-                    }
-                    deferred_signal = Some((self.session.fg_pgrp_raw(), sig));
-                }
-                InputAction::ReprintLine => {
-                    if echo_len > 0 {
-                        self.driver.write_output(&echo_buf[..echo_len]);
-                        echo_len = 0;
-                    }
-                    self.driver.write_output(b"\n");
-                    let content = self.ldisc.edit_content();
-                    for &b in content {
-                        self.driver.write_output(&[b]);
-                    }
-                }
-                InputAction::KillLineEcho { columns } => {
-                    if echo_len > 0 {
-                        self.driver.write_output(&echo_buf[..echo_len]);
-                        echo_len = 0;
-                    }
-                    for _ in 0..columns {
-                        self.driver.write_output(&[0x08, 0x20, 0x08]);
-                    }
-                }
-                InputAction::None => {}
-            }
-
-            // Phase 36: IXOFF — send XOFF if input buffer is filling up.
-            if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
-                self.driver.write_output(&[xoff]);
-            }
+            events[i] = InputEvent::normal(c);
         }
 
-        if echo_len > 0 {
-            self.driver.write_output(&echo_buf[..echo_len]);
+        let batch = self.ldisc.receive_buf(&events[..count]);
+        if batch.echo_len > 0 {
+            self.driver.write_output(&batch.echo[..batch.echo_len]);
         }
-
-        deferred_signal
+        if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
+            self.driver.write_output(&[xoff]);
+        }
+        batch
+            .signal
+            .map(|(sig, _)| (self.session.fg_pgrp_raw(), sig))
     }
 }
 
@@ -360,13 +300,19 @@ pub fn default_console_tty() -> TtyIndex {
 ///
 /// Called from interrupt context (keyboard ISR) or from `drain_hw_input_locked`.
 /// Feeds the byte through the line discipline and handles echo/signal actions.
-pub fn push_input(idx: TtyIndex, c: u8) {
+pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
+    let event = event.into();
+    push_input_batch(idx, core::slice::from_ref(&event));
+}
+
+pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
+    if slot >= MAX_TTYS || events.is_empty() {
         return;
     }
 
-    let mut route = None;
+    let mut route: Option<(self::driver::DriverId, [u8; 256], usize)> = None;
+    let mut deferred_signal = None;
     let mut ixoff_byte_out = None;
     let mut output_resumed = false;
     let mut deferred_pkt_event: u8 = 0;
@@ -385,7 +331,7 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         // can detect stopped→resumed transitions for IXON wakeup.
         let was_stopped = tty.ldisc.is_stopped();
 
-        let action = tty.ldisc.input_char(c);
+        let batch: BatchResult = tty.ldisc.receive_buf(events);
         if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
             ixoff_byte_out = Some((tty.driver.id(), xoff));
         }
@@ -406,70 +352,24 @@ pub fn push_input(idx: TtyIndex, c: u8) {
         }
 
         // Finishing Phase 2: Activate throttle when cooked buffer fills.
-        if !tty.throttled && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER {
+        if batch.throttle_check
+            && !tty.throttled
+            && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER
+        {
             tty.throttled = true;
         }
 
-        // Handle echo, reprint, and signal actions while we hold the lock.
-        match action {
-            InputAction::Echo { buf, len } => {
-                let mut out = [0u8; 1025];
-                out[..len as usize].copy_from_slice(&buf[..len as usize]);
-                route = Some((tty.driver.id(), out, len as usize));
-            }
-            InputAction::ReprintLine => {
-                let mut out = [0u8; 1025];
-                out[0] = b'\n';
-                let content = tty.ldisc.edit_content();
-                let copy_len = core::cmp::min(content.len(), out.len().saturating_sub(1));
-                out[1..1 + copy_len].copy_from_slice(&content[..copy_len]);
-                route = Some((tty.driver.id(), out, copy_len + 1));
-            }
-            InputAction::KillLineEcho { columns } => {
-                // Phase 27: Build BS-SP-BS triples for visual line erase.
-                let mut out = [0u8; 1025];
-                let triples = core::cmp::min(columns as usize, out.len() / 3);
-                for i in 0..triples {
-                    out[i * 3] = 0x08;
-                    out[i * 3 + 1] = 0x20;
-                    out[i * 3 + 2] = 0x08;
-                }
-                route = Some((tty.driver.id(), out, triples * 3));
-            }
-            InputAction::Signal(sig) => {
-                let pgid = tty.session.fg_pgrp_raw();
-                // Release lock before signalling to avoid deadlock.
-                drop(guard);
-                if let Some((driver_id, xoff)) = ixoff_byte_out {
-                    write_driver_unlocked(driver_id, &[xoff]);
-                }
-                if pgid != 0 {
-                    let _ = signal_process_group(pgid, sig);
-                }
-                // Even on signal path, wake output waiters if resumed.
-                if output_resumed {
-                    TTY_OUTPUT_WAITERS[slot].wake_all();
-                    TTY_POLL_WAITERS[slot].wake_all();
-                }
-                // Phase 39: Deliver deferred packet event.
-                if deferred_pkt_event != 0 {
-                    pty::queue_packet_event(idx, deferred_pkt_event);
-                }
-                return;
-            }
-            InputAction::Bell => {
-                let mut out = [0u8; 1025];
-                out[0] = 0x07;
-                route = Some((tty.driver.id(), out, 1));
-            }
-            InputAction::None => {}
+        if batch.echo_len > 0 {
+            let mut out = [0u8; 256];
+            out[..batch.echo_len].copy_from_slice(&batch.echo[..batch.echo_len]);
+            route = Some((tty.driver.id(), out, batch.echo_len));
         }
 
-        // Finishing Phase 10: Use batched wake policy instead of waking
-        // on every byte.  `should_wake_reader()` coalesces non-canonical
-        // mode wakeups behind the WAKEUP_CHARS threshold while preserving
-        // immediate wake on canonical line boundaries.
-        tty.ldisc.should_wake_reader()
+        if let Some((sig, _)) = batch.signal {
+            deferred_signal = Some((tty.session.fg_pgrp_raw(), sig));
+        }
+
+        batch.should_wake
     };
 
     // Phase 39: Deliver deferred packet event now that the slot lock is released.
@@ -488,6 +388,12 @@ pub fn push_input(idx: TtyIndex, c: u8) {
     // Phase 36: IXOFF — send XOFF byte to terminal if high-water exceeded.
     if let Some((driver_id, xoff)) = ixoff_byte_out {
         write_driver_unlocked(driver_id, &[xoff]);
+    }
+
+    if let Some((pgid, sig)) = deferred_signal {
+        if pgid != 0 {
+            let _ = signal_process_group(pgid, sig);
+        }
     }
 
     if wake {
@@ -595,6 +501,11 @@ pub fn read_with_attach(
                 match tty.session.check_read(caller_pgid, caller_sid) {
                     ForegroundCheck::BackgroundRead => {
                         drop(guard);
+                        if is_current_signal_blocked_or_ignored(SIGTTIN)
+                            || is_pgrp_orphaned(caller_pgid, caller_sid)
+                        {
+                            return Err(TtyError::HungUp);
+                        }
                         if caller_pgid != 0 {
                             let _ = signal_process_group(caller_pgid, SIGTTIN);
                         }
@@ -1073,12 +984,22 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 }
             } else {
                 TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+                    if has_pending_signal() {
+                        return true;
+                    }
                     let guard = TTY_SLOTS[peer_slot].lock();
                     match guard.as_ref() {
                         Some(tty) => !tty.throttled || tty.hung_up || tty.peer_closed,
                         None => true,
                     }
                 });
+                if has_pending_signal() {
+                    return if pos > 0 {
+                        Ok(pos)
+                    } else {
+                        Err(TtyError::Restart)
+                    };
+                }
             }
             // Re-check hangup after unblock.
             {
@@ -1154,12 +1075,22 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             }
         } else {
             TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+                if has_pending_signal() {
+                    return true;
+                }
                 let guard = TTY_SLOTS[slot].lock();
                 match guard.as_ref() {
                     Some(tty) => !tty.ldisc.is_stopped() && !tty.output_stopped,
                     None => true, // slot gone — let the next lock attempt return NotAllocated
                 }
             });
+            if has_pending_signal() {
+                return if pos > 0 {
+                    Ok(pos)
+                } else {
+                    Err(TtyError::Restart)
+                };
+            }
         }
 
         let mut out_buf = [0u8; OUT_BUF_CAP];
@@ -1443,6 +1374,9 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     // Slow path: wait until drain completes.
     if scheduler_is_enabled() != 0 {
         TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+            if has_pending_signal() {
+                return true;
+            }
             if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
                 return false;
             }
@@ -1452,6 +1386,9 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
                 None => true, // slot gone — drain vacuously satisfied
             }
         });
+        if has_pending_signal() {
+            return Err(TtyError::Restart);
+        }
     } else {
         // Pre-scheduler fallback: busy-poll (very early boot only).
         loop {
@@ -1482,9 +1419,13 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 /// process group is orphaned, `EIO` is returned instead (there is no
 /// parent to continue a stopped group).
 fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Result<(), TtyError> {
-    // c_cflag is the authoritative source for baud rate (POSIX).
-    // c_ispeed/c_ospeed are informational fields populated by get_termios;
-    // they do not override c_cflag in the standard set_termios path.
+    // Phase 14.6: c_cflag CBAUD bits are authoritative for baud rate.
+    // c_ispeed/c_ospeed are informational fields populated by get_termios()
+    // but do NOT override c_cflag on set_termios().  This matches existing
+    // POSIX semantics and the test_review_speed_fields_merge_into_cflag
+    // contract.
+    let merged = *t;
+
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
@@ -1552,21 +1493,23 @@ fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Res
     }
 
     let mut deferred_pkt_events: u8 = 0;
+    let mut defer_hangup = false;
     let result = {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
                 // Phase 39: Capture old IXON state before applying termios.
                 let old_ixon = tty.ldisc.termios().c_iflag & slopos_abi::syscall::IXON;
-                let new_ixon = t.c_iflag & slopos_abi::syscall::IXON;
+                let new_ixon = merged.c_iflag & slopos_abi::syscall::IXON;
 
                 if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
                     tty.ldisc.flush_input();
                     // Phase 39: Input flush on slave → TIOCPKT_FLUSHREAD.
                     deferred_pkt_events |= slopos_abi::syscall::TIOCPKT_FLUSHREAD;
                 }
-                tty.ldisc.set_termios(t);
-                tty.driver.set_termios(t);
+                tty.ldisc.set_termios(&merged);
+                tty.driver.set_termios(&merged);
+                defer_hangup = (merged.c_cflag & CBAUD) == B0;
 
                 // Phase 39: Track IXON toggle for packet mode.
                 if old_ixon == 0 && new_ixon != 0 {
@@ -1584,6 +1527,10 @@ fn set_termios_mode(idx: TtyIndex, t: &UserTermios, mode: TermiosSetMode) -> Res
     // Phase 39: Deliver deferred packet events now that the slot lock is released.
     if deferred_pkt_events != 0 {
         pty::queue_packet_event(idx, deferred_pkt_events);
+    }
+
+    if defer_hangup {
+        hangup(idx);
     }
 
     result
@@ -2448,7 +2395,7 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             revents |= POLLIN;
         }
 
-        if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() {
+        if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() && !tty.output_stopped {
             revents |= POLLOUT;
         }
 

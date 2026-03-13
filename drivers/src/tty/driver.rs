@@ -23,6 +23,37 @@ use crate::serial;
 use crate::tty::pty;
 use crate::tty::pty::PtyPeerHandle;
 
+#[derive(Clone, Copy, Debug)]
+pub struct InputEvent {
+    pub byte: u8,
+    pub status: InputStatus,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputStatus {
+    Normal = 0,
+    Break = 1,
+    ParityError = 2,
+    FrameError = 3,
+    Overrun = 4,
+}
+
+impl InputEvent {
+    pub const fn normal(byte: u8) -> Self {
+        Self {
+            byte,
+            status: InputStatus::Normal,
+        }
+    }
+}
+
+impl From<u8> for InputEvent {
+    fn from(value: u8) -> Self {
+        Self::normal(value)
+    }
+}
+
 /// Backend driver operations for a TTY.
 ///
 /// Implementors provide the hardware-level write and optional input polling.

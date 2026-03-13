@@ -748,5 +748,21 @@ slopos_lib::define_test_suite!(
         test_fp13_tcsetsw_hangup_returns_error,
         test_fp13_tcsetsf_hangup_returns_error,
         test_fp13_inflight_accounting_round_trip,
+        // Finishing Phase 14: Core Semantic Correctness (Gold Standard Audit)
+        test_fp14_input_event_normal_behavior,
+        test_fp14_input_event_break_brkint,
+        test_fp14_input_event_break_ignbrk,
+        test_fp14_input_event_parity_parmrk,
+        test_fp14_input_event_parity_ignpar,
+        test_fp14_input_event_overrun_noop,
+        test_fp14_poll_output_stopped_masks_pollout,
+        test_fp14_poll_output_not_stopped_has_pollout,
+        test_fp14_grantpt_unlocks_slave,
+        test_fp14_b0_hangup,
+        test_fp14_speed_roundtrip,
+        test_fp14_batched_ingress_no_data_loss,
+        test_fp14_batched_ingress_signal_in_middle,
+        test_fp14_background_read_sigttin_blocked_eio,
+        test_fp14_receive_buf_accumulates_echo,
     ]
 );

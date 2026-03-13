@@ -886,7 +886,7 @@ Drain logic currently combines `TTY_OUTPUT_INFLIGHT` and `driver.output_pending(
 
 ## 17. Phase 14: Core Semantic Correctness (Gold Standard Audit)
 
-**Status**: Pending
+**Status**: ✅ Done
 
 > **Priority**: P0 — these are the semantic gaps where real programs (bash, vim, tmux, ssh) will break. Identified by a comparative audit against Linux N_TTY, RedoxOS, and Asterinas TTY implementations.
 > **Principle**: Fix the places where real software breaks first: input status modeling, signal interruptibility, job control edge semantics, PTY allocation ABI, and per-byte lock churn. Keep all existing architectural strengths (per-slot locking, generation-tagged handles, split-write, deferred signals).

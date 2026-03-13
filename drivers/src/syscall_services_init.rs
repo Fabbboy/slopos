@@ -264,8 +264,11 @@ fn tty_alloc_pty_adapter() -> i32 {
     }
 }
 
-fn tty_grantpt_adapter(_tty_index: TtyIndex) -> i32 {
-    0
+fn tty_grantpt_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::set_pty_lock(tty_index, false) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
 }
 
 fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {

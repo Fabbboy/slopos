@@ -32,7 +32,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_lib::IrqMutex;
 
-use super::driver::TtyDriverKind;
+use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
     TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
 };
@@ -262,10 +262,12 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     let mut written = 0usize;
 
     for chunk in data.chunks(BATCH_SIZE) {
-        for &byte in chunk {
-            super::push_input(peer.idx, byte);
-            written += 1;
+        let mut events = [InputEvent::normal(0); BATCH_SIZE];
+        for (i, &byte) in chunk.iter().enumerate() {
+            events[i] = InputEvent::normal(byte);
         }
+        super::push_input_batch(peer.idx, &events[..chunk.len()]);
+        written += chunk.len();
 
         // Re-check throttle after processing the batch.  If the slave
         // just became throttled, return a short write so the caller
@@ -316,7 +318,7 @@ pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
             if master.ldisc.input_full() {
                 break; // master buffer full — return short write
             }
-            master.ldisc.input_char(byte);
+            master.ldisc.input_char(InputEvent::normal(byte));
             count += 1;
         }
 

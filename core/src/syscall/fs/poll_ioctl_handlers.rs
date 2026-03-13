@@ -2,6 +2,7 @@
 
 use core::ffi::c_int;
 
+use slopos_abi::signal::SIGTTOU;
 use slopos_abi::syscall::{
     FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCGETD,
     TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY, TIOCOUTQ, TIOCPKT, TIOCSCTTY,
@@ -10,6 +11,9 @@ use slopos_abi::syscall::{
 
 use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
 
+use slopos_lib::kernel_services::driver_runtime::{
+    current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, signal_process_group,
+};
 use slopos_lib::kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
@@ -403,8 +407,21 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let pgrp = try_or_err!(ctx, copy_from_user(ptr));
-            // Use session-validated set: caller's SID must match the TTY's session.
+            let caller_pgid = current_task_pgid();
             let caller_sid = crate::sched::current_task_sid();
+
+            let tty_sid = tty::get_session_id(tty_idx);
+            let fg_pgrp = tty::get_foreground_pgrp(tty_idx);
+            if tty_sid != 0 && tty_sid == caller_sid && caller_pgid != 0 && fg_pgrp != 0 && caller_pgid != fg_pgrp {
+                if !is_current_signal_blocked_or_ignored(SIGTTOU) {
+                    if is_pgrp_orphaned(caller_pgid, caller_sid) {
+                        return ctx.err();
+                    }
+                    let _ = signal_process_group(caller_pgid, SIGTTOU);
+                    return ctx.err();
+                }
+            }
+
             let rc = tty::set_foreground_pgrp_checked(tty_idx, pgrp, caller_sid);
             if rc == 0 {
                 ctx.ok(0)
