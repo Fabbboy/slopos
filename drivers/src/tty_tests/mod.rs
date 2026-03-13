@@ -848,5 +848,17 @@ slopos_lib::define_test_suite!(
         test_excl_hupcl_no_hupcl_last_close_no_hangup,
         test_excl_hupcl_hupcl_pty_no_double_hangup,
         test_excl_hupcl_close_clears_exclusive,
+        test_ttyflags_default_empty,
+        test_ttyflags_insert_remove_contains,
+        test_mark_hung_up_clears_output_stopped,
+        test_packet_events_default_empty,
+        test_packet_events_from_bits_matches_tiocpkt,
+        test_packet_events_bits_roundtrip,
+        test_tty_fields_pub_crate_smoke,
+        test_session_fields_pub_crate_smoke,
+        test_slave_starts_locked,
+        test_ttyflags_set_method,
+        test_ttyflags_multi_flag_operations,
+        test_no_driver_kind_none,
     ]
 );

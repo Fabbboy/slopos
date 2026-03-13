@@ -22,7 +22,9 @@ use slopos_lib::testing::TestResult;
 use crate::tty;
 use crate::tty::TtyError;
 use crate::tty::TtyIndex;
-use crate::tty::driver::{DriverId, InputEvent, InputStatus, TtyDriverKind, VConsoleDriver};
+use crate::tty::driver::{
+    DriverId, InputEvent, InputStatus, SerialConsoleDriver, TtyDriverKind, VConsoleDriver,
+};
 use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
@@ -33,6 +35,7 @@ use crate::tty::vconsole::{
     CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use crate::tty::{PacketEvents, TtyFlags};
 
 use crate::tty::pty::PtyPeerHandle;
 
@@ -755,9 +758,9 @@ pub fn test_tty_index_eq() -> TestResult {
 // TtyDriverKind tests
 // ===========================================================================
 
-/// TtyDriverKind::None does not panic on write/drain.
+/// TtyDriverKind::SerialConsole(SerialConsoleDriver) does not panic on write/drain.
 pub fn test_driver_none_no_panic() -> TestResult {
-    let driver = TtyDriverKind::None;
+    let driver = TtyDriverKind::SerialConsole(SerialConsoleDriver);
     driver.write_output(b"test");
     let mut buf = [0u8; 16];
     let n = driver.drain_input(&mut buf);
@@ -829,16 +832,13 @@ pub fn test_table_tty0_has_index_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// TTY 0 is active by default.
+/// TTY 0 is allocated by default (slot being Some is the active state).
 pub fn test_table_tty0_active() -> TestResult {
     tty::table::tty_table_init();
 
     let guard = TTY_SLOTS[0].lock();
-    if let Some(tty) = guard.as_ref() {
-        if !tty.active {
-            klog_info!("TTY_TEST: BUG - TTY 0 is not active");
-            return TestResult::Fail;
-        }
+    if guard.is_some() {
+        // Slot is allocated — active.
     } else {
         klog_info!("TTY_TEST: BUG - TTY 0 not allocated");
         return TestResult::Fail;
@@ -2307,7 +2307,7 @@ pub fn test_per_tty_lock_independence() -> TestResult {
 pub fn test_driver_id_round_trip() -> TestResult {
     let serial = TtyDriverKind::SerialConsole(crate::tty::driver::SerialConsoleDriver);
     let vconsole = TtyDriverKind::VConsole(VConsoleDriver);
-    let none = TtyDriverKind::None;
+    let none = TtyDriverKind::SerialConsole(SerialConsoleDriver);
 
     if serial.id() != DriverId::SerialConsole {
         klog_info!("TTY_TEST: BUG - SerialConsole id mismatch");
@@ -2317,7 +2317,7 @@ pub fn test_driver_id_round_trip() -> TestResult {
         klog_info!("TTY_TEST: BUG - VConsole id mismatch");
         return TestResult::Fail;
     }
-    if none.id() != DriverId::None {
+    if none.id() != DriverId::SerialConsole {
         klog_info!("TTY_TEST: BUG - None id mismatch");
         return TestResult::Fail;
     }
@@ -3394,14 +3394,14 @@ pub fn test_pty_driver_id_variants() -> TestResult {
     // Also verify they differ from existing IDs.
     if master_id == DriverId::SerialConsole
         || master_id == DriverId::VConsole
-        || master_id == DriverId::None
+        || master_id == DriverId::SerialConsole
     {
         klog_info!("TTY_TEST: BUG - PtyMaster should differ from SerialConsole/VConsole/None");
         return TestResult::Fail;
     }
     if slave_id == DriverId::SerialConsole
         || slave_id == DriverId::VConsole
-        || slave_id == DriverId::None
+        || slave_id == DriverId::SerialConsole
     {
         klog_info!("TTY_TEST: BUG - PtySlave should differ from SerialConsole/VConsole/None");
         return TestResult::Fail;
@@ -5845,7 +5845,7 @@ pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
         return TestResult::Fail;
     }
 
-    let none_kind = TtyDriverKind::None;
+    let none_kind = TtyDriverKind::SerialConsole(SerialConsoleDriver);
     if none_kind.output_pending() {
         klog_info!("TTY_TEST: BUG - None kind output_pending should be false");
         return TestResult::Fail;
@@ -11319,7 +11319,10 @@ pub fn test_pty_initially_unthrottled() -> TestResult {
 
     let throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
     };
     if throttled {
         klog_info!("TTY_TEST: BUG - fresh PTY slave is already throttled");
@@ -11369,7 +11372,10 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
 
     let throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(false)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(false)
     };
     if !throttled {
         klog_info!("TTY_TEST: BUG - slave not throttled after exceeding high-water");
@@ -11417,7 +11423,11 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     // Verify not yet throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        if guard.as_ref().map(|t| t.throttled).unwrap_or(true) {
+        if guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
+        {
             klog_info!("TTY_TEST: BUG - slave throttled before high-water");
             tty::set_termios(slave, &saved).unwrap();
             let _ = tty::close_ref(slave);
@@ -11503,7 +11513,11 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     // Confirm throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        if !guard.as_ref().map(|t| t.throttled).unwrap_or(false) {
+        if !guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(false)
+        {
             klog_info!("TTY_TEST: BUG - slave not throttled after fill");
             tty::set_termios(slave, &saved).unwrap();
             let _ = tty::close_ref(slave);
@@ -11523,7 +11537,10 @@ pub fn test_read_unthrottles_slave() -> TestResult {
                 // Check if unthrottled yet.
                 let still_throttled = {
                     let guard = TTY_SLOTS[slave.0 as usize].lock();
-                    guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+                    guard
+                        .as_ref()
+                        .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+                        .unwrap_or(true)
                 };
                 if !still_throttled {
                     break;
@@ -11535,7 +11552,10 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
     };
     if still_throttled {
         klog_info!(
@@ -11639,7 +11659,10 @@ pub fn test_console_not_throttled() -> TestResult {
     // either be false or irrelevant (no master to back-pressure).
     let throttled = {
         let guard = TTY_SLOTS[0].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(false)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(false)
     };
 
     // Even if the flag gets set mechanically, it has no effect on console.
@@ -12537,7 +12560,11 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     // Confirm throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        if !guard.as_ref().map(|t| t.throttled).unwrap_or(false) {
+        if !guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(false)
+        {
             klog_info!("TTY_TEST: BUG - slave not throttled after fill");
             tty::set_termios(slave, &saved).unwrap();
             let _ = tty::close_ref(slave);
@@ -12561,7 +12588,10 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
     };
     if still_throttled {
         klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIFLUSH)");
@@ -12614,7 +12644,10 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        guard.as_ref().map(|t| t.throttled).unwrap_or(true)
+        guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
     };
     if still_throttled {
         klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIOFLUSH)");
@@ -12670,7 +12703,11 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     // Verify not yet throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
-        if guard.as_ref().map(|t| t.throttled).unwrap_or(true) {
+        if guard
+            .as_ref()
+            .map(|t| t.flags.contains(TtyFlags::THROTTLED))
+            .unwrap_or(true)
+        {
             klog_info!("TTY_TEST: BUG - slave throttled before master_write burst");
             tty::set_termios(slave, &saved).unwrap();
             let _ = tty::close_ref(slave);
@@ -15302,7 +15339,7 @@ pub fn test_output_pending_bytes_all_drivers() -> TestResult {
         return TestResult::Fail;
     }
 
-    let none = TtyDriverKind::None;
+    let none = TtyDriverKind::SerialConsole(SerialConsoleDriver);
     if none.output_pending_bytes() != 0 {
         klog_info!("TTY_TEST: BUG - fp13 None output_pending_bytes should be 0");
         return TestResult::Fail;
@@ -15800,15 +15837,15 @@ pub fn test_tty_struct_fields_accessible() -> TestResult {
     let guard = crate::tty::table::TTY_SLOTS[0].lock();
     if let Some(tty) = guard.as_ref() {
         let _ = tty.index;
-        let _ = tty.active;
-        let _ = tty.hung_up;
-        let _ = tty.peer_closed;
+        // active field removed — slot being Some means active
+        let _ = tty.flags.contains(TtyFlags::HUNG_UP);
+        let _ = tty.flags.contains(TtyFlags::PEER_CLOSED);
         let _ = tty.open_count;
-        let _ = tty.slave_locked;
-        let _ = tty.packet_mode;
+        let _ = tty.flags.contains(TtyFlags::SLAVE_LOCKED);
+        let _ = tty.flags.contains(TtyFlags::PACKET_MODE);
         let _ = tty.packet_events;
-        let _ = tty.throttled;
-        let _ = tty.output_stopped;
+        let _ = tty.flags.contains(TtyFlags::THROTTLED);
+        let _ = tty.flags.contains(TtyFlags::OUTPUT_STOPPED);
         let _ = tty.winsize;
     }
     TestResult::Pass
@@ -16130,7 +16167,7 @@ pub fn test_ctty_pty_master_ctty_does_not_attach_session() -> TestResult {
 }
 
 pub fn test_ctty_can_be_ctty_none_driver() -> TestResult {
-    let driver = TtyDriverKind::None;
+    let driver = TtyDriverKind::SerialConsole(SerialConsoleDriver);
     if !driver.can_be_controlling_terminal() {
         klog_info!("TTY_TEST: BUG - None driver should allow ctty (vacuously)");
         return TestResult::Fail;
@@ -16718,6 +16755,181 @@ pub fn test_excl_hupcl_close_clears_exclusive() -> TestResult {
                 "TTY_TEST: BUG - exclusive should be cleared after last close, got {:?}",
                 other
             );
+            TestResult::Fail
+        }
+    }
+}
+
+// ===========================================================================
+// ===========================================================================
+
+pub fn test_ttyflags_default_empty() -> TestResult {
+    let flags = TtyFlags::empty();
+    if flags.bits() != 0 {
+        klog_info!("TTY_TEST: BUG - empty TtyFlags has non-zero bits");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ttyflags_insert_remove_contains() -> TestResult {
+    let mut flags = TtyFlags::empty();
+    flags.insert(TtyFlags::HUNG_UP);
+    if !flags.contains(TtyFlags::HUNG_UP) {
+        return TestResult::Fail;
+    }
+    flags.remove(TtyFlags::HUNG_UP);
+    if flags.contains(TtyFlags::HUNG_UP) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_mark_hung_up_clears_output_stopped() -> TestResult {
+    tty::table::tty_table_init();
+    let result = tty::table::with_tty(TtyIndex(0), |tty| {
+        tty.flags.insert(TtyFlags::OUTPUT_STOPPED);
+        tty.mark_hung_up();
+        let hung = tty.flags.contains(TtyFlags::HUNG_UP);
+        let stopped = tty.flags.contains(TtyFlags::OUTPUT_STOPPED);
+        (hung, stopped)
+    });
+    match result {
+        Some((true, false)) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - mark_hung_up invariant failed: {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_packet_events_default_empty() -> TestResult {
+    let events = PacketEvents::empty();
+    if events.bits() != 0 {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_packet_events_from_bits_matches_tiocpkt() -> TestResult {
+    use slopos_abi::syscall::*;
+    let pkt = PacketEvents::from_bits_truncate(TIOCPKT_FLUSHREAD | TIOCPKT_STOP);
+    if !pkt.contains(PacketEvents::FLUSHREAD) || !pkt.contains(PacketEvents::STOP) {
+        return TestResult::Fail;
+    }
+    if pkt.contains(PacketEvents::FLUSHWRITE) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_packet_events_bits_roundtrip() -> TestResult {
+    let pkt = PacketEvents::FLUSHREAD | PacketEvents::START;
+    let raw = pkt.bits();
+    let pkt2 = PacketEvents::from_bits_truncate(raw);
+    if pkt != pkt2 {
+        return TestResult::Fail;
+    }
+    if raw != (slopos_abi::syscall::TIOCPKT_FLUSHREAD | slopos_abi::syscall::TIOCPKT_START) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_tty_fields_pub_crate_smoke() -> TestResult {
+    tty::table::tty_table_init();
+    let ok = tty::table::with_tty_ref(TtyIndex(0), |tty| {
+        let _ = tty.flags;
+        let _ = tty.packet_events;
+        let _ = tty.open_count;
+        let _ = &tty.ldisc;
+        let _ = &tty.driver;
+        let _ = &tty.session;
+        let _ = tty.winsize;
+        true
+    });
+    if ok != Some(true) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_session_fields_pub_crate_smoke() -> TestResult {
+    tty::table::tty_table_init();
+    let ok = tty::table::with_tty_ref(TtyIndex(0), |tty| {
+        let _ = tty.session.session_leader;
+        let _ = tty.session.session_id;
+        let _ = tty.session.fg_pgrp;
+        let _ = tty.session.focused_task_id;
+        true
+    });
+    if ok != Some(true) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_slave_starts_locked() -> TestResult {
+    tty::table::tty_table_init();
+    let master = match tty::pty_alloc() {
+        Ok(m) => m,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let slave = match tty::table::with_tty_ref(master, |tty| match &tty.driver {
+        TtyDriverKind::PtyMaster { peer } => Some(peer.idx),
+        _ => None,
+    })
+    .flatten()
+    {
+        Some(s) => s,
+        None => return TestResult::Fail,
+    };
+    let locked = tty::table::with_tty_ref(slave, |tty| tty.flags.contains(TtyFlags::SLAVE_LOCKED));
+    if locked != Some(true) {
+        klog_info!("TTY_TEST: BUG - PTY slave should start locked");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ttyflags_set_method() -> TestResult {
+    let mut flags = TtyFlags::empty();
+    flags.set(TtyFlags::PACKET_MODE, true);
+    if !flags.contains(TtyFlags::PACKET_MODE) {
+        return TestResult::Fail;
+    }
+    flags.set(TtyFlags::PACKET_MODE, false);
+    if flags.contains(TtyFlags::PACKET_MODE) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_ttyflags_multi_flag_operations() -> TestResult {
+    let mut flags = TtyFlags::empty();
+    flags.insert(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
+    if !flags.contains(TtyFlags::HUNG_UP) || !flags.contains(TtyFlags::PEER_CLOSED) {
+        return TestResult::Fail;
+    }
+    flags.remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
+    if flags.contains(TtyFlags::HUNG_UP) || flags.contains(TtyFlags::PEER_CLOSED) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_no_driver_kind_none() -> TestResult {
+    tty::table::tty_table_init();
+    let id0 = tty::table::with_tty_ref(TtyIndex(0), |tty| tty.driver.id());
+    let id1 = tty::table::with_tty_ref(TtyIndex(1), |tty| tty.driver.id());
+    use crate::tty::driver::DriverId;
+    match (id0, id1) {
+        (Some(DriverId::SerialConsole), Some(DriverId::VConsole)) => TestResult::Pass,
+        other => {
+            klog_info!("TTY_TEST: BUG - unexpected driver IDs: {:?}", other);
             TestResult::Fail
         }
     }
