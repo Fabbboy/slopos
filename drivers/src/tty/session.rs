@@ -104,17 +104,17 @@ pub const NO_FOREGROUND_PGRP: u32 = 0;
 #[derive(Clone, Copy)]
 pub struct TtySession {
     /// Session leader's PID (`None` = no session attached).
-    pub session_leader: Option<SessionId>,
+    pub(crate) session_leader: Option<SessionId>,
     /// Session ID (typically == session leader's PID).
-    pub session_id: Option<SessionId>,
+    pub(crate) session_id: Option<SessionId>,
     /// Foreground process group ID (`None` = none).
-    pub fg_pgrp: Option<ProcessGroupId>,
+    pub(crate) fg_pgrp: Option<ProcessGroupId>,
     /// The task ID that currently has input focus on this TTY.
     /// Set by the compositor via `set_focus()`.  0 = no specific task focused.
     ///
     /// **Not** wrapped in a newtype — this is a compositor concept, not a POSIX
     /// session/pgrp ID.
-    pub focused_task_id: u32,
+    pub(crate) focused_task_id: u32,
 }
 
 /// Result of a foreground access check.

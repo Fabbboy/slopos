@@ -56,6 +56,7 @@ mod lifecycle;
 mod poll;
 mod termios;
 
+use bitflags::bitflags;
 use slopos_abi::syscall::UserWinsize;
 
 use self::driver::TtyDriverKind;
@@ -73,67 +74,60 @@ pub use slopos_abi::syscall::TtyIndex;
 /// Maximum number of TTY instances.
 pub const MAX_TTYS: usize = 32;
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct TtyFlags: u16 {
+        const HUNG_UP = 1 << 0;
+        const PEER_CLOSED = 1 << 1;
+        const SLAVE_LOCKED = 1 << 2;
+        const PACKET_MODE = 1 << 3;
+        const THROTTLED = 1 << 4;
+        const OUTPUT_STOPPED = 1 << 5;
+        const EXCLUSIVE = 1 << 6;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct PacketEvents: u8 {
+        const FLUSHREAD = slopos_abi::syscall::TIOCPKT_FLUSHREAD as u8;
+        const FLUSHWRITE = slopos_abi::syscall::TIOCPKT_FLUSHWRITE as u8;
+        const STOP = slopos_abi::syscall::TIOCPKT_STOP as u8;
+        const START = slopos_abi::syscall::TIOCPKT_START as u8;
+        const NOSTOP = slopos_abi::syscall::TIOCPKT_NOSTOP as u8;
+        const DOSTOP = slopos_abi::syscall::TIOCPKT_DOSTOP as u8;
+    }
+}
+
 /// The central TTY structure — one per terminal.
 pub struct Tty {
     /// Which TTY slot this is (0 = serial console, 1 = virtual console, etc.).
-    pub index: TtyIndex,
+    /// Read in tests; suppressed dead_code since it's pub(crate).
+    #[allow(dead_code)]
+    pub(crate) index: TtyIndex,
 
     /// The line discipline owned by this TTY.
-    pub ldisc: LdiscKind,
+    pub(crate) ldisc: LdiscKind,
 
     /// Hardware driver backend.
-    pub driver: TtyDriverKind,
+    pub(crate) driver: TtyDriverKind,
 
     /// Session/foreground state (includes focused_task_id).
-    pub session: TtySession,
+    pub(crate) session: TtySession,
 
     /// Window size (for TIOCGWINSZ / TIOCSWINSZ).
-    pub winsize: UserWinsize,
+    pub(crate) winsize: UserWinsize,
+    pub(crate) open_count: u32,
+    pub(crate) flags: TtyFlags,
+    pub(crate) packet_events: PacketEvents,
+}
 
-    /// Whether this TTY is active/allocated.
-    pub active: bool,
-
-    pub open_count: u32,
-
-    pub hung_up: bool,
-
-    pub peer_closed: bool,
-
-    /// PTY slave lock state.  When `true`, the corresponding
-    /// `/dev/pts/N` device node cannot be opened.  Only meaningful for
-    /// PTY slaves (always `false` for consoles and masters).  Defaults to
-    /// `true` on `pty_alloc()` — the master holder must unlock via
-    /// `TIOCSPTLCK` before the slave can be opened.
-    pub slave_locked: bool,
-
-    /// PTY packet mode.  When `true` on a PTY master, every
-    /// `read()` is prefixed with a single control byte indicating the
-    /// event type (see `TIOCPKT_*` constants in `abi`).
-    pub packet_mode: bool,
-
-    /// Pending packet-mode event bits.  Bitwise OR of
-    /// `TIOCPKT_FLUSHREAD`, `TIOCPKT_FLUSHWRITE`, `TIOCPKT_STOP`,
-    /// `TIOCPKT_START`, `TIOCPKT_NOSTOP`, `TIOCPKT_DOSTOP`.
-    /// Consumed on the next master `read()` when non-zero.
-    pub packet_events: u8,
-
-    /// PTY flow control throttle flag.  When `true`,
-    /// the slave's cooked buffer has exceeded `THROTTLE_HIGH_WATER` and
-    /// the master-side writer must be back-pressured (blocked or EAGAIN).
-    /// Cleared when a slave `read()` drains below `THROTTLE_LOW_WATER`.
-    pub throttled: bool,
-
-    /// Explicit output-stop state for TCXONC.  When `true`,
-    /// `tty_write()` blocks (or returns EAGAIN for non-blocking) until output
-    /// is resumed via `tcxonc(TCOON)`.  Separate from the ldisc `stopped`
-    /// flag which is driven by IXON (Ctrl+S / Ctrl+Q keyboard flow control).
-    pub output_stopped: bool,
-
-    /// Exclusive mode flag.  When `true`, subsequent `open_ref()` calls
-    /// return `DeviceBusy` unless `open_count` is still zero (the exclusive
-    /// holder itself).  Set via `TIOCEXCL`, cleared via `TIOCNXCL`, queried
-    /// via `TIOCGEXCL`.  Matches Linux `TTY_EXCLUSIVE` semantics.
-    pub exclusive: bool,
+impl Tty {
+    pub(crate) fn mark_hung_up(&mut self) {
+        self.flags.insert(TtyFlags::HUNG_UP);
+        self.flags.remove(TtyFlags::OUTPUT_STOPPED);
+        debug_assert!(!self.flags.contains(TtyFlags::OUTPUT_STOPPED));
+    }
 }
 
 /// Kernel-internal error type for TTY operations.

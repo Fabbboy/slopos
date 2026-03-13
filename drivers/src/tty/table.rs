@@ -37,7 +37,7 @@ use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
 use super::ldisc::{LdiscKind, LineDisc};
 use super::pty::PtyPeerHandle;
 use super::session::TtySession;
-use super::{MAX_TTYS, Tty, TtyIndex};
+use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
 use slopos_lib::IrqMutex;
 use slopos_lib::WaitQueue;
@@ -178,16 +178,9 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            active: true,
             open_count: 0,
-            hung_up: false,
-            peer_closed: false,
-            slave_locked: false,
-            packet_mode: false,
-            packet_events: 0,
-            throttled: false,
-            output_stopped: false,
-            exclusive: false,
+            flags: TtyFlags::empty(),
+            packet_events: PacketEvents::empty(),
         }
     }
 
@@ -203,16 +196,9 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            active: true,
             open_count: 0,
-            hung_up: false,
-            peer_closed: false,
-            slave_locked: false,
-            packet_mode: false,
-            packet_events: 0,
-            throttled: false,
-            output_stopped: false,
-            exclusive: false,
+            flags: TtyFlags::empty(),
+            packet_events: PacketEvents::empty(),
         }
     }
 
@@ -228,16 +214,9 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            active: true,
             open_count: 0,
-            hung_up: false,
-            peer_closed: false,
-            slave_locked: true,
-            packet_mode: false,
-            packet_events: 0,
-            throttled: false,
-            output_stopped: false,
-            exclusive: false,
+            flags: TtyFlags::SLAVE_LOCKED,
+            packet_events: PacketEvents::empty(),
         }
     }
 }
