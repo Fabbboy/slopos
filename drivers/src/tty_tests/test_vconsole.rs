@@ -567,7 +567,7 @@ pub fn test_fp15_parser_fuzz_utf8_no_panic() -> TestResult {
 }
 
 pub fn test_fp15_replacement_glyph_exists() -> TestResult {
-    use slopos_abi::font::{get_glyph_for_codepoint, FONT_CHAR_HEIGHT};
+    use slopos_abi::font::{FONT_CHAR_HEIGHT, get_glyph_for_codepoint};
     let glyph = get_glyph_for_codepoint(0xFFFD);
     // The replacement glyph should not be all zeros (it's a filled diamond).
     let mut has_nonzero = false;

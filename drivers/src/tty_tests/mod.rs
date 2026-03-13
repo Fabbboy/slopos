@@ -797,5 +797,16 @@ slopos_lib::define_test_suite!(
         test_fp15_parser_fuzz_utf8_no_panic,
         test_fp15_replacement_glyph_exists,
         test_fp15_get_glyph_for_codepoint_ascii,
+        // Finishing Phase 16: mod.rs Module Decomposition
+        test_fp16_mod_reexports_io_functions,
+        test_fp16_mod_reexports_termios_functions,
+        test_fp16_mod_reexports_job_control_functions,
+        test_fp16_mod_reexports_lifecycle_functions,
+        test_fp16_mod_reexports_poll_functions,
+        test_fp16_mod_reexports_pty_functions,
+        test_fp16_tty_struct_fields_accessible,
+        test_fp16_tty_error_variants_unchanged,
+        test_fp16_max_ttys_constant,
+        test_fp16_existing_api_smoke_test,
     ]
 );

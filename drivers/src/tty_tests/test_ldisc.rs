@@ -15727,5 +15727,144 @@ pub fn test_fp14_receive_buf_accumulates_echo() -> TestResult {
 }
 
 // ===========================================================================
+// Finishing Phase 16: mod.rs Module Decomposition — Regression Tests
+// ===========================================================================
+
+pub fn test_fp16_mod_reexports_io_functions() -> TestResult {
+    // Verify I/O functions are accessible through crate::tty::*
+    let _: fn(TtyIndex, &mut [u8], bool) -> Result<usize, TtyError> = tty::read;
+    let _: fn(TtyIndex, &[u8], bool) -> Result<usize, TtyError> = tty::write;
+    let _: fn(TtyIndex) -> bool = tty::has_data;
+    let _: fn(TtyIndex) -> Result<usize, TtyError> = tty::bytes_available;
+    let _: fn(TtyIndex) -> Result<usize, TtyError> = tty::output_queued_bytes;
+    TestResult::Pass
+}
+
+pub fn test_fp16_mod_reexports_termios_functions() -> TestResult {
+    use slopos_abi::syscall::{UserTermios, UserWinsize};
+    let _: fn(TtyIndex) -> Result<UserTermios, TtyError> = tty::get_termios;
+    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios;
+    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios_wait;
+    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios_flush;
+    let _: fn(TtyIndex) -> Result<bool, TtyError> = tty::is_output_idle;
+    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_ldisc;
+    let _: fn(TtyIndex, u32) -> Result<(), TtyError> = tty::set_ldisc;
+    let _: fn(TtyIndex) -> Result<UserWinsize, TtyError> = tty::get_winsize;
+    let _: fn(TtyIndex, &UserWinsize) -> Result<(), TtyError> = tty::set_winsize;
+    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcflush;
+    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcsbrk;
+    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcxonc;
+    TestResult::Pass
+}
+
+pub fn test_fp16_mod_reexports_job_control_functions() -> TestResult {
+    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_foreground_pgrp;
+    let _: fn(TtyIndex, u32) -> Result<(), TtyError> = tty::set_foreground_pgrp;
+    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_session_id;
+    let _: fn(TtyIndex, u32, u32) = tty::attach_session;
+    let _: fn(TtyIndex) = tty::detach_session;
+    TestResult::Pass
+}
+
+pub fn test_fp16_mod_reexports_lifecycle_functions() -> TestResult {
+    let _: fn() -> TtyIndex = tty::active_tty;
+    let _: fn(TtyIndex) = tty::set_active_tty;
+    let _: fn(TtyIndex) -> Result<(), TtyError> = tty::switch_active_tty;
+    let _: fn() -> TtyIndex = tty::default_console_tty;
+    let _: fn(TtyIndex) = tty::set_default_console_tty;
+    let _: fn() = tty::init;
+    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::open_ref;
+    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::close_ref;
+    let _: fn(TtyIndex) = tty::hangup;
+    let _: fn(TtyIndex) -> bool = tty::is_hung_up;
+    let _: fn(TtyIndex) = tty::vhangup;
+    TestResult::Pass
+}
+
+pub fn test_fp16_mod_reexports_poll_functions() -> TestResult {
+    let _: fn(TtyIndex, u16) -> u16 = tty::poll_events;
+    let _: fn(&[u8]) = tty::poll_sleep_on;
+    let _: fn() = tty::poll_sleep;
+    let _: fn(u32) -> Result<(), TtyError> = tty::set_compositor_focus;
+    let _: fn() -> Result<u32, TtyError> = tty::get_compositor_focus;
+    TestResult::Pass
+}
+
+pub fn test_fp16_mod_reexports_pty_functions() -> TestResult {
+    let _: fn(TtyIndex) -> bool = tty::is_pty_slave;
+    let _: fn(TtyIndex) -> bool = tty::is_slave_locked;
+    TestResult::Pass
+}
+
+pub fn test_fp16_tty_struct_fields_accessible() -> TestResult {
+    use slopos_abi::syscall::UserWinsize;
+    let guard = crate::tty::table::TTY_SLOTS[0].lock();
+    if let Some(tty) = guard.as_ref() {
+        let _ = tty.index;
+        let _ = tty.active;
+        let _ = tty.hung_up;
+        let _ = tty.peer_closed;
+        let _ = tty.open_count;
+        let _ = tty.slave_locked;
+        let _ = tty.packet_mode;
+        let _ = tty.packet_events;
+        let _ = tty.throttled;
+        let _ = tty.output_stopped;
+        let _ = tty.winsize;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp16_tty_error_variants_unchanged() -> TestResult {
+    let errors = [
+        (TtyError::InvalidIndex, -22),
+        (TtyError::NotAllocated, -6),
+        (TtyError::HungUp, -5),
+        (TtyError::WouldBlock, -11),
+        (TtyError::PermissionDenied, -1),
+        (TtyError::InvalidArg, -22),
+        (TtyError::Restart, -512),
+    ];
+    for (err, expected) in &errors {
+        if err.to_errno() != *expected {
+            klog_info!(
+                "TTY_TEST: BUG - {:?}.to_errno() = {} expected {}",
+                err,
+                err.to_errno(),
+                expected
+            );
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp16_max_ttys_constant() -> TestResult {
+    if tty::MAX_TTYS != 32 {
+        klog_info!(
+            "TTY_TEST: BUG - MAX_TTYS changed from 32 to {}",
+            tty::MAX_TTYS
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_fp16_existing_api_smoke_test() -> TestResult {
+    let idx = tty::active_tty();
+    let _ = tty::get_termios(idx);
+    let _ = tty::get_foreground_pgrp(idx);
+    let _ = tty::get_session_id(idx);
+    let _ = tty::get_winsize(idx);
+    let _ = tty::get_ldisc(idx);
+    let _ = tty::is_hung_up(idx);
+    let _ = tty::has_data(idx);
+    let _ = tty::bytes_available(idx);
+    let _ = tty::is_output_idle(idx);
+    let _ = tty::output_queued_bytes(idx);
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================
