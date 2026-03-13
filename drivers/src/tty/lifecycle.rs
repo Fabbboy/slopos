@@ -15,7 +15,7 @@ use slopos_lib::kernel_services::driver_runtime::{
 use super::driver::TtyDriverKind;
 use super::pty;
 use super::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, TtyError, TtyIndex};
+use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Active TTY tracking (for keyboard input routing)
@@ -51,7 +51,7 @@ pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
     {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
-            Some(tty) if tty.active => {}
+            Some(_) => {}
             _ => return Err(TtyError::NotAllocated),
         }
     }
@@ -94,7 +94,7 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
         // TIOCEXCL: reject opens when exclusive mode is set and TTY already open.
-        if tty.exclusive && tty.open_count > 0 {
+        if tty.flags.contains(TtyFlags::EXCLUSIVE) && tty.open_count > 0 {
             return Err(TtyError::DeviceBusy);
         }
         let peer_to_reopen = match tty.driver {
@@ -105,8 +105,7 @@ pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
             .open_count
             .checked_add(1)
             .unwrap_or_else(|| panic!("tty open_count overflow for idx {}", idx.0));
-        tty.hung_up = false;
-        tty.peer_closed = false;
+        tty.flags.remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
         let open_count = tty.open_count;
         drop(guard);
 
@@ -148,9 +147,7 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
                     pty::free_pair_if_unused(idx, master_idx);
                     return Ok(0);
                 }
-                TtyDriverKind::SerialConsole(_)
-                | TtyDriverKind::VConsole(_)
-                | TtyDriverKind::None => {
+                TtyDriverKind::SerialConsole(_) | TtyDriverKind::VConsole(_) => {
                     let hupcl = tty
                         .ldisc
                         .termios()
@@ -159,9 +156,8 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
                     let sid = tty.session.session_id_raw();
                     tty.ldisc.flush_all();
                     tty.session.detach();
-                    tty.hung_up = false;
-                    tty.peer_closed = false;
-                    tty.exclusive = false;
+                    tty.flags
+                        .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
                     if hupcl && sid != 0 {
                         drop(guard);
                         hangup(idx);
@@ -193,13 +189,10 @@ pub fn hangup(idx: TtyIndex) {
         };
         let sid = tty.session.session_id_raw();
         tty.ldisc.flush_all();
-        // Clear output stop so blocked writers unblock
-        // and see the hung_up flag on re-check.
-        tty.output_stopped = false;
         // full flush → both FLUSHREAD + FLUSHWRITE packet events.
         // Deferred until after lock is dropped to avoid self-deadlock.
         tty.session.detach();
-        tty.hung_up = true;
+        tty.mark_hung_up();
         sid
     };
 
@@ -233,7 +226,7 @@ pub fn is_hung_up(idx: TtyIndex) -> bool {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => tty.hung_up,
+        Some(tty) => tty.flags.contains(TtyFlags::HUNG_UP),
         None => false,
     }
 }
@@ -266,7 +259,11 @@ pub fn set_exclusive(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
     let mut guard = TTY_SLOTS[slot].lock();
     match guard.as_mut() {
         Some(tty) => {
-            tty.exclusive = enable;
+            if enable {
+                tty.flags.insert(TtyFlags::EXCLUSIVE);
+            } else {
+                tty.flags.remove(TtyFlags::EXCLUSIVE);
+            }
             Ok(())
         }
         None => Err(TtyError::NotAllocated),
@@ -281,7 +278,7 @@ pub fn get_exclusive(idx: TtyIndex) -> Result<bool, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.exclusive),
+        Some(tty) => Ok(tty.flags.contains(TtyFlags::EXCLUSIVE)),
         None => Err(TtyError::NotAllocated),
     }
 }

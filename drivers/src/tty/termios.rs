@@ -21,7 +21,7 @@ use super::lifecycle::hangup;
 use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, TtyError, TtyIndex};
+use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -117,7 +117,7 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 ///
 /// Output is considered **idle** when ANY of the following are true:
 ///
-///   - The TTY is hung up (`tty.hung_up == true`).  Hangup discards all
+///   - The TTY is hung up (`tty.flags.contains(TtyFlags::HUNG_UP) == true`).  Hangup discards all
 ///     pending output, so the drain is vacuously complete.
 ///   - The slot has been deallocated (`None`).  Same reasoning.
 ///   - BOTH of these hold simultaneously:
@@ -155,8 +155,8 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
-            Some(tty) if tty.hung_up => return Ok(()), // hangup discards output
-            Some(_) => {}                              // slot alive, proceed
+            Some(tty) if tty.flags.contains(TtyFlags::HUNG_UP) => return Ok(()), // hangup discards output
+            Some(_) => {} // slot alive, proceed
             None => return Err(TtyError::NotAllocated),
         }
     }
@@ -166,7 +166,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
     if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if tty.hung_up || !tty.driver.output_pending() {
+            if tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending() {
                 return Ok(());
             }
         } else {
@@ -185,7 +185,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
             }
             let guard = TTY_SLOTS[slot].lock();
             match guard.as_ref() {
-                Some(tty) => tty.hung_up || !tty.driver.output_pending(),
+                Some(tty) => tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending(),
                 None => true, // slot gone — drain vacuously satisfied
             }
         });
@@ -198,7 +198,12 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
             if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
                 let guard = TTY_SLOTS[slot].lock();
                 match guard.as_ref() {
-                    Some(tty) if tty.hung_up || !tty.driver.output_pending() => break,
+                    Some(tty)
+                        if tty.flags.contains(TtyFlags::HUNG_UP)
+                            || !tty.driver.output_pending() =>
+                    {
+                        break;
+                    }
                     None => break,
                     _ => {}
                 }
@@ -243,7 +248,7 @@ pub(super) fn set_termios_mode(
     {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if tty.hung_up {
+            if tty.flags.contains(TtyFlags::HUNG_UP) {
                 return Err(TtyError::HungUp);
             }
         }
@@ -379,7 +384,7 @@ pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.hung_up || !tty.driver.output_pending()),
+        Some(tty) => Ok(tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -419,7 +424,7 @@ pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
 
         // Post-hangup I/O hardening — state-changing ioctls
         // on a hung-up TTY return EIO.
-        if tty.hung_up {
+        if tty.flags.contains(TtyFlags::HUNG_UP) {
             return Err(TtyError::HungUp);
         }
 
@@ -486,7 +491,7 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if tty.hung_up {
+            if tty.flags.contains(TtyFlags::HUNG_UP) {
                 return Err(TtyError::HungUp);
             }
         }
@@ -557,8 +562,8 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
                     // After flushing all input the buffer is empty, so the
                     // throttle condition is no longer true.  Clear it and
                     // resolve the peer to wake.
-                    if tty.throttled {
-                        tty.throttled = false;
+                    if tty.flags.contains(TtyFlags::THROTTLED) {
+                        tty.flags.remove(TtyFlags::THROTTLED);
                         if let TtyDriverKind::PtySlave { ref peer } = tty.driver {
                             unthrottled_peer = Some(peer.idx.0 as usize);
                         }
@@ -617,7 +622,7 @@ pub fn tcsbrk(idx: TtyIndex, arg: i32) -> Result<(), TtyError> {
     {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
-            Some(tty) if tty.hung_up => return Err(TtyError::HungUp),
+            Some(tty) if tty.flags.contains(TtyFlags::HUNG_UP) => return Err(TtyError::HungUp),
             Some(_) => {}
             None => return Err(TtyError::NotAllocated),
         }
@@ -659,8 +664,8 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
             let was_stopped = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
-                let prev = tty.output_stopped;
-                tty.output_stopped = true;
+                let prev = tty.flags.contains(TtyFlags::OUTPUT_STOPPED);
+                tty.flags.insert(TtyFlags::OUTPUT_STOPPED);
                 prev
             };
             // Notify master of flow-control stop transition.
@@ -675,8 +680,8 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
             let was_stopped = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
-                let prev = tty.output_stopped;
-                tty.output_stopped = false;
+                let prev = tty.flags.contains(TtyFlags::OUTPUT_STOPPED);
+                tty.flags.remove(TtyFlags::OUTPUT_STOPPED);
                 prev
             };
             // Wake writers and poll waiters regardless — no harm in a

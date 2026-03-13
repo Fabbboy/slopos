@@ -36,7 +36,7 @@ use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
     TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
 };
-use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
+use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Generation-safe peer identity
@@ -181,15 +181,15 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
         match tty.driver {
             TtyDriverKind::PtySlave { ref peer } => {
                 // Locked slaves cannot be opened.
-                if tty.slave_locked {
+                if tty.flags.contains(TtyFlags::SLAVE_LOCKED) {
                     return Err(TtyError::PermissionDenied);
                 }
                 tty.open_count = tty
                     .open_count
                     .checked_add(1)
                     .unwrap_or_else(|| panic!("pty slave open_count overflow for idx {}", idx.0));
-                tty.hung_up = false;
-                tty.peer_closed = false;
+                tty.flags.remove(TtyFlags::HUNG_UP);
+                tty.flags.remove(TtyFlags::PEER_CLOSED);
                 (tty.open_count, peer.idx)
             }
             _ => return Err(TtyError::NotAllocated),
@@ -248,7 +248,7 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
     {
         let guard = TTY_SLOTS[slave_slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if tty.throttled {
+            if tty.flags.contains(TtyFlags::THROTTLED) {
                 return 0;
             }
         }
@@ -275,7 +275,7 @@ pub fn master_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
         {
             let guard = TTY_SLOTS[slave_slot].lock();
             if let Some(tty) = guard.as_ref() {
-                if tty.throttled {
+                if tty.flags.contains(TtyFlags::THROTTLED) {
                     return written;
                 }
             }
@@ -309,7 +309,8 @@ pub fn slave_write(peer: PtyPeerHandle, data: &[u8]) -> usize {
             return 0;
         };
 
-        if master.peer_closed || master.hung_up {
+        if master.flags.contains(TtyFlags::PEER_CLOSED) || master.flags.contains(TtyFlags::HUNG_UP)
+        {
             return 0;
         }
 
@@ -375,7 +376,7 @@ pub fn mark_peer_closed(idx: TtyIndex) {
 
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
-        tty.peer_closed = true;
+        tty.flags.insert(TtyFlags::PEER_CLOSED);
     }
     drop(guard);
     TTY_INPUT_WAITERS[slot].wake_all();
@@ -389,7 +390,7 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
 
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
-        tty.peer_closed = false;
+        tty.flags.remove(TtyFlags::PEER_CLOSED);
     }
 }
 
@@ -475,7 +476,7 @@ pub fn set_pty_lock(idx: TtyIndex, locked: bool) -> Result<(), TtyError> {
     }
     let mut guard = TTY_SLOTS[slave_slot].lock();
     let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
-    tty.slave_locked = locked;
+    tty.flags.set(TtyFlags::SLAVE_LOCKED, locked);
     Ok(())
 }
 
@@ -507,7 +508,7 @@ pub fn get_pty_lock(idx: TtyIndex) -> Result<bool, TtyError> {
     }
     let guard = TTY_SLOTS[slave_slot].lock();
     let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
-    Ok(tty.slave_locked)
+    Ok(tty.flags.contains(TtyFlags::SLAVE_LOCKED))
 }
 
 /// Check whether a PTY slave is currently locked.
@@ -521,7 +522,7 @@ pub fn is_slave_locked(idx: TtyIndex) -> bool {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => tty.slave_locked,
+        Some(tty) => tty.flags.contains(TtyFlags::SLAVE_LOCKED),
         None => false,
     }
 }
@@ -547,9 +548,9 @@ pub fn set_packet_mode(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
         _ => return Err(TtyError::NotAllocated),
     }
 
-    tty.packet_mode = enable;
+    tty.flags.set(TtyFlags::PACKET_MODE, enable);
     if !enable {
-        tty.packet_events = 0;
+        tty.packet_events = PacketEvents::empty();
     }
     Ok(())
 }
@@ -564,7 +565,7 @@ pub fn get_packet_mode(idx: TtyIndex) -> Result<bool, TtyError> {
     let guard = TTY_SLOTS[slot].lock();
     let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
     match tty.driver {
-        TtyDriverKind::PtyMaster { .. } => Ok(tty.packet_mode),
+        TtyDriverKind::PtyMaster { .. } => Ok(tty.flags.contains(TtyFlags::PACKET_MODE)),
         _ => Err(TtyError::NotAllocated),
     }
 }
@@ -605,10 +606,10 @@ pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
         let Some(master) = guard.as_mut() else {
             return;
         };
-        if !master.packet_mode {
+        if !master.flags.contains(TtyFlags::PACKET_MODE) {
             return;
         }
-        master.packet_events |= event_bits;
+        master.packet_events |= PacketEvents::from_bits_truncate(event_bits);
         true
     };
 

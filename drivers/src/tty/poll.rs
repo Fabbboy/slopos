@@ -10,7 +10,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_lib::kernel_services::driver_runtime::scheduler_is_enabled;
 
 use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, TtyError, TtyIndex};
+use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Compositor focus
@@ -104,12 +104,16 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
 
         // Packet events also make the master readable.
         if (requested & POLLIN) != 0
-            && (tty.ldisc.has_data() || (tty.packet_mode && tty.packet_events != 0))
+            && (tty.ldisc.has_data()
+                || (tty.flags.contains(TtyFlags::PACKET_MODE) && !tty.packet_events.is_empty()))
         {
             revents |= POLLIN;
         }
 
-        if (requested & POLLOUT) != 0 && !tty.ldisc.is_stopped() && !tty.output_stopped {
+        if (requested & POLLOUT) != 0
+            && !tty.ldisc.is_stopped()
+            && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
+        {
             revents |= POLLOUT;
         }
 
@@ -119,7 +123,9 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
         // with EOF (0 bytes), making the fd "readable".
         // POLLERR is set because a subsequent write() will return -EIO,
         // matching Linux's tty_poll() behaviour.
-        if tty.hung_up || (tty.peer_closed && !tty.ldisc.has_data()) {
+        if tty.flags.contains(TtyFlags::HUNG_UP)
+            || (tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data())
+        {
             revents |= POLLHUP | POLLERR;
             if (requested & POLLIN) != 0 {
                 revents |= POLLIN;

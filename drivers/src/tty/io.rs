@@ -24,7 +24,7 @@ use super::session::ForegroundCheck;
 use super::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
 };
-use super::{MAX_TTYS, Tty, TtyError, TtyIndex};
+use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain
@@ -106,7 +106,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             None => return,
         };
 
-        if tty.hung_up {
+        if tty.flags.contains(TtyFlags::HUNG_UP) {
             return;
         }
 
@@ -136,10 +136,10 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
         // Activate throttle when cooked buffer fills.
         if batch.throttle_check
-            && !tty.throttled
+            && !tty.flags.contains(TtyFlags::THROTTLED)
             && tty.ldisc.bytes_available() >= ldisc::THROTTLE_HIGH_WATER
         {
-            tty.throttled = true;
+            tty.flags.insert(TtyFlags::THROTTLED);
         }
 
         if batch.echo_len > 0 {
@@ -269,11 +269,11 @@ pub fn read_with_attach(
             // permanently dead.  Reads always return EOF (0 bytes) once
             // any buffered data has been consumed, regardless of whether
             // the read is blocking or non-blocking.
-            if tty.peer_closed && !tty.ldisc.has_data() {
+            if tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
-            if tty.hung_up && !tty.ldisc.has_data() {
+            if tty.flags.contains(TtyFlags::HUNG_UP) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
@@ -309,10 +309,10 @@ pub fn read_with_attach(
             // packet events, return a single-byte read with the event
             // bitmask (consuming the events).  If no events but data is
             // available, prefix the read with TIOCPKT_DATA (0x00).
-            if tty.packet_mode && total == 0 {
-                if tty.packet_events != 0 {
-                    buf[0] = tty.packet_events;
-                    tty.packet_events = 0;
+            if tty.flags.contains(TtyFlags::PACKET_MODE) && total == 0 {
+                if !tty.packet_events.is_empty() {
+                    buf[0] = tty.packet_events.bits();
+                    tty.packet_events = PacketEvents::empty();
                     drop(guard);
                     if let Some((pgid, sig)) = deferred_signal {
                         if pgid != 0 {
@@ -347,10 +347,10 @@ pub fn read_with_attach(
                             .ixoff_check_xon()
                             .map(|xon| (tty.driver.id(), xon));
                         // Unthrottle after packet-mode read.
-                        let mut pkt_unthrottled_peer = if tty.throttled
+                        let mut pkt_unthrottled_peer = if tty.flags.contains(TtyFlags::THROTTLED)
                             && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                         {
-                            tty.throttled = false;
+                            tty.flags.remove(TtyFlags::THROTTLED);
                             match &tty.driver {
                                 TtyDriverKind::PtySlave { peer } => Some(peer.idx.0 as usize),
                                 _ => None,
@@ -403,10 +403,10 @@ pub fn read_with_attach(
                 }
                 // Unthrottle if occupancy dropped below low-water.
                 if got > 0
-                    && tty.throttled
+                    && tty.flags.contains(TtyFlags::THROTTLED)
                     && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
                 {
-                    tty.throttled = false;
+                    tty.flags.remove(TtyFlags::THROTTLED);
                     if let TtyDriverKind::PtySlave { peer } = &tty.driver {
                         unthrottled_peer = Some(peer.idx.0 as usize);
                     }
@@ -529,11 +529,11 @@ pub fn read_with_attach(
 
             // Check hung-up after drain (data may have been
             // flushed by hangup).  Always EOF regardless of blocking mode.
-            if tty.peer_closed && !tty.ldisc.has_data() {
+            if tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
-            if tty.hung_up && !tty.ldisc.has_data() {
+            if tty.flags.contains(TtyFlags::HUNG_UP) && !tty.ldisc.has_data() {
                 return Ok(0);
             }
 
@@ -608,7 +608,9 @@ pub fn read_with_attach(
                             }
                         }
                         let sig = tty.drain_hw_input_locked();
-                        let result = tty.hung_up || tty.peer_closed || tty.ldisc.has_data();
+                        let result = tty.flags.contains(TtyFlags::HUNG_UP)
+                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                            || tty.ldisc.has_data();
                         (sig, result)
                     }
                     None => return true,
@@ -679,7 +681,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
-            if tty.hung_up {
+            if tty.flags.contains(TtyFlags::HUNG_UP) {
                 return Err(TtyError::HungUp);
             }
         }
@@ -768,7 +770,11 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             if nonblock {
                 let guard = TTY_SLOTS[peer_slot].lock();
                 let is_throttled = match guard.as_ref() {
-                    Some(tty) => tty.throttled && !tty.hung_up && !tty.peer_closed,
+                    Some(tty) => {
+                        tty.flags.contains(TtyFlags::THROTTLED)
+                            && !tty.flags.contains(TtyFlags::HUNG_UP)
+                            && !tty.flags.contains(TtyFlags::PEER_CLOSED)
+                    }
                     None => false,
                 };
                 drop(guard);
@@ -786,7 +792,11 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                     }
                     let guard = TTY_SLOTS[peer_slot].lock();
                     match guard.as_ref() {
-                        Some(tty) => !tty.throttled || tty.hung_up || tty.peer_closed,
+                        Some(tty) => {
+                            !tty.flags.contains(TtyFlags::THROTTLED)
+                                || tty.flags.contains(TtyFlags::HUNG_UP)
+                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                        }
                         None => true,
                     }
                 });
@@ -802,7 +812,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             {
                 let guard = TTY_SLOTS[slot].lock();
                 if let Some(tty) = guard.as_ref() {
-                    if tty.hung_up {
+                    if tty.flags.contains(TtyFlags::HUNG_UP) {
                         return if pos > 0 {
                             Ok(pos)
                         } else {
@@ -832,7 +842,11 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 TTY_OUTPUT_WAITERS[master_slot].wait_event(|| {
                     let guard = TTY_SLOTS[master_slot].lock();
                     match guard.as_ref() {
-                        Some(tty) => !tty.ldisc.input_full() || tty.hung_up || tty.peer_closed,
+                        Some(tty) => {
+                            !tty.ldisc.input_full()
+                                || tty.flags.contains(TtyFlags::HUNG_UP)
+                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                        }
                         None => true,
                     }
                 });
@@ -840,7 +854,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
             {
                 let guard = TTY_SLOTS[slot].lock();
                 if let Some(tty) = guard.as_ref() {
-                    if tty.hung_up {
+                    if tty.flags.contains(TtyFlags::HUNG_UP) {
                         return if pos > 0 {
                             Ok(pos)
                         } else {
@@ -859,7 +873,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         if nonblock {
             let guard = TTY_SLOTS[slot].lock();
             let is_stopped = match guard.as_ref() {
-                Some(tty) => tty.ldisc.is_stopped() || tty.output_stopped,
+                Some(tty) => tty.ldisc.is_stopped() || tty.flags.contains(TtyFlags::OUTPUT_STOPPED),
                 None => false,
             };
             drop(guard);
@@ -877,7 +891,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 }
                 let guard = TTY_SLOTS[slot].lock();
                 match guard.as_ref() {
-                    Some(tty) => !tty.ldisc.is_stopped() && !tty.output_stopped,
+                    Some(tty) => {
+                        !tty.ldisc.is_stopped() && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
+                    }
                     None => true, // slot gone — let the next lock attempt return NotAllocated
                 }
             });
@@ -1050,13 +1066,9 @@ fn input_available_cb() -> c_int {
         let (deferred_signal, has_data) = {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
-                if tty.active {
-                    let sig = tty.drain_hw_input_locked();
-                    let data = tty.ldisc.has_data();
-                    (sig, data)
-                } else {
-                    (None, false)
-                }
+                let sig = tty.drain_hw_input_locked();
+                let data = tty.ldisc.has_data();
+                (sig, data)
             } else {
                 (None, false)
             }
