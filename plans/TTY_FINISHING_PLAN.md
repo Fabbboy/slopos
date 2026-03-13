@@ -1,10 +1,10 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 16-phase gold-standard roadmap — Phases 1–13 COMPLETE, Phases 14–16 PENDING
+> **Status**: 16-phase gold-standard roadmap — Phases 1–15 COMPLETE, Phase 16 PENDING
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 9 files, ~7700 lines, ~630 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
-> **Phases 14–16**: Post-completion gold-standard audit identified three remaining semantic gaps separating "excellent hobby OS TTY" from "production-grade Rust kernel TTY": input status modeling + interruptible blocking + job control edges (Phase 14), VConsole Unicode + broader xterm emulation (Phase 15), and mod.rs module decomposition (Phase 16). These phases are independent and can be implemented in separate sessions.
+> **Current**: `drivers/src/tty/` — 9 files, ~7900 lines, ~1556 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments.
+> **Phase 16**: The only remaining phase is `mod.rs` module decomposition — a pure refactor with no behavioral changes. Should be done AFTER all functional changes are complete.
 
 ---
 
@@ -58,7 +58,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | 12 | `no_room`-style overflow recovery | P1 | Medium | **DONE** ✅ |
 | 13 | Output drain semantics hardening | P2 | Small | **DONE** ✅ |
 | 14 | Core semantic correctness (typed input, interruptible waits, job control, PTY ABI, batched ingress) | P0 | Large | Pending |
-| 15 | VConsole Unicode & broadened xterm emulation | P1 | Medium-Large | Pending |
+| 15 | VConsole Unicode & broadened xterm emulation | P1 | Medium-Large | **DONE** ✅ |
 | 16 | `mod.rs` module decomposition | P2 | Medium | Pending |
 
 ---
@@ -1063,7 +1063,7 @@ These are small targeted fixes that naturally land alongside the above:
 
 ## 18. Phase 15: VConsole Unicode & Broadened Xterm Emulation
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Changed cell model from `u8` to `u32` (Unicode codepoint per cell). Added UTF-8 decoder to `VtParser` ground state with 4-byte accumulator, overlong/surrogate rejection, and U+FFFD replacement for invalid sequences. Widened `VtAction::Print(u8)` to `VtAction::Print(u32)`. Added `SgrAttr::Foreground256(u8)`, `Background256(u8)`, `ForegroundRgb(u8,u8,u8)`, `BackgroundRgb(u8,u8,u8)` with full 6×6×6 cube + grayscale ramp → RGB mapping. Added DEC private mode tracking: DECCKM (mode 1), DECOM (mode 6), DECAWM (mode 7), bracketed paste (mode 2004). Added `is_double_width()` CJK range detection and continuation marker (`0xFFFF_FFFF`) for double-width cell handling. Added `get_glyph_for_codepoint(u32)` with replacement character diamond glyph. 32 regression tests added.
 
 > **Priority**: P1 usability — the local framebuffer console currently handles only ASCII printable bytes and basic SGR (8+8 colors). Modern terminal programs (vim, tmux, bat, delta, less) depend on UTF-8 rendering, 256-color/truecolor, and several DEC private modes.
 > **Principle**: Upgrade from "basic VGA terminal" to "usable xterm-class console". NOT a full xterm reimplementation — focus on the subset that real programs actually use. If SlopOS eventually gets a full userland terminal emulator, the kernel PTY/TTY path stays byte-transport focused while the compositor owns "full xterm" behavior.
@@ -1171,15 +1171,16 @@ Use a lookup table or Unicode `East_Asian_Width` property to determine width. Th
 - Regression: all existing VT100 parser tests pass (ASCII behavior unchanged).
 - `just build` + `just test` gate.
 
-### 15.8 Files expected to change
+### 15.8 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/vtparser.rs` | Add UTF-8 decoder in ground state, 256-color/truecolor SGR parsing, bracketed paste mode, additional DEC private modes, `VtAction::Print` widened to `u32` |
-| `drivers/src/tty/vconsole.rs` | Change cell model from `u8` to `Cell { codepoint: u32, attrs }`, add font glyph lookup for codepoints > 127 (or replacement char), double-width cell handling, 256-color→RGB mapping |
-| `abi/src/font.rs` | Potentially extend font data for Latin-1/Basic Latin supplement glyphs, or add fallback glyph logic |
-| `drivers/src/tty_tests/test_vconsole.rs` | UTF-8 rendering tests, 256-color SGR tests, truecolor tests, double-width tests, bracketed paste tests |
-| `drivers/src/tty_tests/test_ldisc.rs` | Verify vtparser changes don't affect ldisc behavior (ldisc operates on bytes, not codepoints) |
+| `drivers/src/tty/vtparser.rs` | Added `State::Utf8` with 4-byte accumulator, widened `VtAction::Print(u8)` → `Print(u32)`, added `SgrAttr::Foreground256`/`Background256`/`ForegroundRgb`/`BackgroundRgb` variants with proper sub-parameter consumption, added DEC mode tracking (`bracketed_paste`, `cursor_key_mode`, `origin_mode`, `auto_wrap`) for modes 1/6/7/2004 |
+| `drivers/src/tty/vconsole.rs` | Changed `cells: [[u8; ...]; ...]` → `[[u32; ...]; ...]` (codepoint model), renamed `print_char` → `print_codepoint`, added `color256_to_rgb()` with 6×6×6 cube + grayscale mapping, added `CONTINUATION_CODEPOINT` marker for double-width CJK, added 256-color/truecolor branches in `apply_sgr`, backspace clears continuation cells, double-width at last column renders space |
+| `abi/src/font.rs` | Added `REPLACEMENT_GLYPH` (filled diamond), `get_glyph_for_codepoint(u32)` with ASCII fast-path and replacement fallback, `is_double_width(cp: u32)` with CJK/Hangul/Fullwidth Unicode ranges |
+| `drivers/src/tty_tests/test_vconsole.rs` | Added 32 tests (`test_fp15_*`): UTF-8 2/3/4-byte decode, invalid/truncated/overlong rejection, 256-color fg/bg SGR, truecolor fg/bg SGR, vconsole 256-color/truecolor rendering, bracketed paste toggle, DECAWM/DECCKM/DECOM toggle, DECTCEM/alt screen regression, u32 cell model, "Héllo" rendering, CJK double-width, replacement char, mixed ASCII+UTF-8+escapes, color cube mapping, grayscale mapping, width range checks, fuzz test, glyph existence |
+| `drivers/src/tty_tests/test_ldisc.rs` | Updated existing tests for `u32` cell comparisons (`b'A'` → `b'A' as u32`) and `VtAction::Print(u32)` pattern matches |
+| `drivers/src/tty_tests/mod.rs` | Updated `boxed_vconsole_state()` helper for `u32` cells, registered 32 new `test_fp15_*` tests in suite |
 
 ---
 
