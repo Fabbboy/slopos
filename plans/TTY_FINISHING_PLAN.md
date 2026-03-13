@@ -1,9 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 22-phase gold-standard roadmap — Phases 1–18 COMPLETE, Phases 19–22 pending (post-audit hardening)
+> **Status**: 22-phase gold-standard roadmap — Phases 1–19 COMPLETE, Phases 20–22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1590 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed.
+> **Current**: `drivers/src/tty/` — 14 files, ~8100 lines, ~1604 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~248 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, TIOCGSID ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed. Exclusive mode (TIOCEXCL/TIOCNXCL/TIOCGEXCL) and HUPCL enforcement on last close.
 > **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
@@ -70,7 +70,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | **Post-Audit Hardening (Phases 17–22)** | | | | |
 | 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | **DONE** ✅ |
 | 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | **DONE** ✅ |
-| 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | Pending |
+| 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | **DONE** ✅ |
 | 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | Pending |
 | 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | Pending |
 | 22 | Forward-looking: TIOCGPTPEER & flip-buffer architecture | P3 | Medium-Large | Pending |
@@ -1424,7 +1424,7 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 
 ## 22. Phase 19: Missing Ioctls (TIOCGSID, TIOCEXCL) & HUPCL Enforcement
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Added `TIOCEXCL` (0x540C), `TIOCNXCL` (0x540D), `TIOCGEXCL` (0x80045440) ABI constants and `ERRNO_EBUSY`. Added `exclusive: bool` to `Tty` struct and `DeviceBusy` error variant mapping to `EBUSY`. `TIOCEXCL` sets exclusive flag, `TIOCNXCL` clears it, `TIOCGEXCL` queries it. `open_ref()` rejects opens with `DeviceBusy` when exclusive and already open. Hardened `TIOCGSID` ioctl dispatch with POSIX controlling-terminal check (returns `ENOTTY` if FD is not the caller's ctty). HUPCL enforcement in `close_ref()` for non-PTY terminals: when `HUPCL` is set in `c_cflag` and `open_count` reaches zero, calls `hangup()` to assert hangup semantics. Last close also clears the exclusive flag. PTY close paths unchanged (master-close already triggers slave hangup). 14 regression tests added.
 
 > **Priority**: P1 — `TIOCGSID` is POSIX-required. `TIOCEXCL` is used by serial tools (minicom, screen). `HUPCL` enforcement is expected by POSIX but currently not enforced. Bundled because all three are small, independent additions with no shared code paths.
 > **Principle**: Add the missing ioctl support and enforce `HUPCL` semantics. Each sub-item is self-contained — the phase bundles them to avoid plan sprawl.
@@ -1482,16 +1482,19 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 - Regression: all existing lifecycle/ioctl tests pass.
 - `just build` + `just test` gate.
 
-### 19.5 Files expected to change
+### 19.5 Files changed
 
 | File | Change |
 |------|--------|
-| `abi/src/syscall.rs` | Add `TIOCGSID`, `TIOCEXCL`, `TIOCNXCL`, `TIOCGEXCL` constants |
-| `drivers/src/tty/mod.rs` | Add `exclusive: bool` field to `Tty` struct (or defer to Phase 20 `TtyFlags`) |
-| `drivers/src/tty/lifecycle.rs` | Add HUPCL check in `close_ref()` for non-PTY terminals; add exclusive check in `open_ref()` |
-| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Wire `TIOCGSID`, `TIOCEXCL`, `TIOCNXCL`, `TIOCGEXCL` through ioctl dispatch |
-| `lib/src/kernel_services/syscall_services/tty.rs` | Add service bridge for new ioctls |
-| `drivers/src/tty_tests.rs` | TIOCGSID, exclusive mode, HUPCL enforcement tests |
+| `abi/src/syscall.rs` | Added `TIOCEXCL` (0x540C), `TIOCNXCL` (0x540D), `TIOCGEXCL` (0x80045440) constants and `ERRNO_EBUSY` (-16) |
+| `drivers/src/tty/mod.rs` | Added `exclusive: bool` field to `Tty` struct, `DeviceBusy` variant to `TtyError` mapping to `ERRNO_EBUSY`, re-exported `set_exclusive`/`get_exclusive` from `lifecycle.rs` |
+| `drivers/src/tty/table.rs` | Added `exclusive: false` to all three `Tty` constructors (`new`, `new_pty_master`, `new_pty_slave`) |
+| `drivers/src/tty/lifecycle.rs` | Added exclusive check in `open_ref()` — returns `DeviceBusy` when `exclusive && open_count > 0`. Added HUPCL enforcement in `close_ref()` for non-PTY terminals — checks `ControlFlags::HUPCL` and calls `hangup()` when set and session exists. Last close clears `exclusive`. Added `set_exclusive()` and `get_exclusive()` public functions |
+| `core/src/syscall/fs/poll_ioctl_handlers.rs` | Hardened `TIOCGSID` with controlling-terminal check (caller's ctty must match FD). Added `TIOCEXCL`, `TIOCNXCL`, `TIOCGEXCL` ioctl dispatch through service bridge |
+| `lib/src/kernel_services/syscall_services/tty.rs` | Added `set_exclusive(TtyIndex, bool) -> i32` and `get_exclusive(TtyIndex) -> i32` to service bridge |
+| `drivers/src/syscall_services_init.rs` | Added `tty_set_exclusive_adapter` and `tty_get_exclusive_adapter`, registered in `TTY_SERVICES` struct |
+| `drivers/src/tty_tests/test_ldisc.rs` | Added 14 tests (`test_excl_hupcl_*`): ABI constant values, ERRNO_EBUSY value, session ID returns, exclusive initially false, set/clear roundtrip, exclusive blocks second open, NXCL allows second open, unallocated slot error, HUPCL last close triggers hangup, no-HUPCL last close skips hangup, PTY no double hangup, close clears exclusive |
+| `drivers/src/tty_tests/mod.rs` | Registered 14 new `test_excl_hupcl_*` tests in suite |
 
 ---
 
