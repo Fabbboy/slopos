@@ -118,8 +118,6 @@ pub enum TtyDriverKind {
     PtyMaster { peer: PtyPeerHandle },
     /// PTY slave — writes go to the master's read buffer.
     PtySlave { peer: PtyPeerHandle },
-    /// Uninitialised / empty slot.
-    None,
 }
 
 impl TtyDriverKind {
@@ -135,7 +133,6 @@ impl TtyDriverKind {
                 // Short writes flow back through write_driver_unlocked's return value.
                 let _ = pty::slave_write(*peer, buf);
             }
-            Self::None => {}
         }
     }
 
@@ -148,7 +145,6 @@ impl TtyDriverKind {
                 // PTY input arrives via push_input, not polling.
                 0
             }
-            Self::None => 0,
         }
     }
 
@@ -157,7 +153,7 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.set_termios(termios),
             Self::VConsole(d) => d.set_termios(termios),
-            Self::PtyMaster { .. } | Self::PtySlave { .. } | Self::None => {}
+            Self::PtyMaster { .. } | Self::PtySlave { .. } => {}
         }
     }
 
@@ -171,7 +167,6 @@ impl TtyDriverKind {
             // transmission latency.  POSIX considers output "sent" once it
             // reaches the kernel buffer destined for the peer.
             Self::PtyMaster { .. } | Self::PtySlave { .. } => false,
-            Self::None => false,
         }
     }
 
@@ -186,7 +181,6 @@ impl TtyDriverKind {
             // PTY output is immediately buffered in the peer — zero
             // hardware-level pending bytes.
             Self::PtyMaster { .. } | Self::PtySlave { .. } => 0,
-            Self::None => 0,
         }
     }
 
@@ -212,7 +206,6 @@ impl TtyDriverKind {
             Self::VConsole(_) => DriverId::VConsole,
             Self::PtyMaster { peer } => DriverId::PtyMaster { peer: *peer },
             Self::PtySlave { peer } => DriverId::PtySlave { peer: *peer },
-            Self::None => DriverId::None,
         }
     }
 }
@@ -240,8 +233,6 @@ pub enum DriverId {
     PtyMaster { peer: PtyPeerHandle },
     /// PTY slave — writes go to the master via generation-validated handle.
     PtySlave { peer: PtyPeerHandle },
-    /// Empty / uninitialised slot.
-    None,
 }
 
 /// Write processed output bytes to the hardware **without** holding any TTY
@@ -276,7 +267,6 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
         }
         DriverId::PtyMaster { peer } => pty::master_write(peer, data),
         DriverId::PtySlave { peer } => pty::slave_write(peer, data),
-        DriverId::None => data.len(),
     }
 }
 
