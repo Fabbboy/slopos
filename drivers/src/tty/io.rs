@@ -161,10 +161,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     }
 
     if let Some((driver_id, out, out_len)) = route {
-        // Track in-flight echo output for drain semantics.
-        TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
         write_driver_unlocked(driver_id, &out[..out_len]);
-        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
@@ -322,10 +321,22 @@ pub fn read_with_attach(
                     }
                     return Ok(1);
                 }
-                // Reserve buf[0] for the TIOCPKT_DATA prefix byte.
                 if buf.len() < 2 {
-                    // Not enough room for prefix + data; fall through
-                    // to the wait logic below.
+                    // Buffer too small for TIOCPKT_DATA prefix + payload.
+                    // If data is available we cannot deliver it — return 0
+                    // rather than busy-looping between the wait and this
+                    // check.  The caller must use a larger buffer.
+                    if tty.ldisc.has_data() {
+                        drop(guard);
+                        if let Some((pgid, sig)) = deferred_signal {
+                            if pgid != 0 {
+                                let _ = signal_process_group(pgid, sig);
+                            }
+                        }
+                        return Ok(0);
+                    }
+                    // No data and no events — fall through to wait for
+                    // packet events (which CAN be returned in 1 byte).
                 } else {
                     let got = tty.ldisc.read(&mut buf[1..]);
                     if got > 0 {
@@ -921,11 +932,9 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         }
         // Per-TTY lock dropped.
 
-        // Driver I/O without any TTY lock (slow — hardware).
-        // Track in-flight output for drain semantics.
-        TTY_OUTPUT_INFLIGHT[slot].fetch_add(1, Ordering::Release);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
         let driver_written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
-        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(1, Ordering::Release);
+        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
         if driver_written < out_len {
             break;
         }
@@ -1000,15 +1009,10 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
 /// Get the number of bytes queued for output on a TTY.
 ///
 /// Used by the `TIOCOUTQ` ioctl.  Returns the sum of:
-///   1. The per-TTY inflight counter (`TTY_OUTPUT_INFLIGHT`) — bytes that
-///      have been processed by the line discipline but not yet transmitted
-///      to the hardware driver.
+///   1. The per-TTY inflight byte counter (`TTY_OUTPUT_INFLIGHT`) — the
+///      exact number of processed bytes currently between ldisc output
+///      and hardware driver completion.
 ///   2. Driver-level pending output (for async/interrupt-driven drivers).
-///
-/// For synchronous backends (serial console, vconsole) the driver pending
-/// count is always zero because `write_output` blocks until the byte is on
-/// the wire.  For PTYs, output is immediately buffered in the peer so the
-/// driver also reports zero.
 #[must_use]
 pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;

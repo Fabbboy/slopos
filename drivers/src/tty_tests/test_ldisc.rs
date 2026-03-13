@@ -16139,5 +16139,319 @@ pub fn test_ctty_can_be_ctty_none_driver() -> TestResult {
 }
 
 // ===========================================================================
+// TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
+// ===========================================================================
+
+pub fn test_inflight_byte_granularity() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let before = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
+    if before != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - inflight before write should be 0, got {}",
+            before
+        );
+        return TestResult::Fail;
+    }
+
+    let data = b"Hello, byte accounting!";
+    let _ = tty::write(TtyIndex(0), data, false);
+
+    let after = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
+    if after != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - inflight after sync write should be 0, got {}",
+            after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+pub fn test_tiocoutq_returns_bytes_not_ops() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+
+    TTY_OUTPUT_INFLIGHT[slot].store(256, Ordering::Release);
+
+    let result = tty::output_queued_bytes(idx);
+
+    TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+
+    match result {
+        Ok(256) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!("TTY_TEST: BUG - TIOCOUTQ expected 256 bytes, got {}", n);
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - TIOCOUTQ error: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_tiocoutq_zero_after_sync_write() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let _ = tty::write(TtyIndex(0), b"test output drain", false);
+
+    match tty::output_queued_bytes(TtyIndex(0)) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!(
+                "TTY_TEST: BUG - TIOCOUTQ after sync write should be 0, got {}",
+                n
+            );
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - TIOCOUTQ error: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_tiocoutq_various_byte_counts() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    let idx = TtyIndex(0);
+    let slot = idx.0 as usize;
+
+    for &count in &[1u32, 42, 100, 512, 4096] {
+        TTY_OUTPUT_INFLIGHT[slot].store(count, Ordering::Release);
+        match tty::output_queued_bytes(idx) {
+            Ok(n) if n as u32 == count => {}
+            Ok(n) => {
+                TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+                klog_info!("TTY_TEST: BUG - TIOCOUTQ expected {}, got {}", count, n);
+                return TestResult::Fail;
+            }
+            Err(e) => {
+                TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+                klog_info!("TTY_TEST: BUG - TIOCOUTQ error for {}: {:?}", count, e);
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+    TestResult::Pass
+}
+
+pub fn test_packet_mode_1byte_with_events() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
+        return TestResult::Fail;
+    };
+
+    tty::set_packet_mode(master, true).unwrap();
+
+    let mut t = tty::get_termios(slave).unwrap();
+    t.c_iflag |= slopos_abi::syscall::IXON;
+    tty::set_termios(slave, &t).unwrap();
+
+    let mut buf = [0u8; 1];
+    match tty::read(master, &mut buf, true) {
+        Ok(1) if buf[0] != 0 => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet 1-byte with events: expected Ok(1) with event, got {:?}, buf[0]=0x{:02X}",
+                other,
+                buf[0]
+            );
+            let _ = tty::set_packet_mode(master, false);
+            t.c_iflag &= !slopos_abi::syscall::IXON;
+            let _ = tty::set_termios(slave, &t);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::set_packet_mode(master, false);
+    t.c_iflag &= !slopos_abi::syscall::IXON;
+    let _ = tty::set_termios(slave, &t);
+    packet_mode_teardown_pty(master, slave, &saved);
+    TestResult::Pass
+}
+
+pub fn test_packet_mode_1byte_data_no_events() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
+        return TestResult::Fail;
+    };
+
+    tty::set_packet_mode(master, true).unwrap();
+
+    let _ = tty::write(slave, b"Z", false);
+
+    let mut buf = [0u8; 1];
+    match tty::read(master, &mut buf, true) {
+        Ok(0) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet 1-byte with data but no events: expected Ok(0), got {:?}",
+                other
+            );
+            let _ = tty::set_packet_mode(master, false);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let mut big_buf = [0u8; 16];
+    match tty::read(master, &mut big_buf, true) {
+        Ok(n)
+            if n >= 2 && big_buf[0] == slopos_abi::syscall::TIOCPKT_DATA && big_buf[1] == b'Z' => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet data still available after 1-byte read: expected TIOCPKT_DATA + 'Z', got {:?}",
+                other
+            );
+            let _ = tty::set_packet_mode(master, false);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::set_packet_mode(master, false);
+    packet_mode_teardown_pty(master, slave, &saved);
+    TestResult::Pass
+}
+
+/// PTY master uses RawDisc (VMIN=0, VTIME=0) so empty nonblock reads
+/// return immediately with 0 bytes.
+pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
+        return TestResult::Fail;
+    };
+
+    tty::set_packet_mode(master, true).unwrap();
+
+    let mut buf = [0u8; 1];
+    match tty::read(master, &mut buf, true) {
+        Ok(0) => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet 1-byte no data nonblock: expected Ok(0), got {:?}",
+                other
+            );
+            let _ = tty::set_packet_mode(master, false);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::set_packet_mode(master, false);
+    packet_mode_teardown_pty(master, slave, &saved);
+    TestResult::Pass
+}
+
+pub fn test_packet_mode_2byte_works() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet_mode setup failed");
+        return TestResult::Fail;
+    };
+
+    tty::set_packet_mode(master, true).unwrap();
+
+    let _ = tty::write(slave, b"Q", false);
+
+    let mut buf = [0u8; 2];
+    match tty::read(master, &mut buf, true) {
+        Ok(2) if buf[0] == slopos_abi::syscall::TIOCPKT_DATA && buf[1] == b'Q' => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet 2-byte: expected [DATA, 'Q'], got {:?}, buf={:?}",
+                other,
+                buf
+            );
+            let _ = tty::set_packet_mode(master, false);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::set_packet_mode(master, false);
+    packet_mode_teardown_pty(master, slave, &saved);
+    TestResult::Pass
+}
+
+pub fn test_tiocoutq_byte_accounting_regression_idle() -> TestResult {
+    tty::table::tty_table_init();
+    match tty::output_queued_bytes(TtyIndex(0)) {
+        Ok(0) => TestResult::Pass,
+        Ok(n) => {
+            klog_info!("TTY_TEST: BUG - regression idle expected 0, got {}", n);
+            TestResult::Fail
+        }
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - regression idle error: {:?}", e);
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_packet_mode_data_prefix_regression() -> TestResult {
+    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+        klog_info!("TTY_TEST: BUG - packet regression setup failed");
+        return TestResult::Fail;
+    };
+
+    tty::set_packet_mode(master, true).unwrap();
+
+    let _ = tty::write(slave, b"AB", false);
+    let mut buf = [0u8; 16];
+    match tty::read(master, &mut buf, true) {
+        Ok(n)
+            if n >= 3
+                && buf[0] == slopos_abi::syscall::TIOCPKT_DATA
+                && buf[1] == b'A'
+                && buf[2] == b'B' => {}
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - packet regression: expected [DATA, 'A', 'B'], got {:?}",
+                other
+            );
+            let _ = tty::set_packet_mode(master, false);
+            packet_mode_teardown_pty(master, slave, &saved);
+            return TestResult::Fail;
+        }
+    }
+
+    let _ = tty::set_packet_mode(master, false);
+    packet_mode_teardown_pty(master, slave, &saved);
+    TestResult::Pass
+}
+
+pub fn test_echo_inflight_byte_granularity() -> TestResult {
+    use core::sync::atomic::Ordering;
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    tty::push_input(TtyIndex(0), b'X');
+
+    let after = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
+    if after != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - inflight after echo should be 0, got {}",
+            after
+        );
+        drain_tty_nonblock(TtyIndex(0));
+        return TestResult::Fail;
+    }
+
+    drain_tty_nonblock(TtyIndex(0));
+    TestResult::Pass
+}
+
+// ===========================================================================
 // Test suite registration
 // ===========================================================================

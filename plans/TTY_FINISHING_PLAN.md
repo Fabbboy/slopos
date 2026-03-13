@@ -1,9 +1,9 @@
 # SlopOS TTY Finishing Touches Plan
 
-> **Status**: 22-phase gold-standard roadmap — Phases 1–17 COMPLETE, Phases 18–22 pending (post-audit hardening)
+> **Status**: 22-phase gold-standard roadmap — Phases 1–18 COMPLETE, Phases 19–22 pending (post-audit hardening)
 > **Predecessor**: TTY Overhaul Plan (42 phases, all complete) — the foundational rewrite from global singleton to per-terminal subsystem
 > **Target**: Close the remaining architectural gaps identified in the Linux N_TTY / RedoxOS / Asterinas comparative review, bringing the TTY subsystem to production-grade quality
-> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1579 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, fg_pgrp change wake).
+> **Current**: `drivers/src/tty/` — 14 files, ~7900 lines, ~1590 regression tests. Clean per-TTY API, PTY with generation-safe peer handles, per-slot locking, full POSIX termios flag coverage (c_iflag, c_oflag, c_lflag, c_cc), session/job control, VT100 emulation with UTF-8 + 256-color/truecolor + DEC private modes, packet mode, EXTPROC, vhangup. Zero TODO/FIXME/HACK comments. Module decomposition complete — `mod.rs` slimmed from ~2543 to ~239 lines with focused sub-modules for I/O, termios, job control, lifecycle, and poll. POSIX controlling terminal semantics hardened (PTY master ctty guard, TIOCSPGRP ctty validation, fg_pgrp change wake). TIOCOUTQ byte-accurate accounting, packet mode 1-byte buffer edge case fixed.
 > **Post-Audit**: Phases 17–22 address findings from a comprehensive gold-standard audit against Linux N_TTY, RedoxOS, Asterinas, and POSIX.1-2024. Focus: POSIX semantic correctness, Rust idiomaticity, encapsulation, and forward-looking architecture.
 
 ---
@@ -69,7 +69,7 @@ A comparative review against Linux N_TTY and RedoxOS identified **7 initial gaps
 | | | | | |
 | **Post-Audit Hardening (Phases 17–22)** | | | | |
 | 17 | POSIX controlling terminal semantics (ctty guard, O_NOCTTY, TIOCSPGRP validation, fg_pgrp wake) | P0 | Medium | **DONE** ✅ |
-| 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | Pending |
+| 18 | TIOCOUTQ byte accounting & packet mode edge fix | P1 | Small | **DONE** ✅ |
 | 19 | Missing ioctls (TIOCGSID, TIOCEXCL) & HUPCL enforcement | P1 | Small | Pending |
 | 20 | Rust encapsulation & type safety (privatize fields, TtyFlags, remove redundant state) | P2 | Medium | Pending |
 | 21 | Deferred actions RAII & boilerplate reduction | P2 | Medium | Pending |
@@ -1373,7 +1373,7 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 
 ## 21. Phase 18: TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
 
-**Status**: Pending
+**Status**: **DONE** ✅ — Changed `TTY_OUTPUT_INFLIGHT` from operation-count to byte-count granularity: `fetch_add(out_len)` / `fetch_sub(out_len)` in both the write path and echo path in `io.rs`. `output_queued_bytes()` (TIOCOUTQ) now returns accurate byte counts instead of operation counts. Fixed packet mode read with `buf.len() < 2` edge case: when data is available but buffer is too small for prefix + payload, returns `Ok(0)` instead of busy-looping. 11 regression tests added.
 
 > **Priority**: P1 — `TIOCOUTQ` currently returns wrong values (counts operations, not bytes). Packet mode has an edge case with 1-byte read buffers. Both are bugs that will confuse programs but won't crash them.
 > **Principle**: Fix two distinct output/read accounting bugs. Bundled because both are small, self-contained fixes in `io.rs` / `table.rs`.
@@ -1411,14 +1411,14 @@ This phase bundles four interconnected controlling terminal / job control fixes.
 - Regression: all existing TIOCOUTQ and packet mode tests pass.
 - `just build` + `just test` gate.
 
-### 18.4 Files expected to change
+### 18.4 Files changed
 
 | File | Change |
 |------|--------|
-| `drivers/src/tty/table.rs` | Change `TTY_OUTPUT_INFLIGHT` to byte-granularity (or remove entirely if driver-based approach used) |
-| `drivers/src/tty/io.rs` | Update `write_driver_unlocked` to track bytes not calls; fix packet mode `buf.len() == 1` edge case in read path |
-| `drivers/src/tty/termios.rs` | Update `output_queued_bytes()` if switching to pure driver-based accounting |
-| `drivers/src/tty_tests.rs` | Byte-granularity TIOCOUTQ tests, packet mode 1-byte buffer tests |
+| `drivers/src/tty/table.rs` | Updated `TTY_OUTPUT_INFLIGHT` doc comment to reflect byte-granularity semantics (was operation-count) |
+| `drivers/src/tty/io.rs` | Changed write path `fetch_add(1)`/`fetch_sub(1)` to `fetch_add(out_len as u32)`/`fetch_sub(out_len as u32)` for both the main write path and echo output path. Fixed packet mode read: when `buf.len() < 2` and data is available but no packet events, returns `Ok(0)` instead of falling through to wait logic (which caused busy-loop). Updated `output_queued_bytes()` doc comment. |
+| `drivers/src/tty_tests/test_ldisc.rs` | Added 11 tests: `test_inflight_byte_granularity`, `test_tiocoutq_returns_bytes_not_ops`, `test_tiocoutq_zero_after_sync_write`, `test_tiocoutq_various_byte_counts`, `test_packet_mode_1byte_with_events`, `test_packet_mode_1byte_data_no_events`, `test_packet_mode_1byte_no_data_nonblock`, `test_packet_mode_2byte_works`, `test_tiocoutq_byte_accounting_regression_idle`, `test_packet_mode_data_prefix_regression`, `test_echo_inflight_byte_granularity` |
+| `drivers/src/tty_tests/mod.rs` | Registered 11 new tests in suite |
 
 ---
 

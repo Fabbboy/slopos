@@ -76,14 +76,16 @@ pub static TTY_OUTPUT_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new()
 /// global `POLL_NOTIFY`.
 pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }; MAX_TTYS];
 
-/// Per-TTY output-in-flight counter.  Tracks the number of `write()`
-/// operations that have processed output through the line discipline but
-/// have not yet completed the unlocked hardware write.  Used by
-/// `wait_output_idle()` to block `TCSETSW` /
-/// `TCSETSF` until all in-flight output reaches the hardware.
+/// Per-TTY output-in-flight **byte** counter.  Tracks the number of
+/// bytes that have been processed through the line discipline but have
+/// not yet completed the unlocked hardware write.  Used by
+/// `wait_output_idle()` to block `TCSETSW` / `TCSETSF` until all
+/// in-flight output reaches the hardware, and by `TIOCOUTQ` to report
+/// accurate queue depth.
 ///
-/// Increment **before** `write_driver_unlocked`, decrement **after**,
-/// then wake `TTY_OUTPUT_WAITERS` so drain waiters re-check.
+/// Increment by the chunk byte count **before** `write_driver_unlocked`,
+/// decrement by the same count **after**, then wake
+/// `TTY_OUTPUT_WAITERS` so drain waiters re-check.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
 /// Per-TTY generation counter.  Incremented each time a slot transitions

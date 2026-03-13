@@ -821,5 +821,17 @@ slopos_lib::define_test_suite!(
         test_ctty_set_fg_pgrp_checked_completes_without_deadlock,
         test_ctty_pty_master_ctty_does_not_attach_session,
         test_ctty_can_be_ctty_none_driver,
+        // TIOCOUTQ Byte Accounting & Packet Mode Edge Fix
+        test_inflight_byte_granularity,
+        test_tiocoutq_returns_bytes_not_ops,
+        test_tiocoutq_zero_after_sync_write,
+        test_tiocoutq_various_byte_counts,
+        test_packet_mode_1byte_with_events,
+        test_packet_mode_1byte_data_no_events,
+        test_packet_mode_1byte_no_data_nonblock,
+        test_packet_mode_2byte_works,
+        test_tiocoutq_byte_accounting_regression_idle,
+        test_packet_mode_data_prefix_regression,
+        test_echo_inflight_byte_granularity,
     ]
 );
