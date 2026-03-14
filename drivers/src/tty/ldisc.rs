@@ -135,9 +135,52 @@ pub(crate) trait LdiscOps {
     fn clear_flusho(&mut self);
 }
 
+const ECHO_BUF_CAP: usize = 256;
+
+pub struct EchoBuf {
+    buf: [u8; ECHO_BUF_CAP],
+    len: usize,
+}
+
+impl EchoBuf {
+    const fn new() -> Self {
+        Self {
+            buf: [0; ECHO_BUF_CAP],
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, byte: u8) {
+        if self.len < ECHO_BUF_CAP {
+            self.buf[self.len] = byte;
+            self.len += 1;
+        }
+    }
+
+    pub fn extend(&mut self, bytes: &[u8]) {
+        let remaining = ECHO_BUF_CAP.saturating_sub(self.len);
+        let n = core::cmp::min(remaining, bytes.len());
+        if n > 0 {
+            self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+            self.len += n;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 pub struct BatchResult {
-    pub echo: [u8; 256],
-    pub echo_len: usize,
+    pub echo: EchoBuf,
     pub signal: Option<(u8, bool)>,
     pub should_wake: bool,
     pub throttle_check: bool,
@@ -146,27 +189,10 @@ pub struct BatchResult {
 impl BatchResult {
     const fn new() -> Self {
         Self {
-            echo: [0; 256],
-            echo_len: 0,
+            echo: EchoBuf::new(),
             signal: None,
             should_wake: false,
             throttle_check: false,
-        }
-    }
-
-    fn push_echo(&mut self, byte: u8) {
-        if self.echo_len < self.echo.len() {
-            self.echo[self.echo_len] = byte;
-            self.echo_len += 1;
-        }
-    }
-
-    fn push_echo_slice(&mut self, bytes: &[u8]) {
-        let remaining = self.echo.len().saturating_sub(self.echo_len);
-        let copy_len = core::cmp::min(remaining, bytes.len());
-        if copy_len > 0 {
-            self.echo[self.echo_len..self.echo_len + copy_len].copy_from_slice(&bytes[..copy_len]);
-            self.echo_len += copy_len;
         }
     }
 }
@@ -1366,7 +1392,18 @@ impl LineDisc {
     /// ISIG signal processing and IXON flow control are already handled
     /// upstream in `input_char()` before this method is called.
     fn extproc_input(&mut self, c: u8) -> InputAction {
-        // Overflow tracking centralised in push_cooked().
+        if c == 0xFF && self.termios.input_flags().contains(InputFlags::PARMRK) {
+            if self.cooked_free() < 2 {
+                if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
+                    return InputAction::Bell;
+                }
+                return InputAction::None;
+            }
+            self.push_cooked(0xFF);
+            self.push_cooked(0xFF);
+            return InputAction::None;
+        }
+
         if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
                 return InputAction::Bell;
@@ -1379,6 +1416,28 @@ impl LineDisc {
 
     /// Non-canonical (raw) mode: push directly to cooked buffer.
     fn raw_input(&mut self, c: u8, lflag: LocalFlags) -> InputAction {
+        // PARMRK 0xFF escaping: when PARMRK is set, a literal 0xFF must be
+        // doubled (0xFF 0xFF) so userland can distinguish it from the PARMRK
+        // break prefix (0xFF 0x00 0x00).  Linux n_tty.c does this in
+        // n_tty_receive_char_special().
+        if c == 0xFF && self.termios.input_flags().contains(InputFlags::PARMRK) {
+            if self.cooked_free() < 2 {
+                if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
+                    return InputAction::Bell;
+                }
+                return InputAction::None;
+            }
+            self.push_cooked(0xFF);
+            self.push_cooked(0xFF);
+            if lflag.contains(LocalFlags::ECHO) {
+                return InputAction::Echo {
+                    buf: [0xFF, 0, 0, 0, 0, 0, 0, 0],
+                    len: 1,
+                };
+            }
+            return InputAction::None;
+        }
+
         // Overflow tracking centralised in push_cooked().
         if !self.push_cooked(c) {
             if self.termios.input_flags().contains(InputFlags::IMAXBEL) {
@@ -1757,9 +1816,19 @@ impl LineDisc {
     }
 
     fn flush_edit_to_cooked(&mut self) {
+        let parmrk = self.termios.input_flags().contains(InputFlags::PARMRK);
         let mut i = 0usize;
         while i < self.edit_len {
-            if !self.push_cooked(self.edit_buf[i]) {
+            let byte = self.edit_buf[i];
+            // PARMRK 0xFF escape: double literal 0xFF at flush time so the
+            // edit buffer stays clean for display/backspace purposes.
+            if parmrk && byte == 0xFF {
+                if self.cooked_free() < 2 {
+                    break;
+                }
+                self.push_cooked(0xFF);
+                self.push_cooked(0xFF);
+            } else if !self.push_cooked(byte) {
                 break;
             }
             i += 1;
@@ -1875,10 +1944,10 @@ impl LdiscOps for LineDisc {
         for &event in events {
             match self.input_char(event) {
                 InputAction::Echo { buf, len } => {
-                    result.push_echo_slice(&buf[..len as usize]);
+                    result.echo.extend(&buf[..len as usize]);
                 }
                 InputAction::Bell => {
-                    result.push_echo(0x07);
+                    result.echo.push(0x07);
                 }
                 InputAction::Signal(sig) => {
                     result.signal = Some((
@@ -1888,12 +1957,12 @@ impl LdiscOps for LineDisc {
                     break;
                 }
                 InputAction::ReprintLine => {
-                    result.push_echo(b'\n');
-                    result.push_echo_slice(self.edit_content());
+                    result.echo.push(b'\n');
+                    result.echo.extend(self.edit_content());
                 }
                 InputAction::KillLineEcho { columns } => {
                     for _ in 0..columns {
-                        result.push_echo_slice(&[0x08, 0x20, 0x08]);
+                        result.echo.extend(&[0x08, 0x20, 0x08]);
                     }
                 }
                 InputAction::None => {}

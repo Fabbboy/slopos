@@ -60,9 +60,11 @@ impl From<u8> for InputEvent {
 /// The TTY core calls these methods — the driver never touches the line
 /// discipline directly.
 pub trait TtyDriver {
-    /// Write processed output bytes to the terminal hardware (serial port,
-    /// framebuffer, etc.).
-    fn write_output(&self, buf: &[u8]);
+    /// Write processed output bytes to the terminal hardware.
+    ///
+    /// Returns the number of bytes accepted.  Synchronous drivers always
+    /// return `buf.len()`; PTY drivers may return less (short write).
+    fn write_output(&self, buf: &[u8]) -> usize;
 
     /// Poll for pending hardware input, returning bytes read into `out`.
     /// Called by `Tty::drain_hw_input_locked`.  May return 0 if no data is available
@@ -121,18 +123,12 @@ pub enum TtyDriverKind {
 }
 
 impl TtyDriverKind {
-    /// Delegate `write_output` to the inner driver.
-    pub fn write_output(&self, buf: &[u8]) {
+    pub fn write_output(&self, buf: &[u8]) -> usize {
         match self {
             Self::SerialConsole(d) => d.write_output(buf),
             Self::VConsole(d) => d.write_output(buf),
-            Self::PtyMaster { peer } => {
-                pty::master_write(*peer, buf);
-            }
-            Self::PtySlave { peer } => {
-                // Short writes flow back through write_driver_unlocked's return value.
-                let _ = pty::slave_write(*peer, buf);
-            }
+            Self::PtyMaster { peer } => pty::master_write(*peer, buf),
+            Self::PtySlave { peer } => pty::slave_write(*peer, buf),
         }
     }
 
@@ -281,10 +277,11 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
 pub struct SerialConsoleDriver;
 
 impl TtyDriver for SerialConsoleDriver {
-    fn write_output(&self, buf: &[u8]) {
+    fn write_output(&self, buf: &[u8]) -> usize {
         for &b in buf {
             serial::serial_putc_com1(b);
         }
+        buf.len()
     }
 
     fn drain_input(&self, out: &mut [u8]) -> usize {
@@ -318,11 +315,12 @@ impl TtyDriver for SerialConsoleDriver {
 pub struct VConsoleDriver;
 
 impl TtyDriver for VConsoleDriver {
-    fn write_output(&self, buf: &[u8]) {
+    fn write_output(&self, buf: &[u8]) -> usize {
         super::vconsole::write(buf);
         for &b in buf {
             serial::serial_putc_com1(b);
         }
+        buf.len()
     }
 
     fn drain_input(&self, _out: &mut [u8]) -> usize {

@@ -86,6 +86,12 @@ pub(crate) enum VtAction {
     InsertLines(u16),
     /// Delete N lines at cursor (CSI M / DL).
     DeleteLines(u16),
+    /// Delete N characters at cursor, shifting remainder left (CSI P / DCH).
+    DeleteChars(u16),
+    /// Insert N blank characters at cursor, shifting remainder right (CSI @ / ICH).
+    InsertChars(u16),
+    /// Erase N characters at cursor without shifting (CSI X / ECH).
+    EraseChars(u16),
     /// DEC private set mode (CSI ? N h).
     SetMode(u16),
     /// DEC private reset mode (CSI ? N l).
@@ -556,6 +562,9 @@ impl VtParser {
             }
             b'L' => VtAction::InsertLines(self.param(0, 1)),
             b'M' => VtAction::DeleteLines(self.param(0, 1)),
+            b'P' => VtAction::DeleteChars(self.param(0, 1)),
+            b'@' => VtAction::InsertChars(self.param(0, 1)),
+            b'X' => VtAction::EraseChars(self.param(0, 1)),
             b'S' => VtAction::ScrollUp(self.param(0, 1)),
             b'T' => VtAction::ScrollDown(self.param(0, 1)),
             b'm' => self.dispatch_sgr(),

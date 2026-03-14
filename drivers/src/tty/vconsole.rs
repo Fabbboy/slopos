@@ -11,6 +11,9 @@
 //! Unicode codepoint cells (u32), UTF-8 decode, 256-color/truecolor
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
+extern crate alloc;
+
+use alloc::vec;
 use core::ptr;
 
 use slopos_abi::font::{
@@ -88,6 +91,96 @@ impl Cell {
         Self {
             codepoint: b' ' as u32,
             attrs: CellAttributes::default_colors(),
+        }
+    }
+}
+
+pub(crate) struct CellGrid {
+    cells: Option<alloc::boxed::Box<[Cell]>>,
+    cols: usize,
+}
+
+impl CellGrid {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            cells: None,
+            cols: 0,
+        }
+    }
+
+    pub(crate) fn allocate(&mut self, rows: usize, cols: usize) {
+        let total = rows.saturating_mul(cols);
+        if total == 0 {
+            self.cells = None;
+            self.cols = 0;
+            return;
+        }
+        if let Some(ref existing) = self.cells {
+            if existing.len() == total && self.cols == cols {
+                self.clear_all();
+                return;
+            }
+        }
+        self.cells = Some(vec![Cell::blank(); total].into_boxed_slice());
+        self.cols = cols;
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, row: usize, col: usize) -> Cell {
+        match self.cells.as_ref() {
+            Some(c) => {
+                let idx = row * self.cols + col;
+                if idx < c.len() { c[idx] } else { Cell::blank() }
+            }
+            None => Cell::blank(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, row: usize, col: usize, cell: Cell) {
+        if let Some(ref mut c) = self.cells {
+            let idx = row * self.cols + col;
+            if idx < c.len() {
+                c[idx] = cell;
+            }
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn get_mut(&mut self, row: usize, col: usize) -> Option<&mut Cell> {
+        if let Some(ref mut c) = self.cells {
+            let idx = row * self.cols + col;
+            c.get_mut(idx)
+        } else {
+            None
+        }
+    }
+
+    fn row_copy(&mut self, dst_row: usize, src_row: usize, n_cols: usize) {
+        if let Some(ref mut c) = self.cells {
+            let n = n_cols.min(self.cols);
+            let src = src_row * self.cols;
+            let dst = dst_row * self.cols;
+            if src + n <= c.len() && dst + n <= c.len() {
+                c.copy_within(src..src + n, dst);
+            }
+        }
+    }
+
+    fn copy_from(&mut self, other: &CellGrid, rows: usize, cols: usize) {
+        for r in 0..rows {
+            for c in 0..cols {
+                self.set(r, c, other.get(r, c));
+            }
+        }
+    }
+
+    fn clear_all(&mut self) {
+        if let Some(ref mut c) = self.cells {
+            for cell in c.iter_mut() {
+                *cell = Cell::blank();
+            }
         }
     }
 }
@@ -195,14 +288,14 @@ pub(crate) struct VConsoleState {
     pub(crate) rows: u16,
     pub(crate) cols: u16,
     pub(crate) fb: Option<VConsoleFbInfo>,
-    pub(crate) cells: [[Cell; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+    pub(crate) cells: CellGrid,
     pub(crate) parser: VtParser,
     pub(crate) cursor_attrs: CursorAttributes,
     pub(crate) saved_cursor_row: u16,
     pub(crate) saved_cursor_col: u16,
     pub(crate) saved_cursor_attrs: CursorAttributes,
     pub(crate) cursor_visible: bool,
-    pub(crate) alt_cells: [[Cell; VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+    pub(crate) alt_cells: CellGrid,
     pub(crate) alt_screen_cursor_row: u16,
     pub(crate) alt_screen_cursor_col: u16,
     pub(crate) in_alt_screen: bool,
@@ -218,14 +311,14 @@ impl VConsoleState {
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
             fb: None,
-            cells: [[Cell::blank(); VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+            cells: CellGrid::empty(),
             parser: VtParser::new(),
             cursor_attrs: CursorAttributes::default_attrs(),
             saved_cursor_row: 0,
             saved_cursor_col: 0,
             saved_cursor_attrs: CursorAttributes::default_attrs(),
             cursor_visible: true,
-            alt_cells: [[Cell::blank(); VCONSOLE_MAX_COLS]; VCONSOLE_MAX_ROWS],
+            alt_cells: CellGrid::empty(),
             alt_screen_cursor_row: 0,
             alt_screen_cursor_col: 0,
             in_alt_screen: false,
@@ -259,6 +352,9 @@ impl VConsoleState {
             VtAction::SetScrollRegion { top, bottom } => self.set_scroll_region(top, bottom),
             VtAction::InsertLines(n) => self.insert_lines(n),
             VtAction::DeleteLines(n) => self.delete_lines(n),
+            VtAction::DeleteChars(n) => self.delete_chars(n),
+            VtAction::InsertChars(n) => self.insert_chars(n),
+            VtAction::EraseChars(n) => self.erase_chars(n),
             VtAction::SetMode(mode) => self.set_dec_mode(mode),
             VtAction::ResetMode(mode) => self.reset_dec_mode(mode),
             VtAction::Nop => {}
@@ -286,30 +382,45 @@ impl VConsoleState {
         };
 
         if wide && col + 1 < cols {
-            self.cells[row][col] = Cell {
-                codepoint: cp,
-                attrs: cell_attr,
-            };
-            self.cells[row][col + 1] = Cell {
-                codepoint: CONTINUATION_CODEPOINT,
-                attrs: cell_attr,
-            };
+            self.cells.set(
+                row,
+                col,
+                Cell {
+                    codepoint: cp,
+                    attrs: cell_attr,
+                },
+            );
+            self.cells.set(
+                row,
+                col + 1,
+                Cell {
+                    codepoint: CONTINUATION_CODEPOINT,
+                    attrs: cell_attr,
+                },
+            );
             self.render_cell(self.cursor_row, self.cursor_col);
             self.render_cell(self.cursor_row, self.cursor_col + 1);
             self.cursor_col = self.cursor_col.saturating_add(2);
         } else if wide {
-            // At last column — no room for double-width; render replacement.
-            self.cells[row][col] = Cell {
-                codepoint: b' ' as u32,
-                attrs: cell_attr,
-            };
+            self.cells.set(
+                row,
+                col,
+                Cell {
+                    codepoint: b' ' as u32,
+                    attrs: cell_attr,
+                },
+            );
             self.render_cell(self.cursor_row, self.cursor_col);
             self.cursor_col = self.cursor_col.saturating_add(1);
         } else {
-            self.cells[row][col] = Cell {
-                codepoint: cp,
-                attrs: cell_attr,
-            };
+            self.cells.set(
+                row,
+                col,
+                Cell {
+                    codepoint: cp,
+                    attrs: cell_attr,
+                },
+            );
             self.render_cell(self.cursor_row, self.cursor_col);
             self.cursor_col = self.cursor_col.saturating_add(1);
         }
@@ -331,12 +442,11 @@ impl VConsoleState {
                     let row = self.cursor_row as usize;
                     let col = self.cursor_col as usize;
                     if row < self.rows as usize && col < self.cols as usize {
-                        // If erasing a continuation cell, also clear the lead cell.
-                        if self.cells[row][col].codepoint == CONTINUATION_CODEPOINT && col > 0 {
-                            self.cells[row][col - 1] = Cell::blank();
+                        if self.cells.get(row, col).codepoint == CONTINUATION_CODEPOINT && col > 0 {
+                            self.cells.set(row, col - 1, Cell::blank());
                             self.render_cell(self.cursor_row, (col - 1) as u16);
                         }
-                        self.cells[row][col] = Cell::blank();
+                        self.cells.set(row, col, Cell::blank());
                         self.render_cell(self.cursor_row, self.cursor_col);
                     }
                 }
@@ -394,44 +504,41 @@ impl VConsoleState {
         let cols = self.cols as usize;
         let cr = self.cursor_row as usize;
         let cc = self.cursor_col as usize;
-        let clear_attr = CellAttributes {
-            fg: self.cursor_attrs.effective_fg(),
-            bg: self.cursor_attrs.effective_bg(),
+        let clear_cell = Cell {
+            codepoint: b' ' as u32,
+            attrs: CellAttributes {
+                fg: self.cursor_attrs.effective_fg(),
+                bg: self.cursor_attrs.effective_bg(),
+            },
         };
 
         match mode {
             EraseMode::ToEnd => {
                 if cr < rows {
                     for c in cc..cols {
-                        self.cells[cr][c] = Cell {
-                            codepoint: b' ' as u32,
-                            attrs: clear_attr,
-                        };
+                        self.cells.set(cr, c, clear_cell);
                     }
                     self.render_row_range(cr, cc, cols);
                 }
                 for r in (cr + 1)..rows {
-                    self.clear_row_with_attr(r, clear_attr);
+                    self.clear_row_with_attr(r, clear_cell.attrs);
                 }
             }
             EraseMode::ToStart => {
                 for r in 0..cr {
-                    self.clear_row_with_attr(r, clear_attr);
+                    self.clear_row_with_attr(r, clear_cell.attrs);
                 }
                 if cr < rows {
                     let end = if cc < cols { cc + 1 } else { cols };
                     for c in 0..end {
-                        self.cells[cr][c] = Cell {
-                            codepoint: b' ' as u32,
-                            attrs: clear_attr,
-                        };
+                        self.cells.set(cr, c, clear_cell);
                     }
                     self.render_row_range(cr, 0, end);
                 }
             }
             EraseMode::All => {
                 for r in 0..rows {
-                    self.clear_row_with_attr(r, clear_attr);
+                    self.clear_row_with_attr(r, clear_cell.attrs);
                 }
                 self.cursor_row = 0;
                 self.cursor_col = 0;
@@ -446,33 +553,30 @@ impl VConsoleState {
         if cr >= self.rows as usize {
             return;
         }
-        let clear_attr = CellAttributes {
-            fg: self.cursor_attrs.effective_fg(),
-            bg: self.cursor_attrs.effective_bg(),
+        let clear_cell = Cell {
+            codepoint: b' ' as u32,
+            attrs: CellAttributes {
+                fg: self.cursor_attrs.effective_fg(),
+                bg: self.cursor_attrs.effective_bg(),
+            },
         };
 
         match mode {
             EraseMode::ToEnd => {
                 for c in cc..cols {
-                    self.cells[cr][c] = Cell {
-                        codepoint: b' ' as u32,
-                        attrs: clear_attr,
-                    };
+                    self.cells.set(cr, c, clear_cell);
                 }
                 self.render_row_range(cr, cc, cols);
             }
             EraseMode::ToStart => {
                 let end = if cc < cols { cc + 1 } else { cols };
                 for c in 0..end {
-                    self.cells[cr][c] = Cell {
-                        codepoint: b' ' as u32,
-                        attrs: clear_attr,
-                    };
+                    self.cells.set(cr, c, clear_cell);
                 }
                 self.render_row_range(cr, 0, end);
             }
             EraseMode::All => {
-                self.clear_row_with_attr(cr, clear_attr);
+                self.clear_row_with_attr(cr, clear_cell.attrs);
             }
         }
     }
@@ -499,10 +603,7 @@ impl VConsoleState {
                 if row < sr_top + shift {
                     break;
                 }
-                let src = row - shift;
-                for c in 0..cols {
-                    self.cells[row][c] = self.cells[src][c];
-                }
+                self.cells.row_copy(row, row - shift, cols);
                 if row == sr_top + shift {
                     break;
                 }
@@ -513,7 +614,7 @@ impl VConsoleState {
         for r in sr_top..sr_top + shift {
             if r <= sr_bottom {
                 for c in 0..cols {
-                    self.cells[r][c] = Cell::blank();
+                    self.cells.set(r, c, Cell::blank());
                 }
             }
         }
@@ -609,16 +710,10 @@ impl VConsoleState {
         }
         let rows = self.rows as usize;
         let cols = self.cols as usize;
-        for r in 0..rows {
-            self.alt_cells[r][..cols].copy_from_slice(&self.cells[r][..cols]);
-        }
+        self.alt_cells.copy_from(&self.cells, rows, cols);
         self.alt_screen_cursor_row = self.cursor_row;
         self.alt_screen_cursor_col = self.cursor_col;
-        for r in 0..rows {
-            for c in 0..cols {
-                self.cells[r][c] = Cell::blank();
-            }
-        }
+        self.cells.clear_all();
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.in_alt_screen = true;
@@ -635,9 +730,7 @@ impl VConsoleState {
         }
         let rows = self.rows as usize;
         let cols = self.cols as usize;
-        for r in 0..rows {
-            self.cells[r][..cols].copy_from_slice(&self.alt_cells[r][..cols]);
-        }
+        self.cells.copy_from(&self.alt_cells, rows, cols);
         self.cursor_row = self.alt_screen_cursor_row;
         self.cursor_col = self.alt_screen_cursor_col;
         self.in_alt_screen = false;
@@ -674,9 +767,7 @@ impl VConsoleState {
         let shift = (n as usize).min(sr_bottom - cur + 1);
         let mut row = sr_bottom;
         while row >= cur + shift {
-            for c in 0..cols {
-                self.cells[row][c] = self.cells[row - shift][c];
-            }
+            self.cells.row_copy(row, row - shift, cols);
             if row == cur + shift {
                 break;
             }
@@ -685,7 +776,7 @@ impl VConsoleState {
         for r in cur..cur + shift {
             if r <= sr_bottom {
                 for c in 0..cols {
-                    self.cells[r][c] = Cell::blank();
+                    self.cells.set(r, c, Cell::blank());
                 }
             }
         }
@@ -693,6 +784,73 @@ impl VConsoleState {
             for c in 0..cols {
                 self.render_cell(r as u16, c as u16);
             }
+        }
+    }
+
+    fn delete_chars(&mut self, n: u16) {
+        let row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        let cols = self.cols as usize;
+        if row >= self.rows as usize || col >= cols {
+            return;
+        }
+        let shift = (n as usize).min(cols - col);
+        for c in col..cols {
+            let src = c + shift;
+            let cell = if src < cols {
+                self.cells.get(row, src)
+            } else {
+                Cell::blank()
+            };
+            self.cells.set(row, c, cell);
+        }
+        for c in col..cols {
+            self.render_cell(self.cursor_row, c as u16);
+        }
+    }
+
+    fn insert_chars(&mut self, n: u16) {
+        let row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        let cols = self.cols as usize;
+        if row >= self.rows as usize || col >= cols {
+            return;
+        }
+        let shift = (n as usize).min(cols - col);
+        let mut c = cols;
+        while c > col + shift {
+            c -= 1;
+            self.cells.set(row, c, self.cells.get(row, c - shift));
+        }
+        for c in col..col + shift {
+            if c < cols {
+                self.cells.set(row, c, Cell::blank());
+            }
+        }
+        for c in col..cols {
+            self.render_cell(self.cursor_row, c as u16);
+        }
+    }
+
+    fn erase_chars(&mut self, n: u16) {
+        let row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        let cols = self.cols as usize;
+        if row >= self.rows as usize || col >= cols {
+            return;
+        }
+        let end = (col + n as usize).min(cols);
+        let clear_attr = CellAttributes {
+            fg: self.cursor_attrs.effective_fg(),
+            bg: self.cursor_attrs.effective_bg(),
+        };
+        let clear_cell = Cell {
+            codepoint: b' ' as u32,
+            attrs: clear_attr,
+        };
+        for c in col..end {
+            self.cells.set(row, c, clear_cell);
+            self.render_cell(self.cursor_row, c as u16);
         }
     }
 
@@ -709,12 +867,10 @@ impl VConsoleState {
         for row in cur..=sr_bottom {
             let src = row + shift;
             if src <= sr_bottom {
-                for c in 0..cols {
-                    self.cells[row][c] = self.cells[src][c];
-                }
+                self.cells.row_copy(row, src, cols);
             } else {
                 for c in 0..cols {
-                    self.cells[row][c] = Cell::blank();
+                    self.cells.set(row, c, Cell::blank());
                 }
             }
         }
@@ -761,11 +917,12 @@ impl VConsoleState {
             return;
         }
         let cols = self.cols as usize;
+        let clear_cell = Cell {
+            codepoint: b' ' as u32,
+            attrs: attr,
+        };
         for c in 0..cols {
-            self.cells[row][c] = Cell {
-                codepoint: b' ' as u32,
-                attrs: attr,
-            };
+            self.cells.set(row, c, clear_cell);
         }
         for c in 0..cols {
             self.render_cell(row as u16, c as u16);
@@ -801,7 +958,7 @@ impl VConsoleState {
                     let row = self.cursor_row as usize;
                     let col = self.cursor_col as usize;
                     if row < self.rows as usize && col < self.cols as usize {
-                        self.cells[row][col] = Cell::blank();
+                        self.cells.set(row, col, Cell::blank());
                         self.render_cell(self.cursor_row, self.cursor_col);
                     }
                 }
@@ -814,13 +971,17 @@ impl VConsoleState {
                 let row = self.cursor_row as usize;
                 let col = self.cursor_col as usize;
                 if row < self.rows as usize && col < self.cols as usize {
-                    self.cells[row][col] = Cell {
-                        codepoint: b as u32,
-                        attrs: CellAttributes {
-                            fg: self.cursor_attrs.effective_fg(),
-                            bg: self.cursor_attrs.effective_bg(),
+                    self.cells.set(
+                        row,
+                        col,
+                        Cell {
+                            codepoint: b as u32,
+                            attrs: CellAttributes {
+                                fg: self.cursor_attrs.effective_fg(),
+                                bg: self.cursor_attrs.effective_bg(),
+                            },
                         },
-                    };
+                    );
                     self.render_cell(self.cursor_row, self.cursor_col);
                     self.cursor_col = self.cursor_col.saturating_add(1);
                 }
@@ -844,11 +1005,10 @@ impl VConsoleState {
         }
 
         for row in (sr_top + 1)..=sr_bottom {
-            let (head, tail) = self.cells.split_at_mut(row);
-            head[row - 1][..cols].copy_from_slice(&tail[0][..cols]);
+            self.cells.row_copy(row - 1, row, cols);
         }
         for c in 0..cols {
-            self.cells[sr_bottom][c] = Cell::blank();
+            self.cells.set(sr_bottom, c, Cell::blank());
         }
 
         let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
@@ -893,7 +1053,7 @@ impl VConsoleState {
             return;
         }
 
-        let cell = self.cells[row_usize][col_usize];
+        let cell = self.cells.get(row_usize, col_usize);
         let attrs = &cell.attrs;
         let cp = cell.codepoint;
         let glyph = if cp == CONTINUATION_CODEPOINT {
@@ -927,7 +1087,7 @@ impl VConsoleState {
         }
         let cols = self.cols as usize;
         for c in 0..cols {
-            self.cells[row_usize][c] = Cell::blank();
+            self.cells.set(row_usize, c, Cell::blank());
         }
         for col in 0..cols {
             self.render_cell(row, col as u16);
@@ -948,6 +1108,10 @@ impl VConsoleState {
             self.cols = DEFAULT_COLS;
             self.rows = DEFAULT_ROWS;
         }
+
+        self.cells.allocate(self.rows as usize, self.cols as usize);
+        self.alt_cells
+            .allocate(self.rows as usize, self.cols as usize);
 
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
@@ -1056,22 +1220,18 @@ pub(crate) fn reset_for_tests() {
     state.rows = DEFAULT_ROWS;
     state.cols = DEFAULT_COLS;
     state.fb = None;
-    for r in 0..VCONSOLE_MAX_ROWS {
-        for c in 0..VCONSOLE_MAX_COLS {
-            state.cells[r][c] = Cell::blank();
-        }
-    }
+    state
+        .cells
+        .allocate(DEFAULT_ROWS as usize, DEFAULT_COLS as usize);
     state.parser = VtParser::new();
     state.cursor_attrs = CursorAttributes::default_attrs();
     state.saved_cursor_row = 0;
     state.saved_cursor_col = 0;
     state.saved_cursor_attrs = CursorAttributes::default_attrs();
     state.cursor_visible = true;
-    for r in 0..VCONSOLE_MAX_ROWS {
-        for c in 0..VCONSOLE_MAX_COLS {
-            state.alt_cells[r][c] = Cell::blank();
-        }
-    }
+    state
+        .alt_cells
+        .allocate(DEFAULT_ROWS as usize, DEFAULT_COLS as usize);
     state.alt_screen_cursor_row = 0;
     state.alt_screen_cursor_col = 0;
     state.in_alt_screen = false;

@@ -33,7 +33,8 @@ use crate::tty::session::{
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    Cell, CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
+    Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
+    VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
@@ -43,7 +44,7 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
     let mut state = Box::<VConsoleState>::new_uninit();
     unsafe {
         let state_ref = state.as_mut_ptr();
-        let default_cell = CellAttributes {
+        let _default_cell = CellAttributes {
             fg: 0x00AAAAAA,
             bg: 0x00000000,
         };
@@ -59,27 +60,25 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).rows = 25;
         (*state_ref).cols = 80;
         (*state_ref).fb = None;
-        for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).cells[r].fill(Cell {
-                codepoint: b' ' as u32,
-                attrs: default_cell,
-            });
-        }
+        core::ptr::write(&mut (*state_ref).cells, CellGrid::empty());
+        (*state_ref)
+            .cells
+            .allocate(VCONSOLE_MAX_ROWS, VCONSOLE_MAX_COLS);
         (*state_ref).parser = VtParser::new();
         (*state_ref).cursor_attrs = default_cursor;
         (*state_ref).saved_cursor_row = 0;
         (*state_ref).saved_cursor_col = 0;
         (*state_ref).saved_cursor_attrs = default_cursor;
         (*state_ref).cursor_visible = true;
-        for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).alt_cells[r].fill(Cell {
-                codepoint: b' ' as u32,
-                attrs: default_cell,
-            });
-        }
+        core::ptr::write(&mut (*state_ref).alt_cells, CellGrid::empty());
+        (*state_ref)
+            .alt_cells
+            .allocate(VCONSOLE_MAX_ROWS, VCONSOLE_MAX_COLS);
         (*state_ref).alt_screen_cursor_row = 0;
         (*state_ref).alt_screen_cursor_col = 0;
         (*state_ref).in_alt_screen = false;
+        (*state_ref).scroll_top = 0;
+        (*state_ref).scroll_bottom = 0;
         state.assume_init()
     }
 }

@@ -4,6 +4,16 @@
 //! decomposition: extracted from `mod.rs` to isolate the hot data
 //! paths (read/write/push_input) from termios configuration, lifecycle
 //! management, job control, and poll readiness.
+//!
+//! # Echo serialisation
+//!
+//! Unlike Linux, which uses a separate echo buffer + deferred processing,
+//! SlopOS accumulates echo bytes into `EchoBuf` during `receive_buf()` and
+//! writes them atomically under `TTY_WRITE_LOCKS[slot]`.  User writes also
+//! acquire the same per-slot write lock, so echo and user output never
+//! interleave at the byte level.  A separate echo buffer is therefore not
+//! needed for correctness — the write lock provides the POSIX §11.1.9
+//! serialisation guarantee.
 
 use core::ffi::c_int;
 use core::sync::atomic::Ordering;
@@ -55,11 +65,11 @@ impl Tty {
 
         let batch = self.ldisc.receive_buf(&events[..count]);
         let xoff = self.ldisc.ixoff_check_xoff();
-        if batch.echo_len > 0 || xoff.is_some() {
+        if !batch.echo.is_empty() || xoff.is_some() {
             let slot = self.index.0 as usize;
             let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            if batch.echo_len > 0 {
-                self.driver.write_output(&batch.echo[..batch.echo_len]);
+            if !batch.echo.is_empty() {
+                self.driver.write_output(batch.echo.as_slice());
             }
             if let Some(xoff_byte) = xoff {
                 self.driver.write_output(&[xoff_byte]);
@@ -136,10 +146,11 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             tty.flags.insert(TtyFlags::THROTTLED);
         }
 
-        if batch.echo_len > 0 {
+        let echo_len = batch.echo.len();
+        if echo_len > 0 {
             let mut out = [0u8; 256];
-            out[..batch.echo_len].copy_from_slice(&batch.echo[..batch.echo_len]);
-            route = Some((tty.driver.id(), out, batch.echo_len));
+            out[..echo_len].copy_from_slice(batch.echo.as_slice());
+            route = Some((tty.driver.id(), out, echo_len));
         }
 
         if let Some((sig, _)) = batch.signal {
