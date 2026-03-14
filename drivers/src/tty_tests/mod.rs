@@ -243,7 +243,10 @@ slopos_lib::define_test_suite!(
         test_write_returns_result,
         test_get_termios_returns_result,
         test_vmin0_vtime0_immediate_return,
+        test_vmin0_vtime0_with_data_immediate_return,
         test_vmin_enforcement,
+        test_vmin_limited_by_buffer_size,
+        test_canonical_to_noncanonical_preserves_buffered_data,
         test_set_fg_pgrp_checked_permission_denied,
         test_hangup_read_returns_hung_up,
         // Per-TTY Locking & Performance
@@ -794,6 +797,7 @@ slopos_lib::define_test_suite!(
         test_is_double_width_ranges,
         test_sgr_standard_colors_unaffected,
         test_parser_fuzz_utf8_no_panic,
+        test_vtparser_fuzz_no_panic,
         test_replacement_glyph_exists,
         test_get_glyph_for_codepoint_ascii,
         // mod.rs Module Decomposition

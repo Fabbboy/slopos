@@ -2235,6 +2235,99 @@ pub fn test_vmin_enforcement() -> TestResult {
     }
 }
 
+pub fn test_vmin0_vtime0_with_data_immediate_return() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 0;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'x');
+    tty::push_input(TtyIndex(0), b'y');
+
+    let mut buf = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut buf, false);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(2) if &buf[..2] == b"xy" => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN=0/VTIME=0 with data expected Ok(2), got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_vmin_limited_by_buffer_size() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 8;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    tty::push_input(TtyIndex(0), b'a');
+    tty::push_input(TtyIndex(0), b'b');
+    tty::push_input(TtyIndex(0), b'c');
+
+    let mut buf = [0u8; 3];
+    let result = tty::read(TtyIndex(0), &mut buf, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(3) if &buf == b"abc" => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - VMIN larger than buffer should cap at buffer size, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+pub fn test_canonical_to_noncanonical_preserves_buffered_data() -> TestResult {
+    tty::table::tty_table_init();
+    drain_tty_nonblock(TtyIndex(0));
+
+    let saved = tty::get_termios(TtyIndex(0)).unwrap();
+
+    tty::push_input(TtyIndex(0), b'a');
+    tty::push_input(TtyIndex(0), b'b');
+    tty::push_input(TtyIndex(0), b'c');
+
+    let mut raw = saved;
+    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
+    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
+    tty::set_termios(TtyIndex(0), &raw).unwrap();
+
+    let mut out = [0u8; 8];
+    let result = tty::read(TtyIndex(0), &mut out, true);
+    tty::set_termios(TtyIndex(0), &saved).unwrap();
+
+    match result {
+        Ok(3) if &out[..3] == b"abc" => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - canonical->noncanonical should preserve buffered data, got {:?}",
+                other
+            );
+            TestResult::Fail
+        }
+    }
+}
+
 pub fn test_set_fg_pgrp_checked_permission_denied() -> TestResult {
     tty::table::tty_table_init();
     tty::attach_session(TtyIndex(0), 10, 10);
@@ -4807,25 +4900,25 @@ pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
     TestResult::Pass
 }
 
-/// IXON resume clears stopped and any character resumes.
+/// IXON + IXANY: any character resumes stopped output.
 pub fn test_ixon_any_char_resumes() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Enable IXON.
+    // Enable IXON + IXANY (IXANY required for any-char-resumes per POSIX).
     {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
             let mut t = *tty.ldisc.termios();
-            t.c_iflag |= slopos_abi::syscall::IXON;
+            t.c_iflag |= slopos_abi::syscall::IXON | slopos_abi::syscall::IXANY;
             tty.ldisc.set_termios(&t);
         }
     }
 
-    // Ctrl+S stops, then any printable char resumes.
+    // Ctrl+S stops, then any printable char resumes (with IXANY set).
     tty::push_input(idx, 0x13);
-    tty::push_input(idx, b'x'); // any char resumes when IXON
+    tty::push_input(idx, b'x');
 
     let stopped = {
         let guard = TTY_SLOTS[idx.0 as usize].lock();

@@ -565,6 +565,77 @@ pub fn test_parser_fuzz_utf8_no_panic() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_vtparser_fuzz_no_panic() -> TestResult {
+    let mut parser = VtParser::new();
+
+    let assert_ground = |p: &mut VtParser| -> bool {
+        // Send BEL (terminates OSC) + ESC \ (terminates OSC via ST) first,
+        // then probe with a printable char to confirm Ground state.
+        let _ = p.advance(0x07); // BEL — terminates OSC string
+        let _ = p.advance(0x1B); // ESC
+        let _ = p.advance(b'\\'); // ST — terminates any ESC sequence
+        for _ in 0..64 {
+            if p.advance(b'G') == VtAction::Print(b'G' as u32) {
+                return true;
+            }
+        }
+        false
+    };
+
+    for b in 0u8..=u8::MAX {
+        let _ = parser.advance(b);
+        if !assert_ground(&mut parser) {
+            klog_info!(
+                "TTY_TEST: BUG - parser did not return to Ground after byte 0x{:02x}",
+                b
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    for b in 0u8..=u8::MAX {
+        let _ = parser.advance(0x1B);
+        let _ = parser.advance(b);
+        if !assert_ground(&mut parser) {
+            klog_info!(
+                "TTY_TEST: BUG - parser did not recover after ESC 0x{:02x}",
+                b
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    let csi_sequences: [&[u8]; 8] = [
+        b"\x1b[31m",
+        b"\x1b[0m",
+        b"\x1b[999;1H",
+        b"\x1b[38;2;255;0;127m",
+        b"\x1b[48;5;200m",
+        b"\x1b[?2004h",
+        b"\x1b[?7l",
+        b"\x1b[12;34;56;78;90m",
+    ];
+    for seq in csi_sequences {
+        for &b in seq {
+            let _ = parser.advance(b);
+        }
+        if !assert_ground(&mut parser) {
+            klog_info!("TTY_TEST: BUG - parser did not recover after CSI fuzz sequence");
+            return TestResult::Fail;
+        }
+    }
+
+    for _ in 0..2048 {
+        let _ = parser.advance(0x80);
+    }
+    if !assert_ground(&mut parser) {
+        klog_info!("TTY_TEST: BUG - parser did not recover after continuation-byte flood");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 pub fn test_replacement_glyph_exists() -> TestResult {
     use slopos_abi::font::{FONT_CHAR_HEIGHT, get_glyph_for_codepoint};
     let glyph = get_glyph_for_codepoint(0xFFFD);
