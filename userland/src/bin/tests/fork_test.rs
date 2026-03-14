@@ -3,17 +3,16 @@
 use std::fs;
 
 use slopos_userland::apps::shell;
-use slopos_userland::syscall::{core as sys_core, tty};
 
 const EXPECTED: &[u8] = b"piped text\n";
 
-fn fail(msg: &[u8], code: i32) -> ! {
-    let _ = tty::write(msg);
-    sys_core::exit_with_code(code);
+fn fail(msg: &str, code: i32) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(code);
 }
 
 fn main() {
-    let _ = tty::write(b"fork_test: pipeline repro start\n");
+    eprintln!("fork_test: pipeline repro start");
 
     shell::cwd_set(b"/");
     shell::env::initialize_defaults();
@@ -36,18 +35,18 @@ fn main() {
     ];
     let rc = shell::exec::execute_tokens(argv.len() as i32, &argv);
     if rc != 0 {
-        fail(b"fork_test: execute_tokens failed\n", 20);
+        fail("fork_test: execute_tokens failed", 20);
     }
 
     let out = match fs::read("/tmp/tee.txt") {
         Ok(out) => out,
-        Err(_) => fail(b"fork_test: verify read failed\n", 22),
+        Err(_) => fail("fork_test: verify read failed", 22),
     };
 
     if out.as_slice() != EXPECTED {
-        fail(b"fork_test: verify mismatch\n", 23);
+        fail("fork_test: verify mismatch", 23);
     }
 
-    let _ = tty::write(b"fork_test: pipeline repro PASS\n");
-    sys_core::exit_with_code(0);
+    eprintln!("fork_test: pipeline repro PASS");
+    std::process::exit(0);
 }

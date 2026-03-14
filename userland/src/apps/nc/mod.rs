@@ -9,7 +9,7 @@ pub mod udp;
 
 use std::net::Ipv4Addr;
 
-use crate::syscall::{core as sys_core, fs, process, tty};
+use crate::syscall::{fs, process, tty};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -235,7 +235,7 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
             // Flag processing — may contain bundled flags like -ulvk
             if arg == b"-h" || arg == b"--help" {
                 print_usage();
-                sys_core::exit();
+                std::process::exit(0);
             }
 
             if arg == b"-p" {
@@ -384,7 +384,7 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
 pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
     if argc <= 1 || argv.is_null() {
         print_usage();
-        sys_core::exit_with_code(1);
+        std::process::exit(1);
     }
 
     let config = match parse_args(argc, argv) {
@@ -392,13 +392,10 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
         Err(e) => {
             print_error(e);
             print_usage();
-            sys_core::exit_with_code(1);
+            std::process::exit(1);
         }
     };
 
-    // Disable kernel echo, canonical mode, AND signal generation — nc handles
-    // its own line editing and Ctrl+C detection.  Also ignore SIGPIPE so that
-    // a broken TCP connection returns an error instead of killing the process.
     process::ignore_signal(slopos_abi::signal::SIGPIPE);
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
@@ -415,18 +412,17 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
         (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
     };
 
-    // Restore termios before exiting.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(0, t);
     }
 
-    sys_core::exit_with_code(exit_code as i32);
+    std::process::exit(exit_code as i32);
 }
 
 pub fn nc_main_std(args: Vec<String>) -> ! {
     if args.len() <= 1 {
         print_usage();
-        sys_core::exit_with_code(1);
+        std::process::exit(1);
     }
 
     let byte_args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
@@ -437,7 +433,7 @@ pub fn nc_main_std(args: Vec<String>) -> ! {
         Err(e) => {
             print_error(e);
             print_usage();
-            sys_core::exit_with_code(1);
+            std::process::exit(1);
         }
     };
 
@@ -461,7 +457,7 @@ pub fn nc_main_std(args: Vec<String>) -> ! {
         let _ = fs::tcsetattr(0, t);
     }
 
-    sys_core::exit_with_code(exit_code as i32);
+    std::process::exit(exit_code as i32);
 }
 
 // ---------------------------------------------------------------------------
