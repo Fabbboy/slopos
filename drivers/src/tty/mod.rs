@@ -154,18 +154,12 @@ impl Tty {
 /// ```
 #[derive(Default)]
 pub(crate) struct PostLockWork {
-    /// Deferred signal delivery: `(pgid, signum)`.
     signal: Option<(u32, u8)>,
-    /// Deferred IXOFF/IXON byte to send to a driver.
     ixoff_byte: Option<(DriverId, u8)>,
-    /// Deferred packet event to queue on a slave's master.
     packet_event: Option<(TtyIndex, u8)>,
-    /// Slot indices where `TTY_INPUT_WAITERS` should be woken.
-    wake_input: [bool; MAX_TTYS],
-    /// Slot indices where `TTY_OUTPUT_WAITERS` should be woken.
-    wake_output: [bool; MAX_TTYS],
-    /// Slot indices where `TTY_POLL_WAITERS` should be woken.
-    wake_poll: [bool; MAX_TTYS],
+    wake_input: u32,
+    wake_output: u32,
+    wake_poll: u32,
 }
 
 impl PostLockWork {
@@ -175,9 +169,9 @@ impl PostLockWork {
             signal: None,
             ixoff_byte: None,
             packet_event: None,
-            wake_input: [false; MAX_TTYS],
-            wake_output: [false; MAX_TTYS],
-            wake_poll: [false; MAX_TTYS],
+            wake_input: 0,
+            wake_output: 0,
+            wake_poll: 0,
         }
     }
 
@@ -186,9 +180,9 @@ impl PostLockWork {
         self.signal.is_none()
             && self.ixoff_byte.is_none()
             && self.packet_event.is_none()
-            && !self.wake_input.iter().any(|&x| x)
-            && !self.wake_output.iter().any(|&x| x)
-            && !self.wake_poll.iter().any(|&x| x)
+            && self.wake_input == 0
+            && self.wake_output == 0
+            && self.wake_poll == 0
     }
 
     /// Queue a signal for delivery to a process group.
@@ -220,76 +214,71 @@ impl PostLockWork {
         }
     }
 
-    /// Mark a slot for input waiter wakeup.
     #[inline]
     pub(crate) fn wake_input_slot(&mut self, slot: usize) {
         if slot < MAX_TTYS {
-            self.wake_input[slot] = true;
+            self.wake_input |= 1 << slot;
         }
     }
 
-    /// Mark a slot for output waiter wakeup.
     #[inline]
     pub(crate) fn wake_output_slot(&mut self, slot: usize) {
         if slot < MAX_TTYS {
-            self.wake_output[slot] = true;
+            self.wake_output |= 1 << slot;
         }
     }
 
-    /// Mark a slot for poll waiter wakeup.
     #[inline]
     pub(crate) fn wake_poll_slot(&mut self, slot: usize) {
         if slot < MAX_TTYS {
-            self.wake_poll[slot] = true;
+            self.wake_poll |= 1 << slot;
         }
     }
 
-    /// Convenience: wake both output and poll waiters on a slot.
     #[inline]
     pub(crate) fn wake_output_and_poll(&mut self, slot: usize) {
         self.wake_output_slot(slot);
         self.wake_poll_slot(slot);
     }
 
-    /// Convenience: wake input and poll waiters on a slot.
     #[inline]
     pub(crate) fn wake_input_and_poll(&mut self, slot: usize) {
         self.wake_input_slot(slot);
         self.wake_poll_slot(slot);
     }
 
-    /// Execute all accumulated deferred work.
-    ///
-    /// **MUST be called after dropping all per-TTY locks.**
     pub(crate) fn execute(self) {
         use slopos_lib::kernel_services::driver_runtime::signal_process_group;
 
-        // 1. Deliver deferred signal.
         if let Some((pgid, sig)) = self.signal {
             let _ = signal_process_group(pgid, sig);
         }
 
-        // 2. Send IXOFF/IXON byte to driver.
         if let Some((driver_id, byte)) = self.ixoff_byte {
             write_driver_unlocked(driver_id, &[byte]);
         }
 
-        // 3. Queue packet event on master.
         if let Some((slave_idx, event_bits)) = self.packet_event {
             pty::queue_packet_event(slave_idx, event_bits);
         }
 
-        // 4. Wake waiters.
-        for slot in 0..MAX_TTYS {
-            if self.wake_input[slot] {
-                TTY_INPUT_WAITERS[slot].wake_all();
-            }
-            if self.wake_output[slot] {
-                TTY_OUTPUT_WAITERS[slot].wake_all();
-            }
-            if self.wake_poll[slot] {
-                TTY_POLL_WAITERS[slot].wake_all();
-            }
+        let mut bits = self.wake_input;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            TTY_INPUT_WAITERS[slot].wake_all();
+            bits &= bits - 1;
+        }
+        bits = self.wake_output;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            TTY_OUTPUT_WAITERS[slot].wake_all();
+            bits &= bits - 1;
+        }
+        bits = self.wake_poll;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            TTY_POLL_WAITERS[slot].wake_all();
+            bits &= bits - 1;
         }
     }
 }
