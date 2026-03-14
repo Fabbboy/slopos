@@ -24,11 +24,15 @@ pub unsafe extern "C" fn slopos_fstat(fd: i32, stat_buf: *mut SloposStat) -> i32
     match Sys::fstat(fd, raw.as_mut_ptr()) {
         Ok(()) => {
             if !stat_buf.is_null() {
+                let kernel_type = raw[0];
+                let posix_mode = match kernel_type {
+                    1 => 0o040755u32,
+                    _ => 0o100644u32,
+                };
+                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
                 unsafe {
-                    (*stat_buf).st_mode = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    (*stat_buf).st_size = u64::from_le_bytes([
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                    ]);
+                    (*stat_buf).st_mode = posix_mode;
+                    (*stat_buf).st_size = size;
                     (*stat_buf).st_atime = 0;
                     (*stat_buf).st_mtime = 0;
                     (*stat_buf).st_ctime = 0;
@@ -46,11 +50,15 @@ pub unsafe extern "C" fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat)
     match Sys::stat(path, raw.as_mut_ptr()) {
         Ok(()) => {
             if !stat_buf.is_null() {
+                let kernel_type = raw[0];
+                let posix_mode = match kernel_type {
+                    1 => 0o040755u32,
+                    _ => 0o100644u32,
+                };
+                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
                 unsafe {
-                    (*stat_buf).st_mode = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    (*stat_buf).st_size = u64::from_le_bytes([
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                    ]);
+                    (*stat_buf).st_mode = posix_mode;
+                    (*stat_buf).st_size = size;
                     (*stat_buf).st_atime = 0;
                     (*stat_buf).st_mtime = 0;
                     (*stat_buf).st_ctime = 0;
