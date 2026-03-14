@@ -34,7 +34,7 @@ pub mod surface;
 pub mod window;
 
 pub use event::Event;
-pub use run::{run, ControlFlow, WindowedApp};
+pub use run::{ControlFlow, WindowedApp, run};
 pub use surface::{Surface, SurfaceError};
 pub use window::Window;
 

@@ -13,13 +13,17 @@ pub mod env;
 pub mod errno;
 pub mod error;
 pub mod ffi;
+pub mod io;
 pub mod mem;
+pub mod net;
 pub mod pal;
 pub mod process;
 pub mod signal;
 pub mod stdio;
 pub mod string;
 pub mod thread;
+pub mod time;
+pub mod tty;
 
 pub use errno::{__errno_location, Errno, errno_get, errno_set};
 pub use error::{SyscallError, SyscallResult, demux, mux};

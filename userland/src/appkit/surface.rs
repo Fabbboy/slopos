@@ -7,7 +7,7 @@
 //! `Surface::present_region()` to push completed frames to the compositor.
 
 use crate::gfx::{DrawBuffer, PixelFormat};
-use crate::syscall::{window, DisplayInfo, ShmBuffer};
+use crate::syscall::{DisplayInfo, ShmBuffer, window};
 
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceError {
