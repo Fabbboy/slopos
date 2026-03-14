@@ -1,6 +1,7 @@
 use slopos_lib::{IrqMutex, RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::ps2;
+use crate::tty::vconsole;
 use crate::tty::{active_tty, push_input};
 use slopos_lib::kernel_services::driver_runtime::request_reschedule_from_interrupt;
 
@@ -261,8 +262,22 @@ pub fn handle_scancode(scancode: u8) {
                 }
             }
             0x53 => KEY_DELETE,
-            0x49 => KEY_PAGE_UP,
-            0x51 => KEY_PAGE_DOWN,
+            0x49 => {
+                if shift {
+                    drop(state);
+                    vconsole::scroll_view_up(12);
+                    return;
+                }
+                KEY_PAGE_UP
+            }
+            0x51 => {
+                if shift {
+                    drop(state);
+                    vconsole::scroll_view_down(12);
+                    return;
+                }
+                KEY_PAGE_DOWN
+            }
             _ => 0,
         };
         if extended_key != 0 {

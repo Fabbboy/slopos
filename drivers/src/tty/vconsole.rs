@@ -32,6 +32,8 @@ const DEFAULT_ROWS: u16 = 25;
 const FG_COLOR: u32 = 0x00AAAAAA;
 const BG_COLOR: u32 = 0x00000000;
 
+const SCROLLBACK_LINES: usize = 200;
+
 /// Continuation marker for the right half of a double-width character.
 const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
 
@@ -277,6 +279,97 @@ pub(crate) struct VConsoleFbInfo {
 }
 
 unsafe impl Send for VConsoleFbInfo {}
+
+// ---------------------------------------------------------------------------
+// Scrollback ring buffer (heap-allocated, owned via Box)
+// ---------------------------------------------------------------------------
+
+/// Flat ring buffer of `SCROLLBACK_LINES` rows.  Allocated once on the heap
+/// via `ScrollbackBuf::new()` so `VConsoleState` stores only a pointer.
+struct ScrollbackBuf {
+    buf: alloc::boxed::Box<[Cell]>,
+    cols: usize,
+    head: usize,
+    count: usize,
+    view_offset: usize,
+}
+
+impl ScrollbackBuf {
+    fn new(cols: usize) -> Self {
+        let total = SCROLLBACK_LINES.saturating_mul(cols);
+        let mut v = alloc::vec::Vec::new();
+        if total > 0 {
+            let _ = v.try_reserve_exact(total);
+            v.resize(total, Cell::blank());
+        }
+        Self {
+            buf: v.into_boxed_slice(),
+            cols,
+            head: 0,
+            count: 0,
+            view_offset: 0,
+        }
+    }
+
+    fn push_row(&mut self, cells: &CellGrid, row: usize, cols: usize) {
+        if self.buf.is_empty() || cols == 0 || self.cols == 0 {
+            return;
+        }
+        let start = self.head * self.cols;
+        let end = start + self.cols;
+        if end > self.buf.len() {
+            return;
+        }
+        let n = cols.min(self.cols);
+        for c in 0..n {
+            self.buf[start + c] = cells.get(row, c);
+        }
+        self.head = (self.head + 1) % SCROLLBACK_LINES;
+        if self.count < SCROLLBACK_LINES {
+            self.count += 1;
+        }
+    }
+
+    fn line_count(&self) -> usize {
+        self.count
+    }
+
+    fn get_row(&self, offset_from_bottom: usize) -> Option<&[Cell]> {
+        if offset_from_bottom == 0 || offset_from_bottom > self.count || self.cols == 0 {
+            return None;
+        }
+        let idx = (self.head + SCROLLBACK_LINES - offset_from_bottom) % SCROLLBACK_LINES;
+        let start = idx * self.cols;
+        let end = start + self.cols;
+        if end > self.buf.len() {
+            return None;
+        }
+        Some(&self.buf[start..end])
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        self.view_offset = (self.view_offset + lines).min(self.count);
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        self.view_offset = self.view_offset.saturating_sub(lines);
+    }
+
+    fn reset_view(&mut self) {
+        self.view_offset = 0;
+    }
+
+    fn viewing_history(&self) -> bool {
+        self.view_offset > 0
+    }
+
+    #[cfg(feature = "itests")]
+    fn clear(&mut self) {
+        self.head = 0;
+        self.count = 0;
+        self.view_offset = 0;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // VConsole state
@@ -1004,6 +1097,14 @@ impl VConsoleState {
             return;
         }
 
+        let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
+        if full_screen && !self.in_alt_screen {
+            if let Some(ref mut sb) = *SCROLLBACK.lock() {
+                sb.push_row(&self.cells, sr_top, cols);
+                sb.reset_view();
+            }
+        }
+
         for row in (sr_top + 1)..=sr_bottom {
             self.cells.row_copy(row - 1, row, cols);
         }
@@ -1038,6 +1139,76 @@ impl VConsoleState {
                         self.render_cell(r as u16, c as u16);
                     }
                 }
+            }
+        }
+    }
+
+    fn redraw_from_scrollback(&self) {
+        let guard = SCROLLBACK.lock();
+        let Some(ref sb) = *guard else { return };
+        if !sb.viewing_history() {
+            self.redraw_all();
+            return;
+        }
+
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        let sb_lines = sb.view_offset.min(rows);
+        let live_lines = rows - sb_lines;
+
+        for r in 0..sb_lines {
+            let sb_row_offset = sb.view_offset - r;
+            if let Some(sb_row) = sb.get_row(sb_row_offset) {
+                for c in 0..cols.min(sb_row.len()) {
+                    self.render_cell_direct(r as u16, c as u16, &sb_row[c]);
+                }
+                for c in sb_row.len()..cols {
+                    self.render_cell_direct(r as u16, c as u16, &Cell::blank());
+                }
+            }
+        }
+        for r in 0..live_lines {
+            for c in 0..cols {
+                self.render_cell((sb_lines + r) as u16, c as u16);
+            }
+        }
+    }
+
+    fn redraw_all(&self) {
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        for r in 0..rows {
+            for c in 0..cols {
+                self.render_cell(r as u16, c as u16);
+            }
+        }
+    }
+
+    fn render_cell_direct(&self, row: u16, col: u16, cell: &Cell) {
+        let Some(fb) = self.fb else { return };
+        let (r, c) = (row as usize, col as usize);
+        if r >= self.rows as usize || c >= self.cols as usize {
+            return;
+        }
+        let glyph = if cell.codepoint == CONTINUATION_CODEPOINT {
+            get_glyph_or_space(b' ')
+        } else if cell.codepoint <= 0x7E {
+            get_glyph_or_space(cell.codepoint as u8)
+        } else {
+            get_glyph_for_codepoint(cell.codepoint)
+        };
+        let x0 = c * FONT_CHAR_WIDTH as usize;
+        let y0 = r * FONT_CHAR_HEIGHT as usize;
+        for gy in 0..FONT_CHAR_HEIGHT as usize {
+            let bits = glyph[gy];
+            for gx in 0..FONT_CHAR_WIDTH as usize {
+                let mask = 1u8 << (7 - gx as u8);
+                let color = if (bits & mask) != 0 {
+                    cell.attrs.fg
+                } else {
+                    cell.attrs.bg
+                };
+                self.put_pixel(&fb, x0 + gx, y0 + gy, color);
             }
         }
     }
@@ -1124,6 +1295,7 @@ impl VConsoleState {
         }
     }
 
+    #[inline(always)]
     fn put_pixel(&self, fb: &VConsoleFbInfo, x: usize, y: usize, color: u32) {
         if x >= fb.width as usize || y >= fb.height as usize {
             return;
@@ -1137,14 +1309,14 @@ impl VConsoleState {
             .saturating_mul(fb.pitch as usize)
             .saturating_add(x.saturating_mul(bpp));
 
+        // SAFETY: bounds checked above (x < width, y < height) and offset
+        // derived from pitch guarantees we stay within the framebuffer.
         unsafe {
             let p = fb.base.add(offset);
             match fb.bytes_per_pixel {
                 4 => {
-                    ptr::write(p, (color & 0xFF) as u8);
-                    ptr::write(p.add(1), ((color >> 8) & 0xFF) as u8);
-                    ptr::write(p.add(2), ((color >> 16) & 0xFF) as u8);
-                    ptr::write(p.add(3), 0);
+                    let bgra = color & 0x00FF_FFFF;
+                    ptr::write_unaligned(p as *mut u32, bgra);
                 }
                 3 => {
                     ptr::write(p, (color & 0xFF) as u8);
@@ -1156,8 +1328,7 @@ impl VConsoleState {
                     let g = ((color >> 8) & 0xFF) as u16;
                     let b = (color & 0xFF) as u16;
                     let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-                    ptr::write(p, (rgb565 & 0xFF) as u8);
-                    ptr::write(p.add(1), ((rgb565 >> 8) & 0xFF) as u8);
+                    ptr::write_unaligned(p as *mut u16, rgb565);
                 }
                 _ => {}
             }
@@ -1166,6 +1337,7 @@ impl VConsoleState {
 }
 
 static VCONSOLE_STATE: IrqMutex<VConsoleState> = IrqMutex::new(VConsoleState::new());
+static SCROLLBACK: IrqMutex<Option<alloc::boxed::Box<ScrollbackBuf>>> = IrqMutex::new(None);
 
 pub fn register_framebuffer(
     base: *mut u8,
@@ -1178,20 +1350,28 @@ pub fn register_framebuffer(
         return;
     }
 
-    let mut state = VCONSOLE_STATE.lock();
-    state.fb = Some(VConsoleFbInfo {
-        base,
-        pitch,
-        width,
-        height,
-        bytes_per_pixel,
-    });
-    state.recalculate_dimensions();
-    for row in 0..state.rows {
-        state.clear_row(row);
-    }
-    state.cursor_row = 0;
-    state.cursor_col = 0;
+    let cols = {
+        let mut state = VCONSOLE_STATE.lock();
+        state.fb = Some(VConsoleFbInfo {
+            base,
+            pitch,
+            width,
+            height,
+            bytes_per_pixel,
+        });
+        state.recalculate_dimensions();
+        for row in 0..state.rows {
+            state.clear_row(row);
+        }
+        state.cursor_row = 0;
+        state.cursor_col = 0;
+        state.cols as usize
+    };
+
+    // Heap allocation outside the IrqMutex — allocating with interrupts
+    // disabled triggers UB checks in the global allocator.
+    let scrollback = alloc::boxed::Box::new(ScrollbackBuf::new(cols));
+    *SCROLLBACK.lock() = Some(scrollback);
 }
 
 pub fn write(data: &[u8]) {
@@ -1203,6 +1383,17 @@ pub fn write(data: &[u8]) {
         return;
     }
 
+    {
+        let mut sb_guard = SCROLLBACK.lock();
+        if let Some(ref mut sb) = *sb_guard {
+            if sb.viewing_history() {
+                sb.reset_view();
+                drop(sb_guard);
+                state.redraw_all();
+            }
+        }
+    }
+
     for &b in data {
         state.process_byte(b);
     }
@@ -1210,6 +1401,24 @@ pub fn write(data: &[u8]) {
 
 pub fn has_framebuffer() -> bool {
     VCONSOLE_STATE.lock().fb.is_some()
+}
+
+pub fn scroll_view_up(lines: usize) {
+    if let Some(ref mut sb) = *SCROLLBACK.lock() {
+        sb.scroll_up(lines);
+    }
+    VCONSOLE_STATE.lock().redraw_from_scrollback();
+}
+
+pub fn scroll_view_down(lines: usize) {
+    if let Some(ref mut sb) = *SCROLLBACK.lock() {
+        sb.scroll_down(lines);
+    }
+    VCONSOLE_STATE.lock().redraw_from_scrollback();
+}
+
+pub fn scrollback_line_count() -> usize {
+    SCROLLBACK.lock().as_ref().map_or(0, |sb| sb.line_count())
 }
 
 #[cfg(feature = "itests")]
@@ -1237,4 +1446,7 @@ pub(crate) fn reset_for_tests() {
     state.in_alt_screen = false;
     state.scroll_top = 0;
     state.scroll_bottom = DEFAULT_ROWS.saturating_sub(1);
+    if let Some(ref mut sb) = *SCROLLBACK.lock() {
+        sb.clear();
+    }
 }
