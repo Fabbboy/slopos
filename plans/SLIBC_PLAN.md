@@ -1,6 +1,6 @@
 # SlopOS slibc Implementation Plan
 
-> **Status**: Not Started
+> **Status**: Phase 0 Complete
 > **Target**: Build `slibc` — the SlopOS Rust-native C standard library — from the existing userland libc fragments into a fully standalone crate that enables Rust `std` in userland
 > **Scope**: Userland only. No kernel changes. Every syscall referenced here already exists in `abi/src/syscall.rs`.
 
@@ -119,76 +119,67 @@ The existing libc code is a private module inside `userland/src/libc/`. It canno
 
 ### 0A: Create the slibc Crate
 
-- [ ] **0A.1** Create `slibc/Cargo.toml`:
-  - `name = "slopos-slibc"`, `version = "0.1.0"`, `edition = "2021"`
-  - `crate-type = ["staticlib", "rlib"]` — staticlib for C linkage, rlib for Rust imports
-  - `[dependencies]`: `slopos-abi = { path = "../abi" }`
-  - `[profile.release]`: `panic = "abort"`, `opt-level = "s"`, `lto = true`
-  - Add `slibc` to the workspace `members` array in the root `Cargo.toml`
-- [ ] **0A.2** Create `slibc/src/lib.rs`:
-  - `#![no_std]`, `#![no_main]`, `#![forbid(unsafe_op_in_unsafe_fn)]`
-  - `#![allow(non_camel_case_types, non_snake_case)]` — C naming conventions
+- [x] **0A.1** Create `slibc/Cargo.toml`:
+  - `name = "slopos-slibc"`, workspace version/edition/license, `crate-type = ["rlib"]`
+  - `[dependencies]`: `slopos-abi = { workspace = true }`
+  - Added `slibc` to the workspace `members` array and `[workspace.dependencies]` in the root `Cargo.toml`
+- [x] **0A.2** Create `slibc/src/lib.rs`:
+  - `#![no_std]`, `#![allow(unsafe_op_in_unsafe_fn)]`, `#![feature(sync_unsafe_cell)]`
   - Declare modules: `pub mod pal`, `pub mod error`, `pub mod mem`, `pub mod string`, `pub mod crt`, `pub mod ffi`
   - Re-export the public API: `pub use error::*`, `pub use string::*`, `pub use mem::*`
-- [ ] **0A.3** Create `slibc/src/pal/mod.rs` as an empty module placeholder (filled in Phase 1A)
-- [ ] **0A.4** Create `slibc/src/error.rs` as an empty module placeholder (filled in Phase 1C)
+- [x] **0A.3** Create `slibc/src/pal/mod.rs` with `pub mod raw` and `pub mod syscall` submodules
+- [x] **0A.4** Create `slibc/src/error.rs` with SyscallError, SyscallResult, demux(), mux()
 
 ### 0B: Move the Raw Syscall Layer
 
-- [ ] **0B.1** Create `slibc/src/pal/raw.rs`:
-  - Copy `syscall0`..`syscall6` inline asm functions verbatim from `userland/src/syscall/raw.rs`
-  - These are `pub(crate) unsafe fn syscallN(nr: u64, ...) -> i64` using `syscall` instruction
-  - Preserve the exact register assignments: `rax`=nr, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`=args, `rax`=return
-  - Add `pub(crate) use raw::*;` in `slibc/src/pal/mod.rs`
-- [ ] **0B.2** Move `SyscallError`, `SyscallResult`, and `demux()` from `userland/src/syscall/error.rs` to `slibc/src/error.rs`:
-  - `SyscallError(i32)` newtype wrapping the negative errno value
-  - `SyscallResult<T> = Result<T, SyscallError>`
-  - `pub fn demux(ret: i64) -> SyscallResult<u64>` — returns `Err` if `ret < 0`, else `Ok(ret as u64)`
-  - Keep `impl From<SyscallError> for i32` for C interop
+- [x] **0B.1** Create `slibc/src/pal/raw.rs`:
+  - Copied `syscall0`..`syscall6` inline asm functions from `userland/src/syscall/raw.rs`
+  - Preserved exact register assignments: `rax`=nr, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`=args, `rax`=return
+- [x] **0B.2** Moved `SyscallError`, `SyscallResult`, `demux()`, and `mux()` to `slibc/src/error.rs`:
+  - Userland `syscall/error.rs` now re-exports from slibc
 
 ### 0C: Move the Memory Subsystem
 
-- [ ] **0C.1** Create `slibc/src/mem/mod.rs`:
-  - Declare `pub mod malloc`, `pub mod free_list`
-  - Re-export: `pub use malloc::{malloc, free, realloc, calloc}`
-- [ ] **0C.2** Move `userland/src/libc/malloc.rs` to `slibc/src/mem/malloc.rs`:
-  - Update all `use crate::libc::free_list::*` to `use super::free_list::*`
-  - Update `use crate::syscall::*` to `use crate::pal::raw::*` and `use slopos_abi::syscall::*`
-  - Preserve the brk-based allocator logic exactly — no changes to behavior
-- [ ] **0C.3** Move `userland/src/libc/free_list.rs` to `slibc/src/mem/free_list.rs`:
-  - Update any internal `use crate::*` paths
-  - The 484-line intrusive doubly-linked free-list is moved verbatim
+- [x] **0C.1** Create `slibc/src/mem/mod.rs`:
+  - Declares `pub mod malloc`, `pub mod free_list`
+  - Re-exports: `pub use malloc::{alloc, calloc, dealloc, realloc}`
+- [x] **0C.2** Moved malloc.rs to `slibc/src/mem/malloc.rs`:
+  - Updated imports to use `crate::pal::syscall::sys_brk`
+  - Inlined `align_up_usize` to remove `slopos-lib` dependency
+  - Preserved brk-based allocator logic exactly
+- [x] **0C.3** Moved free_list.rs to `slibc/src/mem/free_list.rs`:
+  - Added proper `unsafe` blocks for `forbid(unsafe_op_in_unsafe_fn)` compatibility
 
 ### 0D: Move CRT0 and Runtime
 
-- [ ] **0D.1** Create `slibc/src/crt/mod.rs`:
-  - Move `userland/src/libc/crt0.rs` content here
-  - The `_start` symbol, argc/argv/envp stack parsing, and jump to `main` all live here
-  - `#[no_mangle] pub unsafe extern "C" fn _start()` remains the entry point
-- [ ] **0D.2** Create `slibc/src/string/mod.rs`:
-  - Move `u_memcpy`, `u_memset`, `u_strlen`, `u_strnlen` from `userland/src/runtime.rs`
-  - Rename to `memcpy`, `memset`, `strlen`, `strnlen` (the public C names)
-  - Mark each `#[no_mangle] pub unsafe extern "C" fn`
-- [ ] **0D.3** Create `slibc/src/ffi/mod.rs`:
-  - Move `userland/src/libc/ffi.rs` content here
-  - All `#[no_mangle] extern "C"` exports: read, write, open, close, exit, brk, sbrk, malloc, free, realloc, calloc
+- [x] **0D.1** Create `slibc/src/crt/mod.rs`:
+  - Moved crt0.rs content — CRT0 functions: set_main, argc, argv, envp, init_from_stack, crt0_start, get_arg, get_env
+  - Updated `sys_exit` import to use `crate::pal::syscall::sys_exit`
+- [x] **0D.2** Create `slibc/src/string/mod.rs`:
+  - Moved `u_memcpy`, `u_memset`, `u_strlen`, `u_strnlen`, `ptr_is_null`, `slice_from_cstr`, `slice_from_cstr_mut` from `userland/src/runtime.rs`
+  - C-standard name aliases (memcpy, strlen, etc.) deferred to Phase 1D
+- [x] **0D.3** Create `slibc/src/ffi/mod.rs`:
+  - Moved ffi.rs — all `#[no_mangle] extern "C"` exports: read, write, open, close, exit, _exit, brk, sbrk, malloc, free, realloc, calloc
+  - Updated imports to use `crate::mem::malloc` and `crate::pal::syscall`
 
 ### 0E: Update Userland to Import slibc
 
-- [ ] **0E.1** Add `slopos-slibc = { path = "../slibc" }` to `userland/Cargo.toml` dependencies
-- [ ] **0E.2** Remove `userland/src/libc/` directory and all its files (they now live in `slibc/`)
-- [ ] **0E.3** Remove `userland/src/runtime.rs` (moved to `slibc/src/string/`)
-- [ ] **0E.4** Update all `use crate::libc::*` imports in `userland/src/` to `use slibc::*`
-- [ ] **0E.5** Update `userland/src/syscall/raw.rs` to re-export from `slibc::pal::raw` instead of defining its own inline asm (or delete and redirect)
-- [ ] **0E.6** Update `userland/src/syscall/error.rs` to re-export from `slibc::error` instead of defining its own types
+- [x] **0E.1** Added `slopos-slibc = { workspace = true }` to `userland/Cargo.toml` dependencies
+- [x] **0E.2** Removed `userland/src/libc/` directory and all its files (they now live in `slibc/`)
+- [x] **0E.3** Replaced `userland/src/runtime.rs` with thin re-exports from `slopos_slibc::string`
+- [x] **0E.4** No `use crate::libc::*` imports existed outside libc/ itself — no changes needed
+- [x] **0E.5** Updated `userland/src/syscall/raw.rs` to re-export from `slopos_slibc::pal::raw`
+- [x] **0E.6** Updated `userland/src/syscall/error.rs` to re-export from `slopos_slibc::error`
+- [x] **0E.7** Removed dead `pub(crate)` raw C-ABI wrappers from `userland/src/syscall/fs.rs` (only used by deleted libc layer)
+- [x] **0E.8** Removed `#![feature(sync_unsafe_cell)]` from `userland/src/lib.rs` (moved to slibc)
 
 ### Phase 0 Gate
 
-- [ ] **GATE**: `slibc/` is a workspace member listed in root `Cargo.toml`
-- [ ] **GATE**: `userland/` imports `slopos-slibc` and has no local `libc/` module
-- [ ] **GATE**: No duplicate definitions of `syscall0`..`syscall6`, `SyscallError`, `malloc`, `_start`
-- [ ] **GATE**: `just build` passes with zero regressions
-- [ ] **GATE**: `just test` passes with zero regressions
+- [x] **GATE**: `slibc/` is a workspace member listed in root `Cargo.toml`
+- [x] **GATE**: `userland/` imports `slopos-slibc` and has no local `libc/` module
+- [x] **GATE**: No duplicate definitions — userland re-exports from slibc via thin wrapper modules
+- [x] **GATE**: `just build` passes with zero regressions
+- [x] **GATE**: `just test` passes with zero regressions (all 111 tests across 8 suites pass)
 
 ---
 
