@@ -11,24 +11,24 @@ use super::output::WINDOW_STATE_MINIMIZED;
 pub struct StartMenuItem {
     pub label: &'static str,
     pub window_title: Option<&'static [u8]>,
-    pub program_name: &'static [u8],
+    pub program_name: &'static str,
 }
 
 pub const START_MENU_ITEMS: [StartMenuItem; 3] = [
     StartMenuItem {
         label: "Files",
         window_title: Some(b"Files"),
-        program_name: b"file_manager",
+        program_name: "file_manager",
     },
     StartMenuItem {
         label: "Info",
         window_title: Some(b"Sysinfo"),
-        program_name: b"sysinfo",
+        program_name: "sysinfo",
     },
     StartMenuItem {
         label: "Shell",
         window_title: None,
-        program_name: b"shell",
+        program_name: "shell",
     },
 ];
 

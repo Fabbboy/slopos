@@ -51,7 +51,7 @@ pub trait WindowedApp {
 /// Creates a `Window`, calls `app.init()`, then enters the main loop:
 /// poll events -> dispatch -> redraw if requested -> present -> yield.
 ///
-/// This function never returns normally; it calls `sys_core::exit()` on
+/// This function never returns normally; it calls `std::process::exit(0)` on
 /// `ControlFlow::Exit`.
 pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
     let mut win = match Window::new(width, height) {
@@ -64,7 +64,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
                 super::surface::SurfaceError::AttachFailed => b"appkit: surface attach failed\n",
             };
             let _ = tty::write(msg);
-            sys_core::exit_with_code(1);
+            std::process::exit(1);
         }
     };
 
@@ -79,7 +79,7 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
             let event = Event::from_raw(raw);
             win.track_pointer(&event);
             if app.on_event(&mut win, event) == ControlFlow::Exit {
-                sys_core::exit();
+                std::process::exit(0);
             }
         }
 

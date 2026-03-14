@@ -5,13 +5,13 @@ mod renderer;
 mod surface_cache;
 mod taskbar;
 
-use core::ffi::c_void;
-
 use crate::gfx::{DamageRect, DamageTracker};
 use crate::syscall::{
     DisplayInfo, UserWindowInfo, core as sys_core, input as sys_input, tty, window,
 };
 use crate::theme::*;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use hover::{
     HOVER_APP_BTN_BASE, HOVER_CLOSE_BASE, HOVER_MENU_ITEM_BASE, HOVER_MINIMIZE_BASE,
@@ -352,7 +352,7 @@ impl WindowManager {
     }
 }
 
-pub fn compositor_user_main(_arg: *mut c_void) {
+pub fn compositor_user_main() {
     tty::write(b"COMPOSITOR: starting\n");
     let mut wm = WindowManager::new();
     let mut fb_info = DisplayInfo::default();
@@ -384,9 +384,10 @@ pub fn compositor_user_main(_arg: *mut c_void) {
     const TARGET_FRAME_MS: u64 = 16;
     let mut frame_count: u32 = 0;
     let mut metrics = FrameMetrics::new();
+    let time_origin = Instant::now();
 
     loop {
-        let frame_start_ms = sys_core::get_time_ms();
+        let frame_start = Instant::now();
 
         window::drain_queue();
         sys_input::drain_queue();
@@ -466,12 +467,11 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             }
             frame_count = frame_count.saturating_add(1);
             if flip_result {
-                let present_time = sys_core::get_time_ms();
+                let present_time = time_origin.elapsed().as_millis() as u64;
                 window::mark_frames_done(present_time);
             }
 
-            let frame_end_ms = sys_core::get_time_ms();
-            let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
+            let frame_time = frame_start.elapsed().as_millis() as u64;
             let copied = estimate_present_bytes(
                 output.width,
                 output.height,
@@ -487,10 +487,10 @@ pub fn compositor_user_main(_arg: *mut c_void) {
             wm.taskbar_needs_redraw = false;
         }
 
-        let frame_end_ms = sys_core::get_time_ms();
-        let frame_time = frame_end_ms.saturating_sub(frame_start_ms);
-        if frame_time < TARGET_FRAME_MS {
-            sys_core::sleep_ms((TARGET_FRAME_MS - frame_time) as u32);
+        let frame_elapsed = frame_start.elapsed();
+        let target_frame = Duration::from_millis(TARGET_FRAME_MS);
+        if frame_elapsed < target_frame {
+            thread::sleep(target_frame - frame_elapsed);
         }
     }
 }
