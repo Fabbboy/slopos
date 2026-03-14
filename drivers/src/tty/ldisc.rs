@@ -30,15 +30,15 @@ use super::driver::{InputEvent, InputStatus};
 // Expanded from 1024 to 4096 to match Linux/RedoxOS.
 // Handles long pastes, history expansion, and heredoc input gracefully.
 const EDIT_BUF_SIZE: usize = 4096;
-const COOKED_BUF_SIZE: usize = 4096;
+const COOKED_BUF_SIZE: usize = 8192;
 
 // PTY throttle water marks for back-pressure.
 // When the cooked buffer occupancy hits high-water, the slave sets
 // `throttled = true` on the TTY, signalling the master to stop writing.
 // When a read drains occupancy to the low-water mark, the slave clears
 // `throttled` and wakes the master so it can resume.
-pub(crate) const THROTTLE_HIGH_WATER: usize = COOKED_BUF_SIZE * 3 / 4; // 3072
-pub(crate) const THROTTLE_LOW_WATER: usize = COOKED_BUF_SIZE / 4; // 1024
+pub(crate) const THROTTLE_HIGH_WATER: usize = COOKED_BUF_SIZE * 3 / 4;
+pub(crate) const THROTTLE_LOW_WATER: usize = COOKED_BUF_SIZE / 4;
 
 // IXOFF flow-control water marks.
 // High-water: send XOFF when combined pending input exceeds this.

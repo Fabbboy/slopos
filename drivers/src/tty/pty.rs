@@ -229,8 +229,8 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
 ///
 /// - **Batch checking** allows up to `BATCH_SIZE - 1` bytes (63) to be
 ///   pushed past `THROTTLE_HIGH_WATER` before the flag is noticed.  With
-///   `COOKED_BUF_SIZE = 4096` and `HIGH_WATER = 3072`, the worst-case
-///   occupancy is ~3135 — well within the remaining 1024-byte headroom.
+///   `COOKED_BUF_SIZE = 8192` and `HIGH_WATER = 6144`, the worst-case
+///   occupancy is ~6207 — well within the remaining 2048-byte headroom.
 ///   `push_cooked()` independently guards against actual overflow, so no
 ///   data loss occurs.
 ///

@@ -9031,8 +9031,8 @@ pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
     t.c_iflag |= InputFlags::IMAXBEL.bits();
     ld.set_termios(&t);
 
-    // Fill the cooked buffer (4096 bytes).
-    for _ in 0..4096 {
+    // Fill the cooked buffer (COOKED_BUF_SIZE = 8192 bytes).
+    for _ in 0..8192 {
         ld.input_char(b'a');
     }
 
@@ -9058,16 +9058,19 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     ld.set_termios(&t);
 
-    // Flush a big line to cooked: 4000 chars + newline → cooked_count=4001.
+    // Flush two big lines to cooked.
     for _ in 0..4000 {
         ld.input_char(b'x');
     }
-    ld.input_char(b'\n'); // flushes 4001 bytes (4000+newline) to cooked
+    ld.input_char(b'\n');
+    for _ in 0..4000 {
+        ld.input_char(b'w');
+    }
+    ld.input_char(b'\n');
 
     // Now type more into the edit buffer until pending exceeds high-water.
-    // pending = edit_len + cooked_count.  We need pending >= 6553.
-    // cooked_count = 4001, so we need edit_len >= 2553.
-    for _ in 0..2560 {
+    // pending = edit_len + cooked_count, must cross IXOFF high-water.
+    for _ in 0..1830 {
         ld.input_char(b'y');
     }
 
@@ -9096,21 +9099,27 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     t.c_cc[CcIndex::Vstart.as_usize()] = 0x11;
     ld.set_termios(&t);
 
-    // IXOFF_TOTAL_CAPACITY = 8192, HIGH_WATER = 6553 (80%), LOW_WATER = 1638 (20%).
-    // Fill past high-water via canonical mode: one cooked line + edit chars.
-    // Line 1: 4000 chars + '\n' → flush to cooked (4001 bytes).
+    // IXOFF_TOTAL_CAPACITY = 12288, HIGH_WATER = 9830, LOW_WATER = 2457.
     for _ in 0..4000 {
         ld.input_char(b'x');
     }
     ld.input_char(b'\n'); // flush to cooked → 4001
+    for _ in 0..4000 {
+        ld.input_char(b'w');
+    }
+    ld.input_char(b'\n');
 
-    // Add chars to edit.  pending = 4001 + 2553 = 6554 >= 6553.
-    for _ in 0..2553 {
+    // Add chars to edit to hit high-water.
+    for _ in 0..1828 {
         ld.input_char(b'y');
     }
     let _ = ld.ixoff_check_xoff(); // consume the XOFF
 
-    // Drain line 1 from cooked (the x-line, 4001 bytes).
+    if ld.ixoff_check_xon().is_some() {
+        klog_info!("TTY_TEST: BUG - IXOFF should not return XON before low-water");
+        return TestResult::Fail;
+    }
+
     let mut drain = [0u8; 512];
     let mut total_read = 0usize;
     loop {
@@ -9120,22 +9129,6 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
         }
         total_read += got;
     }
-    // cooked = 0, edit = 2553, pending = 2553 > 1638 — not yet at low-water.
-
-    // Flush edit to cooked by committing the y-line with '\n'.
-    // edit becomes 2554, cooked is empty so all 2554 bytes fit.
-    ld.input_char(b'\n');
-
-    // Drain line 2 (the y-line, 2554 bytes).
-    loop {
-        let got = ld.read(&mut drain);
-        if got == 0 {
-            break;
-        }
-        total_read += got;
-    }
-    // cooked = 0, edit = 0, pending = 0 < 1638 → XON should trigger.
-
     let xon = ld.ixoff_check_xon();
     if xon != Some(0x11) {
         klog_info!(
@@ -9162,8 +9155,8 @@ pub fn test_ixoff_not_set_no_flow_control() -> TestResult {
     t.c_iflag &= !InputFlags::IXOFF.bits(); // ensure IXOFF is off
     ld.set_termios(&t);
 
-    // Fill buffer.
-    for _ in 0..4097 {
+    // Fill buffer and overflow by one byte.
+    for _ in 0..8193 {
         ld.input_char(b'x');
     }
 
@@ -10789,7 +10782,7 @@ pub fn test_extproc_imaxbel() -> TestResult {
     ld.set_termios(&t);
 
     // Fill the cooked buffer.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.input_char(b'x');
     }
 
@@ -11292,8 +11285,8 @@ pub fn test_throttle_watermark_constants() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // High-water should be <= cooked buffer size (4096).
-    if THROTTLE_HIGH_WATER > 4096 {
+    // High-water should be <= cooked buffer size (8192).
+    if THROTTLE_HIGH_WATER > 8192 {
         klog_info!(
             "TTY_TEST: BUG - THROTTLE_HIGH_WATER ({}) > COOKED_BUF_SIZE",
             THROTTLE_HIGH_WATER
@@ -11739,8 +11732,8 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
 pub fn test_push_cooked_returns_false_when_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
-    // Fill the cooked buffer to capacity (4096 bytes).
-    for _ in 0..4096 {
+    // Fill the cooked buffer to capacity (8192 bytes).
+    for _ in 0..8192 {
         if !ld.push_cooked(b'X') {
             klog_info!("TTY_TEST: BUG - push_cooked returned false before buffer full");
             return TestResult::Fail;
@@ -11772,7 +11765,7 @@ pub fn test_canonical_flush_fits_in_cooked() -> TestResult {
     drain_tty_nonblock(idx);
 
     // Type a full edit buffer worth of characters + newline.
-    // Edit buffer is 1024, cooked is 4096, so it always fits.
+    // Edit buffer is 4096, cooked is 8192, so it always fits.
     for _ in 0..1020 {
         tty::push_input(idx, b'Z');
     }
@@ -11819,7 +11812,7 @@ pub fn test_imaxbel_bell_on_cooked_overflow() -> TestResult {
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the cooked buffer to capacity.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         tty::push_input(slave, b'F');
     }
 
@@ -11885,7 +11878,7 @@ pub fn test_no_imaxbel_silent_drop() -> TestResult {
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the cooked buffer.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         tty::push_input(slave, b'F');
     }
 
@@ -12953,7 +12946,7 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     // Fill the cooked buffer to near-capacity via non-canonical mode.
     // Leave room for exactly 10 more bytes.
     let spare = 10usize;
-    let fill_count = 4096 - spare; // COOKED_BUF_SIZE = 4096
+    let fill_count = 8192 - spare;
 
     let mut t = *ld.termios();
     t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
@@ -13050,8 +13043,8 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the slave's cooked buffer past the throttle high-water mark
-    // (THROTTLE_HIGH_WATER = 3072).  Write 3200 bytes in blocking mode.
-    let fill = [b'Z'; 3200];
+    // (THROTTLE_HIGH_WATER = 6144).  Write 6400 bytes in blocking mode.
+    let fill = [b'Z'; 6400];
     let _ = tty::write(master, &fill, false);
 
     // The slave should now be throttled.  A non-blocking write from the
@@ -13259,7 +13252,7 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
     let mut t = *ld.termios();
     t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
     ld.set_termios(&t);
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.input_char(b'Z');
     }
 
@@ -13292,7 +13285,7 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     ld.set_termios(&t);
 
     // Fill cooked buffer to capacity minus exactly 3 bytes.
-    for _ in 0..4093 {
+    for _ in 0..8189 {
         if !ld.push_cooked(b'X') {
             klog_info!("TTY_TEST: BUG - push_cooked failed during fill");
             return TestResult::Fail;
@@ -13314,10 +13307,18 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     }
 
     // Drain the fill bytes first.
-    let mut drain = [0u8; 4093];
+    let mut drain = [0u8; 4096];
     let n_drain = ld.read(&mut drain);
-    if n_drain != 4093 {
-        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4093", n_drain);
+    if n_drain != 4096 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
+        return TestResult::Fail;
+    }
+    let n_drain2 = ld.read(&mut drain[..4093]);
+    if n_drain2 != 4093 {
+        klog_info!(
+            "TTY_TEST: BUG - second drain {} bytes, expected 4093",
+            n_drain2
+        );
         return TestResult::Fail;
     }
 
@@ -13348,7 +13349,7 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
 
     // Fill cooked buffer to capacity minus 2 bytes — NOT enough for the
     // 3-byte PARMRK triplet.
-    for _ in 0..4094 {
+    for _ in 0..8190 {
         ld.push_cooked(b'X');
     }
 
@@ -13366,10 +13367,18 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     }
 
     // Drain the fill bytes.
-    let mut drain = [0u8; 4094];
+    let mut drain = [0u8; 4096];
     let n_drain = ld.read(&mut drain);
-    if n_drain != 4094 {
-        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4094", n_drain);
+    if n_drain != 4096 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
+        return TestResult::Fail;
+    }
+    let n_drain2 = ld.read(&mut drain[..4094]);
+    if n_drain2 != 4094 {
+        klog_info!(
+            "TTY_TEST: BUG - second drain {} bytes, expected 4094",
+            n_drain2
+        );
         return TestResult::Fail;
     }
 
@@ -13399,7 +13408,7 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     ld.set_termios(&t);
 
     // Fill cooked buffer to capacity minus 1 byte.
-    for _ in 0..4095 {
+    for _ in 0..8191 {
         ld.push_cooked(b'X');
     }
 
@@ -13417,10 +13426,18 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     }
 
     // Drain and verify no partial PARMRK sequence leaked.
-    let mut drain = [0u8; 4095];
+    let mut drain = [0u8; 4096];
     let n_drain = ld.read(&mut drain);
-    if n_drain != 4095 {
-        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4095", n_drain);
+    if n_drain != 4096 {
+        klog_info!("TTY_TEST: BUG - drained {} bytes, expected 4096", n_drain);
+        return TestResult::Fail;
+    }
+    let n_drain2 = ld.read(&mut drain[..4095]);
+    if n_drain2 != 4095 {
+        klog_info!(
+            "TTY_TEST: BUG - second drain {} bytes, expected 4095",
+            n_drain2
+        );
         return TestResult::Fail;
     }
     let mut buf = [0u8; 8];
@@ -13447,7 +13464,7 @@ pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
     ld.set_termios(&t);
 
     // Fill cooked buffer completely.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
 
@@ -14201,9 +14218,9 @@ pub fn test_noncanonical_wake_near_full() -> TestResult {
     t.c_lflag &= !LocalFlags::ICANON.bits();
     ld.set_termios(&t);
 
-    // Fill cooked buffer to near capacity (4096 - 64 = 4032 bytes).
+    // Fill cooked buffer to near capacity (8192 - 64 = 8128 bytes).
     // Push in batches, draining the wake flag each time.
-    let target = 4096 - 64;
+    let target = 8192 - 64;
     let mut pushed = 0usize;
     while pushed < target {
         ld.input_char(b'z');
@@ -14713,7 +14730,7 @@ pub fn test_no_room_initially_false() -> TestResult {
 pub fn test_no_room_set_on_cooked_full() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill to capacity.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         if !ld.push_cooked(b'X') {
             klog_info!("TTY_TEST: BUG - push_cooked failed before buffer full");
             return TestResult::Fail;
@@ -14753,7 +14770,7 @@ pub fn test_no_room_not_set_before_full() -> TestResult {
 pub fn test_overflow_count_increments() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill to capacity.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     // Drop 5 bytes.
@@ -14774,7 +14791,7 @@ pub fn test_overflow_count_increments() -> TestResult {
 pub fn test_overflow_count_saturates() -> TestResult {
     let mut ld = LineDisc::new();
     // Fill buffer.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     // Simulate many overflows (we can't do u32::MAX iterations, so verify
@@ -14804,7 +14821,7 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
     // Fill to capacity and trigger no_room.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     ld.push_cooked(b'Y'); // triggers no_room
@@ -14812,14 +14829,22 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
         klog_info!("TTY_TEST: BUG - no_room not set after overflow");
         return TestResult::Fail;
     }
-    // Drain to just above low-water (1024) — no_room should persist.
-    let drain_to_above = 4096 - (THROTTLE_LOW_WATER + 1);
+    // Drain to just above low-water (2048) — no_room should persist.
+    let drain_to_above = 8192 - (THROTTLE_LOW_WATER + 1);
     let mut scratch = [0u8; 4096];
-    let got = ld.read(&mut scratch[..drain_to_above]);
-    if got != drain_to_above {
+    let mut drained = 0usize;
+    while drained < drain_to_above {
+        let want = core::cmp::min(scratch.len(), drain_to_above - drained);
+        let got = ld.read(&mut scratch[..want]);
+        if got == 0 {
+            break;
+        }
+        drained += got;
+    }
+    if drained != drain_to_above {
         klog_info!(
-            "TTY_TEST: BUG - read returned {} expected {}",
-            got,
+            "TTY_TEST: BUG - drained {} expected {}",
+            drained,
             drain_to_above
         );
         return TestResult::Fail;
@@ -14854,7 +14879,7 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
 /// no_room stays set when still above threshold.
 pub fn test_no_room_stays_above_threshold() -> TestResult {
     let mut ld = LineDisc::new();
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     ld.push_cooked(b'Y');
@@ -14875,7 +14900,7 @@ pub fn test_no_room_stays_above_threshold() -> TestResult {
 /// flush_input clears no_room and overflow_count.
 pub fn test_flush_input_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     ld.push_cooked(b'Y');
@@ -14898,7 +14923,7 @@ pub fn test_flush_input_clears_no_room() -> TestResult {
 /// flush_all clears no_room and overflow_count.
 pub fn test_flush_all_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     ld.push_cooked(b'Y');
@@ -14919,11 +14944,12 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
     // Cycle 1: fill → overflow → drain → recovery.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'A');
     }
     ld.push_cooked(b'B'); // no_room
     let mut scratch = [0u8; 4096];
+    let _ = ld.read(&mut scratch);
     let _ = ld.read(&mut scratch);
     // After full drain, cooked_count == 0 which is below THROTTLE_LOW_WATER.
     if !ld.check_no_room_recovery() {
@@ -14931,7 +14957,7 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
         return TestResult::Fail;
     }
     // Cycle 2: fill again — no_room should be clearable again.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'C');
     }
     ld.push_cooked(b'D');
@@ -14940,8 +14966,24 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
         return TestResult::Fail;
     }
     // Drain below threshold.
-    let drain_amount = 4096 - THROTTLE_LOW_WATER;
-    let _ = ld.read(&mut scratch[..drain_amount]);
+    let drain_amount = 8192 - THROTTLE_LOW_WATER;
+    let mut drained = 0usize;
+    while drained < drain_amount {
+        let want = core::cmp::min(scratch.len(), drain_amount - drained);
+        let got = ld.read(&mut scratch[..want]);
+        if got == 0 {
+            break;
+        }
+        drained += got;
+    }
+    if drained != drain_amount {
+        klog_info!(
+            "TTY_TEST: BUG - drained {} expected {}",
+            drained,
+            drain_amount
+        );
+        return TestResult::Fail;
+    }
     if !ld.check_no_room_recovery() {
         klog_info!("TTY_TEST: BUG - recovery did not trigger on second cycle");
         return TestResult::Fail;
@@ -14992,7 +15034,7 @@ pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     t.c_iflag |= slopos_abi::syscall::IMAXBEL;
     ld.set_termios(&t);
     // Fill cooked buffer.
-    for _ in 0..4096 {
+    for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
     // Next input_char should return Bell AND set no_room.
@@ -15058,7 +15100,7 @@ pub fn test_ldisc_kind_dispatch() -> TestResult {
     t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
     t.c_iflag &= !slopos_abi::syscall::IMAXBEL;
     lk.set_termios(&t);
-    for _ in 0..4097 {
+    for _ in 0..8193 {
         lk.input_char(b'Q');
     }
     if !lk.no_room() {
