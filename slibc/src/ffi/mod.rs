@@ -1,3 +1,6 @@
+pub mod syscalls;
+pub mod tests;
+
 use core::ffi::{c_char, c_int, c_void};
 
 use crate::mem::malloc as heap;
