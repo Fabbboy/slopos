@@ -9,7 +9,7 @@ use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegme
 use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
-use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
+use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
 use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
 };
@@ -638,6 +638,16 @@ pub fn process_vm_load_elf_data(
     let (segments, segment_count) = validator.validate_load_segments()?;
     let segments = &segments[..segment_count];
 
+    let tls_segment = validator.find_tls_segment()?;
+    let tls_offset = validator.find_tls_offset()?;
+    let (tls_vaddr, tls_filesz, tls_memsz, tls_align, tls_offset) = match tls_segment {
+        Some((vaddr, filesz, memsz, align)) => {
+            let offset = tls_offset.ok_or(ElfError::InvalidSegmentOffset)?;
+            (vaddr, filesz, memsz, align, Some(offset))
+        }
+        None => (0, 0, 0, 0, None),
+    };
+
     let process = find_process_vm(process_id);
     if process.is_null() {
         return Err(ElfError::NullPointer);
@@ -676,6 +686,10 @@ pub fn process_vm_load_elf_data(
         let pages = load_segment_pages(page_dir, data, segment, user_start, user_end)?;
         mapped_pages = mapped_pages.saturating_add(pages);
     }
+
+    let (tls_tp, tls_pages) =
+        setup_tls_block(page_dir, data, tls_offset, tls_filesz, tls_memsz, tls_align)?;
+    mapped_pages = mapped_pages.saturating_add(tls_pages);
 
     if needs_reloc {
         let _ = apply_elf_relocations(
@@ -719,6 +733,11 @@ pub fn process_vm_load_elf_data(
         phdr_addr: phdr_user_addr,
         phent_size: header.e_phentsize,
         phnum: header.e_phnum,
+        tls_filesz,
+        tls_memsz,
+        tls_align,
+        tls_vaddr,
+        tls_tp,
     })
 }
 
@@ -750,6 +769,154 @@ fn unmap_existing_code_region(page_dir: *mut ProcessPageDir, code_base: u64) {
         code_base.saturating_sub(0x100000),
         code_limit + 0x100000,
     );
+}
+
+fn setup_tls_block(
+    page_dir: *mut ProcessPageDir,
+    elf_data: &[u8],
+    tls_offset: Option<u64>,
+    tls_filesz: u64,
+    tls_memsz: u64,
+    tls_align: u64,
+) -> Result<(u64, u32), ElfError> {
+    if page_dir.is_null() {
+        return Err(ElfError::NullPointer);
+    }
+    if tls_filesz > tls_memsz {
+        return Err(ElfError::FileSizeExceedsMemSize);
+    }
+    if tls_align != 0 && !tls_align.is_power_of_two() {
+        return Err(ElfError::InvalidAlignment);
+    }
+
+    let align = tls_align.max(8);
+    let tls_size_aligned = if tls_memsz == 0 {
+        0
+    } else {
+        tls_memsz
+            .checked_add(align - 1)
+            .ok_or(ElfError::SegmentSizeOverflow)?
+            & !(align - 1)
+    };
+    let tcb_size = core::mem::size_of::<u64>() as u64;
+    let total_size = tls_size_aligned
+        .checked_add(tcb_size)
+        .ok_or(ElfError::SegmentSizeOverflow)?;
+    let total_size_aligned = align_up(total_size as usize, PAGE_SIZE_4KB as usize) as u64;
+
+    let tls_base = PROCESS_TLS_BASE_VA;
+    let tls_end = tls_base
+        .checked_add(total_size_aligned)
+        .ok_or(ElfError::SegmentSizeOverflow)?;
+
+    unmap_user_range(page_dir, tls_base, tls_end);
+
+    let mut tls_pages = 0u32;
+    if map_user_range(
+        page_dir,
+        tls_base,
+        tls_end,
+        PageFlags::USER_RW.bits(),
+        &mut tls_pages,
+    ) != 0
+    {
+        return Err(ElfError::NullPointer);
+    }
+
+    if tls_filesz > 0 {
+        let offset = tls_offset.ok_or(ElfError::InvalidSegmentOffset)?;
+        let src_end = offset
+            .checked_add(tls_filesz)
+            .ok_or(ElfError::InvalidSegmentOffset)?;
+        if src_end > elf_data.len() as u64 {
+            return Err(ElfError::InvalidSegmentOffset);
+        }
+        let src = &elf_data[offset as usize..src_end as usize];
+        write_user_bytes(page_dir, tls_base, src)?;
+    }
+
+    if tls_memsz > tls_filesz {
+        zero_user_bytes(page_dir, tls_base + tls_filesz, tls_memsz - tls_filesz)?;
+    }
+
+    let tp = tls_base + tls_size_aligned;
+    write_user_u64(page_dir, tp, tp)?;
+    Ok((tp, tls_pages))
+}
+
+fn write_user_bytes(
+    page_dir: *mut ProcessPageDir,
+    dst_addr: u64,
+    data: &[u8],
+) -> Result<(), ElfError> {
+    let mut written = 0usize;
+    while written < data.len() {
+        let va = dst_addr
+            .checked_add(written as u64)
+            .ok_or(ElfError::SegmentSizeOverflow)?;
+        let page_va = va & !(PAGE_SIZE_4KB - 1);
+        let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
+        let chunk = core::cmp::min(data.len() - written, PAGE_SIZE_4KB as usize - page_off);
+
+        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(page_va));
+        if phys.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+        let virt = phys.to_virt();
+        if virt.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(written),
+                virt.as_mut_ptr::<u8>().add(page_off),
+                chunk,
+            );
+        }
+        written += chunk;
+    }
+    Ok(())
+}
+
+fn zero_user_bytes(
+    page_dir: *mut ProcessPageDir,
+    start_addr: u64,
+    len: u64,
+) -> Result<(), ElfError> {
+    let mut zeroed = 0u64;
+    while zeroed < len {
+        let va = start_addr
+            .checked_add(zeroed)
+            .ok_or(ElfError::SegmentSizeOverflow)?;
+        let page_va = va & !(PAGE_SIZE_4KB - 1);
+        let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
+        let page_remaining = PAGE_SIZE_4KB - page_off as u64;
+        let chunk = core::cmp::min(len - zeroed, page_remaining) as usize;
+
+        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(page_va));
+        if phys.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+        let virt = phys.to_virt();
+        if virt.is_null() {
+            return Err(ElfError::NullPointer);
+        }
+
+        unsafe {
+            core::ptr::write_bytes(virt.as_mut_ptr::<u8>().add(page_off), 0, chunk);
+        }
+        zeroed = zeroed.saturating_add(chunk as u64);
+    }
+    Ok(())
+}
+
+fn write_user_u64(
+    page_dir: *mut ProcessPageDir,
+    dst_addr: u64,
+    value: u64,
+) -> Result<(), ElfError> {
+    write_user_bytes(page_dir, dst_addr, &value.to_le_bytes())
 }
 
 fn load_segment_pages(
