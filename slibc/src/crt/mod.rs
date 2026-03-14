@@ -81,6 +81,7 @@ pub unsafe extern "C" fn __libc_start_main(
     (*ENVP.get()).0 = envp_ptr;
     crate::env::environ = envp_ptr as *mut *mut u8;
     crate::stdio::streams::stdio_init();
+    crate::thread::tls::tls_init_main_thread();
 
     let ret = main(argc, argv, envp_ptr);
     crate::process::exit(ret)
@@ -97,6 +98,7 @@ pub unsafe fn crt0_start() -> ! {
 
     crate::env::environ = envp as *mut *mut u8;
     crate::stdio::streams::stdio_init();
+    crate::thread::tls::tls_init_main_thread();
 
     if let Some(main) = *MAIN_FN.get() {
         let ret = main(argc, argv, envp);

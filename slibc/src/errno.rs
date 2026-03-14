@@ -1,9 +1,5 @@
-//! POSIX errno — the currency of failure in the Wheel of Fate.
-//!
-//! Provides a transparent `Errno` newtype over `i32`, all standard POSIX error
-//! constants, and the thread-local storage backing for `errno`.
-//!
-//! Phase 4 will upgrade the static storage to per-thread via FS_BASE / TCB.
+//! POSIX errno — per-thread via TCB when TLS is initialized, static fallback
+//! during early boot.
 
 use core::fmt;
 
@@ -111,27 +107,35 @@ pub const EHOSTUNREACH: Errno = Errno(113);
 pub const EALREADY: Errno = Errno(114);
 pub const EINPROGRESS: Errno = Errno(115);
 
-static mut ERRNO_VAL: i32 = 0;
+static mut ERRNO_FALLBACK: i32 = 0;
 
-/// Set the current thread's errno value.
 #[inline]
 pub fn errno_set(e: i32) {
     unsafe {
-        ERRNO_VAL = e;
+        if crate::thread::tls::tls_is_initialized() {
+            *crate::thread::tcb::Tcb::errno_ptr() = e;
+        } else {
+            ERRNO_FALLBACK = e;
+        }
     }
 }
 
-/// Read the current thread's errno value.
 #[inline]
 pub fn errno_get() -> i32 {
-    unsafe { ERRNO_VAL }
+    unsafe {
+        if crate::thread::tls::tls_is_initialized() {
+            *crate::thread::tcb::Tcb::errno_ptr()
+        } else {
+            ERRNO_FALLBACK
+        }
+    }
 }
 
-/// Returns a pointer to the current thread's errno storage.
-///
-/// Required by C code that uses the `errno` macro — typically defined as
-/// `#define errno (*__errno_location())`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
-    &raw mut ERRNO_VAL
+    if crate::thread::tls::tls_is_initialized() {
+        crate::thread::tcb::Tcb::errno_ptr()
+    } else {
+        &raw mut ERRNO_FALLBACK
+    }
 }

@@ -19,6 +19,7 @@ pub mod process;
 pub mod signal;
 pub mod stdio;
 pub mod string;
+pub mod thread;
 
 pub use errno::{__errno_location, Errno, errno_get, errno_set};
 pub use error::{SyscallError, SyscallResult, demux, mux};
