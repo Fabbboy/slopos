@@ -6,7 +6,7 @@
 //!
 //! Applications should use the typed APIs. The raw APIs are only for `libc/syscall.rs`.
 
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{CStr, c_char};
 
 use super::RawFd;
 use super::error::{SyscallResult, demux};
@@ -295,41 +295,4 @@ pub fn tcsetattr(fd: RawFd, t: &UserTermios) -> SyscallResult<()> {
         )
     };
     demux(result).map(|_| ())
-}
-
-// =============================================================================
-// Raw C-ABI Wrappers (for libc layer only)
-// =============================================================================
-
-/// Raw open syscall for libc compatibility.
-///
-/// # Safety
-/// `path` must be a valid null-terminated string pointer.
-#[inline(always)]
-pub(crate) unsafe fn open_raw(path: *const c_char, flags: u32) -> i64 {
-    unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) as i64 }
-}
-
-/// Raw close syscall for libc compatibility.
-#[inline(always)]
-pub(crate) fn close_raw(fd: RawFd) -> i64 {
-    unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) as i64 }
-}
-
-/// Raw read syscall for libc compatibility.
-///
-/// # Safety
-/// `buf` must be valid for writes of `len` bytes.
-#[inline(always)]
-pub(crate) unsafe fn read_raw(fd: RawFd, buf: *mut c_void, len: usize) -> i64 {
-    unsafe { syscall3(SYSCALL_FS_READ, fd as u64, buf as u64, len as u64) as i64 }
-}
-
-/// Raw write syscall for libc compatibility.
-///
-/// # Safety
-/// `buf` must be valid for reads of `len` bytes.
-#[inline(always)]
-pub(crate) unsafe fn write_raw(fd: RawFd, buf: *const c_void, len: usize) -> i64 {
-    unsafe { syscall3(SYSCALL_FS_WRITE, fd as u64, buf as u64, len as u64) as i64 }
 }

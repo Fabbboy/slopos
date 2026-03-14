@@ -60,3 +60,4 @@ testbins = []
 slopos-abi = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-lib = { workspace = true }
+slopos-slibc = { workspace = true }
