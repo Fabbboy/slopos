@@ -24,7 +24,7 @@ RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
 BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc"
-BUILD_STD="${BUILD_STD:-core,alloc}"
+BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
 "$SCRIPT_DIR/ensure_toolchain.sh"

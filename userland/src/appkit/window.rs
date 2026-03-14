@@ -1,6 +1,6 @@
 //! High-level window abstraction combining surface, input, and redraw state.
 
-use crate::syscall::{InputEvent, input, window};
+use crate::syscall::{input, window, InputEvent};
 
 use super::event::Event;
 use super::surface::{Surface, SurfaceError};

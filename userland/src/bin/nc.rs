@@ -1,11 +1,5 @@
-#![no_std]
+#![feature(restricted_std)]
 #![no_main]
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    let _ = slopos_userland::syscall::tty::write(b"panic!\n");
-    slopos_userland::syscall::core::exit_with_code(101);
-}
 
 /// Entry point for nc — extracts argc/argv from the user stack
 /// (placed there by the kernel's exec handler) and dispatches to nc_main.

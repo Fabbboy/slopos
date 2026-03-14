@@ -2,7 +2,7 @@
 //! Exercises the actual shell pipeline path for:
 //! `echo "piped text" | tee /tmp/tee.txt`
 
-#![no_std]
+#![feature(restricted_std)]
 #![no_main]
 
 use core::ffi::c_char;

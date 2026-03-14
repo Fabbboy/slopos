@@ -34,7 +34,7 @@ pub mod surface;
 pub mod window;
 
 pub use event::Event;
-pub use run::{ControlFlow, WindowedApp, run};
+pub use run::{run, ControlFlow, WindowedApp};
 pub use surface::{Surface, SurfaceError};
 pub use window::Window;
 
@@ -58,19 +58,12 @@ pub use window::Window;
 /// # Usage
 ///
 /// ```rust,ignore
-/// #![no_std]
 /// #![no_main]
 /// slopos_userland::entry!(slopos_userland::apps::file_manager::file_manager_main);
 /// ```
 #[macro_export]
 macro_rules! entry {
     ($main_fn:path) => {
-        #[panic_handler]
-        fn panic(_info: &core::panic::PanicInfo) -> ! {
-            let _ = $crate::syscall::tty::write(b"panic!\n");
-            $crate::syscall::core::exit_with_code(101);
-        }
-
         /// Rust trampoline called from naked `_start`.
         /// Invokes the application entry point then exits cleanly.
         #[allow(unreachable_code)]

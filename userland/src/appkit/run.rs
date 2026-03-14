@@ -5,7 +5,7 @@
 //! are monomorphized (no trait objects).
 
 use crate::gfx::DrawBuffer;
-use crate::syscall::{InputEvent, core as sys_core, tty};
+use crate::syscall::{core as sys_core, tty, InputEvent};
 
 use super::event::Event;
 use super::window::{self, Window};

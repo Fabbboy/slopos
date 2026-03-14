@@ -1,4 +1,4 @@
-#![no_std]
+#![feature(restricted_std)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod appkit;
