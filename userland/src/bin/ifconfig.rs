@@ -1,3 +1,5 @@
 #![feature(restricted_std)]
-#![no_main]
-slopos_userland::entry!(slopos_userland::apps::ifconfig::ifconfig_main);
+
+fn main() {
+    slopos_userland::apps::ifconfig::ifconfig_main();
+}
