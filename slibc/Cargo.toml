@@ -1,0 +1,19 @@
+[package]
+name = "slopos-slibc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "slibc - SlopOS Rust-native C standard library for userland"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+slopos-abi = { workspace = true }
