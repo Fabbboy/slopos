@@ -4,6 +4,7 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(sync_unsafe_cell)]
+#![feature(c_variadic)]
 
 extern crate alloc;
 
@@ -13,6 +14,7 @@ pub mod error;
 pub mod ffi;
 pub mod mem;
 pub mod pal;
+pub mod stdio;
 pub mod string;
 
 pub use errno::{__errno_location, Errno, errno_get, errno_set};
