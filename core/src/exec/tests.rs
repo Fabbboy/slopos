@@ -431,6 +431,11 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
         phdr_addr: 0x402000,
         phent_size: 56,
         phnum: 3,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        tls_vaddr: 0,
+        tls_tp: 0,
     };
 
     let result = super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info);
@@ -490,6 +495,11 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         phdr_addr: 0x7000_2000,
         phent_size: 56,
         phnum: 5,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        tls_vaddr: 0,
+        tls_tp: 0,
     };
 
     let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {
@@ -576,6 +586,11 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         phdr_addr: 0x402000,
         phent_size: 56,
         phnum: 1,
+        tls_filesz: 0,
+        tls_memsz: 0,
+        tls_align: 0,
+        tls_vaddr: 0,
+        tls_tp: 0,
     };
 
     let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {

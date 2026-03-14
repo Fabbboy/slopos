@@ -132,6 +132,7 @@ pub fn spawn_program_with_attrs(
         let process_id = unsafe { (*task_info).process_id };
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
+        let mut tls_tp = 0u64;
 
         if let Err(err) = do_exec(
             process_id,
@@ -140,6 +141,7 @@ pub fn spawn_program_with_attrs(
             None,
             &mut entry,
             &mut stack_ptr,
+            &mut tls_tp,
         ) {
             task_terminate(task_id);
             return Err(err);
@@ -149,6 +151,9 @@ pub fn spawn_program_with_attrs(
             (*task_info).entry_point = entry;
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
+            if tls_tp != 0 {
+                (*task_info).fs_base = tls_tp;
+            }
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has
@@ -195,6 +200,7 @@ pub fn do_exec(
     envp: Option<&[&[u8]]>,
     entry_out: &mut u64,
     stack_ptr_out: &mut u64,
+    tls_tp_out: &mut u64,
 ) -> Result<(), ExecError> {
     if path.is_empty() || path.len() > EXEC_MAX_PATH {
         return Err(ExecError::NameTooLong);
@@ -251,15 +257,17 @@ pub fn do_exec(
 
     let stack_top = setup_user_stack(process_id, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;
+    *tls_tp_out = exec_info.tls_tp;
 
     // POSIX: close all FDs with FD_CLOEXEC set after point of no return.
     slopos_fs::fileio_close_on_exec(process_id);
 
     klog_info!(
-        "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}",
+        "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}, tls_tp={:#x}",
         process_id,
         *entry_out,
-        stack_top
+        stack_top,
+        *tls_tp_out,
     );
 
     Ok(())
