@@ -35,6 +35,7 @@ use slopos_lib::IrqMutex;
 use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
     TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
+    mark_slot_allocated, mark_slot_free,
 };
 use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex, open_ref};
 
@@ -143,6 +144,8 @@ pub fn pty_alloc() -> Result<TtyIndex, TtyError> {
         let mut guard = TTY_SLOTS[slave_slot].lock();
         *guard = Some(Tty::new_pty_slave(slave_idx, master_peer));
     }
+    mark_slot_allocated(master_slot);
+    mark_slot_allocated(slave_slot);
 
     Ok(master_idx)
 }
@@ -463,15 +466,15 @@ pub fn free_pair_if_unused(idx: TtyIndex, peer_idx: TtyIndex) {
         let mut guard = TTY_SLOTS[idx_slot].lock();
         *guard = None;
     }
-    // Bump generation so stale PtyPeerHandles pointing at this slot are
-    // invalidated.
     TTY_GENERATIONS[idx_slot].fetch_add(1, Ordering::Release);
+    mark_slot_free(idx_slot);
 
     {
         let mut guard = TTY_SLOTS[peer_slot].lock();
         *guard = None;
     }
     TTY_GENERATIONS[peer_slot].fetch_add(1, Ordering::Release);
+    mark_slot_free(peer_slot);
 }
 
 // ---------------------------------------------------------------------------

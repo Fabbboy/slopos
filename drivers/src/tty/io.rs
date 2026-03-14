@@ -53,14 +53,15 @@ impl Tty {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut events = [InputEvent::normal(0); 64];
+        // Feed raw hardware bytes directly to the line discipline.
+        // The ldisc handles all input mapping via c_iflag processing:
+        //   - CR→NL: handled by ICRNL in process_iflag()
+        //   - NL→CR: handled by INLCR in process_iflag()
+        //   - DEL (0x7F): matched against VERASE (default 0x7F) in canonical_input()
+        // Pre-mapping here would bypass POSIX input flag semantics (e.g.
+        // IGNCR could not discard CR if it was already mapped to NL).
         for i in 0..count {
-            let mut c = scratch[i];
-            if c == b'\r' {
-                c = b'\n';
-            } else if c == 0x7F {
-                c = 0x08;
-            }
-            events[i] = InputEvent::normal(c);
+            events[i] = InputEvent::normal(scratch[i]);
         }
 
         let batch = self.ldisc.receive_buf(&events[..count]);
@@ -861,7 +862,11 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 /// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
     let mut any_data = false;
-    for i in 0..MAX_TTYS {
+    let mut bits = super::table::active_slots_bitmap();
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+
         let mut deferred = PostLockWork::new();
         let has_data = {
             let mut guard = TTY_SLOTS[i].lock();
