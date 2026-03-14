@@ -2,11 +2,11 @@ use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_F
 
 #[derive(Clone, Copy)]
 pub struct ProgramSpec {
-    pub name: &'static [u8],
-    pub path: &'static [u8],
+    pub name: &'static str,
+    pub path: &'static str,
     pub priority: u8,
     pub flags: u16,
-    pub desc: &'static [u8],
+    pub desc: &'static str,
     /// If true, the program owns a display surface and should be spawned
     /// directly via `spawn_path_with_attrs`. Text programs (gui=false) fall
     /// through to the fork+execve pipeline so stdout is properly captured.
@@ -15,101 +15,100 @@ pub struct ProgramSpec {
 
 const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
-        name: b"init",
-        path: b"/sbin/init",
+        name: "init",
+        path: "/sbin/init",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"",
+        desc: "",
         gui: false,
     },
     ProgramSpec {
-        name: b"shell",
-        path: b"/bin/shell",
+        name: "shell",
+        path: "/bin/shell",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"",
+        desc: "",
         gui: false,
     },
     ProgramSpec {
-        name: b"compositor",
-        path: b"/bin/compositor",
+        name: "compositor",
+        path: "/bin/compositor",
         priority: 4,
         flags: TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR,
-        desc: b"",
+        desc: "",
         gui: true,
     },
     ProgramSpec {
-        name: b"roulette",
-        path: b"/bin/roulette",
+        name: "roulette",
+        path: "/bin/roulette",
         priority: 5,
         flags: TASK_FLAG_USER_MODE | TASK_FLAG_DISPLAY_EXCLUSIVE,
-        desc: b"Spin the Wheel of Fate",
+        desc: "Spin the Wheel of Fate",
         gui: true,
     },
     ProgramSpec {
-        name: b"file_manager",
-        path: b"/bin/file_manager",
+        name: "file_manager",
+        path: "/bin/file_manager",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"Browse filesystem",
+        desc: "Browse filesystem",
         gui: true,
     },
     ProgramSpec {
-        name: b"sysinfo",
-        path: b"/bin/sysinfo",
+        name: "sysinfo",
+        path: "/bin/sysinfo",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"System information panel",
+        desc: "System information panel",
         gui: true,
     },
     ProgramSpec {
-        name: b"nmap",
-        path: b"/bin/nmap",
+        name: "nmap",
+        path: "/bin/nmap",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"Scan network for hosts",
+        desc: "Scan network for hosts",
         gui: false,
     },
     ProgramSpec {
-        name: b"ifconfig",
-        path: b"/bin/ifconfig",
+        name: "ifconfig",
+        path: "/bin/ifconfig",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"Show network configuration",
+        desc: "Show network configuration",
         gui: false,
     },
     ProgramSpec {
-        name: b"nc",
-        path: b"/bin/nc",
+        name: "nc",
+        path: "/bin/nc",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"Network Swiss army knife",
+        desc: "Network Swiss army knife",
         gui: false,
     },
     #[cfg(feature = "testbins")]
     ProgramSpec {
-        name: b"fork_test",
-        path: b"/bin/fork_test",
+        name: "fork_test",
+        path: "/bin/fork_test",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: b"",
+        desc: "",
         gui: false,
     },
 ];
 
-fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
-    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    &bytes[..len]
+fn trim_nul_bytes(text: &str) -> &str {
+    text.split('\0').next().unwrap_or(text)
 }
 
-pub fn resolve_program(name: &[u8]) -> Option<&'static ProgramSpec> {
+pub fn resolve_program(name: &str) -> Option<&'static ProgramSpec> {
     let requested = trim_nul_bytes(name);
     PROGRAM_REGISTRY
         .iter()
         .find(|spec| trim_nul_bytes(spec.name) == requested)
 }
 
-pub fn resolve_program_path(path: &[u8]) -> Option<&'static ProgramSpec> {
+pub fn resolve_program_path(path: &str) -> Option<&'static ProgramSpec> {
     let requested = trim_nul_bytes(path);
     PROGRAM_REGISTRY
         .iter()
