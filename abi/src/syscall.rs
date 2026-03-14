@@ -649,6 +649,9 @@ pub const TIOCPKT_NOSTOP: u8 = 0x10;
 /// `IXON` set on slave termios.
 pub const TIOCPKT_DOSTOP: u8 = 0x20;
 
+/// Open PTY slave from master fd — race-free, namespace-safe (Linux 4.13+).
+pub const TIOCGPTPEER: u64 = 0x5441;
+
 /// Set exclusive mode on a TTY — prevents other opens.
 /// Linux value: 0x540C.
 pub const TIOCEXCL: u64 = 0x540C;
@@ -695,6 +698,7 @@ pub const INLCR: u32 = 0x040;
 pub const IGNCR: u32 = 0x080;
 pub const ICRNL: u32 = 0x100;
 pub const IXON: u32 = 0x400;
+pub const IXANY: u32 = 0x800;
 pub const IXOFF: u32 = 0x1000;
 pub const IUTF8: u32 = 0x4000;
 pub const IUCLC: u32 = 0x200;
@@ -718,6 +722,7 @@ pub const XTABS: u32 = 0x1800;
 pub const ECHOCTL: u32 = 0x200;
 pub const ECHOPRT: u32 = 0x400;
 pub const ECHOKE: u32 = 0x800;
+pub const FLUSHO: u32 = 0x1000;
 pub const NOFLSH: u32 = 0x80;
 pub const TOSTOP: u32 = 0x100;
 pub const IEXTEN: u32 = 0x8000;
@@ -784,6 +789,7 @@ pub const VSTOP: usize = 9;
 pub const VSUSP: usize = 10;
 pub const VREPRINT: usize = 12;
 pub const VWERASE: usize = 14;
+pub const VDISCARD: usize = 13;
 pub const VLNEXT: usize = 15;
 pub const VEOL2: usize = 16;
 
@@ -808,6 +814,7 @@ bitflags::bitflags! {
         const IGNCR  = 0x080;
         const ICRNL  = 0x100;
         const IXON   = 0x400;
+        const IXANY  = 0x800;
         const IXOFF  = 0x1000;
         const IUTF8  = 0x4000;
         const IMAXBEL = 0x2000;
@@ -851,6 +858,7 @@ bitflags::bitflags! {
         const ECHOCTL = 0x200;
         const ECHOPRT = 0x400;
         const ECHOKE  = 0x800;
+        const FLUSHO  = 0x1000;
         const PENDIN  = 0x4000;
         const IEXTEN  = 0x8000;
         const EXTPROC = 0x10000;
@@ -902,6 +910,7 @@ pub enum CcIndex {
     Vsusp = 10,
     Veol = 11,
     Vreprint = 12,
+    Vdiscard = 13,
     Vwerase = 14,
     Vlnext = 15,
     Veol2 = 16,
@@ -973,6 +982,7 @@ impl Default for UserTermios {
         cc[VSTOP] = 0x13; // Ctrl+S
         cc[VSUSP] = 0x1A; // Ctrl+Z
         cc[VREPRINT] = 0x12; // Ctrl+R
+        cc[VDISCARD] = 0x0F; // Ctrl+O
         cc[VWERASE] = 0x17; // Ctrl+W
         cc[VLNEXT] = 0x16; // Ctrl+V
         Self {
