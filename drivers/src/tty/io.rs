@@ -31,8 +31,8 @@ use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
 use super::session::ForegroundCheck;
 use super::table::{
-    TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
-    TTY_WRITE_LOCKS,
+    InflightGuard, TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS,
+    TTY_SLOTS, TTY_WRITE_LOCKS,
 };
 use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
 
@@ -163,9 +163,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
     if let Some((driver_id, out, out_len)) = route {
         let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-        TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
+        let _inflight = InflightGuard::new(slot, out_len);
         write_driver_unlocked(driver_id, &out[..out_len]);
-        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
+        drop(_inflight);
         drop(_write_guard);
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
@@ -753,9 +753,8 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         // with concurrent echo output (POSIX §11.1.9 echo serialization).
         let driver_written = {
             let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
+            let _inflight = InflightGuard::new(slot, out_len);
             let written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
-            TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
             written
         };
         if driver_written < out_len {

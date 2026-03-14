@@ -295,3 +295,43 @@ pub(crate) fn mark_slot_free(slot: usize) {
 pub(crate) fn active_slots_bitmap() -> u32 {
     TTY_ALLOC_BITMAP.load(Ordering::Acquire)
 }
+
+// ---------------------------------------------------------------------------
+// RAII guard for TTY_OUTPUT_INFLIGHT
+// ---------------------------------------------------------------------------
+
+/// RAII guard that decrements `TTY_OUTPUT_INFLIGHT[slot]` on drop.
+///
+/// Prevents counter drift if a future code change introduces an early return
+/// or panic between the increment and decrement.  Matches the discipline
+/// already established by [`super::PostLockWork`] for deferred actions.
+///
+/// # Usage
+///
+/// ```ignore
+/// let _inflight = InflightGuard::new(slot, byte_count);
+/// write_driver_unlocked(driver_id, &buf[..byte_count]);
+/// // guard drops here — counter decremented automatically
+/// ```
+pub(crate) struct InflightGuard {
+    slot: usize,
+    count: u32,
+}
+
+impl InflightGuard {
+    /// Increment `TTY_OUTPUT_INFLIGHT[slot]` by `count` and return a guard
+    /// that will decrement it on drop.
+    #[inline]
+    pub(crate) fn new(slot: usize, count: usize) -> Self {
+        let count = count as u32;
+        TTY_OUTPUT_INFLIGHT[slot].fetch_add(count, Ordering::Release);
+        Self { slot, count }
+    }
+}
+
+impl Drop for InflightGuard {
+    #[inline]
+    fn drop(&mut self) {
+        TTY_OUTPUT_INFLIGHT[self.slot].fetch_sub(self.count, Ordering::Release);
+    }
+}
