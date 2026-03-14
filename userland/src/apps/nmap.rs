@@ -1,7 +1,6 @@
 use crate::syscall::{
-    USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember, core,
+    USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember,
     net::{net_info, net_scan},
-    tty,
 };
 
 fn format_ipv4(ip: [u8; 4]) -> String {
@@ -16,59 +15,57 @@ fn format_mac(mac: [u8; 6]) -> String {
 }
 
 fn print_member(member: &UserNetMember) {
-    let msg = format!(
-        "host {}  mac {}\n",
+    println!(
+        "host {}  mac {}",
         format_ipv4(member.ipv4),
         format_mac(member.mac)
     );
-    let _ = tty::write(msg.as_bytes());
 }
 
-pub fn nmap_main() -> ! {
+pub fn nmap_main() {
     let mut info = UserNetInfo::default();
     if net_info(&mut info) != 0 {
-        let _ = tty::write(b"nmap: net_info syscall failed\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: net_info syscall failed");
+        std::process::exit(1);
     }
 
     if info.nic_ready == 0 {
-        let _ = tty::write(b"nmap: no network interface detected\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: no network interface detected");
+        std::process::exit(1);
     }
 
     if info.link_up == 0 {
-        let _ = tty::write(b"nmap: network link is down\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: network link is down");
+        std::process::exit(1);
     }
 
     if info.ipv4 == [0; 4] {
-        let _ = tty::write(b"nmap: no IP address (DHCP failed?)\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: no IP address (DHCP failed?)");
+        std::process::exit(1);
     }
 
-    let msg = format!("nmap: interface virtio0 ip {}\n", format_ipv4(info.ipv4));
-    let _ = tty::write(msg.as_bytes());
-    let _ = tty::write(b"nmap: scanning...\n");
+    println!("nmap: interface virtio0 ip {}", format_ipv4(info.ipv4));
+    println!("nmap: scanning...");
 
     let mut members = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
     let count = net_scan(&mut members, true);
 
     if count < 0 {
-        let _ = tty::write(b"nmap: scan syscall failed\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: scan syscall failed");
+        std::process::exit(1);
     }
 
     if count == 0 {
-        let _ = tty::write(b"nmap: no hosts discovered on network\n");
-        core::exit_with_code(1);
+        eprintln!("nmap: no hosts discovered on network");
+        std::process::exit(1);
     }
 
-    let _ = tty::write(b"nmap: discovered members\n");
+    println!("nmap: discovered members");
     let mut idx = 0usize;
     while idx < count as usize && idx < members.len() {
         print_member(&members[idx]);
         idx += 1;
     }
 
-    core::exit();
+    std::process::exit(0);
 }

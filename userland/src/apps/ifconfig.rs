@@ -1,4 +1,4 @@
-use crate::syscall::{UserNetInfo, core, net::net_info, tty};
+use crate::syscall::{UserNetInfo, net::net_info};
 
 fn format_ipv4(ip: [u8; 4]) -> String {
     format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
@@ -11,32 +11,28 @@ fn format_mac(mac: [u8; 6]) -> String {
     )
 }
 
-pub fn ifconfig_main() -> ! {
+pub fn ifconfig_main() {
     let mut info = UserNetInfo::default();
     if net_info(&mut info) != 0 {
-        let _ = tty::write(b"ifconfig: net_info syscall failed\n");
-        core::exit_with_code(1);
+        eprintln!("ifconfig: net_info syscall failed");
+        std::process::exit(1);
     }
 
     if info.nic_ready == 0 {
-        let _ = tty::write(b"ifconfig: no network interface\n");
-        core::exit_with_code(1);
+        eprintln!("ifconfig: no network interface");
+        std::process::exit(1);
     }
 
     let flags = if info.link_up != 0 { "UP" } else { "DOWN" };
-    let line = format!("virtio0: flags=<{}>  mtu {}\n", flags, info.mtu);
-    let _ = tty::write(line.as_bytes());
-    let line = format!(
-        "           inet {}  netmask {}  gateway {}\n",
+    println!("virtio0: flags=<{}>  mtu {}", flags, info.mtu);
+    println!(
+        "           inet {}  netmask {}  gateway {}",
         format_ipv4(info.ipv4),
         format_ipv4(info.subnet_mask),
         format_ipv4(info.gateway)
     );
-    let _ = tty::write(line.as_bytes());
-    let line = format!("           ether {}\n", format_mac(info.mac));
-    let _ = tty::write(line.as_bytes());
-    let line = format!("           dns {}\n", format_ipv4(info.dns));
-    let _ = tty::write(line.as_bytes());
+    println!("           ether {}", format_mac(info.mac));
+    println!("           dns {}", format_ipv4(info.dns));
 
-    core::exit();
+    std::process::exit(0);
 }
