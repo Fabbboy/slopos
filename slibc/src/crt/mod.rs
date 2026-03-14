@@ -61,18 +61,48 @@ pub unsafe fn init_from_stack() {
     }
 }
 
+/// Two-stage C runtime startup: parses the stack, initializes environ
+/// and stdio, calls main, then performs a clean exit.
+///
+/// # Safety
+/// `main`, `argc`, and `argv` must be valid. `envp` is derived from
+/// `argv[argc+1]` per the System V ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __libc_start_main(
+    main: MainFn,
+    argc: isize,
+    argv: *const *const c_char,
+) -> ! {
+    *MAIN_FN.get() = Some(main);
+    *ARGC.get() = argc;
+    (*ARGV.get()).0 = argv;
+
+    let envp_ptr = argv.add(argc as usize + 1) as *const *const c_char;
+    (*ENVP.get()).0 = envp_ptr;
+    crate::env::environ = envp_ptr as *mut *mut u8;
+    crate::stdio::streams::stdio_init();
+
+    let ret = main(argc, argv, envp_ptr);
+    crate::process::exit(ret)
+}
+
 /// # Safety
 /// Same RSP requirements as [`init_from_stack`].
 pub unsafe fn crt0_start() -> ! {
-    use crate::pal::syscall::sys_exit;
-
     init_from_stack();
 
+    let argc = *ARGC.get();
+    let argv = (*ARGV.get()).0;
+    let envp = (*ENVP.get()).0;
+
+    crate::env::environ = envp as *mut *mut u8;
+    crate::stdio::streams::stdio_init();
+
     if let Some(main) = *MAIN_FN.get() {
-        let ret = main(*ARGC.get(), (*ARGV.get()).0, (*ENVP.get()).0);
-        sys_exit(ret);
+        let ret = main(argc, argv, envp);
+        crate::process::exit(ret);
     } else {
-        sys_exit(127);
+        crate::process::_exit(127);
     }
 }
 

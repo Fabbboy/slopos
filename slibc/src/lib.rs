@@ -9,11 +9,14 @@
 extern crate alloc;
 
 pub mod crt;
+pub mod env;
 pub mod errno;
 pub mod error;
 pub mod ffi;
 pub mod mem;
 pub mod pal;
+pub mod process;
+pub mod signal;
 pub mod stdio;
 pub mod string;
 

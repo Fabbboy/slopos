@@ -29,16 +29,6 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn exit(status: c_int) -> ! {
-    sys::sys_exit(status)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn _exit(status: c_int) -> ! {
-    sys::sys_exit(status)
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn brk(addr: *mut c_void) -> *mut c_void {
     sys::sys_brk(addr)
 }
