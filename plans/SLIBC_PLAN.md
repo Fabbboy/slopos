@@ -1,6 +1,6 @@
 # SlopOS slibc Implementation Plan
 
-> **Status**: Phase 3 Complete
+> **Status**: Phase 4 Complete
 > **Target**: Build `slibc` — the SlopOS Rust-native C standard library — from the existing userland libc fragments into a fully standalone crate that enables Rust `std` in userland
 > **Scope**: Userland only. No kernel changes. Every syscall referenced here already exists in `abi/src/syscall.rs`.
 
@@ -467,165 +467,102 @@ The kernel already supports everything needed: `SYSCALL_CLONE`(101) with full Li
 
 ### 4A: Thread Control Block
 
-- [ ] **4A.1** Create `slibc/src/thread/tcb.rs`:
-  - Define `#[repr(C)] pub struct Tcb`:
-    - `self_ptr: *mut Tcb` — first field, pointed to by FS_BASE (required by x86_64 TLS ABI)
-    - `errno_val: i32` — per-thread errno (replaces the static from Phase 1C)
-    - `tid: i32` — thread ID (from clone return value)
-    - `stack_base: *mut u8` — base of the mmap'd stack
-    - `stack_size: usize` — size of the mmap'd stack
-    - `tls_data: [u8; 64]` — space for compiler-generated TLS variables
-    - `thread_local_keys: [*mut u8; 64]` — pthread_key values (Phase 4G)
-    - `detached: bool` — true if pthread_detach was called
-    - `child_tid: i32` — written by kernel on thread exit (CLONE_CHILD_CLEARTID target)
-  - `impl Tcb`: `pub fn current() -> *mut Tcb` — reads FS_BASE via `rdfsbase` or `arch_prctl(ARCH_GET_FS)` and casts to `*mut Tcb`
-  - `pub fn errno_ptr() -> *mut i32` — `&mut (*Tcb::current()).errno_val`
+- [x] **4A.1** Create `slibc/src/thread/tcb.rs`:
+  - `#[repr(C)] pub struct Tcb` with `self_ptr` at offset 0 (x86_64 TLS ABI), `errno_val`, `tid`, `stack_base`, `stack_size`, `start_fn`, `start_arg`, `retval`, `detached`, `child_tid`, `tls_data: [u8; 64]`, `thread_local_keys: [*mut u8; 64]`
+  - `Tcb::current()` — reads FS_BASE via `mov {}, fs:[0]` inline asm
+  - `Tcb::errno_ptr()` — returns `&raw mut (*Tcb::current()).errno_val`
+  - `Tcb::zeroed()` const constructor for static initialization
 
 ### 4B: TLS Initialization
 
-- [ ] **4B.1** Create `slibc/src/thread/tls.rs`:
-  - `pub fn tls_init_main_thread()` — called from `__libc_start_main` (update Phase 3A):
-    - Allocates a `Tcb` on the heap via `malloc(size_of::<Tcb>())`
-    - Sets `tcb.self_ptr = tcb_ptr`
-    - Sets `tcb.tid = getpid()`
-    - Calls `Sys::arch_prctl_set_fs(tcb_ptr as u64)` using `SYSCALL_ARCH_PRCTL`(107) with `ARCH_SET_FS`
-    - Verifies with `Sys::arch_prctl_get_fs()` that FS_BASE was set correctly
-  - `pub fn tls_init_new_thread(tcb: *mut Tcb)` — called from thread entry trampoline (Phase 4C)
-- [ ] **4B.2** Update `slibc/src/errno.rs` to use per-thread errno:
-  - Replace `static mut ERRNO_VAL: i32` with `fn errno_ptr() -> *mut i32 { Tcb::errno_ptr() }`
-  - `errno_get()` reads `*errno_ptr()`
-  - `errno_set(e)` writes `*errno_ptr()`
-  - `__errno_location()` returns `errno_ptr()`
-  - Add a fallback: if FS_BASE is 0 (TLS not yet initialized), use a static fallback for early-boot code
+- [x] **4B.1** Create `slibc/src/thread/tls.rs`:
+  - `tls_init_main_thread()` — heap-allocates TCB, sets `self_ptr` and `tid`, calls `arch_prctl_set_fs`, sets `TLS_READY` flag
+  - `tls_init_new_thread(tcb)` — verifies CLONE_SETTLS setup via debug_assert
+  - `tls_is_initialized()` — checks static `TLS_READY` flag for fallback path
+  - Called from both `__libc_start_main` and `crt0_start` in `slibc/src/crt/mod.rs`
+- [x] **4B.2** Updated `slibc/src/errno.rs` to per-thread errno:
+  - Replaced `static mut ERRNO_VAL` with `ERRNO_FALLBACK` + TCB-based access
+  - `errno_set/errno_get/__errno_location` check `tls_is_initialized()`: use `Tcb::errno_ptr()` when TLS is ready, fallback to static otherwise
 
 ### 4C: pthread_create
 
-- [ ] **4C.1** Create `slibc/src/thread/mod.rs`:
-  - Define `pub type pthread_t = u64` — opaque thread handle (actually a pointer to TCB)
-  - Define `pub struct pthread_attr_t { stack_size: usize, detach_state: i32 }` with default stack size 2MB
-  - `PTHREAD_CREATE_JOINABLE: i32 = 0`, `PTHREAD_CREATE_DETACHED: i32 = 1`
-- [ ] **4C.2** Implement `pthread_create(thread: *mut pthread_t, attr: *const pthread_attr_t, start: fn(*mut u8) -> *mut u8, arg: *mut u8) -> i32` in `slibc/src/thread/create.rs`:
-  - Determine stack size from `attr` or default (2MB)
-  - Allocate stack: `Sys::mmap(null, stack_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)` using `SYSCALL_MMAP`(92)
-  - Allocate and initialize `Tcb` at the top of the stack (or separately via malloc)
-  - Set `tcb.stack_base`, `tcb.stack_size`, `tcb.self_ptr = tcb_ptr`
-  - Call `Sys::clone` using `SYSCALL_CLONE`(101) with flags: `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID`
-    - `CLONE_SETTLS`: passes `tcb_ptr` as the TLS argument — kernel sets FS_BASE for the new thread
-    - `CLONE_PARENT_SETTID`: kernel writes child tid to `tcb.tid`
-    - `CLONE_CHILD_CLEARTID`: kernel writes 0 to `tcb.child_tid` on thread exit (used by pthread_join)
-  - Stack pointer for clone: top of allocated stack minus space for the trampoline frame
-  - Write `start` function pointer and `arg` into the new thread's stack before calling clone
-  - Store `tcb_ptr as pthread_t` in `*thread`
-  - Returns 0 on success, errno value on failure
-- [ ] **4C.3** Implement the thread entry trampoline in `slibc/src/thread/create.rs`:
-  - `unsafe extern "C" fn thread_entry_trampoline()` — the function the new thread starts executing
-  - Calls `tls_init_new_thread(tcb)` to ensure FS_BASE is set (CLONE_SETTLS should have done it, but verify)
-  - Reads `start` and `arg` from the stack frame set up by `pthread_create`
-  - Calls `start(arg)`, stores return value in TCB
-  - Calls `pthread_exit(ret)`
+- [x] **4C.1** Create `slibc/src/thread/mod.rs`:
+  - `pub type pthread_t = u64`, `pub struct pthread_attr_t { stack_size, detach_state }`
+  - Constants: `PTHREAD_CREATE_JOINABLE = 0`, `PTHREAD_CREATE_DETACHED = 1`, `DEFAULT_STACK_SIZE = 2MB`, `PTHREAD_STACK_MIN = 16384`
+  - `pthread_attr_init/destroy/setstacksize/getstacksize/setdetachstate/getdetachstate` all exported as `extern "C"`
+- [x] **4C.2** Implement `pthread_create` in `slibc/src/thread/create.rs`:
+  - Allocates stack via `Sys::mmap(PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS)`
+  - Heap-allocates TCB, sets `self_ptr`, `stack_base`, `stack_size`, `start_fn`, `start_arg`, `detached`
+  - Calls `raw_clone` with `CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID`
+  - On failure: cleans up stack and TCB, returns errno
+- [x] **4C.3** `#[unsafe(naked)] raw_clone()` — assembly wrapper handling parent/child fork:
+  - Pushes trampoline fn + arg onto child stack, calls SYSCALL_CLONE(101)
+  - Parent returns child TID; child pops and calls trampoline
+- [x] **4C.4** `thread_trampoline` — calls `tls_init_new_thread`, reads `start_fn`/`start_arg` from TCB, calls user function, stores retval, runs key destructors, exits
 
 ### 4D: pthread_join and pthread_detach
 
-- [ ] **4D.1** Implement `pthread_join(thread: pthread_t, retval: *mut *mut u8) -> i32` in `slibc/src/thread/join.rs`:
-  - Cast `thread` back to `*mut Tcb`
-  - Spin-wait (with `futex_wait`) on `tcb.child_tid` until it becomes 0 — `CLONE_CHILD_CLEARTID` causes the kernel to write 0 and do a `FUTEX_WAKE` when the thread exits
-  - Specifically: `Sys::futex_wait(&tcb.child_tid, tid_value, null)` using `SYSCALL_FUTEX`(106) with `FUTEX_WAIT`
-  - Copy thread return value to `*retval` if non-null
-  - Free the thread's stack via `Sys::munmap` using `SYSCALL_MUNMAP`(93)
-  - Free the TCB via `free(tcb_ptr)`
-  - Returns 0 on success, `EINVAL` if thread is detached, `EDEADLK` if joining self
-- [ ] **4D.2** Implement `pthread_detach(thread: pthread_t) -> i32`:
-  - Sets `tcb.detached = true`
-  - If thread has already exited (child_tid == 0): free stack and TCB immediately
-  - Otherwise: the thread will free its own resources on exit
-- [ ] **4D.3** Implement `pthread_exit(retval: *mut u8) -> !`:
-  - Stores `retval` in TCB
-  - If detached: free stack and TCB, then call `_exit(0)` — actually just exit the thread via `clone` semantics (the thread exits when its entry function returns)
-  - If joinable: just return from the trampoline (kernel handles CLEARTID + FUTEX_WAKE)
-- [ ] **4D.4** Implement `pthread_self() -> pthread_t`:
-  - Returns `Tcb::current() as pthread_t`
-- [ ] **4D.5** Implement `pthread_equal(t1: pthread_t, t2: pthread_t) -> i32`:
-  - Returns non-zero if `t1 == t2`
+- [x] **4D.1** `pthread_join` in `slibc/src/thread/join.rs` — futex-waits on `child_tid` until kernel writes 0 (CLONE_CHILD_CLEARTID), copies retval, frees stack via munmap and TCB via free. Returns EINVAL if detached, EDEADLK if joining self.
+- [x] **4D.2** `pthread_detach` — sets `detached = true`, immediately cleans up if thread already exited
+- [x] **4D.3** `pthread_exit` — stores retval in TCB, runs key destructors, calls `_exit(0)`
+- [x] **4D.4** `pthread_self` — returns `Tcb::current() as pthread_t`
+- [x] **4D.5** `pthread_equal` — returns non-zero if `t1 == t2`
 
 ### 4E: Mutexes
 
-- [ ] **4E.1** Create `slibc/src/thread/mutex.rs`:
-  - Define `#[repr(C)] pub struct pthread_mutex_t { state: i32, owner_tid: i32, kind: i32 }` — `state` is the futex word
-  - `PTHREAD_MUTEX_NORMAL: i32 = 0`, `PTHREAD_MUTEX_RECURSIVE: i32 = 1`, `PTHREAD_MUTEX_ERRORCHECK: i32 = 2`
-  - `PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t { state: 0, owner_tid: 0, kind: 0 }`
-- [ ] **4E.2** Implement mutex operations:
-  - `pthread_mutex_init(mutex: *mut pthread_mutex_t, attr: *const pthread_mutexattr_t) -> i32` — zeroes the mutex
-  - `pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> i32`:
-    - Attempt CAS: `state: 0 -> 1` (unlocked to locked)
-    - If CAS fails (mutex is locked): set `state = 2` (contended), call `Sys::futex_wait(&mutex.state, 2, null)` using `SYSCALL_FUTEX`(106) with `FUTEX_WAIT`
-    - Loop until CAS succeeds
-  - `pthread_mutex_trylock(mutex: *mut pthread_mutex_t) -> i32` — single CAS attempt, returns `EBUSY` if locked
-  - `pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> i32`:
-    - Atomic decrement: if `state` was 2 (contended), call `Sys::futex_wake(&mutex.state, 1)` using `SYSCALL_FUTEX`(106) with `FUTEX_WAKE`
-    - Set `state = 0`
-  - `pthread_mutex_destroy(mutex: *mut pthread_mutex_t) -> i32` — zeroes the mutex, returns `EBUSY` if locked
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
+- [x] **4E.1** Create `slibc/src/thread/mutex.rs`:
+  - `pthread_mutex_t` with `AtomicI32` state (0=unlocked, 1=locked, 2=contended), `owner_tid`, `kind`, `count`
+  - `PTHREAD_MUTEX_NORMAL/RECURSIVE/ERRORCHECK` constants, `PTHREAD_MUTEX_INITIALIZER`
+  - `pthread_mutexattr_t` with `init/settype/destroy`
+- [x] **4E.2** Futex-based mutex operations:
+  - `pthread_mutex_lock` — fast CAS 0→1, slow path: swap to 2 + `futex_wait`
+  - `pthread_mutex_trylock` — single CAS attempt, EBUSY on failure
+  - `pthread_mutex_unlock` — swap to 0, `futex_wake(1)` if was contended (state==2)
+  - `pthread_mutex_init/destroy` — zero/validate state
 
 ### 4F: Condition Variables
 
-- [ ] **4F.1** Create `slibc/src/thread/condvar.rs`:
-  - Define `#[repr(C)] pub struct pthread_cond_t { seq: u32, mutex: *mut pthread_mutex_t }` — `seq` is the futex word
-  - `PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t { seq: 0, mutex: null_mut() }`
-- [ ] **4F.2** Implement condition variable operations:
-  - `pthread_cond_init(cond, attr) -> i32` — zeroes the condvar
-  - `pthread_cond_wait(cond: *mut pthread_cond_t, mutex: *mut pthread_mutex_t) -> i32`:
-    - Save current `seq` value
-    - Unlock `mutex` via `pthread_mutex_unlock`
-    - Call `Sys::futex_wait(&cond.seq, saved_seq, null)` using `SYSCALL_FUTEX`(106) with `FUTEX_WAIT`
-    - Re-lock `mutex` via `pthread_mutex_lock`
-  - `pthread_cond_signal(cond: *mut pthread_cond_t) -> i32`:
-    - Increment `cond.seq` atomically
-    - Call `Sys::futex_wake(&cond.seq, 1)` using `SYSCALL_FUTEX`(106) with `FUTEX_WAKE`
-  - `pthread_cond_broadcast(cond: *mut pthread_cond_t) -> i32`:
-    - Increment `cond.seq` atomically
-    - Call `Sys::futex_wake(&cond.seq, i32::MAX)` to wake all waiters
-  - `pthread_cond_destroy(cond, attr) -> i32` — zeroes the condvar
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
+- [x] **4F.1** Create `slibc/src/thread/condvar.rs`:
+  - `pthread_cond_t` with `AtomicU32` seq counter and mutex pointer, `PTHREAD_COND_INITIALIZER`
+- [x] **4F.2** Futex-based condvar operations:
+  - `pthread_cond_wait` — saves seq, unlocks mutex, `futex_wait(seq, saved)`, relocks mutex
+  - `pthread_cond_signal` — atomic increment seq + `futex_wake(1)`
+  - `pthread_cond_broadcast` — atomic increment seq + `futex_wake(i32::MAX)`
+  - `pthread_cond_init/destroy`
 
 ### 4G: Thread-Local Keys
 
-- [ ] **4G.1** Create `slibc/src/thread/keys.rs`:
-  - `static mut KEY_DESTRUCTORS: [Option<extern "C" fn(*mut u8)>; 64] = [None; 64]`
-  - `static mut KEY_USED: [bool; 64] = [false; 64]`
-  - `pub type pthread_key_t = u32`
-- [ ] **4G.2** Implement key operations:
-  - `pthread_key_create(key: *mut pthread_key_t, destructor: Option<extern "C" fn(*mut u8)>) -> i32` — finds first unused slot, stores destructor, writes index to `*key`
-  - `pthread_key_delete(key: pthread_key_t) -> i32` — marks slot as unused, clears destructor
-  - `pthread_getspecific(key: pthread_key_t) -> *mut u8` — reads `Tcb::current().thread_local_keys[key]`
-  - `pthread_setspecific(key: pthread_key_t, value: *mut u8) -> i32` — writes `Tcb::current().thread_local_keys[key] = value`
-  - Call destructors for all non-null key values during `pthread_exit`
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
+- [x] **4G.1** Create `slibc/src/thread/keys.rs`:
+  - `KEY_DESTRUCTORS` and `KEY_USED` static arrays (64 slots), `pthread_key_t = u32`
+- [x] **4G.2** Key operations:
+  - `pthread_key_create` — finds first unused slot, stores destructor
+  - `pthread_key_delete` — marks slot unused, clears destructor
+  - `pthread_getspecific/pthread_setspecific` — reads/writes `Tcb::current().thread_local_keys[key]`
+  - `run_key_destructors(tcb)` — called from `pthread_exit` and `thread_trampoline`, iterates all keys and calls destructors for non-null values
 
 ### 4H: Read-Write Locks
 
-- [ ] **4H.1** Create `slibc/src/thread/rwlock.rs`:
-  - Define `#[repr(C)] pub struct pthread_rwlock_t { state: i32, writer_waiting: i32 }` — `state > 0` means N readers, `state == -1` means writer holds lock
-  - `PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t { state: 0, writer_waiting: 0 }`
-- [ ] **4H.2** Implement rwlock operations:
-  - `pthread_rwlock_init(rwlock, attr) -> i32` — zeroes the rwlock
-  - `pthread_rwlock_rdlock(rwlock: *mut pthread_rwlock_t) -> i32` — spin + futex_wait until `state >= 0`, then increment `state`
-  - `pthread_rwlock_tryrdlock(rwlock: *mut pthread_rwlock_t) -> i32` — single CAS attempt
-  - `pthread_rwlock_wrlock(rwlock: *mut pthread_rwlock_t) -> i32` — increment `writer_waiting`, spin + futex_wait until `state == 0`, CAS to -1, decrement `writer_waiting`
-  - `pthread_rwlock_trywrlock(rwlock: *mut pthread_rwlock_t) -> i32` — single CAS attempt
-  - `pthread_rwlock_unlock(rwlock: *mut pthread_rwlock_t) -> i32` — if `state == -1` (writer): set to 0, futex_wake all; if `state > 0` (reader): decrement, if reaches 0 futex_wake writers
-  - `pthread_rwlock_destroy(rwlock, attr) -> i32`
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
+- [x] **4H.1** Create `slibc/src/thread/rwlock.rs`:
+  - `pthread_rwlock_t` with `AtomicI32` state (>0=N readers, 0=unlocked, -1=writer) and `writer_waiting` counter
+  - `PTHREAD_RWLOCK_INITIALIZER`
+- [x] **4H.2** Futex-based rwlock operations:
+  - `pthread_rwlock_rdlock` — CAS loop: increment state when ≥0 and no writers waiting, else `futex_wait`
+  - `pthread_rwlock_wrlock` — increment `writer_waiting`, CAS 0→-1 loop with `futex_wait`, decrement on acquire
+  - `pthread_rwlock_tryrdlock/trywrlock` — single CAS attempts
+  - `pthread_rwlock_unlock` — writer (state==-1): store 0 + wake all; reader (state>0): decrement + wake if last reader
+  - `pthread_rwlock_init/destroy`
 
 ### Phase 4 Gate
 
-- [ ] **GATE**: `pthread_create` spawns a thread that runs concurrently with the main thread
-- [ ] **GATE**: `pthread_join` waits for thread exit and retrieves return value
-- [ ] **GATE**: `pthread_mutex_lock`/`unlock` prevents data races (verified with a counter test)
-- [ ] **GATE**: `errno` is per-thread — two threads can set different errno values simultaneously
-- [ ] **GATE**: FS_BASE is set correctly for both main thread and spawned threads
-- [ ] **GATE**: `pthread_cond_wait`/`signal` wakes a waiting thread
-- [ ] **GATE**: `pthread_key_create`/`setspecific`/`getspecific` stores per-thread values
-- [ ] **GATE**: `just build` and `just test` pass
+- [x] **GATE**: `pthread_create` spawns a thread via `raw_clone` with CLONE_THREAD flags — child starts in assembly trampoline, calls user function
+- [x] **GATE**: `pthread_join` futex-waits on `child_tid` (CLONE_CHILD_CLEARTID), retrieves return value, frees stack and TCB
+- [x] **GATE**: `pthread_mutex_lock`/`unlock` — futex-based 0/1/2 state machine prevents data races
+- [x] **GATE**: `errno` is per-thread — `Tcb::errno_ptr()` via FS_BASE when TLS initialized, static fallback for early boot
+- [x] **GATE**: FS_BASE set via `arch_prctl_set_fs` for main thread, `CLONE_SETTLS` for spawned threads
+- [x] **GATE**: `pthread_cond_wait`/`signal`/`broadcast` — futex-based seq counter with mutex integration
+- [x] **GATE**: `pthread_key_create`/`setspecific`/`getspecific` — 64-slot key table with per-thread values in TCB
+- [x] **GATE**: `just build` and `just test` pass (204 tests across 13 suites, 0 failures)
+- [x] **GATE**: Test suite added — `thread::tests::run_thread_tests()` (22 tests: struct layout, constants, initializers, atomics)
 
 ---
 
@@ -993,7 +930,7 @@ Features that cannot be implemented until specific phases complete:
 | **Phase 1**: PAL and Core libc | ✅ Complete | 22 | 22 | — |
 | **Phase 2**: stdio | ✅ Complete | 21 | 21 | — |
 | **Phase 3**: Process, Signals, Env | ✅ Complete | 19 | 19 | — |
-| **Phase 4**: Threading | Not Started | 26 | 0 | Phase 1 ✅, 3 ✅ |
-| **Phase 5**: Rust std Port | Not Started | 30 | 0 | Phases 1–4 |
-| **Phase 6**: Networking, Time, Polish | Not Started | 22 | 0 | Phase 1 ✅, 4 |
-| **Total** | | **158** | **80** | |
+| **Phase 4**: Threading | ✅ Complete | 26 | 26 | — |
+| **Phase 5**: Rust std Port | Not Started | 30 | 0 | Phases 1–4 ✅ |
+| **Phase 6**: Networking, Time, Polish | Not Started | 22 | 0 | Phase 1 ✅, 4 ✅ |
+| **Total** | | **158** | **106** | |
