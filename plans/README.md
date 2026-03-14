@@ -17,7 +17,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
 | [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |
-| [SLIBC_PLAN.md](./SLIBC_PLAN.md) | 7-phase plan for **slibc** — the SlopOS Rust-native C standard library enabling full Rust `std` in userland (PAL, stdio, pthread, Rust std port) — 157 tasks |
+| [USERLAND_STD_MIGRATION_PLAN.md](./USERLAND_STD_MIGRATION_PLAN.md) | 7-phase plan to migrate all userland code from `no_std`-era patterns to idiomatic Rust `std` — entry points, I/O, formatting, file ops, process management, app rewrites — 89 tasks |
 
 
 ---
