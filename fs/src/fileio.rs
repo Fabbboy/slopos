@@ -1489,6 +1489,56 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
     })
 }
 
+/// Allocate a new file descriptor pointing to an already-opened TTY.
+///
+/// Used by `TIOCGPTPEER` to create a slave FD from a master FD without
+/// going through the `/dev/pts/N` path.  The caller must have already
+/// called `tty::open_pty_peer()` to validate and increment the open count.
+pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, flags: u32) -> c_int {
+    with_tables(|kernel, processes| {
+        let kernel_ptr = kernel as *mut FileTableSlot;
+        let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
+            t as *mut FileTableSlot
+        } else if let Some(t) = find_free_table(processes) {
+            t as *mut FileTableSlot
+        } else {
+            kernel_ptr
+        };
+        let table: &mut FileTableSlot = unsafe { &mut *table_ptr };
+
+        if !table.in_use {
+            table.in_use = true;
+            table.process_id = process_id;
+            reset_table(table);
+        }
+
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+
+        let Some(slot_idx) = find_free_slot(table) else {
+            drop(guard);
+            return -1;
+        };
+
+        let desc = unsafe { &mut (*table_ptr).descriptors[slot_idx] };
+        desc.inode = 0;
+        desc.fs = None;
+        desc.flags = flags;
+        desc.position = 0;
+        desc.valid = true;
+        desc.cloexec = (flags & O_CLOEXEC as u32) != 0;
+        desc.tty_index = Some(tty_idx);
+        desc.pipe_id = INVALID_PIPE_ID;
+        desc.socket_idx = INVALID_SOCKET_IDX;
+        desc.pipe_read_end = false;
+        desc.pipe_write_end = false;
+
+        drop(guard);
+        maybe_acquire_controlling_tty_on_open(tty_idx, flags);
+        slot_idx as c_int
+    })
+}
+
 pub fn file_pipe_create(
     process_id: u32,
     flags: u32,

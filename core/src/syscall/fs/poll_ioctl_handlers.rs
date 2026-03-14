@@ -10,7 +10,7 @@ use slopos_abi::syscall::{
     UserTermios, UserTimeval, UserWinsize,
 };
 
-use slopos_fs::fileio::{file_get_tty_index, file_poll_fd};
+use slopos_fs::fileio::{file_get_tty_index, file_open_tty_fd, file_poll_fd};
 
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, signal_process_group,
@@ -377,7 +377,15 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             if peer_tty < 0 {
                 ctx.err()
             } else {
-                ctx.ok(peer_tty as u64)
+                let slave_idx = slopos_abi::syscall::TtyIndex(peer_tty as u8);
+                let open_flags = arg as u32;
+                let new_fd = file_open_tty_fd(pid, slave_idx, open_flags);
+                if new_fd < 0 {
+                    tty::close_ref(slave_idx);
+                    ctx.err()
+                } else {
+                    ctx.ok(new_fd as u64)
+                }
             }
         }
         TIOCSETD => {
