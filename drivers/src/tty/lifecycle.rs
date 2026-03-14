@@ -154,9 +154,12 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
                         .control_flags()
                         .contains(slopos_abi::syscall::ControlFlags::HUPCL);
                     let sid = tty.session.session_id_raw();
+                    // HUPCL fires only when a session is attached (sid != 0).
+                    // Without a session, there is no process group to receive
+                    // SIGHUP and no DTR line to drop (QEMU serial is virtual).
+                    // POSIX allows this: HUPCL is "implementation-defined" for
+                    // terminals without modem control.
                     if hupcl && sid != 0 {
-                        // hangup() must own flush + detach + signal: it
-                        // reads session_id under lock to deliver SIGHUP.
                         tty.flags.remove(TtyFlags::EXCLUSIVE);
                         drop(guard);
                         hangup(idx);

@@ -277,19 +277,18 @@ pub(super) fn set_termios_mode(
 
         match check_result {
             ForegroundCheck::BackgroundWrite => {
-                // POSIX: if SIGTTOU is blocked or ignored, proceed silently.
+                // POSIX §11.1.4: tcsetattr() always triggers SIGTTOU for
+                // background processes, regardless of TOSTOP.  This differs
+                // from write(), which only checks when TOSTOP is set.
                 if !is_current_signal_blocked_or_ignored(SIGTTOU) {
-                    // Check if the process group is orphaned.
                     if is_pgrp_orphaned(caller_pgid, caller_sid) {
                         return Err(TtyError::OrphanedProcessGroup);
                     }
-                    // Deliver SIGTTOU to the caller's process group.
                     if caller_pgid != 0 {
                         let _ = signal_process_group(caller_pgid, SIGTTOU);
                     }
                     return Err(TtyError::SignalInterrupt);
                 }
-                // SIGTTOU blocked or ignored — fall through to apply termios.
             }
             ForegroundCheck::DeniedCrossSession => {
                 return Err(TtyError::CrossSessionDenied);
