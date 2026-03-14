@@ -278,6 +278,10 @@ pub(crate) struct VConsoleFbInfo {
     pub(crate) bytes_per_pixel: u8,
 }
 
+// SAFETY: The framebuffer base address is a physical memory mapping that
+// remains valid and stable for the entire lifetime of the kernel.  It is
+// only written to via `put_pixel` which performs bounds-checked writes.
+// The address does not alias any Rust-managed allocation.
 unsafe impl Send for VConsoleFbInfo {}
 
 // ---------------------------------------------------------------------------
@@ -299,8 +303,9 @@ impl ScrollbackBuf {
         let total = SCROLLBACK_LINES.saturating_mul(cols);
         let mut v = alloc::vec::Vec::new();
         if total > 0 {
-            let _ = v.try_reserve_exact(total);
-            v.resize(total, Cell::blank());
+            if v.try_reserve_exact(total).is_ok() {
+                v.resize(total, Cell::blank());
+            }
         }
         Self {
             buf: v.into_boxed_slice(),

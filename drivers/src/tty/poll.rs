@@ -187,15 +187,14 @@ pub fn poll_sleep_on(slots: &[u8]) {
 /// ALL active TTY poll waiters.  Retained for backward compatibility with
 /// code paths that do not yet pass slot indices.
 pub fn poll_sleep() {
-    // Collect all active TTY indices.
     let mut slots = [0u8; MAX_TTYS];
     let mut count = 0;
-    for i in 0..MAX_TTYS {
-        let guard = TTY_SLOTS[i].lock();
-        if guard.is_some() {
-            slots[count] = i as u8;
-            count += 1;
-        }
+    let mut bits = super::table::active_slots_bitmap();
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        slots[count] = i as u8;
+        count += 1;
+        bits &= bits - 1;
     }
     poll_sleep_on(&slots[..count]);
 }

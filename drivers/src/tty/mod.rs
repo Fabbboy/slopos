@@ -156,7 +156,6 @@ impl Drop for Tty {
 /// }
 /// deferred.execute();  // delivers everything outside the lock
 /// ```
-#[derive(Default)]
 pub(crate) struct PostLockWork {
     signal: Option<(u32, u8)>,
     ixoff_byte: Option<(DriverId, u8, usize)>,
@@ -164,6 +163,8 @@ pub(crate) struct PostLockWork {
     wake_input: u32,
     wake_output: u32,
     wake_poll: u32,
+    #[cfg(debug_assertions)]
+    executed: bool,
 }
 
 impl PostLockWork {
@@ -176,10 +177,15 @@ impl PostLockWork {
             wake_input: 0,
             wake_output: 0,
             wake_poll: 0,
+            #[cfg(debug_assertions)]
+            executed: false,
         }
     }
 
-    #[cfg_attr(not(feature = "itests"), expect(dead_code, reason = "used in itests"))]
+    #[cfg_attr(
+        not(any(feature = "itests", debug_assertions)),
+        expect(dead_code, reason = "used in itests and debug Drop impl")
+    )]
     pub(crate) fn is_empty(&self) -> bool {
         self.signal.is_none()
             && self.ixoff_byte.is_none()
@@ -250,7 +256,11 @@ impl PostLockWork {
         self.wake_poll_slot(slot);
     }
 
-    pub(crate) fn execute(self) {
+    pub(crate) fn execute(mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.executed = true;
+        }
         use slopos_lib::kernel_services::driver_runtime::signal_process_group;
 
         if let Some((pgid, sig)) = self.signal {
@@ -284,6 +294,16 @@ impl PostLockWork {
             TTY_POLL_WAITERS[slot].wake_all();
             bits &= bits - 1;
         }
+    }
+}
+
+#[cfg(all(debug_assertions, not(feature = "itests")))]
+impl Drop for PostLockWork {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.executed || self.is_empty(),
+            "PostLockWork dropped with pending deferred work — call .execute()"
+        );
     }
 }
 
