@@ -28,7 +28,7 @@ BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
 "$SCRIPT_DIR/ensure_toolchain.sh"
-if [ "$BUILD_STD" = "core,alloc,std" ]; then
+if [[ "$BUILD_STD" == *"std"* ]]; then
     "$SCRIPT_DIR/patch_std.sh"
 fi
 
