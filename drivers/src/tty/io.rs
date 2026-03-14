@@ -22,6 +22,7 @@ use super::ldisc::{self, BatchResult, OutputAction};
 use super::session::ForegroundCheck;
 use super::table::{
     TTY_INPUT_WAITERS, TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS,
+    TTY_WRITE_LOCKS,
 };
 use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
 
@@ -53,11 +54,16 @@ impl Tty {
         }
 
         let batch = self.ldisc.receive_buf(&events[..count]);
-        if batch.echo_len > 0 {
-            self.driver.write_output(&batch.echo[..batch.echo_len]);
-        }
-        if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
-            self.driver.write_output(&[xoff]);
+        let xoff = self.ldisc.ixoff_check_xoff();
+        if batch.echo_len > 0 || xoff.is_some() {
+            let slot = self.index.0 as usize;
+            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
+            if batch.echo_len > 0 {
+                self.driver.write_output(&batch.echo[..batch.echo_len]);
+            }
+            if let Some(xoff_byte) = xoff {
+                self.driver.write_output(&[xoff_byte]);
+            }
         }
         batch
             .signal
@@ -110,7 +116,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
         let batch: BatchResult = tty.ldisc.receive_buf(events);
         if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
-            deferred.add_ixoff_byte(tty.driver.id(), xoff);
+            deferred.add_ixoff_byte(tty.driver.id(), xoff, slot);
         }
 
         if was_stopped && !tty.ldisc.is_stopped() {
@@ -144,9 +150,11 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     };
 
     if let Some((driver_id, out, out_len)) = route {
+        let _write_guard = TTY_WRITE_LOCKS[slot].lock();
         TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
         write_driver_unlocked(driver_id, &out[..out_len]);
         TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
+        drop(_write_guard);
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 
@@ -279,7 +287,7 @@ pub fn read_with_attach(
                         buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
                         total = 1 + got;
                         if let Some(xon) = tty.ldisc.ixoff_check_xon() {
-                            deferred.add_ixoff_byte(tty.driver.id(), xon);
+                            deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
                         }
                         if tty.flags.contains(TtyFlags::THROTTLED)
                             && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
@@ -305,7 +313,7 @@ pub fn read_with_attach(
                 total = total.saturating_add(got);
                 if got > 0 {
                     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
-                        deferred.add_ixoff_byte(tty.driver.id(), xon);
+                        deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
                     }
                 }
                 if got > 0
@@ -741,16 +749,18 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 }
             }
         }
-        // Per-TTY lock dropped.
-
-        TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
-        let driver_written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
-        TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
+        // Per-TTY lock dropped — acquire per-slot write lock to serialize
+        // with concurrent echo output (POSIX §11.1.9 echo serialization).
+        let driver_written = {
+            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
+            TTY_OUTPUT_INFLIGHT[slot].fetch_add(out_len as u32, Ordering::Release);
+            let written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
+            TTY_OUTPUT_INFLIGHT[slot].fetch_sub(out_len as u32, Ordering::Release);
+            written
+        };
         if driver_written < out_len {
             break;
         }
-        // Wake drain waiters (TCSETSW / TCSETSF) now that this chunk
-        // has reached the hardware.
         TTY_OUTPUT_WAITERS[slot].wake_all();
     }
 

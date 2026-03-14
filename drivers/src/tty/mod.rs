@@ -62,7 +62,7 @@ use slopos_abi::syscall::UserWinsize;
 use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
 use self::ldisc::LdiscKind;
 use self::session::TtySession;
-use self::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS};
+use self::table::{TTY_INPUT_WAITERS, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_WRITE_LOCKS};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -155,7 +155,7 @@ impl Tty {
 #[derive(Default)]
 pub(crate) struct PostLockWork {
     signal: Option<(u32, u8)>,
-    ixoff_byte: Option<(DriverId, u8)>,
+    ixoff_byte: Option<(DriverId, u8, usize)>,
     packet_event: Option<(TtyIndex, u8)>,
     wake_input: u32,
     wake_output: u32,
@@ -193,10 +193,9 @@ impl PostLockWork {
         }
     }
 
-    /// Queue an IXOFF/IXON byte to send to a driver.
     #[inline]
-    pub(crate) fn add_ixoff_byte(&mut self, driver_id: DriverId, byte: u8) {
-        self.ixoff_byte = Some((driver_id, byte));
+    pub(crate) fn add_ixoff_byte(&mut self, driver_id: DriverId, byte: u8, slot: usize) {
+        self.ixoff_byte = Some((driver_id, byte, slot));
     }
 
     /// Queue a packet event to deliver to a slave's paired master.
@@ -254,7 +253,8 @@ impl PostLockWork {
             let _ = signal_process_group(pgid, sig);
         }
 
-        if let Some((driver_id, byte)) = self.ixoff_byte {
+        if let Some((driver_id, byte, slot)) = self.ixoff_byte {
+            let _wg = (slot < MAX_TTYS).then(|| TTY_WRITE_LOCKS[slot].lock());
             write_driver_unlocked(driver_id, &[byte]);
         }
 

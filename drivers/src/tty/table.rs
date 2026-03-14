@@ -88,6 +88,27 @@ pub static TTY_POLL_WAITERS: [WaitQueue; MAX_TTYS] = [const { WaitQueue::new() }
 /// `TTY_OUTPUT_WAITERS` so drain waiters re-check.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
 
+/// Per-TTY write serialization locks.
+///
+/// Serializes all output to a TTY's hardware driver — both echo output
+/// (from `push_input_batch` / `drain_hw_input_locked`) and user writes
+/// (from `write()`).  Without this, concurrent echo and user writes can
+/// interleave bytes at the driver level, causing corrupted terminal output.
+///
+/// This is the Rust equivalent of Linux's `atomic_write_lock` on
+/// `tty_struct`.  POSIX §11.1.9 requires echo to be indistinguishable
+/// from terminal-generated output, implying proper serialization.
+///
+/// # Lock Ordering
+///
+/// `TTY_SLOTS[i]` → `TTY_WRITE_LOCKS[i]` (the write lock may be acquired
+/// while holding the slot lock, but **NEVER** the reverse).  The user-write
+/// path drops the slot lock before acquiring the write lock; the echo path
+/// in `drain_hw_input_locked` acquires the write lock while the slot lock
+/// is still held — both orderings are safe because no code path ever
+/// acquires the slot lock while holding the write lock.
+pub static TTY_WRITE_LOCKS: [IrqMutex<()>; MAX_TTYS] = [const { IrqMutex::new(()) }; MAX_TTYS];
+
 /// Per-TTY generation counter.  Incremented each time a slot transitions
 /// from allocated → free (`*slot = None`).  Used by `PtyPeerHandle` to
 /// detect stale references after rapid PTY free/reuse cycles.

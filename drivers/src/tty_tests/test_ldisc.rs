@@ -32,7 +32,7 @@ use crate::tty::session::{
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
+    Cell, CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 use crate::tty::{PacketEvents, TtyFlags};
@@ -60,10 +60,10 @@ fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).cols = 80;
         (*state_ref).fb = None;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).cells[r].fill(b' ' as u32);
-            for c in 0..VCONSOLE_MAX_COLS {
-                (*state_ref).cell_attrs[r][c] = default_cell;
-            }
+            (*state_ref).cells[r].fill(Cell {
+                codepoint: b' ' as u32,
+                attrs: default_cell,
+            });
         }
         (*state_ref).parser = VtParser::new();
         (*state_ref).cursor_attrs = default_cursor;
@@ -72,10 +72,10 @@ fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).saved_cursor_attrs = default_cursor;
         (*state_ref).cursor_visible = true;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).alt_screen_cells[r].fill(b' ' as u32);
-            for c in 0..VCONSOLE_MAX_COLS {
-                (*state_ref).alt_screen_attrs[r][c] = default_cell;
-            }
+            (*state_ref).alt_cells[r].fill(Cell {
+                codepoint: b' ' as u32,
+                attrs: default_cell,
+            });
         }
         (*state_ref).alt_screen_cursor_row = 0;
         (*state_ref).alt_screen_cursor_col = 0;
@@ -5007,7 +5007,8 @@ pub fn test_vconsole_state_initial() -> TestResult {
 pub fn test_vconsole_write_byte_printable() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.write_byte(b'A');
-    if state.cells[0][0] != b'A' as u32 || state.cursor_row != 0 || state.cursor_col != 1 {
+    if state.cells[0][0].codepoint != b'A' as u32 || state.cursor_row != 0 || state.cursor_col != 1
+    {
         klog_info!("TTY_TEST: BUG - printable write did not update vconsole state");
         return TestResult::Fail;
     }
@@ -5045,7 +5046,7 @@ pub fn test_vconsole_write_byte_backspace() -> TestResult {
     state.write_byte(b'A');
     state.write_byte(b'B');
     state.write_byte(0x08);
-    if state.cursor_col != 1 || state.cells[0][1] != b' ' as u32 {
+    if state.cursor_col != 1 || state.cells[0][1].codepoint != b' ' as u32 {
         klog_info!("TTY_TEST: BUG - backspace did not erase previous column");
         return TestResult::Fail;
     }
@@ -5056,14 +5057,16 @@ pub fn test_vconsole_scroll_at_bottom() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.rows = 2;
     state.cols = 4;
-    state.cells[0][0] = b'A' as u32;
-    state.cells[1][0] = b'B' as u32;
+    state.cells[0][0].codepoint = b'A' as u32;
+    state.cells[1][0].codepoint = b'B' as u32;
     state.cursor_row = 1;
     state.cursor_col = 0;
 
     state.write_byte(b'\n');
 
-    if state.cells[0][0] != b'B' as u32 || state.cells[1][0] != b' ' as u32 || state.cursor_row != 1
+    if state.cells[0][0].codepoint != b'B' as u32
+        || state.cells[1][0].codepoint != b' ' as u32
+        || state.cursor_row != 1
     {
         klog_info!("TTY_TEST: BUG - vconsole scroll did not shift/clear rows correctly");
         return TestResult::Fail;
@@ -10318,7 +10321,7 @@ pub fn test_vconsole_clear_screen() -> TestResult {
     // Write some chars first.
     state.process_byte(b'H');
     state.process_byte(b'i');
-    if state.cells[0][0] != b'H' as u32 || state.cells[0][1] != b'i' as u32 {
+    if state.cells[0][0].codepoint != b'H' as u32 || state.cells[0][1].codepoint != b'i' as u32 {
         klog_info!("TTY_TEST: BUG - chars not written");
         return TestResult::Fail;
     }
@@ -10326,7 +10329,7 @@ pub fn test_vconsole_clear_screen() -> TestResult {
     for &b in b"\x1b[2J" {
         state.process_byte(b);
     }
-    if state.cells[0][0] != b' ' as u32 || state.cells[0][1] != b' ' as u32 {
+    if state.cells[0][0].codepoint != b' ' as u32 || state.cells[0][1].codepoint != b' ' as u32 {
         klog_info!("TTY_TEST: BUG - screen not cleared");
         return TestResult::Fail;
     }
@@ -10371,10 +10374,10 @@ pub fn test_vconsole_sgr_color() -> TestResult {
     }
     // Write a char and verify cell attrs
     state.process_byte(b'X');
-    if state.cell_attrs[0][0].fg != 0x00AA0000 {
+    if state.cells[0][0].attrs.fg != 0x00AA0000 {
         klog_info!(
             "TTY_TEST: BUG - cell fg is 0x{:08x}, expected 0x00AA0000",
-            state.cell_attrs[0][0].fg
+            state.cells[0][0].attrs.fg
         );
         return TestResult::Fail;
     }
@@ -10469,13 +10472,13 @@ pub fn test_vconsole_erase_line() -> TestResult {
         state.process_byte(b);
     }
     // Cols 0,1 should still have A,B; cols 2+ should be spaces
-    if state.cells[0][0] != b'A' as u32 || state.cells[0][1] != b'B' as u32 {
+    if state.cells[0][0].codepoint != b'A' as u32 || state.cells[0][1].codepoint != b'B' as u32 {
         klog_info!("TTY_TEST: BUG - A/B were erased");
         return TestResult::Fail;
     }
-    if state.cells[0][2] != b' ' as u32
-        || state.cells[0][3] != b' ' as u32
-        || state.cells[0][4] != b' ' as u32
+    if state.cells[0][2].codepoint != b' ' as u32
+        || state.cells[0][3].codepoint != b' ' as u32
+        || state.cells[0][4].codepoint != b' ' as u32
     {
         klog_info!("TTY_TEST: BUG - cols 2-4 not cleared");
         return TestResult::Fail;
@@ -10525,10 +10528,10 @@ pub fn test_vconsole_scroll_up() -> TestResult {
         state.process_byte(b);
     }
     // Row 0 should now have 'B' (shifted from row 1)
-    if state.cells[0][0] != b'B' as u32 {
+    if state.cells[0][0].codepoint != b'B' as u32 {
         klog_info!(
             "TTY_TEST: BUG - row 0 col 0 is '{}', expected 'B'",
-            char::from_u32(state.cells[0][0]).unwrap_or('?')
+            char::from_u32(state.cells[0][0].codepoint).unwrap_or('?')
         );
         return TestResult::Fail;
     }
@@ -17014,7 +17017,7 @@ pub fn test_p21_postlockwork_execute_completes() -> TestResult {
 
 pub fn test_p21_postlockwork_ixoff_byte() -> TestResult {
     let mut plw = PostLockWork::new();
-    plw.add_ixoff_byte(DriverId::SerialConsole, 0x13);
+    plw.add_ixoff_byte(DriverId::SerialConsole, 0x13, 0);
     if plw.is_empty() {
         return TestResult::Fail;
     }

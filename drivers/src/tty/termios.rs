@@ -20,7 +20,9 @@ use super::ldisc::LdiscKind;
 use super::lifecycle::hangup;
 use super::pty;
 use super::session::ForegroundCheck;
-use super::table::{TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
+use super::table::{
+    TTY_OUTPUT_INFLIGHT, TTY_OUTPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS, TTY_WRITE_LOCKS,
+};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
@@ -401,6 +403,19 @@ pub fn get_ldisc(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
+/// Switch the line discipline for a TTY.
+///
+/// # Safety invariant — old ldisc preserved on failure
+///
+/// If `ldisc_id` is unsupported, this returns `Err(UnsupportedLineDiscipline)`
+/// **without touching the current ldisc** — no flush, no state change.  The
+/// TTY continues operating with its previous line discipline.  This is safe
+/// because `LdiscKind::from_id()` constructs the new ldisc *before* any
+/// mutation of the old one.  Only after successful construction does the
+/// old ldisc get flushed and replaced.
+///
+/// All ldisc access in SlopOS goes through the per-slot `IrqMutex`, so
+/// there is no risk of concurrent reads observing a half-switched ldisc.
 #[must_use]
 pub fn set_ldisc(idx: TtyIndex, ldisc_id: u32) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
@@ -681,26 +696,24 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
             Ok(())
         }
         TCIOFF => {
-            // Transmit the STOP control byte (VSTOP / XOFF) to the
-            // terminal device — the host→device flow-control path.
             let (driver_id, stop_byte) = {
                 let guard = TTY_SLOTS[slot].lock();
                 let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
                 let stop = tty.ldisc.termios().c_cc[CcIndex::Vstop.as_usize()];
                 (tty.driver.id(), stop)
             };
+            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
             write_driver_unlocked(driver_id, &[stop_byte]);
             Ok(())
         }
         TCION => {
-            // Transmit the START control byte (VSTART / XON) to the
-            // terminal device — the host→device flow-control path.
             let (driver_id, start_byte) = {
                 let guard = TTY_SLOTS[slot].lock();
                 let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
                 let start = tty.ldisc.termios().c_cc[CcIndex::Vstart.as_usize()];
                 (tty.driver.id(), start)
             };
+            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
             write_driver_unlocked(driver_id, &[start_byte]);
             Ok(())
         }
