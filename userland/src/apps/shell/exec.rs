@@ -291,9 +291,12 @@ fn resolve_exec_path(command: *const u8, tmp: &mut [u8; 256]) -> Option<*const u
         return Some(tmp.as_ptr());
     }
 
-    if let Some(spec) = program_registry::resolve_program(name) {
-        let path_len = spec.path.len().min(tmp.len() - 1);
-        tmp[..path_len].copy_from_slice(&spec.path[..path_len]);
+    if let Ok(name_str) = core::str::from_utf8(name)
+        && let Some(spec) = program_registry::resolve_program(name_str)
+    {
+        let path_bytes = spec.path.as_bytes();
+        let path_len = path_bytes.len().min(tmp.len() - 1);
+        tmp[..path_len].copy_from_slice(&path_bytes[..path_len]);
         tmp[path_len] = 0;
         return Some(tmp.as_ptr());
     }
@@ -357,9 +360,12 @@ fn registry_spec_for_command(
         if normalize_path(cmd.argv[0], &mut tmp) != 0 {
             return None;
         }
-        return program_registry::resolve_program_path(&tmp);
+        let path_len = tmp.iter().position(|&b| b == 0).unwrap_or(tmp.len());
+        let path_str = core::str::from_utf8(&tmp[..path_len]).ok()?;
+        return program_registry::resolve_program_path(path_str);
     }
-    program_registry::resolve_program(name)
+    let name_str = core::str::from_utf8(name).ok()?;
+    program_registry::resolve_program(name_str)
 }
 
 fn command_resolves(cmd: &ParsedCommand) -> bool {
@@ -422,8 +428,12 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         let _ = fs::close_fd(pipe_fds[1]);
     }
 
-    let tid =
-        process::spawn_path_with_argv(spec.path, &cmd.argv[..cmd.argc], spec.priority, spec.flags);
+    let tid = process::spawn_path_with_argv(
+        spec.path.as_bytes(),
+        &cmd.argv[..cmd.argc],
+        spec.priority,
+        spec.flags,
+    );
 
     // Restore fd 1 immediately after spawn so shell output is normal again.
     if capture {
