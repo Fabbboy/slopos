@@ -80,6 +80,12 @@ pub(crate) enum VtAction {
     SaveCursor,
     /// Restore cursor position and attributes (DECRC / ESC 8).
     RestoreCursor,
+    /// Set scroll region (DECSTBM) — 0-based top/bottom rows.
+    SetScrollRegion { top: u16, bottom: u16 },
+    /// Insert N blank lines at cursor (CSI L / IL).
+    InsertLines(u16),
+    /// Delete N lines at cursor (CSI M / DL).
+    DeleteLines(u16),
     /// DEC private set mode (CSI ? N h).
     SetMode(u16),
     /// DEC private reset mode (CSI ? N l).
@@ -545,9 +551,16 @@ impl VtParser {
                 };
                 VtAction::EraseLine(mode)
             }
+            b'L' => VtAction::InsertLines(self.param(0, 1)),
+            b'M' => VtAction::DeleteLines(self.param(0, 1)),
             b'S' => VtAction::ScrollUp(self.param(0, 1)),
             b'T' => VtAction::ScrollDown(self.param(0, 1)),
             b'm' => self.dispatch_sgr(),
+            b'r' => {
+                let top = self.param(0, 1).saturating_sub(1);
+                let bottom = self.param(1, 0);
+                VtAction::SetScrollRegion { top, bottom }
+            }
             b'h' => {
                 if self.private_mode {
                     let mode = self.param(0, 0);

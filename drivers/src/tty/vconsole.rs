@@ -193,6 +193,8 @@ pub(crate) struct VConsoleState {
     pub(crate) alt_screen_cursor_row: u16,
     pub(crate) alt_screen_cursor_col: u16,
     pub(crate) in_alt_screen: bool,
+    pub(crate) scroll_top: u16,
+    pub(crate) scroll_bottom: u16,
 }
 
 impl VConsoleState {
@@ -217,6 +219,8 @@ impl VConsoleState {
             alt_screen_cursor_row: 0,
             alt_screen_cursor_col: 0,
             in_alt_screen: false,
+            scroll_top: 0,
+            scroll_bottom: 0,
         }
     }
 
@@ -242,6 +246,9 @@ impl VConsoleState {
             VtAction::SetAttribute(attr) => self.apply_sgr(attr),
             VtAction::SaveCursor => self.save_cursor(),
             VtAction::RestoreCursor => self.restore_cursor(),
+            VtAction::SetScrollRegion { top, bottom } => self.set_scroll_region(top, bottom),
+            VtAction::InsertLines(n) => self.insert_lines(n),
+            VtAction::DeleteLines(n) => self.delete_lines(n),
             VtAction::SetMode(mode) => self.set_dec_mode(mode),
             VtAction::ResetMode(mode) => self.reset_dec_mode(mode),
             VtAction::Nop => {}
@@ -453,41 +460,43 @@ impl VConsoleState {
     }
 
     fn scroll_down_n(&mut self, n: u16) {
-        let rows = self.rows as usize;
         let cols = self.cols as usize;
-        if rows == 0 || cols == 0 {
+        let sr_top = self.scroll_top as usize;
+        let sr_bottom = self.effective_scroll_bottom() as usize;
+        if sr_bottom <= sr_top || cols == 0 {
             return;
         }
-        let shift = core::cmp::min(n as usize, rows);
+        let region_height = sr_bottom - sr_top + 1;
+        let shift = core::cmp::min(n as usize, region_height);
 
-        if shift < rows {
-            let mut row = rows - 1;
+        if shift < region_height {
+            let mut row = sr_bottom;
             loop {
-                if row < shift {
+                if row < sr_top + shift {
                     break;
                 }
                 let src = row - shift;
-                let mut tmp_cells = [b' ' as u32; VCONSOLE_MAX_COLS];
-                tmp_cells[..cols].copy_from_slice(&self.cells[src][..cols]);
-                self.cells[row][..cols].copy_from_slice(&tmp_cells[..cols]);
-                let mut tmp_attrs = [CellAttributes::default_colors(); VCONSOLE_MAX_COLS];
-                tmp_attrs[..cols].copy_from_slice(&self.cell_attrs[src][..cols]);
-                self.cell_attrs[row][..cols].copy_from_slice(&tmp_attrs[..cols]);
-                if row == shift {
+                for c in 0..cols {
+                    self.cells[row][c] = self.cells[src][c];
+                    self.cell_attrs[row][c] = self.cell_attrs[src][c];
+                }
+                if row == sr_top + shift {
                     break;
                 }
                 row -= 1;
             }
         }
 
-        for r in 0..shift {
-            for c in 0..cols {
-                self.cells[r][c] = b' ' as u32;
-                self.cell_attrs[r][c] = CellAttributes::default_colors();
+        for r in sr_top..sr_top + shift {
+            if r <= sr_bottom {
+                for c in 0..cols {
+                    self.cells[r][c] = b' ' as u32;
+                    self.cell_attrs[r][c] = CellAttributes::default_colors();
+                }
             }
         }
 
-        for r in 0..rows {
+        for r in sr_top..=sr_bottom {
             for c in 0..cols {
                 self.render_cell(r as u16, c as u16);
             }
@@ -620,18 +629,115 @@ impl VConsoleState {
         }
     }
 
+    fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        let max_row = self.rows.saturating_sub(1);
+        let b = if bottom == 0 {
+            max_row
+        } else {
+            bottom.saturating_sub(1).min(max_row)
+        };
+        let t = top.min(b);
+        self.scroll_top = t;
+        self.scroll_bottom = b;
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    fn insert_lines(&mut self, n: u16) {
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        let sr_top = self.scroll_top as usize;
+        let sr_bottom = self.effective_scroll_bottom() as usize;
+        let cur = self.cursor_row as usize;
+        if cur < sr_top || cur > sr_bottom || rows == 0 || cols == 0 {
+            return;
+        }
+        let shift = (n as usize).min(sr_bottom - cur + 1);
+        let mut row = sr_bottom;
+        while row >= cur + shift {
+            for c in 0..cols {
+                self.cells[row][c] = self.cells[row - shift][c];
+                self.cell_attrs[row][c] = self.cell_attrs[row - shift][c];
+            }
+            if row == cur + shift {
+                break;
+            }
+            row -= 1;
+        }
+        for r in cur..cur + shift {
+            if r <= sr_bottom {
+                for c in 0..cols {
+                    self.cells[r][c] = b' ' as u32;
+                    self.cell_attrs[r][c] = CellAttributes::default_colors();
+                }
+            }
+        }
+        for r in sr_top..=sr_bottom {
+            for c in 0..cols {
+                self.render_cell(r as u16, c as u16);
+            }
+        }
+    }
+
+    fn delete_lines(&mut self, n: u16) {
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        let sr_top = self.scroll_top as usize;
+        let sr_bottom = self.effective_scroll_bottom() as usize;
+        let cur = self.cursor_row as usize;
+        if cur < sr_top || cur > sr_bottom || rows == 0 || cols == 0 {
+            return;
+        }
+        let shift = (n as usize).min(sr_bottom - cur + 1);
+        for row in cur..=sr_bottom {
+            let src = row + shift;
+            if src <= sr_bottom {
+                for c in 0..cols {
+                    self.cells[row][c] = self.cells[src][c];
+                    self.cell_attrs[row][c] = self.cell_attrs[src][c];
+                }
+            } else {
+                for c in 0..cols {
+                    self.cells[row][c] = b' ' as u32;
+                    self.cell_attrs[row][c] = CellAttributes::default_colors();
+                }
+            }
+        }
+        for r in sr_top..=sr_bottom {
+            for c in 0..cols {
+                self.render_cell(r as u16, c as u16);
+            }
+        }
+    }
+
+    fn effective_scroll_bottom(&self) -> u16 {
+        if self.scroll_bottom == 0 || self.scroll_bottom >= self.rows {
+            self.rows.saturating_sub(1)
+        } else {
+            self.scroll_bottom
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
     fn check_wrap_and_scroll(&mut self) {
         if self.cursor_col >= self.cols {
-            self.cursor_col = 0;
-            self.cursor_row = self.cursor_row.saturating_add(1);
+            if self.parser.auto_wrap {
+                self.cursor_col = 0;
+                self.cursor_row = self.cursor_row.saturating_add(1);
+            } else {
+                self.cursor_col = self.cols.saturating_sub(1);
+            }
         }
-        if self.cursor_row >= self.rows {
-            self.scroll_up();
-            self.cursor_row = self.rows.saturating_sub(1);
+        let sr_bottom = self.effective_scroll_bottom();
+        if self.cursor_row > sr_bottom {
+            let n = self.cursor_row - sr_bottom;
+            for _ in 0..n {
+                self.scroll_up();
+            }
+            self.cursor_row = sr_bottom;
         }
     }
 
@@ -709,45 +815,55 @@ impl VConsoleState {
     // -----------------------------------------------------------------------
 
     pub(crate) fn scroll_up(&mut self) {
-        let rows = self.rows as usize;
         let cols = self.cols as usize;
-        if rows == 0 || cols == 0 {
+        let sr_top = self.scroll_top as usize;
+        let sr_bottom = self.effective_scroll_bottom() as usize;
+        if sr_bottom <= sr_top || cols == 0 {
             return;
         }
 
-        for row in 1..rows {
+        for row in (sr_top + 1)..=sr_bottom {
             let (head, tail) = self.cells.split_at_mut(row);
             head[row - 1][..cols].copy_from_slice(&tail[0][..cols]);
         }
         for c in 0..cols {
-            self.cells[rows - 1][c] = b' ' as u32;
+            self.cells[sr_bottom][c] = b' ' as u32;
         }
 
-        for row in 1..rows {
+        for row in (sr_top + 1)..=sr_bottom {
             let (head, tail) = self.cell_attrs.split_at_mut(row);
             head[row - 1][..cols].copy_from_slice(&tail[0][..cols]);
         }
         for c in 0..cols {
-            self.cell_attrs[rows - 1][c] = CellAttributes::default_colors();
+            self.cell_attrs[sr_bottom][c] = CellAttributes::default_colors();
         }
 
+        let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
         if let Some(fb) = self.fb {
-            let row_px = FONT_CHAR_HEIGHT as usize;
-            let pitch = fb.pitch as usize;
-            let copy_rows = rows.saturating_sub(1).saturating_mul(row_px);
-            let copy_bytes = copy_rows.saturating_mul(pitch);
-            if copy_bytes > 0 {
-                unsafe {
-                    let src = fb.base.add(row_px.saturating_mul(pitch));
-                    ptr::copy(src, fb.base, copy_bytes);
+            if full_screen {
+                let row_px = FONT_CHAR_HEIGHT as usize;
+                let pitch = fb.pitch as usize;
+                let rows = self.rows as usize;
+                let copy_rows = rows.saturating_sub(1).saturating_mul(row_px);
+                let copy_bytes = copy_rows.saturating_mul(pitch);
+                if copy_bytes > 0 {
+                    unsafe {
+                        let src = fb.base.add(row_px.saturating_mul(pitch));
+                        ptr::copy(src, fb.base, copy_bytes);
+                    }
                 }
-            }
-
-            let clear_start_y = rows.saturating_sub(1).saturating_mul(row_px);
-            let width = fb.width as usize;
-            for y in clear_start_y..clear_start_y.saturating_add(row_px) {
-                for x in 0..width {
-                    self.put_pixel(&fb, x, y, BG_COLOR);
+                let clear_start_y = rows.saturating_sub(1).saturating_mul(row_px);
+                let width = fb.width as usize;
+                for y in clear_start_y..clear_start_y.saturating_add(row_px) {
+                    for x in 0..width {
+                        self.put_pixel(&fb, x, y, BG_COLOR);
+                    }
+                }
+            } else {
+                for r in sr_top..=sr_bottom {
+                    for c in 0..cols {
+                        self.render_cell(r as u16, c as u16);
+                    }
                 }
             }
         }
@@ -819,6 +935,9 @@ impl VConsoleState {
             self.cols = DEFAULT_COLS;
             self.rows = DEFAULT_ROWS;
         }
+
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
 
         if self.cursor_col >= self.cols {
             self.cursor_col = self.cols.saturating_sub(1);
@@ -945,4 +1064,6 @@ pub(crate) fn reset_for_tests() {
     state.alt_screen_cursor_row = 0;
     state.alt_screen_cursor_col = 0;
     state.in_alt_screen = false;
+    state.scroll_top = 0;
+    state.scroll_bottom = DEFAULT_ROWS.saturating_sub(1);
 }
