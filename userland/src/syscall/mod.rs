@@ -25,7 +25,7 @@
 //! | `window` | Framebuffer, surface, window management |
 //! | `input` | Input events, pointer, keyboard |
 //! | `roulette` | Wheel of Fate syscalls |
-//! | `wrappers` | RAII types (ShmBuffer, FdGuard) |
+//! | `wrappers` | RAII types (ShmBuffer) |
 
 pub mod core;
 pub mod error;
@@ -55,7 +55,6 @@ pub use slopos_abi::{
     UserNetMember, WindowInfo,
 };
 
-pub use wrappers::fd::FdGuard;
 pub use wrappers::shm::{CachedShmMapping, ShmBuffer, ShmBufferRef};
 
 pub type UserWindowInfo = WindowInfo;
