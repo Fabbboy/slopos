@@ -3,16 +3,24 @@ use core::ffi::c_void;
 use core::ptr;
 
 use super::free_list::{
-    BlockHeader, FreeList, HEADER_SIZE, MAGIC_FREE, MIN_BLOCK_SIZE, try_split_block,
+    BlockHeader, FreeList, HEADER_SIZE, MAGIC_ALLOCATED, MAGIC_FREE, MIN_BLOCK_SIZE,
+    try_split_block,
 };
+use crate::pal::raw::{syscall2, syscall6};
 use crate::pal::syscall::sys_brk;
+use slopos_abi::syscall::{
+    MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE, SYSCALL_MMAP, SYSCALL_MUNMAP,
+};
 
-const ALIGNMENT: usize = 16;
+pub const ALIGNMENT: usize = 16;
 const INITIAL_HEAP_SIZE: usize = 64 * 1024;
 const EXTEND_MIN_SIZE: usize = 64 * 1024;
+const MMAP_THRESHOLD: usize = 128 * 1024;
+const MMAP_FLAG: u32 = 1;
+const PAGE_SIZE: usize = 4096;
 
 #[inline]
-const fn align_up_usize(val: usize, align: usize) -> usize {
+pub(crate) const fn align_up_usize(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)
 }
 
@@ -95,12 +103,39 @@ unsafe fn try_coalesce_forward(block: *mut BlockHeader) {
     (*block).update_checksum();
 }
 
+unsafe fn alloc_mmap(size: usize) -> *mut c_void {
+    let total = align_up_usize(size + HEADER_SIZE, PAGE_SIZE);
+    let ret = syscall6(
+        SYSCALL_MMAP,
+        0,
+        total as u64,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        (-1i64) as u64,
+        0,
+    );
+    match crate::demux(ret) {
+        Ok(addr) => {
+            let block = addr as *mut BlockHeader;
+            BlockHeader::init(block, (total - HEADER_SIZE) as u32, MAGIC_ALLOCATED);
+            (*block).flags = MMAP_FLAG;
+            (*block).update_checksum();
+            BlockHeader::data_ptr(block) as *mut c_void
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 pub fn alloc(size: usize) -> *mut c_void {
     if size == 0 {
         return ptr::null_mut();
     }
 
     unsafe {
+        if size >= MMAP_THRESHOLD {
+            return alloc_mmap(size);
+        }
+
         init_heap();
         if (*HEAP_START.get()).0.is_null() {
             return ptr::null_mut();
@@ -140,6 +175,12 @@ pub fn dealloc(ptr: *mut c_void) {
             return;
         }
 
+        if (*block).flags & MMAP_FLAG != 0 {
+            let total = (*block).total_size();
+            syscall2(SYSCALL_MUNMAP, block as u64, total as u64);
+            return;
+        }
+
         (*block).mark_free();
         (*FREE_LIST.get()).0.push_front(block);
         try_coalesce_forward(block);
@@ -166,7 +207,7 @@ pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         let old_size = (*block).size as usize;
         let aligned_size = align_up_usize(size, ALIGNMENT).max(MIN_BLOCK_SIZE);
 
-        if old_size >= aligned_size {
+        if old_size >= aligned_size && (*block).flags & MMAP_FLAG == 0 {
             return ptr;
         }
 
@@ -175,7 +216,8 @@ pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             return ptr::null_mut();
         }
 
-        ptr::copy_nonoverlapping(ptr as *const u8, new_ptr as *mut u8, old_size);
+        let copy_size = if old_size < size { old_size } else { size };
+        ptr::copy_nonoverlapping(ptr as *const u8, new_ptr as *mut u8, copy_size);
         dealloc(ptr);
 
         new_ptr
@@ -195,4 +237,76 @@ pub fn calloc(nmemb: usize, size: usize) -> *mut c_void {
         }
     }
     ptr
+}
+
+/// Allocate memory with a specific alignment.
+///
+/// For alignments <= 16, delegates to the standard allocator.
+/// For larger alignments, uses mmap (page-aligned = 4096-aligned).
+pub fn memalign(alignment: usize, size: usize) -> *mut u8 {
+    if size == 0 {
+        return ptr::null_mut();
+    }
+
+    if alignment <= ALIGNMENT {
+        return alloc(size) as *mut u8;
+    }
+
+    unsafe {
+        if alignment <= PAGE_SIZE {
+            return alloc_mmap(size) as *mut u8;
+        }
+
+        let total = size + alignment + HEADER_SIZE;
+        let mapped = align_up_usize(total, PAGE_SIZE);
+        let ret = syscall6(
+            SYSCALL_MMAP,
+            0,
+            mapped as u64,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            (-1i64) as u64,
+            0,
+        );
+        match crate::demux(ret) {
+            Ok(addr) => {
+                let base = addr as usize;
+                let data_start = base + HEADER_SIZE;
+                let aligned_data = align_up_usize(data_start, alignment);
+                let block = (aligned_data - HEADER_SIZE) as *mut BlockHeader;
+                BlockHeader::init(
+                    block,
+                    (mapped - (aligned_data - base)) as u32,
+                    MAGIC_ALLOCATED,
+                );
+                (*block).flags = MMAP_FLAG;
+                (*block).update_checksum();
+                aligned_data as *mut u8
+            }
+            Err(_) => ptr::null_mut(),
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memalign_ffi(alignment: usize, size: usize) -> *mut u8 {
+    memalign(alignment, size)
+}
+
+pub fn malloc_usable_size(ptr: *mut u8) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let block = BlockHeader::from_data_ptr(ptr);
+        if !(*block).is_valid() || !(*block).is_allocated() {
+            return 0;
+        }
+        (*block).size as usize
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc_usable_size_ffi(ptr: *mut u8) -> usize {
+    malloc_usable_size(ptr)
 }
