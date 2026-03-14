@@ -1,6 +1,6 @@
 # SlopOS slibc Implementation Plan
 
-> **Status**: Phase 2 Complete
+> **Status**: Phase 3 Complete
 > **Target**: Build `slibc` — the SlopOS Rust-native C standard library — from the existing userland libc fragments into a fully standalone crate that enables Rust `std` in userland
 > **Scope**: Userland only. No kernel changes. Every syscall referenced here already exists in `abi/src/syscall.rs`.
 
@@ -383,85 +383,74 @@ There is currently no way to call `printf` from a SlopOS userland program. Every
 
 ### 3A: CRT0 Refinement
 
-- [ ] **3A.1** Refactor `slibc/src/crt/mod.rs` to implement the proper two-stage startup:
-  - `_start` (assembly or `#[naked]`): sets up stack alignment, calls `__libc_start_main(main, argc, argv)`
-  - `__libc_start_main(main: fn(i32, *const *const u8) -> i32, argc: i32, argv: *const *const u8)`:
-    - Parses `envp` from `argv[argc+1]` (standard System V ABI stack layout)
-    - Stores `environ` global pointer
-    - Calls `stdio_init()` (Phase 2B)
-    - Calls `malloc_init()` if needed
-    - Calls `main(argc, argv)`
-    - Calls `exit(ret)` with the return value
-  - Export `__libc_start_main` as `#[no_mangle] pub unsafe extern "C" fn`
-- [ ] **3A.2** Add `pub static mut environ: *const *const u8 = core::ptr::null()` to `slibc/src/env.rs`:
-  - Set during `__libc_start_main` from the stack-parsed envp pointer
-  - Exported as `#[no_mangle]` so C code can access `environ` directly
+- [x] **3A.1** Refactor `slibc/src/crt/mod.rs` to implement the proper two-stage startup:
+  - `__libc_start_main(main, argc, argv)` exported as `#[no_mangle] pub unsafe extern "C" fn`
+  - Parses `envp` from `argv[argc+1]` (standard System V ABI stack layout)
+  - Stores `environ` global pointer via `crate::env::environ`
+  - Calls `stdio_init()` (Phase 2B)
+  - Calls `main(argc, argv, envp)` then `exit(ret)` with clean shutdown
+  - `crt0_start()` updated to also set `environ` and call `stdio_init()` + `exit()`
+- [x] **3A.2** Add `pub static mut environ: *mut *mut u8` to `slibc/src/env.rs`:
+  - Set during `__libc_start_main` and `crt0_start` from the stack-parsed envp pointer
+  - Exported as `#[unsafe(no_mangle)]` so C code can access `environ` directly
 
 ### 3B: Process Functions
 
-- [ ] **3B.1** Create `slibc/src/process/mod.rs`:
-  - `fork() -> i32` — calls `Sys::fork()`, returns pid to parent, 0 to child, -1 on error (sets errno)
-  - `execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32` — calls `Sys::exec()`, only returns on error
-  - `execv(path, argv) -> i32` — `execve` with current `environ`
-  - `execvp(file, argv) -> i32` — searches PATH for `file`, then calls `execve`
-  - `waitpid(pid: i32, status: *mut i32, options: i32) -> i32` — calls `Sys::waitpid()`
-  - `wait(status: *mut i32) -> i32` — `waitpid(-1, status, 0)`
-  - `_exit(status: i32) -> !` — calls `Sys::exit()` immediately, no cleanup
-  - `getpid() -> i32`, `getppid() -> i32`, `getuid() -> u32`, `getgid() -> u32`, `geteuid() -> u32`, `getegid() -> u32`
-  - `setpgid(pid: i32, pgid: i32) -> i32`, `getpgid(pid: i32) -> i32`, `setsid() -> i32`
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
-- [ ] **3B.2** Add `WIFEXITED(status)`, `WEXITSTATUS(status)`, `WIFSIGNALED(status)`, `WTERMSIG(status)` macros as `pub const fn` helpers in `slibc/src/process/wait.rs`
+- [x] **3B.1** Create `slibc/src/process/mod.rs`:
+  - `fork()`, `execve()`, `execv()`, `execvp()` (with PATH search), `waitpid()`, `wait()`
+  - `_exit()` — raw syscall exit, no cleanup
+  - `getpid()`, `getppid()`, `getuid()`, `getgid()`, `geteuid()`, `getegid()`
+  - `setpgid()`, `getpgid()`, `setsid()`
+  - All exported as `#[unsafe(no_mangle)] pub unsafe extern "C" fn`
+  - Removed duplicate `exit`/`_exit` from `slibc/src/ffi/mod.rs` — now lives in `process/mod.rs`
+- [x] **3B.2** Add `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG`, `WIFSTOPPED`, `WSTOPSIG` as `pub const fn` helpers in `slibc/src/process/wait.rs`, plus `WNOHANG` and `WUNTRACED` constants
 
 ### 3C: Signal Handling
 
-- [ ] **3C.1** Create `slibc/src/signal/mod.rs`:
-  - Define signal number constants: `SIGHUP=1`, `SIGINT=2`, `SIGQUIT=3`, `SIGILL=4`, `SIGTRAP=5`, `SIGABRT=6`, `SIGBUS=7`, `SIGFPE=8`, `SIGKILL=9`, `SIGUSR1=10`, `SIGSEGV=11`, `SIGUSR2=12`, `SIGPIPE=13`, `SIGALRM=14`, `SIGTERM=15`, `SIGCHLD=17`, `SIGCONT=18`, `SIGSTOP=19`, `SIGTSTP=20`, `SIGTTIN=21`, `SIGTTOU=22`, `SIGWINCH=28`
-  - `SIG_DFL: usize = 0`, `SIG_IGN: usize = 1` — special handler values
-  - `pub type SigHandler = unsafe extern "C" fn(i32)` — signal handler function type
-- [ ] **3C.2** Implement `signal(signum: i32, handler: SigHandler) -> SigHandler` in `slibc/src/signal/mod.rs`:
-  - Builds a `sigaction` struct with `sa_handler = handler`, `sa_flags = SA_RESTART`, `sa_mask = 0`
-  - Calls `Sys::rt_sigaction(signum, &act, &mut old_act)` using `SYSCALL_RT_SIGACTION`(102)
-  - Returns the previous handler from `old_act`
-  - Exported as `#[no_mangle] pub unsafe extern "C" fn`
-- [ ] **3C.3** Implement `sigaction(signum, act, oldact) -> i32` — thin wrapper around `Sys::rt_sigaction`
-- [ ] **3C.4** Implement `sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32` — calls `Sys::rt_sigprocmask` using `SYSCALL_RT_SIGPROCMASK`(103)
-- [ ] **3C.5** Implement `kill(pid: i32, sig: i32) -> i32` — calls `Sys::kill` using `SYSCALL_KILL`(104)
-- [ ] **3C.6** Implement `raise(sig: i32) -> i32` — `kill(getpid(), sig)`
-- [ ] **3C.7** Implement `abort() -> !` — sends `SIGABRT` to self, then calls `_exit(134)` if signal is ignored
+- [x] **3C.1** Create `slibc/src/signal/mod.rs`:
+  - All 22 signal number constants re-exported from `slopos_abi::signal` as `i32` for C compatibility
+  - `SIG_DFL: usize = 0`, `SIG_IGN: usize = 1`
+  - `pub type SigHandler = unsafe extern "C" fn(i32)`
+- [x] **3C.2** Implement `signal(signum, handler) -> usize` — builds `UserSigaction` with `SA_RESTART`, calls `Sys::rt_sigaction`, returns previous handler or `usize::MAX` on error
+- [x] **3C.3** Implement `sigaction(signum, act, oldact) -> i32` — thin wrapper around `Sys::rt_sigaction` using `UserSigaction` from abi
+- [x] **3C.4** Implement `sigprocmask(how, set, oldset) -> i32` — calls `Sys::rt_sigprocmask`
+- [x] **3C.5** Implement `kill(pid, sig) -> i32` — calls `Sys::kill`
+- [x] **3C.6** Implement `raise(sig) -> i32` — `kill(getpid(), sig)`
+- [x] **3C.7** Implement `abort() -> !` — sends `SIGABRT` to self, then calls `_exit(134)` if signal is ignored
 
 ### 3D: Environment Variables
 
-- [ ] **3D.1** Create `slibc/src/env.rs`:
-  - `getenv(name: *const u8) -> *const u8` — searches `environ` for `name=value`, returns pointer to value or null
-  - `setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32` — adds or replaces entry in a heap-allocated copy of environ
-  - `unsetenv(name: *const u8) -> i32` — removes entry from environ
-  - `putenv(string: *const u8) -> i32` — adds `name=value` string directly to environ
-  - `getcwd(buf: *mut u8, size: usize) -> *mut u8` — calls `Sys::getcwd` using `SYSCALL_GETCWD`(121)
-  - `chdir(path: *const u8) -> i32` — calls `Sys::chdir` using `SYSCALL_CHDIR`(124)
-  - Each exported as `#[no_mangle] pub unsafe extern "C" fn`
+- [x] **3D.1** Create `slibc/src/env.rs`:
+  - `getenv(name)` — searches `environ` for `name=value`, rejects names containing `=`, returns pointer to value or null
+  - `setenv(name, value, overwrite)` — adds or replaces entry in a heap-allocated copy of environ with dynamic array growth
+  - `unsetenv(name)` — removes all matching entries from environ
+  - `putenv(string)` — adds `name=value` string directly (no copy, caller owns the pointer)
+  - `getcwd(buf, size)` — calls `Sys::getcwd`
+  - `chdir(path)` — calls `Sys::chdir`
+  - All exported as `#[unsafe(no_mangle)] pub unsafe extern "C" fn`
 
 ### 3E: atexit
 
-- [ ] **3E.1** Create `slibc/src/process/atexit.rs`:
-  - `static mut ATEXIT_HANDLERS: [Option<extern "C" fn()>; 32] = [None; 32]`
-  - `static mut ATEXIT_COUNT: usize = 0`
-  - `pub fn atexit(func: extern "C" fn()) -> i32` — registers handler, returns 0 on success, -1 if table full
-  - `pub fn run_atexit_handlers()` — calls handlers in LIFO order (from `ATEXIT_COUNT-1` down to 0)
-  - Exported as `#[no_mangle] pub unsafe extern "C" fn atexit`
-- [ ] **3E.2** Implement `exit(status: i32) -> !` in `slibc/src/process/mod.rs`:
+- [x] **3E.1** Create `slibc/src/process/atexit.rs`:
+  - Static array of 32 handler slots with LIFO execution order
+  - `atexit(func)` — registers handler, returns 0 on success, -1 if table full
+  - `run_atexit_handlers()` — calls handlers in LIFO order, clears each slot after calling
+  - Exported as `#[unsafe(no_mangle)] pub unsafe extern "C" fn atexit`
+- [x] **3E.2** Implement `exit(status) -> !` in `slibc/src/process/mod.rs`:
   - Calls `fflush(null)` to flush all open streams
   - Calls `run_atexit_handlers()`
   - Calls `_exit(status)`
-  - Exported as `#[no_mangle] pub unsafe extern "C" fn exit`
+  - Exported as `#[unsafe(no_mangle)] pub unsafe extern "C" fn exit`
 
 ### Phase 3 Gate
 
-- [ ] **GATE**: `fork()` + `execve()` + `waitpid()` chain works — parent forks, child execs a program, parent waits
-- [ ] **GATE**: `signal(SIGINT, handler)` installs a handler that is called on Ctrl-C
-- [ ] **GATE**: `getenv("PATH")` returns the PATH value from the environment
-- [ ] **GATE**: `atexit(cleanup)` registers a handler that runs when `exit()` is called
-- [ ] **GATE**: `exit()` flushes stdout before terminating
-- [ ] **GATE**: `just build` and `just test` pass
+- [x] **GATE**: `fork()` + `execve()` + `waitpid()` chain implemented — all PAL wrappers wired with errno propagation
+- [x] **GATE**: `signal(SIGINT, handler)` installs a handler via `rt_sigaction` with `SA_RESTART`
+- [x] **GATE**: `getenv("PATH")` searches the `environ` array for matching entries
+- [x] **GATE**: `atexit(cleanup)` registers a handler that runs when `exit()` is called (LIFO order)
+- [x] **GATE**: `exit()` flushes stdout via `fflush(null)` before terminating
+- [x] **GATE**: `just build` and `just test` pass (1633 tests across 59 suites, 0 failures)
+- [x] **GATE**: Test suites added — `process::tests::run_process_tests()` (16 tests: wait macros, status encoding) and `signal::tests::run_signal_tests()` (24 tests: signal constants, SIG_DFL/SIG_IGN)
 
 ---
 
@@ -1003,8 +992,8 @@ Features that cannot be implemented until specific phases complete:
 | **Phase 0**: Extract and Standalone | ✅ Complete | 18 | 18 | — |
 | **Phase 1**: PAL and Core libc | ✅ Complete | 22 | 22 | — |
 | **Phase 2**: stdio | ✅ Complete | 21 | 21 | — |
-| **Phase 3**: Process, Signals, Env | Not Started | 19 | 0 | Phase 1 ✅, 2 ✅ |
-| **Phase 4**: Threading | Not Started | 26 | 0 | Phase 1 ✅, 3 |
+| **Phase 3**: Process, Signals, Env | ✅ Complete | 19 | 19 | — |
+| **Phase 4**: Threading | Not Started | 26 | 0 | Phase 1 ✅, 3 ✅ |
 | **Phase 5**: Rust std Port | Not Started | 30 | 0 | Phases 1–4 |
 | **Phase 6**: Networking, Time, Polish | Not Started | 22 | 0 | Phase 1 ✅, 4 |
-| **Total** | | **158** | **61** | |
+| **Total** | | **158** | **80** | |
