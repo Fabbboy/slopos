@@ -6,14 +6,16 @@
   "disable-redzone": true,
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
+  "env": "slibc",
   "executables": true,
   "features": "-mmx,+xsave,+avx,+avx2",
   "has-rpath": false,
+  "has-thread-local": true,
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
   "llvm-target": "x86_64-unknown-none",
   "max-atomic-width": 64,
-  "os": "none",
+  "os": "slopos",
   "panic-strategy": "abort",
   "pre-link-args": {
     "ld.lld": ["-Tuserland/userland.ld", "--emit-relocs"]
@@ -23,7 +25,7 @@
     "kind": "none"
   },
   "target-pointer-width": 64,
+  "tls-model": "local-exec",
   "trap-unreachable": true,
   "vendor": "slopos"
 }
-
