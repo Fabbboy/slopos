@@ -1,7 +1,6 @@
-use core::ffi::c_char;
+use std::fs;
 
 use crate::program_registry;
-use crate::syscall::{UserFsEntry, UserFsList, fs};
 
 use super::builtins::BUILTINS;
 use super::parser::is_space;
@@ -68,14 +67,16 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
     let mut match_count = 0;
 
     for entry in BUILTINS {
-        if entry.name.len() >= prefix_len && &entry.name[..prefix_len] == prefix {
-            push_command_match(entry.name, &mut matches, &mut match_count);
+        let name = entry.name.as_bytes();
+        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
+            push_command_match(name, &mut matches, &mut match_count);
         }
     }
 
     for spec in program_registry::user_programs() {
-        if spec.name.len() >= prefix_len && &spec.name[..prefix_len] == prefix {
-            push_command_match(spec.name, &mut matches, &mut match_count);
+        let name = spec.name.as_bytes();
+        if name.len() >= prefix_len && &name[..prefix_len] == prefix {
+            push_command_match(name, &mut matches, &mut match_count);
         }
     }
 
@@ -185,54 +186,62 @@ fn complete_path(
     if dir_len == 0 {
         return;
     }
-    dir_buf[dir_len] = 0;
 
-    let mut entries = [UserFsEntry::new(); 32];
-    let mut list = UserFsList {
-        entries: entries.as_mut_ptr(),
-        max_entries: entries.len() as u32,
-        count: 0,
+    let dir_str = match core::str::from_utf8(&dir_buf[..dir_len]) {
+        Ok(s) => s,
+        Err(_) => return,
     };
 
-    if fs::list_dir(dir_buf.as_ptr() as *const c_char, &mut list).is_err() {
+    let read_dir = match fs::read_dir(dir_str) {
+        Ok(read_dir) => read_dir,
+        Err(_) => return,
+    };
+
+    let mut matches: std::vec::Vec<PathMatch> = std::vec::Vec::new();
+
+    for dir_entry in read_dir {
+        let dir_entry = match dir_entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        let name = match dir_entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+        let name_bytes = name.as_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+
+        let file_type = match dir_entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+
+        if dirs_only && !file_type.is_dir() {
+            continue;
+        }
+
+        if name_bytes.len() >= file_prefix_len && &name_bytes[..file_prefix_len] == file_prefix {
+            matches.push(PathMatch {
+                name: name.into_bytes(),
+                is_directory: file_type.is_dir(),
+            });
+        }
+    }
+
+    if matches.is_empty() {
         return;
     }
 
-    let mut match_indices: [usize; 32] = [0; 32];
-    let mut match_count = 0;
-
-    for i in 0..list.count as usize {
-        let entry = &entries[i];
-        let name_len = entry_name_len(entry);
-
-        if name_len == 1 && entry.name[0] == b'.' {
-            continue;
-        }
-        if name_len == 2 && entry.name[0] == b'.' && entry.name[1] == b'.' {
-            continue;
-        }
-        if dirs_only && !entry.is_directory() {
-            continue;
-        }
-
-        if name_len >= file_prefix_len
-            && &entry.name[..file_prefix_len] == file_prefix
-            && match_count < match_indices.len()
-        {
-            match_indices[match_count] = i;
-            match_count += 1;
-        }
-    }
-
-    if match_count == 0 {
-        return;
-    }
+    let match_count = matches.len();
 
     if match_count == 1 {
-        let entry = &entries[match_indices[0]];
-        let name_len = entry_name_len(entry);
+        let entry = &matches[0];
+        let name_len = entry.name.len();
         let remaining = name_len - file_prefix_len;
-        let suffix = if entry.is_directory() { b'/' } else { b' ' };
+        let suffix = if entry.is_directory { b'/' } else { b' ' };
         let insert_len = remaining + 1;
         if insert_len <= result.insertion.len() {
             result.insertion[..remaining].copy_from_slice(&entry.name[file_prefix_len..name_len]);
@@ -240,13 +249,13 @@ fn complete_path(
             result.insertion_len = insert_len;
         }
     } else {
-        let first = &entries[match_indices[0]];
-        let first_len = entry_name_len(first);
+        let first = &matches[0];
+        let first_len = first.name.len();
         let mut common_len = first_len;
 
         for i in 1..match_count {
-            let entry = &entries[match_indices[i]];
-            let name_len = entry_name_len(entry);
+            let entry = &matches[i];
+            let name_len = entry.name.len();
             let mut j = file_prefix_len;
             while j < common_len && j < name_len && first.name[j] == entry.name[j] {
                 j += 1;
@@ -263,12 +272,12 @@ fn complete_path(
         result.show_matches = true;
         let mut pos = 0;
         for i in 0..match_count {
-            let entry = &entries[match_indices[i]];
-            let name_len = entry_name_len(entry);
+            let entry = &matches[i];
+            let name_len = entry.name.len();
             if pos + name_len + 3 < result.matches_buf.len() {
                 result.matches_buf[pos..pos + name_len].copy_from_slice(&entry.name[..name_len]);
                 pos += name_len;
-                if entry.is_directory() {
+                if entry.is_directory {
                     result.matches_buf[pos] = b'/';
                     pos += 1;
                 }
@@ -319,12 +328,9 @@ fn build_dir_path(
     len
 }
 
-fn entry_name_len(entry: &UserFsEntry) -> usize {
-    entry
-        .name
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(entry.name.len())
+struct PathMatch {
+    name: std::vec::Vec<u8>,
+    is_directory: bool,
 }
 
 fn cwd_strlen(cwd: &[u8]) -> usize {
