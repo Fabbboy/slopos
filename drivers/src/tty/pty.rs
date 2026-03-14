@@ -36,7 +36,7 @@ use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{
     TTY_GENERATIONS, TTY_INPUT_WAITERS, TTY_SLOTS, find_free_slot, find_free_slot_excluding,
 };
-use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex};
+use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex, open_ref};
 
 // ---------------------------------------------------------------------------
 // Generation-safe peer identity
@@ -200,6 +200,36 @@ pub fn pty_open_slave(idx: TtyIndex) -> Result<u32, TtyError> {
     clear_peer_closed(peer_idx);
 
     Ok(count)
+}
+
+pub fn pty_open_peer(master_idx: TtyIndex) -> Result<TtyIndex, TtyError> {
+    let _alloc = PTY_ALLOC_LOCK.lock();
+
+    let master_slot = master_idx.0 as usize;
+    if master_slot >= MAX_TTYS {
+        return Err(TtyError::InvalidIndex);
+    }
+
+    let slave_idx = {
+        let guard = TTY_SLOTS[master_slot].lock();
+        let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+        match &tty.driver {
+            TtyDriverKind::PtyMaster { peer } => {
+                if !validate_peer(peer) {
+                    return Err(TtyError::NotAllocated);
+                }
+                peer.idx
+            }
+            _ => return Err(TtyError::NotAllocated),
+        }
+    };
+
+    if is_slave_locked(slave_idx) {
+        return Err(TtyError::PermissionDenied);
+    }
+
+    open_ref(slave_idx)?;
+    Ok(slave_idx)
 }
 
 // ---------------------------------------------------------------------------

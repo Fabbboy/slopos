@@ -334,6 +334,13 @@ fn tty_open_pty_slave_adapter(tty_index: TtyIndex) -> i32 {
     }
 }
 
+fn tty_open_pty_peer_adapter(tty_index: TtyIndex) -> i32 {
+    match tty::pty_open_peer(tty_index) {
+        Ok(idx) => idx.0 as i32,
+        Err(_) => -1,
+    }
+}
+
 fn tty_write_bytes_adapter(
     tty_index: TtyIndex,
     buf: *const u8,
@@ -489,6 +496,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_pty_number: tty_get_pty_number_adapter,
     is_pty_slave: tty_is_pty_slave_adapter,
     open_pty_slave: tty_open_pty_slave_adapter,
+    open_pty_peer: tty_open_pty_peer_adapter,
     poll_events: tty_poll_events_adapter,
     poll_sleep: tty_poll_sleep_adapter,
     poll_sleep_on: tty_poll_sleep_on_adapter,

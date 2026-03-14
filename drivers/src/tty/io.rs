@@ -77,7 +77,7 @@ impl Tty {
 
 pub use super::pty::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
+    pty_open_peer, pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +179,76 @@ fn notify_input_ready(idx: TtyIndex) {
     TTY_POLL_WAITERS[slot].wake_all();
 }
 
+fn check_read_foreground(tty: &Tty, caller_pgid: u32, caller_sid: u32) -> Result<(), TtyError> {
+    match tty.session.check_read(caller_pgid, caller_sid) {
+        ForegroundCheck::BackgroundRead => Err(TtyError::BackgroundRead),
+        ForegroundCheck::DeniedCrossSession => Err(TtyError::CrossSessionDenied),
+        ForegroundCheck::Allowed
+        | ForegroundCheck::BootstrapAllowed
+        | ForegroundCheck::BackgroundWrite => Ok(()),
+    }
+}
+
+fn drain_and_recover(tty: &mut Tty, slot: usize, deferred: &mut PostLockWork) -> bool {
+    let mut woke_peers = false;
+
+    if tty.flags.contains(TtyFlags::THROTTLED)
+        && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
+    {
+        tty.flags.remove(TtyFlags::THROTTLED);
+        if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+            deferred.wake_output_and_poll(peer.idx.0 as usize);
+            woke_peers = true;
+        }
+    }
+
+    if tty.ldisc.check_no_room_recovery() {
+        deferred.wake_input_and_poll(slot);
+        if let TtyDriverKind::PtySlave { peer } = &tty.driver {
+            deferred.wake_output_and_poll(peer.idx.0 as usize);
+            woke_peers = true;
+        }
+    }
+
+    woke_peers
+}
+
+fn try_read_packet_mode(
+    tty: &mut Tty,
+    buf: &mut [u8],
+    deferred: &mut PostLockWork,
+) -> Option<Result<usize, TtyError>> {
+    if !tty.flags.contains(TtyFlags::PACKET_MODE) {
+        return None;
+    }
+
+    if !tty.packet_events.is_empty() {
+        buf[0] = tty.packet_events.bits();
+        tty.packet_events = PacketEvents::empty();
+        return Some(Ok(1));
+    }
+
+    if buf.len() < 2 {
+        if tty.ldisc.has_data() {
+            return Some(Ok(0));
+        }
+        return None;
+    }
+
+    let got = tty.ldisc.read(&mut buf[1..]);
+    if got == 0 {
+        return None;
+    }
+
+    buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
+    let slot = tty.index.0 as usize;
+    if let Some(xon) = tty.ldisc.ixoff_check_xon() {
+        deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
+    }
+    let _ = drain_and_recover(tty, slot, deferred);
+    Some(Ok(1 + got))
+}
+
 // ---------------------------------------------------------------------------
 // Read path
 // ---------------------------------------------------------------------------
@@ -242,8 +312,8 @@ pub fn read_with_attach(
             }
 
             if enforce_access {
-                match tty.session.check_read(caller_pgid, caller_sid) {
-                    ForegroundCheck::BackgroundRead => {
+                match check_read_foreground(tty, caller_pgid, caller_sid) {
+                    Err(TtyError::BackgroundRead) => {
                         drop(guard);
                         if is_current_signal_blocked_or_ignored(SIGTTIN)
                             || is_pgrp_orphaned(caller_pgid, caller_sid)
@@ -255,11 +325,8 @@ pub fn read_with_attach(
                         }
                         return Err(TtyError::BackgroundRead);
                     }
-                    ForegroundCheck::DeniedCrossSession => {
-                        return Err(TtyError::CrossSessionDenied);
-                    }
-                    ForegroundCheck::Allowed | ForegroundCheck::BootstrapAllowed => {}
-                    ForegroundCheck::BackgroundWrite => {}
+                    Err(err) => return Err(err),
+                    Ok(()) => {}
                 }
             }
 
@@ -268,45 +335,10 @@ pub fn read_with_attach(
             }
 
             if tty.flags.contains(TtyFlags::PACKET_MODE) && total == 0 {
-                if !tty.packet_events.is_empty() {
-                    buf[0] = tty.packet_events.bits();
-                    tty.packet_events = PacketEvents::empty();
+                if let Some(result) = try_read_packet_mode(tty, buf, &mut deferred) {
                     drop(guard);
                     deferred.execute();
-                    return Ok(1);
-                }
-                if buf.len() < 2 {
-                    if tty.ldisc.has_data() {
-                        drop(guard);
-                        deferred.execute();
-                        return Ok(0);
-                    }
-                } else {
-                    let got = tty.ldisc.read(&mut buf[1..]);
-                    if got > 0 {
-                        buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
-                        total = 1 + got;
-                        if let Some(xon) = tty.ldisc.ixoff_check_xon() {
-                            deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
-                        }
-                        if tty.flags.contains(TtyFlags::THROTTLED)
-                            && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
-                        {
-                            tty.flags.remove(TtyFlags::THROTTLED);
-                            if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                                deferred.wake_output_and_poll(peer.idx.0 as usize);
-                            }
-                        }
-                        if tty.ldisc.check_no_room_recovery() {
-                            deferred.wake_input_and_poll(slot);
-                            if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                                deferred.wake_output_and_poll(peer.idx.0 as usize);
-                            }
-                        }
-                        drop(guard);
-                        deferred.execute();
-                        return Ok(total);
-                    }
+                    return result;
                 }
             } else {
                 let got = tty.ldisc.read(&mut buf[total..]);
@@ -315,21 +347,7 @@ pub fn read_with_attach(
                     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
                         deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
                     }
-                }
-                if got > 0
-                    && tty.flags.contains(TtyFlags::THROTTLED)
-                    && tty.ldisc.bytes_available() <= ldisc::THROTTLE_LOW_WATER
-                {
-                    tty.flags.remove(TtyFlags::THROTTLED);
-                    if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                        deferred.wake_output_and_poll(peer.idx.0 as usize);
-                    }
-                }
-                if got > 0 && tty.ldisc.check_no_room_recovery() {
-                    deferred.wake_input_and_poll(slot);
-                    if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                        deferred.wake_output_and_poll(peer.idx.0 as usize);
-                    }
+                    let _ = drain_and_recover(tty, slot, &mut deferred);
                 }
             }
 
@@ -459,6 +477,159 @@ pub fn read_with_attach(
     }
 }
 
+fn check_write_foreground(slot: usize) -> Result<(), TtyError> {
+    let task_id = current_task_id();
+    if task_id == 0 {
+        return Ok(());
+    }
+
+    let caller_pgid = current_task_pgid();
+    let caller_sid = current_task_sid();
+    let guard = TTY_SLOTS[slot].lock();
+    let check_result = match guard.as_ref() {
+        Some(tty) => {
+            let tostop = tty
+                .ldisc
+                .termios()
+                .local_flags()
+                .contains(LocalFlags::TOSTOP);
+            Some(tty.session.check_write(caller_pgid, caller_sid, tostop))
+        }
+        None => return Err(TtyError::NotAllocated),
+    };
+    drop(guard);
+
+    match check_result {
+        Some(ForegroundCheck::BackgroundWrite) => {
+            if !is_current_signal_blocked_or_ignored(SIGTTOU) {
+                if is_pgrp_orphaned(caller_pgid, caller_sid) {
+                    return Err(TtyError::OrphanedProcessGroup);
+                }
+                if caller_pgid != 0 {
+                    let _ = signal_process_group(caller_pgid, SIGTTOU);
+                }
+                return Err(TtyError::BackgroundWrite);
+            }
+            Ok(())
+        }
+        Some(ForegroundCheck::DeniedCrossSession) => Err(TtyError::CrossSessionDenied),
+        _ => Ok(()),
+    }
+}
+
+fn wait_for_write_ready(
+    slot: usize,
+    peer_slave_slot: Option<usize>,
+    peer_master_slot: Option<usize>,
+    nonblock: bool,
+) -> Result<(), TtyError> {
+    if let Some(peer_slot) = peer_slave_slot {
+        if nonblock {
+            let guard = TTY_SLOTS[peer_slot].lock();
+            let is_throttled = match guard.as_ref() {
+                Some(tty) => {
+                    tty.flags.contains(TtyFlags::THROTTLED)
+                        && !tty.flags.contains(TtyFlags::HUNG_UP)
+                        && !tty.flags.contains(TtyFlags::PEER_CLOSED)
+                }
+                None => false,
+            };
+            drop(guard);
+            if is_throttled {
+                return Err(TtyError::WouldBlock);
+            }
+        } else {
+            TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
+                if has_pending_signal() {
+                    return true;
+                }
+                let guard = TTY_SLOTS[peer_slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => {
+                        !tty.flags.contains(TtyFlags::THROTTLED)
+                            || tty.flags.contains(TtyFlags::HUNG_UP)
+                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                    }
+                    None => true,
+                }
+            });
+            if has_pending_signal() {
+                return Err(TtyError::Restart);
+            }
+        }
+
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if tty.flags.contains(TtyFlags::HUNG_UP) {
+                return Err(TtyError::HungUp);
+            }
+        }
+    }
+
+    if let Some(master_slot) = peer_master_slot {
+        if nonblock {
+            let guard = TTY_SLOTS[master_slot].lock();
+            let is_full = match guard.as_ref() {
+                Some(tty) => tty.ldisc.input_full(),
+                None => false,
+            };
+            drop(guard);
+            if is_full {
+                return Err(TtyError::WouldBlock);
+            }
+        } else {
+            TTY_OUTPUT_WAITERS[master_slot].wait_event(|| {
+                let guard = TTY_SLOTS[master_slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => {
+                        !tty.ldisc.input_full()
+                            || tty.flags.contains(TtyFlags::HUNG_UP)
+                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                    }
+                    None => true,
+                }
+            });
+        }
+
+        let guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_ref() {
+            if tty.flags.contains(TtyFlags::HUNG_UP) {
+                return Err(TtyError::HungUp);
+            }
+        }
+    }
+
+    if nonblock {
+        let guard = TTY_SLOTS[slot].lock();
+        let is_stopped = match guard.as_ref() {
+            Some(tty) => tty.ldisc.is_stopped() || tty.flags.contains(TtyFlags::OUTPUT_STOPPED),
+            None => false,
+        };
+        drop(guard);
+        if is_stopped {
+            return Err(TtyError::WouldBlock);
+        }
+    } else {
+        TTY_OUTPUT_WAITERS[slot].wait_event(|| {
+            if has_pending_signal() {
+                return true;
+            }
+            let guard = TTY_SLOTS[slot].lock();
+            match guard.as_ref() {
+                Some(tty) => {
+                    !tty.ldisc.is_stopped() && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
+                }
+                None => true,
+            }
+        });
+        if has_pending_signal() {
+            return Err(TtyError::Restart);
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Write path
 // ---------------------------------------------------------------------------
@@ -498,50 +669,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         }
     }
 
-    // Write-side foreground check.
-    // Enforce cross-session denial and TOSTOP.
-    // bypass if SIGTTOU is blocked/ignored; return EIO for
-    // orphaned background process groups.
-    // Only enforce for real tasks (task_id != 0 avoids early-boot writes).
-    let task_id = current_task_id();
-    if task_id != 0 {
-        let caller_pgid = current_task_pgid();
-        let caller_sid = current_task_sid();
-        let guard = TTY_SLOTS[slot].lock();
-        let check_result = match guard.as_ref() {
-            Some(tty) => {
-                let tostop = tty
-                    .ldisc
-                    .termios()
-                    .local_flags()
-                    .contains(LocalFlags::TOSTOP);
-                Some(tty.session.check_write(caller_pgid, caller_sid, tostop))
-            }
-            None => return Err(TtyError::NotAllocated),
-        };
-        drop(guard);
-
-        match check_result {
-            Some(ForegroundCheck::BackgroundWrite) => {
-                // if SIGTTOU is blocked or ignored, proceed silently.
-                if !is_current_signal_blocked_or_ignored(SIGTTOU) {
-                    // orphaned pgrp → EIO.
-                    if is_pgrp_orphaned(caller_pgid, caller_sid) {
-                        return Err(TtyError::OrphanedProcessGroup);
-                    }
-                    if caller_pgid != 0 {
-                        let _ = signal_process_group(caller_pgid, SIGTTOU);
-                    }
-                    return Err(TtyError::BackgroundWrite);
-                }
-                // SIGTTOU blocked or ignored — fall through to write.
-            }
-            Some(ForegroundCheck::DeniedCrossSession) => {
-                return Err(TtyError::CrossSessionDenied);
-            }
-            _ => {}
-        }
-    }
+    check_write_foreground(slot)?;
 
     // Maximum output bytes per chunk.  Each input byte can expand to at most
     // 2 output bytes (e.g. NL → CR+NL with ONLCR).  256 bytes leaves room
@@ -564,149 +692,8 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     };
     let mut pos = 0;
     while pos < data.len() {
-        // PTY master throttle back-pressure.
-        // If the peer slave is throttled, block until the slave reader
-        // drains enough data to unthrottle.  Non-blocking writes return
-        // a short write (or EAGAIN if no bytes written yet) instead of
-        // blocking.
-        if let Some(peer_slot) = peer_slave_slot {
-            if nonblock {
-                let guard = TTY_SLOTS[peer_slot].lock();
-                let is_throttled = match guard.as_ref() {
-                    Some(tty) => {
-                        tty.flags.contains(TtyFlags::THROTTLED)
-                            && !tty.flags.contains(TtyFlags::HUNG_UP)
-                            && !tty.flags.contains(TtyFlags::PEER_CLOSED)
-                    }
-                    None => false,
-                };
-                drop(guard);
-                if is_throttled {
-                    return if pos > 0 {
-                        Ok(pos) // short write
-                    } else {
-                        Err(TtyError::WouldBlock)
-                    };
-                }
-            } else {
-                TTY_OUTPUT_WAITERS[peer_slot].wait_event(|| {
-                    if has_pending_signal() {
-                        return true;
-                    }
-                    let guard = TTY_SLOTS[peer_slot].lock();
-                    match guard.as_ref() {
-                        Some(tty) => {
-                            !tty.flags.contains(TtyFlags::THROTTLED)
-                                || tty.flags.contains(TtyFlags::HUNG_UP)
-                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
-                        }
-                        None => true,
-                    }
-                });
-                if has_pending_signal() {
-                    return if pos > 0 {
-                        Ok(pos)
-                    } else {
-                        Err(TtyError::Restart)
-                    };
-                }
-            }
-            // Re-check hangup after unblock.
-            {
-                let guard = TTY_SLOTS[slot].lock();
-                if let Some(tty) = guard.as_ref() {
-                    if tty.flags.contains(TtyFlags::HUNG_UP) {
-                        return if pos > 0 {
-                            Ok(pos)
-                        } else {
-                            Err(TtyError::HungUp)
-                        };
-                    }
-                }
-            }
-        }
-
-        if let Some(master_slot) = peer_master_slot {
-            if nonblock {
-                let guard = TTY_SLOTS[master_slot].lock();
-                let is_full = match guard.as_ref() {
-                    Some(tty) => tty.ldisc.input_full(),
-                    None => false,
-                };
-                drop(guard);
-                if is_full {
-                    return if pos > 0 {
-                        Ok(pos)
-                    } else {
-                        Err(TtyError::WouldBlock)
-                    };
-                }
-            } else {
-                TTY_OUTPUT_WAITERS[master_slot].wait_event(|| {
-                    let guard = TTY_SLOTS[master_slot].lock();
-                    match guard.as_ref() {
-                        Some(tty) => {
-                            !tty.ldisc.input_full()
-                                || tty.flags.contains(TtyFlags::HUNG_UP)
-                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
-                        }
-                        None => true,
-                    }
-                });
-            }
-            {
-                let guard = TTY_SLOTS[slot].lock();
-                if let Some(tty) = guard.as_ref() {
-                    if tty.flags.contains(TtyFlags::HUNG_UP) {
-                        return if pos > 0 {
-                            Ok(pos)
-                        } else {
-                            Err(TtyError::HungUp)
-                        };
-                    }
-                }
-            }
-        }
-
-        // Output-stop enforcement.
-        // Block the writer when EITHER the line discipline is stopped
-        // (IXON: Ctrl+S / VSTOP) OR the TTY has been explicitly stopped
-        // via tcxonc(TCOOFF).  Non-blocking writes return a short write
-        // (or EAGAIN if no bytes written yet) instead of blocking.
-        if nonblock {
-            let guard = TTY_SLOTS[slot].lock();
-            let is_stopped = match guard.as_ref() {
-                Some(tty) => tty.ldisc.is_stopped() || tty.flags.contains(TtyFlags::OUTPUT_STOPPED),
-                None => false,
-            };
-            drop(guard);
-            if is_stopped {
-                return if pos > 0 {
-                    Ok(pos) // short write
-                } else {
-                    Err(TtyError::WouldBlock)
-                };
-            }
-        } else {
-            TTY_OUTPUT_WAITERS[slot].wait_event(|| {
-                if has_pending_signal() {
-                    return true;
-                }
-                let guard = TTY_SLOTS[slot].lock();
-                match guard.as_ref() {
-                    Some(tty) => {
-                        !tty.ldisc.is_stopped() && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
-                    }
-                    None => true, // slot gone — let the next lock attempt return NotAllocated
-                }
-            });
-            if has_pending_signal() {
-                return if pos > 0 {
-                    Ok(pos)
-                } else {
-                    Err(TtyError::Restart)
-                };
-            }
+        if let Err(err) = wait_for_write_ready(slot, peer_slave_slot, peer_master_slot, nonblock) {
+            return if pos > 0 { Ok(pos) } else { Err(err) };
         }
 
         let mut out_buf = [0u8; OUT_BUF_CAP];
@@ -721,6 +708,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 None => return Err(TtyError::NotAllocated),
             };
             driver_id = tty.driver.id();
+            tty.ldisc.clear_flusho();
 
             while pos < data.len() {
                 match tty.ldisc.process_output_byte(data[pos]) {

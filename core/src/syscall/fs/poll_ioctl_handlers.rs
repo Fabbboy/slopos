@@ -5,8 +5,8 @@ use core::ffi::c_int;
 use slopos_abi::signal::SIGTTOU;
 use slopos_abi::syscall::{
     FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL,
-    TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGSID, TIOCGWINSZ, TIOCNOTTY,
-    TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
+    TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ,
+    TIOCNOTTY, TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
     UserTermios, UserTimeval, UserWinsize,
 };
 
@@ -370,6 +370,14 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 let pty_number = pty_number as u32;
                 try_or_err!(ctx, copy_to_user(ptr, &pty_number));
                 ctx.ok(0)
+            }
+        }
+        TIOCGPTPEER => {
+            let peer_tty = tty::open_pty_peer(tty_idx);
+            if peer_tty < 0 {
+                ctx.err()
+            } else {
+                ctx.ok(peer_tty as u64)
             }
         }
         TIOCSETD => {
