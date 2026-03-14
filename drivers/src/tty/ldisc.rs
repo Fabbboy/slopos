@@ -63,8 +63,9 @@ pub(crate) const WAKEUP_CHARS: usize = 256;
 pub enum InputAction {
     /// No action needed.
     None,
-    /// Echo bytes back to the terminal.  Up to 4 bytes (e.g. BS-SPACE-BS or ^X).
-    Echo { buf: [u8; 4], len: u8 },
+    /// Echo bytes back to the terminal.  Up to 8 bytes for headroom
+    /// (ECHOPRT prefix + multi-byte UTF-8 representative).
+    Echo { buf: [u8; 8], len: u8 },
     /// Deliver a signal to the foreground process group.
     Signal(u8),
     /// Redisplay the current edit line (VREPRINT / Ctrl+R).
@@ -105,7 +106,10 @@ pub enum OutputAction {
 /// match arm in every wrapper.
 ///
 /// **Crate-internal only** — external API surface is unchanged.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "trait bounds used by forward_ldisc_ops! macro impls"
+)]
 pub(crate) trait LdiscOps {
     fn termios(&self) -> &UserTermios;
     fn vmin_vtime(&self) -> (u8, u8);
@@ -128,6 +132,7 @@ pub(crate) trait LdiscOps {
     fn no_room(&self) -> bool;
     fn overflow_count(&self) -> u32;
     fn check_no_room_recovery(&mut self) -> bool;
+    fn clear_flusho(&mut self);
 }
 
 pub struct BatchResult {
@@ -459,6 +464,10 @@ pub struct LineDisc {
     /// Incremented by `push_cooked()` on each failed push.  Reset on
     /// `flush_input()`/`flush_all()`.  Diagnostic-only.
     overflow_count: u32,
+
+    /// FLUSHO state — when `true`, output is discarded until toggled off
+    /// by another VDISCARD press.  Mirrors Linux's `FLUSHO` c_lflag behavior.
+    flushing_output: bool,
 }
 
 impl LineDisc {
@@ -478,7 +487,7 @@ impl LineDisc {
             0x1A, // VSUSP   = Ctrl+Z
             0,    // VEOL
             0x12, // VREPRINT = Ctrl+R
-            0,    // (unused index 13)
+            0x0F, // VDISCARD = Ctrl+O
             0x17, // VWERASE = Ctrl+W
             0x16, // VLNEXT  = Ctrl+V
             0,    // VEOL2 (disabled)
@@ -520,12 +529,10 @@ impl LineDisc {
             wake_chars_pending: 0,
             no_room: false,
             overflow_count: 0,
+            flushing_output: false,
         }
     }
 
-    // -- Accessors -----------------------------------------------------------
-
-    /// Immutable reference to the current termios.
     pub fn termios(&self) -> &UserTermios {
         &self.termios
     }
@@ -728,6 +735,7 @@ impl LineDisc {
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;
+        self.flushing_output = false;
     }
 
     pub fn flush_input(&mut self) {
@@ -742,6 +750,7 @@ impl LineDisc {
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;
+        self.flushing_output = false;
     }
 
     /// Return a slice of the current edit buffer contents (for VREPRINT echo).
@@ -749,9 +758,13 @@ impl LineDisc {
         &self.edit_buf[..self.edit_len]
     }
 
-    /// Whether output is currently stopped (XOFF / Ctrl+S).
     pub fn is_stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// Clear FLUSHO state — called on userspace `write()` per Linux semantics.
+    pub fn clear_flusho(&mut self) {
+        self.flushing_output = false;
     }
 
     // -- Input processing ----------------------------------------------------
@@ -891,8 +904,9 @@ impl LineDisc {
                 self.stopped = false;
                 return InputAction::None;
             }
-            // Any character resumes output when stopped (if IXON is set).
-            if self.stopped {
+            // IXANY: any character resumes stopped output.
+            // Without IXANY, only VSTART (handled above) resumes.
+            if self.stopped && iflag.contains(InputFlags::IXANY) {
                 self.stopped = false;
             }
         }
@@ -909,13 +923,16 @@ impl LineDisc {
         if lflag.contains(LocalFlags::IEXTEN) {
             if c == self.cc(CcIndex::Vlnext) {
                 self.literal_next = true;
-                // Echo ^V if ECHOCTL is set.
                 if lflag.contains(LocalFlags::ECHOCTL | LocalFlags::ECHO) {
                     return InputAction::Echo {
-                        buf: [b'^', b'V', 0, 0],
+                        buf: [b'^', b'V', 0, 0, 0, 0, 0, 0],
                         len: 2,
                     };
                 }
+                return InputAction::None;
+            }
+            if c == self.cc(CcIndex::Vdiscard) && c != POSIX_VDISABLE {
+                self.flushing_output = !self.flushing_output;
                 return InputAction::None;
             }
             if lflag.contains(LocalFlags::ICANON) {
@@ -945,9 +962,11 @@ impl LineDisc {
     ///
     /// Called by the TTY core's `write()` function for each output byte.
     pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        if self.flushing_output {
+            return OutputAction::Suppress;
+        }
         let oflag = self.termios.output_flags();
         if !oflag.contains(OutputFlags::OPOST) {
-            // No output processing — still track column for echo accuracy.
             self.update_column_raw(c);
             return OutputAction::Emit {
                 buf: [c, 0],
@@ -1148,7 +1167,7 @@ impl LineDisc {
             self.flush_edit_to_cooked();
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0],
+                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
@@ -1170,18 +1189,18 @@ impl LineDisc {
                 }
                 if close_erase {
                     return InputAction::Echo {
-                        buf: [b'/', c, 0, 0],
+                        buf: [b'/', c, 0, 0, 0, 0, 0, 0],
                         len: 2,
                     };
                 }
                 return InputAction::Echo {
-                    buf: [c, 0, 0, 0],
+                    buf: [c, 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0],
+                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
@@ -1198,18 +1217,18 @@ impl LineDisc {
             if lflag.intersects(LocalFlags::ECHO | LocalFlags::ECHONL) {
                 if close_erase {
                     return InputAction::Echo {
-                        buf: [b'/', b'\n', 0, 0],
+                        buf: [b'/', b'\n', 0, 0, 0, 0, 0, 0],
                         len: 2,
                     };
                 }
                 return InputAction::Echo {
-                    buf: [b'\n', 0, 0, 0],
+                    buf: [b'\n', 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0],
+                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
@@ -1250,7 +1269,7 @@ impl LineDisc {
         if !lflag.contains(LocalFlags::ECHO) {
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0],
+                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             }
@@ -1262,12 +1281,12 @@ impl LineDisc {
             self.column += 2;
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', b'^', c + 0x40, 0],
+                    buf: [b'/', b'^', c + 0x40, 0, 0, 0, 0, 0],
                     len: 3,
                 };
             }
             return InputAction::Echo {
-                buf: [b'^', c + 0x40, 0, 0],
+                buf: [b'^', c + 0x40, 0, 0, 0, 0, 0, 0],
                 len: 2,
             };
         }
@@ -1276,12 +1295,12 @@ impl LineDisc {
             self.column += 1;
             if close_erase {
                 return InputAction::Echo {
-                    buf: [b'/', c, 0, 0],
+                    buf: [b'/', c, 0, 0, 0, 0, 0, 0],
                     len: 2,
                 };
             }
             return InputAction::Echo {
-                buf: [c, 0, 0, 0],
+                buf: [c, 0, 0, 0, 0, 0, 0, 0],
                 len: 1,
             };
         }
@@ -1289,7 +1308,7 @@ impl LineDisc {
         // Non-printable, no ECHOCTL — no echo.
         if close_erase {
             return InputAction::Echo {
-                buf: [b'/', 0, 0, 0],
+                buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
                 len: 1,
             };
         }
@@ -1332,7 +1351,7 @@ impl LineDisc {
         // multi-byte character.
         if lflag.contains(LocalFlags::ECHO) {
             InputAction::Echo {
-                buf: [c, 0, 0, 0],
+                buf: [c, 0, 0, 0, 0, 0, 0, 0],
                 len: 1,
             }
         } else {
@@ -1371,12 +1390,12 @@ impl LineDisc {
             // ECHOCTL in raw mode.
             if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
                 return InputAction::Echo {
-                    buf: [b'^', c + 0x40, 0, 0],
+                    buf: [b'^', c + 0x40, 0, 0, 0, 0, 0, 0],
                     len: 2,
                 };
             }
             return InputAction::Echo {
-                buf: [c, 0, 0, 0],
+                buf: [c, 0, 0, 0, 0, 0, 0, 0],
                 len: 1,
             };
         }
@@ -1408,14 +1427,14 @@ impl LineDisc {
             if self.in_erase_seq {
                 // Continuing an existing erase sequence — just echo the erased char.
                 return InputAction::Echo {
-                    buf: [erased, 0, 0, 0],
+                    buf: [erased, 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             } else {
                 // First erase in a new sequence — output \ then the erased char.
                 self.in_erase_seq = true;
                 return InputAction::Echo {
-                    buf: [b'\\', erased, 0, 0],
+                    buf: [b'\\', erased, 0, 0, 0, 0, 0, 0],
                     len: 2,
                 };
             }
@@ -1436,7 +1455,7 @@ impl LineDisc {
                 self.column -= 1;
             }
             return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0],
+                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
                 len: 3,
             };
         }
@@ -1464,13 +1483,13 @@ impl LineDisc {
             let representative = self.edit_buf[cp_start];
             if self.in_erase_seq {
                 return InputAction::Echo {
-                    buf: [representative, 0, 0, 0],
+                    buf: [representative, 0, 0, 0, 0, 0, 0, 0],
                     len: 1,
                 };
             } else {
                 self.in_erase_seq = true;
                 return InputAction::Echo {
-                    buf: [b'\\', representative, 0, 0],
+                    buf: [b'\\', representative, 0, 0, 0, 0, 0, 0],
                     len: 2,
                 };
             }
@@ -1485,7 +1504,7 @@ impl LineDisc {
         if width <= 1 {
             // Single-column character — one BS-SP-BS triple.
             return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0],
+                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
                 len: 3,
             };
         }
@@ -1517,7 +1536,7 @@ impl LineDisc {
 
         if lflag.contains(LocalFlags::ECHOK) {
             return InputAction::Echo {
-                buf: [b'\n', 0, 0, 0],
+                buf: [b'\n', 0, 0, 0, 0, 0, 0, 0],
                 len: 1,
             };
         }
@@ -1567,7 +1586,7 @@ impl LineDisc {
         // Most terminals handle this gracefully.
         if erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
             return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0],
+                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
                 len: 3,
             };
         }
@@ -1625,7 +1644,7 @@ impl LineDisc {
 
         if columns_erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
             return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0],
+                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
                 len: 3,
             };
         }
@@ -1841,6 +1860,10 @@ macro_rules! forward_ldisc_ops {
         fn check_no_room_recovery(&mut self) -> bool {
             self.check_no_room_recovery()
         }
+        #[inline]
+        fn clear_flusho(&mut self) {
+            self.clear_flusho()
+        }
     };
 }
 
@@ -1929,6 +1952,8 @@ impl RawDisc {
             overflow_count: 0,
         }
     }
+
+    // -- Accessors -----------------------------------------------------------
 
     pub fn termios(&self) -> &UserTermios {
         &self.termios
@@ -2026,6 +2051,8 @@ impl RawDisc {
     pub fn is_stopped(&self) -> bool {
         false
     }
+
+    pub fn clear_flusho(&mut self) {}
 
     /// Raw input: push byte directly to buffer, no processing.
     pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
@@ -2159,5 +2186,6 @@ impl LdiscKind {
         fn no_room(&self) -> bool;
         fn overflow_count(&self) -> u32;
         fn check_no_room_recovery(&mut self) -> bool;
+        fn clear_flusho(&mut self);
     }
 }

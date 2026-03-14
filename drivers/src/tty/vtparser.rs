@@ -501,7 +501,10 @@ impl VtParser {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "API completeness — used by future CSI dispatch extensions"
+    )]
     fn param_raw(&self, idx: usize) -> u16 {
         if idx < self.param_count {
             self.params[idx]

@@ -102,9 +102,6 @@ bitflags! {
 
 /// The central TTY structure — one per terminal.
 pub struct Tty {
-    /// Which TTY slot this is (0 = serial console, 1 = virtual console, etc.).
-    /// Read in tests; suppressed dead_code since it's pub(crate).
-    #[allow(dead_code)]
     pub(crate) index: TtyIndex,
 
     /// The line discipline owned by this TTY.
@@ -128,6 +125,13 @@ impl Tty {
         self.flags.insert(TtyFlags::HUNG_UP);
         self.flags.remove(TtyFlags::OUTPUT_STOPPED);
         debug_assert!(!self.flags.contains(TtyFlags::OUTPUT_STOPPED));
+    }
+}
+
+impl Drop for Tty {
+    fn drop(&mut self) {
+        self.ldisc.flush_all();
+        self.session.detach();
     }
 }
 
@@ -175,7 +179,7 @@ impl PostLockWork {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "itests"), expect(dead_code, reason = "used in itests"))]
     pub(crate) fn is_empty(&self) -> bool {
         self.signal.is_none()
             && self.ixoff_byte.is_none()
@@ -364,7 +368,7 @@ pub use self::io::{
 // io.rs: PTY re-exports (originally in mod.rs, routed through io.rs)
 pub use self::io::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
+    pty_open_peer, pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 // termios.rs: terminal configuration and control ioctls

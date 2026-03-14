@@ -782,7 +782,10 @@ impl VConsoleState {
     // Simple byte-level output (used by integration tests)
     // -----------------------------------------------------------------------
 
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(feature = "itests"),
+        expect(dead_code, reason = "used by itests feature")
+    )]
     pub(crate) fn write_byte(&mut self, b: u8) {
         match b {
             b'\n' => {
