@@ -201,27 +201,8 @@ pub fn find_pgid_by_job_id(job_id: u16) -> Option<u32> {
 }
 
 pub fn write_u64(value: u64) {
-    let mut tmp = [0u8; 32];
-    let mut idx = 0usize;
-    if value == 0 {
-        tmp[0] = b'0';
-        idx = 1;
-    } else {
-        let mut n = value;
-        let mut rev = [0u8; 32];
-        let mut r = 0usize;
-        while n != 0 && r < rev.len() {
-            rev[r] = b'0' + (n % 10) as u8;
-            n /= 10;
-            r += 1;
-        }
-        while r > 0 {
-            idx += 1;
-            tmp[idx - 1] = rev[r - 1];
-            r -= 1;
-        }
-    }
-    shell_write(&tmp[..idx]);
+    let text = format!("{}", value);
+    shell_write(text.as_bytes());
 }
 
 pub fn parse_u32_arg(ptr: *const u8) -> Option<u32> {

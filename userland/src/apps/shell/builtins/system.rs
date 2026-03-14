@@ -9,13 +9,13 @@ use super::super::display::{
 use super::super::jobs::write_u64;
 use super::super::parser::u_streq_slice;
 use super::super::{HALTED, NL, REBOOTING};
-use super::{BUILTINS, BuiltinCategory, print_kv};
+use super::{BUILTINS, BuiltinCategory};
 
 const NAME_COL_WIDTH: usize = 12;
 const PADDING: &[u8] = b"            ";
 
-fn write_padded_colored(name: &[u8], color: u8) {
-    shell_write_idx(name, color);
+fn write_padded_colored(name: &str, color: u8) {
+    shell_write_idx(name.as_bytes(), color);
     let pad = NAME_COL_WIDTH.saturating_sub(name.len());
     if pad > 0 {
         shell_write(&PADDING[..pad]);
@@ -31,7 +31,7 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
     shell_write(b"Type 'help <command>' for detailed usage.\n\n");
 
     for &cat in BuiltinCategory::ALL {
-        shell_write_idx(cat.label(), COLOR_PROMPT_ACCENT);
+        shell_write_idx(cat.label().as_bytes(), COLOR_PROMPT_ACCENT);
         shell_write(b":\n");
         for entry in BUILTINS {
             if entry.category != cat {
@@ -39,10 +39,10 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
             }
             shell_write(b"  ");
             write_padded_colored(entry.name, COLOR_EXEC_GREEN);
-            shell_write(entry.desc);
-            shell_write(NL);
+            shell_write(entry.desc.as_bytes());
+            shell_write(NL.as_bytes());
         }
-        shell_write(NL);
+        shell_write(NL.as_bytes());
     }
 
     shell_write_idx(b"Programs", COLOR_PROMPT_ACCENT);
@@ -50,41 +50,41 @@ pub fn cmd_help(argc: i32, argv: &[*const u8]) -> i32 {
     for spec in program_registry::user_programs() {
         shell_write(b"  ");
         write_padded_colored(spec.name, COLOR_EXEC_GREEN);
-        shell_write(spec.desc);
-        shell_write(NL);
+        shell_write(spec.desc.as_bytes());
+        shell_write(NL.as_bytes());
     }
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     0
 }
 
 fn cmd_help_single(name: *const u8) -> i32 {
     for entry in BUILTINS {
-        if !u_streq_slice(name, entry.name) {
+        if !u_streq_slice(name, entry.name.as_bytes()) {
             continue;
         }
-        shell_write_idx(entry.name, COLOR_EXEC_GREEN);
+        shell_write_idx(entry.name.as_bytes(), COLOR_EXEC_GREEN);
         shell_write(b" - ");
-        shell_write(entry.desc);
+        shell_write(entry.desc.as_bytes());
         shell_write(b"\n\n");
         shell_write_idx(b"Usage: ", COLOR_COMMENT_GRAY);
-        shell_write(entry.usage);
+        shell_write(entry.usage.as_bytes());
         shell_write(b"\n\n");
         if !entry.detail.is_empty() {
-            shell_write(entry.detail);
-            shell_write(NL);
+            shell_write(entry.detail.as_bytes());
+            shell_write(NL.as_bytes());
         }
         return 0;
     }
 
     for spec in program_registry::user_programs() {
-        if !u_streq_slice(name, spec.name) {
+        if !u_streq_slice(name, spec.name.as_bytes()) {
             continue;
         }
-        shell_write_idx(spec.name, COLOR_EXEC_GREEN);
+        shell_write_idx(spec.name.as_bytes(), COLOR_EXEC_GREEN);
         shell_write(b" - ");
-        shell_write(spec.desc);
-        shell_write(NL);
+        shell_write(spec.desc.as_bytes());
+        shell_write(NL.as_bytes());
         return 0;
     }
 
@@ -116,7 +116,7 @@ pub fn cmd_echo(argc: i32, argv: &[*const u8]) -> i32 {
         shell_write(unsafe { core::slice::from_raw_parts(arg, len) });
         first = false;
     }
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     0
 }
 
@@ -127,12 +127,12 @@ pub fn cmd_clear(_argc: i32, _argv: &[*const u8]) -> i32 {
 }
 
 pub fn cmd_shutdown(_argc: i32, _argv: &[*const u8]) -> i32 {
-    shell_write(HALTED);
+    shell_write(HALTED.as_bytes());
     process::halt();
 }
 
 pub fn cmd_reboot(_argc: i32, _argv: &[*const u8]) -> i32 {
-    shell_write(REBOOTING);
+    shell_write(REBOOTING.as_bytes());
     process::reboot();
 }
 
@@ -144,25 +144,25 @@ pub fn cmd_info(_argc: i32, _argv: &[*const u8]) -> i32 {
     }
     shell_write_idx(b"Kernel information:\n", COLOR_PROMPT_ACCENT);
     shell_write_idx(b"  Memory: total pages=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.total_pages as u64);
+    shell_write(format!("{}", info.total_pages as u64).as_bytes());
     shell_write_idx(b"  Free pages=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.free_pages as u64);
+    shell_write(format!("{}", info.free_pages as u64).as_bytes());
     shell_write_idx(b"  Allocated pages=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.allocated_pages as u64);
+    shell_write(format!("{}", info.allocated_pages as u64).as_bytes());
     shell_write_idx(b"  Tasks: total=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.total_tasks as u64);
+    shell_write(format!("{}", info.total_tasks as u64).as_bytes());
     shell_write_idx(b"  Active tasks=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.active_tasks as u64);
+    shell_write(format!("{}", info.active_tasks as u64).as_bytes());
     shell_write_idx(b"  Task ctx switches=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.task_context_switches);
+    shell_write(format!("{}", info.task_context_switches).as_bytes());
     shell_write_idx(b"  Scheduler: switches=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.scheduler_context_switches);
+    shell_write(format!("{}", info.scheduler_context_switches).as_bytes());
     shell_write_idx(b"  Yields=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.scheduler_yields);
+    shell_write(format!("{}", info.scheduler_yields).as_bytes());
     shell_write_idx(b"  Ready=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.ready_tasks as u64);
+    shell_write(format!("{}", info.ready_tasks as u64).as_bytes());
     shell_write_idx(b"  schedule() calls=", COLOR_COMMENT_GRAY);
-    print_kv(b"", info.schedule_calls as u64);
+    shell_write(format!("{}", info.schedule_calls as u64).as_bytes());
     0
 }
 
@@ -232,10 +232,10 @@ pub fn cmd_cpuinfo(_argc: i32, _argv: &[*const u8]) -> i32 {
     shell_write(b"x86_64\n");
     shell_write_idx(b"CPU(s):        ", COLOR_COMMENT_GRAY);
     write_u64(cpu_count as u64);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     shell_write_idx(b"Current CPU:   ", COLOR_COMMENT_GRAY);
     write_u64(current as u64);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     0
 }
 
@@ -261,19 +261,19 @@ pub fn cmd_free(_argc: i32, _argv: &[*const u8]) -> i32 {
     write_right_aligned(info.total_pages as u64, 10);
     write_right_aligned(info.free_pages as u64, 11);
     write_right_aligned(info.allocated_pages as u64, 11);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     shell_write_idx(b"KiB:     ", COLOR_COMMENT_GRAY);
     write_right_aligned(total_kb, 10);
     write_right_aligned(free_kb, 11);
     write_right_aligned(used_kb, 11);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     shell_write_idx(b"MiB:     ", COLOR_COMMENT_GRAY);
     write_right_aligned(total_kb / 1024, 10);
     write_right_aligned(free_kb / 1024, 11);
     write_right_aligned(used_kb / 1024, 11);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     0
 }
@@ -404,7 +404,7 @@ pub fn cmd_uname(argc: i32, argv: &[*const u8]) -> i32 {
         shell_write(b"x86_64");
     }
 
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     0
 }
 
@@ -415,7 +415,7 @@ pub fn cmd_whoami(_argc: i32, _argv: &[*const u8]) -> i32 {
     } else {
         shell_write(b"uid=");
         write_u64(uid as u64);
-        shell_write(NL);
+        shell_write(NL.as_bytes());
     }
     0
 }
@@ -450,13 +450,13 @@ pub fn cmd_resolve(argc: i32, argv: &[*const u8]) -> i32 {
             write_u64(addr[2] as u64);
             shell_write(b".");
             write_u64(addr[3] as u64);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
             0
         }
         None => {
             shell_write(b"resolve: failed to resolve ");
             shell_write(hostname);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
             1
         }
     }

@@ -1,5 +1,5 @@
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 mod banner;
 pub mod buffers;
@@ -30,25 +30,25 @@ impl<T> SyncUnsafeCell<T> {
 
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
-pub(crate) static NL: &[u8] = b"\n";
-pub(crate) static UNKNOWN_CMD: &[u8] = b"Unknown command. Type 'help'.\n";
-pub(crate) static PATH_TOO_LONG: &[u8] = b"path too long\n";
-pub(crate) static ERR_NO_SUCH: &[u8] = b"No such file or directory\n";
-pub(crate) static ERR_TOO_MANY_ARGS: &[u8] = b"too many arguments\n";
-pub(crate) static ERR_MISSING_OPERAND: &[u8] = b"missing operand\n";
-pub(crate) static ERR_MISSING_FILE: &[u8] = b"missing file operand\n";
-pub(crate) static ERR_MISSING_TEXT: &[u8] = b"missing text operand\n";
-pub(crate) static HALTED: &[u8] = b"Shell requested shutdown...\n";
-pub(crate) static REBOOTING: &[u8] = b"Shell requested reboot...\n";
+pub(crate) static NL: &str = "\n";
+pub(crate) static UNKNOWN_CMD: &str = "Unknown command. Type 'help'.\n";
+pub(crate) static PATH_TOO_LONG: &str = "path too long\n";
+pub(crate) static ERR_NO_SUCH: &str = "No such file or directory\n";
+pub(crate) static ERR_TOO_MANY_ARGS: &str = "too many arguments\n";
+pub(crate) static ERR_MISSING_OPERAND: &str = "missing operand\n";
+pub(crate) static ERR_MISSING_FILE: &str = "missing file operand\n";
+pub(crate) static ERR_MISSING_TEXT: &str = "missing text operand\n";
+pub(crate) static HALTED: &str = "Shell requested shutdown...\n";
+pub(crate) static REBOOTING: &str = "Shell requested reboot...\n";
 
 pub(crate) const SHELL_IO_MAX: usize = 512;
 
 const CWD_MAX: usize = 256;
 static CWD: SyncUnsafeCell<[u8; CWD_MAX]> = SyncUnsafeCell::new([0; CWD_MAX]);
 
-static LAST_EXIT_CODE: SyncUnsafeCell<i32> = SyncUnsafeCell::new(0);
-static LAST_BG_PID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
-static SHELL_PID: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
+static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
+static SHELL_PID: AtomicU32 = AtomicU32::new(0);
 
 pub fn cwd_bytes() -> [u8; CWD_MAX] {
     unsafe { *CWD.get() }
@@ -62,23 +62,23 @@ pub fn cwd_set(path: &[u8]) {
 }
 
 pub fn last_exit_code() -> i32 {
-    unsafe { *LAST_EXIT_CODE.get() }
+    LAST_EXIT_CODE.load(Ordering::Relaxed)
 }
 
 pub fn set_last_exit_code(code: i32) {
-    unsafe { *LAST_EXIT_CODE.get() = code }
+    LAST_EXIT_CODE.store(code, Ordering::Relaxed)
 }
 
 pub fn last_bg_pid() -> u32 {
-    unsafe { *LAST_BG_PID.get() }
+    LAST_BG_PID.load(Ordering::Relaxed)
 }
 
 pub fn set_last_bg_pid(pid: u32) {
-    unsafe { *LAST_BG_PID.get() = pid }
+    LAST_BG_PID.store(pid, Ordering::Relaxed)
 }
 
 pub fn shell_pid() -> u32 {
-    unsafe { *SHELL_PID.get() }
+    SHELL_PID.load(Ordering::Relaxed)
 }
 
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
@@ -246,7 +246,7 @@ pub struct ShellState {
     pub prompt_len: usize,
 }
 
-pub fn shell_user_main(_arg: *mut c_void) {
+pub fn shell_user_main() {
     use slopos_abi::signal::SIGINT;
 
     use crate::syscall::process;
@@ -260,7 +260,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
 
     cwd_set(b"/");
     env::initialize_defaults();
-    unsafe { *SHELL_PID.get() = process::getpid() }
+    SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();
     let _ = process::ignore_signal(SIGINT);
 
@@ -290,7 +290,7 @@ pub fn shell_user_main(_arg: *mut c_void) {
         let rc = exec::execute_tokens(token_count, &tokens);
         set_last_exit_code(rc);
         if rc == 127 {
-            display::shell_write_idx(UNKNOWN_CMD, display::COLOR_ERROR_RED);
+            display::shell_write_idx(UNKNOWN_CMD.as_bytes(), display::COLOR_ERROR_RED);
         }
     }
 }
