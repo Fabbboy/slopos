@@ -1,12 +1,13 @@
 //! Standalone File Manager Application
 
-use core::str;
+use std::fs;
+use std::path::PathBuf;
+use std::string::String;
 
 use slopos_abi::draw::Color32;
 
 use crate::appkit::{self, ControlFlow, Event, Window, WindowedApp};
 use crate::gfx::{self, DrawBuffer};
-use crate::syscall::{UserFsEntry, UserFsList, fs};
 use crate::theme::*;
 
 const FM_CONTENT_WIDTH: u32 = FM_WIDTH as u32;
@@ -14,70 +15,77 @@ const FM_CONTENT_HEIGHT: u32 = (FM_HEIGHT - FM_TITLE_HEIGHT) as u32;
 const NAV_ROW_HEIGHT: i32 = 24;
 
 pub struct FileManager {
-    current_path: [u8; 128],
-    entries: [UserFsEntry; 32],
-    entry_count: u32,
+    current_path: PathBuf,
+    entries: std::vec::Vec<FileEntry>,
     scroll_top: u32,
+}
+
+struct FileEntry {
+    name: String,
+    is_directory: bool,
 }
 
 impl FileManager {
     fn new() -> Self {
         let mut fm = Self {
-            current_path: [0; 128],
-            entries: [UserFsEntry::new(); 32],
-            entry_count: 0,
+            current_path: PathBuf::from("/"),
+            entries: std::vec::Vec::new(),
             scroll_top: 0,
         };
-        fm.current_path[0] = b'/';
         fm.refresh();
         fm
     }
 
     fn refresh(&mut self) {
-        self.entries = [UserFsEntry::new(); 32];
-        let mut list = UserFsList {
-            entries: self.entries.as_mut_ptr(),
-            max_entries: 32,
-            count: 0,
+        self.entries.clear();
+
+        let read_dir = match fs::read_dir(&self.current_path) {
+            Ok(read_dir) => read_dir,
+            Err(_) => return,
         };
-        let _ = fs::list_dir(self.current_path.as_ptr() as *const i8, &mut list);
-        self.entry_count = list.count.min(self.entries.len() as u32);
+
+        for dir_entry in read_dir {
+            let dir_entry = match dir_entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let name = match dir_entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let file_type = match dir_entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+
+            self.entries.push(FileEntry {
+                name,
+                is_directory: file_type.is_dir(),
+            });
+        }
+
+        self.entries.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        });
     }
 
-    fn navigate(&mut self, name: &[u8]) {
-        if name == b".." {
-            let mut len = 0;
-            while len < 128 && self.current_path[len] != 0 {
-                len += 1;
+    fn navigate(&mut self, name: &str) {
+        if name == ".." {
+            if !self.current_path.pop() {
+                self.current_path = PathBuf::from("/");
             }
-            if len > 1 {
-                let mut i = len - 1;
-                while i > 0 && self.current_path[i] != b'/' {
-                    self.current_path[i] = 0;
-                    i -= 1;
-                }
-                if i > 0 {
-                    self.current_path[i] = 0;
-                }
+            if self.current_path.as_os_str().is_empty() {
+                self.current_path = PathBuf::from("/");
             }
         } else {
-            let mut len = 0;
-            while len < 128 && self.current_path[len] != 0 {
-                len += 1;
-            }
-            if len + 1 + name.len() + 1 <= 128 {
-                if len > 1 || (len == 1 && self.current_path[0] != b'/') {
-                    self.current_path[len] = b'/';
-                    len += 1;
-                } else if len == 0 {
-                    self.current_path[0] = b'/';
-                    len = 1;
-                }
-                for (i, &b) in name.iter().enumerate() {
-                    self.current_path[len + i] = b;
-                }
-                self.current_path[len + name.len()] = 0;
-            }
+            self.current_path.push(name);
         }
         self.refresh();
         self.scroll_top = 0;
@@ -86,7 +94,7 @@ impl FileManager {
     fn handle_click(&mut self, x: i32, y: i32) -> bool {
         if y >= 0 && y < NAV_ROW_HEIGHT {
             if x >= 4 && x < 4 + BUTTON_SIZE {
-                self.navigate(b"..");
+                self.navigate("..");
                 return true;
             }
             return false;
@@ -96,15 +104,11 @@ impl FileManager {
         if list_y >= 0 && x >= 0 {
             let idx = (list_y / FM_ITEM_HEIGHT) as u32;
             let entry_idx = self.scroll_top + idx;
-            if entry_idx < self.entry_count {
-                let entry = self.entries[entry_idx as usize];
-                if entry.is_directory() {
-                    let mut name_len = 0;
-                    while name_len < 64 && entry.name[name_len] != 0 {
-                        name_len += 1;
-                    }
-                    let name = &entry.name[..name_len];
-                    self.navigate(name);
+            if (entry_idx as usize) < self.entries.len() {
+                let entry = &self.entries[entry_idx as usize];
+                if entry.is_directory {
+                    let next = entry.name.clone();
+                    self.navigate(next.as_str());
                 }
                 return true;
             }
@@ -143,11 +147,7 @@ impl WindowedApp for FileManager {
         gfx::fill_rect(fb, 4, 4, BUTTON_SIZE, BUTTON_SIZE - 8, COLOR_BUTTON);
         gfx::font::draw_string(fb, 8, 4, "^", COLOR_TEXT, COLOR_BUTTON);
 
-        let mut len = 0;
-        while len < self.current_path.len() && self.current_path[len] != 0 {
-            len += 1;
-        }
-        let path_str = str::from_utf8(&self.current_path[..len]).unwrap_or("/");
+        let path_str = self.current_path.to_str().unwrap_or("/");
         gfx::font::draw_string(
             fb,
             4 + BUTTON_SIZE + 8,
@@ -161,7 +161,7 @@ impl WindowedApp for FileManager {
         let available_height = height - NAV_ROW_HEIGHT;
         let max_visible = available_height / FM_ITEM_HEIGHT;
 
-        for i in 0..self.entry_count as usize {
+        for i in 0..self.entries.len() {
             if i < self.scroll_top as usize {
                 continue;
             }
@@ -172,23 +172,17 @@ impl WindowedApp for FileManager {
             let item_y = list_start_y + (row * FM_ITEM_HEIGHT);
             let entry = &self.entries[i];
 
-            let mut name_len = 0;
-            while name_len < 64 && entry.name[name_len] != 0 {
-                name_len += 1;
-            }
-            let name = str::from_utf8(&entry.name[..name_len]).unwrap_or("?");
-
-            let color = if entry.is_directory() {
+            let color = if entry.is_directory {
                 Color32::rgb(0x40, 0x80, 0xFF)
             } else {
                 COLOR_TEXT
             };
-            gfx::font::draw_string(fb, 8, item_y + 2, name, color, FM_COLOR_BG);
+            gfx::font::draw_string(fb, 8, item_y + 2, entry.name.as_str(), color, FM_COLOR_BG);
         }
     }
 }
 
-pub fn file_manager_main(_arg: *mut core::ffi::c_void) -> ! {
+pub fn file_manager_main() -> ! {
     let fm = FileManager::new();
     appkit::run(fm, FM_CONTENT_WIDTH, FM_CONTENT_HEIGHT)
 }
