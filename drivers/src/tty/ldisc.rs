@@ -85,6 +85,47 @@ pub enum InputAction {
     Bell,
 }
 
+impl InputAction {
+    /// Construct an `Echo` action from a byte slice (max 8 bytes).
+    #[inline]
+    pub fn echo(bytes: &[u8]) -> Self {
+        let mut buf = [0u8; 8];
+        let len = bytes.len().min(8);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Self::Echo {
+            buf,
+            len: len as u8,
+        }
+    }
+
+    /// Construct a single-byte `Echo` action.
+    #[inline]
+    pub const fn echo1(b: u8) -> Self {
+        Self::Echo {
+            buf: [b, 0, 0, 0, 0, 0, 0, 0],
+            len: 1,
+        }
+    }
+
+    /// Construct a two-byte `Echo` action.
+    #[inline]
+    pub const fn echo2(a: u8, b: u8) -> Self {
+        Self::Echo {
+            buf: [a, b, 0, 0, 0, 0, 0, 0],
+            len: 2,
+        }
+    }
+
+    /// Construct a three-byte `Echo` action.
+    #[inline]
+    pub const fn echo3(a: u8, b: u8, c: u8) -> Self {
+        Self::Echo {
+            buf: [a, b, c, 0, 0, 0, 0, 0],
+            len: 3,
+        }
+    }
+}
+
 /// Actions returned by output processing (`process_output_byte`).
 pub enum OutputAction {
     /// Emit these bytes to the driver (up to 2 bytes, e.g. `\r\n`).
@@ -150,20 +191,24 @@ impl EchoBuf {
         }
     }
 
-    pub fn push(&mut self, byte: u8) {
+    pub fn push(&mut self, byte: u8) -> bool {
         if self.len < ECHO_BUF_CAP {
             self.buf[self.len] = byte;
             self.len += 1;
+            true
+        } else {
+            false
         }
     }
 
-    pub fn extend(&mut self, bytes: &[u8]) {
+    pub fn extend(&mut self, bytes: &[u8]) -> usize {
         let remaining = ECHO_BUF_CAP.saturating_sub(self.len);
         let n = core::cmp::min(remaining, bytes.len());
         if n > 0 {
             self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
             self.len += n;
         }
+        n
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -197,16 +242,15 @@ impl BatchResult {
     }
 }
 
-/// Generates delegating `impl LdiscKind` methods that forward to the inner
-/// variant via the `LdiscOps` trait.  Supports `&self` and `&mut self` receivers.
+/// Zero-cost enum dispatch for `LdiscKind` → inner variant methods.
 ///
-/// Usage:
-/// ```ignore
-/// dispatch_ldisc! {
-///     fn termios(&self) -> &UserTermios;
-///     fn set_termios(&mut self, t: &UserTermios);
-/// }
-/// ```
+/// Adding a new shared method requires four touch-points:
+///   1. `LdiscOps` trait — add the signature
+///   2. `forward_ldisc_ops!` — add the forwarding impl
+///   3. `dispatch_ldisc!` invocation in `impl LdiscKind` — add the entry
+///   4. Each variant (`LineDisc`, `RawDisc`) — implement the inherent method
+///
+/// Uses compile-time enum match instead of `enum_dispatch` (which needs `alloc`).
 macro_rules! dispatch_ldisc {
     // &self, with return type
     (@one &, $name:ident, ($($arg:ident : $argty:ty),*), $ret:ty) => {
@@ -950,10 +994,7 @@ impl LineDisc {
             if c == self.cc(CcIndex::Vlnext) {
                 self.literal_next = true;
                 if lflag.contains(LocalFlags::ECHOCTL | LocalFlags::ECHO) {
-                    return InputAction::Echo {
-                        buf: [b'^', b'V', 0, 0, 0, 0, 0, 0],
-                        len: 2,
-                    };
+                    return InputAction::echo2(b'^', b'V');
                 }
                 return InputAction::None;
             }
@@ -1192,10 +1233,7 @@ impl LineDisc {
         if c == self.cc(CcIndex::Veof) {
             self.flush_edit_to_cooked();
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(b'/');
             }
             return InputAction::None;
         }
@@ -1214,21 +1252,12 @@ impl LineDisc {
                     self.column += 1;
                 }
                 if close_erase {
-                    return InputAction::Echo {
-                        buf: [b'/', c, 0, 0, 0, 0, 0, 0],
-                        len: 2,
-                    };
+                    return InputAction::echo2(b'/', c);
                 }
-                return InputAction::Echo {
-                    buf: [c, 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(c);
             }
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(b'/');
             }
             return InputAction::None;
         }
@@ -1242,21 +1271,12 @@ impl LineDisc {
             self.column = 0;
             if lflag.intersects(LocalFlags::ECHO | LocalFlags::ECHONL) {
                 if close_erase {
-                    return InputAction::Echo {
-                        buf: [b'/', b'\n', 0, 0, 0, 0, 0, 0],
-                        len: 2,
-                    };
+                    return InputAction::echo2(b'/', b'\n');
                 }
-                return InputAction::Echo {
-                    buf: [b'\n', 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(b'\n');
             }
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(b'/');
             }
             return InputAction::None;
         }
@@ -1294,10 +1314,7 @@ impl LineDisc {
 
         if !lflag.contains(LocalFlags::ECHO) {
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(b'/');
             }
             return InputAction::None;
         }
@@ -1306,37 +1323,22 @@ impl LineDisc {
         if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
             self.column += 2;
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', b'^', c + 0x40, 0, 0, 0, 0, 0],
-                    len: 3,
-                };
+                return InputAction::echo3(b'/', b'^', c + 0x40);
             }
-            return InputAction::Echo {
-                buf: [b'^', c + 0x40, 0, 0, 0, 0, 0, 0],
-                len: 2,
-            };
+            return InputAction::echo2(b'^', c + 0x40);
         }
 
         if self.is_printable(c) {
             self.column += 1;
             if close_erase {
-                return InputAction::Echo {
-                    buf: [b'/', c, 0, 0, 0, 0, 0, 0],
-                    len: 2,
-                };
+                return InputAction::echo2(b'/', c);
             }
-            return InputAction::Echo {
-                buf: [c, 0, 0, 0, 0, 0, 0, 0],
-                len: 1,
-            };
+            return InputAction::echo1(c);
         }
 
         // Non-printable, no ECHOCTL — no echo.
         if close_erase {
-            return InputAction::Echo {
-                buf: [b'/', 0, 0, 0, 0, 0, 0, 0],
-                len: 1,
-            };
+            return InputAction::echo1(b'/');
         }
         InputAction::None
     }
@@ -1376,10 +1378,7 @@ impl LineDisc {
         // Always echo the raw byte so the terminal can reconstruct the
         // multi-byte character.
         if lflag.contains(LocalFlags::ECHO) {
-            InputAction::Echo {
-                buf: [c, 0, 0, 0, 0, 0, 0, 0],
-                len: 1,
-            }
+            InputAction::echo1(c)
         } else {
             InputAction::None
         }
@@ -1430,10 +1429,7 @@ impl LineDisc {
             self.push_cooked(0xFF);
             self.push_cooked(0xFF);
             if lflag.contains(LocalFlags::ECHO) {
-                return InputAction::Echo {
-                    buf: [0xFF, 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(0xFF);
             }
             return InputAction::None;
         }
@@ -1448,15 +1444,9 @@ impl LineDisc {
         if lflag.contains(LocalFlags::ECHO) {
             // ECHOCTL in raw mode.
             if lflag.contains(LocalFlags::ECHOCTL) && c < 0x20 && c != b'\t' && c != b'\n' {
-                return InputAction::Echo {
-                    buf: [b'^', c + 0x40, 0, 0, 0, 0, 0, 0],
-                    len: 2,
-                };
+                return InputAction::echo2(b'^', c + 0x40);
             }
-            return InputAction::Echo {
-                buf: [c, 0, 0, 0, 0, 0, 0, 0],
-                len: 1,
-            };
+            return InputAction::echo1(c);
         }
         InputAction::None
     }
@@ -1485,17 +1475,11 @@ impl LineDisc {
         if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
             if self.in_erase_seq {
                 // Continuing an existing erase sequence — just echo the erased char.
-                return InputAction::Echo {
-                    buf: [erased, 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(erased);
             } else {
                 // First erase in a new sequence — output \ then the erased char.
                 self.in_erase_seq = true;
-                return InputAction::Echo {
-                    buf: [b'\\', erased, 0, 0, 0, 0, 0, 0],
-                    len: 2,
-                };
+                return InputAction::echo2(b'\\', erased);
             }
         }
 
@@ -1513,10 +1497,7 @@ impl LineDisc {
             if self.column > 0 {
                 self.column -= 1;
             }
-            return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
-                len: 3,
-            };
+            return InputAction::echo3(0x08, 0x20, 0x08);
         }
         InputAction::None
     }
@@ -1541,16 +1522,10 @@ impl LineDisc {
         if lflag.contains(LocalFlags::ECHOPRT | LocalFlags::ECHO) {
             let representative = self.edit_buf[cp_start];
             if self.in_erase_seq {
-                return InputAction::Echo {
-                    buf: [representative, 0, 0, 0, 0, 0, 0, 0],
-                    len: 1,
-                };
+                return InputAction::echo1(representative);
             } else {
                 self.in_erase_seq = true;
-                return InputAction::Echo {
-                    buf: [b'\\', representative, 0, 0, 0, 0, 0, 0],
-                    len: 2,
-                };
+                return InputAction::echo2(b'\\', representative);
             }
         }
 
@@ -1562,10 +1537,7 @@ impl LineDisc {
 
         if width <= 1 {
             // Single-column character — one BS-SP-BS triple.
-            return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
-                len: 3,
-            };
+            return InputAction::echo3(0x08, 0x20, 0x08);
         }
         // Multi-column character (e.g. CJK, emoji) — multiple BS-SP-BS triples.
         InputAction::KillLineEcho {
@@ -1594,10 +1566,7 @@ impl LineDisc {
         }
 
         if lflag.contains(LocalFlags::ECHOK) {
-            return InputAction::Echo {
-                buf: [b'\n', 0, 0, 0, 0, 0, 0, 0],
-                len: 1,
-            };
+            return InputAction::echo1(b'\n');
         }
         InputAction::None
     }
@@ -1644,10 +1613,7 @@ impl LineDisc {
         // a newline + the remaining edit content (like a simplified reprint).
         // Most terminals handle this gracefully.
         if erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
-            return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
-                len: 3,
-            };
+            return InputAction::echo3(0x08, 0x20, 0x08);
         }
 
         // For multi-char erases, request a reprint so the line is redrawn.
@@ -1702,10 +1668,7 @@ impl LineDisc {
         }
 
         if columns_erased <= 1 && lflag.contains(LocalFlags::ECHOE) {
-            return InputAction::Echo {
-                buf: [0x08, 0x20, 0x08, 0, 0, 0, 0, 0],
-                len: 3,
-            };
+            return InputAction::echo3(0x08, 0x20, 0x08);
         }
 
         // For multi-column erases, request a reprint so the line is redrawn.
@@ -1939,6 +1902,11 @@ macro_rules! forward_ldisc_ops {
 impl LdiscOps for LineDisc {
     forward_ldisc_ops!(LineDisc);
 
+    /// Process a batch of input events, collecting echo output and at most
+    /// one signal.  Stops on the first signal-generating character — if
+    /// multiple signal chars arrive in one batch (rare in practice), only the
+    /// first is captured.  This is acceptable because keyboard input rarely
+    /// produces multiple signal chars per ISR batch.
     fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         let mut result = BatchResult::new();
         for &event in events {
