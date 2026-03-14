@@ -85,7 +85,12 @@ impl FileManager {
                 self.current_path = PathBuf::from("/");
             }
         } else {
-            self.current_path.push(name);
+            let mut next_path = self.current_path.to_string_lossy().into_owned();
+            if !next_path.ends_with('/') {
+                next_path.push('/');
+            }
+            next_path.push_str(name);
+            self.current_path = PathBuf::from(next_path);
         }
         self.refresh();
         self.scroll_top = 0;
