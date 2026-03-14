@@ -33,7 +33,7 @@ use crate::tty::session::{
 };
 use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
-    CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
+    Cell, CellAttributes, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
@@ -60,10 +60,10 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).cols = 80;
         (*state_ref).fb = None;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).cells[r].fill(b' ' as u32);
-            for c in 0..VCONSOLE_MAX_COLS {
-                (*state_ref).cell_attrs[r][c] = default_cell;
-            }
+            (*state_ref).cells[r].fill(Cell {
+                codepoint: b' ' as u32,
+                attrs: default_cell,
+            });
         }
         (*state_ref).parser = VtParser::new();
         (*state_ref).cursor_attrs = default_cursor;
@@ -72,10 +72,10 @@ pub(crate) fn boxed_vconsole_state() -> Box<VConsoleState> {
         (*state_ref).saved_cursor_attrs = default_cursor;
         (*state_ref).cursor_visible = true;
         for r in 0..VCONSOLE_MAX_ROWS {
-            (*state_ref).alt_screen_cells[r].fill(b' ' as u32);
-            for c in 0..VCONSOLE_MAX_COLS {
-                (*state_ref).alt_screen_attrs[r][c] = default_cell;
-            }
+            (*state_ref).alt_cells[r].fill(Cell {
+                codepoint: b' ' as u32,
+                attrs: default_cell,
+            });
         }
         (*state_ref).alt_screen_cursor_row = 0;
         (*state_ref).alt_screen_cursor_col = 0;

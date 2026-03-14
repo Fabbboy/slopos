@@ -180,10 +180,10 @@ pub fn test_vconsole_256_color_sets_fg() -> TestResult {
     }
     state.process_byte(b'X');
     // 256-color index 1 = ANSI red = 0x00AA0000
-    if state.cell_attrs[0][0].fg != 0x00AA0000 {
+    if state.cells[0][0].attrs.fg != 0x00AA0000 {
         klog_info!(
             "TTY_TEST: expected fg 0x00AA0000, got 0x{:08x}",
-            state.cell_attrs[0][0].fg
+            state.cells[0][0].attrs.fg
         );
         return TestResult::Fail;
     }
@@ -197,11 +197,11 @@ pub fn test_vconsole_truecolor_sets_fg() -> TestResult {
     }
     state.process_byte(b'Y');
     let expected: u32 = (255 << 16) | (128 << 8) | 0;
-    if state.cell_attrs[0][0].fg != expected {
+    if state.cells[0][0].attrs.fg != expected {
         klog_info!(
             "TTY_TEST: expected fg 0x{:08x}, got 0x{:08x}",
             expected,
-            state.cell_attrs[0][0].fg
+            state.cells[0][0].attrs.fg
         );
         return TestResult::Fail;
     }
@@ -321,19 +321,19 @@ pub fn test_dectcem_still_works() -> TestResult {
 pub fn test_alt_screen_still_works() -> TestResult {
     let mut state = boxed_vconsole_state();
     state.process_byte(b'Z');
-    if state.cells[0][0] != b'Z' as u32 {
+    if state.cells[0][0].codepoint != b'Z' as u32 {
         return TestResult::Fail;
     }
     for &b in b"\x1b[?1049h" {
         state.process_byte(b);
     }
-    if !state.in_alt_screen || state.cells[0][0] != b' ' as u32 {
+    if !state.in_alt_screen || state.cells[0][0].codepoint != b' ' as u32 {
         return TestResult::Fail;
     }
     for &b in b"\x1b[?1049l" {
         state.process_byte(b);
     }
-    if state.in_alt_screen || state.cells[0][0] != b'Z' as u32 {
+    if state.in_alt_screen || state.cells[0][0].codepoint != b'Z' as u32 {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -341,8 +341,7 @@ pub fn test_alt_screen_still_works() -> TestResult {
 
 pub fn test_cell_model_u32() -> TestResult {
     let state = boxed_vconsole_state();
-    // Verify cells are u32 by checking a space is stored as u32.
-    if state.cells[0][0] != 0x20 {
+    if state.cells[0][0].codepoint != 0x20 {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -355,20 +354,20 @@ pub fn test_vconsole_utf8_hello_renders() -> TestResult {
     for &b in b"H\xc3\xa9llo" {
         state.process_byte(b);
     }
-    if state.cells[0][0] != b'H' as u32 {
+    if state.cells[0][0].codepoint != b'H' as u32 {
         return TestResult::Fail;
     }
-    if state.cells[0][1] != 0x00E9 {
+    if state.cells[0][1].codepoint != 0x00E9 {
         klog_info!(
             "TTY_TEST: cell[0][1] = 0x{:04x}, expected 0x00E9",
-            state.cells[0][1]
+            state.cells[0][1].codepoint
         );
         return TestResult::Fail;
     }
-    if state.cells[0][2] != b'l' as u32 || state.cells[0][3] != b'l' as u32 {
+    if state.cells[0][2].codepoint != b'l' as u32 || state.cells[0][3].codepoint != b'l' as u32 {
         return TestResult::Fail;
     }
-    if state.cells[0][4] != b'o' as u32 {
+    if state.cells[0][4].codepoint != b'o' as u32 {
         return TestResult::Fail;
     }
     if state.cursor_col != 5 {
@@ -383,18 +382,18 @@ pub fn test_double_width_cjk() -> TestResult {
     for &b in &[0xE4u8, 0xB8, 0xAD] {
         state.process_byte(b);
     }
-    if state.cells[0][0] != 0x4E2D {
+    if state.cells[0][0].codepoint != 0x4E2D {
         klog_info!(
             "TTY_TEST: cell[0][0] = 0x{:04x}, expected 0x4E2D",
-            state.cells[0][0]
+            state.cells[0][0].codepoint
         );
         return TestResult::Fail;
     }
     // Second cell should be continuation marker.
-    if state.cells[0][1] != 0xFFFF_FFFF {
+    if state.cells[0][1].codepoint != 0xFFFF_FFFF {
         klog_info!(
             "TTY_TEST: cell[0][1] = 0x{:08x}, expected continuation",
-            state.cells[0][1]
+            state.cells[0][1].codepoint
         );
         return TestResult::Fail;
     }
@@ -410,10 +409,10 @@ pub fn test_invalid_utf8_in_vconsole() -> TestResult {
     let mut state = boxed_vconsole_state();
     // 0xFF is invalid — should render replacement character (U+FFFD).
     state.process_byte(0xFF);
-    if state.cells[0][0] != 0xFFFD {
+    if state.cells[0][0].codepoint != 0xFFFD {
         klog_info!(
             "TTY_TEST: cell[0][0] = 0x{:04x}, expected 0xFFFD",
-            state.cells[0][0]
+            state.cells[0][0].codepoint
         );
         return TestResult::Fail;
     }
@@ -436,25 +435,25 @@ pub fn test_mixed_ascii_utf8_escapes() -> TestResult {
     state.process_byte(b'B');
 
     // Cell 0 = 'A' with default fg
-    if state.cells[0][0] != b'A' as u32 {
+    if state.cells[0][0].codepoint != b'A' as u32 {
         return TestResult::Fail;
     }
     // Cell 1 = é (0xE9) with red fg
-    if state.cells[0][1] != 0xE9 {
+    if state.cells[0][1].codepoint != 0xE9 {
         return TestResult::Fail;
     }
-    if state.cell_attrs[0][1].fg != 0x00AA0000 {
+    if state.cells[0][1].attrs.fg != 0x00AA0000 {
         klog_info!(
             "TTY_TEST: é fg = 0x{:08x}, expected red",
-            state.cell_attrs[0][1].fg
+            state.cells[0][1].attrs.fg
         );
         return TestResult::Fail;
     }
     // Cell 2 = 'B' with default fg
-    if state.cells[0][2] != b'B' as u32 {
+    if state.cells[0][2].codepoint != b'B' as u32 {
         return TestResult::Fail;
     }
-    if state.cell_attrs[0][2].fg != 0x00AAAAAA {
+    if state.cells[0][2].attrs.fg != 0x00AAAAAA {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -469,10 +468,10 @@ pub fn test_256color_cube_mapping() -> TestResult {
     }
     state.process_byte(b'X');
     let expected_21: u32 = 0x000000FF; // blue
-    if state.cell_attrs[0][0].fg != expected_21 {
+    if state.cells[0][0].attrs.fg != expected_21 {
         klog_info!(
             "TTY_TEST: index 21 fg = 0x{:08x}, expected 0x{:08x}",
-            state.cell_attrs[0][0].fg,
+            state.cells[0][0].attrs.fg,
             expected_21
         );
         return TestResult::Fail;
@@ -489,10 +488,10 @@ pub fn test_256color_grayscale_mapping() -> TestResult {
     state.process_byte(b'G');
     let v: u32 = 8;
     let expected = (v << 16) | (v << 8) | v;
-    if state.cell_attrs[0][0].fg != expected {
+    if state.cells[0][0].attrs.fg != expected {
         klog_info!(
             "TTY_TEST: grayscale 232 fg = 0x{:08x}, expected 0x{:08x}",
-            state.cell_attrs[0][0].fg,
+            state.cells[0][0].attrs.fg,
             expected
         );
         return TestResult::Fail;
