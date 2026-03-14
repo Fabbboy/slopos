@@ -154,15 +154,18 @@ pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
                         .control_flags()
                         .contains(slopos_abi::syscall::ControlFlags::HUPCL);
                     let sid = tty.session.session_id_raw();
-                    tty.ldisc.flush_all();
-                    tty.session.detach();
-                    tty.flags
-                        .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
                     if hupcl && sid != 0 {
+                        // hangup() must own flush + detach + signal: it
+                        // reads session_id under lock to deliver SIGHUP.
+                        tty.flags.remove(TtyFlags::EXCLUSIVE);
                         drop(guard);
                         hangup(idx);
                         return Ok(0);
                     }
+                    tty.ldisc.flush_all();
+                    tty.session.detach();
+                    tty.flags
+                        .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
                 }
             }
         }
