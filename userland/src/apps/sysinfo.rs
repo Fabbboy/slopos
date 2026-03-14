@@ -1,7 +1,4 @@
-use core::ffi::c_void;
-
 use slopos_abi::PAGE_SIZE;
-use slopos_lib::numfmt;
 
 use crate::appkit::{self, Window, WindowedApp};
 use crate::gfx::{self, DrawBuffer};
@@ -32,104 +29,68 @@ impl WindowedApp for SysinfoApp {
         let mut info = UserSysInfo::default();
         let sys_rc = sys_core::sys_info(&mut info);
 
-        let mut line = [0u8; 96];
         let mut y = MARGIN_Y;
 
         draw_text(fb, MARGIN_X, y, "SLOPOS SYSINFO");
         y += LINE_HEIGHT;
 
-        draw_text(
-            fb,
-            MARGIN_X,
-            y,
-            format_line(&mut line, "CPUs available: ", cpu_count, ""),
-        );
+        draw_text(fb, MARGIN_X, y, &format!("CPUs available: {}", cpu_count));
         y += LINE_HEIGHT;
 
-        draw_text(
-            fb,
-            MARGIN_X,
-            y,
-            format_line(&mut line, "Current CPU: ", current_cpu, ""),
-        );
+        draw_text(fb, MARGIN_X, y, &format!("Current CPU: {}", current_cpu));
         y += LINE_HEIGHT;
 
         if sys_rc == 0 {
-            let total_mib = pages_to_mib(info.total_pages as u64);
-            let free_mib = pages_to_mib(info.free_pages as u64);
-            let alloc_mib = pages_to_mib(info.allocated_pages as u64);
+            let total_mib = (info.total_pages as u64).saturating_mul(PAGE_SIZE) / (1024 * 1024);
+            let free_mib = (info.free_pages as u64).saturating_mul(PAGE_SIZE) / (1024 * 1024);
+            let alloc_mib = (info.allocated_pages as u64).saturating_mul(PAGE_SIZE) / (1024 * 1024);
 
+            draw_text(fb, MARGIN_X, y, &format!("Memory total: {} MiB", total_mib));
+            y += LINE_HEIGHT;
+            draw_text(fb, MARGIN_X, y, &format!("Memory free: {} MiB", free_mib));
+            y += LINE_HEIGHT;
+            draw_text(fb, MARGIN_X, y, &format!("Memory alloc: {} MiB", alloc_mib));
+            y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Memory total: ", total_mib, " MiB"),
+                &format!("Tasks total: {}", info.total_tasks as u64),
             );
             y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Memory free: ", free_mib, " MiB"),
+                &format!("Tasks active: {}", info.active_tasks as u64),
             );
             y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Memory alloc: ", alloc_mib, " MiB"),
+                &format!("Tasks ready: {}", info.ready_tasks as u64),
             );
             y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Tasks total: ", info.total_tasks as u64, ""),
+                &format!("Task ctx switches: {}", info.task_context_switches),
             );
             y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Tasks active: ", info.active_tasks as u64, ""),
+                &format!("Scheduler switches: {}", info.scheduler_context_switches),
             );
             y += LINE_HEIGHT;
             draw_text(
                 fb,
                 MARGIN_X,
                 y,
-                format_line(&mut line, "Tasks ready: ", info.ready_tasks as u64, ""),
-            );
-            y += LINE_HEIGHT;
-            draw_text(
-                fb,
-                MARGIN_X,
-                y,
-                format_line(
-                    &mut line,
-                    "Task ctx switches: ",
-                    info.task_context_switches,
-                    "",
-                ),
-            );
-            y += LINE_HEIGHT;
-            draw_text(
-                fb,
-                MARGIN_X,
-                y,
-                format_line(
-                    &mut line,
-                    "Scheduler switches: ",
-                    info.scheduler_context_switches,
-                    "",
-                ),
-            );
-            y += LINE_HEIGHT;
-            draw_text(
-                fb,
-                MARGIN_X,
-                y,
-                format_line(&mut line, "Scheduler yields: ", info.scheduler_yields, ""),
+                &format!("Scheduler yields: {}", info.scheduler_yields),
             );
             y += LINE_HEIGHT;
         } else {
@@ -141,38 +102,10 @@ impl WindowedApp for SysinfoApp {
     }
 }
 
-pub fn sysinfo_main(_arg: *mut c_void) -> ! {
+pub fn sysinfo_main() -> ! {
     appkit::run(SysinfoApp, SYSINFO_WIDTH, SYSINFO_HEIGHT)
 }
 
 fn draw_text(fb: &mut DrawBuffer<'_>, x: i32, y: i32, text: &str) {
     gfx::font::draw_string(fb, x, y, text, COLOR_TEXT, COLOR_BACKGROUND);
-}
-
-fn format_line<'a>(buf: &'a mut [u8; 96], label: &str, value: u64, suffix: &str) -> &'a str {
-    let mut idx = 0usize;
-    idx = copy_bytes(buf, idx, label.as_bytes());
-
-    let mut num = [0u8; 21];
-    let formatted = numfmt::fmt_u64(value, &mut num);
-    let digits = formatted.strip_suffix(&[0]).unwrap_or(formatted);
-    idx = copy_bytes(buf, idx, digits);
-
-    idx = copy_bytes(buf, idx, suffix.as_bytes());
-    core::str::from_utf8(&buf[..idx]).unwrap_or("???")
-}
-
-fn pages_to_mib(pages: u64) -> u64 {
-    pages.saturating_mul(PAGE_SIZE) / (1024 * 1024)
-}
-
-fn copy_bytes(buf: &mut [u8; 96], mut idx: usize, src: &[u8]) -> usize {
-    for &b in src {
-        if idx >= buf.len() {
-            break;
-        }
-        buf[idx] = b;
-        idx += 1;
-    }
-    idx
 }
