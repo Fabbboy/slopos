@@ -110,7 +110,17 @@ fi
 
 # 3c. Individual module routing with `_ =>` fallback
 patch_cfg_select "$STD_SYS/stdio/mod.rs" "slopos" "*"
-patch_cfg_select "$STD_SYS/time/mod.rs" "slopos" "*"
+
+# Time uses `use ... as imp;` pattern (pub use imp::{...} outside cfg_select!)
+if ! grep -q 'target_os = "slopos"' "$STD_SYS/time/mod.rs" 2>/dev/null; then
+    sed -i '/^[[:space:]]*_ => {/{
+i\    target_os = "slopos" => {\
+        mod slopos;\
+        use slopos as imp;\
+    }
+}' "$STD_SYS/time/mod.rs"
+    echo "  Patched time/mod.rs"
+fi
 
 # Thread needs specific exports
 if ! grep -q 'target_os = "slopos"' "$STD_SYS/thread/mod.rs" 2>/dev/null; then
