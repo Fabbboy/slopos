@@ -24,9 +24,13 @@ RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
 BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc"
+BUILD_STD="${BUILD_STD:-core,alloc}"
 
-# Ensure toolchain is available
+# Ensure toolchain is available and std patches are applied
 "$SCRIPT_DIR/ensure_toolchain.sh"
+if [ "$BUILD_STD" = "core,alloc,std" ]; then
+    "$SCRIPT_DIR/patch_std.sh"
+fi
 
 mkdir -p "$BUILD_DIR"
 
@@ -38,7 +42,8 @@ done
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 $CARGO +"$RUST_CHANNEL" build \
-    -Zbuild-std=core,alloc \
+    -Zbuild-std="$BUILD_STD" \
+    -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
     --target "$USERLAND_TARGET" \
     --package slopos-userland \
@@ -60,7 +65,8 @@ echo "Userland binaries built: $(for b in $BINS; do printf '%s/%s.elf ' "$BUILD_
 if [ "$TEST_MODE" = "--test" ]; then
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
     $CARGO +"$RUST_CHANNEL" build \
-        -Zbuild-std=core,alloc \
+        -Zbuild-std="$BUILD_STD" \
+        -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \
         --target "$USERLAND_TARGET" \
         --package slopos-userland \
