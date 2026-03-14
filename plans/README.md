@@ -17,7 +17,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
 | [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |
-| [TTY_FINISHING_PLAN.md](./TTY_FINISHING_PLAN.md) | 7-phase plan for TTY subsystem finishing touches — per-slot poll, PTY flow control, c_cflag completion, missing ioctls, signal restart |
+
 
 ---
 
