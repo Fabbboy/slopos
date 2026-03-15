@@ -777,8 +777,7 @@ impl LineDisc {
             return false;
         }
 
-        // Non-canonical mode: wake when any data is available.
-        // POSIX VMIN=1 semantics — each byte satisfies the read.
+        // Non-canonical mode (VMIN=1): wake when any data is available.
         if self.cooked.count() > 0 {
             self.wake_chars_pending = 0;
             return true;

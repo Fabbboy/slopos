@@ -14280,21 +14280,19 @@ pub fn test_canonical_wake_on_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// Non-canonical mode does NOT wake on every byte.
+/// Non-canonical VMIN=1: wake as soon as any data is available.
 pub fn test_noncanonical_no_wake_per_byte() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
-    // Switch to non-canonical mode.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ICANON.bits();
     ld.set_termios(&t);
 
-    // Push a few bytes — well below WAKEUP_CHARS threshold.
     for _ in 0..10 {
         ld.input_char(b'x');
     }
-    if ld.should_wake_reader() {
-        klog_info!("TTY_TEST: BUG - noncanonical wake after only 10 bytes");
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - noncanonical VMIN=1 should wake when data available");
         return TestResult::Fail;
     }
 
@@ -14355,7 +14353,7 @@ pub fn test_noncanonical_wake_near_full() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_input resets wake_chars_pending counter.
+/// flush_input clears the buffer; refilled data should be readable.
 pub fn test_flush_input_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -14363,26 +14361,28 @@ pub fn test_flush_input_resets_wake_counter() -> TestResult {
     t.c_lflag &= !LocalFlags::ICANON.bits();
     ld.set_termios(&t);
 
-    // Push some bytes (below threshold).
     for _ in 0..100 {
         ld.input_char(b'q');
     }
-    // Flush — counter should reset.
     ld.flush_input();
 
-    // Push another batch below threshold — should NOT wake.
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - wake with empty buffer after flush_input");
+        return TestResult::Fail;
+    }
+
     for _ in 0..100 {
         ld.input_char(b'q');
     }
-    if ld.should_wake_reader() {
-        klog_info!("TTY_TEST: BUG - wake triggered after flush_input + partial refill");
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - no wake after flush_input + refill");
         return TestResult::Fail;
     }
 
     TestResult::Pass
 }
 
-/// flush_all resets wake_chars_pending counter.
+/// flush_all clears the buffer; refilled data should be readable.
 pub fn test_flush_all_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -14390,18 +14390,21 @@ pub fn test_flush_all_resets_wake_counter() -> TestResult {
     t.c_lflag &= !LocalFlags::ICANON.bits();
     ld.set_termios(&t);
 
-    // Push some bytes.
     for _ in 0..100 {
         ld.input_char(b'w');
     }
     ld.flush_all();
 
-    // Push another batch below threshold.
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - wake with empty buffer after flush_all");
+        return TestResult::Fail;
+    }
+
     for _ in 0..100 {
         ld.input_char(b'w');
     }
-    if ld.should_wake_reader() {
-        klog_info!("TTY_TEST: BUG - wake triggered after flush_all + partial refill");
+    if !ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - no wake after flush_all + refill");
         return TestResult::Fail;
     }
 
@@ -14438,40 +14441,29 @@ pub fn test_rawdisc_wake_batching() -> TestResult {
     TestResult::Pass
 }
 
-/// should_wake_reader resets counter on wake.
+/// should_wake_reader returns false on empty buffer, true when data exists.
 pub fn test_wake_resets_counter() -> TestResult {
-    use crate::tty::ldisc::WAKEUP_CHARS;
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ICANON.bits();
     ld.set_termios(&t);
 
-    // Push WAKEUP_CHARS to trigger first wake.
-    for _ in 0..WAKEUP_CHARS {
-        ld.input_char(b'a');
-    }
-    let first_wake = ld.should_wake_reader();
-    if !first_wake {
-        klog_info!("TTY_TEST: BUG - first wake did not fire");
-        return TestResult::Fail;
-    }
-
-    // Counter was reset.  Push a few more — should NOT wake yet.
-    for _ in 0..10 {
-        ld.input_char(b'b');
-    }
     if ld.should_wake_reader() {
-        klog_info!("TTY_TEST: BUG - spurious wake after counter reset");
+        klog_info!("TTY_TEST: BUG - wake on empty buffer");
         return TestResult::Fail;
     }
 
-    // Push up to the next threshold boundary.
-    for _ in 10..WAKEUP_CHARS {
-        ld.input_char(b'c');
-    }
+    ld.input_char(b'a');
     if !ld.should_wake_reader() {
-        klog_info!("TTY_TEST: BUG - second wake did not fire");
+        klog_info!("TTY_TEST: BUG - no wake after single byte");
+        return TestResult::Fail;
+    }
+
+    // Drain the buffer, then verify no spurious wake.
+    ld.flush_input();
+    if ld.should_wake_reader() {
+        klog_info!("TTY_TEST: BUG - wake after flush");
         return TestResult::Fail;
     }
 
