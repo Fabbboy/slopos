@@ -1,6 +1,7 @@
 use crate::program_registry;
-use crate::syscall::{UserWindowInfo, core as sys_core, input, process, tty, window};
+use crate::syscall::{UserWindowInfo, input, process, tty, window};
 use crate::theme::*;
+use std::time::Instant;
 
 use super::MAX_WINDOWS;
 use super::output::WINDOW_STATE_MINIMIZED;
@@ -31,6 +32,7 @@ pub struct InputHandler {
     pending_close_tasks: [u32; MAX_WINDOWS],
     pending_close_deadlines: [u64; MAX_WINDOWS],
     pending_close_count: usize,
+    clock_origin: Instant,
 }
 
 impl InputHandler {
@@ -52,7 +54,13 @@ impl InputHandler {
             pending_close_tasks: [0; MAX_WINDOWS],
             pending_close_deadlines: [0; MAX_WINDOWS],
             pending_close_count: 0,
+            clock_origin: Instant::now(),
         }
+    }
+
+    #[inline]
+    fn now_ms(&self) -> u64 {
+        self.clock_origin.elapsed().as_millis() as u64
     }
 
     pub fn update_mouse(&mut self) {
@@ -193,7 +201,7 @@ impl InputHandler {
             return;
         }
 
-        let now = sys_core::get_time_ms();
+        let now = self.now_ms();
         let mut i = 0usize;
         while i < self.pending_close_count {
             let task_id = self.pending_close_tasks[i];
@@ -317,7 +325,7 @@ impl InputHandler {
             return;
         }
 
-        let now = sys_core::get_time_ms();
+        let now = self.now_ms();
         let requested = input::request_close(task_id) == 0;
 
         if !requested || self.pending_close_count >= MAX_WINDOWS {
@@ -353,7 +361,7 @@ impl InputHandler {
     fn launch_or_raise_program(
         &mut self,
         window_title: Option<&[u8]>,
-        program_name: &[u8],
+        program_name: &str,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
     ) {
@@ -368,7 +376,8 @@ impl InputHandler {
         }
 
         if let Some(spec) = program_registry::resolve_program(program_name) {
-            let tid = process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags);
+            let tid =
+                process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags);
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {

@@ -7,9 +7,9 @@
 pub mod tcp;
 pub mod udp;
 
-use core::ffi::c_void;
+use std::net::Ipv4Addr;
 
-use crate::syscall::{core::exit_with_code, fs, process, tty};
+use crate::syscall::{fs, process, tty};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,9 +52,16 @@ enum NcError {
 // Output helpers
 // ---------------------------------------------------------------------------
 
-fn write_out(buf: &[u8]) {
-    if fs::write_slice(1, buf).is_err() {
-        let _ = tty::write(buf);
+pub(super) fn stdout_write(mut buf: &[u8]) {
+    while !buf.is_empty() {
+        match fs::write_slice(1, buf) {
+            Ok(0) => break,
+            Ok(written) => buf = &buf[written..],
+            Err(_) => {
+                let _ = tty::write(buf);
+                break;
+            }
+        }
     }
 }
 
@@ -77,12 +84,12 @@ pub(super) fn process_raw_stdin_char(
         0x08 | 0x7F => {
             if *line_pos > 0 {
                 *line_pos -= 1;
-                write_out(b"\x08 \x08");
+                stdout_write(b"\x08 \x08");
             }
             StdinResult::Continue
         }
         b'\n' | b'\r' => {
-            write_out(b"\n");
+            stdout_write(b"\n");
             if *line_pos > 0 {
                 let send_len = if *line_pos < line_buf.len() {
                     line_buf[*line_pos] = b'\n';
@@ -99,7 +106,7 @@ pub(super) fn process_raw_stdin_char(
             if *line_pos < line_buf.len() - 1 {
                 line_buf[*line_pos] = c;
                 *line_pos += 1;
-                write_out(&[c]);
+                stdout_write(&[c]);
             }
             StdinResult::Continue
         }
@@ -107,127 +114,28 @@ pub(super) fn process_raw_stdin_char(
     }
 }
 
-fn write_u8_dec(mut value: u8, out: &mut [u8], idx: &mut usize) {
-    let mut tmp = [0u8; 3];
-    let mut n = 0usize;
-    loop {
-        tmp[n] = b'0' + (value % 10);
-        value /= 10;
-        n += 1;
-        if value == 0 {
-            break;
-        }
-    }
-    while n > 0 {
-        n -= 1;
-        if *idx < out.len() {
-            out[*idx] = tmp[n];
-            *idx += 1;
-        }
-    }
-}
-
-fn write_u16_dec(mut value: u16, out: &mut [u8], idx: &mut usize) {
-    let mut tmp = [0u8; 5];
-    let mut n = 0usize;
-    loop {
-        tmp[n] = b'0' + (value % 10) as u8;
-        value /= 10;
-        n += 1;
-        if value == 0 {
-            break;
-        }
-    }
-    while n > 0 {
-        n -= 1;
-        if *idx < out.len() {
-            out[*idx] = tmp[n];
-            *idx += 1;
-        }
-    }
-}
-
-fn write_u32_dec(mut value: u32, out: &mut [u8], idx: &mut usize) {
-    let mut tmp = [0u8; 10];
-    let mut n = 0usize;
-    loop {
-        tmp[n] = b'0' + (value % 10) as u8;
-        value /= 10;
-        n += 1;
-        if value == 0 {
-            break;
-        }
-    }
-    while n > 0 {
-        n -= 1;
-        if *idx < out.len() {
-            out[*idx] = tmp[n];
-            *idx += 1;
-        }
-    }
-}
-
-fn write_ipv4(ip: [u8; 4], out: &mut [u8], idx: &mut usize) {
-    write_u8_dec(ip[0], out, idx);
-    out[*idx] = b'.';
-    *idx += 1;
-    write_u8_dec(ip[1], out, idx);
-    out[*idx] = b'.';
-    *idx += 1;
-    write_u8_dec(ip[2], out, idx);
-    out[*idx] = b'.';
-    *idx += 1;
-    write_u8_dec(ip[3], out, idx);
-}
-
-fn append_bytes(buf: &mut [u8], idx: &mut usize, src: &[u8]) {
-    let avail = buf.len() - *idx;
-    let len = if src.len() < avail { src.len() } else { avail };
-    buf[*idx..*idx + len].copy_from_slice(&src[..len]);
-    *idx += len;
-}
-
 /// Print a verbose message: `nc: <msg>\n`.  Only emits output when verbose is on.
-fn verbose_msg(config: &NcConfig, msg: &[u8]) {
+fn verbose_msg(config: &NcConfig, msg: &str) {
     if !config.verbose {
         return;
     }
-    let mut line = [0u8; 256];
-    let mut i = 0usize;
-    append_bytes(&mut line, &mut i, b"nc: ");
-    append_bytes(&mut line, &mut i, msg);
-    append_bytes(&mut line, &mut i, b"\n");
-    write_out(&line[..i]);
+    eprintln!("nc: {}", msg);
 }
 
 /// Print verbose with IP:port: `nc: <prefix> <ip>:<port>\n`
-fn verbose_addr(config: &NcConfig, prefix: &[u8], ip: [u8; 4], port: u16) {
+fn verbose_addr(config: &NcConfig, prefix: &str, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    let mut line = [0u8; 256];
-    let mut i = 0usize;
-    append_bytes(&mut line, &mut i, b"nc: ");
-    append_bytes(&mut line, &mut i, prefix);
-    write_ipv4(ip, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b":");
-    write_u16_dec(port, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b"\n");
-    write_out(&line[..i]);
+    eprintln!("nc: {}{}:{}", prefix, Ipv4Addr::from(ip), port);
 }
 
 /// Print verbose with byte count: `nc: <prefix> <count> bytes\n`
-fn verbose_bytes(config: &NcConfig, prefix: &[u8], count: usize) {
+fn verbose_bytes(config: &NcConfig, prefix: &str, count: usize) {
     if !config.verbose {
         return;
     }
-    let mut line = [0u8; 256];
-    let mut i = 0usize;
-    append_bytes(&mut line, &mut i, b"nc: ");
-    append_bytes(&mut line, &mut i, prefix);
-    write_u32_dec(count as u32, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b" bytes\n");
-    write_out(&line[..i]);
+    eprintln!("nc: {}{} bytes", prefix, count);
 }
 
 /// Print verbose with byte count and source addr:
@@ -236,16 +144,12 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    let mut line = [0u8; 256];
-    let mut i = 0usize;
-    append_bytes(&mut line, &mut i, b"nc: received ");
-    write_u32_dec(count as u32, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b" bytes from ");
-    write_ipv4(ip, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b":");
-    write_u16_dec(port, &mut line, &mut i);
-    append_bytes(&mut line, &mut i, b"\n");
-    write_out(&line[..i]);
+    eprintln!(
+        "nc: received {} bytes from {}:{}",
+        count,
+        Ipv4Addr::from(ip),
+        port
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,109 +157,54 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    write_out(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
-    write_out(b"\n");
-    write_out(b"  -u        UDP mode (default is TCP)\n");
-    write_out(b"  -l        Listen mode (bind and accept/receive)\n");
-    write_out(b"  -v        Verbose output\n");
-    write_out(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
-    write_out(b"  -p port   Source port (client mode)\n");
-    write_out(b"  -w secs   Timeout in seconds\n");
-    write_out(b"  host      Remote hostname or IP (client mode)\n");
-    write_out(b"  port      Remote port (client) or listen port (listen mode)\n");
+    stdout_write(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
+    stdout_write(b"\n");
+    stdout_write(b"  -u        UDP mode (default is TCP)\n");
+    stdout_write(b"  -l        Listen mode (bind and accept/receive)\n");
+    stdout_write(b"  -v        Verbose output\n");
+    stdout_write(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
+    stdout_write(b"  -p port   Source port (client mode)\n");
+    stdout_write(b"  -w secs   Timeout in seconds\n");
+    stdout_write(b"  host      Remote hostname or IP (client mode)\n");
+    stdout_write(b"  port      Remote port (client) or listen port (listen mode)\n");
 }
 
 fn print_error(err: NcError) {
     let msg = match err {
-        NcError::MissingHost => b"nc: missing host\n" as &[u8],
-        NcError::MissingPort => b"nc: missing port\n" as &[u8],
-        NcError::InvalidPort => b"nc: invalid port number\n" as &[u8],
-        NcError::ResolveFailed => b"nc: cannot resolve hostname\n" as &[u8],
-        NcError::UnknownFlag => b"nc: unknown flag\n" as &[u8],
+        NcError::MissingHost => "nc: missing host",
+        NcError::MissingPort => "nc: missing port",
+        NcError::InvalidPort => "nc: invalid port number",
+        NcError::ResolveFailed => "nc: cannot resolve hostname",
+        NcError::UnknownFlag => "nc: unknown flag",
     };
-    write_out(msg);
+    eprintln!("{}", msg);
 }
 
-/// Parse a port number from a byte slice.  Returns `None` on invalid input.
-fn parse_port(s: &[u8]) -> Option<u16> {
-    if s.is_empty() {
+fn parse_port(s: &str) -> Option<u16> {
+    let parsed = s.parse::<u16>().ok()?;
+    if parsed == 0 {
         return None;
     }
-    let mut val: u32 = 0;
-    for &b in s {
-        if b < b'0' || b > b'9' {
-            return None;
-        }
-        val = val * 10 + (b - b'0') as u32;
-        if val > 65535 {
-            return None;
-        }
-    }
-    if val == 0 {
-        return None;
-    }
-    Some(val as u16)
+    Some(parsed)
 }
 
 /// Parse a dotted-quad IPv4 address (e.g. "10.0.2.2").
-fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
-    let mut octets = [0u8; 4];
-    let mut octet_idx = 0usize;
-    let mut current: u16 = 0;
-    let mut has_digit = false;
-
-    for &b in s {
-        if b == b'.' {
-            if !has_digit || octet_idx >= 3 {
-                return None;
-            }
-            if current > 255 {
-                return None;
-            }
-            octets[octet_idx] = current as u8;
-            octet_idx += 1;
-            current = 0;
-            has_digit = false;
-        } else if b >= b'0' && b <= b'9' {
-            current = current * 10 + (b - b'0') as u16;
-            has_digit = true;
-        } else {
-            return None;
-        }
-    }
-
-    if !has_digit || octet_idx != 3 || current > 255 {
-        return None;
-    }
-    octets[3] = current as u8;
-    Some(octets)
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    Some(s.parse::<Ipv4Addr>().ok()?.octets())
 }
 
 /// Resolve a host argument: try dotted-quad first, then kernel DNS.
 fn resolve_host(host: &[u8]) -> Result<[u8; 4], NcError> {
-    if let Some(ip) = parse_ipv4(host) {
+    if let Ok(host_str) = core::str::from_utf8(host)
+        && let Some(ip) = parse_ipv4(host_str)
+    {
         return Ok(ip);
     }
     // Try kernel DNS resolution
     match crate::syscall::net::resolve(host) {
         Some(ip) => Ok(ip),
-        None => Err(NcError::ResolveFailed),
+        _ => Err(NcError::ResolveFailed),
     }
-}
-
-/// Compare two byte slices for equality.
-fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// Core argument parsing logic operating on clean Rust slices.
@@ -384,37 +233,38 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
 
         if arg[0] == b'-' {
             // Flag processing — may contain bundled flags like -ulvk
-            if bytes_eq(arg, b"-h") || bytes_eq(arg, b"--help") {
+            if arg == b"-h" || arg == b"--help" {
                 print_usage();
-                exit_with_code(0);
+                std::process::exit(0);
             }
 
-            if bytes_eq(arg, b"-p") {
+            if arg == b"-p" {
                 // Next arg is port number
                 i += 1;
                 if i >= args.len() {
                     return Err(NcError::MissingPort);
                 }
-                local_port = parse_port(args[i]).ok_or(NcError::InvalidPort)?;
+                let port_str = core::str::from_utf8(args[i])
+                    .ok()
+                    .ok_or(NcError::InvalidPort)?;
+                local_port = parse_port(port_str).ok_or(NcError::InvalidPort)?;
                 i += 1;
                 continue;
             }
 
-            if bytes_eq(arg, b"-w") {
+            if arg == b"-w" {
                 // Next arg is timeout in seconds
                 i += 1;
                 if i >= args.len() {
                     return Err(NcError::InvalidPort); // reuse error for missing value
                 }
-                // Parse timeout as u32
-                let mut t: u32 = 0;
-                for &b in args[i] {
-                    if b < b'0' || b > b'9' {
-                        return Err(NcError::InvalidPort);
-                    }
-                    t = t * 10 + (b - b'0') as u32;
-                }
-                timeout_secs = t;
+                let timeout_str = core::str::from_utf8(args[i])
+                    .ok()
+                    .ok_or(NcError::InvalidPort)?;
+                timeout_secs = timeout_str
+                    .parse::<u32>()
+                    .ok()
+                    .ok_or(NcError::InvalidPort)?;
                 i += 1;
                 continue;
             }
@@ -461,7 +311,10 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
             if pos_count == 0 {
                 return Err(NcError::MissingPort);
             }
-            let port = parse_port(positional[0]).ok_or(NcError::InvalidPort)?;
+            let port_str = core::str::from_utf8(positional[0])
+                .ok()
+                .ok_or(NcError::InvalidPort)?;
+            let port = parse_port(port_str).ok_or(NcError::InvalidPort)?;
             Ok(NcConfig {
                 mode,
                 protocol,
@@ -482,7 +335,10 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
                 return Err(NcError::MissingPort);
             }
             let addr = resolve_host(positional[0])?;
-            let port = parse_port(positional[1]).ok_or(NcError::InvalidPort)?;
+            let port_str = core::str::from_utf8(positional[1])
+                .ok()
+                .ok_or(NcError::InvalidPort)?;
+            let port = parse_port(port_str).ok_or(NcError::InvalidPort)?;
             Ok(NcConfig {
                 mode,
                 protocol,
@@ -528,7 +384,7 @@ fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> 
 pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
     if argc <= 1 || argv.is_null() {
         print_usage();
-        exit_with_code(1);
+        std::process::exit(1);
     }
 
     let config = match parse_args(argc, argv) {
@@ -536,13 +392,10 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
         Err(e) => {
             print_error(e);
             print_usage();
-            exit_with_code(1);
+            std::process::exit(1);
         }
     };
 
-    // Disable kernel echo, canonical mode, AND signal generation — nc handles
-    // its own line editing and Ctrl+C detection.  Also ignore SIGPIPE so that
-    // a broken TCP connection returns an error instead of killing the process.
     process::ignore_signal(slopos_abi::signal::SIGPIPE);
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
@@ -559,19 +412,52 @@ pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
         (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
     };
 
-    // Restore termios before exiting.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(0, t);
     }
 
-    exit_with_code(exit_code as i32);
+    std::process::exit(exit_code as i32);
 }
 
-/// Legacy entry point for the standard entry! macro (no args).
-/// Prints usage and exits since nc requires arguments.
-pub fn nc_main(_arg: *mut c_void) -> ! {
-    print_usage();
-    exit_with_code(1);
+pub fn nc_main_std(args: Vec<String>) -> ! {
+    if args.len() <= 1 {
+        print_usage();
+        std::process::exit(1);
+    }
+
+    let byte_args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+    let slices: Vec<&[u8]> = byte_args.iter().map(|a| a.as_slice()).collect();
+
+    let config = match parse_args_from_slices(&slices) {
+        Ok(c) => c,
+        Err(e) => {
+            print_error(e);
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+
+    process::ignore_signal(slopos_abi::signal::SIGPIPE);
+    let saved_termios = fs::tcgetattr(0).ok();
+    if let Some(ref t) = saved_termios {
+        let mut raw = *t;
+        raw.c_lflag &=
+            !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON | slopos_abi::syscall::ISIG);
+        let _ = fs::tcsetattr(0, &raw);
+    }
+
+    let exit_code = match (config.protocol, config.mode) {
+        (NcProtocol::Udp, NcMode::Client) => udp::udp_client(&config),
+        (NcProtocol::Udp, NcMode::Listen) => udp::udp_listen(&config),
+        (NcProtocol::Tcp, NcMode::Client) => tcp::tcp_client(&config),
+        (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
+    };
+
+    if let Some(ref t) = saved_termios {
+        let _ = fs::tcsetattr(0, t);
+    }
+
+    std::process::exit(exit_code as i32);
 }
 
 // ---------------------------------------------------------------------------
@@ -588,133 +474,42 @@ mod tests {
 
     #[test]
     fn test_parse_port_valid() {
-        assert_eq!(parse_port(b"80"), Some(80));
-        assert_eq!(parse_port(b"443"), Some(443));
-        assert_eq!(parse_port(b"65535"), Some(65535));
-        assert_eq!(parse_port(b"1"), Some(1));
-        assert_eq!(parse_port(b"12345"), Some(12345));
+        assert_eq!(parse_port("80"), Some(80));
+        assert_eq!(parse_port("443"), Some(443));
+        assert_eq!(parse_port("65535"), Some(65535));
+        assert_eq!(parse_port("1"), Some(1));
+        assert_eq!(parse_port("12345"), Some(12345));
     }
 
     #[test]
     fn test_parse_port_invalid() {
-        assert_eq!(parse_port(b""), None);
-        assert_eq!(parse_port(b"0"), None);
-        assert_eq!(parse_port(b"65536"), None);
-        assert_eq!(parse_port(b"abc"), None);
-        assert_eq!(parse_port(b"12a"), None);
-        assert_eq!(parse_port(b"99999"), None);
+        assert_eq!(parse_port(""), None);
+        assert_eq!(parse_port("0"), None);
+        assert_eq!(parse_port("65536"), None);
+        assert_eq!(parse_port("abc"), None);
+        assert_eq!(parse_port("12a"), None);
+        assert_eq!(parse_port("99999"), None);
     }
 
     #[test]
     fn test_parse_ipv4_valid() {
-        assert_eq!(parse_ipv4(b"10.0.2.2"), Some([10, 0, 2, 2]));
-        assert_eq!(parse_ipv4(b"192.168.1.1"), Some([192, 168, 1, 1]));
-        assert_eq!(parse_ipv4(b"0.0.0.0"), Some([0, 0, 0, 0]));
-        assert_eq!(parse_ipv4(b"255.255.255.255"), Some([255, 255, 255, 255]));
-        assert_eq!(parse_ipv4(b"127.0.0.1"), Some([127, 0, 0, 1]));
+        assert_eq!(parse_ipv4("10.0.2.2"), Some([10, 0, 2, 2]));
+        assert_eq!(parse_ipv4("192.168.1.1"), Some([192, 168, 1, 1]));
+        assert_eq!(parse_ipv4("0.0.0.0"), Some([0, 0, 0, 0]));
+        assert_eq!(parse_ipv4("255.255.255.255"), Some([255, 255, 255, 255]));
+        assert_eq!(parse_ipv4("127.0.0.1"), Some([127, 0, 0, 1]));
     }
 
     #[test]
     fn test_parse_ipv4_invalid() {
-        assert_eq!(parse_ipv4(b""), None);
-        assert_eq!(parse_ipv4(b"10.0.2"), None);
-        assert_eq!(parse_ipv4(b"10.0.2.2.1"), None);
-        assert_eq!(parse_ipv4(b"256.0.0.1"), None);
-        assert_eq!(parse_ipv4(b"10.0.2.abc"), None);
-        assert_eq!(parse_ipv4(b"..."), None);
-        assert_eq!(parse_ipv4(b"1.2.3."), None);
-        assert_eq!(parse_ipv4(b".1.2.3"), None);
-    }
-
-    #[test]
-    fn test_write_u8_dec() {
-        let mut buf = [0u8; 8];
-        let mut idx = 0;
-        write_u8_dec(0, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"0");
-
-        idx = 0;
-        write_u8_dec(255, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"255");
-
-        idx = 0;
-        write_u8_dec(42, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"42");
-    }
-
-    #[test]
-    fn test_write_u16_dec() {
-        let mut buf = [0u8; 8];
-        let mut idx = 0;
-        write_u16_dec(0, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"0");
-
-        idx = 0;
-        write_u16_dec(65535, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"65535");
-
-        idx = 0;
-        write_u16_dec(8080, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"8080");
-    }
-
-    #[test]
-    fn test_write_u32_dec() {
-        let mut buf = [0u8; 16];
-        let mut idx = 0;
-        write_u32_dec(0, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"0");
-
-        idx = 0;
-        write_u32_dec(1000, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"1000");
-
-        idx = 0;
-        write_u32_dec(4294967295, &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"4294967295");
-    }
-
-    #[test]
-    fn test_write_ipv4() {
-        let mut buf = [0u8; 20];
-        let mut idx = 0;
-        write_ipv4([10, 0, 2, 2], &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"10.0.2.2");
-
-        idx = 0;
-        write_ipv4([192, 168, 1, 1], &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"192.168.1.1");
-
-        idx = 0;
-        write_ipv4([255, 255, 255, 255], &mut buf, &mut idx);
-        assert_eq!(&buf[..idx], b"255.255.255.255");
-    }
-
-    #[test]
-    fn test_bytes_eq() {
-        assert!(bytes_eq(b"hello", b"hello"));
-        assert!(!bytes_eq(b"hello", b"world"));
-        assert!(!bytes_eq(b"hi", b"hello"));
-        assert!(bytes_eq(b"", b""));
-    }
-
-    #[test]
-    fn test_append_bytes() {
-        let mut buf = [0u8; 16];
-        let mut idx = 0;
-        append_bytes(&mut buf, &mut idx, b"hello");
-        assert_eq!(&buf[..idx], b"hello");
-        append_bytes(&mut buf, &mut idx, b" world");
-        assert_eq!(&buf[..idx], b"hello world");
-    }
-
-    #[test]
-    fn test_append_bytes_overflow() {
-        let mut buf = [0u8; 5];
-        let mut idx = 0;
-        append_bytes(&mut buf, &mut idx, b"hello world");
-        assert_eq!(idx, 5);
-        assert_eq!(&buf[..], b"hello");
+        assert_eq!(parse_ipv4(""), None);
+        assert_eq!(parse_ipv4("10.0.2"), None);
+        assert_eq!(parse_ipv4("10.0.2.2.1"), None);
+        assert_eq!(parse_ipv4("256.0.0.1"), None);
+        assert_eq!(parse_ipv4("10.0.2.abc"), None);
+        assert_eq!(parse_ipv4("..."), None);
+        assert_eq!(parse_ipv4("1.2.3."), None);
+        assert_eq!(parse_ipv4(".1.2.3"), None);
     }
 
     // -----------------------------------------------------------------------

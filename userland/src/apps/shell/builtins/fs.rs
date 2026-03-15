@@ -2,14 +2,17 @@
 //! stat, touch, cp, mv, head, tail, wc, hexdump, tee, diff.
 
 use core::cmp;
-use core::ffi::c_char;
+use core::option::Option;
+use core::option::Option::{None, Some};
 use core::ptr;
+use core::result::Result::{Err, Ok};
+
+use std::env;
+use std::fs::{self as stdfs, File, OpenOptions};
+use std::io::{Read, Write};
 
 use crate::runtime;
-use crate::syscall::{
-    USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, UserFsEntry,
-    UserFsList, UserFsStat, fs, process,
-};
+use crate::syscall::fs as sys_fs;
 
 use super::super::buffers;
 use super::super::display::{COLOR_DIR_BLUE, COLOR_ERROR_RED, shell_write, shell_write_idx};
@@ -20,60 +23,82 @@ use super::super::{
     PATH_TOO_LONG, SHELL_IO_MAX,
 };
 
+struct LsEntry {
+    name: std::vec::Vec<u8>,
+    is_directory: bool,
+    size: u64,
+}
+
 pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     let path_ptr = if argc == 2 { argv[1] } else { ptr::null() };
 
-    let path = buffers::with_path_buf(|path_buf| {
+    buffers::with_path_buf(|path_buf| {
         if path_ptr.is_null() {
             let cwd = super::super::cwd_bytes();
             let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(1);
             let len = cwd_len.min(path_buf.len() - 1);
             path_buf[..len].copy_from_slice(&cwd[..len]);
             path_buf[len] = 0;
-            path_buf.as_ptr()
-        } else {
-            if normalize_path(path_ptr, path_buf) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
-                return ptr::null();
-            }
-            path_buf.as_ptr()
-        }
-    });
-
-    if path.is_null() {
-        return 1;
-    }
-
-    let result = buffers::with_list_entries(|entries| {
-        let mut stat = UserFsStat::default();
-        if fs::stat_path(path as *const c_char, &mut stat).is_err() {
-            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+        } else if normalize_path(path_ptr, path_buf) != 0 {
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
-        if !stat.is_directory() {
+
+        let path_str = path_buf_to_str(path_buf);
+        let metadata = match stdfs::metadata(path_str) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+                return 1;
+            }
+        };
+        if !metadata.is_dir() {
             shell_write_idx(b"ls: not a directory\n", COLOR_ERROR_RED);
             return 1;
         }
 
-        let mut list = UserFsList {
-            entries: entries.as_mut_ptr(),
-            max_entries: entries.len() as u32,
-            count: 0,
+        let read_dir = match stdfs::read_dir(path_str) {
+            Ok(read_dir) => read_dir,
+            Err(_) => {
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+                return 1;
+            }
         };
 
-        if fs::list_dir(path as *const c_char, &mut list).is_err() {
-            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
-            return 1;
+        let mut entries: std::vec::Vec<LsEntry> = std::vec::Vec::new();
+        for dir_entry in read_dir {
+            let dir_entry = match dir_entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let name = match dir_entry.file_name().into_string() {
+                Ok(name) => name.into_bytes(),
+                Err(_) => continue,
+            };
+
+            if name == b"." || name == b".." {
+                continue;
+            }
+
+            let entry_meta = match dir_entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+
+            entries.push(LsEntry {
+                name,
+                is_directory: entry_meta.is_dir(),
+                size: entry_meta.len(),
+            });
         }
 
-        let count = list.count as usize;
-
-        // Sort entries alphabetically (case-insensitive)
+        let count = entries.len();
         if count > 1 {
             for i in 0..count - 1 {
                 for j in 0..count - 1 - i {
@@ -84,43 +109,32 @@ pub fn cmd_ls(argc: i32, argv: &[*const u8]) -> i32 {
             }
         }
 
-        let mut shown = 0usize;
+        if entries.is_empty() {
+            shell_write(b"(empty)\n");
+            return 0;
+        }
 
-        for i in 0..count {
-            let entry = &entries[i];
-            let name_len = runtime::u_strnlen(entry.name.as_ptr(), entry.name.len());
-            if name_len == 1 && entry.name[0] == b'.' {
-                continue;
-            }
-            if name_len == 2 && entry.name[0] == b'.' && entry.name[1] == b'.' {
-                continue;
-            }
-            if entry.is_directory() {
-                shell_write_idx(&entry.name[..name_len], COLOR_DIR_BLUE);
+        for entry in &entries {
+            if entry.is_directory {
+                shell_write_idx(&entry.name, COLOR_DIR_BLUE);
                 shell_write_idx(b"/\n", COLOR_DIR_BLUE);
             } else {
-                shell_write(&entry.name[..name_len]);
+                shell_write(&entry.name);
                 shell_write(b" (");
-                jobs::write_u64(entry.size as u64);
+                jobs::write_u64(entry.size);
                 shell_write(b")\n");
             }
-            shown += 1;
         }
 
-        if shown == 0 {
-            shell_write(b"(empty)\n");
-        }
         0
-    });
-
-    result
+    })
 }
 
 pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc == 1 {
         let mut buf = [0u8; SHELL_IO_MAX];
         loop {
-            let n = match fs::read_slice(0, &mut buf) {
+            let n = match sys_fs::read_slice(0, &mut buf) {
                 Ok(n) => n,
                 Err(_) => break,
             };
@@ -141,28 +155,28 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
 
-            let mut tmp = [0u8; SHELL_IO_MAX + 1];
-            let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-                Ok(fd) => fd,
+            let path_str = path_buf_to_str(path_buf);
+            let mut file = match File::open(path_str) {
+                Ok(file) => file,
                 Err(_) => {
                     shell_write_idx(b"cat: ", COLOR_ERROR_RED);
-                    shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+                    shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
                     return 1;
                 }
             };
-            let r = match fs::read_slice(fd, &mut tmp[..SHELL_IO_MAX]) {
+
+            let mut tmp = [0u8; SHELL_IO_MAX + 1];
+            let r = match file.read(&mut tmp[..SHELL_IO_MAX]) {
                 Ok(n) => n,
                 Err(_) => {
-                    let _ = fs::close_fd(fd);
                     shell_write_idx(b"cat: read error\n", COLOR_ERROR_RED);
                     return 1;
                 }
             };
-            let _ = fs::close_fd(fd);
             let len = cmp::min(r, tmp.len() - 1);
             tmp[len] = 0;
             if len == 0 {
@@ -170,9 +184,9 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
             }
             shell_write(&tmp[..len]);
             if tmp[len - 1] != b'\n' {
-                shell_write(NL);
+                shell_write(NL.as_bytes());
             }
-            if r as usize == SHELL_IO_MAX {
+            if r == SHELL_IO_MAX {
                 shell_write(b"[truncated]\n");
             }
             0
@@ -186,27 +200,27 @@ pub fn cmd_cat(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_FILE, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_FILE.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc < 3 {
-        shell_write_idx(ERR_MISSING_TEXT, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_TEXT.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
         let text = argv[2];
         if text.is_null() {
-            shell_write_idx(ERR_MISSING_TEXT, COLOR_ERROR_RED);
+            shell_write_idx(ERR_MISSING_TEXT.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
@@ -216,50 +230,32 @@ pub fn cmd_write(argc: i32, argv: &[*const u8]) -> i32 {
         }
 
         let text_slice = unsafe { core::slice::from_raw_parts(text, len) };
-        let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
-        let fd = match fs::open_path(
-            path_buf.as_ptr() as *const c_char,
-            USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-        ) {
-            Ok(fd) => fd,
-            Err(_) => {
-                shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
-                return 1;
-            }
-        };
-        let w = match fs::write_slice(fd, text_slice) {
-            Ok(n) => n,
-            Err(_) => {
-                let _ = fs::close_fd(fd);
-                shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
-                return 1;
-            }
-        };
-        let _ = fs::close_fd(fd);
-        if w != len {
+        let path_str = path_buf_to_str(path_buf);
+        if stdfs::write(path_str, text_slice).is_err() {
             shell_write_idx(b"write failed\n", COLOR_ERROR_RED);
             return 1;
         }
+
         0
     })
 }
 
 pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
-        if fs::mkdir_path(path_buf.as_ptr() as *const c_char).is_err() {
+        if stdfs::create_dir(path_buf_to_str(path_buf)).is_err() {
             shell_write_idx(b"mkdir failed\n", COLOR_ERROR_RED);
             return 1;
         }
@@ -269,20 +265,20 @@ pub fn cmd_mkdir(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
-        if fs::unlink_path(path_buf.as_ptr() as *const c_char).is_err() {
+        if stdfs::remove_file(path_buf_to_str(path_buf)).is_err() {
             shell_write_idx(b"rm failed\n", COLOR_ERROR_RED);
             return 1;
         }
@@ -292,7 +288,7 @@ pub fn cmd_rm(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 2 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -332,7 +328,7 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
                     }
                 }
             } else if normalize_path(arg, &mut resolved) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
         }
@@ -344,68 +340,85 @@ pub fn cmd_cd(argc: i32, argv: &[*const u8]) -> i32 {
         resolved[1] = 0;
     }
 
-    let mut stat = UserFsStat::default();
-    if fs::stat_path(resolved.as_ptr() as *const c_char, &mut stat).is_err() {
-        shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+    let path_str = path_buf_to_str(&resolved);
+    let metadata = match stdfs::metadata(path_str) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+            return 1;
+        }
+    };
+    if !metadata.is_dir() {
+        shell_write_idx(b"cd: not a directory\n", COLOR_ERROR_RED);
         return 1;
     }
-    if !stat.is_directory() {
-        shell_write_idx(b"cd: not a directory\n", COLOR_ERROR_RED);
+    if env::set_current_dir(path_str).is_err() {
+        shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     super::super::cwd_set(&resolved);
-    let _ = process::chdir(resolved.as_ptr());
     0
 }
 
 pub fn cmd_pwd(_argc: i32, _argv: &[*const u8]) -> i32 {
+    if let Ok(path) = env::current_dir() {
+        if let Some(path_str) = path.to_str() {
+            shell_write(path_str.as_bytes());
+            shell_write(NL.as_bytes());
+            return 0;
+        }
+    }
+
     let cwd = super::super::cwd_bytes();
     let cwd_len = cwd.iter().position(|&b| b == 0).unwrap_or(1);
     shell_write(&cwd[..cwd_len]);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     0
 }
 
 pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc > 2 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
-        let mut stat = UserFsStat::default();
-        if fs::stat_path(path_buf.as_ptr() as *const c_char, &mut stat).is_err() {
-            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
-            return 1;
-        }
+        let metadata = match stdfs::metadata(path_buf_to_str(path_buf)) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+                return 1;
+            }
+        };
 
         let path_len = path_buf.iter().position(|&b| b == 0).unwrap_or(0);
         shell_write(b"  File: ");
         shell_write(&path_buf[..path_len]);
-        shell_write(NL);
+        shell_write(NL.as_bytes());
 
         shell_write(b"  Type: ");
-        match stat.type_ {
-            0 => shell_write(b"regular file"),
-            1 => shell_write(b"directory"),
-            2 => shell_write(b"character device"),
-            _ => shell_write(b"unknown"),
-        };
-        shell_write(NL);
+        if metadata.is_file() {
+            shell_write(b"regular file");
+        } else if metadata.is_dir() {
+            shell_write(b"directory");
+        } else {
+            shell_write(b"unknown");
+        }
+        shell_write(NL.as_bytes());
 
         shell_write(b"  Size: ");
-        jobs::write_u64(stat.size as u64);
-        shell_write(NL);
+        jobs::write_u64(metadata.len());
+        shell_write(NL.as_bytes());
 
         0
     })
@@ -413,7 +426,7 @@ pub fn cmd_stat(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_OPERAND, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_OPERAND.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -424,26 +437,19 @@ pub fn cmd_touch(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
 
-            let mut stat = UserFsStat::default();
-            if fs::stat_path(path_buf.as_ptr() as *const c_char, &mut stat).is_ok() {
-                return 0;
+            if OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(path_buf_to_str(path_buf))
+                .is_err()
+            {
+                shell_write_idx(b"touch: cannot create file\n", COLOR_ERROR_RED);
+                return 1;
             }
-
-            let fd = match fs::open_path(
-                path_buf.as_ptr() as *const c_char,
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-            ) {
-                Ok(fd) => fd,
-                Err(_) => {
-                    shell_write_idx(b"touch: cannot create file\n", COLOR_ERROR_RED);
-                    return 1;
-                }
-            };
-            let _ = fs::close_fd(fd);
             0
         });
         if result != 0 {
@@ -459,7 +465,7 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -467,11 +473,11 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
     let mut dst_path = [0u8; 256];
 
     if normalize_path(argv[1], &mut src_path) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut dst_path) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -483,7 +489,26 @@ pub fn cmd_cp(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
 
-    copy_file_inner(&src_path, &dst_path)
+    let src_str = path_buf_to_str(&src_path);
+    let dst_str = path_buf_to_str(&dst_path);
+
+    let metadata = match stdfs::metadata(src_str) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+            return 1;
+        }
+    };
+    if metadata.is_dir() {
+        shell_write_idx(b"cannot copy directory\n", COLOR_ERROR_RED);
+        return 1;
+    }
+
+    if stdfs::copy(src_str, dst_str).is_err() {
+        shell_write_idx(b"copy failed\n", COLOR_ERROR_RED);
+        return 1;
+    }
+    0
 }
 
 pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
@@ -492,7 +517,7 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -500,11 +525,11 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
     let mut dst_path = [0u8; 256];
 
     if normalize_path(argv[1], &mut src_path) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut dst_path) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -516,21 +541,31 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
 
-    if fs::rename(
-        src_path.as_ptr() as *const c_char,
-        dst_path.as_ptr() as *const c_char,
-    )
-    .is_ok()
-    {
+    let src_str = path_buf_to_str(&src_path);
+    let dst_str = path_buf_to_str(&dst_path);
+
+    if stdfs::rename(src_str, dst_str).is_ok() {
         return 0;
     }
 
-    let rc = copy_file_inner(&src_path, &dst_path);
-    if rc != 0 {
-        return rc;
+    let metadata = match stdfs::metadata(src_str) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+            return 1;
+        }
+    };
+    if metadata.is_dir() {
+        shell_write_idx(b"cannot copy directory\n", COLOR_ERROR_RED);
+        return 1;
     }
 
-    if fs::unlink_path(src_path.as_ptr() as *const c_char).is_err() {
+    if stdfs::copy(src_str, dst_str).is_err() {
+        shell_write_idx(b"copy failed\n", COLOR_ERROR_RED);
+        return 1;
+    }
+
+    if stdfs::remove_file(src_str).is_err() {
         shell_write_idx(b"mv: cannot remove source\n", COLOR_ERROR_RED);
         return 1;
     }
@@ -539,15 +574,10 @@ pub fn cmd_mv(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
-    // Determine source (stdin vs file) and line count.
-    //   head            → stdin, 10 lines
-    //   head <N>        → stdin, N lines
-    //   head <file>     → file,  10 lines
-    //   head <file> <N> → file,  N lines
     let (use_stdin, n_lines, file_arg_idx) = if argc < 2 {
         (true, 10usize, 0usize)
     } else if argc == 2 {
@@ -572,21 +602,19 @@ pub fn cmd_head(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[file_arg_idx], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
-        let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-            Ok(fd) => fd,
+        let mut file = match File::open(path_buf_to_str(path_buf)) {
+            Ok(file) => file,
             Err(_) => {
-                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
         };
 
-        let rc = head_from_fd(fd, n_lines);
-        let _ = fs::close_fd(fd);
-        rc
+        head_from_reader(&mut file, n_lines)
     })
 }
 
@@ -596,7 +624,7 @@ fn head_from_fd(fd: i32, n_lines: usize) -> i32 {
     let mut done = false;
 
     while !done {
-        let n = match fs::read_slice(fd, &mut buf) {
+        let n = match sys_fs::read_slice(fd, &mut buf) {
             Ok(n) => n,
             Err(_) => break,
         };
@@ -605,8 +633,38 @@ fn head_from_fd(fd: i32, n_lines: usize) -> i32 {
         }
 
         let mut output_end = n;
-        for i in 0..n {
-            if buf[i] == b'\n' {
+        for (i, &b) in buf[..n].iter().enumerate() {
+            if b == b'\n' {
+                lines_seen += 1;
+                if lines_seen >= n_lines {
+                    output_end = i + 1;
+                    done = true;
+                    break;
+                }
+            }
+        }
+        shell_write(&buf[..output_end]);
+    }
+    0
+}
+
+fn head_from_reader<R: Read>(reader: &mut R, n_lines: usize) -> i32 {
+    let mut lines_seen = 0usize;
+    let mut buf = [0u8; SHELL_IO_MAX];
+    let mut done = false;
+
+    while !done {
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut output_end = n;
+        for (i, &b) in buf[..n].iter().enumerate() {
+            if b == b'\n' {
                 lines_seen += 1;
                 if lines_seen >= n_lines {
                     output_end = i + 1;
@@ -622,7 +680,7 @@ fn head_from_fd(fd: i32, n_lines: usize) -> i32 {
 
 pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -650,21 +708,19 @@ pub fn cmd_tail(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[file_arg_idx], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
-        let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-            Ok(fd) => fd,
+        let mut file = match File::open(path_buf_to_str(path_buf)) {
+            Ok(file) => file,
             Err(_) => {
-                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
         };
 
-        let rc = tail_from_fd(fd, n_lines);
-        let _ = fs::close_fd(fd);
-        rc
+        tail_from_reader(&mut file, n_lines)
     })
 }
 
@@ -678,7 +734,7 @@ fn tail_from_fd(fd: i32, n_lines: usize) -> i32 {
             break;
         }
         let chunk = (TAIL_BUF - total).min(SHELL_IO_MAX);
-        let n = match fs::read_slice(fd, &mut data[total..total + chunk]) {
+        let n = match sys_fs::read_slice(fd, &mut data[total..total + chunk]) {
             Ok(n) => n,
             Err(_) => break,
         };
@@ -688,15 +744,42 @@ fn tail_from_fd(fd: i32, n_lines: usize) -> i32 {
         total += n;
     }
 
-    if total == 0 {
+    write_tail_output(&data[..total], n_lines)
+}
+
+fn tail_from_reader<R: Read>(reader: &mut R, n_lines: usize) -> i32 {
+    const TAIL_BUF: usize = 4096;
+    let mut data = [0u8; TAIL_BUF];
+    let mut total = 0usize;
+
+    loop {
+        if total >= TAIL_BUF {
+            break;
+        }
+        let chunk = (TAIL_BUF - total).min(SHELL_IO_MAX);
+        let n = match reader.read(&mut data[total..total + chunk]) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+
+    write_tail_output(&data[..total], n_lines)
+}
+
+fn write_tail_output(data: &[u8], n_lines: usize) -> i32 {
+    if data.is_empty() {
         return 0;
     }
 
     let mut count = 0usize;
-    let scan_start = if data[total - 1] == b'\n' {
-        total.saturating_sub(1)
+    let scan_start = if data[data.len() - 1] == b'\n' {
+        data.len().saturating_sub(1)
     } else {
-        total
+        data.len()
     };
 
     let mut start = 0usize;
@@ -712,9 +795,9 @@ fn tail_from_fd(fd: i32, n_lines: usize) -> i32 {
         }
     }
 
-    shell_write(&data[start..total]);
-    if data[total - 1] != b'\n' {
-        shell_write(NL);
+    shell_write(&data[start..]);
+    if data[data.len() - 1] != b'\n' {
+        shell_write(NL.as_bytes());
     }
     0
 }
@@ -727,7 +810,7 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
         let mut in_word = false;
         let mut buf = [0u8; SHELL_IO_MAX];
         loop {
-            let n = match fs::read_slice(0, &mut buf) {
+            let n = match sys_fs::read_slice(0, &mut buf) {
                 Ok(n) => n,
                 Err(_) => break,
             };
@@ -735,11 +818,11 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
                 break;
             }
             chars += n;
-            for j in 0..n {
-                if buf[j] == b'\n' {
+            for &b in &buf[..n] {
+                if b == b'\n' {
                     lines += 1;
                 }
-                if is_wc_space(buf[j]) {
+                if is_wc_space(b) {
                     if in_word {
                         words += 1;
                         in_word = false;
@@ -768,15 +851,15 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
         }
         let result = buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[i], path_buf) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
 
-            let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-                Ok(fd) => fd,
+            let mut file = match File::open(path_buf_to_str(path_buf)) {
+                Ok(file) => file,
                 Err(_) => {
                     shell_write_idx(b"wc: ", COLOR_ERROR_RED);
-                    shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+                    shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
                     return 1;
                 }
             };
@@ -788,7 +871,7 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
             let mut buf = [0u8; SHELL_IO_MAX];
 
             loop {
-                let n = match fs::read_slice(fd, &mut buf) {
+                let n = match file.read(&mut buf) {
                     Ok(n) => n,
                     Err(_) => break,
                 };
@@ -796,11 +879,11 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
                     break;
                 }
                 chars += n;
-                for j in 0..n {
-                    if buf[j] == b'\n' {
+                for &b in &buf[..n] {
+                    if b == b'\n' {
                         lines += 1;
                     }
-                    if is_wc_space(buf[j]) {
+                    if is_wc_space(b) {
                         if in_word {
                             words += 1;
                             in_word = false;
@@ -813,7 +896,6 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
             if in_word {
                 words += 1;
             }
-            let _ = fs::close_fd(fd);
 
             let path_len = path_buf.iter().position(|&b| b == 0).unwrap_or(0);
             write_wc_line(lines, words, chars, &path_buf[..path_len]);
@@ -836,11 +918,11 @@ pub fn cmd_wc(argc: i32, argv: &[*const u8]) -> i32 {
 
 pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
     if argc < 2 {
-        shell_write_idx(ERR_MISSING_FILE, COLOR_ERROR_RED);
+        shell_write_idx(ERR_MISSING_FILE.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -858,29 +940,27 @@ pub fn cmd_hexdump(argc: i32, argv: &[*const u8]) -> i32 {
 
     buffers::with_path_buf(|path_buf| {
         if normalize_path(argv[1], path_buf) != 0 {
-            shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+            shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
             return 1;
         }
 
-        let fd = match fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-            Ok(fd) => fd,
+        let mut file = match File::open(path_buf_to_str(path_buf)) {
+            Ok(file) => file,
             Err(_) => {
-                shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
+                shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
                 return 1;
             }
         };
 
         let read_len = max_bytes.min(SHELL_IO_MAX);
         let mut buf = [0u8; SHELL_IO_MAX];
-        let n = match fs::read_slice(fd, &mut buf[..read_len]) {
+        let n = match file.read(&mut buf[..read_len]) {
             Ok(n) => n,
             Err(_) => {
-                let _ = fs::close_fd(fd);
                 shell_write_idx(b"hexdump: read error\n", COLOR_ERROR_RED);
                 return 1;
             }
         };
-        let _ = fs::close_fd(fd);
 
         if n == 0 {
             shell_write(b"(empty)\n");
@@ -931,7 +1011,7 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
         return 1;
     }
     if argc > 3 {
-        shell_write_idx(ERR_TOO_MANY_ARGS, COLOR_ERROR_RED);
+        shell_write_idx(ERR_TOO_MANY_ARGS.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
@@ -939,26 +1019,35 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
     let mut path2 = [0u8; 256];
 
     if normalize_path(argv[1], &mut path1) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
     if normalize_path(argv[2], &mut path2) != 0 {
-        shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
+        shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
         return 1;
     }
 
     const DIFF_BUF: usize = 2048;
-    let mut data1 = [0u8; DIFF_BUF];
-    let mut data2 = [0u8; DIFF_BUF];
 
-    let len1 = match read_file_into_buf(&path1, &mut data1) {
-        Some(n) => n,
-        None => return 1,
+    let data1 = match stdfs::read(path_buf_to_str(&path1)) {
+        Ok(data) => data,
+        Err(_) => {
+            shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+            return 1;
+        }
     };
-    let len2 = match read_file_into_buf(&path2, &mut data2) {
-        Some(n) => n,
-        None => return 1,
+    let data2 = match stdfs::read(path_buf_to_str(&path2)) {
+        Ok(data) => data,
+        Err(_) => {
+            shell_write_idx(ERR_NO_SUCH.as_bytes(), COLOR_ERROR_RED);
+            return 1;
+        }
     };
+
+    let len1 = data1.len().min(DIFF_BUF);
+    let len2 = data2.len().min(DIFF_BUF);
+    let data1 = &data1[..len1];
+    let data2 = &data2[..len2];
 
     let mut pos1 = 0usize;
     let mut pos2 = 0usize;
@@ -985,14 +1074,14 @@ pub fn cmd_diff(argc: i32, argv: &[*const u8]) -> i32 {
             jobs::write_u64(line_num as u64);
             shell_write(b"c");
             jobs::write_u64(line_num as u64);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
             shell_write(b"< ");
             shell_write(line1);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
             shell_write(b"---\n");
             shell_write(b"> ");
             shell_write(line2);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
         }
 
         if end1 == 0 && end2 == 0 {
@@ -1010,7 +1099,6 @@ pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
     let mut append = false;
     let mut file_arg: Option<usize> = None;
 
-    // Parse arguments: tee [-a] [file]
     let mut i = 1usize;
     while i < argc as usize {
         if i >= argv.len() || argv[i].is_null() {
@@ -1028,61 +1116,63 @@ pub fn cmd_tee(argc: i32, argv: &[*const u8]) -> i32 {
         i += 1;
     }
 
-    // Open file if specified
-    let file_fd = if let Some(idx) = file_arg {
+    let mut file = if let Some(idx) = file_arg {
         buffers::with_path_buf(|path_buf| {
             if normalize_path(argv[idx], path_buf) != 0 {
-                shell_write_idx(PATH_TOO_LONG, COLOR_ERROR_RED);
-                return -1i32;
+                shell_write_idx(PATH_TOO_LONG.as_bytes(), COLOR_ERROR_RED);
+                return None;
             }
-            let flags = if append {
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT | USER_FS_OPEN_APPEND
+
+            let mut options = OpenOptions::new();
+            options.create(true).write(true);
+            if append {
+                options.append(true);
             } else {
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT
-            };
-            // For truncate mode, remove existing file first
-            if !append {
-                let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
+                options.truncate(true);
             }
-            match fs::open_path(path_buf.as_ptr() as *const c_char, flags) {
-                Ok(fd) => fd as i32,
+
+            match options.open(path_buf_to_str(path_buf)) {
+                Ok(file) => Some(file),
                 Err(_) => {
                     shell_write_idx(b"tee: cannot open file\n", COLOR_ERROR_RED);
-                    -1i32
+                    None
                 }
             }
         })
     } else {
-        -1i32
+        None
     };
 
-    if file_arg.is_some() && file_fd < 0 {
+    if file_arg.is_some() && file.is_none() {
         return 1;
     }
 
     let mut buf = [0u8; SHELL_IO_MAX];
     loop {
-        let n = match fs::read_slice(0, &mut buf) {
+        let n = match sys_fs::read_slice(0, &mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(_) => break,
         };
         shell_write(&buf[..n]);
-        if file_fd >= 0 {
-            let _ = fs::write_slice(file_fd as i32, &buf[..n]);
+        if let Some(file) = file.as_mut() {
+            if file.write_all(&buf[..n]).is_err() {
+                shell_write_idx(b"tee: write error\n", COLOR_ERROR_RED);
+                return 1;
+            }
         }
     }
 
-    if file_fd >= 0 {
-        let _ = fs::close_fd(file_fd as i32);
-    }
     0
 }
 
-fn entry_name_gt(a: &UserFsEntry, b: &UserFsEntry) -> bool {
-    let a_len = a.name.iter().position(|&c| c == 0).unwrap_or(a.name.len());
-    let b_len = b.name.iter().position(|&c| c == 0).unwrap_or(b.name.len());
-    let min_len = a_len.min(b_len);
+fn path_buf_to_str(path: &[u8]) -> &str {
+    let path_len = path.iter().position(|&b| b == 0).unwrap_or(0);
+    core::str::from_utf8(&path[..path_len]).unwrap_or("/")
+}
+
+fn entry_name_gt(a: &LsEntry, b: &LsEntry) -> bool {
+    let min_len = a.name.len().min(b.name.len());
 
     for i in 0..min_len {
         let ca = a.name[i].to_ascii_lowercase();
@@ -1091,95 +1181,7 @@ fn entry_name_gt(a: &UserFsEntry, b: &UserFsEntry) -> bool {
             return ca > cb;
         }
     }
-    a_len > b_len
-}
-
-fn copy_file_inner(src_path: &[u8], dst_path: &[u8]) -> i32 {
-    let mut stat = UserFsStat::default();
-    if fs::stat_path(src_path.as_ptr() as *const c_char, &mut stat).is_err() {
-        shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
-        return 1;
-    }
-    if stat.is_directory() {
-        shell_write_idx(b"cannot copy directory\n", COLOR_ERROR_RED);
-        return 1;
-    }
-
-    let src_fd = match fs::open_path(src_path.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-        Ok(fd) => fd,
-        Err(_) => {
-            shell_write_idx(b"cannot open source\n", COLOR_ERROR_RED);
-            return 1;
-        }
-    };
-
-    let _ = fs::unlink_path(dst_path.as_ptr() as *const c_char);
-    let dst_fd = match fs::open_path(
-        dst_path.as_ptr() as *const c_char,
-        USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-    ) {
-        Ok(fd) => fd,
-        Err(_) => {
-            let _ = fs::close_fd(src_fd);
-            shell_write_idx(b"cannot create destination\n", COLOR_ERROR_RED);
-            return 1;
-        }
-    };
-
-    let mut buf = [0u8; SHELL_IO_MAX];
-    loop {
-        let n = match fs::read_slice(src_fd, &mut buf) {
-            Ok(n) => n,
-            Err(_) => {
-                let _ = fs::close_fd(src_fd);
-                let _ = fs::close_fd(dst_fd);
-                shell_write_idx(b"read error\n", COLOR_ERROR_RED);
-                return 1;
-            }
-        };
-        if n == 0 {
-            break;
-        }
-        if fs::write_slice(dst_fd, &buf[..n]).is_err() {
-            let _ = fs::close_fd(src_fd);
-            let _ = fs::close_fd(dst_fd);
-            shell_write_idx(b"write error\n", COLOR_ERROR_RED);
-            return 1;
-        }
-    }
-
-    let _ = fs::close_fd(src_fd);
-    let _ = fs::close_fd(dst_fd);
-    0
-}
-
-fn read_file_into_buf(path: &[u8], buf: &mut [u8]) -> Option<usize> {
-    let fd = match fs::open_path(path.as_ptr() as *const c_char, USER_FS_OPEN_READ) {
-        Ok(fd) => fd,
-        Err(_) => {
-            shell_write_idx(ERR_NO_SUCH, COLOR_ERROR_RED);
-            return None;
-        }
-    };
-
-    let mut total = 0usize;
-    loop {
-        if total >= buf.len() {
-            break;
-        }
-        let chunk = (buf.len() - total).min(SHELL_IO_MAX);
-        let n = match fs::read_slice(fd, &mut buf[total..total + chunk]) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        total += n;
-    }
-
-    let _ = fs::close_fd(fd);
-    Some(total)
+    a.name.len() > b.name.len()
 }
 
 fn find_line_end(data: &[u8]) -> (usize, usize) {
@@ -1209,7 +1211,7 @@ fn write_wc_line(lines: usize, words: usize, chars: usize, name: &[u8]) {
         shell_write(b" ");
         shell_write(name);
     }
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 }
 
 fn write_hex_byte(b: u8) {

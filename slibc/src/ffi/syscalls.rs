@@ -24,11 +24,15 @@ pub unsafe extern "C" fn slopos_fstat(fd: i32, stat_buf: *mut SloposStat) -> i32
     match Sys::fstat(fd, raw.as_mut_ptr()) {
         Ok(()) => {
             if !stat_buf.is_null() {
+                let kernel_type = raw[0];
+                let posix_mode = match kernel_type {
+                    1 => 0o040755u32,
+                    _ => 0o100644u32,
+                };
+                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
                 unsafe {
-                    (*stat_buf).st_mode = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    (*stat_buf).st_size = u64::from_le_bytes([
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                    ]);
+                    (*stat_buf).st_mode = posix_mode;
+                    (*stat_buf).st_size = size;
                     (*stat_buf).st_atime = 0;
                     (*stat_buf).st_mtime = 0;
                     (*stat_buf).st_ctime = 0;
@@ -46,11 +50,15 @@ pub unsafe extern "C" fn slopos_stat(path: *const u8, stat_buf: *mut SloposStat)
     match Sys::stat(path, raw.as_mut_ptr()) {
         Ok(()) => {
             if !stat_buf.is_null() {
+                let kernel_type = raw[0];
+                let posix_mode = match kernel_type {
+                    1 => 0o040755u32,
+                    _ => 0o100644u32,
+                };
+                let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as u64;
                 unsafe {
-                    (*stat_buf).st_mode = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    (*stat_buf).st_size = u64::from_le_bytes([
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                    ]);
+                    (*stat_buf).st_mode = posix_mode;
+                    (*stat_buf).st_size = size;
                     (*stat_buf).st_atime = 0;
                     (*stat_buf).st_mtime = 0;
                     (*stat_buf).st_ctime = 0;
@@ -104,10 +112,70 @@ pub unsafe extern "C" fn slopos_dup2(old: i32, new: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_list(path: *const u8, buf: *mut u8, buf_len: usize) -> isize {
-    match Sys::list(path, buf, buf_len) {
-        Ok(n) => n as isize,
-        Err(e) => -(e.raw() as isize),
+    const MAX_ENTRIES: usize = 64;
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct Entry {
+        name: [u8; 64],
+        type_: u8,
+        size: u32,
     }
+
+    #[repr(C)]
+    struct ListHdr {
+        entries: *mut Entry,
+        max_entries: u32,
+        count: u32,
+    }
+
+    let mut entries = [unsafe { core::mem::zeroed::<Entry>() }; MAX_ENTRIES];
+    let mut hdr = ListHdr {
+        entries: entries.as_mut_ptr(),
+        max_entries: MAX_ENTRIES as u32,
+        count: 0,
+    };
+
+    let ret = unsafe {
+        crate::pal::raw::syscall2(
+            slopos_abi::syscall::SYSCALL_FS_LIST,
+            path as u64,
+            &mut hdr as *mut ListHdr as u64,
+        )
+    };
+
+    let signed = ret as i64;
+    if signed < 0 {
+        return signed as isize;
+    }
+
+    let count = hdr.count as usize;
+    let mut pos = 0usize;
+    for i in 0..count {
+        let entry = &entries[i];
+        let name_len = entry
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(entry.name.len());
+        if name_len == 0 {
+            continue;
+        }
+        let needed = if pos == 0 { name_len } else { name_len + 1 };
+        if pos + needed > buf_len {
+            return -(34i64) as isize;
+        }
+        if pos > 0 {
+            unsafe { *buf.add(pos) = b'\n' };
+            pos += 1;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(entry.name.as_ptr(), buf.add(pos), name_len);
+        }
+        pos += name_len;
+    }
+
+    pos as isize
 }
 
 #[unsafe(no_mangle)]

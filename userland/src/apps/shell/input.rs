@@ -6,6 +6,7 @@ use crate::runtime;
 use crate::syscall::core as sys_core;
 use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs, input};
 use slopos_abi::syscall::{ECHO, ECHOE, ICANON, ISIG, POLLIN};
+use std::time::{Duration, Instant};
 
 use super::buffers;
 use super::completion;
@@ -100,9 +101,9 @@ fn input_loop(
 
     let mut line_row = super::display::shell_console_get_cursor().1;
 
-    const BLINK_INTERVAL_MS: u64 = 500;
+    const BLINK_INTERVAL: Duration = Duration::from_millis(500);
     let mut cursor_visible = true;
-    let mut last_blink_ms = sys_core::get_time_ms();
+    let mut last_blink = Instant::now();
 
     let mut sel = InputSelection::NONE;
     let mut mouse_dragging = false;
@@ -159,7 +160,7 @@ fn input_loop(
                     };
                     mouse_dragging = true;
                     cursor_visible = true;
-                    last_blink_ms = sys_core::get_time_ms();
+                    last_blink = Instant::now();
                     mouse_acted = true;
                 }
             } else {
@@ -208,10 +209,10 @@ fn input_loop(
             -1i64
         };
         if rc < 0 {
-            let now = sys_core::get_time_ms();
-            if now.wrapping_sub(last_blink_ms) >= BLINK_INTERVAL_MS {
+            let now = Instant::now();
+            if now.duration_since(last_blink) >= BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
-                last_blink_ms = now;
+                last_blink = now;
                 rd!();
             }
             if !mouse_acted {
@@ -222,7 +223,7 @@ fn input_loop(
         let c = rc as u8;
 
         cursor_visible = true;
-        last_blink_ms = sys_core::get_time_ms();
+        last_blink = Instant::now();
 
         if c == KEY_PAGE_UP {
             shell_console_page_up();

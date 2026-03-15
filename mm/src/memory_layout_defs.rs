@@ -80,6 +80,9 @@ pub const PROCESS_CODE_START_VA: u64 = 0x0000_0000_0040_0000;
 /// Process data segment start virtual address.
 pub const PROCESS_DATA_START_VA: u64 = 0x0000_0000_0080_0000;
 
+/// Process static TLS block base virtual address.
+pub const PROCESS_TLS_BASE_VA: u64 = 0x0000_0000_00C0_0000;
+
 /// Process heap start virtual address.
 pub const PROCESS_HEAP_START_VA: u64 = 0x0000_0000_0100_0000;
 

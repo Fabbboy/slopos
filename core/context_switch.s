@@ -149,14 +149,14 @@ context_switch:
     # Clobbers rax, rcx, rdx — all overwritten by GPR restore below.
     FPU_RESTORE %r15
 
-    # Segments - restore DS, ES, FS, SS but NOT GS
+    # Segments - restore DS, ES, SS but NOT GS or FS
     # Writing to GS selector zeros IA32_GS_BASE MSR in long mode, breaking per-CPU access
+    # Writing to FS selector zeros IA32_FS_BASE MSR in long mode, breaking user TLS
+    # Both are managed via their respective MSRs by execute_task()
     movq    0x98(%r15), %rax
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
     movw    %ax, %es
-    movq    0xA8(%r15), %rax
-    movw    %ax, %fs
     movq    0xB8(%r15), %rax
     movw    %ax, %ss
 
@@ -284,8 +284,8 @@ context_switch_user:
     movw    %ax, %ds
     movq    0xA0(%r15), %rax
     movw    %ax, %es
-    movq    0xA8(%r15), %rax
-    movw    %ax, %fs
+    # FS selector is NOT restored — loading FS=0 would clobber FS_BASE to 0.
+    # FS_BASE is set via MSR by execute_task() before entering this function.
     # GS selector is NOT restored - SWAPGS manages GS_BASE MSR state
     # Writing to GS selector would not affect the MSR anyway in 64-bit mode
 

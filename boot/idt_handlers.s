@@ -47,12 +47,12 @@
     pushq %r14
     pushq %r15
 
-    # Set up kernel data segments (excluding GS which is managed by SWAPGS)
+    # Set up kernel data segments (excluding GS and FS)
+    # GS is managed by SWAPGS for per-CPU access
+    # FS holds user TLS base via FS_BASE MSR — must not be clobbered
     movw $SEL_KERNEL_DATA, %ax
     movw %ax, %ds
     movw %ax, %es
-    movw %ax, %fs
-    # GS is NOT touched - SWAPGS manages the GS base MSRs
 
     movq %rsp, %rdi
     call common_exception_handler
@@ -356,12 +356,12 @@ syscall_entry:
     pushq %r14
     pushq %r15
 
-    # Set up kernel data segments for syscall context
+    # Set up kernel data segments for syscall context (excluding GS and FS)
+    # GS is managed by SWAPGS for per-CPU access
+    # FS holds user TLS base via FS_BASE MSR — must not be clobbered
     movw $SEL_KERNEL_DATA, %ax
     movw %ax, %ds
     movw %ax, %es
-    movw %ax, %fs
-    # GS is NOT touched - SWAPGS manages the GS base MSRs
 
     sti
 

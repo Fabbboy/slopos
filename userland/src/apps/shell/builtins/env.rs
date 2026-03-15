@@ -14,7 +14,7 @@ pub fn cmd_export(argc: i32, argv: &[*const u8]) -> i32 {
             shell_write(key);
             shell_write(b"=");
             shell_write(value);
-            shell_write(NL);
+            shell_write(NL.as_bytes());
         });
         return 0;
     }
@@ -79,7 +79,7 @@ pub fn cmd_env(_argc: i32, _argv: &[*const u8]) -> i32 {
         shell_write(key);
         shell_write(b"=");
         shell_write(value);
-        shell_write(NL);
+        shell_write(NL.as_bytes());
     });
     0
 }

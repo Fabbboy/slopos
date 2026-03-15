@@ -1,25 +1,27 @@
 use crate::program_registry;
-use crate::syscall::{core as sys_core, process, tty};
+use crate::syscall::{core as sys_core, process};
 
-fn spawn_service(name: &[u8]) -> i32 {
+fn spawn_service(name: &str) -> i32 {
     let tid = match program_registry::resolve_program(name) {
-        Some(spec) => process::spawn_path_with_attrs(spec.path, spec.priority, spec.flags),
+        Some(spec) => {
+            process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags)
+        }
         None => -1,
     };
     if tid <= 0 {
-        let _ = tty::write(b"init: failed to spawn service\n");
+        eprintln!("init: failed to spawn service");
     }
     tid
 }
 
-pub fn init_user_main(_arg: *mut u8) {
-    let roulette_tid = spawn_service(b"roulette");
+pub fn init_user_main() {
+    let roulette_tid = spawn_service("roulette");
     if roulette_tid > 0 {
         process::waitpid(roulette_tid as u32);
     }
 
-    let compositor_tid = spawn_service(b"compositor");
-    spawn_service(b"shell");
+    let compositor_tid = spawn_service("compositor");
+    spawn_service("shell");
 
     // Block on compositor — it runs forever so init stays dormant (zero CPU).
     // Like real PID 1: wait for children, don't busy-loop.

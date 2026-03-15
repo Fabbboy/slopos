@@ -25,12 +25,13 @@ pub fn getcwd(buf: &mut [u8]) -> i64 {
 }
 
 #[inline(always)]
-pub fn spawn_path(path: &[u8]) -> i32 {
+pub fn spawn_path(path: impl AsRef<[u8]>) -> i32 {
     spawn_path_with_attrs(path, 5, 0)
 }
 
 #[inline(always)]
-pub fn spawn_path_with_attrs(path: &[u8], priority: u8, flags: u16) -> i32 {
+pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: u8, flags: u16) -> i32 {
+    let path = path.as_ref();
     unsafe {
         syscall6(
             SYSCALL_SPAWN_PATH,

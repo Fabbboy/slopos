@@ -2,6 +2,8 @@
 
 use crate::runtime;
 use crate::syscall::{UserSysInfo, core as sys_core, roulette};
+use std::thread;
+use std::time::Duration;
 
 use super::super::NL;
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
@@ -84,7 +86,7 @@ pub fn cmd_sleep(argc: i32, argv: &[*const u8]) -> i32 {
     if ms == 0 {
         return 0;
     }
-    sys_core::sleep_ms(ms);
+    thread::sleep(Duration::from_millis(ms as u64));
     0
 }
 
@@ -127,7 +129,7 @@ pub fn cmd_seq(argc: i32, argv: &[*const u8]) -> i32 {
     let mut i = start;
     loop {
         write_u64(i);
-        if !shell_write(NL) {
+        if !shell_write(NL.as_bytes()) {
             break;
         }
         if i == end {
@@ -153,7 +155,7 @@ pub fn cmd_yes(argc: i32, argv: &[*const u8]) -> i32 {
     };
 
     for _ in 0..MAX_ITERATIONS {
-        if !shell_write(text) || !shell_write(NL) {
+        if !shell_write(text) || !shell_write(NL.as_bytes()) {
             break;
         }
         sys_core::yield_now();
@@ -177,7 +179,7 @@ pub fn cmd_random(argc: i32, argv: &[*const u8]) -> i32 {
         raw
     };
     write_u64(value as u64);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
     0
 }
 
@@ -188,11 +190,11 @@ pub fn cmd_roulette(_argc: i32, _argv: &[*const u8]) -> i32 {
     let spin = roulette::spin();
     let fate = spin as u32;
 
-    sys_core::sleep_ms(200);
+    thread::sleep(Duration::from_millis(200));
 
     shell_write(b"Fate number: ");
     write_u64(fate as u64);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     let is_win = (fate & 1) == 1;
 
@@ -219,7 +221,7 @@ pub fn cmd_wl(_argc: i32, _argv: &[*const u8]) -> i32 {
 
     shell_write(b"W/L Balance: ");
     write_i64(balance);
-    shell_write(NL);
+    shell_write(NL.as_bytes());
 
     if balance > 100 {
         shell_write(b"The Wheel favors the bold.\n");

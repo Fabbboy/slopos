@@ -1,6 +1,6 @@
 # SlopOS Userland `no_std` → `std` Migration Plan
 
-> **Status**: Not Started
+> **Status**: Complete
 > **Target**: Migrate all userland code from `no_std`-era patterns to idiomatic Rust `std`, leveraging the completed slibc PAL
 > **Scope**: Userland only (`userland/`). No kernel changes. slibc is assumed complete (Phase 6 of SLIBC_PLAN.md).
 > **Prerequisite**: [SLIBC_PLAN.md](./SLIBC_PLAN.md) — all phases complete
@@ -666,14 +666,27 @@ After **every phase**:
 
 | Phase | Tasks | Status | Description |
 |---|---|---|---|
-| **0** | 13 | Not Started | Foundation — entry points, feature gates |
-| **1** | 15 | Not Started | I/O layer — println, std::io |
-| **2** | 9 | Not Started | String & number formatting |
-| **3** | 18 | Not Started | File operations — std::fs |
-| **4** | 10 | Not Started | Process management — std::process, std::env |
-| **5** | 9 | Not Started | App-by-app modernization |
-| **6** | 15 | Not Started | Cleanup & deletion |
-| **Total** | **89** | | |
+| **0** | 13 | **Complete** | Foundation — entry points, feature gates |
+| **1** | 15 | **Complete** | I/O layer — println, std::io |
+| **2** | 9 | **Complete** | String & number formatting |
+| **3** | 18 | **Complete** | File operations — std::fs |
+| **4** | 10 | **Complete** | Process management — std::process, std::env |
+| **5** | 9 | **Complete** | App-by-app modernization |
+| **6** | 15 | **Complete** | Cleanup & deletion |
+| **Total** | **89** | **Complete** | |
+
+### Notes on Remaining Raw Syscalls
+
+The following stay as raw syscalls per the plan's Section 3 (SlopOS-specific interfaces with no `std` equivalent):
+
+- **Shell pipeline plumbing** (`exec.rs`): `fork()`, `execve()`, `pipe()`, `dup2()`, `poll()`, `setpgid()`, `tcsetpgrp()`, `waitpid()` — POSIX job control primitives below `std::process::Command`'s abstraction level
+- **Shell terminal I/O** (`input.rs`): `tcgetattr()`, `tcsetattr()`, `read_slice(0, ...)` for raw TTY input
+- **Shell display redirect** (`display.rs`): `write_slice(redirected_fd, ...)` for pipe/file output redirection
+- **NC socket operations** (`tcp.rs`, `udp.rs`): Raw `net::socket()`, `net::connect()`, `net::send()`, `net::recv()`, `fs::poll()` — multiplexed I/O not expressible via `std::net` without threading
+- **NC terminal mode** (`nc/mod.rs`): `tcgetattr()`, `tcsetattr()` for raw mode
+- **Window/Surface/Input/Roulette syscalls**: SlopOS compositor protocol (no POSIX or `std` equivalent)
+- **SHM operations**: Shared memory for compositor surface rendering
+- **`runtime.rs`**: Still used by shell parser/exec for `u_strlen`/`u_strnlen` on raw `*const u8` token pointers from the shell's argument system
 
 ### LOC Impact Estimate
 

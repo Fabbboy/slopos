@@ -258,6 +258,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
     let mut entry_point = 0u64;
     let mut stack_ptr = 0u64;
+    let mut tls_tp = 0u64;
 
     match exec::do_exec(
         process_id,
@@ -266,6 +267,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         envp_refs.as_deref(),
         &mut entry_point,
         &mut stack_ptr,
+        &mut tls_tp,
     ) {
         Ok(()) => {
             // Point of no return: old image is gone.  Tear down task-bound
@@ -275,6 +277,10 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
             crate::scheduler::task::task_cleanup_for_exec(task_id);
 
             unsafe {
+                if tls_tp != 0 {
+                    (*task).fs_base = tls_tp;
+                    slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, tls_tp);
+                }
                 (*frame).rip = entry_point;
                 (*frame).rsp = stack_ptr;
                 (*frame).rax = 0;

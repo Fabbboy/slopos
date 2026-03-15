@@ -743,6 +743,36 @@ impl<'a> ElfValidator<'a> {
         }
         Ok(false)
     }
+
+    /// Find the optional PT_TLS segment.
+    ///
+    /// Returns `(p_vaddr, p_filesz, p_memsz, p_align)` when present.
+    pub fn find_tls_segment(&self) -> ElfResult<Option<(u64, u64, u64, u64)>> {
+        let Some(phdr) = self.find_tls_program_header()? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            phdr.p_vaddr,
+            phdr.p_filesz,
+            phdr.p_memsz,
+            phdr.p_align,
+        )))
+    }
+
+    /// Find PT_TLS and return file offset for the .tdata template.
+    pub fn find_tls_offset(&self) -> ElfResult<Option<u64>> {
+        Ok(self.find_tls_program_header()?.map(|phdr| phdr.p_offset))
+    }
+
+    fn find_tls_program_header(&self) -> ElfResult<Option<Elf64Phdr>> {
+        for i in 0..self.header.e_phnum as usize {
+            let phdr = self.get_program_header(i)?;
+            if phdr.p_type == PT_TLS {
+                return Ok(Some(phdr));
+            }
+        }
+        Ok(None)
+    }
 }
 
 // =============================================================================
@@ -761,4 +791,14 @@ pub struct ElfExecInfo {
     pub phent_size: u16,
     /// Number of program headers.
     pub phnum: u16,
+    /// Size of initialized TLS template (.tdata).
+    pub tls_filesz: u64,
+    /// Total static TLS size (.tdata + .tbss).
+    pub tls_memsz: u64,
+    /// TLS alignment requirement from PT_TLS.
+    pub tls_align: u64,
+    /// TLS template virtual address from PT_TLS.
+    pub tls_vaddr: u64,
+    /// Thread pointer (TCB address) to load into FS base.
+    pub tls_tp: u64,
 }

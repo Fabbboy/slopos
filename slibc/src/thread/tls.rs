@@ -18,6 +18,17 @@ pub fn tls_is_initialized() -> bool {
 /// # Safety
 /// Must be called exactly once from the main thread during CRT startup.
 pub unsafe fn tls_init_main_thread() {
+    if let Ok(fs_base) = Sys::arch_prctl_get_fs() {
+        if fs_base != 0 {
+            let tcb_ptr = fs_base as *mut Tcb;
+            if !tcb_ptr.is_null() && (*tcb_ptr).self_ptr == tcb_ptr {
+                (*tcb_ptr).tid = Sys::getpid();
+                TLS_READY = true;
+                return;
+            }
+        }
+    }
+
     let tcb_ptr = malloc::alloc(mem::size_of::<Tcb>()) as *mut Tcb;
     if tcb_ptr.is_null() {
         return;
