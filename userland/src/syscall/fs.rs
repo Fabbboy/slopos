@@ -23,7 +23,7 @@ use slopos_abi::{UserFsList, UserFsStat};
 ///
 /// # Arguments
 /// * `path` - Null-terminated path string
-/// * `flags` - Open flags (USER_FS_OPEN_READ, USER_FS_OPEN_WRITE, etc.)
+/// * `flags` - POSIX open flags (O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, etc.)
 ///
 /// # Returns
 /// File descriptor on success

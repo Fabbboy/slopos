@@ -17,7 +17,7 @@ use crate::syscall::signal::{
     syscall_rt_sigreturn,
 };
 use slopos_abi::addr::PhysAddr;
-use slopos_abi::fs::USER_FS_OPEN_READ;
+use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
     SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGUSR1, SigSet, SignalFrame, UserSigaction, sig_bit,
 };
@@ -545,7 +545,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
     let fd = file_open_for_process(
         pid,
         path.as_ptr() as *const c_char,
-        USER_FS_OPEN_READ | O_NOCTTY as u32,
+        O_RDONLY | O_NOCTTY as u32,
     );
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
     assert_test!(fd >= 0, "open(/dev/tty, O_NOCTTY) failed");
@@ -689,7 +689,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let pid = unsafe { (*task_ptr).process_id };
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
     assert_test!(fd >= 0, "open(/dev/pts/N) failed");
@@ -743,7 +743,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let fd = file_open_for_process(
         pid,
         path.as_ptr() as *const c_char,
-        USER_FS_OPEN_READ | O_NOCTTY as u32,
+        O_RDONLY | O_NOCTTY as u32,
     );
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
@@ -2225,7 +2225,7 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
     let path = b"/dev/tty\0";
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
     assert_eq_test!(
@@ -2266,7 +2266,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     let path = b"/dev/tty\0";
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
-    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
     assert_test!(fd >= 0, "open(/dev/tty) with ctty should succeed");
@@ -2325,7 +2325,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     let path = b"/dev/tty\0";
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
-    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
     assert_eq_test!(
@@ -2378,7 +2378,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     let path = b"/dev/tty\0";
     let cpu_id = slopos_lib::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
-    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, USER_FS_OPEN_READ);
+    let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
 
     assert_test!(fd >= 0, "child open(/dev/tty) should succeed");

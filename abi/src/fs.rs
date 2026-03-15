@@ -12,11 +12,15 @@ pub const FS_TYPE_DIRECTORY: u8 = 1;
 pub const FS_TYPE_CHARDEV: u8 = 2;
 pub const FS_TYPE_UNKNOWN: u8 = 0xFF;
 
-/// File open flags
-pub const USER_FS_OPEN_READ: u32 = 0x1;
-pub const USER_FS_OPEN_WRITE: u32 = 0x2;
-pub const USER_FS_OPEN_CREAT: u32 = 0x4;
-pub const USER_FS_OPEN_APPEND: u32 = 0x8;
+/// POSIX file open flags (access mode in low 2 bits, modifiers above).
+pub const O_RDONLY: u32 = 0;
+pub const O_WRONLY: u32 = 1;
+pub const O_RDWR: u32 = 2;
+pub const O_ACCMODE: u32 = 3;
+pub const O_CREAT: u32 = 0x40;
+pub const O_EXCL: u32 = 0x80;
+pub const O_TRUNC: u32 = 0x200;
+pub const O_APPEND: u32 = 0x400;
 
 /// Filesystem directory entry information.
 ///

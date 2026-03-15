@@ -3,10 +3,8 @@ use core::ptr;
 
 use crate::program_registry;
 use crate::runtime;
-use crate::syscall::{
-    POLLHUP, POLLIN, USER_FS_OPEN_APPEND, USER_FS_OPEN_CREAT, USER_FS_OPEN_READ,
-    USER_FS_OPEN_WRITE, UserFsStat, UserPollFd, core as sys_core, fs, process,
-};
+use crate::syscall::{POLLHUP, POLLIN, UserFsStat, UserPollFd, core as sys_core, fs, process};
+use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_WRONLY};
 
 use super::SyncUnsafeCell;
 use super::builtins;
@@ -534,23 +532,19 @@ fn open_redirect_target(redir: Redirect, path_buf: &mut [u8; 256]) -> Result<(i3
 
     match redir.kind {
         RedirectKind::Input => {
-            let fd = fs::open_path(path_buf.as_ptr() as *const c_char, USER_FS_OPEN_READ)
-                .map_err(|_| ())?;
+            let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_RDONLY).map_err(|_| ())?;
             Ok((0, fd))
         }
         RedirectKind::OutputTruncate => {
             let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
-            let fd = fs::open_path(
-                path_buf.as_ptr() as *const c_char,
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT,
-            )
-            .map_err(|_| ())?;
+            let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_WRONLY | O_CREAT)
+                .map_err(|_| ())?;
             Ok((1, fd))
         }
         RedirectKind::OutputAppend => {
             let fd = fs::open_path(
                 path_buf.as_ptr() as *const c_char,
-                USER_FS_OPEN_WRITE | USER_FS_OPEN_CREAT | USER_FS_OPEN_APPEND,
+                O_WRONLY | O_CREAT | O_APPEND,
             )
             .map_err(|_| ())?;
             Ok((1, fd))

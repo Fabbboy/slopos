@@ -3,7 +3,9 @@ use core::slice;
 
 use slopos_lib::{InitFlag, IrqMutex};
 
-use slopos_abi::fs::{FS_TYPE_FILE, USER_FS_OPEN_CREAT, UserFsEntry, UserFsStat};
+use slopos_abi::fs::{
+    FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY, UserFsEntry, UserFsStat,
+};
 use slopos_abi::net::INVALID_SOCKET_IDX;
 use slopos_abi::syscall::{
     F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
@@ -25,7 +27,25 @@ type ssize_t = isize;
 
 const FILE_OPEN_READ: u32 = 1 << 0;
 const FILE_OPEN_WRITE: u32 = 1 << 1;
+const FILE_OPEN_CREAT: u32 = 1 << 2;
 const FILE_OPEN_APPEND: u32 = 1 << 3;
+
+fn posix_to_internal_flags(posix: u32) -> u32 {
+    let mut f = 0u32;
+    match posix & O_ACCMODE {
+        O_RDONLY => f |= FILE_OPEN_READ,
+        O_WRONLY => f |= FILE_OPEN_WRITE,
+        O_RDWR => f |= FILE_OPEN_READ | FILE_OPEN_WRITE,
+        _ => {}
+    }
+    if posix & O_CREAT != 0 {
+        f |= FILE_OPEN_CREAT;
+    }
+    if posix & O_APPEND != 0 {
+        f |= FILE_OPEN_APPEND;
+    }
+    f | (posix & !(O_ACCMODE | O_CREAT | O_APPEND))
+}
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
@@ -682,7 +702,8 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
     })
 }
 
-pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -> c_int {
+pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: u32) -> c_int {
+    let flags = posix_to_internal_flags(posix_flags);
     if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
         return -1;
     }
@@ -861,7 +882,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, flags: u32) -
         });
     }
 
-    let create = (flags & USER_FS_OPEN_CREAT) != 0;
+    let create = (flags & FILE_OPEN_CREAT) != 0;
 
     let handle = match vfs_open(path_bytes, create) {
         Ok(h) => h,
