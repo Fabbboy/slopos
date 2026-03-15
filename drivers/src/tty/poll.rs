@@ -10,7 +10,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_lib::kernel_services::driver_runtime::scheduler_is_enabled;
 
 use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
+use super::{PostLockWork, TtyError, TtyFlags, TtyIndex, MAX_TTYS};
 
 // ---------------------------------------------------------------------------
 // Compositor focus
@@ -171,8 +171,7 @@ pub fn poll_sleep_on(slots: &[u8]) {
         return;
     }
 
-    // Block once — any wake from any registered queue unblocks us.
-    slopos_lib::kernel_services::driver_runtime::block_current_task();
+    slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
 
     // Clean up: remove ourselves from all registered queues.
     for &slot in slots {
