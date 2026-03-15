@@ -348,6 +348,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     set_current_task_controlling_tty: runtime_set_current_task_controlling_tty,
     clear_session_controlling_tty: runtime_clear_session_controlling_tty,
     block_current_task: scheduler::block_current_task,
+    sleep_current_task_ms: scheduler::sleep_current_task_ms,
     unblock_task: runtime_unblock_task,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,

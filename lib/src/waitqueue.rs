@@ -320,12 +320,14 @@ impl WaitQueue {
                 }
             }
 
-            // Use scheduler sleep with remaining timeout.
-            // For now, just block and rely on wake_one/wake_all + re-check.
-            // A proper timed wait would integrate with the sleep queue, but
-            // the re-check loop with uptime comparison achieves the same
-            // correctness (at the cost of one extra context switch on timeout).
-            block_current_task();
+            let remaining = deadline_ms.saturating_sub(clock::uptime_ms());
+            if remaining == 0 {
+                let mut inner = self.inner.lock();
+                inner.remove_task(task);
+                return false;
+            }
+            let sleep_ms = remaining.min(500) as u32;
+            driver_runtime::sleep_current_task_ms(sleep_ms);
         }
     }
 

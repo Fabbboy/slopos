@@ -26,6 +26,7 @@ crate::define_service! {
         set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool;
         clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize;
         block_current_task();
+        sleep_current_task_ms(ms: u32) -> c_int;
         unblock_task(task: DriverTaskHandle) -> c_int;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
         signal_process_group(pgid: u32, signum: u8) -> bool;
