@@ -4,10 +4,10 @@ use core::ffi::c_int;
 
 use slopos_abi::signal::SIGTTOU;
 use slopos_abi::syscall::{
-    FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW, TCXONC, TIOCEXCL,
-    TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ,
-    TIOCNOTTY, TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK, UserPollFd,
-    UserTermios, UserTimeval, UserWinsize,
+    ERRNO_EINTR, FIONREAD, POLLIN, POLLOUT, TCFLSH, TCGETS, TCSBRK, TCSETS, TCSETSF, TCSETSW,
+    TCXONC, TIOCEXCL, TIOCGETD, TIOCGEXCL, TIOCGPGRP, TIOCGPTLCK, TIOCGPTN, TIOCGPTPEER, TIOCGSID,
+    TIOCGWINSZ, TIOCNOTTY, TIOCNXCL, TIOCOUTQ, TIOCPKT, TIOCSCTTY, TIOCSETD, TIOCSPGRP, TIOCSPTLCK,
+    UserPollFd, UserTermios, UserTimeval, UserWinsize,
 };
 
 use slopos_fs::fileio::{
@@ -144,6 +144,10 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
 
         if pipe_registered > 0 {
             file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
+        }
+
+        if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+            return ctx.err_with(ERRNO_EINTR as u64);
         }
     }
 });
