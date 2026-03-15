@@ -7,69 +7,10 @@ use std::time::Duration;
 
 use super::super::NL;
 use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
-use super::super::jobs::{parse_u32_arg, write_u64};
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn format_i64(value: i64, buf: &mut [u8; 21]) -> usize {
-    if value == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-
-    let negative = value < 0;
-    // wrapping_neg handles i64::MIN without overflow (stays in u64 domain)
-    let mut n = if negative {
-        (value as u64).wrapping_neg()
-    } else {
-        value as u64
-    };
-
-    let mut rev = [0u8; 20];
-    let mut r = 0usize;
-    while n != 0 && r < rev.len() {
-        rev[r] = b'0' + (n % 10) as u8;
-        n /= 10;
-        r += 1;
-    }
-
-    let mut pos = 0usize;
-    if negative {
-        buf[pos] = b'-';
-        pos += 1;
-    }
-    while r > 0 {
-        buf[pos] = rev[r - 1];
-        pos += 1;
-        r -= 1;
-    }
-    pos
-}
-
-fn write_i64(value: i64) {
-    let mut buf = [0u8; 21];
-    let len = format_i64(value, &mut buf);
-    shell_write(&buf[..len]);
-}
+use super::super::jobs::{arg_as_str, parse_u32_arg, write_u64};
 
 fn parse_u64_arg(ptr: *const u8) -> Option<u64> {
-    if ptr.is_null() {
-        return None;
-    }
-    let len = runtime::u_strlen(ptr);
-    if len == 0 {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    let mut v: u64 = 0;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        v = v.checked_mul(10)?;
-        v = v.checked_add((b - b'0') as u64)?;
-    }
-    Some(v)
+    arg_as_str(ptr)?.parse().ok()
 }
 
 // ─── Commands ───────────────────────────────────────────────────────────────
@@ -219,9 +160,7 @@ pub fn cmd_wl(_argc: i32, _argv: &[*const u8]) -> i32 {
 
     let balance = info.wl_balance;
 
-    shell_write(b"W/L Balance: ");
-    write_i64(balance);
-    shell_write(NL.as_bytes());
+    shell_write(format!("W/L Balance: {balance}\n").as_bytes());
 
     if balance > 100 {
         shell_write(b"The Wheel favors the bold.\n");

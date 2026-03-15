@@ -201,11 +201,10 @@ pub fn find_pgid_by_job_id(job_id: u16) -> Option<u32> {
 }
 
 pub fn write_u64(value: u64) {
-    let text = format!("{}", value);
-    shell_write(text.as_bytes());
+    shell_write(format!("{value}").as_bytes());
 }
 
-pub fn parse_u32_arg(ptr: *const u8) -> Option<u32> {
+pub fn arg_as_str(ptr: *const u8) -> Option<&'static str> {
     if ptr.is_null() {
         return None;
     }
@@ -214,13 +213,9 @@ pub fn parse_u32_arg(ptr: *const u8) -> Option<u32> {
         return None;
     }
     let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    let mut v: u32 = 0;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        v = v.checked_mul(10)?;
-        v = v.checked_add((b - b'0') as u32)?;
-    }
-    Some(v)
+    core::str::from_utf8(bytes).ok()
+}
+
+pub fn parse_u32_arg(ptr: *const u8) -> Option<u32> {
+    arg_as_str(ptr)?.parse().ok()
 }
