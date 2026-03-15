@@ -10,7 +10,10 @@ use slopos_abi::syscall::{
     UserTermios, UserTimeval, UserWinsize,
 };
 
-use slopos_fs::fileio::{file_get_tty_index, file_open_tty_fd, file_poll_fd};
+use slopos_fs::fileio::{
+    file_get_tty_index, file_open_tty_fd, file_poll_fd, file_poll_register_pipes,
+    file_poll_unregister_pipes,
+};
 
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, signal_process_group,
@@ -69,11 +72,14 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let base_ptr = args.arg0;
     let start_ms = crate::platform::get_time_ms();
 
+    let mut pipe_fds = [(0i32, 0u16); SELECT_MAX_FDS];
+
     loop {
         let mut ready_count = 0u64;
-        // Collect TTY slot indices for per-slot poll sleep.
         let mut poll_tty_slots = [0u8; 32];
         let mut poll_tty_count = 0usize;
+        let mut pipe_fd_count = 0usize;
+
         for idx in 0..nfds {
             let user_ptr = try_or_err!(
                 ctx,
@@ -89,16 +95,17 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
                 if pfd.revents != 0 {
                     ready_count += 1;
                 }
-                // Track TTY indices for per-slot poll sleep.
                 if let Some(tty_idx) = file_get_tty_index(pid, pfd.fd as c_int) {
                     let s = tty_idx.0;
-                    // Deduplicate: only add if not already present.
                     if poll_tty_count < poll_tty_slots.len()
                         && !poll_tty_slots[..poll_tty_count].contains(&s)
                     {
                         poll_tty_slots[poll_tty_count] = s;
                         poll_tty_count += 1;
                     }
+                } else if pipe_fd_count < pipe_fds.len() {
+                    pipe_fds[pipe_fd_count] = (pfd.fd as i32, pfd.events);
+                    pipe_fd_count += 1;
                 }
             }
             try_or_err!(ctx, copy_to_user(user_ptr, &pfd));
@@ -118,14 +125,25 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             }
         }
 
-        // Per-slot poll sleep instead of global wake.
+        let pipe_registered = if pipe_fd_count > 0 {
+            file_poll_register_pipes(pid, &pipe_fds[..pipe_fd_count])
+        } else {
+            0
+        };
+
         if poll_tty_count > 0 {
             tty::poll_sleep_on(
                 poll_tty_slots[..poll_tty_count].as_ptr(),
                 poll_tty_count,
             );
+        } else if pipe_registered > 0 {
+            slopos_lib::kernel_services::driver_runtime::block_current_task();
         } else {
             tty::poll_sleep();
+        }
+
+        if pipe_registered > 0 {
+            file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
         }
     }
 });

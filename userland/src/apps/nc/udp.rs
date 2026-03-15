@@ -3,27 +3,28 @@ use slopos_abi::syscall::POLLIN;
 use std::time::Instant;
 
 use super::{
-    NcConfig, StdinResult, stdout_write, verbose_addr, verbose_bytes, verbose_msg, verbose_recv,
+    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv, write_stdout,
+    writeln_stdout,
 };
 
 pub(super) fn udp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
-            stdout_write(b"nc: socket creation failed\n");
+            write_stdout(b"nc: socket creation failed\n");
             return 1;
         }
     };
 
     if config.local_port != 0 {
         if let Err(_) = net::bind_any(fd, config.local_port) {
-            stdout_write(b"nc: bind failed (port in use?)\n");
+            write_stdout(b"nc: bind failed (port in use?)\n");
             return 1;
         }
     }
 
     if let Err(_) = net::set_nonblocking(fd) {
-        stdout_write(b"nc: failed to set non-blocking\n");
+        write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
 
@@ -86,10 +87,14 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
                                     }
                                     Err(_) => {
-                                        stdout_write(b"nc: send failed\n");
+                                        write_stdout(b"nc: send failed\n");
                                     }
                                 }
                                 line_pos = 0;
+                            }
+                            StdinResult::Quit => {
+                                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                return 0;
                             }
                             StdinResult::Continue => {}
                         }
@@ -104,9 +109,9 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
             match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
                 Ok(0) => {}
                 Ok(received) => {
-                    stdout_write(&recv_buf[..received]);
+                    write_stdout(&recv_buf[..received]);
                     if recv_buf[received - 1] != b'\n' {
-                        stdout_write(b"\n");
+                        write_stdout(b"\n");
                     }
                     verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
                     last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -118,7 +123,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                stdout_write(b"nc: timeout\n");
+                write_stdout(b"nc: timeout\n");
                 let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
                 return 1;
             }
@@ -130,7 +135,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_DGRAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
-            stdout_write(b"nc: socket creation failed\n");
+            write_stdout(b"nc: socket creation failed\n");
             return 1;
         }
     };
@@ -138,17 +143,20 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     let _ = net::set_reuse_addr(fd);
 
     if let Err(_) = net::bind_any(fd, config.local_port) {
-        stdout_write(b"nc: bind failed (port in use?)\n");
+        write_stdout(b"nc: bind failed (port in use?)\n");
         return 1;
     }
 
     if let Err(_) = net::set_nonblocking(fd) {
-        stdout_write(b"nc: failed to set non-blocking\n");
+        write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
 
     if config.verbose {
-        eprintln!("nc: listening on 0.0.0.0:{} (udp)", config.local_port);
+        writeln_stdout(format_args!(
+            "nc: listening on 0.0.0.0:{} (udp)",
+            config.local_port
+        ));
     }
 
     let mut read_buf = [0u8; 64];
@@ -199,11 +207,15 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
                                                 clock_start.elapsed().as_millis() as u64;
                                         }
                                         Err(_) => {
-                                            stdout_write(b"nc: send failed\n");
+                                            write_stdout(b"nc: send failed\n");
                                         }
                                     }
                                 }
                                 line_pos = 0;
+                            }
+                            StdinResult::Quit => {
+                                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                return 0;
                             }
                             StdinResult::Continue => {}
                         }
@@ -218,9 +230,9 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
             match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
                 Ok(0) => {}
                 Ok(received) => {
-                    stdout_write(&recv_buf[..received]);
+                    write_stdout(&recv_buf[..received]);
                     if recv_buf[received - 1] != b'\n' {
-                        stdout_write(b"\n");
+                        write_stdout(b"\n");
                     }
                     verbose_recv(config, received, src_addr.addr, u16::from_be(src_addr.port));
                     last_peer = SockAddrIn {
@@ -239,7 +251,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                stdout_write(b"nc: timeout\n");
+                write_stdout(b"nc: timeout\n");
                 let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
                 return 1;
             }

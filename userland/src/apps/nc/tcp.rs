@@ -3,20 +3,22 @@ use slopos_abi::syscall::POLLIN;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{NcConfig, StdinResult, stdout_write, verbose_addr, verbose_bytes, verbose_msg};
+use super::{
+    NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, write_stdout, writeln_stdout,
+};
 
 pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
-            stdout_write(b"nc: socket creation failed\n");
+            write_stdout(b"nc: socket creation failed\n");
             return 1;
         }
     };
 
     if config.local_port != 0 {
         if let Err(_) = net::bind_any(fd, config.local_port) {
-            stdout_write(b"nc: bind failed (port in use?)\n");
+            write_stdout(b"nc: bind failed (port in use?)\n");
             return 1;
         }
     }
@@ -36,7 +38,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     );
 
     if let Err(_) = net::connect(fd, &dest) {
-        stdout_write(b"nc: connect failed\n");
+        write_stdout(b"nc: connect failed\n");
         return 1;
     }
 
@@ -49,13 +51,11 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     verbose_msg(config, "protocol: tcp");
 
     if let Err(_) = net::set_nonblocking(fd) {
-        stdout_write(b"nc: failed to set non-blocking\n");
+        write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
 
-    // Separate read buffer for raw chars from terminal.
     let mut read_buf = [0u8; 64];
-    // Line accumulation buffer: chars build up here until Enter sends them.
     let mut line_buf = [0u8; 1024];
     let mut line_pos = 0usize;
     let mut recv_buf = [0u8; 2048];
@@ -79,7 +79,6 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
 
         let _ = fs::poll(&mut pfds, 100);
 
-        // --- stdin (raw char-by-char) ---
         if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
             match fs::read_slice(0, &mut read_buf) {
                 Ok(0) => {
@@ -101,12 +100,16 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
                                     }
                                     Err(_) => {
-                                        stdout_write(b"nc: send failed (broken pipe)\n");
+                                        write_stdout(b"nc: send failed (broken pipe)\n");
                                         let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
                                         return 1;
                                     }
                                 }
                                 line_pos = 0;
+                            }
+                            StdinResult::Quit => {
+                                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                return 0;
                             }
                             StdinResult::Continue => {}
                         }
@@ -116,7 +119,6 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
             }
         }
 
-        // --- socket recv ---
         if (pfds[1].revents & POLLIN) != 0 {
             match net::recv(fd, &mut recv_buf, 0) {
                 Ok(0) => {
@@ -125,9 +127,9 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
                     return 0;
                 }
                 Ok(received) => {
-                    stdout_write(&recv_buf[..received]);
+                    write_stdout(&recv_buf[..received]);
                     if recv_buf[received - 1] != b'\n' {
-                        stdout_write(b"\n");
+                        write_stdout(b"\n");
                     }
                     verbose_bytes(config, "received ", received);
                     last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -145,7 +147,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
         if config.timeout_ms > 0 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                stdout_write(b"nc: timeout\n");
+                write_stdout(b"nc: timeout\n");
                 let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
                 return 1;
             }
@@ -157,7 +159,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     let fd = match net::socket(slopos_abi::net::AF_INET, slopos_abi::net::SOCK_STREAM, 0) {
         Ok(fd) => fd,
         Err(_) => {
-            stdout_write(b"nc: socket creation failed\n");
+            write_stdout(b"nc: socket creation failed\n");
             return 1;
         }
     };
@@ -165,22 +167,25 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     let _ = net::set_reuse_addr(fd);
 
     if let Err(_) = net::bind_any(fd, config.local_port) {
-        stdout_write(b"nc: bind failed (port in use?)\n");
+        write_stdout(b"nc: bind failed (port in use?)\n");
         return 1;
     }
 
     if let Err(_) = net::listen(fd, 1) {
-        stdout_write(b"nc: listen failed\n");
+        write_stdout(b"nc: listen failed\n");
         return 1;
     }
 
     if let Err(_) = net::set_nonblocking(fd) {
-        stdout_write(b"nc: failed to set non-blocking\n");
+        write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
 
     if config.verbose {
-        eprintln!("nc: listening on 0.0.0.0:{} (tcp)", config.local_port);
+        writeln_stdout(format_args!(
+            "nc: listening on 0.0.0.0:{} (tcp)",
+            config.local_port
+        ));
     }
 
     let clock_start = Instant::now();
@@ -192,7 +197,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
             if config.timeout_ms > 0 {
                 let elapsed = accept_start.elapsed().as_millis() as u64;
                 if elapsed >= config.timeout_ms as u64 {
-                    stdout_write(b"nc: timeout waiting for connection\n");
+                    write_stdout(b"nc: timeout waiting for connection\n");
                     let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
                     return 1;
                 }
@@ -212,7 +217,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
         );
 
         if let Err(_) = net::set_nonblocking(client_fd) {
-            stdout_write(b"nc: failed to set non-blocking on client socket\n");
+            write_stdout(b"nc: failed to set non-blocking on client socket\n");
             let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
             if !config.keep_listen {
                 return 1;
@@ -243,7 +248,6 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
 
             let _ = fs::poll(&mut pfds, 100);
 
-            // --- stdin (raw char-by-char) ---
             if !stdin_closed && (pfds[0].revents & POLLIN) != 0 {
                 match fs::read_slice(0, &mut read_buf) {
                     Ok(0) => {
@@ -266,7 +270,7 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
                                                 clock_start.elapsed().as_millis() as u64;
                                         }
                                         Err(_) => {
-                                            stdout_write(b"nc: send failed (broken pipe)\n");
+                                            write_stdout(b"nc: send failed (broken pipe)\n");
                                             let _ = net::shutdown(
                                                 client_fd,
                                                 slopos_abi::syscall::SHUT_RDWR,
@@ -276,6 +280,11 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
                                     }
                                     line_pos = 0;
                                 }
+                                StdinResult::Quit => {
+                                    let _ =
+                                        net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
+                                    break 'client Some(0u8);
+                                }
                                 StdinResult::Continue => {}
                             }
                         }
@@ -284,7 +293,6 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
                 }
             }
 
-            // --- socket recv ---
             if (pfds[1].revents & POLLIN) != 0 {
                 match net::recv(client_fd, &mut recv_buf, 0) {
                     Ok(0) => {
@@ -293,9 +301,9 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
                         break 'client None;
                     }
                     Ok(received) => {
-                        stdout_write(&recv_buf[..received]);
+                        write_stdout(&recv_buf[..received]);
                         if recv_buf[received - 1] != b'\n' {
-                            stdout_write(b"\n");
+                            write_stdout(b"\n");
                         }
                         verbose_bytes(config, "received ", received);
                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -315,14 +323,13 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
             if config.timeout_ms > 0 {
                 let now = clock_start.elapsed().as_millis() as u64;
                 if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
-                    stdout_write(b"nc: timeout\n");
+                    write_stdout(b"nc: timeout\n");
                     let _ = net::shutdown(client_fd, slopos_abi::syscall::SHUT_RDWR);
                     break 'client None;
                 }
             }
         };
 
-        // If the inner loop requested a hard exit (broken pipe), propagate.
         if let Some(code) = client_exit {
             let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
             return code;

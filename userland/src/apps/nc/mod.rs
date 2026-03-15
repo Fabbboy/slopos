@@ -1,6 +1,6 @@
-//! nc — SlopOS network Swiss army knife (UDP + TCP)
+//! nc -- SlopOS network Swiss army knife (UDP + TCP)
 //!
-//! Exercises the full socket lifecycle: socket() → bind()/connect() → send/recv → shutdown().
+//! Exercises the full socket lifecycle: socket() -> bind()/connect() -> send/recv -> shutdown().
 //! Supports UDP client and listen modes with half-duplex I/O, TCP client and
 //! listen (with `-k` keep-listening), and defaults to TCP.
 
@@ -9,7 +9,7 @@ pub mod udp;
 
 use std::net::Ipv4Addr;
 
-use crate::syscall::{fs, process, tty};
+use crate::syscall::{fs, process};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,7 +27,7 @@ enum NcProtocol {
     Tcp,
 }
 
-/// Parsed command-line configuration — built once, never mutated.
+/// Parsed command-line configuration -- built once, never mutated.
 struct NcConfig {
     mode: NcMode,
     protocol: NcProtocol,
@@ -52,18 +52,58 @@ enum NcError {
 // Output helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn stdout_write(mut buf: &[u8]) {
-    while !buf.is_empty() {
-        match fs::write_slice(1, buf) {
+pub(super) fn write_stdout(buf: &[u8]) {
+    let mut remaining = buf;
+    while !remaining.is_empty() {
+        match fs::write_slice(1, remaining) {
             Ok(0) => break,
-            Ok(written) => buf = &buf[written..],
-            Err(_) => {
-                let _ = tty::write(buf);
-                break;
-            }
+            Ok(n) => remaining = &remaining[n..],
+            Err(_) => break,
         }
     }
 }
+
+/// Formatted write to stdout with newline, via raw fd 1 syscall.
+/// Avoids std::io::Stdout buffering which doesn't flush through pipes.
+pub(super) fn writeln_stdout(args: core::fmt::Arguments<'_>) {
+    use core::fmt::Write;
+    let mut buf = WriteBuf::new();
+    let _ = write!(buf, "{}\n", args);
+    write_stdout(buf.as_bytes());
+}
+
+struct WriteBuf {
+    buf: [u8; 256],
+    pos: usize,
+}
+
+impl WriteBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0u8; 256],
+            pos: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.pos]
+    }
+}
+
+impl core::fmt::Write for WriteBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let avail = self.buf.len() - self.pos;
+        let n = bytes.len().min(avail);
+        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        self.pos += n;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stdin processing (raw mode)
+// ---------------------------------------------------------------------------
 
 /// Result of processing a single raw stdin character.
 pub(super) enum StdinResult {
@@ -71,25 +111,36 @@ pub(super) enum StdinResult {
     Continue,
     /// Line is ready: send `line_buf[..len]`, then reset `line_pos` to 0.
     SendLine(usize),
+    /// User requested exit (Ctrl+C or Ctrl+D).
+    Quit,
 }
 
-/// Process one raw stdin byte: echo printable chars, handle backspace, detect Enter.
-/// Caller is responsible for performing the actual network send when `SendLine` is returned.
+/// Process one raw stdin byte: echo printable chars, handle backspace, detect
+/// Enter and Ctrl+C/D.  Caller is responsible for performing the actual network
+/// send when `SendLine` is returned and cleanup on `Quit`.
 pub(super) fn process_raw_stdin_char(
     c: u8,
     line_buf: &mut [u8; 1024],
     line_pos: &mut usize,
 ) -> StdinResult {
     match c {
+        // Ctrl+C / Ctrl+D -> quit
+        0x03 => {
+            write_stdout(b"^C\n");
+            StdinResult::Quit
+        }
+        0x04 => StdinResult::Quit,
+        // Backspace / DEL
         0x08 | 0x7F => {
             if *line_pos > 0 {
                 *line_pos -= 1;
-                stdout_write(b"\x08 \x08");
+                write_stdout(b"\x08 \x08");
             }
             StdinResult::Continue
         }
+        // Enter
         b'\n' | b'\r' => {
-            stdout_write(b"\n");
+            write_stdout(b"\n");
             if *line_pos > 0 {
                 let send_len = if *line_pos < line_buf.len() {
                     line_buf[*line_pos] = b'\n';
@@ -102,11 +153,12 @@ pub(super) fn process_raw_stdin_char(
                 StdinResult::Continue
             }
         }
+        // Printable ASCII
         0x20..=0x7E => {
             if *line_pos < line_buf.len() - 1 {
                 line_buf[*line_pos] = c;
                 *line_pos += 1;
-                stdout_write(&[c]);
+                write_stdout(&[c]);
             }
             StdinResult::Continue
         }
@@ -114,42 +166,47 @@ pub(super) fn process_raw_stdin_char(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Verbose output helpers (stdout so the shell can capture them)
+// ---------------------------------------------------------------------------
+
 /// Print a verbose message: `nc: <msg>\n`.  Only emits output when verbose is on.
 fn verbose_msg(config: &NcConfig, msg: &str) {
     if !config.verbose {
         return;
     }
-    eprintln!("nc: {}", msg);
+    writeln_stdout(format_args!("nc: {}", msg));
 }
 
-/// Print verbose with IP:port: `nc: <prefix> <ip>:<port>\n`
 fn verbose_addr(config: &NcConfig, prefix: &str, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    eprintln!("nc: {}{}:{}", prefix, Ipv4Addr::from(ip), port);
+    writeln_stdout(format_args!(
+        "nc: {}{}:{}",
+        prefix,
+        Ipv4Addr::from(ip),
+        port
+    ));
 }
 
-/// Print verbose with byte count: `nc: <prefix> <count> bytes\n`
 fn verbose_bytes(config: &NcConfig, prefix: &str, count: usize) {
     if !config.verbose {
         return;
     }
-    eprintln!("nc: {}{} bytes", prefix, count);
+    writeln_stdout(format_args!("nc: {}{} bytes", prefix, count));
 }
 
-/// Print verbose with byte count and source addr:
-/// `nc: received <N> bytes from <ip>:<port>\n`
 fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
     if !config.verbose {
         return;
     }
-    eprintln!(
+    writeln_stdout(format_args!(
         "nc: received {} bytes from {}:{}",
         count,
         Ipv4Addr::from(ip),
         port
-    );
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -157,16 +214,16 @@ fn verbose_recv(config: &NcConfig, count: usize, ip: [u8; 4], port: u16) {
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    stdout_write(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
-    stdout_write(b"\n");
-    stdout_write(b"  -u        UDP mode (default is TCP)\n");
-    stdout_write(b"  -l        Listen mode (bind and accept/receive)\n");
-    stdout_write(b"  -v        Verbose output\n");
-    stdout_write(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
-    stdout_write(b"  -p port   Source port (client mode)\n");
-    stdout_write(b"  -w secs   Timeout in seconds\n");
-    stdout_write(b"  host      Remote hostname or IP (client mode)\n");
-    stdout_write(b"  port      Remote port (client) or listen port (listen mode)\n");
+    write_stdout(b"usage: nc [-ulvk] [-p port] [-w timeout] [host] port\n");
+    write_stdout(b"\n");
+    write_stdout(b"  -u        UDP mode (default is TCP)\n");
+    write_stdout(b"  -l        Listen mode (bind and accept/receive)\n");
+    write_stdout(b"  -v        Verbose output\n");
+    write_stdout(b"  -k        Keep listening after client disconnects (TCP -l only)\n");
+    write_stdout(b"  -p port   Source port (client mode)\n");
+    write_stdout(b"  -w secs   Timeout in seconds\n");
+    write_stdout(b"  host      Remote hostname or IP (client mode)\n");
+    write_stdout(b"  port      Remote port (client) or listen port (listen mode)\n");
 }
 
 fn print_error(err: NcError) {
@@ -177,7 +234,7 @@ fn print_error(err: NcError) {
         NcError::ResolveFailed => "nc: cannot resolve hostname",
         NcError::UnknownFlag => "nc: unknown flag",
     };
-    eprintln!("{}", msg);
+    writeln_stdout(format_args!("{}", msg));
 }
 
 fn parse_port(s: &str) -> Option<u16> {
@@ -210,8 +267,6 @@ fn resolve_host(host: &[u8]) -> Result<[u8; 4], NcError> {
 /// Core argument parsing logic operating on clean Rust slices.
 ///
 /// The first element (`args[0]`) is the program name and is skipped.
-/// This function is separated from the raw-pointer entry so it can be
-/// tested without constructing C-style argv arrays.
 fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     let mut udp = false;
     let mut listen = false;
@@ -232,7 +287,7 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
         }
 
         if arg[0] == b'-' {
-            // Flag processing — may contain bundled flags like -ulvk
+            // Flag processing -- may contain bundled flags like -ulvk
             if arg == b"-h" || arg == b"--help" {
                 print_usage();
                 std::process::exit(0);
@@ -353,73 +408,12 @@ fn parse_args_from_slices(args: &[&[u8]]) -> Result<NcConfig, NcError> {
     }
 }
 
-/// Parse argv into an NcConfig.
-///
-/// Converts raw C-style argv pointers from the kernel into Rust slices,
-/// then delegates to [`parse_args_from_slices`] for the actual parsing logic.
-fn parse_args(argc: usize, argv: *const *const u8) -> Result<NcConfig, NcError> {
-    // Stack-allocated scratch space — 16 args is more than enough for nc.
-    let mut args: [&[u8]; 16] = [&[]; 16];
-    let count = if argc > 16 { 16 } else { argc };
-
-    for idx in 0..count {
-        let ptr = unsafe { *argv.add(idx) };
-        if ptr.is_null() {
-            args[idx] = &[];
-        } else {
-            let len = crate::runtime::u_strlen(ptr);
-            args[idx] = unsafe { core::slice::from_raw_parts(ptr, len) };
-        }
-    }
-
-    parse_args_from_slices(&args[..count])
-}
-
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Entry point when launched with argc/argv extracted from the user stack.
-/// This is the primary entry for fork+execve launches from the shell.
-pub fn nc_main_args(argc: usize, argv: *const *const u8) -> ! {
-    if argc <= 1 || argv.is_null() {
-        print_usage();
-        std::process::exit(1);
-    }
-
-    let config = match parse_args(argc, argv) {
-        Ok(c) => c,
-        Err(e) => {
-            print_error(e);
-            print_usage();
-            std::process::exit(1);
-        }
-    };
-
-    process::ignore_signal(slopos_abi::signal::SIGPIPE);
-    let saved_termios = fs::tcgetattr(0).ok();
-    if let Some(ref t) = saved_termios {
-        let mut raw = *t;
-        raw.c_lflag &=
-            !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON | slopos_abi::syscall::ISIG);
-        let _ = fs::tcsetattr(0, &raw);
-    }
-
-    let exit_code = match (config.protocol, config.mode) {
-        (NcProtocol::Udp, NcMode::Client) => udp::udp_client(&config),
-        (NcProtocol::Udp, NcMode::Listen) => udp::udp_listen(&config),
-        (NcProtocol::Tcp, NcMode::Client) => tcp::tcp_client(&config),
-        (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
-    };
-
-    if let Some(ref t) = saved_termios {
-        let _ = fs::tcsetattr(0, t);
-    }
-
-    std::process::exit(exit_code as i32);
-}
-
-pub fn nc_main_std(args: Vec<String>) -> ! {
+/// Main entry point for nc, called from the binary crate.
+pub fn nc_main(args: Vec<String>) -> ! {
     if args.len() <= 1 {
         print_usage();
         std::process::exit(1);
@@ -438,6 +432,7 @@ pub fn nc_main_std(args: Vec<String>) -> ! {
     };
 
     process::ignore_signal(slopos_abi::signal::SIGPIPE);
+
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
@@ -453,6 +448,7 @@ pub fn nc_main_std(args: Vec<String>) -> ! {
         (NcProtocol::Tcp, NcMode::Listen) => tcp::tcp_listen(&config),
     };
 
+    // Restore terminal state before exiting.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(0, t);
     }
@@ -461,7 +457,7 @@ pub fn nc_main_std(args: Vec<String>) -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (argument parsing & helpers — no kernel needed)
+// Tests (argument parsing & helpers -- no kernel needed)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -469,7 +465,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Helper function tests (carried forward)
+    // Helper function tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -515,15 +511,9 @@ mod tests {
     // -----------------------------------------------------------------------
     // Argument parsing tests
     // -----------------------------------------------------------------------
-    //
-    // These test `parse_args_from_slices` which takes clean `&[&[u8]]` slices
-    // instead of raw C pointers, making them unit-testable.  The tests serve
-    // as regression documentation; they can be extracted to a host-side test
-    // crate if needed (the no_std kernel target cannot run them directly).
 
     #[test]
     fn test_tcp_is_default_protocol() {
-        // `nc host port` without -u should default to TCP
         let args: &[&[u8]] = &[b"nc", b"10.0.2.2", b"80"];
         let config = parse_args_from_slices(args).unwrap();
         assert_eq!(config.protocol, NcProtocol::Tcp);
@@ -612,7 +602,6 @@ mod tests {
 
     #[test]
     fn test_combined_flags_separate() {
-        // -v -u -l -k -p 1234 -w 10 8080
         let args: &[&[u8]] = &[
             b"nc", b"-v", b"-u", b"-l", b"-k", b"-p", b"1234", b"-w", b"10", b"8080",
         ];
@@ -627,7 +616,6 @@ mod tests {
 
     #[test]
     fn test_error_missing_host() {
-        // Client mode with no positional args
         let args: &[&[u8]] = &[b"nc"];
         let err = parse_args_from_slices(args).unwrap_err();
         assert_eq!(err, NcError::MissingHost);
@@ -635,7 +623,6 @@ mod tests {
 
     #[test]
     fn test_error_missing_port_client() {
-        // Client mode with host but no port
         let args: &[&[u8]] = &[b"nc", b"10.0.2.2"];
         let err = parse_args_from_slices(args).unwrap_err();
         assert_eq!(err, NcError::MissingPort);
@@ -643,7 +630,6 @@ mod tests {
 
     #[test]
     fn test_error_missing_port_listen() {
-        // Listen mode with no port
         let args: &[&[u8]] = &[b"nc", b"-l"];
         let err = parse_args_from_slices(args).unwrap_err();
         assert_eq!(err, NcError::MissingPort);
@@ -704,7 +690,6 @@ mod tests {
     fn test_missing_w_value() {
         let args: &[&[u8]] = &[b"nc", b"-w"];
         let err = parse_args_from_slices(args).unwrap_err();
-        // Reuses InvalidPort for missing -w value
         assert_eq!(err, NcError::InvalidPort);
     }
 }

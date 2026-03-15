@@ -71,6 +71,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --target "$USERLAND_TARGET" \
         --package slopos-userland \
         --bin fork_test \
+        --bin io_capture_test \
         --features testbins \
         --no-default-features \
         --release
@@ -78,6 +79,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/fork_test" ]; then
         cp "$RELEASE_DIR/fork_test" "$BUILD_DIR/fork_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/io_capture_test" ]; then
+        cp "$RELEASE_DIR/io_capture_test" "$BUILD_DIR/io_capture_test.elf"
+    fi
 
-    echo "Userland test binary built: $BUILD_DIR/fork_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf"
 fi

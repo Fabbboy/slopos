@@ -95,6 +95,15 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "",
         gui: false,
     },
+    #[cfg(feature = "testbins")]
+    ProgramSpec {
+        name: "io_capture_test",
+        path: "/bin/io_capture_test",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "",
+        gui: false,
+    },
 ];
 
 fn trim_nul_bytes(text: &str) -> &str {

@@ -3,7 +3,7 @@ use core::ptr;
 
 use crate::program_registry;
 use crate::runtime;
-use crate::syscall::{POLLHUP, POLLIN, UserFsStat, UserPollFd, core as sys_core, fs, process};
+use crate::syscall::{POLLIN, UserFsStat, UserPollFd, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_WRONLY};
 
 use super::SyncUnsafeCell;
@@ -467,41 +467,34 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
     enter_foreground(pid);
 
     // Stream child stdout to the shell display in real-time.
-    // We poll the pipe with infinite timeout (-1): the kernel blocks the
-    // task until POLLIN (child wrote data) or POLLHUP (child exited and
-    // pipe write-end closed).  This is truly event-driven — zero CPU
-    // while the child is idle, instant wake on output.  Same pattern
-    // Linux terminal emulators use on PTY master fds.
+    // The pipe read-end MUST be non-blocking so the inner drain loop
+    // returns EAGAIN when all available data is consumed instead of
+    // blocking forever (which would hang for long-running children like nc).
     let status = if capture {
+        let _ = crate::syscall::net::set_nonblocking(pipe_fds[0]);
         let mut buf = [0u8; 512];
         let exit_status;
         loop {
-            // Poll the read-end of the pipe for available data.
             let mut pfds = [UserPollFd {
                 fd: pipe_fds[0],
                 events: POLLIN,
                 revents: 0,
             }];
-            let _ = fs::poll(&mut pfds, -1); // block until data or hangup
+            let _ = fs::poll(&mut pfds, 50);
 
-            // Drain all currently available data from the pipe.
-            if pfds[0].revents & (POLLIN | POLLHUP) != 0 {
-                loop {
-                    match fs::read_slice(pipe_fds[0], &mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            shell_write(&buf[..n]);
-                        }
-                        Err(_) => break,
+            loop {
+                match fs::read_slice(pipe_fds[0], &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        shell_write(&buf[..n]);
                     }
+                    Err(_) => break,
                 }
             }
 
-            // Non-blocking check: has the child exited?
             if let Some(st) = process::waitpid_nohang(pid) {
-                // Final drain: the child is dead so the pipe writer-count has
-                // dropped to zero.  Any remaining buffered data can be read
-                // without risk of blocking.
+                // Final drain — child is dead, pipe write-end closed,
+                // remaining data can be read without blocking.
                 loop {
                     match fs::read_slice(pipe_fds[0], &mut buf) {
                         Ok(0) => break,

@@ -777,13 +777,9 @@ impl LineDisc {
             return false;
         }
 
-        // Non-canonical mode: batch wakeups.
-        if self.cooked.count() == 0 {
-            return false;
-        }
-
-        let near_full = self.cooked.count() >= self.cooked.capacity().saturating_sub(64);
-        if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
+        // Non-canonical mode: wake when any data is available.
+        // POSIX VMIN=1 semantics — each byte satisfies the read.
+        if self.cooked.count() > 0 {
             self.wake_chars_pending = 0;
             return true;
         }
@@ -2135,7 +2131,7 @@ impl LdiscOps for RawDisc {
             let _ = self.input_char(event);
         }
         let mut result = BatchResult::new();
-        result.should_wake = self.should_wake_reader();
+        result.should_wake = !self.buf.is_empty();
         result.throttle_check = true;
         result
     }

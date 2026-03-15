@@ -51,6 +51,9 @@ path = "src/bin/nc.rs"
 [[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"
+[[bin]]
+name = "io_capture_test"
+path = "src/bin/tests/io_capture_test.rs"
 
 [features]
 default = []

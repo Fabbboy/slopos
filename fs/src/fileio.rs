@@ -403,6 +403,124 @@ fn pipe_wake_all_writers(slot: &mut PipeSlot) {
     }
 }
 
+fn pipe_wait_queue_remove(
+    waiters: &mut [DriverTaskHandle; PIPE_MAX_WAITERS],
+    count: &mut usize,
+    task: DriverTaskHandle,
+) {
+    if task.is_null() {
+        return;
+    }
+    for i in 0..*count {
+        if waiters[i] == task {
+            for j in i + 1..*count {
+                waiters[j - 1] = waiters[j];
+            }
+            *count -= 1;
+            waiters[*count] = core::ptr::null_mut();
+            return;
+        }
+    }
+}
+
+/// Register the current task on pipe reader/writer wait queues for all pipe
+/// fds in a poll set.  Returns the number of registrations made.  The caller
+/// MUST call `file_poll_unregister_pipes` after waking to clean up.
+pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
+    let task = current_task();
+    if task.is_null() {
+        return 0;
+    }
+    let mut registered = 0usize;
+    let mut pipe_state = PIPE_STATE.lock();
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return;
+        };
+        if !table.in_use {
+            return;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        for &(fd, events) in fds {
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                continue;
+            };
+            if desc.pipe_id == INVALID_PIPE_ID {
+                continue;
+            }
+            let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
+                continue;
+            };
+            if desc.pipe_read_end && (events & POLLIN) != 0 {
+                if pipe_wait_queue_push(
+                    &mut slot.reader_waiters,
+                    &mut slot.reader_waiter_count,
+                    task,
+                ) {
+                    registered += 1;
+                }
+            }
+            if desc.pipe_write_end && (events & POLLOUT) != 0 {
+                if pipe_wait_queue_push(
+                    &mut slot.writer_waiters,
+                    &mut slot.writer_waiter_count,
+                    task,
+                ) {
+                    registered += 1;
+                }
+            }
+        }
+        drop(guard);
+    });
+    registered
+}
+
+/// Remove the current task from all pipe wait queues it was registered on.
+pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
+    let task = current_task();
+    if task.is_null() {
+        return;
+    }
+    let mut pipe_state = PIPE_STATE.lock();
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return;
+        };
+        if !table.in_use {
+            return;
+        }
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        for &(fd, events) in fds {
+            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+                continue;
+            };
+            if desc.pipe_id == INVALID_PIPE_ID {
+                continue;
+            }
+            let Some(slot) = pipe_slot_mut(&mut pipe_state, desc.pipe_id) else {
+                continue;
+            };
+            if desc.pipe_read_end && (events & POLLIN) != 0 {
+                pipe_wait_queue_remove(
+                    &mut slot.reader_waiters,
+                    &mut slot.reader_waiter_count,
+                    task,
+                );
+            }
+            if desc.pipe_write_end && (events & POLLOUT) != 0 {
+                pipe_wait_queue_remove(
+                    &mut slot.writer_waiters,
+                    &mut slot.writer_waiter_count,
+                    task,
+                );
+            }
+        }
+        drop(guard);
+    });
+}
+
 fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {
     let copy = *src;
     if let Some(idx) = copy.tty_index {
