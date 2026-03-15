@@ -34,6 +34,7 @@ impl SyscallError {
     pub const EROFS: Self = Self(30);
     pub const EPIPE: Self = Self(32);
     pub const ENOSYS: Self = Self(38);
+    pub const ETIMEDOUT: Self = Self(110);
     pub const ECONNREFUSED: Self = Self(111);
 
     #[inline]
@@ -76,6 +77,7 @@ impl SyscallError {
             30 => "Read-only file system",
             32 => "Broken pipe",
             38 => "Function not implemented",
+            110 => "Connection timed out",
             111 => "Connection refused",
             _ => "Unknown error",
         }

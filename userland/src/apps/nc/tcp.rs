@@ -37,8 +37,10 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
         config.remote_port,
     );
 
-    if let Err(_) = net::connect(fd, &dest) {
-        write_stdout(b"nc: connect failed\n");
+    if let Err(e) = net::connect(fd, &dest) {
+        write_stdout(b"nc: connect failed: ");
+        write_stdout(e.as_str().as_bytes());
+        write_stdout(b"\n");
         return 1;
     }
 

@@ -436,8 +436,7 @@ pub fn nc_main(args: Vec<String>) -> ! {
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
-        raw.c_lflag &=
-            !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON | slopos_abi::syscall::ISIG);
+        raw.c_lflag &= !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON);
         let _ = fs::tcsetattr(0, &raw);
     }
 
