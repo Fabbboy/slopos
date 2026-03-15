@@ -6,18 +6,14 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 
 | Document | Description |
 |----------|-------------|
-| [SCHEDULER_FULL_SYMMETRY.md](./SCHEDULER_FULL_SYMMETRY.md) | Optional scheduler cleanup - eliminate remaining BSP/AP asymmetries |
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
-| [COMPOSITOR_RENDERING_GOLD_STANDARD_PLAN.md](./COMPOSITOR_RENDERING_GOLD_STANDARD_PLAN.md) | Deep compositor analysis and lean roadmap for artifact-free high-performance rendering |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
-| [COMPOSITOR_HOVER_REGISTRY.md](./COMPOSITOR_HOVER_REGISTRY.md) | Replace ad-hoc hover tracking with a single reactive HoverRegion registry |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
-| [CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md](./CRITICAL_KERNEL_POSIX_BLOCKERS_PLAN.md) | Detailed execution playbook with dependencies, tests, rollback strategy, phase gates, and task checklists |
 | [LEGACY_MODERNIZATION_PLAN.md](./LEGACY_MODERNIZATION_PLAN.md) | 8-phase roadmap to replace all legacy hardware (PIT, FXSAVE, port-I/O PCI, naive spinlocks) with modern equivalents (HPET, XSAVE, ECAM, ticket locks, MSI, TCP, PCID) — 109 tasks |
-| [ABI_SCOPE_CLEANUP.md](./ABI_SCOPE_CLEANUP.md) | Extract `gfx` crate from `abi` — move rendering algorithms out of the types crate |
 | [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |
-| [USERLAND_STD_MIGRATION_PLAN.md](./USERLAND_STD_MIGRATION_PLAN.md) | 7-phase plan to migrate all userland code from `no_std`-era patterns to idiomatic Rust `std` — entry points, I/O, formatting, file ops, process management, app rewrites — 89 tasks |
+| [NETCAT_PLAN.md](./NETCAT_PLAN.md) | nc (netcat) implementation plan |
+| [PHASE8_UNSAFE_INVARIANT_REGISTRY.md](./PHASE8_UNSAFE_INVARIANT_REGISTRY.md) | Unsafe invariant registry for legacy modernization Phase 8 |
 
 
 ---
