@@ -1256,20 +1256,6 @@ impl VConsoleState {
         }
     }
 
-    pub(crate) fn clear_row(&mut self, row: u16) {
-        let row_usize = row as usize;
-        if row_usize >= self.rows as usize {
-            return;
-        }
-        let cols = self.cols as usize;
-        for c in 0..cols {
-            self.cells.set(row_usize, c, Cell::blank());
-        }
-        for col in 0..cols {
-            self.render_cell(row, col as u16);
-        }
-    }
-
     pub(crate) fn recalculate_dimensions(&mut self) {
         if let Some(fb) = self.fb {
             let char_w = FONT_CHAR_WIDTH as u32;
@@ -1365,9 +1351,7 @@ pub fn register_framebuffer(
             bytes_per_pixel,
         });
         state.recalculate_dimensions();
-        for row in 0..state.rows {
-            state.clear_row(row);
-        }
+        // Don't clear_row() — would paint over the active splash screen.
         state.cursor_row = 0;
         state.cursor_col = 0;
         state.cols as usize
