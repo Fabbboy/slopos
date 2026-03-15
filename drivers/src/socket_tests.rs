@@ -15,11 +15,19 @@ fn connect_and_establish() -> Result<(u32, usize), &'static str> {
     if sock < 0 {
         return Err("socket_create failed");
     }
-    if socket_connect(sock as u32, [10, 0, 0, 2], 80) < 0 {
+    let sock = sock as u32;
+
+    // Use non-blocking connect so the test doesn't block waiting for a
+    // SYN-ACK that can only arrive from manual injection below.
+    socket_set_nonblocking(sock, true);
+
+    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    // Non-blocking connect returns EINPROGRESS (-115) or 0.
+    if rc < 0 && rc != -115 {
         return Err("socket_connect failed");
     }
 
-    let Some(tcp_idx) = socket_lookup_tcp_idx(sock as u32) else {
+    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
         return Err("no tcp idx");
     };
     let Some(conn) = tcp::tcp_get_connection(tcp_idx) else {
@@ -37,7 +45,7 @@ fn connect_and_establish() -> Result<(u32, usize), &'static str> {
         checksum: 0,
         urgent_ptr: 0,
     };
-    let _ = tcp::tcp_input(
+    let result = tcp::tcp_input(
         conn.tuple.remote_ip,
         conn.tuple.local_ip,
         &syn_ack,
@@ -45,8 +53,9 @@ fn connect_and_establish() -> Result<(u32, usize), &'static str> {
         &[],
         0,
     );
+    socket_notify_tcp_activity(&result);
 
-    Ok((sock as u32, tcp_idx))
+    Ok((sock, tcp_idx))
 }
 
 pub fn test_socket_create_tcp() -> TestResult {
@@ -159,7 +168,12 @@ pub fn test_socket_listen_on_connected() -> TestResult {
 pub fn test_socket_connect_creates_tcp_connection() -> TestResult {
     reset();
     let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
-    assert_eq_test!(socket_connect(sock, [10, 0, 0, 2], 80), 0);
+    socket_set_nonblocking(sock, true);
+    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    assert_test!(
+        rc == 0 || rc == -115,
+        "non-blocking connect should succeed or EINPROGRESS"
+    );
     let tcp_idx = socket_lookup_tcp_idx(sock).unwrap();
     assert_eq_test!(tcp::tcp_get_state(tcp_idx), Some(TcpState::SynSent));
     pass!()
@@ -177,7 +191,9 @@ pub fn test_socket_connect_invalid_socket() -> TestResult {
 pub fn test_socket_connect_already_connected() -> TestResult {
     reset();
     let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
-    assert_eq_test!(socket_connect(sock, [10, 0, 0, 2], 80), 0);
+    socket_set_nonblocking(sock, true);
+    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    assert_test!(rc == 0 || rc == -115, "first non-blocking connect");
     assert_test!(
         socket_connect(sock, [10, 0, 0, 2], 80) < 0,
         "double connect fails"
@@ -656,6 +672,135 @@ pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
     pass!()
 }
 
+/// Regression test: reproduces the "nc: send failed (broken pipe)" scenario.
+///
+/// The old `socket_connect()` returned immediately without waiting for the
+/// TCP 3WHS. A subsequent `socket_send()` found the socket still in
+/// `Connecting` state and returned `ENOTCONN` — reported as "broken pipe".
+///
+/// This test uses non-blocking connect + manual 3WHS injection to verify
+/// that after establishment, send works correctly.
+pub fn test_tcp_send_after_blocking_connect() -> TestResult {
+    reset();
+
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    assert_test!(sock >= 0, "socket_create succeeds");
+    let sock = sock as u32;
+
+    socket_set_nonblocking(sock, true);
+    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    assert_test!(rc == 0 || rc == -115, "non-blocking connect");
+
+    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
+        return fail!("no tcp connection after connect");
+    };
+    let Some(conn) = tcp::tcp_get_connection(tcp_idx) else {
+        return fail!("cannot snapshot tcp connection");
+    };
+    assert_eq_test!(conn.state, TcpState::SynSent, "should be in SynSent");
+
+    let syn_ack = TcpHeader {
+        src_port: conn.tuple.remote_port,
+        dst_port: conn.tuple.local_port,
+        seq_num: 5000,
+        ack_num: conn.iss.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let result = tcp::tcp_input(
+        conn.tuple.remote_ip,
+        conn.tuple.local_ip,
+        &syn_ack,
+        &[],
+        &[],
+        0,
+    );
+    socket_notify_tcp_activity(&result);
+
+    assert_eq_test!(
+        tcp::tcp_get_state(tcp_idx),
+        Some(TcpState::Established),
+        "TCP should be Established after SYN-ACK"
+    );
+
+    // Socket state should now be Connected (via sync_socket_state or
+    // notify path) — this is the state nc expects before send.
+    let payload = b"Hello World\n";
+    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    assert_test!(
+        n > 0,
+        "send after connect + 3WHS must succeed (was: broken pipe)"
+    );
+    assert_eq_test!(n as usize, payload.len(), "all bytes should be accepted");
+
+    pass!()
+}
+
+/// Regression test: verify that send on a TCP socket that has not completed
+/// the 3WHS returns an error (ENOTCONN), not EPIPE.
+pub fn test_tcp_send_before_handshake_complete() -> TestResult {
+    reset();
+
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    assert_test!(sock >= 0, "socket_create succeeds");
+    let sock = sock as u32;
+
+    // Force non-blocking so connect returns immediately.
+    socket_set_nonblocking(sock, true);
+
+    // Connect sends SYN but returns immediately (non-blocking).
+    let rc = socket_connect(sock, [10, 0, 0, 2], 80);
+    // Non-blocking connect should return 0 (SYN sent) or EINPROGRESS.
+    assert_test!(rc == 0 || rc == -115, "non-blocking connect");
+
+    // Verify TCP is in SynSent (handshake NOT complete).
+    let Some(tcp_idx) = socket_lookup_tcp_idx(sock) else {
+        return fail!("no tcp idx after connect");
+    };
+    assert_eq_test!(
+        tcp::tcp_get_state(tcp_idx),
+        Some(TcpState::SynSent),
+        "TCP should be SynSent"
+    );
+
+    // Try to send data BEFORE the 3WHS completes.
+    let payload = b"Hello World\n";
+    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    assert_test!(n < 0, "send before 3WHS completion must fail (ENOTCONN)");
+
+    // Now complete the handshake.
+    let conn = tcp::tcp_get_connection(tcp_idx).unwrap();
+    let syn_ack = TcpHeader {
+        src_port: conn.tuple.remote_port,
+        dst_port: conn.tuple.local_port,
+        seq_num: 7000,
+        ack_num: conn.iss.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let result = tcp::tcp_input(
+        conn.tuple.remote_ip,
+        conn.tuple.local_ip,
+        &syn_ack,
+        &[],
+        &[],
+        0,
+    );
+    socket_notify_tcp_activity(&result);
+
+    // After 3WHS, send should now succeed.
+    let n2 = socket_send(sock, payload.as_ptr(), payload.len());
+    assert_test!(n2 > 0, "send after 3WHS completion must succeed");
+
+    pass!()
+}
+
 pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
     reset();
     let listen_sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
@@ -764,6 +909,8 @@ slopos_lib::define_test_suite!(
         test_tcp_shutdown_wr_transitions_to_fin_wait1,
         test_tcp_shutdown_wr_recv_still_works,
         test_tcp_send_after_shutdown_wr_fails,
+        test_tcp_send_after_blocking_connect,
+        test_tcp_send_before_handshake_complete,
         test_tcp_listen_accept_incoming_syn,
     ]
 );

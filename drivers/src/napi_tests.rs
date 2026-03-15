@@ -21,7 +21,9 @@ fn connect_and_establish() -> Option<(u32, usize)> {
     if sock < 0 {
         return None;
     }
-    if socket::socket_connect(sock as u32, [10, 0, 0, 2], 80) < 0 {
+    socket::socket_set_nonblocking(sock as u32, true);
+    let rc = socket::socket_connect(sock as u32, [10, 0, 0, 2], 80);
+    if rc < 0 && rc != -115 {
         return None;
     }
     let tcp_idx = socket::socket_lookup_tcp_idx(sock as u32)?;

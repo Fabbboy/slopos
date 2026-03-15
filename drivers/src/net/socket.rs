@@ -639,8 +639,9 @@ use core::cmp;
 use slopos_abi::net::{AF_INET, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ,
-    ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN,
-    ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, POLLERR, POLLHUP, POLLIN, POLLOUT,
+    ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENETUNREACH,
+    ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT,
+    ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_lib::{IrqMutex, WaitQueue};
 
@@ -1486,53 +1487,111 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 }
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx as usize) else {
-        return errno_i32(ERRNO_ENOTSOCK);
-    };
+    let (tcp_idx, nonblocking, send_hint) = {
+        let mut table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get_mut(sock_idx as usize) else {
+            return errno_i32(ERRNO_ENOTSOCK);
+        };
 
-    match &mut sock.inner {
-        SocketInner::Tcp(tcp_inner) => {
-            if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
-                return errno_i32(ERRNO_EISCONN);
-            }
-
-            let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
-                crate::net::netstack::NET_STACK
-                    .first_ipv4()
-                    .map(|ip| ip.0)
-                    .unwrap_or([0; 4])
-            });
-
-            match tcp::tcp_connect(local_ip, addr, port) {
-                Ok((tcp_idx, syn)) => {
-                    let send_rc = socket_send_tcp_segment(&syn, &[]);
-                    if send_rc != 0 {
-                        let _ = tcp::tcp_abort(tcp_idx);
-                        return send_rc;
-                    }
-
-                    sock.local_addr = Some(SockAddr::new(
-                        Ipv4Addr(syn.tuple.local_ip),
-                        Port(syn.tuple.local_port),
-                    ));
-                    sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
-                    tcp_inner.conn_id = Some(tcp_idx as u32);
-                    sock.state = SocketState::Connecting;
-
-                    // Set bidirectional socket↔connection link.
-                    tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
-                    0
+        match &mut sock.inner {
+            SocketInner::Tcp(tcp_inner) => {
+                if matches!(sock.state, SocketState::Connected | SocketState::Connecting) {
+                    return errno_i32(ERRNO_EISCONN);
                 }
-                Err(e) => map_tcp_err(e),
+
+                let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
+                    crate::net::netstack::NET_STACK
+                        .first_ipv4()
+                        .map(|ip| ip.0)
+                        .unwrap_or([0; 4])
+                });
+
+                match tcp::tcp_connect(local_ip, addr, port) {
+                    Ok((tcp_idx, syn)) => {
+                        let send_rc = socket_send_tcp_segment(&syn, &[]);
+                        if send_rc != 0 {
+                            let _ = tcp::tcp_abort(tcp_idx);
+                            return send_rc;
+                        }
+
+                        sock.local_addr = Some(SockAddr::new(
+                            Ipv4Addr(syn.tuple.local_ip),
+                            Port(syn.tuple.local_port),
+                        ));
+                        sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
+                        tcp_inner.conn_id = Some(tcp_idx as u32);
+                        sock.state = SocketState::Connecting;
+
+                        tcp::tcp_set_socket_idx(tcp_idx, Some(sock_idx as usize));
+
+                        let nb = sock.is_nonblocking();
+                        let hint = sock.send_wq_idx;
+                        (tcp_idx, nb, hint)
+                    }
+                    Err(e) => return map_tcp_err(e),
+                }
             }
+            SocketInner::Udp(_) => {
+                sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
+                sock.state = SocketState::Connected;
+                return 0;
+            }
+            SocketInner::Raw(_) => return errno_i32(ERRNO_EPROTONOSUPPORT),
         }
-        SocketInner::Udp(_) => {
-            sock.remote_addr = Some(SockAddr::new(Ipv4Addr(addr), Port(port)));
-            sock.state = SocketState::Connected;
+    };
+    // Table lock released — SYN-ACK processing can now proceed.
+
+    if nonblocking {
+        return errno_i32(ERRNO_EINPROGRESS);
+    }
+
+    // Blocking connect: wait for the TCP three-way handshake to complete.
+    // The ingress path calls tcp_input() → socket_notify_tcp_activity()
+    // which wakes SEND_WQS when the state changes.
+    let wait_ok = SEND_WQS[wq_slot(send_hint)].wait_event_timeout(
+        || {
+            if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+                return true;
+            }
+            let state = tcp::tcp_get_state(tcp_idx);
+            !matches!(state, Some(TcpState::SynSent))
+        },
+        30_000,
+    );
+
+    if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+        let _ = tcp::tcp_abort(tcp_idx);
+        let mut table = NEW_SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx as usize) {
+            sock.state = SocketState::Closed;
+        }
+        return errno_i32(ERRNO_EINTR);
+    }
+
+    if !wait_ok {
+        let _ = tcp::tcp_abort(tcp_idx);
+        let mut table = NEW_SOCKET_TABLE.lock();
+        if let Some(sock) = table.get_mut(sock_idx as usize) {
+            sock.state = SocketState::Closed;
+        }
+        return errno_i32(ERRNO_ETIMEDOUT);
+    }
+
+    match tcp::tcp_get_state(tcp_idx) {
+        Some(TcpState::Established) => {
+            let mut table = NEW_SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx as usize) {
+                sock.state = SocketState::Connected;
+            }
             0
         }
-        SocketInner::Raw(_) => errno_i32(ERRNO_EPROTONOSUPPORT),
+        _ => {
+            let mut table = NEW_SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx as usize) {
+                sock.state = SocketState::Closed;
+            }
+            errno_i32(ERRNO_ECONNREFUSED)
+        }
     }
 }
 
