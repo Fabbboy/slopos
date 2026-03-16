@@ -1,6 +1,8 @@
 use crate::syscall::common::SyscallDisposition;
 use crate::syscall::context::SyscallContext;
-use slopos_abi::net::{AF_INET, INVALID_SOCKET_IDX, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
+use slopos_abi::net::{
+    AF_INET, INVALID_SOCKET_IDX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn,
+};
 use slopos_abi::syscall::*;
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_mm::user_copy::{
@@ -48,6 +50,7 @@ define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
     if sock_type != SOCK_STREAM && sock_type != SOCK_DGRAM {
         return ctx.err_with(ERRNO_EPROTONOSUPPORT);
     }
+    let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
     let sock_idx = socket::create(domain, sock_type, protocol);
     if sock_idx < 0 {

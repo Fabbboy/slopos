@@ -391,6 +391,15 @@ pub fn dns_parse_response(packet: &[u8], expected_id: u16) -> Option<DnsResponse
         if rr_type == DnsType::A as u16 && rdlength == 4 {
             let mut addr = [0u8; 4];
             addr.copy_from_slice(&packet[pos..pos + 4]);
+            klog_debug!(
+                "dns: A record at offset {} -> {}.{}.{}.{} (raw: {:02x?})",
+                pos,
+                addr[0],
+                addr[1],
+                addr[2],
+                addr[3],
+                &packet[pos..pos + 4]
+            );
             a_addr = Some((addr, ttl));
             // Don't break — continue to find the best answer
         } else if rr_type == DnsType::CNAME as u16 {
@@ -668,6 +677,12 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             klog_debug!("dns: empty response (attempt {})", attempt);
             continue;
         }
+
+        klog_debug!(
+            "dns: response {} bytes, first 32: {:02x?}",
+            resp_len,
+            &resp_buf[..resp_len.min(32)]
+        );
 
         // Parse response
         if let Some(response) = dns_parse_response(&resp_buf[..resp_len], id) {

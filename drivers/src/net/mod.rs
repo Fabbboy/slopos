@@ -10,6 +10,7 @@ pub mod types;
 pub mod arp;
 pub mod dhcp;
 pub mod dns;
+pub mod icmp;
 pub mod ingress;
 pub mod ipv4;
 pub mod loopback;
@@ -93,14 +94,23 @@ pub fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     Some((src_port, dst_port, &payload[8..udp_len]))
 }
 
-/// Compute the one's-complement checksum for an IPv4 header.
-pub fn ipv4_header_checksum(header: &[u8]) -> u16 {
+/// Compute the one's-complement checksum (RFC 1071).
+///
+/// Works for IPv4 headers, ICMP messages, and any other protocol that
+/// uses the standard internet checksum.  Handles odd-length data by
+/// padding the trailing byte with a zero.
+pub fn ipv4_header_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let mut i = 0usize;
-    while i + 1 < header.len() {
-        let word = u16::from_be_bytes([header[i], header[i + 1]]) as u32;
+    while i + 1 < data.len() {
+        let word = u16::from_be_bytes([data[i], data[i + 1]]) as u32;
         sum = sum.wrapping_add(word);
         i += 2;
+    }
+
+    // Handle trailing odd byte (pad with zero on the right).
+    if i < data.len() {
+        sum = sum.wrapping_add((data[i] as u32) << 8);
     }
 
     while (sum >> 16) != 0 {

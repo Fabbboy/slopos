@@ -22,7 +22,6 @@
 //! - Full IPv4 header validation
 //! - Protocol dispatch to existing TCP/UDP handlers via the socket layer
 //! - DNS response interception for the in-kernel resolver
-//! - ICMP stub (logs and drops)
 
 use slopos_lib::klog_debug;
 
@@ -118,15 +117,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
     match IpProtocol::from_u8(proto) {
         Some(IpProtocol::Tcp) => dispatch_tcp(src_ip, dst_ip, &pkt),
         Some(IpProtocol::Udp) => dispatch_udp(src_ip, dst_ip, &pkt),
-        Some(IpProtocol::Icmp) => {
-            klog_debug!(
-                "ipv4: ICMP from {}.{}.{}.{} — stub, dropping",
-                src_ip[0],
-                src_ip[1],
-                src_ip[2],
-                src_ip[3]
-            );
-        }
+        Some(IpProtocol::Icmp) => super::icmp::handle_rx(src_ip, dst_ip, &pkt),
         None => {
             klog_debug!("ipv4: unknown protocol {}, dropping", proto);
         }

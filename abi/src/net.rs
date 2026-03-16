@@ -36,6 +36,11 @@ pub const AF_INET: u16 = 2;
 pub const SOCK_STREAM: u16 = 1;
 /// Socket type: datagram (UDP).
 pub const SOCK_DGRAM: u16 = 2;
+/// Socket type: raw (ICMP).
+pub const SOCK_RAW: u16 = 3;
+
+/// IP protocol: ICMP.
+pub const IPPROTO_ICMP: u16 = 1;
 
 /// IPv4 socket address — mirrors POSIX `sockaddr_in` layout.
 #[repr(C)]
