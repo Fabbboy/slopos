@@ -86,6 +86,22 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Network Swiss army knife",
         gui: false,
     },
+    ProgramSpec {
+        name: "curl",
+        path: "/bin/curl",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Transfer data from URLs",
+        gui: false,
+    },
+    ProgramSpec {
+        name: "ping",
+        path: "/bin/ping",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Send ICMP ECHO_REQUEST to network hosts",
+        gui: false,
+    },
     #[cfg(feature = "testbins")]
     ProgramSpec {
         name: "fork_test",

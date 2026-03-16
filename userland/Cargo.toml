@@ -48,6 +48,15 @@ path = "src/bin/ifconfig.rs"
 [[bin]]
 name = "nc"
 path = "src/bin/nc.rs"
+
+[[bin]]
+name = "curl"
+path = "src/bin/curl.rs"
+
+[[bin]]
+name = "ping"
+path = "src/bin/ping.rs"
+
 [[bin]]
 name = "fork_test"
 path = "src/bin/tests/fork_test.rs"

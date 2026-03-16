@@ -5,7 +5,6 @@ set -euo pipefail
 #
 # Usage: build_userland.sh <build_dir> <cargo_target_dir> [--test]
 #
-# Without --test: builds init, shell, compositor, roulette, file_manager, sysinfo, nmap, ifconfig
 # With --test:    also builds fork_test (requires testbins feature)
 #
 # Environment:
@@ -23,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc"
+BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc curl ping"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied

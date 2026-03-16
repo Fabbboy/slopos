@@ -194,7 +194,7 @@ QEMU_ARGS=(
     -drive "file=$FS_IMAGE,if=none,id=virtio-disk0,format=raw"
     -object "iothread,id=iot0"
     -device "virtio-blk-pci,drive=virtio-disk0,disable-legacy=on,iothread=iot0"
-    -netdev "user,id=slopnet0${NET_HOSTFWD}"
+    -netdev "user,id=slopnet0,dns=1.1.1.1${NET_HOSTFWD}"
     -device "virtio-net-pci,netdev=slopnet0,disable-legacy=on"
     -boot "order=d,menu=off"
     -serial stdio
