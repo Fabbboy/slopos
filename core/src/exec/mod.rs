@@ -175,7 +175,11 @@ pub fn spawn_program_with_attrs(
             if !parent_ptr.is_null() {
                 let parent = unsafe { &*parent_ptr };
                 let child = unsafe { &mut *task_info };
-                child.pgid = parent.pgid;
+                if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
+                    child.pgid = task_id;
+                } else {
+                    child.pgid = parent.pgid;
+                }
                 child.sid = parent.sid;
                 child.controlling_tty = parent.controlling_tty;
                 child.parent_task_id = parent_task_id;

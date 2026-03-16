@@ -121,6 +121,10 @@ pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
 pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
 pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
+/// Place the spawned task into its own process group (`pgid = task_id`)
+/// instead of inheriting the parent's pgid.  Eliminates the SMP race
+/// between spawn and the parent's `setpgid` + `tcsetpgrp` calls.
+pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 
 // --- Task Exit/Fault Reason ---
 

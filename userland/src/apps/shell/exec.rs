@@ -426,11 +426,17 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         let _ = fs::close_fd(pipe_fds[1]);
     }
 
+    let spawn_flags = if background {
+        spec.flags
+    } else {
+        spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP
+    };
+
     let tid = process::spawn_path_with_argv(
         spec.path.as_bytes(),
         &cmd.argv[..cmd.argc],
         spec.priority,
-        spec.flags,
+        spawn_flags,
     );
 
     // Restore fd 1 immediately after spawn so shell output is normal again.
@@ -461,8 +467,7 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         return Some(0);
     }
 
-    // Put the child in its own process group so the TTY can target it
-    // with SIGINT (Ctrl+C) independently of the shell.
+    // Confirm pgid (child already has it via TASK_FLAG_NEW_PGRP) and set fg.
     let _ = process::setpgid(pid, pid);
     enter_foreground(pid);
 
