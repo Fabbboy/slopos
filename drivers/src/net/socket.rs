@@ -827,50 +827,64 @@ fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) -> Opt
 }
 
 pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
-    let src_mac = virtio_net::virtio_net_mac().unwrap_or([0; 6]);
-    let dst_mac = [0xff; 6];
+    let opt_len = if seg.mss != 0 { 4usize } else { 0usize };
+    let tcp_len = TCP_HEADER_LEN + opt_len + payload.len();
+    let ip_total_len = net::IPV4_HEADER_LEN + tcp_len;
 
-    let ip_total_len =
-        net::IPV4_HEADER_LEN + TCP_HEADER_LEN + if seg.mss != 0 { 4 } else { 0 } + payload.len();
-    let frame_len = net::ETH_HEADER_LEN + ip_total_len;
-    let mut frame = [0u8; 1600];
-    if frame_len > frame.len() {
-        return errno_i32(ERRNO_EINVAL);
-    }
-
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
-    frame[12..14].copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
-
-    let ip = net::ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 1] = 0;
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 4..ip + 6].copy_from_slice(&0u16.to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0u16.to_be_bytes());
-    frame[ip + 8] = 64;
-    frame[ip + 9] = net::IPPROTO_TCP;
-    frame[ip + 10..ip + 12].copy_from_slice(&0u16.to_be_bytes());
-    frame[ip + 12..ip + 16].copy_from_slice(&seg.tuple.local_ip);
-    frame[ip + 16..ip + 20].copy_from_slice(&seg.tuple.remote_ip);
-    let ip_csum = net::ipv4_header_checksum(&frame[ip..ip + net::IPV4_HEADER_LEN]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_csum.to_be_bytes());
-
-    let tcp_start = ip + net::IPV4_HEADER_LEN;
-    let tcp_len = match write_tcp_segment(seg, payload, &mut frame[tcp_start..]) {
+    let mut tcp_segment = Vec::with_capacity(tcp_len);
+    tcp_segment.resize(tcp_len, 0u8);
+    let tcp_len = match write_tcp_segment(seg, payload, tcp_segment.as_mut_slice()) {
         Some(n) => n,
         None => return errno_i32(ERRNO_EINVAL),
     };
 
-    let total = net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN + tcp_len;
-    if !virtio_net::virtio_net_is_ready() {
-        return 0;
+    let mut pkt = match PacketBuf::alloc() {
+        Some(pkt) => pkt,
+        None => return map_net_err(NetError::NoBufferSpace),
+    };
+
+    if pkt.append(&tcp_segment[..tcp_len]).is_err() {
+        return map_net_err(NetError::NoBufferSpace);
     }
 
-    if virtio_net::virtio_net_transmit(&frame[..total]) {
-        0
-    } else {
-        0
+    {
+        let ip_hdr = match pkt.push_header(net::IPV4_HEADER_LEN) {
+            Ok(hdr) => hdr,
+            Err(err) => return map_net_err(err),
+        };
+        ip_hdr[0] = 0x45;
+        ip_hdr[1] = 0;
+        ip_hdr[2..4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+        ip_hdr[4..6].copy_from_slice(&0u16.to_be_bytes());
+        ip_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
+        ip_hdr[8] = 64;
+        ip_hdr[9] = net::IPPROTO_TCP;
+        ip_hdr[10..12].copy_from_slice(&0u16.to_be_bytes());
+        ip_hdr[12..16].copy_from_slice(&seg.tuple.local_ip);
+        ip_hdr[16..20].copy_from_slice(&seg.tuple.remote_ip);
+        let checksum = net::ipv4_header_checksum(ip_hdr);
+        ip_hdr[10..12].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    {
+        let src_mac = virtio_net::virtio_net_mac().unwrap_or([0; 6]);
+        let eth_hdr = match pkt.push_header(net::ETH_HEADER_LEN) {
+            Ok(hdr) => hdr,
+            Err(err) => return map_net_err(err),
+        };
+        eth_hdr[0..6].copy_from_slice(&[0; 6]);
+        eth_hdr[6..12].copy_from_slice(&src_mac);
+        eth_hdr[12..14].copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
+    }
+
+    let head = pkt.head();
+    pkt.set_l2(head);
+    pkt.set_l3(head + net::ETH_HEADER_LEN as u16);
+    pkt.set_l4(head + (net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN) as u16);
+
+    match net::ipv4::send(Ipv4Addr(seg.tuple.remote_ip), pkt) {
+        Ok(()) => 0,
+        Err(err) => map_net_err(err),
     }
 }
 
@@ -1096,7 +1110,7 @@ pub fn socket_create(domain: u16, sock_type: u16, _protocol: u16) -> i32 {
     };
     if let Some(sock) = table.get_mut(idx) {
         sock.recv_queue.clear();
-        sock.set_nonblocking(true);
+        sock.set_nonblocking(false);
     }
     idx as i32
 }
@@ -1487,7 +1501,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
 }
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
-    let (tcp_idx, nonblocking, send_hint) = {
+    let (tcp_idx, nonblocking, _send_hint, syn_seg) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -1508,12 +1522,6 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
                 match tcp::tcp_connect(local_ip, addr, port) {
                     Ok((tcp_idx, syn)) => {
-                        let send_rc = socket_send_tcp_segment(&syn, &[]);
-                        if send_rc != 0 {
-                            let _ = tcp::tcp_abort(tcp_idx);
-                            return send_rc;
-                        }
-
                         sock.local_addr = Some(SockAddr::new(
                             Ipv4Addr(syn.tuple.local_ip),
                             Port(syn.tuple.local_port),
@@ -1526,7 +1534,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
                         let nb = sock.is_nonblocking();
                         let hint = sock.send_wq_idx;
-                        (tcp_idx, nb, hint)
+                        (tcp_idx, nb, hint, syn)
                     }
                     Err(e) => return map_tcp_err(e),
                 }
@@ -1539,59 +1547,66 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             SocketInner::Raw(_) => return errno_i32(ERRNO_EPROTONOSUPPORT),
         }
     };
-    // Table lock released — SYN-ACK processing can now proceed.
+    // Table lock released — send the SYN without holding the socket table lock,
+    // so the NAPI RX path can call socket_notify_tcp_activity without deadlocking.
+    let send_rc = socket_send_tcp_segment(&syn_seg, &[]);
+    if send_rc != 0 {
+        let _ = tcp::tcp_abort(tcp_idx);
+        return send_rc;
+    }
 
     if nonblocking {
         return errno_i32(ERRNO_EINPROGRESS);
     }
 
-    // Blocking connect: wait for the TCP three-way handshake to complete.
-    // The ingress path calls tcp_input() → socket_notify_tcp_activity()
-    // which wakes SEND_WQS when the state changes.
-    let wait_ok = SEND_WQS[wq_slot(send_hint)].wait_event_timeout(
-        || {
-            if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
-                return true;
-            }
-            let state = tcp::tcp_get_state(tcp_idx);
-            !matches!(state, Some(TcpState::SynSent))
-        },
-        30_000,
-    );
+    let deadline_ms = slopos_lib::clock::uptime_ms().saturating_add(30_000);
 
-    if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
-        let _ = tcp::tcp_abort(tcp_idx);
-        let mut table = NEW_SOCKET_TABLE.lock();
-        if let Some(sock) = table.get_mut(sock_idx as usize) {
-            sock.state = SocketState::Closed;
-        }
-        return errno_i32(ERRNO_EINTR);
-    }
-
-    if !wait_ok {
-        let _ = tcp::tcp_abort(tcp_idx);
-        let mut table = NEW_SOCKET_TABLE.lock();
-        if let Some(sock) = table.get_mut(sock_idx as usize) {
-            sock.state = SocketState::Closed;
-        }
-        return errno_i32(ERRNO_ETIMEDOUT);
-    }
-
-    match tcp::tcp_get_state(tcp_idx) {
-        Some(TcpState::Established) => {
-            let mut table = NEW_SOCKET_TABLE.lock();
-            if let Some(sock) = table.get_mut(sock_idx as usize) {
-                sock.state = SocketState::Connected;
-            }
-            0
-        }
-        _ => {
+    loop {
+        if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+            let _ = tcp::tcp_abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
                 sock.state = SocketState::Closed;
             }
-            errno_i32(ERRNO_ECONNREFUSED)
+            return errno_i32(ERRNO_EINTR);
         }
+
+        match tcp::tcp_get_state(tcp_idx) {
+            Some(TcpState::Established) => {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Connected;
+                }
+                return 0;
+            }
+            Some(TcpState::SynSent) => {}
+            Some(TcpState::Closed) | None => {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Closed;
+                }
+                return errno_i32(ERRNO_ECONNREFUSED);
+            }
+            _ => {
+                let mut table = NEW_SOCKET_TABLE.lock();
+                if let Some(sock) = table.get_mut(sock_idx as usize) {
+                    sock.state = SocketState::Closed;
+                }
+                return errno_i32(ERRNO_ECONNREFUSED);
+            }
+        }
+
+        if slopos_lib::clock::uptime_ms() >= deadline_ms {
+            let _ = tcp::tcp_abort(tcp_idx);
+            let mut table = NEW_SOCKET_TABLE.lock();
+            if let Some(sock) = table.get_mut(sock_idx as usize) {
+                sock.state = SocketState::Closed;
+            }
+            return errno_i32(ERRNO_ETIMEDOUT);
+        }
+
+        slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(50);
+        crate::virtio_net::virtnet_force_napi_poll();
     }
 }
 
@@ -2123,6 +2138,28 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     }
 
     flags
+}
+
+pub fn socket_poll_enqueue_recv(sock_idx: u32) -> bool {
+    let wq_hint = {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
+            return false;
+        };
+        sock.recv_wq_idx
+    };
+    RECV_WQS[wq_slot(wq_hint)].enqueue_current()
+}
+
+pub fn socket_poll_dequeue_recv(sock_idx: u32) {
+    let wq_hint = {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock) = table.get(sock_idx as usize) else {
+            return;
+        };
+        sock.recv_wq_idx
+    };
+    RECV_WQS[wq_slot(wq_hint)].remove_current();
 }
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
