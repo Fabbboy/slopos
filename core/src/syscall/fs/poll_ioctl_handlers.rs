@@ -16,7 +16,8 @@ use slopos_fs::fileio::{
 };
 
 use slopos_lib::kernel_services::driver_runtime::{
-    current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, signal_process_group,
+    current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, run_bottom_halves,
+    signal_process_group,
 };
 use slopos_lib::kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
@@ -73,6 +74,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     let start_ms = crate::platform::get_time_ms();
 
     loop {
+        run_bottom_halves();
+
         let mut ready_count = 0u64;
         let mut regs = [PollRegInfo::NONE; SELECT_MAX_FDS];
         let mut reg_count = 0usize;

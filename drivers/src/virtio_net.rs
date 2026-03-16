@@ -29,7 +29,7 @@ use crate::virtio::{
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
-use slopos_lib::kernel_services::driver_runtime::register_idle_wakeup_callback;
+use slopos_lib::kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
 
 use slopos_mm::page_alloc::OwnedPageFrame;
 
@@ -1062,15 +1062,19 @@ pub fn virtnet_force_napi_poll() {
     virtnet_napi_poll_loop();
 }
 
-fn virtnet_idle_wakeup_cb() -> c_int {
-    // Process network timers even when idle (ARP expiry, keepalives, etc.).
-    crate::net::timer::net_timer_process();
+fn napi_bottom_half() {
+    napi_schedule();
+    virtnet_napi_poll_loop();
+}
 
-    if NAPI_EVENT.try_consume() || NAPI_CONTEXT.is_scheduled() {
+extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
+    use slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms;
+    loop {
+        napi_schedule();
         virtnet_napi_poll_loop();
-        return 1;
+        crate::net::timer::net_timer_process();
+        sleep_current_task_ms(1);
     }
-    0
 }
 
 /// MSI-X / MSI interrupt handler for virtio-net.
@@ -1274,7 +1278,19 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         }
     }
 
-    register_idle_wakeup_callback(Some(virtnet_idle_wakeup_cb));
+    register_bottom_half(napi_bottom_half);
+
+    let netpoll_task = spawn_kernel_task(
+        b"netpoll\0".as_ptr() as *const i8,
+        napi_thread_entry,
+        core::ptr::null_mut(),
+        3,
+    );
+    if netpoll_task == slopos_abi::task::INVALID_TASK_ID {
+        klog_info!("virtio-net: failed to spawn netpoll kernel thread");
+        DEVICE_CLAIMED.reset();
+        return -1;
+    }
 
     klog_info!(
         "virtio-net: ready mtu={} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} irq {:?}",
