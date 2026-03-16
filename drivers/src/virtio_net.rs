@@ -1056,6 +1056,12 @@ fn poll_loopback() {
     }
 }
 
+pub fn virtnet_force_napi_poll() {
+    napi_schedule();
+    NAPI_EVENT.signal();
+    virtnet_napi_poll_loop();
+}
+
 fn virtnet_idle_wakeup_cb() -> c_int {
     // Process network timers even when idle (ARP expiry, keepalives, etc.).
     crate::net::timer::net_timer_process();

@@ -23,6 +23,8 @@ pub mod socket_framework_tests;
 #[cfg(feature = "itests")]
 pub mod socket_option_tests;
 pub mod tcp;
+#[cfg(feature = "itests")]
+pub mod tcp_live_tests;
 pub mod tcp_socket;
 #[cfg(feature = "itests")]
 pub mod tcp_socket_tests;
