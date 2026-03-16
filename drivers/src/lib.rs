@@ -14,6 +14,8 @@ pub mod hpet;
 #[cfg(feature = "itests")]
 pub mod hpet_tests;
 #[cfg(feature = "itests")]
+pub mod icmp_tests;
+#[cfg(feature = "itests")]
 pub mod ingress_tests;
 pub mod input_event;
 pub mod interrupt_test;
@@ -76,5 +78,6 @@ pub mod virtio_net_tests;
 #[cfg(feature = "xe-gpu")]
 pub mod xe;
 
+pub use net::icmp;
 pub use ps2::keyboard;
 pub use ps2::mouse;
