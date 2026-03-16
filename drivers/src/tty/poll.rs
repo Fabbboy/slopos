@@ -10,7 +10,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_lib::kernel_services::driver_runtime::scheduler_is_enabled;
 
 use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
-use super::{PostLockWork, TtyError, TtyFlags, TtyIndex, MAX_TTYS};
+use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 
 // ---------------------------------------------------------------------------
 // Compositor focus
@@ -132,6 +132,29 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
 
     deferred.execute();
     revents
+}
+
+/// Register the current task on a TTY poll wait queue.
+///
+/// Returns true when registration succeeds.
+pub fn poll_enqueue(idx: TtyIndex) -> bool {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return false;
+    }
+    if scheduler_is_enabled() == 0 {
+        return false;
+    }
+    TTY_POLL_WAITERS[slot].enqueue_current()
+}
+
+/// Remove the current task from a TTY poll wait queue.
+pub fn poll_dequeue(idx: TtyIndex) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    TTY_POLL_WAITERS[slot].remove_current();
 }
 
 /// Sleep until a poll-relevant event occurs on one of the given TTY slots,

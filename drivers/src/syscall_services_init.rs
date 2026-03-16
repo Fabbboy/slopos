@@ -378,6 +378,14 @@ fn tty_poll_sleep_on_adapter(slots: *const u8, count: usize) {
     tty::poll_sleep_on(slot_slice);
 }
 
+fn tty_poll_enqueue_adapter(tty_index: TtyIndex) -> bool {
+    tty::poll_enqueue(tty_index)
+}
+
+fn tty_poll_dequeue_adapter(tty_index: TtyIndex) {
+    tty::poll_dequeue(tty_index);
+}
+
 fn tty_detach_controlling_terminal_adapter(
     tty_index: TtyIndex,
     caller_sid: u32,
@@ -500,6 +508,8 @@ static TTY_SERVICES: TtyServices = TtyServices {
     poll_events: tty_poll_events_adapter,
     poll_sleep: tty_poll_sleep_adapter,
     poll_sleep_on: tty_poll_sleep_on_adapter,
+    poll_enqueue: tty_poll_enqueue_adapter,
+    poll_dequeue: tty_poll_dequeue_adapter,
     detach_controlling_terminal: tty_detach_controlling_terminal_adapter,
     bytes_available: tty_bytes_available_adapter,
     set_pty_lock: tty_set_pty_lock_adapter,
@@ -623,6 +633,8 @@ static SOCKET_SERVICES: SocketServices = SocketServices {
     close: socket::socket_close,
     poll_readable: socket::socket_poll_readable,
     poll_writable: socket::socket_poll_writable,
+    poll_enqueue_recv: socket::socket_poll_enqueue_recv,
+    poll_dequeue_recv: socket::socket_poll_dequeue_recv,
     set_nonblocking: socket::socket_set_nonblocking,
     setsockopt: socket_setsockopt_adapter,
     getsockopt: socket_getsockopt_adapter,

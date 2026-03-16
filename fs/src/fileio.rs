@@ -58,6 +58,28 @@ const PIPE_BUFFER_SIZE: usize = 4096;
 const INVALID_PIPE_ID: u32 = u32::MAX;
 const PIPE_MAX_WAITERS: usize = 8;
 
+/// Describes what a poll registration attached to, for cleanup.
+#[derive(Clone, Copy)]
+pub struct PollRegInfo {
+    pub kind: PollRegKind,
+    pub registered: bool,
+}
+
+/// Poll registration target kind.
+#[derive(Clone, Copy)]
+pub enum PollRegKind {
+    None,
+    Tty(TtyIndex),
+    Socket(u32),
+}
+
+impl PollRegInfo {
+    pub const NONE: Self = Self {
+        kind: PollRegKind::None,
+        registered: false,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct PipeSlot {
     valid: bool,
@@ -519,6 +541,70 @@ pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
         }
         drop(guard);
     });
+}
+
+/// Register the current task on the wait queue(s) backing poll readiness for
+/// one file descriptor.
+pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollRegInfo {
+    with_tables(|kernel, processes| {
+        let Some(table) = table_for_pid(kernel, processes, process_id) else {
+            return PollRegInfo::NONE;
+        };
+        if !table.in_use {
+            return PollRegInfo::NONE;
+        }
+
+        let table_ptr: *mut FileTableSlot = table;
+        let guard = unsafe { (&(*table_ptr).lock).lock() };
+        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+            drop(guard);
+            return PollRegInfo::NONE;
+        };
+
+        // Pipe registration is handled by file_poll_register_pipes.
+        if let Some(tty_idx) = desc.tty_index {
+            drop(guard);
+            let ok = tty::poll_enqueue(tty_idx);
+            return PollRegInfo {
+                kind: PollRegKind::Tty(tty_idx),
+                registered: ok,
+            };
+        }
+
+        if desc.socket_idx != INVALID_SOCKET_IDX {
+            let sock_idx = desc.socket_idx;
+            drop(guard);
+            let ok = if (events & POLLIN) != 0 {
+                socket::poll_enqueue_recv(sock_idx)
+            } else {
+                false
+            };
+            return PollRegInfo {
+                kind: PollRegKind::Socket(sock_idx),
+                registered: ok,
+            };
+        }
+
+        drop(guard);
+        PollRegInfo::NONE
+    })
+}
+
+/// Remove the current task from wait queues previously registered by
+/// file_poll_register_fd.
+pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
+    if !reg.registered {
+        return;
+    }
+    match reg.kind {
+        PollRegKind::Tty(tty_idx) => {
+            tty::poll_dequeue(tty_idx);
+        }
+        PollRegKind::Socket(sock_idx) => {
+            socket::poll_dequeue_recv(sock_idx);
+        }
+        PollRegKind::None => {}
+    }
 }
 
 fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {

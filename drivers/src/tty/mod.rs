@@ -412,7 +412,8 @@ pub use self::lifecycle::{
 
 // poll.rs: poll readiness and compositor focus
 pub use self::poll::{
-    get_compositor_focus, poll_events, poll_sleep, poll_sleep_on, set_compositor_focus,
+    get_compositor_focus, poll_dequeue, poll_enqueue, poll_events, poll_sleep, poll_sleep_on,
+    set_compositor_focus,
 };
 
 // session.rs: direct re-export
