@@ -1,34 +1,130 @@
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use slopos_lib::klog_info;
 use slopos_lib::{IrqMutex, OnceLock};
 
 use super::per_cpu;
-use super::scheduler::{run_ready_task_from_idle, set_scheduler_enabled, r#yield};
+use super::scheduler::{run_ready_task_from_idle, schedule_task, set_scheduler_enabled, r#yield};
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, Task, reap_zombies, task_get_info,
-    task_set_current,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, Task, TaskEntry, reap_zombies,
+    task_create, task_get_info, task_set_current,
 };
 use super::work_steal::try_work_steal;
 
-static IDLE_WAKEUP_CB: OnceLock<IrqMutex<Option<fn() -> c_int>>> = OnceLock::new();
+const MAX_IDLE_CALLBACKS: usize = 4;
+const MAX_BOTTOM_HALVES: usize = 4;
+
+struct IdleCallbacks {
+    slots: [Option<fn() -> c_int>; MAX_IDLE_CALLBACKS],
+    count: usize,
+}
+
+struct BottomHalves {
+    slots: [Option<fn()>; MAX_BOTTOM_HALVES],
+    count: usize,
+}
+
+impl IdleCallbacks {
+    const fn new() -> Self {
+        Self {
+            slots: [None; MAX_IDLE_CALLBACKS],
+            count: 0,
+        }
+    }
+}
+
+impl BottomHalves {
+    const fn new() -> Self {
+        Self {
+            slots: [None; MAX_BOTTOM_HALVES],
+            count: 0,
+        }
+    }
+}
+
+static IDLE_CBS: OnceLock<IrqMutex<IdleCallbacks>> = OnceLock::new();
+static BOTTOM_HALVES: OnceLock<IrqMutex<BottomHalves>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    IDLE_WAKEUP_CB.call_once(|| IrqMutex::new(None));
-    if let Some(mutex) = IDLE_WAKEUP_CB.get() {
-        *mutex.lock() = callback;
+    IDLE_CBS.call_once(|| IrqMutex::new(IdleCallbacks::new()));
+    let Some(cb) = callback else { return };
+    if let Some(mutex) = IDLE_CBS.get() {
+        let mut cbs = mutex.lock();
+        let idx = cbs.count;
+        if idx < MAX_IDLE_CALLBACKS {
+            cbs.slots[idx] = Some(cb);
+            cbs.count = idx + 1;
+        }
     }
+}
+
+pub fn scheduler_register_bottom_half(callback: fn()) {
+    BOTTOM_HALVES.call_once(|| IrqMutex::new(BottomHalves::new()));
+    if let Some(mutex) = BOTTOM_HALVES.get() {
+        let mut halves = mutex.lock();
+        let idx = halves.count;
+        if idx < MAX_BOTTOM_HALVES {
+            halves.slots[idx] = Some(callback);
+            halves.count = idx + 1;
+        }
+    }
+}
+
+pub fn scheduler_run_bottom_halves() {
+    let mut callbacks = [None; MAX_BOTTOM_HALVES];
+    let mut callback_count = 0usize;
+
+    if let Some(mutex) = BOTTOM_HALVES.get() {
+        let halves = mutex.lock();
+        callback_count = halves.count;
+        callbacks[..callback_count].copy_from_slice(&halves.slots[..callback_count]);
+    }
+
+    for callback in &callbacks[..callback_count] {
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
+pub fn spawn_kernel_task_from_driver(
+    name: *const c_char,
+    entry: extern "C" fn(*mut c_void),
+    arg: *mut c_void,
+    priority: u8,
+) -> u32 {
+    let entry_fn: TaskEntry = unsafe { core::mem::transmute(entry as *const ()) };
+    let task_id = task_create(name, entry_fn, arg, priority, TASK_FLAG_KERNEL_MODE);
+    if task_id == INVALID_TASK_ID {
+        return task_id;
+    }
+    let mut task_ptr: *mut Task = core::ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return INVALID_TASK_ID;
+    }
+    if schedule_task(task_ptr) != 0 {
+        return INVALID_TASK_ID;
+    }
+    task_id
 }
 
 fn unified_idle_loop(_: *mut c_void) {
     loop {
-        let cb = IDLE_WAKEUP_CB.get().and_then(|m| *m.lock());
-        if let Some(callback) = cb {
-            if callback() != 0 {
-                r#yield();
-                continue;
+        let mut any_work = false;
+        if let Some(mutex) = IDLE_CBS.get() {
+            let cbs = mutex.lock();
+            for slot in &cbs.slots[..cbs.count] {
+                if let Some(cb) = slot {
+                    if cb() != 0 {
+                        any_work = true;
+                    }
+                }
             }
+        }
+        if any_work {
+            r#yield();
+            continue;
         }
         let cpu_id = slopos_lib::get_current_cpu();
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
