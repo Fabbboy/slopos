@@ -7,7 +7,7 @@ use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
-use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page, virt_to_phys};
+use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 const NUM_SIZE_CLASSES: usize = 8;
@@ -195,10 +195,9 @@ fn map_heap_pages(heap: &mut KernelHeap, pages: u32) -> Option<u64> {
 fn rollback_mapping(start: u64, mapped_pages: u32) {
     for i in 0..mapped_pages {
         let virt_page = start + (i as u64) * PAGE_SIZE_4KB;
-        let mapped_phys = virt_to_phys(VirtAddr::new(virt_page));
-        if !mapped_phys.is_null() {
-            unmap_page(VirtAddr::new(virt_page));
-            free_page_frame(mapped_phys);
+        let phys = unmap_page(VirtAddr::new(virt_page));
+        if !phys.is_null() {
+            free_page_frame(phys);
         }
     }
 }

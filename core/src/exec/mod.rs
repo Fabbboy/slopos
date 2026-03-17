@@ -19,6 +19,7 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
+    process_vm_reset_stack,
 };
 
 use crate::sched::schedule_task;
@@ -256,6 +257,10 @@ pub fn do_exec(
 
     let exec_info = process_vm_load_elf_data(process_id, elf_data.as_slice(), entry_out)
         .map_err(ExecError::from)?;
+
+    if process_vm_reset_stack(process_id) != 0 {
+        return Err(ExecError::NoMem);
+    }
 
     let stack_top = setup_user_stack(process_id, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;

@@ -401,14 +401,14 @@ pub fn paging_map_shared_kernel_page(
     map_page_4kb_in_dir(page_dir, user_vaddr, phys, flags | PageFlags::USER.bits())
 }
 
-fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
+fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
     if page_dir.is_null() {
-        return -1;
+        return PhysAddr::NULL;
     }
     unsafe {
         let pml4 = (*page_dir).pml4;
         if pml4.is_null() {
-            return -1;
+            return PhysAddr::NULL;
         }
 
         let pml4_idx = PageTableLevel::Four.index_of(vaddr);
@@ -418,22 +418,19 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
 
         let pml4_entry = (&mut *pml4).entry_mut(pml4_idx);
         if !pml4_entry.is_present() {
-            return 0;
+            return PhysAddr::NULL;
         }
         let pml4_entry_phys = pml4_entry.address();
 
         let pdpt = phys_to_table(pml4_entry_phys);
         let pdpt_entry = (&mut *pdpt).entry_mut(pdpt_idx);
         if !pdpt_entry.is_present() {
-            return 0;
+            return PhysAddr::NULL;
         }
 
         if pdpt_entry.is_huge() {
             let phys = pdpt_entry.address();
             pdpt_entry.clear();
-            if page_frame_can_free(phys) != 0 {
-                free_page_frame(phys);
-            }
             tlb::flush_page(vaddr);
             if table_empty(&*pdpt) {
                 pml4_entry.clear();
@@ -441,37 +438,35 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
                     free_page_frame(pml4_entry_phys);
                 }
             }
-            return 0;
+            return phys;
         }
 
         let pdpt_entry_phys = pdpt_entry.address();
         let pd = phys_to_table(pdpt_entry_phys);
         let pd_entry = (&mut *pd).entry_mut(pd_idx);
         if !pd_entry.is_present() {
-            return 0;
+            return PhysAddr::NULL;
         }
 
+        let unmapped_phys;
+
         if pd_entry.is_huge() {
-            let phys = pd_entry.address();
+            unmapped_phys = pd_entry.address();
             pd_entry.clear();
-            if page_frame_can_free(phys) != 0 {
-                free_page_frame(phys);
-            }
             tlb::flush_page(vaddr);
         } else {
             let pd_entry_phys = pd_entry.address();
             let pt = phys_to_table(pd_entry_phys);
             if pt.is_null() {
-                return -1;
+                return PhysAddr::NULL;
             }
             let pt_entry = (&mut *pt).entry_mut(pt_idx);
             if pt_entry.is_present() {
-                let phys = pt_entry.address();
+                unmapped_phys = pt_entry.address();
                 pt_entry.clear();
                 tlb::flush_page(vaddr);
-                if page_frame_can_free(phys) != 0 {
-                    free_page_frame(phys);
-                }
+            } else {
+                unmapped_phys = PhysAddr::NULL;
             }
             if table_empty(&*pt) {
                 pd_entry.clear();
@@ -494,16 +489,16 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_
                 free_page_frame(pml4_entry_phys);
             }
         }
-    }
 
-    0
+        unmapped_phys
+    }
 }
 
-pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int {
+pub fn unmap_page_in_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
     unmap_page_in_directory(page_dir, vaddr)
 }
 
-pub fn unmap_page(vaddr: VirtAddr) -> c_int {
+pub fn unmap_page(vaddr: VirtAddr) -> PhysAddr {
     unmap_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr)
 }
 

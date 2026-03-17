@@ -10,9 +10,7 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::kernel_heap::{kfree, kmalloc};
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES, PROCESS_TLS_BASE_VA};
-use crate::page_alloc::{
-    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_inc_ref,
-};
+use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_inc_ref};
 use crate::paging::{
     PageTable, ProcessPageDir, map_page_4kb_in_dir, paging_copy_kernel_mappings,
     paging_free_user_space, paging_get_pte_flags, paging_mark_cow, paging_mark_range_user,
@@ -162,12 +160,9 @@ fn rollback_range(
 ) {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
-        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(current));
+        let phys = unmap_page_in_dir(page_dir, VirtAddr::new(current));
         if !phys.is_null() {
-            unmap_page_in_dir(page_dir, VirtAddr::new(current));
-            if page_frame_can_free(phys) != 0 {
-                free_page_frame(phys);
-            }
+            free_page_frame(phys);
         }
         *mapped -= 1;
     }
@@ -180,9 +175,8 @@ fn unmap_user_range(page_dir: *mut ProcessPageDir, start_addr: u64, end_addr: u6
     }
     let mut addr = start_addr;
     while addr < end_addr {
-        let phys = virt_to_phys_in_dir(page_dir, VirtAddr::new(addr));
-        if !phys.is_null() && page_frame_can_free(phys) != 0 {
-            unmap_page_in_dir(page_dir, VirtAddr::new(addr));
+        let phys = unmap_page_in_dir(page_dir, VirtAddr::new(addr));
+        if !phys.is_null() {
             free_page_frame(phys);
         }
         addr += PAGE_SIZE_4KB;
@@ -291,13 +285,10 @@ fn unmap_and_free_range(process: *mut ProcessVm, start: u64, end: u64) -> u32 {
     let mut addr = start;
     unsafe {
         while addr < end {
-            let phys = virt_to_phys_in_dir((*process).page_dir, VirtAddr::new(addr));
+            let phys = unmap_page_in_dir((*process).page_dir, VirtAddr::new(addr));
             if !phys.is_null() {
-                let was_allocated = page_frame_can_free(phys) != 0;
-                unmap_page_in_dir((*process).page_dir, VirtAddr::new(addr));
-                if was_allocated {
-                    freed += 1;
-                }
+                free_page_frame(phys);
+                freed += 1;
             }
             addr += PAGE_SIZE_4KB;
         }
@@ -1393,6 +1384,38 @@ pub fn process_vm_get_stack_top(process_id: u32) -> u64 {
         return 0;
     }
     unsafe { (*process_ptr).stack_end }
+}
+
+pub fn process_vm_reset_stack(process_id: u32) -> c_int {
+    let process_ptr = find_process_vm(process_id);
+    if process_ptr.is_null() {
+        return -1;
+    }
+    let (page_dir, stack_start, stack_end) = unsafe {
+        let p = &*process_ptr;
+        (p.page_dir, p.stack_start, p.stack_end)
+    };
+    if page_dir.is_null() || stack_end <= stack_start {
+        return -1;
+    }
+
+    unmap_user_range(page_dir, stack_start, stack_end);
+
+    let stack_flags =
+        (VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::STACK).to_page_flags();
+    let mut pages: u32 = 0;
+    if map_user_range(
+        page_dir,
+        stack_start,
+        stack_end,
+        stack_flags.bits(),
+        &mut pages,
+    ) != 0
+    {
+        return -1;
+    }
+
+    0
 }
 
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
