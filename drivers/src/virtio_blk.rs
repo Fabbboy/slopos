@@ -7,8 +7,8 @@ use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioMmioCaps,
-    VirtioMsixState,
+    self, CompletionEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE,
+    VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         register_irq_handlers, set_driver_ok, setup_interrupts,
@@ -74,7 +74,7 @@ impl VirtioBlkState {
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_BLK_STATE: IrqMutex<VirtioBlkState> = IrqMutex::new(VirtioBlkState::new());
-static BLK_QUEUE_EVENT: QueueEvent = QueueEvent::new();
+static BLK_QUEUE_EVENT: CompletionEvent = CompletionEvent::new();
 static BLK_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct RequestGuard;

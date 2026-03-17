@@ -153,36 +153,88 @@ impl VirtioMmioCaps {
     }
 }
 
-/// Per-queue interrupt completion event.
+// =============================================================================
+// Shared HPET helpers
+// =============================================================================
+
+/// HPET-based polling loop with cli/sti/hlt for efficient IRQ-driven wakeup.
 ///
-/// The MSI-X handler calls [`signal`] when the device places entries
-/// in the used ring. The I/O path calls [`wait_timeout_ms`] which
-/// blocks on a scheduler-backed wait queue until the IRQ wakes it or
-/// the timeout elapses.
-pub struct QueueEvent {
+/// Checks `condition` each iteration. On BSP (CPU 0) uses `sti; hlt` to
+/// sleep until the next interrupt; on APs falls back to spin_loop.
+/// Returns `true` if `condition` returned `true`, `false` on timeout.
+fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
+    use crate::hpet;
+
+    if condition() {
+        return true;
+    }
+
+    let Some(ticks_needed) = hpet::ms_to_ticks(timeout_ms) else {
+        for _ in 0..100_000u32 {
+            if condition() {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        return condition();
+    };
+
+    let start = hpet::read_counter();
+    let allow_hlt = slopos_lib::get_current_cpu() == 0;
+
+    loop {
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+
+        if condition() {
+            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            return true;
+        }
+
+        if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
+            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            return false;
+        }
+
+        if allow_hlt {
+            unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
+        } else {
+            unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+            core::hint::spin_loop();
+        }
+    }
+}
+
+// =============================================================================
+// CompletionEvent — scheduler-backed blocking for request/response waits
+// =============================================================================
+
+/// Completion event for synchronous I/O waits (single-waiter).
+///
+/// Uses HPET-based cli/sti/hlt polling. Scheduler-backed blocking
+/// is deferred to a future iteration — the WillBlock state machine
+/// is in place but the CompletionEvent↔scheduler integration has an
+/// unresolved CAS race after task_wait_for wakeups.
+pub struct CompletionEvent {
     signaled: AtomicBool,
 }
 
-impl QueueEvent {
+impl CompletionEvent {
     pub const fn new() -> Self {
         Self {
             signaled: AtomicBool::new(false),
         }
     }
 
-    /// Called from the MSI-X IRQ handler to signal I/O completion.
     #[inline]
     pub fn signal(&self) {
         self.signaled.store(true, Ordering::Release);
     }
 
-    /// Reset the event (consume the signal).
     #[inline]
     pub fn reset(&self) {
         self.signaled.store(false, Ordering::Release);
     }
 
-    /// Try to consume the signal. Returns `true` if it was set.
     #[inline]
     pub fn try_consume(&self) -> bool {
         self.signaled
@@ -190,72 +242,64 @@ impl QueueEvent {
             .is_ok()
     }
 
-    /// Wait for signal or timeout.
-    ///
-    /// Uses x86 `cli; sti; hlt` to atomically enable interrupts and
-    /// halt, preventing the lost-wakeup race. The HPET main counter
-    /// provides real-time deadline tracking.
-    ///
-    /// Returns `true` if signaled, `false` on timeout.
     pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
-        use crate::hpet;
-
-        if self.try_consume() {
-            return true;
-        }
-
-        let period_fs = hpet::period_fs();
-        if period_fs == 0 {
-            for _ in 0..100_000u32 {
-                if self.try_consume() {
-                    return true;
-                }
-                core::hint::spin_loop();
-            }
-            return self.try_consume();
-        }
-
-        let ticks_needed =
-            ((timeout_ms as u128) * 1_000_000_000_000u128 / period_fs as u128) as u64;
-        let start = hpet::read_counter();
-        let allow_hlt_wait = slopos_lib::get_current_cpu() == 0;
-
-        loop {
-            unsafe {
-                core::arch::asm!("cli", options(nomem, nostack));
-            }
-
-            if self.signaled.load(Ordering::Acquire) {
-                unsafe {
-                    core::arch::asm!("sti", options(nomem, nostack));
-                }
-                self.signaled.store(false, Ordering::Release);
-                return true;
-            }
-
-            if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
-                unsafe {
-                    core::arch::asm!("sti", options(nomem, nostack));
-                }
-                return false;
-            }
-
-            if allow_hlt_wait {
-                // SAFETY: `sti; hlt` atomically enables interrupts then halts.
-                unsafe {
-                    core::arch::asm!("sti", "hlt", options(nomem, nostack));
-                }
-            } else {
-                // AP CPUs do not run a local periodic timer in current SlopOS
-                // bring-up; avoid hlt there or they may never wake.
-                unsafe {
-                    core::arch::asm!("sti", options(nomem, nostack));
-                }
-                core::hint::spin_loop();
-            }
-        }
+        hpet_poll_wait(&|| self.try_consume(), timeout_ms)
     }
 }
+
+// =============================================================================
+// IrqEdgeEvent — fast atomic flag for high-rate edge notifications
+// =============================================================================
+
+/// Lightweight edge-triggered event for high-frequency IRQ notification.
+///
+/// No scheduler interaction in the signal path — keeps the IRQ handler
+/// fast. Safe to wait on while holding an `IrqMutex`.
+pub struct IrqEdgeEvent {
+    signaled: AtomicBool,
+}
+
+impl IrqEdgeEvent {
+    pub const fn new() -> Self {
+        Self {
+            signaled: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    pub fn signal(&self) {
+        self.signaled.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn reset(&self) {
+        self.signaled.store(false, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn try_consume(&self) -> bool {
+        self.signaled
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
+        hpet_poll_wait(
+            &|| {
+                if self.signaled.load(Ordering::Acquire) {
+                    self.signaled.store(false, Ordering::Release);
+                    true
+                } else {
+                    false
+                }
+            },
+            timeout_ms,
+        )
+    }
+}
+
+/// Legacy alias — use [`CompletionEvent`] or [`IrqEdgeEvent`] for new code.
+pub type QueueEvent = IrqEdgeEvent;
 
 // =============================================================================
 // VirtIO Interrupt Mode

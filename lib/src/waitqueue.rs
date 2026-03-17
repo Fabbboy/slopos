@@ -10,8 +10,8 @@
 //! Modeled after the futex wait queue in `core/src/scheduler/futex.rs`:
 //! - Fixed-capacity array of opaque task handles (`DriverTaskHandle`)
 //! - Protected by `IrqMutex` for interrupt-safe access
-//! - Uses `block_current_task()` / `unblock_task()` from the driver runtime
-//! - `pending_wakeup` flag in the scheduler prevents lost-wakeup races
+//! - Uses scheduler wait-gating (`prepare_to_wait`/`finish_wait`) with
+//!   `block_current_task()` / `unblock_task()` from the driver runtime
 //!
 //! # Usage
 //!
@@ -29,7 +29,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::IrqMutex;
 use crate::kernel_services::driver_runtime::{
-    self, DriverTaskHandle, block_current_task, current_task, unblock_task,
+    self, DriverTaskHandle, block_current_task, current_task, finish_wait, prepare_to_wait,
+    unblock_task,
 };
 
 /// Maximum number of tasks that can wait on a single `WaitQueue`.
@@ -154,11 +155,6 @@ impl WaitQueue {
     /// Returns `true` if the condition was met, `false` if the wait queue
     /// was full (could not enqueue — caller should retry or return EAGAIN).
     ///
-    /// # Lost-wakeup safety
-    ///
-    /// The scheduler's `pending_wakeup` flag prevents lost wakeups: if
-    /// `unblock_task()` is called between enqueue and `block_current_task()`,
-    /// the block is skipped.
     pub fn wait_event<F: Fn() -> bool>(&self, condition: F) -> bool {
         loop {
             // Check condition first — fast path.
@@ -176,21 +172,24 @@ impl WaitQueue {
                 return false;
             }
 
+            prepare_to_wait();
+
             {
                 let mut inner = self.inner.lock();
                 // Re-check condition under lock to close the race window.
                 if condition() {
+                    finish_wait();
                     return true;
                 }
                 if !inner.enqueue(task) {
                     // Queue full — cannot wait.
+                    finish_wait();
                     return false;
                 }
             }
-            // Lock dropped here — window where wake_one could fire.
-            // The scheduler's pending_wakeup flag covers this window.
 
             block_current_task();
+            finish_wait();
 
             // We were woken up (or spurious wakeup).  Re-check condition
             // at the top of the loop.
@@ -217,14 +216,18 @@ impl WaitQueue {
             return false;
         }
 
+        prepare_to_wait();
+
         {
             let mut inner = self.inner.lock();
             if !inner.enqueue(task) {
+                finish_wait();
                 return false;
             }
         }
 
         block_current_task();
+        finish_wait();
 
         // Remove ourselves in case of spurious wakeup or if wake_all
         // already dequeued us (remove_task is a no-op in that case).

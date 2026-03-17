@@ -31,6 +31,8 @@ pub enum TaskStatus {
     Blocked = 3,
     /// Task has terminated and is awaiting cleanup.
     Terminated = 4,
+    /// Task declared intent to block, but has not blocked yet.
+    WillBlock = 5,
 }
 
 impl TaskStatus {
@@ -42,6 +44,7 @@ impl TaskStatus {
             2 => Self::Running,
             3 => Self::Blocked,
             4 => Self::Terminated,
+            5 => Self::WillBlock,
             _ => Self::Invalid,
         }
     }
@@ -56,7 +59,18 @@ impl TaskStatus {
         match self {
             Self::Invalid => matches!(target, Self::Ready),
             Self::Ready => matches!(target, Self::Running | Self::Terminated),
-            Self::Running => matches!(target, Self::Ready | Self::Blocked | Self::Terminated),
+            Self::Running => {
+                matches!(
+                    target,
+                    Self::Ready | Self::Blocked | Self::Terminated | Self::WillBlock
+                )
+            }
+            Self::WillBlock => {
+                matches!(
+                    target,
+                    Self::Blocked | Self::Running | Self::Ready | Self::Terminated
+                )
+            }
             Self::Blocked => matches!(target, Self::Ready | Self::Terminated),
             Self::Terminated => matches!(target, Self::Invalid | Self::Terminated),
         }

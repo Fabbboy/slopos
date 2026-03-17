@@ -130,6 +130,17 @@ pub fn period_fs() -> u32 {
     PERIOD_FS.load(Ordering::Relaxed)
 }
 
+/// Convert milliseconds to HPET counter ticks. Returns `None` if HPET
+/// is unavailable (period_fs == 0).
+#[inline]
+pub fn ms_to_ticks(ms: u32) -> Option<u64> {
+    let period = period_fs() as u128;
+    if period == 0 {
+        return None;
+    }
+    Some(((ms as u128) * 1_000_000_000_000u128 / period) as u64)
+}
+
 fn init_inner() -> i32 {
     if !hhdm::is_available() {
         klog_info!("HPET: HHDM unavailable, cannot map MMIO registers");

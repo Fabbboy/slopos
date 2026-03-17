@@ -13,7 +13,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_abi::task::BlockReason;
 use slopos_lib::IrqMutex;
 
-use super::scheduler::{block_current_task, scheduler_get_current_task, unblock_task};
+use super::scheduler::{
+    block_current_task, finish_wait, prepare_to_wait, scheduler_get_current_task, unblock_task,
+};
 use super::task_struct::Task;
 
 /// Number of hash buckets. Must be a power of two.
@@ -136,6 +138,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         unsafe {
             let task = &mut *current;
             task.block_reason = BlockReason::FutexWait;
+            prepare_to_wait();
         }
     }
     // Bucket lock is dropped here.
@@ -143,6 +146,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
     // Block the current task. The scheduler will context-switch away.
     // When FUTEX_WAKE wakes us, execution resumes here.
     block_current_task();
+    finish_wait();
 
     0
 }

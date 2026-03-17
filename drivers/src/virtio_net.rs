@@ -22,7 +22,7 @@ use crate::net::{
 };
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
-    self, QueueEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
+    self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
     pci::{
         PCI_VENDOR_ID_VIRTIO, enable_bus_master, negotiate_features, parse_capabilities,
         register_irq_handlers, set_driver_ok, setup_interrupts,
@@ -145,10 +145,10 @@ impl VirtioNetState {
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
 static VIRTIO_NET_STATE: IrqMutex<VirtioNetState> = IrqMutex::new(VirtioNetState::new());
-static DHCP_RX_EVENT: QueueEvent = QueueEvent::new();
-static NAPI_EVENT: QueueEvent = QueueEvent::new();
+static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
+static NAPI_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
-static DNS_RX_EVENT: QueueEvent = QueueEvent::new();
+static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
 static DNS_RX_BUF: IrqMutex<DnsRxBuf> = IrqMutex::new(DnsRxBuf::new());
 

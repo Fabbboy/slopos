@@ -7,7 +7,7 @@
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
@@ -411,11 +411,6 @@ pub struct Task {
     pub next_ready: *mut Task,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
-    /// Flag set by `unblock_task` when the target task is not yet blocked.
-    /// `block_current_task` checks and clears this to avoid lost wakeups
-    /// on SMP when the unblock fires between the pipe-lock drop and the
-    /// actual `block_current_task` call.
-    pub pending_wakeup: AtomicBool,
 }
 
 impl Task {
@@ -477,7 +472,6 @@ impl Task {
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),
-            pending_wakeup: AtomicBool::new(false),
         }
     }
 

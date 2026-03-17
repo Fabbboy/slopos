@@ -9,6 +9,7 @@ This directory contains architectural analysis and improvement roadmaps for Slop
 | [ANALYSIS_SLOPOS_VS_LINUX_REDOX.md](./ANALYSIS_SLOPOS_VS_LINUX_REDOX.md) | Comprehensive comparison of SlopOS against Linux/GNU and Redox OS |
 | [UI_TOOLKIT_DETAILED_PLAN.md](./UI_TOOLKIT_DETAILED_PLAN.md) | Detailed implementation plan for the retained-mode widget toolkit |
 | [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) | Open performance issues and notes for future development |
+| [WILLBLOCK_SCHEDULER_STATUS.md](./WILLBLOCK_SCHEDULER_STATUS.md) | WillBlock task state refactor status — replaced pending_wakeup, CompletionEvent scheduler path deferred |
 | [LEGACY_MODERNIZATION_PLAN.md](./LEGACY_MODERNIZATION_PLAN.md) | 8-phase roadmap to replace all legacy hardware (PIT, FXSAVE, port-I/O PCI, naive spinlocks) with modern equivalents (HPET, XSAVE, ECAM, ticket locks, MSI, TCP, PCID) — 109 tasks |
 | [SHELL_EVOLUTION_PLAN.md](./SHELL_EVOLUTION_PLAN.md) | 7-phase plan to evolve the shell from command dispatcher to real POSIX-inspired shell (163 tasks) |
 | [NETWORKING_EVOLUTION_PLAN.md](./NETWORKING_EVOLUTION_PLAN.md) | 9-phase roadmap to evolve SlopOS networking from prototype to BSD-socket-compatible TCP/IP stack — ~125 tasks |

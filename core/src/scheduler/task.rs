@@ -1164,6 +1164,9 @@ fn apply_state_transition(
     match new_status {
         TaskStatus::Ready => transition_to_c_int(task_ref.mark_ready()),
         TaskStatus::Running => transition_to_c_int(task_ref.mark_running()),
+        TaskStatus::WillBlock => {
+            transition_to_c_int(task_ref.try_transition_to(TaskStatus::WillBlock))
+        }
         TaskStatus::Blocked => transition_to_c_int(task_ref.block(reason)),
         TaskStatus::Terminated => transition_to_c_int(task_ref.terminate()),
         TaskStatus::Invalid => -1,
@@ -1240,6 +1243,7 @@ pub fn task_state_to_string(status: TaskStatus) -> &'static str {
         TaskStatus::Invalid => "invalid",
         TaskStatus::Ready => "ready",
         TaskStatus::Running => "running",
+        TaskStatus::WillBlock => "willblock",
         TaskStatus::Blocked => "blocked",
         TaskStatus::Terminated => "terminated",
     }
@@ -1341,6 +1345,9 @@ pub fn task_is_ready(task: *const Task) -> bool {
 }
 pub fn task_is_running(task: *const Task) -> bool {
     task_get_state(task) == TaskStatus::Running
+}
+pub fn task_is_will_block(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::WillBlock
 }
 pub fn task_is_blocked(task: *const Task) -> bool {
     task_get_state(task) == TaskStatus::Blocked

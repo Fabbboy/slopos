@@ -8,7 +8,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TaskStatus, task_find_by_id, task_is_blocked, task_is_invalid,
-    task_is_terminated, task_set_state_with_reason,
+    task_is_terminated, task_is_will_block, task_set_state_with_reason,
 };
 use crate::platform;
 
@@ -197,4 +197,65 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     unschedule_task(current);
     schedule();
     0
+}
+
+/// Block the current task with a timeout.
+///
+/// Combines scheduler-backed blocking (`block_current_task` semantics)
+/// with sleep-queue timeout (`sleep_current_task_ms` semantics).
+///
+/// The caller is expected to have registered a wakeup mechanism (e.g.
+/// storing the task handle so an IRQ can call `unblock_task`). This
+/// function provides the timeout safety net: if the external signal
+/// never arrives, the sleep timer wakes us after `timeout_ms`.
+///
+/// # Safety contract
+/// Must NOT be called while holding an `IrqMutex` — blocking with a
+/// mutex held risks deadlock if another task contends the same lock.
+pub fn block_current_task_with_timeout(timeout_ms: u32) {
+    if !is_scheduling_active() {
+        // No scheduler — fall through; the caller's spin fallback handles it.
+        return;
+    }
+
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    if super::per_cpu::is_idle_task(current) {
+        return;
+    }
+
+    let task_id = unsafe { (*current).task_id };
+    if task_id == INVALID_TASK_ID {
+        return;
+    }
+
+    // Only block if still in WillBlock (set by prepare_to_wait).
+    // If Running, the wakeup already arrived — do not re-block.
+    if !task_is_will_block(current) {
+        return;
+    }
+
+    let now_tick = platform::timer_ticks();
+    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
+    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+        return;
+    }
+
+    // Re-check after sleep queue registration (wakeup could have
+    // arrived between the first check and here).
+    if !task_is_will_block(current) {
+        cancel_sleep(task_id);
+        return;
+    }
+
+    if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+        cancel_sleep(task_id);
+        return;
+    }
+
+    unschedule_task(current);
+    schedule();
+    cancel_sleep(task_id);
 }

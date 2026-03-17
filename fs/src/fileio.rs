@@ -14,8 +14,8 @@ use slopos_abi::syscall::{
 
 use slopos_lib::kernel_services::driver_runtime::{
     DriverTaskHandle, block_current_task, current_task, current_task_controlling_tty,
-    current_task_id, current_task_pgid, current_task_sid, scheduler_is_enabled,
-    set_current_task_controlling_tty, unblock_task,
+    current_task_id, current_task_pgid, current_task_sid, finish_wait, prepare_to_wait,
+    scheduler_is_enabled, set_current_task_controlling_tty, unblock_task,
 };
 use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
@@ -1301,6 +1301,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
                     &mut slot.reader_waiter_count,
                     task,
                 ) {
+                    prepare_to_wait();
                     need_block = true;
                 }
             }
@@ -1309,6 +1310,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
 
         if need_block {
             block_current_task();
+            finish_wait();
             // After waking: loop back and re-check pipe state.
             // We might have been woken by: data arrival, writer close (EOF), or signal.
             continue;
@@ -1466,6 +1468,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
                     &mut slot.writer_waiter_count,
                     task,
                 ) {
+                    prepare_to_wait();
                     need_block = true;
                 }
             }
@@ -1474,6 +1477,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
 
         if need_block {
             block_current_task();
+            finish_wait();
             // After waking: loop back and re-check (data consumed? readers gone?)
             continue;
         }

@@ -21,14 +21,14 @@ pub use super::runtime::{
     scheduler_register_idle_wakeup_callback, scheduler_run_bottom_halves,
     spawn_kernel_task_from_driver,
 };
-pub use super::sleep::{cancel_sleep, sleep_current_task_ms};
+pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, task_get_info,
     task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
-    task_pointer_is_valid, task_record_context_switch, task_record_yield, task_set_current,
-    task_set_state,
+    task_is_will_block, task_pointer_is_valid, task_record_context_switch, task_record_yield,
+    task_set_current, task_set_state,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -161,7 +161,13 @@ fn requeue_running_task(cpu_id: usize, current: *mut Task) {
     }
 
     unsafe {
-        if task_is_running(current) && task_set_state((*current).task_id, TaskStatus::Ready) == 0 {
+        // Requeue if Running OR WillBlock.  A WillBlock task is still
+        // executing its pre-block critical section (condition check,
+        // wait-queue enqueue).  If preempted here it must go back to
+        // the Ready queue so it can finish and call block_current_task.
+        if (task_is_running(current) || task_is_will_block(current))
+            && task_set_state((*current).task_id, TaskStatus::Ready) == 0
+        {
             per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                 sched.enqueue_local(current);
             });
@@ -773,27 +779,44 @@ pub fn yield_() {
     r#yield();
 }
 
+pub fn prepare_to_wait() {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    if task_is_blocked(current) || task_is_will_block(current) {
+        return;
+    }
+    let task_id = unsafe { (*current).task_id };
+    let _ = task_set_state(task_id, TaskStatus::WillBlock);
+}
+
+pub fn finish_wait() {
+    let current = scheduler_get_current_task();
+    if current.is_null() {
+        return;
+    }
+    if !task_is_will_block(current) {
+        return;
+    }
+    let task_id = unsafe { (*current).task_id };
+    let _ = task_set_state(task_id, TaskStatus::Running);
+}
+
 pub fn block_current_task() {
     let current = scheduler_get_current_task();
     if current.is_null() {
         return;
     }
-    if task_is_blocked(current) {
+
+    // Only block if still in WillBlock (set by prepare_to_wait).
+    // If Running, the wakeup already arrived — do not re-block.
+    if !task_is_will_block(current) {
         return;
     }
-    // Check for a pending wakeup that arrived between dropping the
-    // subsystem lock (e.g. PIPE_STATE) and reaching this function.
-    // If another CPU already called unblock_task() while we were
-    // Running/Ready, it set this flag instead of changing state.
-    // Clearing it here prevents the lost-wakeup race on SMP.
-    if unsafe {
-        (*current)
-            .pending_wakeup
-            .swap(false, core::sync::atomic::Ordering::AcqRel)
-    } {
-        return;
-    }
-    if task_set_state(unsafe { (*current).task_id }, TaskStatus::Blocked) != 0 {
+
+    let task_id = unsafe { (*current).task_id };
+    if task_set_state(task_id, TaskStatus::Blocked) != 0 {
         return;
     }
     unschedule_task(current);
@@ -819,7 +842,9 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return 0;
     }
     unsafe { (*current).waiting_on.store(task_id, Ordering::Release) };
+    prepare_to_wait();
     block_current_task();
+    finish_wait();
     unsafe {
         (*current)
             .waiting_on
@@ -833,32 +858,24 @@ pub fn unblock_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    // If the task is not yet blocked, it may be in the window between
-    // dropping a subsystem lock and calling block_current_task().
-    // Set the pending_wakeup flag so block_current_task() will see it
-    // and skip the block -- this closes the lost-wakeup race on SMP.
-    if !task_is_blocked(task) {
-        unsafe {
-            (*task)
-                .pending_wakeup
-                .store(true, core::sync::atomic::Ordering::Release)
-        };
+    if task_is_will_block(task) {
+        let task_id = unsafe { (*task).task_id };
+        let _ = task_set_state(task_id, TaskStatus::Running);
         return 0;
     }
 
-    if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
-        // CAS failed - another CPU already changed the state, which is fine
-        // under SMP. Only fail if task is in a bad state.
-        if task_is_terminated(task) || task_is_invalid(task) {
-            return -1;
+    if task_is_blocked(task) {
+        if task_set_state(unsafe { (*task).task_id }, TaskStatus::Ready) != 0 {
+            if task_is_terminated(task) || task_is_invalid(task) {
+                return -1;
+            }
+            return 0;
         }
-        // Task is ready or running - that's success for unblock
-        return 0;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        return schedule_task(task);
     }
 
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-    schedule_task(task)
+    0
 }
 
 /// Attempt to wake a task that was waiting on `completed_id`.
