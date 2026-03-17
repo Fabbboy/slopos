@@ -41,3 +41,7 @@ fs/assets/ext2-tests.img
 
 # Sisyphus agent artifacts
 .sisyphus/
+
+# Python cache artifacts
+__pycache__/
+*.pyc

@@ -8,6 +8,13 @@ Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspe
 - CVSS version: 3.1 Base Score
 - Formula used: Base score derived from Impact + Exploitability subscores with scope-aware rounding up to one decimal
 - Severity mapping: `0.0 None`, `0.1-3.9 Low`, `4.0-6.9 Medium`, `7.0-8.9 High`, `9.0-10.0 Critical`
+- Reusable scorer script: `scripts/cvss_calc.py`
+
+### Reusable scorer
+
+```bash
+python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+```
 
 ## Candidate SlopOS Findings (for remediation)
 

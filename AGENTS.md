@@ -292,6 +292,7 @@ All agents must run a recurring vulnerability review loop for newly written and 
    - Reproducibility (0-30): deterministic repro or strong step-by-step plausibility
 3. Only findings with **confidence >= 80** are considered **guaranteed issues**.
 4. Only guaranteed issues get a CVSS vector/score entry.
+5. Use `scripts/cvss_calc.py` to compute CVSS v3.1 vectors/scores consistently across agents.
 
 ### CVSS file lifecycle requirements
 1. Maintain `CVSS.md` as the single living ledger.
