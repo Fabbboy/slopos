@@ -1,4 +1,4 @@
-use crate::vfs::mount::with_mount_table;
+use crate::vfs::mount::resolve_mount;
 use crate::vfs::traits::{FileSystem, FileType, InodeId, VfsError, VfsResult};
 
 pub struct ResolvedPath {
@@ -11,33 +11,29 @@ pub fn resolve_path(path: &[u8]) -> VfsResult<ResolvedPath> {
         return Err(VfsError::InvalidPath);
     }
 
-    with_mount_table(|mount_table| {
-        let (fs, relative) = mount_table.resolve(path)?;
+    let (fs, relative) = resolve_mount(path)?;
 
-        let mut current_inode = fs.root_inode();
+    let mut current_inode = fs.root_inode();
 
-        for component in PathComponents::new(relative) {
-            if component == b"." {
-                continue;
-            }
-
-            if component == b".." {
-                match fs.lookup(current_inode, b"..") {
-                    Ok(parent) => current_inode = parent,
-                    Err(_) => {}
-                }
-                continue;
-            }
-
-            current_inode = fs.lookup(current_inode, component)?;
+    for component in PathComponents::new(relative) {
+        if component == b"." {
+            continue;
         }
 
-        let fs_static: &'static dyn FileSystem = unsafe { core::mem::transmute(fs) };
+        if component == b".." {
+            match fs.lookup(current_inode, b"..") {
+                Ok(parent) => current_inode = parent,
+                Err(_) => {}
+            }
+            continue;
+        }
 
-        Ok(ResolvedPath {
-            fs: fs_static,
-            inode: current_inode,
-        })
+        current_inode = fs.lookup(current_inode, component)?;
+    }
+
+    Ok(ResolvedPath {
+        fs,
+        inode: current_inode,
     })
 }
 

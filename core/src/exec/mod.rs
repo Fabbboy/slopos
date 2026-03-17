@@ -151,9 +151,7 @@ pub fn spawn_program_with_attrs(
             (*task_info).entry_point = entry;
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
-            if tls_tp != 0 {
-                (*task_info).fs_base = tls_tp;
-            }
+            (*task_info).fs_base = tls_tp;
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has

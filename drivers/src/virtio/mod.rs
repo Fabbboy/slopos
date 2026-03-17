@@ -157,8 +157,8 @@ impl VirtioMmioCaps {
 ///
 /// The MSI-X handler calls [`signal`] when the device places entries
 /// in the used ring. The I/O path calls [`wait_timeout_ms`] which
-/// halts the CPU (via `sti; hlt`) until the interrupt fires or a
-/// HPET-based deadline expires.
+/// blocks on a scheduler-backed wait queue until the IRQ wakes it or
+/// the timeout elapses.
 pub struct QueueEvent {
     signaled: AtomicBool,
 }
@@ -218,15 +218,14 @@ impl QueueEvent {
         let ticks_needed =
             ((timeout_ms as u128) * 1_000_000_000_000u128 / period_fs as u128) as u64;
         let start = hpet::read_counter();
+        let allow_hlt_wait = slopos_lib::get_current_cpu() == 0;
 
         loop {
-            // SAFETY: `cli` is privileged and valid in kernel ring-0 context.
             unsafe {
                 core::arch::asm!("cli", options(nomem, nostack));
             }
 
             if self.signaled.load(Ordering::Acquire) {
-                // SAFETY: `sti` is privileged and valid in kernel ring-0 context.
                 unsafe {
                     core::arch::asm!("sti", options(nomem, nostack));
                 }
@@ -235,16 +234,24 @@ impl QueueEvent {
             }
 
             if hpet::read_counter().wrapping_sub(start) >= ticks_needed {
-                // SAFETY: `sti` is privileged and valid in kernel ring-0 context.
                 unsafe {
                     core::arch::asm!("sti", options(nomem, nostack));
                 }
                 return false;
             }
 
-            // SAFETY: `sti; hlt` atomically enables interrupts then halts.
-            unsafe {
-                core::arch::asm!("sti", "hlt", options(nomem, nostack));
+            if allow_hlt_wait {
+                // SAFETY: `sti; hlt` atomically enables interrupts then halts.
+                unsafe {
+                    core::arch::asm!("sti", "hlt", options(nomem, nostack));
+                }
+            } else {
+                // AP CPUs do not run a local periodic timer in current SlopOS
+                // bring-up; avoid hlt there or they may never wake.
+                unsafe {
+                    core::arch::asm!("sti", options(nomem, nostack));
+                }
+                core::hint::spin_loop();
             }
         }
     }

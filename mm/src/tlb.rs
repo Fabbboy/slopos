@@ -275,6 +275,16 @@ fn send_shootdown_ipi() {
 fn wait_for_acks(initiator_cpu: usize) {
     let cpu_count = TLB_STATE.active_cpu_count.load(Ordering::Acquire) as usize;
 
+    // SYSCALL entry clears IF (SFMASK bit 9) so callers often arrive
+    // with interrupts disabled.  Re-enable them for the spin-wait so
+    // that (a) we can receive TLB IPIs from other CPUs that need our
+    // ack, and (b) mouse/keyboard/timer IRQs keep firing.  The syscall
+    // path holds NO_PREEMPT, so no context switch will occur.
+    let was_enabled = cpu::are_interrupts_enabled();
+    if !was_enabled {
+        cpu::enable_interrupts();
+    }
+
     for cpu_idx in 0..cpu_count.min(MAX_CPUS) {
         if cpu_idx == initiator_cpu {
             continue;
@@ -293,6 +303,10 @@ fn wait_for_acks(initiator_cpu: usize) {
         TLB_STATE.cpu_state[cpu_idx]
             .ack
             .store(false, Ordering::Release);
+    }
+
+    if !was_enabled {
+        cpu::disable_interrupts();
     }
 }
 

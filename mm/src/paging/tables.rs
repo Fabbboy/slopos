@@ -889,7 +889,6 @@ pub fn paging_mark_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_int 
 
         pt_entry.remove_flags(PageFlags::WRITABLE);
         pt_entry.add_flags(PageFlags::COW);
-        tlb::flush_page(aligned_vaddr);
     }
 
     0

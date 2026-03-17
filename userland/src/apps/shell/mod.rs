@@ -246,7 +246,20 @@ pub struct ShellState {
     pub prompt_len: usize,
 }
 
+/// POSIX `isatty(0)` — attempts TCGETS ioctl on stdin.
+fn stdin_is_tty() -> bool {
+    crate::syscall::fs::tcgetattr(0).is_ok()
+}
+
 pub fn shell_user_main() {
+    if stdin_is_tty() {
+        shell_interactive_main();
+    } else {
+        shell_noninteractive_main();
+    }
+}
+
+fn shell_interactive_main() {
     use slopos_abi::signal::SIGINT;
 
     use crate::syscall::process;
@@ -291,6 +304,74 @@ pub fn shell_user_main() {
         set_last_exit_code(rc);
         if rc == 127 {
             display::shell_write_idx(UNKNOWN_CMD.as_bytes(), display::COLOR_ERROR_RED);
+        }
+    }
+}
+
+fn shell_noninteractive_main() {
+    use crate::syscall::fs;
+
+    cwd_set(b"/");
+    env::initialize_defaults();
+    SHELL_PID.store(std::process::id(), Ordering::Relaxed);
+
+    // shell_write() defaults to serial+graphical; redirect to fd 1 so
+    // piped callers (e.g. `nc | shell`) receive the output.
+    display::shell_set_output_fd(1);
+
+    loop {
+        let mut line_buf = [0u8; 256];
+        let mut pos = 0usize;
+
+        let got_line = loop {
+            let mut ch = [0u8; 1];
+            match fs::read_slice(0, &mut ch) {
+                Ok(0) => break false,
+                Ok(_) => {
+                    if ch[0] == b'\n' || ch[0] == b'\r' {
+                        if pos > 0 {
+                            break true;
+                        }
+                        continue;
+                    }
+                    if pos < line_buf.len() - 1 {
+                        line_buf[pos] = ch[0];
+                        pos += 1;
+                    }
+                }
+                Err(_) => break false,
+            }
+        };
+
+        if !got_line && pos == 0 {
+            break;
+        }
+
+        line_buf[pos] = 0;
+
+        buffers::with_line_buf(|buf| {
+            buf[..pos].copy_from_slice(&line_buf[..pos]);
+            buf[pos] = 0;
+        });
+
+        let expanded_len = buffers::with_expand_buf(|expand_buf| {
+            parser::expand_variables(&line_buf, pos, expand_buf)
+        });
+
+        let mut tokens = [core::ptr::null(); parser::SHELL_MAX_TOKENS];
+        let token_count = buffers::with_expand_buf(|expand_buf| {
+            parser::shell_parse_line(&expand_buf[..expanded_len], &mut tokens)
+        });
+
+        if token_count <= 0 {
+            continue;
+        }
+
+        let rc = exec::execute_tokens(token_count, &tokens);
+        set_last_exit_code(rc);
+
+        if !got_line {
+            break;
         }
     }
 }

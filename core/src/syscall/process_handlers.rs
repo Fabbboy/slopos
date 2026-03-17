@@ -14,7 +14,7 @@ use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
 use slopos_fs::vfs::traits::VfsError;
 
-use slopos_lib::InterruptFrame;
+use slopos_lib::{InterruptFrame, cpu};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 
@@ -260,7 +260,12 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
     let mut stack_ptr = 0u64;
     let mut tls_tp = 0u64;
 
-    match exec::do_exec(
+    let irq_was_enabled = cpu::are_interrupts_enabled();
+    if !irq_was_enabled {
+        cpu::enable_interrupts();
+    }
+
+    let exec_result = exec::do_exec(
         process_id,
         path,
         argv_refs.as_deref(),
@@ -268,8 +273,24 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
         &mut entry_point,
         &mut stack_ptr,
         &mut tls_tp,
-    ) {
+    );
+
+    if !irq_was_enabled {
+        cpu::disable_interrupts();
+    }
+
+    match exec_result {
         Ok(()) => {
+            if tls_tp != 0 {
+                let user_tp = match UserPtr::<u64>::try_new(tls_tp) {
+                    Ok(ptr) => ptr,
+                    Err(_) => return ctx.err_with(ERRNO_EFAULT),
+                };
+                if copy_to_user(user_tp, &tls_tp).is_err() {
+                    return ctx.err_with(ERRNO_EFAULT);
+                }
+            }
+
             // Point of no return: old image is gone.  Tear down task-bound
             // resources (compositor surface, shm buffers, input queues, …)
             // so the new program can register fresh ones.

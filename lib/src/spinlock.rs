@@ -41,6 +41,20 @@ pub struct IrqMutexGuard<'a, T> {
     _preempt: PreemptGuard,
 }
 
+pub struct PreemptMutex<T> {
+    next_ticket: AtomicU16,
+    now_serving: AtomicU16,
+    data: UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Send for PreemptMutex<T> {}
+unsafe impl<T: Send> Sync for PreemptMutex<T> {}
+
+pub struct PreemptMutexGuard<'a, T> {
+    mutex: &'a PreemptMutex<T>,
+    _preempt: PreemptGuard,
+}
+
 impl<T> IrqMutex<T> {
     #[inline]
     pub const fn new(data: T) -> Self {
@@ -204,6 +218,86 @@ impl<'a, T> Drop for IrqMutexGuard<'a, T> {
         self.mutex.now_serving.fetch_add(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
         // _preempt drops after this, potentially triggering deferred reschedule
+    }
+}
+
+impl<T> PreemptMutex<T> {
+    #[inline]
+    pub const fn new(data: T) -> Self {
+        Self {
+            next_ticket: AtomicU16::new(0),
+            now_serving: AtomicU16::new(0),
+            data: UnsafeCell::new(data),
+        }
+    }
+
+    #[inline]
+    pub fn lock(&self) -> PreemptMutexGuard<'_, T> {
+        let preempt = PreemptGuard::new();
+        let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+
+        loop {
+            let serving = self.now_serving.load(Ordering::Acquire);
+            if serving == my_ticket {
+                break;
+            }
+            let distance = my_ticket.wrapping_sub(serving) as u32;
+            for _ in 0..distance.min(64) {
+                spin_loop();
+            }
+        }
+
+        PreemptMutexGuard {
+            mutex: self,
+            _preempt: preempt,
+        }
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> Option<PreemptMutexGuard<'_, T>> {
+        let preempt = PreemptGuard::new();
+        let current = self.now_serving.load(Ordering::Relaxed);
+        if self
+            .next_ticket
+            .compare_exchange(
+                current,
+                current.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            Some(PreemptMutexGuard {
+                mutex: self,
+                _preempt: preempt,
+            })
+        } else {
+            drop(preempt);
+            None
+        }
+    }
+}
+
+impl<'a, T> Deref for PreemptMutexGuard<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        unsafe { &*self.mutex.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for PreemptMutexGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.mutex.data.get() }
+    }
+}
+
+impl<'a, T> Drop for PreemptMutexGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.mutex.now_serving.fetch_add(1, Ordering::Release);
     }
 }
 

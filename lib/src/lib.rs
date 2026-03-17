@@ -66,7 +66,10 @@ pub use ports::COM1;
 pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};
 pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
-pub use spinlock::{IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard};
+pub use spinlock::{
+    IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, PreemptMutex,
+    PreemptMutexGuard,
+};
 pub use stacktrace::StacktraceEntry;
 
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};

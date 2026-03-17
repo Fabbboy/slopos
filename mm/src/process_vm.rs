@@ -19,6 +19,7 @@ use crate::paging::{
     paging_sync_kernel_mappings, unmap_page_in_dir, virt_to_phys_in_dir,
 };
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::tlb;
 use crate::vma_flags::VmaFlags;
 use crate::vma_tree::{VmaNode, VmaTree};
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -1955,6 +1956,11 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
             cursor = parent_tree.next(cursor);
         }
+    }
+
+    // paging_mark_cow defers TLB invalidation — flush once for all COW pages.
+    if cow_pages > 0 {
+        tlb::flush_all();
     }
 
     if clone_failed {

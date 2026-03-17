@@ -85,7 +85,7 @@ impl MountTable {
         Err(VfsError::NotFound)
     }
 
-    pub fn resolve<'a>(&self, path: &'a [u8]) -> VfsResult<(&'static dyn FileSystem, &'a [u8])> {
+    pub fn resolve(&self, path: &[u8]) -> VfsResult<(&'static dyn FileSystem, usize)> {
         if path.is_empty() || path[0] != b'/' {
             return Err(VfsError::InvalidPath);
         }
@@ -121,15 +121,7 @@ impl MountTable {
         let (mp, match_len) = best_match.ok_or(VfsError::NotFound)?;
         let fs = mp.fs.ok_or(VfsError::NotFound)?;
 
-        let relative = if match_len >= path.len() {
-            b"/" as &[u8]
-        } else if path[match_len] == b'/' {
-            &path[match_len..]
-        } else {
-            &path[match_len..]
-        };
-
-        Ok((fs, relative))
+        Ok((fs, match_len))
     }
 
     pub fn mount_count(&self) -> usize {
@@ -217,10 +209,17 @@ pub fn with_mount_table<R>(f: impl FnOnce(&MountTable) -> R) -> R {
     f(&guard)
 }
 
-pub fn resolve_mount(path: &[u8]) -> VfsResult<(&'static dyn FileSystem, &'static [u8])> {
-    let guard = MOUNT_TABLE.read();
-    let (fs, relative) = guard.resolve(path)?;
-    let relative_static: &'static [u8] =
-        unsafe { core::slice::from_raw_parts(relative.as_ptr(), relative.len()) };
-    Ok((fs, relative_static))
+pub fn resolve_mount<'a>(path: &'a [u8]) -> VfsResult<(&'static dyn FileSystem, &'a [u8])> {
+    let (fs, match_len) = {
+        let guard = MOUNT_TABLE.read();
+        guard.resolve(path)?
+    };
+
+    let relative = if match_len >= path.len() {
+        b"/" as &[u8]
+    } else {
+        &path[match_len..]
+    };
+
+    Ok((fs, relative))
 }
