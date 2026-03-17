@@ -275,3 +275,44 @@ lore/
 **Ultimate Goal:** Future developers inherit not just code, but an **EPIC**.
 
 ---
+
+## Security Triage & CVSS Ledger (MANDATORY)
+
+All agents must run a recurring vulnerability review loop for newly written and recently changed code.
+
+### Required cadence
+1. Run a security sweep after each major milestone and before any release/PR handoff.
+2. Re-scan subsystems touched by recent commits (at minimum: syscall paths, memory management, filesystems, drivers).
+
+### Triage workflow (strict order)
+1. **List all findings first** in a raw triage section (do not score as CVSS yet).
+2. For each finding, assign a **confidence score (0-100)** using this model:
+   - Evidence quality (0-40): direct code proof, exact path/line references
+   - Exploitability clarity (0-30): realistic attacker path and impact
+   - Reproducibility (0-30): deterministic repro or strong step-by-step plausibility
+3. Only findings with **confidence >= 80** are considered **guaranteed issues**.
+4. Only guaranteed issues get a CVSS vector/score entry.
+
+### CVSS file lifecycle requirements
+1. Maintain `CVSS.md` as the single living ledger.
+2. Every entry must include:
+   - Stable internal ID (e.g., `SLOPOS-YYYY-NNNN`)
+   - Status: `open`, `fixed`, or `needs-retest`
+   - Confidence score and reasoning
+   - CVSS vector + score (only if confidence >= 80)
+   - Exact evidence paths/lines
+3. When an issue is fixed:
+   - Do not delete it.
+   - Mark it `fixed`, include fix date and commit hash (if available), and keep historical traceability.
+4. When new guaranteed issues are found, append them with incremented IDs.
+
+### Repro/examples (required when possible)
+1. Add a minimal repro recipe for each guaranteed issue when technically feasible.
+2. Repro can be a syscall sequence, malformed input artifact, or concise PoC steps.
+3. If no safe repro is possible, document why and provide nearest deterministic validation method.
+
+### Non-negotiable rule
+- Never present speculative issues as CVSS-scored vulnerabilities.
+- Confidence-gated, evidence-backed issues only.
+
+---
