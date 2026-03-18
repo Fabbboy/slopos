@@ -1,5 +1,5 @@
 use crate::hhdm::PhysAddrHhdm;
-use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::{PageFlags, PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

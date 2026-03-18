@@ -24,16 +24,16 @@ pub use super::runtime::{
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
+    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
+    task_is_terminated, task_is_will_block, task_pointer_is_valid, task_record_context_switch,
+    task_record_yield, task_set_current, task_set_state, Task, TaskContext, TaskStatus,
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, task_get_info,
-    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
-    task_is_will_block, task_pointer_is_valid, task_record_context_switch, task_record_yield,
-    task_set_current, task_set_state,
+    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE,
 };
 pub use super::trap::{
-    RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
-    scheduler_handle_post_irq, scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit,
-    scheduler_request_reschedule, scheduler_request_reschedule_from_interrupt,
+    save_preempt_context, save_task_context_from_interrupt_frame, scheduler_handle_post_irq,
+    scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    scheduler_request_reschedule_from_interrupt, RescheduleReason, TrapExitSource,
 };
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
@@ -459,9 +459,6 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             ptr::null_mut()
         };
 
-        // Use CS RPL bits to determine dispatch mode, not TASK_FLAG_USER_MODE.
-        // A user-mode task blocked mid-syscall has CS=0x8 (kernel) in its saved
-        // context, so dispatching via context_switch (retq) is correct.
         if (*to_task).context.cs & 3 == 3 {
             context_switch_user(old_ctx_ptr, &(*to_task).context);
         } else {

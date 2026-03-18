@@ -3,12 +3,12 @@ use core::mem;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down_u64, align_up_usize, klog_debug, klog_info};
+use slopos_lib::{align_down_u64, align_up_usize, klog_debug, klog_info, IrqMutex};
 
 use crate::memory_layout_defs::{KERNEL_HEAP_VBASE, KERNEL_HEAP_VEND};
 use crate::page_alloc::{alloc_page_frame, free_page_frame};
 use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page};
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::{PageFlags, PAGE_SIZE_4KB};
 
 const NUM_SIZE_CLASSES: usize = 8;
 const MAX_ALLOC_SIZE: usize = 0x100000;

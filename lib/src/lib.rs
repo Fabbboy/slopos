@@ -31,6 +31,7 @@ pub mod tsc {
 }
 
 pub mod alignment;
+pub mod boot_flags;
 pub mod cpu_local;
 pub mod init_flag;
 pub mod kdiag;
@@ -58,12 +59,12 @@ pub use paste;
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
 pub use kdiag::kdiag_dump_interrupt_frame;
-pub use kdiag::{InterruptFrame, KDIAG_STACK_TRACE_DEPTH, kdiag_timestamp};
+pub use kdiag::{kdiag_timestamp, InterruptFrame, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
-    KlogLevel, klog_get_level, klog_init, klog_is_enabled, klog_register_backend, klog_set_level,
+    klog_get_level, klog_init, klog_is_enabled, klog_register_backend, klog_set_level, KlogLevel,
 };
 pub use ports::COM1;
-pub use preempt::{IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count};
+pub use preempt::{is_preemption_disabled, preempt_count, IrqPreemptGuard, PreemptGuard};
 pub use ring_buffer::RingBuffer;
 pub use service_cell::ServiceCell;
 pub use spinlock::{
@@ -76,8 +77,9 @@ pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use init_flag::{InitFlag, StateFlag};
 pub use once_lock::OnceLock;
 pub use pcr::{
-    MAX_CPUS, SendIpiToCpuFn, apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id,
-    get_cpu_count, get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
+    apic_id_from_cpu_index, cpu_index_from_apic_id, get_bsp_apic_id, get_cpu_count,
+    get_current_cpu, get_online_cpu_count, is_bsp, is_cpu_online, mark_cpu_offline,
     mark_cpu_online, register_lapic_id_fn, register_send_ipi_to_cpu_fn, send_ipi_to_cpu,
+    SendIpiToCpuFn, MAX_CPUS,
 };
 pub use waitqueue::WaitQueue;

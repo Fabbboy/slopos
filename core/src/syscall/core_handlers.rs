@@ -1,10 +1,10 @@
 use core::ffi::c_char;
 use core::mem::size_of;
 
-use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
+use slopos_abi::syscall::{TtyIndex, UserSysInfo, ERRNO_EINVAL};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
-use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
-use slopos_lib::{InterruptFrame, klog_debug};
+use slopos_abi::{UserNetInfo, UserNetMember, USER_NET_MAX_MEMBERS};
+use slopos_lib::{klog_debug, InterruptFrame};
 
 use crate::platform;
 use crate::sched::{
@@ -13,8 +13,8 @@ use crate::sched::{
 };
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{
-    SyscallDisposition, USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_return_err,
+    syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_return_err,
+    SyscallDisposition, USER_IO_MAX_BYTES,
 };
 use crate::syscall::context::SyscallContext;
 use crate::task::{get_task_stats, task_terminate};
@@ -157,6 +157,7 @@ define_syscall!(syscall_sys_info(ctx, args) {
         ready_tasks: 0,
         schedule_calls: 0,
         wl_balance: slopos_lib::wl_currency::check_balance(),
+        boot_flags: slopos_lib::boot_flags::get_flags(),
     };
 
     get_page_allocator_stats(

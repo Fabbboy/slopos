@@ -2,7 +2,7 @@
 
 use core::arch::{asm, global_asm};
 use core::cell::SyncUnsafeCell;
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{c_char, c_void, CStr};
 
 use slopos_lib::cpu;
 use slopos_lib::string::cstr_to_str;
@@ -14,14 +14,14 @@ use crate::panic::set_panic_cpu_state;
 global_asm!(include_str!("../idt_handlers.s"));
 
 pub use slopos_lib::arch::idt::{
-    EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
-    EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
+    IdtEntry, EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT,
+    EXCEPTION_DEBUG, EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
     EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RESCHEDULE_IPI_VECTOR,
-    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    TLB_SHOOTDOWN_VECTOR,
 };
 
 #[repr(C, packed)]
@@ -87,13 +87,13 @@ use slopos_mm::tlb;
 use slopos_mm::{paging, process_vm};
 
 use slopos_core::sched::{
-    RescheduleReason, TrapExitSource, schedule, scheduler_get_current_task,
-    scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    schedule, scheduler_get_current_task, scheduler_handoff_on_trap_exit,
+    scheduler_request_reschedule, RescheduleReason, TrapExitSource,
 };
 use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
 use slopos_core::task::task_terminate;
 
-use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{TaskExitReason, TaskFaultReason, INVALID_PROCESS_ID, INVALID_TASK_ID};
 use slopos_core::scheduler::task_struct::Task;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 

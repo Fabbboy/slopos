@@ -1,5 +1,7 @@
+use slopos_abi::syscall::BOOT_FLAG_ROULETTE_SKIP;
+
 use crate::program_registry;
-use crate::syscall::{core as sys_core, process};
+use crate::syscall::{core as sys_core, process, UserSysInfo};
 
 fn spawn_service(name: &str) -> i32 {
     let tid = match program_registry::resolve_program(name) {
@@ -15,9 +17,15 @@ fn spawn_service(name: &str) -> i32 {
 }
 
 pub fn init_user_main() {
-    let roulette_tid = spawn_service("roulette");
-    if roulette_tid > 0 {
-        process::waitpid(roulette_tid as u32);
+    let mut info = UserSysInfo::default();
+    let skip_roulette =
+        sys_core::sys_info(&mut info) == 0 && (info.boot_flags & BOOT_FLAG_ROULETTE_SKIP) != 0;
+
+    if !skip_roulette {
+        let roulette_tid = spawn_service("roulette");
+        if roulette_tid > 0 {
+            process::waitpid(roulette_tid as u32);
+        }
     }
 
     let compositor_tid = spawn_service("compositor");

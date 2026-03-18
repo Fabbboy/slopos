@@ -1223,7 +1223,10 @@ pub struct UserSysInfo {
     pub ready_tasks: u32,
     pub schedule_calls: u32,
     pub wl_balance: i64,
+    pub boot_flags: u32,
 }
+
+pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 
 /// POSIX-style timespec returned by `SYSCALL_CLOCK_GETTIME`.
 #[repr(C)]

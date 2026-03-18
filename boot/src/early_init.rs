@@ -1,6 +1,6 @@
 use core::{
     cell::UnsafeCell,
-    ffi::{CStr, c_char},
+    ffi::{c_char, CStr},
     ptr,
 };
 
@@ -381,7 +381,11 @@ pub fn is_kernel_initialized() -> i32 {
 }
 
 pub fn get_initialization_progress() -> i32 {
-    if boot_state().initialized { 100 } else { 50 }
+    if boot_state().initialized {
+        100
+    } else {
+        50
+    }
 }
 
 pub fn report_kernel_status() {
@@ -456,6 +460,11 @@ fn boot_step_boot_config_fn() {
     } else if disable_debug {
         klog_set_level(KlogLevel::Info);
         boot_debug(b"Boot option: debug logging disabled\0");
+    }
+
+    if cmdline.contains("roulette=skip") {
+        slopos_lib::boot_flags::set_flag(slopos_lib::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
+        boot_info(b"Boot option: roulette skip enabled\0");
     }
 }
 

@@ -176,17 +176,19 @@ context_switch:
     movq    0x68(%r15), %r13
     movq    0x70(%r15), %r14
 
-    # RFLAGS
-    movq    0x88(%r15), %rax
-    pushq   %rax
-    popfq
-
-    # Stack and return
+    # Stack and return — restore RSP and push target RIP BEFORE restoring
+    # RFLAGS.  The old code restored RFLAGS (re-enabling interrupts via IF)
+    # then switched RSP and pushed the return address.  A timer interrupt
+    # in that window would push an interrupt frame onto the target kernel
+    # stack, overwriting the return address.
     movq    0x38(%r15), %rsp
     pushq   0x80(%r15)
 
+    # Now restore RFLAGS (may set IF) and the last GPR, then return.
+    movq    0x88(%r15), %rax
     movq    0x78(%r15), %r15
-
+    pushq   %rax
+    popfq
     retq
 
 .Lctx_bad_kernel_target:
