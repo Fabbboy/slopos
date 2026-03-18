@@ -624,6 +624,8 @@ pub struct TcpConnection {
 
     /// Socket table index that owns this connection.
     pub socket_idx: Option<usize>,
+
+    pub reset_received: bool,
 }
 
 impl TcpConnection {
@@ -649,6 +651,7 @@ impl TcpConnection {
             time_wait_timer_token: None,
             active: false,
             socket_idx: None,
+            reset_received: false,
         }
     }
 }
@@ -1426,6 +1429,11 @@ pub fn tcp_is_peer_closed(idx: usize) -> bool {
         .unwrap_or(true)
 }
 
+pub fn tcp_is_reset(idx: usize) -> bool {
+    let table = TCP_TABLE.lock();
+    table.get(idx).map(|c| c.reset_received).unwrap_or(true)
+}
+
 // =============================================================================
 // Incoming segment processing
 // =============================================================================
@@ -1855,7 +1863,11 @@ fn process_established_and_closing(
     // Step 1: Check RST.
     if hdr.is_rst() {
         klog_debug!("tcp: {} idx={} — RST received", current_state.name(), idx);
-        table.release(idx);
+        if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
+        table.connections[idx].state = TcpState::Closed;
+        table.connections[idx].reset_received = true;
         return TcpInputResult {
             conn_idx: Some(idx),
             new_state: Some(TcpState::Closed),
@@ -2426,6 +2438,13 @@ pub fn tcp_recv(idx: usize, out: &mut [u8]) -> Result<usize, TcpError> {
     }
 
     let read = table.buffers[idx].recv.dequeue(out);
+    if read == 0
+        && table.buffers[idx].recv.available() == 0
+        && table.connections[idx].reset_received
+    {
+        return Err(TcpError::ConnectionReset);
+    }
+
     let recv_window = table.buffers[idx].recv.window();
     if let Some(conn) = table.get_mut(idx) {
         conn.rcv_wnd = recv_window;
