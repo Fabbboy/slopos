@@ -464,7 +464,11 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
-            // tcp_engine.on_delayed_ack(timer.key)
+            if let Some((_idx, seg)) =
+                super::tcp::tcp_delayed_ack_check(slopos_lib::clock::uptime_ms())
+            {
+                let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
+            }
         }
         TimerKind::TcpTimeWait => {
             klog_debug!("net_timer: TCP TIME_WAIT expired, key={}", timer.key);

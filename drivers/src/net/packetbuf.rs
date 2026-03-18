@@ -287,6 +287,14 @@ impl PacketBuf {
         Ok(&self.data()[old_head..old_head + len])
     }
 
+    /// Trim the active region to at most `len` bytes from the current head.
+    pub fn trim(&mut self, len: usize) {
+        let max_tail = (self.head as usize) + len;
+        if (self.tail as usize) > max_tail {
+            self.tail = max_tail as u16;
+        }
+    }
+
     /// Append `src` bytes at the tail end of the active region.
     ///
     /// Fails with [`NoBufferSpace`](NetError::NoBufferSpace) if the remaining

@@ -30,8 +30,8 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// Default Maximum Segment Size (Ethernet MTU 1500 − IP 20 − TCP 20).
 pub const DEFAULT_MSS: u16 = 1460;
 
-/// Default receive window size (16 KiB).
-pub const DEFAULT_WINDOW_SIZE: u16 = 16384;
+/// Default receive window size advertised in SYN (unscaled, fits in u16).
+pub const DEFAULT_WINDOW_SIZE: u16 = 32768;
 
 /// Initial retransmission timeout in milliseconds (RFC 6298 recommends 1s).
 pub const INITIAL_RTO_MS: u32 = 1000;
@@ -46,7 +46,7 @@ pub const TIME_WAIT_MS: u64 = 60_000;
 pub const MAX_RETRANSMITS: u8 = 8;
 
 /// Size of per-connection send/receive ring buffers.
-pub const TCP_BUFFER_SIZE: usize = 16384;
+pub const TCP_BUFFER_SIZE: usize = 32768;
 /// Delayed ACK timeout in milliseconds (RFC 1122 §4.2.3.2).
 pub const DELAYED_ACK_MS: u64 = 200;
 /// Send ACK after this many unacknowledged data segments.
@@ -73,6 +73,13 @@ pub const TCP_OPT_END: u8 = 0;
 pub const TCP_OPT_NOP: u8 = 1;
 pub const TCP_OPT_MSS: u8 = 2;
 pub const TCP_OPT_MSS_LEN: u8 = 4;
+pub const TCP_OPT_WINDOW_SCALE: u8 = 3;
+pub const TCP_OPT_WINDOW_SCALE_LEN: u8 = 3;
+
+/// Maximum number of out-of-order segments buffered per connection.
+const OOO_MAX_ENTRIES: usize = 8;
+/// Maximum payload bytes stored per out-of-order entry (one MSS).
+const OOO_ENTRY_MAX: usize = 1460;
 
 // =============================================================================
 // TCP Header
@@ -229,6 +236,73 @@ pub fn parse_mss_option(options: &[u8]) -> Option<u16> {
         }
     }
     None
+}
+
+pub struct ParsedTcpOptions {
+    pub mss: Option<u16>,
+    pub window_scale: Option<u8>,
+}
+
+pub fn parse_tcp_options(options: &[u8]) -> ParsedTcpOptions {
+    let mut result = ParsedTcpOptions {
+        mss: None,
+        window_scale: None,
+    };
+    let mut i = 0;
+    while i < options.len() {
+        match options[i] {
+            TCP_OPT_END => break,
+            TCP_OPT_NOP => {
+                i += 1;
+            }
+            TCP_OPT_MSS => {
+                if i + 3 < options.len() && options[i + 1] == TCP_OPT_MSS_LEN {
+                    result.mss = Some(u16::from_be_bytes([options[i + 2], options[i + 3]]));
+                }
+                i += TCP_OPT_MSS_LEN as usize;
+            }
+            TCP_OPT_WINDOW_SCALE => {
+                if i + 2 < options.len() && options[i + 1] == TCP_OPT_WINDOW_SCALE_LEN {
+                    // RFC 7323: shift count must be <= 14
+                    result.window_scale = Some(options[i + 2].min(14));
+                }
+                i += TCP_OPT_WINDOW_SCALE_LEN as usize;
+            }
+            _ => {
+                if i + 1 >= options.len() {
+                    break;
+                }
+                let opt_len = options[i + 1] as usize;
+                if opt_len < 2 || i + opt_len > options.len() {
+                    break;
+                }
+                i += opt_len;
+            }
+        }
+    }
+    result
+}
+
+/// Compute our receive-side window scale shift count from TCP_BUFFER_SIZE.
+/// RFC 7323 §2.2: shift count = ceil(log2(buffer_size / 65535)).
+pub fn our_window_scale() -> u8 {
+    let mut shift = 0u8;
+    let mut size = TCP_BUFFER_SIZE;
+    while size > u16::MAX as usize && shift < 14 {
+        size >>= 1;
+        shift += 1;
+    }
+    shift
+}
+
+pub fn write_window_scale_option(shift: u8, out: &mut [u8]) -> Option<usize> {
+    if out.len() < 3 {
+        return None;
+    }
+    out[0] = TCP_OPT_WINDOW_SCALE;
+    out[1] = TCP_OPT_WINDOW_SCALE_LEN;
+    out[2] = shift;
+    Some(3)
 }
 
 // =============================================================================
@@ -493,6 +567,8 @@ pub struct TcpOutSegment {
     pub window_size: u16,
     /// MSS option to include (0 = no MSS option).
     pub mss: u16,
+    /// Window Scale option shift count (255 = don't include option).
+    pub wscale: u8,
 }
 
 /// Per-connection state.
@@ -506,8 +582,8 @@ pub struct TcpConnection {
     pub snd_una: u32,
     /// Send next.
     pub snd_nxt: u32,
-    /// Send window.
-    pub snd_wnd: u16,
+    /// Send window (scaled value after window scaling is negotiated).
+    pub snd_wnd: u32,
     /// Initial send sequence number.
     pub iss: u32,
 
@@ -521,6 +597,13 @@ pub struct TcpConnection {
 
     /// Peer's advertised MSS (or DEFAULT_MSS if not specified).
     pub peer_mss: u16,
+
+    /// Window scale shift count we send (our receive window scaling).
+    pub rcv_wscale: u8,
+    /// Window scale shift count the peer sends (their receive window scaling).
+    pub snd_wscale: u8,
+    /// Whether window scaling was negotiated during the handshake.
+    pub wscale_enabled: bool,
 
     /// Retransmission timeout (ms).
     pub rto_ms: u32,
@@ -556,6 +639,9 @@ impl TcpConnection {
             rcv_wnd: DEFAULT_WINDOW_SIZE,
             irs: 0,
             peer_mss: DEFAULT_MSS,
+            rcv_wscale: 0,
+            snd_wscale: 0,
+            wscale_enabled: false,
             rto_ms: INITIAL_RTO_MS,
             retransmits: 0,
             retransmit_timer_token: None,
@@ -564,6 +650,159 @@ impl TcpConnection {
             active: false,
             socket_idx: None,
         }
+    }
+}
+
+// =============================================================================
+// Out-of-Order Reassembly Queue (RFC 793 §3.9)
+// =============================================================================
+
+#[derive(Clone, Copy)]
+struct OooEntry {
+    seq: u32,
+    len: u16,
+    data: [u8; OOO_ENTRY_MAX],
+}
+
+impl OooEntry {
+    const fn empty() -> Self {
+        Self {
+            seq: 0,
+            len: 0,
+            data: [0; OOO_ENTRY_MAX],
+        }
+    }
+
+    fn end_seq(&self) -> u32 {
+        self.seq.wrapping_add(self.len as u32)
+    }
+}
+
+impl core::fmt::Debug for OooEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OooEntry")
+            .field("seq", &self.seq)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpOooQueue {
+    entries: [OooEntry; OOO_MAX_ENTRIES],
+    count: usize,
+}
+
+impl TcpOooQueue {
+    pub const fn new() -> Self {
+        Self {
+            entries: [OooEntry::empty(); OOO_MAX_ENTRIES],
+            count: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn insert(&mut self, seq: u32, data: &[u8]) {
+        if data.is_empty() || data.len() > OOO_ENTRY_MAX {
+            return;
+        }
+
+        // Drop duplicates: skip if we already cover this range.
+        for i in 0..self.count {
+            let e = &self.entries[i];
+            if e.seq == seq && e.len as usize >= data.len() {
+                return;
+            }
+            // If new segment is fully contained within an existing entry, skip.
+            if seq_ge(seq, e.seq) && seq_le(seq.wrapping_add(data.len() as u32), e.end_seq()) {
+                return;
+            }
+        }
+
+        if self.count >= OOO_MAX_ENTRIES {
+            // Evict the entry with the highest sequence number (furthest from rcv_nxt)
+            // to keep near-gap segments which are more likely to complete reassembly.
+            let mut evict_idx = 0;
+            let mut evict_seq = self.entries[0].seq;
+            for i in 1..self.count {
+                if seq_gt(self.entries[i].seq, evict_seq) {
+                    evict_idx = i;
+                    evict_seq = self.entries[i].seq;
+                }
+            }
+            // Only evict if the new entry has a lower seq (closer to gap).
+            if seq_ge(seq, evict_seq) {
+                return;
+            }
+            self.entries[evict_idx] = self.entries[self.count - 1];
+            self.count -= 1;
+        }
+
+        let entry = &mut self.entries[self.count];
+        entry.seq = seq;
+        entry.len = data.len() as u16;
+        entry.data[..data.len()].copy_from_slice(data);
+        self.count += 1;
+    }
+
+    /// Drain contiguous segments starting at `rcv_nxt` into `recv`.
+    /// Returns the total number of bytes drained (for advancing `rcv_nxt`).
+    pub fn drain_contiguous(
+        &mut self,
+        rcv_nxt: u32,
+        recv: &mut TcpRecvState,
+        now_ms: u64,
+    ) -> usize {
+        let mut total = 0usize;
+        let mut next_seq = rcv_nxt;
+
+        loop {
+            let mut found = None;
+            for i in 0..self.count {
+                let e = &self.entries[i];
+                // Exact match or overlapping start (segment starts at or before next_seq
+                // but extends past it).
+                if e.seq == next_seq {
+                    found = Some(i);
+                    break;
+                }
+                // Partial overlap: segment starts before next_seq but data extends beyond.
+                if seq_lt(e.seq, next_seq) && seq_gt(e.end_seq(), next_seq) {
+                    found = Some(i);
+                    break;
+                }
+            }
+
+            let Some(idx) = found else { break };
+
+            let entry = self.entries[idx];
+            let skip = if seq_lt(entry.seq, next_seq) {
+                next_seq.wrapping_sub(entry.seq) as usize
+            } else {
+                0
+            };
+            let usable = &entry.data[skip..entry.len as usize];
+            let wrote = recv.enqueue(usable, now_ms);
+            if wrote == 0 {
+                break; // Receive buffer full
+            }
+            total += wrote;
+            next_seq = next_seq.wrapping_add(wrote as u32);
+
+            self.count -= 1;
+            if idx < self.count {
+                self.entries[idx] = self.entries[self.count];
+            }
+        }
+
+        total
+    }
+
+    pub fn clear(&mut self) {
+        self.count = 0;
     }
 }
 
@@ -802,6 +1041,7 @@ impl TcpRecvState {
 pub struct TcpBufferPair {
     pub send: TcpSendState,
     pub recv: TcpRecvState,
+    pub ooo: TcpOooQueue,
 }
 
 impl TcpBufferPair {
@@ -809,12 +1049,14 @@ impl TcpBufferPair {
         Self {
             send: TcpSendState::new(),
             recv: TcpRecvState::new(),
+            ooo: TcpOooQueue::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.send.clear();
         self.recv.clear();
+        self.ooo.clear();
     }
 }
 
@@ -1025,6 +1267,9 @@ pub fn tcp_connect(
         idx
     );
 
+    let wscale = our_window_scale();
+    conn.rcv_wscale = wscale;
+
     let seg = TcpOutSegment {
         tuple,
         seq_num: iss,
@@ -1032,6 +1277,7 @@ pub fn tcp_connect(
         flags: TCP_FLAG_SYN,
         window_size: DEFAULT_WINDOW_SIZE,
         mss: DEFAULT_MSS,
+        wscale: if wscale > 0 { wscale } else { 255 },
     };
 
     Ok((idx, seg))
@@ -1094,6 +1340,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
                 flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
 
             klog_debug!(
@@ -1117,6 +1364,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
                 flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
 
             klog_debug!(
@@ -1155,6 +1403,7 @@ pub fn tcp_abort(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
             flags: TCP_FLAG_RST,
             window_size: 0,
             mss: 0,
+            wscale: 255,
         })
     } else {
         None
@@ -1187,6 +1436,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
                 flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
 
             klog_debug!(
@@ -1209,6 +1459,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
                 flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
 
             klog_debug!(
@@ -1323,6 +1574,7 @@ fn build_rst_for(hdr: &TcpHeader, local_ip: [u8; 4], remote_ip: [u8; 4]) -> TcpO
         flags,
         window_size: 0,
         mss: 0,
+        wscale: 255,
     }
 }
 
@@ -1424,6 +1676,7 @@ fn process_listen(
                 flags: TCP_FLAG_RST,
                 window_size: 0,
                 mss: 0,
+                wscale: 255,
             }),
             conn_idx: Some(listen_idx),
             ..TcpInputResult::empty()
@@ -1451,7 +1704,7 @@ fn process_listen(
     child.snd_nxt = iss.wrapping_add(1);
     child.irs = hdr.seq_num;
     child.rcv_nxt = hdr.seq_num.wrapping_add(1);
-    child.snd_wnd = hdr.window_size;
+    child.snd_wnd = hdr.window_size as u32;
     child.rcv_wnd = DEFAULT_WINDOW_SIZE;
     child.peer_mss = peer_mss;
     child.rto_ms = INITIAL_RTO_MS;
@@ -1472,6 +1725,7 @@ fn process_listen(
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: DEFAULT_WINDOW_SIZE,
         mss: DEFAULT_MSS,
+        wscale: 255,
     };
 
     TcpInputResult {
@@ -1509,6 +1763,7 @@ fn process_syn_sent(
                     flags: TCP_FLAG_RST,
                     window_size: 0,
                     mss: 0,
+                    wscale: 255,
                 }),
                 conn_idx: Some(idx),
                 ..TcpInputResult::empty()
@@ -1540,12 +1795,23 @@ fn process_syn_sent(
         return TcpInputResult::empty();
     }
 
-    let peer_mss = parse_mss_option(options).unwrap_or(DEFAULT_MSS);
+    let opts = parse_tcp_options(options);
+    let peer_mss = opts.mss.unwrap_or(DEFAULT_MSS);
     let conn = &mut table.connections[idx];
     conn.irs = hdr.seq_num;
     conn.rcv_nxt = hdr.seq_num.wrapping_add(1);
-    conn.snd_wnd = hdr.window_size;
     conn.peer_mss = peer_mss;
+
+    // RFC 7323: window scaling is enabled only if both sides offered it.
+    if let Some(peer_shift) = opts.window_scale {
+        conn.snd_wscale = peer_shift;
+        conn.wscale_enabled = true;
+        conn.snd_wnd = (hdr.window_size as u32) << peer_shift;
+    } else {
+        conn.snd_wnd = hdr.window_size as u32;
+        conn.wscale_enabled = false;
+        conn.rcv_wscale = 0;
+    }
 
     if hdr.is_ack() {
         // SYN+ACK — our SYN was acknowledged.
@@ -1566,6 +1832,7 @@ fn process_syn_sent(
             flags: TCP_FLAG_ACK,
             window_size: conn.rcv_wnd,
             mss: 0,
+            wscale: 255,
         };
 
         TcpInputResult {
@@ -1591,6 +1858,7 @@ fn process_syn_sent(
             flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
             window_size: conn.rcv_wnd,
             mss: DEFAULT_MSS,
+            wscale: 255,
         };
 
         TcpInputResult {
@@ -1639,6 +1907,7 @@ fn process_syn_received(
                 flags: TCP_FLAG_RST,
                 window_size: 0,
                 mss: 0,
+                wscale: 255,
             }),
             conn_idx: Some(idx),
             ..TcpInputResult::empty()
@@ -1648,7 +1917,7 @@ fn process_syn_received(
     // Valid ACK → ESTABLISHED.
     let conn = &mut table.connections[idx];
     conn.snd_una = hdr.ack_num;
-    conn.snd_wnd = hdr.window_size;
+    conn.snd_wnd = hdr.window_size as u32;
     conn.state = TcpState::Established;
     conn.retransmits = 0;
 
@@ -1703,6 +1972,7 @@ fn process_established_and_closing(
                 flags: TCP_FLAG_RST,
                 window_size: 0,
                 mss: 0,
+                wscale: 255,
             }),
             conn_idx: Some(idx),
             new_state: Some(TcpState::Closed),
@@ -1723,7 +1993,11 @@ fn process_established_and_closing(
         let conn = &mut table.connections[idx];
         if seq_gt(hdr.ack_num, conn.snd_una) && seq_le(hdr.ack_num, conn.snd_nxt) {
             conn.snd_una = hdr.ack_num;
-            conn.snd_wnd = hdr.window_size;
+            conn.snd_wnd = if conn.wscale_enabled {
+                (hdr.window_size as u32) << conn.snd_wscale
+            } else {
+                hdr.window_size as u32
+            };
             ack_advanced = true;
         }
     }
@@ -1760,6 +2034,17 @@ fn process_established_and_closing(
     {
         let expected_seq = table.connections[idx].rcv_nxt;
         if hdr.seq_num != expected_seq {
+            // Out-of-order segment: buffer it if it's ahead of rcv_nxt.
+            if seq_gt(hdr.seq_num, expected_seq) {
+                klog_debug!(
+                    "tcp: OOO segment idx={} seq={} expected={} len={}",
+                    idx,
+                    hdr.seq_num,
+                    expected_seq,
+                    payload.len()
+                );
+                table.buffers[idx].ooo.insert(hdr.seq_num, payload);
+            }
             let conn = &table.connections[idx];
             let seg = TcpOutSegment {
                 tuple: conn.tuple,
@@ -1768,6 +2053,7 @@ fn process_established_and_closing(
                 flags: TCP_FLAG_ACK,
                 window_size: table.buffers[idx].recv.window(),
                 mss: 0,
+                wscale: 255,
             };
             return TcpInputResult {
                 response: Some(seg),
@@ -1780,12 +2066,29 @@ fn process_established_and_closing(
 
         let wrote = table.buffers[idx].recv.enqueue(payload, now_ms);
         accepted_payload_len = wrote;
-        let recv_window = table.buffers[idx].recv.window();
         {
             let conn = &mut table.connections[idx];
             conn.rcv_nxt = conn.rcv_nxt.wrapping_add(wrote as u32);
-            conn.rcv_wnd = recv_window;
         }
+
+        // Drain any OOO segments that are now contiguous with rcv_nxt.
+        if !table.buffers[idx].ooo.is_empty() {
+            let rcv_nxt = table.connections[idx].rcv_nxt;
+            let drained = table.buffers[idx].ooo.drain_contiguous(
+                rcv_nxt,
+                &mut table.buffers[idx].recv,
+                now_ms,
+            );
+            if drained > 0 {
+                klog_debug!("tcp: OOO drain idx={} bytes={}", idx, drained);
+                accepted_payload_len += drained;
+                table.connections[idx].rcv_nxt =
+                    table.connections[idx].rcv_nxt.wrapping_add(drained as u32);
+            }
+        }
+
+        let recv_window = table.buffers[idx].recv.window();
+        table.connections[idx].rcv_wnd = recv_window;
 
         if table.buffers[idx].recv.should_ack_now(now_ms) {
             let conn = &table.connections[idx];
@@ -1796,6 +2099,7 @@ fn process_established_and_closing(
                 flags: TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
             table.buffers[idx].recv.ack_sent();
             return TcpInputResult {
@@ -1855,6 +2159,7 @@ fn process_established_and_closing(
                         flags: TCP_FLAG_ACK,
                         window_size: conn.rcv_wnd,
                         mss: 0,
+                        wscale: 255,
                     };
                     return TcpInputResult {
                         response: Some(seg),
@@ -1922,6 +2227,7 @@ fn process_established_and_closing(
                 flags: TCP_FLAG_ACK,
                 window_size: conn.rcv_wnd,
                 mss: 0,
+                wscale: 255,
             };
             return TcpInputResult {
                 response: Some(seg),
@@ -1971,6 +2277,7 @@ fn process_established_and_closing(
             flags: TCP_FLAG_ACK,
             window_size: conn.rcv_wnd,
             mss: 0,
+            wscale: 255,
         };
 
         return TcpInputResult {
@@ -2019,6 +2326,7 @@ fn process_time_wait(
             flags: TCP_FLAG_ACK,
             window_size: conn.rcv_wnd,
             mss: 0,
+            wscale: 255,
         };
         let conn = &mut table.connections[idx];
         conn.time_wait_start_ms = now_ms;
@@ -2282,6 +2590,7 @@ pub fn tcp_poll_transmit(
         flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
         window_size: table.buffers[idx].recv.window(),
         mss: 0,
+        wscale: 255,
     };
 
     Some((seg, payload_len))
@@ -2349,6 +2658,7 @@ pub fn tcp_delayed_ack_check(now_ms: u64) -> Option<(usize, TcpOutSegment)> {
                 flags: TCP_FLAG_ACK,
                 window_size: table.buffers[i].recv.window(),
                 mss: 0,
+                wscale: 255,
             };
             table.buffers[i].recv.ack_sent();
             return Some((i, seg));
@@ -2382,6 +2692,7 @@ pub fn tcp_zero_window_probe(idx: usize, _now_ms: u64) -> Option<TcpOutSegment> 
         flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
         window_size: table.buffers[idx].recv.window(),
         mss: 0,
+        wscale: 255,
     })
 }
 

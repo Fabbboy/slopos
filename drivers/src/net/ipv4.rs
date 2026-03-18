@@ -48,7 +48,7 @@ use crate::net::{self as net, NetError, packetbuf::PacketBuf};
 pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
     // Extract all fields we need while borrowing the payload immutably.
     // We must drop this borrow before calling pkt.set_l4() / pkt.pull_header().
-    let (proto, src_ip, dst_ip, ihl) = {
+    let (proto, src_ip, dst_ip, ihl, ip_total_len) = {
         let ip_data = pkt.payload();
         if ip_data.len() < net::IPV4_HEADER_LEN {
             klog_debug!(
@@ -101,9 +101,12 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         let src_ip: [u8; 4] = ip_data[12..16].try_into().unwrap_or([0; 4]);
         let dst_ip: [u8; 4] = ip_data[16..20].try_into().unwrap_or([0; 4]);
 
-        (proto, src_ip, dst_ip, ihl)
+        (proto, src_ip, dst_ip, ihl, total_len)
     };
     // Immutable borrow of pkt dropped here.
+
+    // Trim packet to IP total_length so L4 handlers never see Ethernet padding.
+    pkt.trim(ip_total_len);
 
     // Set L4 offset (absolute position: current head + IHL).
     pkt.set_l4(pkt.head() + ihl as u16);
@@ -113,9 +116,8 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         return;
     }
 
-    // Dispatch to L4 protocol handler.
     match IpProtocol::from_u8(proto) {
-        Some(IpProtocol::Tcp) => dispatch_tcp(src_ip, dst_ip, &pkt),
+        Some(IpProtocol::Tcp) => dispatch_tcp(src_ip, dst_ip, &pkt, checksum_rx),
         Some(IpProtocol::Udp) => dispatch_udp(src_ip, dst_ip, &pkt),
         Some(IpProtocol::Icmp) => super::icmp::handle_rx(src_ip, dst_ip, &pkt),
         None => {
@@ -134,7 +136,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
 ///
 /// Uses the [`TcpDemuxTable`] for fast 4-tuple / 2-tuple lookup,
 /// then delegates to `tcp_input()` for full state-machine processing.
-fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
+fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: bool) {
     let ip_payload = pkt.payload();
 
     let Some(hdr) = tcp::parse_header(ip_payload) else {
@@ -144,6 +146,12 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     if hdr_len < tcp::TCP_HEADER_LEN || ip_payload.len() < hdr_len {
         return;
     }
+
+    if !checksum_rx && !tcp::verify_checksum(src_ip, dst_ip, ip_payload) {
+        klog_debug!("tcp: bad checksum, dropping segment");
+        return;
+    }
+
     let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
     let payload = &ip_payload[hdr_len..];
     let now_ms = slopos_lib::clock::uptime_ms();

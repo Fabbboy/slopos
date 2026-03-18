@@ -546,6 +546,7 @@ fn build_syn_ack_from(entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment 
         flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
         window_size: DEFAULT_WINDOW_SIZE,
         mss: DEFAULT_MSS,
+        wscale: 255,
     }
 }
 

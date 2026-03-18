@@ -997,6 +997,8 @@ fn virtnet_napi_poll_loop() {
 
     napi_complete();
 
+    crate::net::socket::socket_process_timers();
+
     // Fix NAPI race: if an RX IRQ fired while we were in Polling state,
     // napi_schedule() from the IRQ handler was a no-op (CAS Idle→Scheduled
     // fails when state is Polling).  The IRQ did signal NAPI_EVENT, so
