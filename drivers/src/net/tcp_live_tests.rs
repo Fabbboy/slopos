@@ -197,6 +197,105 @@ fn test_tcp_blocking_connect() -> TestResult {
     pass!()
 }
 
+fn test_tcp_http_get_e2e() -> TestResult {
+    use crate::net::dns;
+    use slopos_abi::net::{AF_INET, SOCK_STREAM};
+
+    socket::socket_reset_all();
+
+    let has_route = ROUTE_TABLE.lookup(Ipv4Addr(GATEWAY_IP)).is_some();
+    if !has_route {
+        klog_info!("tcp_live: no route, skipping HTTP e2e");
+        return pass!();
+    }
+
+    let target_ip = match dns::dns_resolve(b"google.com") {
+        Some(ip) => {
+            klog_info!(
+                "tcp_live: HTTP target {}.{}.{}.{} (google.com)",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
+            );
+            ip
+        }
+        None => {
+            klog_info!("tcp_live: DNS failed, using gateway for HTTP target");
+            GATEWAY_IP
+        }
+    };
+
+    let sock_fd = socket::socket_create(AF_INET, SOCK_STREAM, 0);
+    if sock_fd < 0 {
+        return fail!("socket_create failed: {}", sock_fd);
+    }
+    let sock_idx = sock_fd as u32;
+
+    let connect_rc = socket::socket_connect(sock_idx, target_ip, 80);
+    if connect_rc != 0 {
+        let _ = socket::socket_close(sock_idx);
+        return fail!("socket_connect failed: {}", connect_rc);
+    }
+
+    let request = b"GET / HTTP/1.1\r\nHost: google.com\r\nConnection: close\r\n\r\n";
+    let sent = socket::socket_send(sock_idx, request.as_ptr(), request.len());
+    if sent < 0 {
+        let _ = socket::socket_close(sock_idx);
+        return fail!("socket_send failed: {}", sent);
+    }
+    assert_test!(
+        sent as usize == request.len(),
+        "partial HTTP request send: {}/{}",
+        sent,
+        request.len()
+    );
+
+    let _ = socket::socket_set_nonblocking(sock_idx, true);
+
+    let mut response_prefix = [0u8; 32];
+    let mut prefix_len = 0usize;
+    let eagain = slopos_abi::syscall::ERRNO_EAGAIN as i64;
+
+    for _attempt in 0..50u32 {
+        slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
+        crate::virtio_net::virtnet_force_napi_poll();
+
+        let readable = socket::socket_poll_readable(sock_idx);
+        if readable == 0 {
+            continue;
+        }
+
+        let mut buf = [0u8; 512];
+        let n = socket::socket_recv(sock_idx, buf.as_mut_ptr(), buf.len());
+        if n == eagain {
+            continue;
+        }
+        if n < 0 {
+            let _ = socket::socket_close(sock_idx);
+            return fail!("socket_recv failed: {}", n);
+        }
+        if n == 0 {
+            break;
+        }
+
+        let n = n as usize;
+        let take = core::cmp::min(response_prefix.len().saturating_sub(prefix_len), n);
+        if take > 0 {
+            response_prefix[prefix_len..prefix_len + take].copy_from_slice(&buf[..take]);
+            prefix_len += take;
+        }
+
+        if prefix_len >= 7 && &response_prefix[..7] == b"HTTP/1." {
+            let _ = socket::socket_close(sock_idx);
+            return pass!();
+        }
+    }
+
+    let _ = socket::socket_close(sock_idx);
+    fail!("HTTP response did not start with 'HTTP/1.' within 5s")
+}
+
 slopos_lib::define_test_suite!(
     tcp_live,
     [
@@ -206,5 +305,6 @@ slopos_lib::define_test_suite!(
         test_tcp_syn_transmit,
         test_tcp_connect_does_not_hang,
         test_tcp_blocking_connect,
+        test_tcp_http_get_e2e,
     ]
 );

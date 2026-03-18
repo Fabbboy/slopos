@@ -643,10 +643,10 @@ use core::cmp;
 
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
-    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ,
-    ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EISCONN, ERRNO_ENETUNREACH,
-    ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT,
-    ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
+    ERRNO_EADDRINUSE, ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_ECONNRESET,
+    ERRNO_EDESTADDRREQ, ERRNO_EFAULT, ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EISCONN,
+    ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
+    ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
 use slopos_lib::{IrqMutex, WaitQueue};
 
@@ -765,7 +765,7 @@ fn map_tcp_err(err: TcpError) -> i32 {
         TcpError::AddrInUse => errno_i32(ERRNO_EADDRINUSE),
         TcpError::TableFull => errno_i32(ERRNO_ENOMEM),
         TcpError::ConnectionRefused => errno_i32(ERRNO_ECONNREFUSED),
-        TcpError::ConnectionReset => errno_i32(ERRNO_ECONNREFUSED),
+        TcpError::ConnectionReset => errno_i32(ERRNO_ECONNRESET),
         TcpError::TimedOut => errno_i32(ERRNO_EAGAIN),
         TcpError::InvalidSegment => errno_i32(ERRNO_EINVAL),
     }
@@ -1048,17 +1048,26 @@ pub fn socket_notify_tcp_activity(result: &tcp::TcpInputResult) {
 }
 
 fn sync_socket_state(sock: &mut Socket) {
-    if let Some(tcp_idx) = socket_tcp_conn_id(sock)
-        && let Some(state) = tcp::tcp_get_state(tcp_idx)
-    {
-        if state == TcpState::Established {
-            sock.state = SocketState::Connected;
-        }
-        if matches!(
-            state,
-            TcpState::Closed | TcpState::TimeWait | TcpState::Closing | TcpState::LastAck
-        ) {
-            sock.state = SocketState::Closed;
+    if let Some(tcp_idx) = socket_tcp_conn_id(sock) {
+        match tcp::tcp_get_state(tcp_idx) {
+            Some(
+                TcpState::Established
+                | TcpState::CloseWait
+                | TcpState::FinWait1
+                | TcpState::FinWait2,
+            ) => {
+                sock.state = SocketState::Connected;
+            }
+            Some(TcpState::SynSent | TcpState::SynReceived) => {
+                sock.state = SocketState::Connecting;
+            }
+            Some(TcpState::Closed | TcpState::TimeWait | TcpState::Closing | TcpState::LastAck) => {
+                sock.state = SocketState::Closed;
+            }
+            Some(TcpState::Listen) => {}
+            None => {
+                sock.state = SocketState::Closed;
+            }
         }
     }
 }
@@ -2212,6 +2221,8 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                 if !wait_ok {
                     return errno_i32(ERRNO_EAGAIN) as i64;
                 }
+
+                crate::virtio_net::virtnet_force_napi_poll();
             }
             Err(e) => return map_tcp_err_i64(e),
         }
@@ -2354,12 +2365,21 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     let mut flags = 0u32;
-    if tcp::tcp_recv_available(tcp_idx) > 0 {
+    let recv_available = tcp::tcp_recv_available(tcp_idx);
+    if recv_available > 0 {
         flags |= POLLIN as u32;
     }
 
+    if tcp::tcp_is_reset(tcp_idx) && recv_available == 0 {
+        return (POLLERR | POLLHUP) as u32;
+    }
+
     match tcp::tcp_get_state(tcp_idx) {
-        Some(TcpState::Established | TcpState::CloseWait) => {}
+        Some(TcpState::Established | TcpState::CloseWait) => {
+            if tcp::tcp_is_peer_closed(tcp_idx) && recv_available == 0 {
+                flags |= (POLLIN | POLLHUP) as u32;
+            }
+        }
         Some(
             TcpState::FinWait1
             | TcpState::FinWait2
