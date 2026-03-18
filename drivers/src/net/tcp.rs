@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
-use slopos_lib::{IrqMutex, klog_debug};
+use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
 
 use crate::net::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
@@ -806,101 +806,11 @@ impl TcpOooQueue {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct TcpRingBuffer {
-    data: [u8; TCP_BUFFER_SIZE],
-    head: usize,
-    tail: usize,
-    len: usize,
-}
-
-impl TcpRingBuffer {
-    pub const fn new() -> Self {
-        Self {
-            data: [0; TCP_BUFFER_SIZE],
-            head: 0,
-            tail: 0,
-            len: 0,
-        }
-    }
-
-    pub const fn capacity(&self) -> usize {
-        TCP_BUFFER_SIZE
-    }
-
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub const fn free_space(&self) -> usize {
-        TCP_BUFFER_SIZE - self.len
-    }
-
-    pub fn write(&mut self, data: &[u8]) -> usize {
-        let to_write = core::cmp::min(data.len(), self.free_space());
-        let mut written = 0usize;
-
-        while written < to_write {
-            self.data[self.head] = data[written];
-            self.head = (self.head + 1) % TCP_BUFFER_SIZE;
-            written += 1;
-        }
-
-        self.len += written;
-        written
-    }
-
-    pub fn read(&mut self, out: &mut [u8]) -> usize {
-        let to_read = core::cmp::min(out.len(), self.len);
-        let mut read = 0usize;
-
-        while read < to_read {
-            out[read] = self.data[self.tail];
-            self.tail = (self.tail + 1) % TCP_BUFFER_SIZE;
-            read += 1;
-        }
-
-        self.len -= read;
-        read
-    }
-
-    pub fn peek(&self, offset: usize, out: &mut [u8]) -> usize {
-        if offset >= self.len {
-            return 0;
-        }
-
-        let available = self.len - offset;
-        let to_read = core::cmp::min(out.len(), available);
-        let mut idx = (self.tail + offset) % TCP_BUFFER_SIZE;
-
-        for dst in out.iter_mut().take(to_read) {
-            *dst = self.data[idx];
-            idx = (idx + 1) % TCP_BUFFER_SIZE;
-        }
-
-        to_read
-    }
-
-    pub fn consume(&mut self, n: usize) {
-        let consumed = core::cmp::min(n, self.len);
-        self.tail = (self.tail + consumed) % TCP_BUFFER_SIZE;
-        self.len -= consumed;
-    }
-
-    pub fn clear(&mut self) {
-        self.head = 0;
-        self.tail = 0;
-        self.len = 0;
-    }
-}
+pub type TcpBuffer = RingBuffer<u8, TCP_BUFFER_SIZE>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TcpSendState {
-    pub buf: TcpRingBuffer,
+    pub buf: TcpBuffer,
     pub inflight: usize,
     pub rto_deadline_ms: u64,
     pub needs_retransmit: bool,
@@ -909,7 +819,7 @@ pub struct TcpSendState {
 impl TcpSendState {
     pub const fn new() -> Self {
         Self {
-            buf: TcpRingBuffer::new(),
+            buf: TcpBuffer::new_zeroed(),
             inflight: 0,
             rto_deadline_ms: 0,
             needs_retransmit: false,
@@ -933,7 +843,7 @@ impl TcpSendState {
     }
 
     pub fn peek_unsent(&self, out: &mut [u8]) -> usize {
-        self.buf.peek(self.inflight, out)
+        self.buf.peek_at(self.inflight, out)
     }
 
     pub fn mark_sent(&mut self, n: usize) {
@@ -964,7 +874,7 @@ impl TcpSendState {
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
+        self.buf.reset();
         self.inflight = 0;
         self.rto_deadline_ms = 0;
         self.needs_retransmit = false;
@@ -973,7 +883,7 @@ impl TcpSendState {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TcpRecvState {
-    pub buf: TcpRingBuffer,
+    pub buf: TcpBuffer,
     pub segments_since_ack: u8,
     pub ack_pending: bool,
     pub delayed_ack_deadline_ms: u64,
@@ -982,7 +892,7 @@ pub struct TcpRecvState {
 impl TcpRecvState {
     pub const fn new() -> Self {
         Self {
-            buf: TcpRingBuffer::new(),
+            buf: TcpBuffer::new_zeroed(),
             segments_since_ack: 0,
             ack_pending: false,
             delayed_ack_deadline_ms: 0,
@@ -1030,7 +940,7 @@ impl TcpRecvState {
     }
 
     pub fn clear(&mut self) {
-        self.buf.clear();
+        self.buf.reset();
         self.segments_since_ack = 0;
         self.ack_pending = false;
         self.delayed_ack_deadline_ms = 0;

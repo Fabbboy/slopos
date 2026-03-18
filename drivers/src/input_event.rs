@@ -372,7 +372,7 @@ pub fn input_has_events(task_id: u32) -> bool {
 pub fn input_event_count(task_id: u32) -> u32 {
     let mgr = INPUT_MANAGER.lock();
     if let Some(idx) = mgr.find_queue(task_id) {
-        mgr.queues[idx].events.len()
+        mgr.queues[idx].events.len() as u32
     } else {
         0
     }
