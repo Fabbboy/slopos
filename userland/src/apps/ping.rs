@@ -1,6 +1,5 @@
 use core::fmt::Write;
 use std::net::Ipv4Addr;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::syscall::{SockAddrIn, UserPollFd, fs, net, process};
@@ -25,11 +24,13 @@ struct PingStats {
     total_rtt_ms: f64,
 }
 
-enum WaitResult {
-    ReplyReady,
-    ReplyReadyThenStop,
-    Timeout,
-    Interrupted,
+impl PingStats {
+    fn record_rtt(&mut self, rtt_ms: f64) {
+        self.received += 1;
+        self.min_rtt_ms = self.min_rtt_ms.min(rtt_ms);
+        self.max_rtt_ms = self.max_rtt_ms.max(rtt_ms);
+        self.total_rtt_ms += rtt_ms;
+    }
 }
 
 struct WriteBuf {
@@ -195,6 +196,7 @@ fn parse_args(args: &[String]) -> Result<PingConfig, ()> {
 const ICMP_HEADER_LEN: usize = 8;
 const ICMP_TYPE_ECHO_REQUEST: u8 = 8;
 const ICMP_TYPE_ECHO_REPLY: u8 = 0;
+const DRAIN_TIMEOUT_MS: i64 = 200;
 
 fn build_icmp_request(
     ident: u16,
@@ -238,45 +240,71 @@ fn parse_icmp_reply(buf: &[u8]) -> Option<(u8, u16, u16, Option<u64>)> {
     Some((icmp_type, identifier, sequence, timestamp))
 }
 
-fn wait_for_reply(fd: i32, timeout_ms: i64) -> WaitResult {
-    let mut pfds = [
-        UserPollFd {
-            fd: 0,
-            events: POLLIN,
-            revents: 0,
-        },
-        UserPollFd {
-            fd,
-            events: POLLIN,
-            revents: 0,
-        },
-    ];
-
-    let polled = fs::poll(&mut pfds, timeout_ms).unwrap_or(0);
-    if polled == 0 {
-        return WaitResult::Timeout;
+fn send_ping(
+    fd: i32,
+    target: &SockAddrIn,
+    ident: u16,
+    sequence: u16,
+    clock_start: &Instant,
+    payload_size: usize,
+    stats: &mut PingStats,
+) -> bool {
+    let timestamp_ms = clock_start.elapsed().as_millis() as u64;
+    let icmp_buf = build_icmp_request(ident, sequence, timestamp_ms, payload_size);
+    match net::sendto(fd, &icmp_buf, 0, target) {
+        Ok(_) => {
+            stats.sent += 1;
+            true
+        }
+        Err(_) => {
+            write_stdout(b"ping: sendto failed\n");
+            false
+        }
     }
+}
 
-    let reply_ready = (pfds[1].revents & POLLIN) != 0;
-
-    if (pfds[0].revents & POLLIN) != 0 {
-        let mut read_buf = [0u8; 32];
-        if let Ok(n) = fs::read_slice(0, &mut read_buf) {
-            if read_buf[..n].contains(&0x03) {
-                write_stdout(b"^C\n");
-                if reply_ready {
-                    return WaitResult::ReplyReadyThenStop;
+fn try_receive(fd: i32, clock_start: &Instant, stats: &mut PingStats, verbose: bool) {
+    let mut recv_buf = [0u8; 1600];
+    let mut src = SockAddrIn::default();
+    match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src)) {
+        Ok(received) if received >= ICMP_HEADER_LEN => {
+            if let Some((icmp_type, _id, reply_seq, sent_ts)) =
+                parse_icmp_reply(&recv_buf[..received])
+            {
+                if icmp_type != ICMP_TYPE_ECHO_REPLY {
+                    return;
                 }
-                return WaitResult::Interrupted;
+                let now_ms = clock_start.elapsed().as_millis() as u64;
+                let rtt_ms = match sent_ts {
+                    Some(ts) if ts <= now_ms => (now_ms - ts) as f64,
+                    _ => 0.0,
+                };
+                stats.record_rtt(rtt_ms);
+
+                writeln_stdout(format_args!(
+                    "{} bytes from {}: icmp_seq={} time={:.3} ms",
+                    received,
+                    Ipv4Addr::from(src.addr),
+                    reply_seq,
+                    rtt_ms
+                ));
+            }
+        }
+        Ok(_) => {}
+        Err(_) => {
+            if verbose {
+                writeln_stdout(format_args!("ping: recvfrom failed"));
             }
         }
     }
+}
 
-    if reply_ready {
-        return WaitResult::ReplyReady;
+fn stdin_has_ctrl_c() -> bool {
+    let mut read_buf = [0u8; 32];
+    if let Ok(n) = fs::read_slice(0, &mut read_buf) {
+        return read_buf[..n].contains(&0x03);
     }
-
-    WaitResult::Timeout
+    false
 }
 
 pub fn ping_main(args: Vec<String>) -> ! {
@@ -334,6 +362,13 @@ pub fn ping_main(args: Vec<String>) -> ! {
         config.payload_size
     ));
 
+    let target = SockAddrIn {
+        family: slopos_abi::net::AF_INET,
+        port: 0,
+        addr: target_ip,
+        _pad: [0; 8],
+    };
+
     let mut stats = PingStats {
         sent: 0,
         received: 0,
@@ -344,96 +379,86 @@ pub fn ping_main(args: Vec<String>) -> ! {
 
     let mut sequence: u16 = 0;
     let clock_start = Instant::now();
+    let mut stop_requested = false;
+    let mut next_send = clock_start;
 
     loop {
-        if let Some(limit) = config.count {
-            if stats.sent >= limit {
+        let now = Instant::now();
+        let all_sent = config.count.map_or(false, |limit| stats.sent >= limit);
+
+        if !stop_requested && !all_sent && now >= next_send {
+            if !send_ping(
+                fd,
+                &target,
+                ident,
+                sequence,
+                &clock_start,
+                config.payload_size,
+                &mut stats,
+            ) {
                 break;
             }
+            sequence = sequence.wrapping_add(1);
+            next_send = Instant::now() + config.interval;
         }
 
-        let target = SockAddrIn {
-            family: slopos_abi::net::AF_INET,
-            port: 0,
-            addr: target_ip,
-            _pad: [0; 8],
+        let timeout_ms = if stop_requested {
+            DRAIN_TIMEOUT_MS
+        } else if all_sent {
+            config.timeout_ms
+        } else {
+            let now = Instant::now();
+            match next_send.checked_duration_since(now) {
+                Some(remaining) => (remaining.as_millis() as i64).max(1),
+                None => 0,
+            }
         };
 
-        let request_started = Instant::now();
-        let timestamp_ms = clock_start.elapsed().as_millis() as u64;
-        let icmp_buf = build_icmp_request(ident, sequence, timestamp_ms, config.payload_size);
-        match net::sendto(fd, &icmp_buf, 0, &target) {
-            Ok(_) => {
-                stats.sent += 1;
-            }
-            Err(_) => {
-                write_stdout(b"ping: sendto failed\n");
-                if let Some(ref t) = saved_termios {
-                    let _ = fs::tcsetattr(0, t);
-                }
-                std::process::exit(2);
-            }
+        let (stdin_ready, socket_ready, timed_out) = if stop_requested {
+            let mut pfd = [UserPollFd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            }];
+            let p = fs::poll(&mut pfd, timeout_ms).unwrap_or(0);
+            (false, (pfd[0].revents & POLLIN) != 0, p == 0)
+        } else {
+            let mut pfds = [
+                UserPollFd {
+                    fd: 0,
+                    events: POLLIN,
+                    revents: 0,
+                },
+                UserPollFd {
+                    fd,
+                    events: POLLIN,
+                    revents: 0,
+                },
+            ];
+            let p = fs::poll(&mut pfds, timeout_ms).unwrap_or(0);
+            (
+                (pfds[0].revents & POLLIN) != 0,
+                (pfds[1].revents & POLLIN) != 0,
+                p == 0,
+            )
+        };
+
+        if socket_ready {
+            try_receive(fd, &clock_start, &mut stats, config.verbose);
         }
 
-        let wait_result = wait_for_reply(fd, config.timeout_ms);
-        if matches!(wait_result, WaitResult::Interrupted) {
-            break;
+        if stdin_ready && !stop_requested && stdin_has_ctrl_c() {
+            write_stdout(b"^C\n");
+            stop_requested = true;
+            continue;
         }
-        if matches!(wait_result, WaitResult::Timeout) {
-            if config.verbose {
-                writeln_stdout(format_args!("ping: timeout for icmp_seq={}", sequence));
-            }
-        }
-        if matches!(
-            wait_result,
-            WaitResult::ReplyReady | WaitResult::ReplyReadyThenStop
-        ) {
-            let mut recv_buf = [0u8; 1600];
-            let mut src = SockAddrIn::default();
-            match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src)) {
-                Ok(received) if received >= ICMP_HEADER_LEN => {
-                    if let Some((icmp_type, _id, reply_seq, sent_ts)) =
-                        parse_icmp_reply(&recv_buf[..received])
-                    {
-                        if icmp_type != ICMP_TYPE_ECHO_REPLY {
-                            continue;
-                        }
-                        let now_ms = clock_start.elapsed().as_millis() as u64;
-                        let rtt_ms = match sent_ts {
-                            Some(ts) if ts <= now_ms => (now_ms - ts) as f64,
-                            _ => request_started.elapsed().as_secs_f64() * 1000.0,
-                        };
-                        stats.received += 1;
-                        stats.min_rtt_ms = stats.min_rtt_ms.min(rtt_ms);
-                        stats.max_rtt_ms = stats.max_rtt_ms.max(rtt_ms);
-                        stats.total_rtt_ms += rtt_ms;
 
-                        writeln_stdout(format_args!(
-                            "{} bytes from {}: icmp_seq={} time={:.3} ms",
-                            received,
-                            Ipv4Addr::from(src.addr),
-                            reply_seq,
-                            rtt_ms
-                        ));
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    if config.verbose {
-                        writeln_stdout(format_args!("ping: recvfrom failed"));
-                    }
-                }
-            }
-        }
-        if matches!(wait_result, WaitResult::ReplyReadyThenStop) {
+        if stop_requested && (timed_out || stats.received >= stats.sent) {
             break;
         }
 
-        sequence = sequence.wrapping_add(1);
-
-        let elapsed = request_started.elapsed();
-        if config.interval > elapsed {
-            thread::sleep(config.interval - elapsed);
+        if all_sent && (stats.received >= stats.sent || timed_out) {
+            break;
         }
     }
 

@@ -10,8 +10,8 @@ use crate::pal::{Pal, Sys};
 // Clock constants
 // =============================================================================
 
-pub const CLOCK_REALTIME: i32 = 0;
-pub const CLOCK_MONOTONIC: i32 = 1;
+pub const CLOCK_REALTIME: i32 = 1;
+pub const CLOCK_MONOTONIC: i32 = 0;
 
 // =============================================================================
 // Time structures

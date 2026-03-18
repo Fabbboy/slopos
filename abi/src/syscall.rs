@@ -92,6 +92,9 @@ pub const SYSCALL_CLOCK_GETTIME: u64 = 125;
 /// Monotonic clock — nanoseconds since boot, never adjusted.
 pub const CLOCK_MONOTONIC: u64 = 0;
 
+/// Realtime clock — currently aliases [`CLOCK_MONOTONIC`] (no RTC source yet).
+pub const CLOCK_REALTIME: u64 = 1;
+
 // =============================================================================
 // Window management
 // =============================================================================

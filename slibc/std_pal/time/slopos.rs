@@ -4,8 +4,8 @@ unsafe extern "C" {
     fn slopos_clock_gettime(clk_id: u64, sec: *mut i64, nsec: *mut i64) -> i32;
 }
 
-const CLOCK_REALTIME: u64 = 0;
-const CLOCK_MONOTONIC: u64 = 1;
+const CLOCK_REALTIME: u64 = 1;
+const CLOCK_MONOTONIC: u64 = 0;
 
 fn clock_gettime(clk_id: u64) -> (i64, i64) {
     let mut sec: i64 = 0;

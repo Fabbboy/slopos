@@ -17,8 +17,8 @@ pub fn run_time_tests() -> (u32, u32) {
     check!("Timespec_size", core::mem::size_of::<Timespec>() == 16);
     check!("Timeval_size", core::mem::size_of::<Timeval>() == 16);
 
-    check!("CLOCK_REALTIME_eq_0", CLOCK_REALTIME == 0);
-    check!("CLOCK_MONOTONIC_eq_1", CLOCK_MONOTONIC == 1);
+    check!("CLOCK_MONOTONIC_eq_0", CLOCK_MONOTONIC == 0);
+    check!("CLOCK_REALTIME_eq_1", CLOCK_REALTIME == 1);
 
     check!("clock_gettime_monotonic", unsafe {
         let mut ts = Timespec {

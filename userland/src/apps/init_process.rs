@@ -1,7 +1,7 @@
 use slopos_abi::syscall::BOOT_FLAG_ROULETTE_SKIP;
 
 use crate::program_registry;
-use crate::syscall::{core as sys_core, process, UserSysInfo};
+use crate::syscall::{UserSysInfo, core as sys_core, process};
 
 fn spawn_service(name: &str) -> i32 {
     let tid = match program_registry::resolve_program(name) {

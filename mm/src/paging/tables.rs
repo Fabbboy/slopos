@@ -3,7 +3,7 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::page_table_defs::{PageTable, PageTableEntry, PageTableLevel, PAGE_TABLE_ENTRIES};
+use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_lib::{cpu, klog_debug, klog_info};
@@ -12,7 +12,7 @@ use super::walker::{PageTableWalker, WalkAction};
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 use crate::page_alloc::{
-    alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked, ALLOC_FLAG_ZERO,
+    ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
 use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::tlb;

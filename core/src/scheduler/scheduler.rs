@@ -24,16 +24,16 @@ pub use super::runtime::{
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
 use super::sleep::{reset_sleep_queue, wake_due_sleepers};
 use super::task::{
-    task_get_info, task_is_blocked, task_is_invalid, task_is_ready, task_is_running,
-    task_is_terminated, task_is_will_block, task_pointer_is_valid, task_record_context_switch,
-    task_record_yield, task_set_current, task_set_state, Task, TaskContext, TaskStatus,
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE,
+    TASK_FLAG_USER_MODE, TASK_PRIORITY_IDLE, Task, TaskContext, TaskStatus, task_get_info,
+    task_is_blocked, task_is_invalid, task_is_ready, task_is_running, task_is_terminated,
+    task_is_will_block, task_pointer_is_valid, task_record_context_switch, task_record_yield,
+    task_set_current, task_set_state,
 };
 pub use super::trap::{
-    save_preempt_context, save_task_context_from_interrupt_frame, scheduler_handle_post_irq,
-    scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
-    scheduler_request_reschedule_from_interrupt, RescheduleReason, TrapExitSource,
+    RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
+    scheduler_handle_post_irq, scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit,
+    scheduler_request_reschedule, scheduler_request_reschedule_from_interrupt,
 };
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;
