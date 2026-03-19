@@ -1,8 +1,0 @@
-{
-    "rust-analyzer.cargo.allTargets": false,
-    "rust-analyzer.check.allTargets": false,
-    "rust-analyzer.cargo.target": "${workspaceFolder}/targets/x86_64-slos.json",
-    "rust-analyzer.check.targets": [
-        "${workspaceFolder}/targets/x86_64-slos.json"
-    ]
-}

@@ -39,6 +39,9 @@ Cargo.lock
 fs/assets/ext2.img
 fs/assets/ext2-tests.img
 
+# Editor/IDE config
+.vscode/
+
 # Sisyphus agent artifacts
 .sisyphus/
 
