@@ -45,12 +45,6 @@ impl MockNetDevice {
             is_up: IrqMutex::new(false),
         }
     }
-
-    #[allow(dead_code)]
-    fn with_features(mut self, feats: NetDeviceFeatures) -> Self {
-        self.feats = feats;
-        self
-    }
 }
 
 impl NetDevice for MockNetDevice {

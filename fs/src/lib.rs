@@ -8,6 +8,7 @@ pub mod devfs;
 pub mod ext2;
 pub mod ext2_vfs;
 pub mod fileio;
+pub mod pipe;
 pub mod ramfs;
 pub mod vfs;
 

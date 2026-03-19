@@ -2,14 +2,14 @@
 
 use core::arch::{asm, global_asm};
 use core::cell::SyncUnsafeCell;
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::c_void;
 
 use slopos_lib::cpu;
-use slopos_lib::string::cstr_to_str;
 use slopos_lib::{klog_debug, klog_info};
 
+use crate::exception::*;
 use crate::ist_stacks;
-use crate::panic::set_panic_cpu_state;
+use crate::user_fault::*;
 
 global_asm!(include_str!("../idt_handlers.s"));
 
@@ -75,27 +75,14 @@ pub enum ExceptionMode {
     Test = 1,
 }
 
-use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_core::irq::irq_dispatch;
 use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
-use slopos_lib::kdiag_dump_interrupt_frame;
-use slopos_mm::cow;
-use slopos_mm::demand;
-use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::tlb;
-use slopos_mm::{paging, process_vm};
 
 use slopos_core::sched::{
-    RescheduleReason, TrapExitSource, schedule, scheduler_get_current_task,
-    scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    RescheduleReason, TrapExitSource, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
-use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
-use slopos_core::task::task_terminate;
-
-use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
-use slopos_core::scheduler::task_struct::Task;
-use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
 unsafe extern "C" {
     fn isr0();
@@ -512,175 +499,6 @@ fn initialize_handler_tables() {
     }
 }
 
-fn is_critical_exception_internal(vector: u8) -> bool {
-    slopos_lib::arch::exception::exception_is_critical(vector)
-}
-
-fn in_user(frame: &slopos_lib::InterruptFrame) -> bool {
-    (frame.cs & 0x3) == 0x3
-}
-
-fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
-    // SAFETY: All call sites provide statically defined, NUL-terminated byte
-    // strings so this conversion cannot fail at runtime.
-    unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
-}
-
-#[inline]
-fn resolve_user_fault_task() -> *mut Task {
-    let hw_cr3 = cpu::read_cr3() & !0xFFF;
-    let mut task = scheduler_get_current_task() as *mut Task;
-
-    if !task.is_null() && task_pointer_is_valid(task as *const Task) {
-        let task_cr3 =
-            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.cr3)) } & !0xFFF;
-        if task_cr3 == hw_cr3 {
-            return task;
-        }
-    } else {
-        task = core::ptr::null_mut();
-    }
-
-    let by_cr3 = task_find_by_cr3(hw_cr3);
-    if !by_cr3.is_null() {
-        return by_cr3;
-    }
-
-    task
-}
-
-fn terminate_user_task(
-    reason: TaskFaultReason,
-    frame: &slopos_lib::InterruptFrame,
-    detail: &'static CStr,
-) {
-    let task = resolve_user_fault_task();
-
-    if task.is_null() {
-        klog_info!(
-            "Terminating user fault context without a valid current task: {}",
-            detail.to_str().unwrap_or("<invalid utf-8>")
-        );
-        kdiag_dump_interrupt_frame(frame as *const _);
-        panic_with_frame(
-            "user fault with invalid current task",
-            frame as *const _ as *mut _,
-        );
-        return;
-    }
-
-    let tid = if task.is_null() {
-        INVALID_TASK_ID
-    } else {
-        unsafe { (*task).task_id }
-    };
-    let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
-    let cr2 = cpu::read_cr2();
-    let (rip, rsp, vec, err) = (frame.rip, frame.rsp, frame.vector, frame.error_code);
-    let (entry_point, proc_id, flags, name_str) = if task.is_null() {
-        (0, 0, 0, "<no task>")
-    } else {
-        let name_raw = unsafe { &(*task).name };
-        let len = name_raw
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(name_raw.len());
-        let name = core::str::from_utf8(&name_raw[..len]).unwrap_or("<invalid utf-8>");
-        let ep = unsafe { (*task).entry_point };
-        let pid = unsafe { (*task).process_id };
-        let fl = unsafe { (*task).flags };
-        (ep, pid, fl, name)
-    };
-    klog_info!(
-        "Terminating user task {} ('{}'): {} | vec={} err=0x{:x} cr2=0x{:x} rip=0x{:x} rsp=0x{:x} entry=0x{:x} pid={} flags=0x{:x}",
-        tid,
-        name_str,
-        detail_str,
-        vec,
-        err,
-        cr2,
-        rip,
-        rsp,
-        entry_point,
-        proc_id,
-        flags
-    );
-    kdiag_dump_interrupt_frame(frame as *const _);
-    if !task.is_null() {
-        unsafe {
-            (*task).exit_reason = TaskExitReason::UserFault;
-            (*task).fault_reason = reason;
-            (*task).exit_code = 1;
-            task_terminate(tid);
-            // CRITICAL: Call schedule() directly instead of just setting pending flag.
-            // If we return from this exception handler, iretq will try to resume the
-            // faulting instruction, causing an infinite loop of faults.
-            // schedule() will switch to another task and never return here.
-            schedule();
-        }
-    }
-    let _ = frame;
-}
-
-fn exception_default_panic(frame: *mut slopos_lib::InterruptFrame) {
-    klog_info!("FATAL: Unhandled exception");
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Unhandled exception", frame);
-}
-
-fn exception_fatal(frame: *mut slopos_lib::InterruptFrame) {
-    let name = frame_exception_name(frame);
-    klog_info!("FATAL: {}", name);
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame(name, frame);
-}
-
-fn exception_nonfatal(frame: *mut slopos_lib::InterruptFrame) {
-    let name = frame_exception_name(frame);
-    klog_info!("ERROR: {}", name);
-    kdiag_dump_interrupt_frame(frame);
-}
-
-fn frame_exception_name(frame: *mut slopos_lib::InterruptFrame) -> &'static str {
-    let vector = (unsafe { &*frame }.vector & 0xFF) as u8;
-    slopos_lib::arch::exception::get_exception_name(vector)
-}
-
-fn exception_invalid_opcode(frame: *mut slopos_lib::InterruptFrame) {
-    if in_user(unsafe { &*frame }) {
-        terminate_user_task(
-            TaskFaultReason::UserUd,
-            unsafe { &*frame },
-            cstr_from_bytes(b"invalid opcode in user mode\0"),
-        );
-        return;
-    }
-    exception_fatal(frame);
-}
-
-fn exception_device_not_available(frame: *mut slopos_lib::InterruptFrame) {
-    if in_user(unsafe { &*frame }) {
-        terminate_user_task(
-            TaskFaultReason::UserDeviceNa,
-            unsafe { &*frame },
-            cstr_from_bytes(b"device not available in user mode\0"),
-        );
-        return;
-    }
-    exception_nonfatal(frame);
-}
-
-fn exception_general_protection(frame: *mut slopos_lib::InterruptFrame) {
-    if in_user(unsafe { &*frame }) {
-        terminate_user_task(
-            TaskFaultReason::UserGp,
-            unsafe { &*frame },
-            cstr_from_bytes(b"general protection from user mode\0"),
-        );
-        return;
-    }
-    exception_fatal(frame);
-}
 /// Attempt to resolve a page fault via CoW or demand paging.
 ///
 /// This is the **single authority** for recoverable user-space page fault
@@ -696,194 +514,18 @@ fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };
 
-    // IST guard page hit → not recoverable here (diagnosed later).
     if ist_stacks::ist_guard_fault(fault_addr, core::ptr::null_mut()) != 0 {
         return false;
     }
-
-    // Kernel-mode faults are never transparently resolved.
     if !in_user(frame_ref) {
         return false;
     }
-
     let task_ptr = resolve_user_fault_task();
     if task_ptr.is_null() {
         return false;
     }
-
     let pid = unsafe { (*task_ptr).process_id };
-    if pid == INVALID_PROCESS_ID || (pid as usize) >= MAX_PROCESSES {
-        return false;
-    }
     let tid = unsafe { (*task_ptr).task_id };
-    let page_dir = process_vm::process_vm_get_page_dir(pid);
-    if page_dir.is_null() || (page_dir as u64) < 0xffff_8000_0000_0000 {
-        return false;
-    }
 
-    // Copy-on-Write resolution.
-    if cow::is_cow_fault(frame_ref.error_code, page_dir, fault_addr) {
-        klog_debug!(
-            "PF: COW fault task {} (pid {}) at cr2=0x{:x} err=0x{:x} rip=0x{:x}",
-            tid,
-            pid,
-            fault_addr,
-            frame_ref.error_code,
-            frame_ref.rip
-        );
-        let result = cow::handle_cow_fault(page_dir, fault_addr);
-
-        if result.is_ok() {
-            klog_debug!(
-                "PF: COW resolved for task {} at cr2=0x{:x}",
-                tid,
-                fault_addr
-            );
-            return true;
-        }
-        klog_info!(
-            "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
-            tid,
-            fault_addr
-        );
-    }
-
-    // Demand paging resolution.
-    if demand::is_demand_fault(frame_ref.error_code, pid, fault_addr) {
-        if demand::handle_demand_fault(page_dir, pid, fault_addr, frame_ref.error_code).is_ok() {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Unrecoverable page fault handler.
-///
-/// By the time this runs, `try_handle_page_fault` has already attempted (and
-/// failed) CoW and demand-paging resolution.  This function only performs
-/// diagnostics and terminates the faulting context (user task or kernel panic).
-fn exception_page_fault(frame: *mut slopos_lib::InterruptFrame) {
-    let fault_addr = cpu::read_cr2();
-    let frame_ref = unsafe { &*frame };
-
-    let mut stack_name: *const c_char = core::ptr::null();
-    if ist_stacks::ist_guard_fault(fault_addr, &mut stack_name) != 0 {
-        klog_info!("FATAL: IST stack overflow detected via guard page");
-        if !stack_name.is_null() {
-            klog_info!("Stack: {}", unsafe { cstr_to_str(stack_name) });
-        }
-        klog_info!("Fault address: 0x{:x}", fault_addr);
-        kdiag_dump_interrupt_frame(frame);
-        panic_with_frame("IST stack overflow", frame);
-        return;
-    }
-
-    let from_user = in_user(frame_ref);
-
-    klog_info!("FATAL: Page fault");
-    klog_info!("Fault address: 0x{:x}", fault_addr);
-    let present = if (frame_ref.error_code & 1) != 0 {
-        "Page present"
-    } else {
-        "Page not present"
-    };
-    let access = if (frame_ref.error_code & 2) != 0 {
-        "Write"
-    } else {
-        "Read"
-    };
-    let privilege = if (frame_ref.error_code & 4) != 0 {
-        "User"
-    } else {
-        "Supervisor"
-    };
-    klog_info!(
-        "Error code: 0x{:x} ({}) ({}) ({})",
-        frame_ref.error_code,
-        present,
-        access,
-        privilege
-    );
-
-    if from_user {
-        log_user_page_fault_diagnostics(frame_ref, fault_addr);
-        terminate_user_task(
-            TaskFaultReason::UserPage,
-            frame_ref,
-            cstr_from_bytes(b"user page fault\0"),
-        );
-        return;
-    }
-
-    kdiag_dump_interrupt_frame(frame);
-    panic_with_frame("Page fault", frame);
-}
-
-fn log_user_page_fault_diagnostics(frame_ref: &slopos_lib::InterruptFrame, fault_addr: u64) {
-    let mut pid = INVALID_TASK_ID;
-    let mut cr3 = 0u64;
-    let mut fault_phys = PhysAddr::NULL;
-    let mut rsp_phys = PhysAddr::NULL;
-    let mut rip_phys = PhysAddr::NULL;
-    let mut ctx_rip = 0u64;
-    let mut ctx_rsp = 0u64;
-
-    let task_ptr = resolve_user_fault_task();
-    if !task_ptr.is_null() {
-        pid = unsafe { (*task_ptr).process_id };
-        unsafe {
-            ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rip));
-            ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.rsp));
-        }
-        let dir = process_vm::process_vm_get_page_dir(pid);
-        if !dir.is_null() {
-            cr3 = unsafe { (*dir).pml4_phys.as_u64() };
-            fault_phys = paging::virt_to_phys_process(VirtAddr::new(fault_addr), dir);
-            rsp_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rsp), dir);
-            rip_phys = paging::virt_to_phys_process(VirtAddr::new(frame_ref.rip), dir);
-        }
-    }
-
-    if !rsp_phys.is_null() {
-        if let Some(base_addr) = rsp_phys.to_virt_checked() {
-            let base = base_addr.as_u64() as *const u64;
-            unsafe {
-                let s0 = core::ptr::read_unaligned(base);
-                let s1 = core::ptr::read_unaligned(base.add(1));
-                let s2 = core::ptr::read_unaligned(base.add(2));
-                klog_info!(
-                    "User PF stack top: [0]=0x{:x} [1]=0x{:x} [2]=0x{:x}",
-                    s0,
-                    s1,
-                    s2
-                );
-            }
-        } else {
-            klog_info!(
-                "User PF stack top unavailable (phys 0x{:x} unmapped)",
-                rsp_phys.as_u64()
-            );
-        }
-    }
-
-    klog_info!(
-        "User PF debug: pid={} cr3=0x{:x} fault_phys=0x{:x} rip_phys=0x{:x} rsp_phys=0x{:x}",
-        pid,
-        cr3,
-        fault_phys.as_u64(),
-        rip_phys.as_u64(),
-        rsp_phys.as_u64()
-    );
-    klog_info!(
-        "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",
-        ctx_rip,
-        ctx_rsp
-    );
-}
-
-fn panic_with_frame(message: &str, frame: *mut slopos_lib::InterruptFrame) {
-    let frame_ref = unsafe { &*frame };
-    set_panic_cpu_state(frame_ref.rip, frame_ref.rsp);
-    panic!("{}", message);
+    slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, pid, tid)
 }

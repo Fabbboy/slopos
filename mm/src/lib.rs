@@ -17,6 +17,7 @@ pub mod mmio;
 #[cfg(feature = "itests")]
 pub mod mmio_tests;
 pub mod page_alloc;
+pub mod page_fault;
 pub mod paging;
 pub mod paging_defs;
 pub mod pat;

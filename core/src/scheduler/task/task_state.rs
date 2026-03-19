@@ -1,0 +1,100 @@
+use core::ffi::c_int;
+
+use super::task_table::task_find_by_id;
+use super::{BlockReason, Task, TaskStatus};
+
+pub fn task_set_state(task_id: u32, new_status: TaskStatus) -> c_int {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+
+    let task_ref = unsafe { &*task };
+    if task_ref.status() == TaskStatus::Invalid {
+        return -1;
+    }
+
+    transition_to_c_int(task_ref.try_transition_to(new_status))
+}
+
+#[inline]
+fn transition_to_c_int(success: bool) -> c_int {
+    if success { 0 } else { -1 }
+}
+
+fn apply_state_transition(
+    task_ref: &mut Task,
+    new_status: TaskStatus,
+    reason: BlockReason,
+) -> c_int {
+    match new_status {
+        TaskStatus::Ready => transition_to_c_int(task_ref.mark_ready()),
+        TaskStatus::Running => transition_to_c_int(task_ref.mark_running()),
+        TaskStatus::WillBlock => {
+            transition_to_c_int(task_ref.try_transition_to(TaskStatus::WillBlock))
+        }
+        TaskStatus::Blocked => transition_to_c_int(task_ref.block(reason)),
+        TaskStatus::Terminated => transition_to_c_int(task_ref.terminate()),
+        TaskStatus::Invalid => -1,
+    }
+}
+
+pub fn task_set_state_with_reason(
+    task_id: u32,
+    new_status: TaskStatus,
+    reason: BlockReason,
+) -> c_int {
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return -1;
+    }
+
+    let task_ref = unsafe { &mut *task };
+    if task_ref.status() == TaskStatus::Invalid {
+        return -1;
+    }
+
+    apply_state_transition(task_ref, new_status, reason)
+}
+
+pub fn task_get_state(task: *const Task) -> TaskStatus {
+    if task.is_null() {
+        return TaskStatus::Invalid;
+    }
+    unsafe { (*task).status() }
+}
+
+pub fn task_is_ready(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Ready
+}
+
+pub fn task_is_running(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Running
+}
+
+pub fn task_is_will_block(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::WillBlock
+}
+
+pub fn task_is_blocked(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Blocked
+}
+
+pub fn task_is_terminated(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Terminated
+}
+
+pub fn task_is_invalid(task: *const Task) -> bool {
+    task_get_state(task) == TaskStatus::Invalid
+}
+
+pub fn task_state_to_string(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Invalid => "invalid",
+        TaskStatus::Ready => "ready",
+        TaskStatus::Running => "running",
+        TaskStatus::WillBlock => "willblock",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Terminated => "terminated",
+    }
+}

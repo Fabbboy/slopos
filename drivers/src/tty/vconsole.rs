@@ -148,17 +148,6 @@ impl CellGrid {
         }
     }
 
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn get_mut(&mut self, row: usize, col: usize) -> Option<&mut Cell> {
-        if let Some(ref mut c) = self.cells {
-            let idx = row * self.cols + col;
-            c.get_mut(idx)
-        } else {
-            None
-        }
-    }
-
     fn row_copy(&mut self, dst_row: usize, src_row: usize, n_cols: usize) {
         if let Some(ref mut c) = self.cells {
             let n = n_cols.min(self.cols);

@@ -63,19 +63,6 @@ pub enum DnsRcode {
     Refused = 5,
 }
 
-impl DnsRcode {
-    #[allow(dead_code)]
-    fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(DnsRcode::NoError),
-            2 => Some(DnsRcode::ServFail),
-            3 => Some(DnsRcode::NXDomain),
-            5 => Some(DnsRcode::Refused),
-            _ => None,
-        }
-    }
-}
-
 /// Parsed DNS header (12 bytes).
 #[derive(Clone, Copy, Default)]
 pub struct DnsHeader {

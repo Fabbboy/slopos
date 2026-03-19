@@ -433,12 +433,11 @@ pub type MsiHandler = extern "C" fn(vector: u8, frame: *mut InterruptFrame, ctx:
 
 /// Per-vector MSI registration entry.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // device_bdf stored for future diagnostics / /proc/interrupts
 struct MsiEntry {
     handler: Option<MsiHandler>,
     context: *mut c_void,
     /// BDF identifier for diagnostics (bus << 16 | dev << 8 | func).
-    device_bdf: u32,
+    _device_bdf: u32,
     count: u64,
 }
 
@@ -447,7 +446,7 @@ impl MsiEntry {
         Self {
             handler: None,
             context: core::ptr::null_mut(),
-            device_bdf: 0,
+            _device_bdf: 0,
             count: 0,
         }
     }
@@ -577,7 +576,7 @@ pub fn msi_register_handler(
         table[idx] = MsiEntry {
             handler: Some(handler),
             context,
-            device_bdf,
+            _device_bdf: device_bdf,
             count: 0,
         };
     });

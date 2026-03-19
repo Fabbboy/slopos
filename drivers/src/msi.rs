@@ -40,15 +40,10 @@ use slopos_lib::klog_info;
 /// MSI enable bit (bit 0 of Message Control).
 const MSI_CTRL_ENABLE: u16 = 1 << 0;
 
-/// Multi-message capable mask (bits 3:1) — log₂ of max vectors.
-#[allow(dead_code)]
-const MSI_CTRL_MMC_MASK: u16 = 0x7 << 1;
 const MSI_CTRL_MMC_SHIFT: u16 = 1;
 
 /// Multi-message enable mask (bits 6:4) — log₂ of granted vectors.
 const MSI_CTRL_MME_MASK: u16 = 0x7 << 4;
-#[allow(dead_code)]
-const MSI_CTRL_MME_SHIFT: u16 = 4;
 
 /// 64-bit address capable (bit 7).
 const MSI_CTRL_64BIT: u16 = 1 << 7;
@@ -88,10 +83,6 @@ const MSI_ADDR_DEST_ID_SHIFT: u32 = 12;
 
 /// Delivery mode: Fixed (000b in bits 10:8).
 const MSI_DATA_DELIVERY_FIXED: u16 = 0b000 << 8;
-
-/// Delivery mode: Lowest Priority (001b in bits 10:8).
-#[allow(dead_code)]
-const MSI_DATA_DELIVERY_LOWEST: u16 = 0b001 << 8;
 
 /// Trigger mode: Edge (0 in bit 15).
 const MSI_DATA_TRIGGER_EDGE: u16 = 0 << 15;

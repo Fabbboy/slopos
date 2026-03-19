@@ -8,6 +8,7 @@ pub mod boot_memory;
 pub mod boot_services;
 pub mod cpu_verify;
 pub mod early_init;
+pub mod exception;
 pub mod ffi_boundary;
 pub mod gdt;
 pub use gdt::{gdt_set_kernel_rsp0, syscall_msr_init, syscall_update_kernel_rsp};
@@ -20,6 +21,7 @@ pub mod panic;
 #[cfg(feature = "itests")]
 pub mod shutdown_tests;
 pub mod smp;
+pub mod user_fault;
 pub mod safe_stack {
     pub use crate::ist_stacks::{safe_stack_guard_fault, safe_stack_init, safe_stack_record_usage};
 }
