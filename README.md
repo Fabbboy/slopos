@@ -2,7 +2,6 @@
   <img src="https://img.shields.io/badge/status-it%20boots%20(sometimes)-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/vibes-immaculate-blueviolet?style=for-the-badge" />
   <img src="https://img.shields.io/badge/stability-the%20wheel%20decides-orange?style=for-the-badge" />
-  <img src="https://sloc.xyz/github/Fabbboy/slopos?category=code" />
 </p>
 
 <p align="center">
