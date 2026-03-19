@@ -12,11 +12,11 @@ use alloc::vec::Vec;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{IrqMutex, pass};
 
-use crate::net::netdev::*;
-use crate::net::packetbuf::PacketBuf;
-use crate::net::pool::{PACKET_POOL, PacketPool};
-use crate::net::types::*;
-use crate::net::{ETH_HEADER_LEN, ETHERTYPE_IPV4};
+use crate::netdev::*;
+use crate::packetbuf::PacketBuf;
+use crate::pool::{PACKET_POOL, PacketPool};
+use crate::types::*;
+use crate::{ETH_HEADER_LEN, ETHERTYPE_IPV4};
 
 // =============================================================================
 // Mock NetDevice for testing
@@ -126,7 +126,7 @@ fn build_ipv4_header(proto: u8, src: [u8; 4], dst: [u8; 4], payload_len: usize) 
     hdr[12..16].copy_from_slice(&src);
     hdr[16..20].copy_from_slice(&dst);
     // Compute checksum
-    let csum = crate::net::ipv4_header_checksum(&hdr);
+    let csum = crate::ipv4_header_checksum(&hdr);
     hdr[10..12].copy_from_slice(&csum.to_be_bytes());
     hdr
 }
@@ -149,7 +149,7 @@ pub fn test_ingress_drops_short_frame() -> TestResult {
     };
 
     // Call net_rx — should not panic, just silently drop.
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -175,7 +175,7 @@ pub fn test_ingress_drops_unknown_ethertype() -> TestResult {
     };
 
     // Call net_rx — should not panic, just silently drop.
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -202,7 +202,7 @@ pub fn test_ingress_drops_wrong_destination_mac() -> TestResult {
     };
 
     // Call net_rx — should not panic, just silently drop.
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -233,7 +233,7 @@ pub fn test_ingress_accepts_broadcast_mac() -> TestResult {
     };
 
     // Call net_rx — should not panic (accepted).
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -263,7 +263,7 @@ pub fn test_ingress_accepts_our_mac() -> TestResult {
     };
 
     // Call net_rx — should not panic (accepted).
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -282,7 +282,7 @@ pub fn test_ingress_ipv4_bad_version() -> TestResult {
     let mut ipv4_hdr = build_ipv4_header(17, [192, 168, 1, 100], [192, 168, 1, 1], 8);
     ipv4_hdr[0] = 0x65; // version 6, IHL 5
     // Recompute checksum
-    let csum = crate::net::ipv4_header_checksum(&ipv4_hdr);
+    let csum = crate::ipv4_header_checksum(&ipv4_hdr);
     ipv4_hdr[10..12].copy_from_slice(&csum.to_be_bytes());
 
     let mut payload = Vec::new();
@@ -302,7 +302,7 @@ pub fn test_ingress_ipv4_bad_version() -> TestResult {
     };
 
     // Call net_rx — should not panic (dropped by ipv4 handler).
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -328,7 +328,7 @@ pub fn test_ingress_ipv4_short_header() -> TestResult {
     };
 
     // Call net_rx — should not panic (dropped by ipv4 handler).
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }
@@ -361,7 +361,7 @@ pub fn test_ingress_ipv4_bad_checksum() -> TestResult {
     };
 
     // Call net_rx — should not panic (dropped silently by ipv4 handler).
-    crate::net::ingress::net_rx(&handle, pkt);
+    crate::ingress::net_rx(&handle, pkt);
 
     pass!()
 }

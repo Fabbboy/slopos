@@ -276,7 +276,7 @@ fn get_our_ip() -> Ipv4Addr {
         return ip;
     }
     // Legacy fallback — will be removed once all callers use NetStack.
-    Ipv4Addr(crate::virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]))
+    Ipv4Addr(crate::driver_hooks::virtio_net_ipv4_addr().unwrap_or([0; 4]))
 }
 
 // =============================================================================

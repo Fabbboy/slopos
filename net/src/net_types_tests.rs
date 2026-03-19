@@ -8,7 +8,7 @@ use slopos_abi::net::{AF_INET, SockAddrIn};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::types::*;
+use crate::types::*;
 
 // =============================================================================
 // 1.T6 — Ipv4Addr methods

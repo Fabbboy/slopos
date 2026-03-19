@@ -1,5 +1,5 @@
 [package]
-name = "slopos-drivers"
+name = "slopos-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,20 +10,14 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 crate-type = ["rlib"]
-
 test = false
 doctest = false
+
 [features]
 default = []
-qemu-exit = []
-xe-gpu = []
-itests = ["slopos-net/itests"]
+itests = []
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-acpi = { workspace = true }
-slopos-core = { workspace = true }
 slopos-lib = { workspace = true }
-slopos-mm = { workspace = true }
-slopos-net = { workspace = true }
 bitflags = { workspace = true }

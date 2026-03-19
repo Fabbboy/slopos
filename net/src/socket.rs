@@ -4,9 +4,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use crate::net::packetbuf::PacketBuf;
-use crate::net::tcp_socket;
-use crate::net::types::{Ipv4Addr, NetError, Port, SockAddr};
+use crate::packetbuf::PacketBuf;
+use crate::tcp_socket;
+use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
 
 /// Internal storage for protocol-specific socket state.
 ///
@@ -650,9 +650,8 @@ use slopos_abi::syscall::{
 };
 use slopos_lib::{IrqMutex, WaitQueue};
 
-use crate::net;
-use crate::net::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
-use crate::virtio_net;
+use crate as net;
+use crate::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
 
 const TCP_TX_MAX: usize = 1460;
 pub const UDP_DGRAM_MAX_PAYLOAD: usize = 1472;
@@ -857,7 +856,7 @@ fn write_tcp_segment(seg: &TcpOutSegment, payload: &[u8], out: &mut [u8]) -> Opt
     Some(tcp_len)
 }
 
-pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
+pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     let mut opt_len = 0usize;
     if seg.mss != 0 {
         opt_len += 4;
@@ -905,13 +904,17 @@ pub(crate) fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i3
     }
 
     {
-        let src_mac = virtio_net::virtio_net_mac().unwrap_or([0; 6]);
+        let dst = Ipv4Addr(seg.tuple.remote_ip);
+        let src_mac = net::route::ROUTE_TABLE
+            .lookup(dst)
+            .and_then(|(dev, _)| net::DEVICE_REGISTRY.mac_by_index(dev))
+            .unwrap_or(net::types::MacAddr::ZERO);
         let eth_hdr = match pkt.push_header(net::ETH_HEADER_LEN) {
             Ok(hdr) => hdr,
             Err(err) => return map_net_err(err),
         };
         eth_hdr[0..6].copy_from_slice(&[0; 6]);
-        eth_hdr[6..12].copy_from_slice(&src_mac);
+        eth_hdr[6..12].copy_from_slice(&src_mac.0);
         eth_hdr[12..14].copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
     }
 
@@ -1237,7 +1240,7 @@ pub fn socket_sendto(
             let Some(port) = alloc_ephemeral_port() else {
                 return errno_i32(ERRNO_ENOMEM) as i64;
             };
-            let local_ip = crate::net::netstack::NET_STACK
+            let local_ip = crate::netstack::NET_STACK
                 .first_ipv4()
                 .map(|ip| ip.0)
                 .unwrap_or([0; 4]);
@@ -1272,8 +1275,7 @@ pub fn socket_sendto(
     };
 
     if let Some((bind_addr, reuse_addr)) = auto_bind_udp
-        && let Err(err) =
-            crate::net::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
+        && let Err(err) = crate::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1289,7 +1291,7 @@ pub fn socket_sendto(
     }
 
     if let Some((identifier, reuse_addr)) = auto_bind_icmp
-        && let Err(err) = crate::net::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
+        && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1317,7 +1319,7 @@ pub fn socket_sendto(
     };
 
     if is_udp {
-        match crate::net::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
+        match crate::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
             Ok(n) => n as i64,
             Err(err) => map_net_err(err) as i64,
         }
@@ -1326,13 +1328,13 @@ pub fn socket_sendto(
         // User buffer = [type(1)|code(1)|cksum(2)|id(2)|seq(2)|payload...]
         // Kernel reads sequence from bytes 6-7, uses socket's bound
         // identifier, and sends the payload portion after the header.
-        if payload.len() < crate::net::icmp::ICMP_HEADER_LEN {
+        if payload.len() < crate::icmp::ICMP_HEADER_LEN {
             return errno_i32(ERRNO_EINVAL) as i64;
         }
         let sequence = u16::from_be_bytes([payload[6], payload[7]]);
-        let icmp_payload = &payload[crate::net::icmp::ICMP_HEADER_LEN..];
-        match crate::net::icmp::send_echo_request(dst_ip, identifier, sequence, icmp_payload) {
-            Ok(n) => (n + crate::net::icmp::ICMP_HEADER_LEN) as i64,
+        let icmp_payload = &payload[crate::icmp::ICMP_HEADER_LEN..];
+        match crate::icmp::send_echo_request(dst_ip, identifier, sequence, icmp_payload) {
+            Ok(n) => (n + crate::icmp::ICMP_HEADER_LEN) as i64,
             Err(err) => map_net_err(err) as i64,
         }
     }
@@ -1459,7 +1461,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     }
 
     if let Some((local, reuse_addr)) = udp_bind_args
-        && let Err(err) = crate::net::udp::udp_bind(sock_idx, local.ip, local.port, reuse_addr)
+        && let Err(err) = crate::udp::udp_bind(sock_idx, local.ip, local.port, reuse_addr)
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1474,7 +1476,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     }
 
     if let Some((identifier, reuse_addr)) = icmp_bind_args
-        && let Err(err) = crate::net::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
+        && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
     {
         let mut table = NEW_SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1581,8 +1583,24 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 // Find the TCP connection index for this accepted connection.
                 let tcp_idx = tcp::tcp_find(&accepted_conn.tuple);
 
+                let Some(tcp_idx) = tcp_idx else {
+                    continue;
+                };
+
+                if !matches!(
+                    tcp::tcp_get_state(tcp_idx),
+                    Some(
+                        TcpState::Established
+                            | TcpState::CloseWait
+                            | TcpState::FinWait1
+                            | TcpState::FinWait2
+                    )
+                ) {
+                    continue;
+                }
+
                 let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
-                    conn_id: tcp_idx.map(|i| i as u32),
+                    conn_id: Some(tcp_idx as u32),
                     listen: None,
                 })) else {
                     return errno_i32(ERRNO_ENOMEM);
@@ -1615,9 +1633,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                 }
 
                 // Set bidirectional socket↔connection link.
-                if let Some(tcp_idx) = tcp_idx {
-                    tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
-                }
+                tcp::tcp_set_socket_idx(tcp_idx, Some(new_idx));
 
                 return new_idx as i32;
             }
@@ -1685,7 +1701,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
                 }
 
                 let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
-                    crate::net::netstack::NET_STACK
+                    crate::netstack::NET_STACK
                         .first_ipv4()
                         .map(|ip| ip.0)
                         .unwrap_or([0; 4])
@@ -1782,7 +1798,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         }
 
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(50);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::napi::kick();
     }
 }
 
@@ -1819,7 +1835,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
                 let Some(port) = alloc_ephemeral_port() else {
                     return errno_i32(ERRNO_ENOMEM) as i64;
                 };
-                let local_ip = crate::net::netstack::NET_STACK
+                let local_ip = crate::netstack::NET_STACK
                     .first_ipv4()
                     .map(|ip| ip.0)
                     .unwrap_or([0; 4]);
@@ -1859,7 +1875,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
 
         if let Some((bind_addr, reuse_addr)) = auto_bind_udp
             && let Err(err) =
-                crate::net::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
+                crate::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
         {
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1875,7 +1891,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         }
 
         if let Some((identifier, reuse_addr)) = auto_bind_icmp
-            && let Err(err) = crate::net::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
+            && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
         {
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize)
@@ -1907,7 +1923,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
         };
 
         if is_udp {
-            return match crate::net::udp::udp_sendto(
+            return match crate::udp::udp_sendto(
                 local.ip.0,
                 remote.ip.0,
                 local.port.0,
@@ -1919,12 +1935,8 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
             };
         }
 
-        return match crate::net::icmp::send_echo_request(
-            remote.ip.0,
-            identifier,
-            remote.port.0,
-            payload,
-        ) {
+        return match crate::icmp::send_echo_request(remote.ip.0, identifier, remote.port.0, payload)
+        {
             Ok(n) => n as i64,
             Err(err) => map_net_err(err) as i64,
         };
@@ -2222,7 +2234,7 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
                     return errno_i32(ERRNO_EAGAIN) as i64;
                 }
 
-                crate::virtio_net::virtnet_force_napi_poll();
+                crate::napi::kick();
             }
             Err(e) => return map_tcp_err_i64(e),
         }
@@ -2290,12 +2302,12 @@ pub fn socket_close(sock_idx: u32) -> i32 {
     }
 
     if let Some(local) = udp_unbind {
-        crate::net::udp::udp_unbind(sock_idx, local.ip, local.port);
+        crate::udp::udp_unbind(sock_idx, local.ip, local.port);
         EPHEMERAL_PORTS.lock().release(local.port);
     }
 
     if let Some(identifier) = icmp_unbind {
-        crate::net::icmp::icmp_unbind(sock_idx, identifier);
+        crate::icmp::icmp_unbind(sock_idx, identifier);
         EPHEMERAL_PORTS.lock().release(Port(identifier));
     }
 
@@ -2523,8 +2535,8 @@ pub fn socket_reset_all() {
     }
 
     *EPHEMERAL_PORTS.lock() = EphemeralPortAllocator::new();
-    crate::net::icmp::ICMP_DEMUX.lock().clear();
-    crate::net::udp::UDP_DEMUX.lock().clear();
+    crate::icmp::ICMP_DEMUX.lock().clear();
+    crate::udp::UDP_DEMUX.lock().clear();
     tcp::tcp_reset_all();
 }
 

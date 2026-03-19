@@ -7,9 +7,9 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::packetbuf::{HEADROOM, PacketBuf};
-use crate::net::pool::{PACKET_POOL, POOL_SIZE};
-use crate::net::types::{Ipv4Addr, NetError};
+use crate::packetbuf::{HEADROOM, PacketBuf};
+use crate::pool::{PACKET_POOL, POOL_SIZE};
+use crate::types::{Ipv4Addr, NetError};
 
 /// Ensure the global pool is initialized before each test.
 /// Idempotent — safe to call multiple times.
@@ -458,7 +458,7 @@ pub fn test_ipv4_checksum() -> TestResult {
     // Recompute over the whole header (including the checksum field).
     // Use the standalone ipv4_header_checksum from mod.rs for verification.
     let hdr = &pkt.payload()[l3_off..l3_off + 20];
-    let verify = crate::net::ipv4_header_checksum(hdr);
+    let verify = crate::ipv4_header_checksum(hdr);
     assert_eq_test!(verify, 0, "checksum verifies to 0");
 
     pass!()
@@ -497,7 +497,7 @@ pub fn test_udp_checksum() -> TestResult {
     assert_test!(csum != 0, "UDP checksum should be non-zero");
 
     // Cross-check with the existing udp_checksum function from mod.rs.
-    let expected = crate::net::udp_checksum(src.0, dst.0, 1234, 53, payload);
+    let expected = crate::udp_checksum(src.0, dst.0, 1234, 53, payload);
     assert_eq_test!(csum, expected, "matches existing udp_checksum function");
 
     pass!()
@@ -538,7 +538,7 @@ pub fn test_tcp_checksum() -> TestResult {
     assert_test!(csum != 0, "TCP checksum should be non-zero");
 
     // Cross-check with the existing tcp_checksum function.
-    let expected = crate::net::tcp::tcp_checksum(src.0, dst.0, &tcp_header);
+    let expected = crate::tcp::tcp_checksum(src.0, dst.0, &tcp_header);
     assert_eq_test!(csum, expected, "matches existing tcp_checksum function");
 
     pass!()

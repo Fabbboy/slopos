@@ -28,7 +28,7 @@ use slopos_lib::klog_debug;
 use super::socket;
 use super::tcp;
 use super::types::{DevIndex, IpProtocol};
-use crate::net::{self as net, NetError, packetbuf::PacketBuf};
+use crate::{self as net, NetError, packetbuf::PacketBuf};
 
 /// Handle an incoming IPv4 packet.
 ///

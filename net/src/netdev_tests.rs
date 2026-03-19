@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{IrqMutex, assert_eq_test, assert_test, pass};
 
-use crate::net::netdev::*;
-use crate::net::packetbuf::PacketBuf;
-use crate::net::pool::{PACKET_POOL, PacketPool};
-use crate::net::types::*;
+use crate::netdev::*;
+use crate::packetbuf::PacketBuf;
+use crate::pool::{PACKET_POOL, PacketPool};
+use crate::types::*;
 
 // =============================================================================
 // Mock NetDevice for testing

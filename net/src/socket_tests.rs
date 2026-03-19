@@ -2,9 +2,9 @@ use slopos_abi::net::{AF_INET, SOCK_DGRAM, SOCK_STREAM};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
-use crate::net::socket::*;
-use crate::net::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader, TcpState};
-use crate::net::types::NetError;
+use crate::socket::*;
+use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader, TcpState};
+use crate::types::NetError;
 
 fn reset() {
     socket_reset_all();

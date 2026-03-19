@@ -10,13 +10,13 @@ extern crate alloc;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::loopback::LoopbackDev;
-use crate::net::netdev::{NetDevice, NetDeviceFeatures};
-use crate::net::netstack::NetStack;
-use crate::net::packetbuf::PacketBuf;
-use crate::net::pool::PACKET_POOL;
-use crate::net::route::RouteTable;
-use crate::net::types::{DevIndex, Ipv4Addr};
+use crate::loopback::LoopbackDev;
+use crate::netdev::{NetDevice, NetDeviceFeatures};
+use crate::netstack::NetStack;
+use crate::packetbuf::PacketBuf;
+use crate::pool::PACKET_POOL;
+use crate::route::RouteTable;
+use crate::types::{DevIndex, Ipv4Addr};
 
 // =============================================================================
 // Helpers
@@ -193,7 +193,7 @@ pub fn test_configure_populates_route_table() -> TestResult {
     let prefix = Ipv4Addr::from_u32_be(addr.to_u32_be() & netmask.to_u32_be());
 
     // Add connected route.
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix,
         prefix_len,
         gateway: Ipv4Addr::UNSPECIFIED,
@@ -202,7 +202,7 @@ pub fn test_configure_populates_route_table() -> TestResult {
     });
 
     // Add default gateway route.
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix: Ipv4Addr::UNSPECIFIED,
         prefix_len: 0,
         gateway,
@@ -253,14 +253,14 @@ pub fn test_reconfigure_replaces_routes() -> TestResult {
     let dev = DevIndex(1);
 
     // Initial configuration: 10.0.0.0/24.
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix: Ipv4Addr([10, 0, 0, 0]),
         prefix_len: 24,
         gateway: Ipv4Addr::UNSPECIFIED,
         dev,
         metric: 0,
     });
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix: Ipv4Addr::UNSPECIFIED,
         prefix_len: 0,
         gateway: Ipv4Addr([10, 0, 0, 1]),
@@ -275,14 +275,14 @@ pub fn test_reconfigure_replaces_routes() -> TestResult {
     assert_eq_test!(rt.route_count(), 0, "0 routes after remove_device_routes");
 
     // New config: 192.168.1.0/24.
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix: Ipv4Addr([192, 168, 1, 0]),
         prefix_len: 24,
         gateway: Ipv4Addr::UNSPECIFIED,
         dev,
         metric: 0,
     });
-    rt.add(crate::net::route::RouteEntry {
+    rt.add(crate::route::RouteEntry {
         prefix: Ipv4Addr::UNSPECIFIED,
         prefix_len: 0,
         gateway: Ipv4Addr([192, 168, 1, 1]),

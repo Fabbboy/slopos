@@ -2,12 +2,37 @@ use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, klog_info, pass};
 
-use crate::net::icmp::{self, ICMP_HEADER_LEN};
-use crate::net::route::ROUTE_TABLE;
-use crate::net::socket;
-use crate::net::types::Ipv4Addr;
+use crate::icmp::{self, ICMP_HEADER_LEN};
+use crate::route::{ROUTE_TABLE, RouteEntry};
+use crate::socket;
+use crate::types::{DevIndex, Ipv4Addr};
 
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+
+fn restore_boot_routes() {
+    ROUTE_TABLE.reset();
+    ROUTE_TABLE.add(RouteEntry {
+        prefix: Ipv4Addr([127, 0, 0, 0]),
+        prefix_len: 8,
+        gateway: Ipv4Addr::UNSPECIFIED,
+        dev: DevIndex(0),
+        metric: 0,
+    });
+    ROUTE_TABLE.add(RouteEntry {
+        prefix: Ipv4Addr([10, 0, 2, 0]),
+        prefix_len: 24,
+        gateway: Ipv4Addr::UNSPECIFIED,
+        dev: DevIndex(1),
+        metric: 0,
+    });
+    ROUTE_TABLE.add(RouteEntry {
+        prefix: Ipv4Addr::UNSPECIFIED,
+        prefix_len: 0,
+        gateway: Ipv4Addr(GATEWAY_IP),
+        dev: DevIndex(1),
+        metric: 100,
+    });
+}
 
 fn test_icmp_socket_create() -> TestResult {
     socket::socket_reset_all();
@@ -35,6 +60,7 @@ fn test_icmp_socket_bind() -> TestResult {
 }
 
 fn test_icmp_send_echo_raw() -> TestResult {
+    restore_boot_routes();
     let dst = Ipv4Addr(GATEWAY_IP);
     let has_route = ROUTE_TABLE.lookup(dst).is_some();
     if !has_route {
@@ -56,6 +82,7 @@ fn test_icmp_send_echo_raw() -> TestResult {
 
 fn test_icmp_ping_gateway_e2e() -> TestResult {
     socket::socket_reset_all();
+    restore_boot_routes();
 
     let has_route = ROUTE_TABLE.lookup(Ipv4Addr(GATEWAY_IP)).is_some();
     if !has_route {
@@ -80,7 +107,7 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
 
     for attempt in 0..30u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
 
         let found = icmp::ICMP_DEMUX.lock().lookup(identifier);
         klog_info!(
@@ -98,6 +125,7 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
 
 fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
     socket::socket_reset_all();
+    restore_boot_routes();
 
     let has_route = ROUTE_TABLE.lookup(Ipv4Addr(GATEWAY_IP)).is_some();
     if !has_route {
@@ -142,7 +170,7 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
 
     for attempt in 0..30u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock);
         klog_info!("icmp_test: attempt {} readable={}", attempt, readable);
@@ -190,9 +218,9 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
 }
 
 fn test_dns_resolve_google() -> TestResult {
-    use crate::net::dns;
+    use crate::dns;
 
-    let has_ip = crate::net::netstack::NET_STACK.first_ipv4().is_some();
+    let has_ip = crate::netstack::NET_STACK.first_ipv4().is_some();
     if !has_ip {
         klog_info!("icmp_test: no IP configured, skipping DNS test");
         return pass!();
@@ -224,7 +252,7 @@ fn test_dns_resolve_google() -> TestResult {
 }
 
 fn test_ping_resolved_host_e2e() -> TestResult {
-    use crate::net::dns;
+    use crate::dns;
 
     socket::socket_reset_all();
 
@@ -281,7 +309,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
 
     for _attempt in 0..50u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock);
         if readable != 0 {
@@ -321,6 +349,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
 
 fn test_icmp_napi_scheduling_e2e() -> TestResult {
     socket::socket_reset_all();
+    restore_boot_routes();
 
     let has_route = ROUTE_TABLE.lookup(Ipv4Addr(GATEWAY_IP)).is_some();
     if !has_route {

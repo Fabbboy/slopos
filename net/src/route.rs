@@ -159,6 +159,13 @@ impl RouteTable {
         }
     }
 
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock();
+        for bucket in inner.buckets.iter_mut() {
+            bucket.clear();
+        }
+    }
+
     /// Add a route to the table.
     ///
     /// The route is inserted into `buckets[prefix_len]`, sorted by metric
@@ -278,7 +285,7 @@ impl RouteTable {
         let inner = self.inner.lock();
         let mut routes = Vec::new();
         for bucket in inner.buckets.iter() {
-            routes.extend_from_slice(bucket);
+            routes.extend(bucket.iter().copied());
         }
         routes
     }

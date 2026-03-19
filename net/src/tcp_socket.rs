@@ -30,12 +30,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_lib::{IrqMutex, klog_debug};
 
-use crate::net::tcp::{
+use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_SYN,
     TcpOutSegment, TcpTuple,
 };
-use crate::net::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
-use crate::net::types::{Ipv4Addr, Port, SockAddr};
+use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use crate::types::{Ipv4Addr, Port, SockAddr};
 
 // =============================================================================
 // Constants

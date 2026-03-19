@@ -10,6 +10,7 @@ members = [
   "kernel",
   "lib",
   "mm",
+  "net",
   "slibc",
   "userland",
   "video",
@@ -44,6 +45,7 @@ slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
 slopos-lib = { path = "lib" }
 slopos-mm = { path = "mm" }
+slopos-net = { path = "net" }
 slopos-slibc = { path = "slibc" }
 slopos-tests = { path = "tests" }
 slopos-userland = { path = "userland" }

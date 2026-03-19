@@ -1,19 +1,57 @@
+#![no_std]
+#![allow(unsafe_op_in_unsafe_fn)]
+
 //! Network subsystem.
 //!
 //! Core abstractions (types, pool, packet buffers, device trait) and protocol
 //! modules (DHCP, DNS, TCP, UDP) shared across network drivers.
+extern crate alloc;
+
+#[cfg(feature = "itests")]
+pub mod dns_tests;
+pub mod driver_hooks;
+#[cfg(feature = "itests")]
+pub mod napi_tests;
+#[cfg(feature = "itests")]
+pub mod neighbor_tests;
+#[cfg(feature = "itests")]
+pub mod net_types_tests;
 pub mod netdev;
+#[cfg(feature = "itests")]
+pub mod netdev_tests;
+#[cfg(feature = "itests")]
+pub mod netstack_tests;
 pub mod packetbuf;
+#[cfg(feature = "itests")]
+pub mod packetbuf_tests;
 pub mod pool;
+#[cfg(feature = "itests")]
+pub mod route_tests;
+#[cfg(feature = "itests")]
+pub mod socket_tests;
+#[cfg(feature = "itests")]
+pub mod tcp_data_tests;
+#[cfg(feature = "itests")]
+pub mod tcp_tests;
+#[cfg(feature = "itests")]
+pub mod timer_tests;
 pub mod types;
+#[cfg(feature = "itests")]
+pub mod udp_socket_tests;
 
 pub mod arp;
 pub mod dhcp;
 pub mod dns;
 pub mod icmp;
+#[cfg(feature = "itests")]
+pub mod icmp_tests;
 pub mod ingress;
+#[cfg(feature = "itests")]
+pub mod ingress_tests;
 pub mod ipv4;
 pub mod loopback;
+#[cfg(feature = "itests")]
+pub mod loopback_tests;
 pub mod napi;
 pub mod neighbor;
 pub mod netstack;

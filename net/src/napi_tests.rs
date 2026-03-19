@@ -3,10 +3,10 @@ use slopos_abi::syscall::{ERRNO_EAGAIN, POLLOUT};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{WaitQueue, assert_test, pass};
 
-use crate::net::napi::{NapiContext, NapiState};
-use crate::net::socket;
-use crate::net::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
+use crate::napi::{NapiContext, NapiState};
+use crate::socket;
 use crate::socket_tests;
+use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
 
 fn errno_i64(errno: u64) -> i64 {
     errno as i64 as i32 as i64
@@ -71,7 +71,7 @@ pub fn test_napi_budget_limiting() -> TestResult {
 
 pub fn test_tx_fire_and_forget() -> TestResult {
     let start = slopos_lib::clock::uptime_ms();
-    let _ = crate::virtio_net::virtio_net_transmit(&[0u8; 64]);
+    let _ = crate::driver_hooks::virtio_net_transmit(&[0u8; 64]);
     let end = slopos_lib::clock::uptime_ms();
     assert_test!(
         end.saturating_sub(start) < 1000,

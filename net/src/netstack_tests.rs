@@ -15,8 +15,8 @@ extern crate alloc;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::netstack::{IfaceConfig, NetStack};
-use crate::net::types::{DevIndex, Ipv4Addr};
+use crate::netstack::{IfaceConfig, NetStack};
+use crate::types::{DevIndex, Ipv4Addr};
 
 // =============================================================================
 // Helpers

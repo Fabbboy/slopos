@@ -7,7 +7,7 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
-use crate::net::tcp::{
+use crate::tcp::{
     self, DEFAULT_MSS, DELAYED_ACK_MS, MAX_RETRANSMITS, TCP_BUFFER_SIZE, TCP_FLAG_ACK,
     TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_SYN, TcpError, TcpHeader, TcpState,
 };

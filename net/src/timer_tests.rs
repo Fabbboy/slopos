@@ -6,7 +6,7 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::timer::{FiredTimer, MAX_TIMERS_PER_TICK, NetTimerWheel, TimerKind, TimerToken};
+use crate::timer::{FiredTimer, MAX_TIMERS_PER_TICK, NetTimerWheel, TimerKind, TimerToken};
 
 // =============================================================================
 // Helpers

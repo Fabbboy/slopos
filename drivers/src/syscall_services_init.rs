@@ -8,11 +8,8 @@ use slopos_lib::kernel_services::syscall_services::socket::{
 };
 use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
-use crate::{
-    input_event,
-    net::{dns, socket},
-    tty, virtio_net,
-};
+use crate::{input_event, tty, virtio_net};
+use slopos_net::{dns, socket};
 
 // =============================================================================
 // Input services

@@ -226,7 +226,7 @@ fn boot_step_pci_init_fn() {
     // register the loopback device BEFORE any physical NIC so it
     // gets DevIndex(0) by convention.  This must happen before pci_init()
     // triggers VirtIO-net probe.
-    slopos_drivers::net::loopback::init_loopback();
+    slopos_net::loopback::init_loopback();
 
     klog_debug!("Enumerating PCI devices...");
     virtio_blk_register_driver();

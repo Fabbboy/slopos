@@ -11,7 +11,7 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, fail, pass};
 
-use crate::net::tcp::{
+use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_FIN,
     TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN, TCP_FLAG_URG, TIME_WAIT_MS, TcpConnection, TcpError,
     TcpHeader, TcpState, TcpTuple,

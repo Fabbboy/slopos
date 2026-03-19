@@ -450,7 +450,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             if let Some(act) = action {
                 // Execute the returned action (send ARP request).
                 // multi-NIC support will need per-device handle lookup.
-                if let Some(handle) = crate::virtio_net::get_device_handle() {
+                if let Some(handle) = crate::driver_hooks::get_device_handle() {
                     super::arp::execute_neighbor_action(handle, act);
                 }
             }

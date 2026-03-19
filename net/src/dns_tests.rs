@@ -3,7 +3,7 @@
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::dns;
+use crate::dns;
 
 // =============================================================================
 // 5F.T1 — DNS name encoding
@@ -292,7 +292,7 @@ pub fn test_dns_t5_cache() -> TestResult {
 
 pub fn test_dns_t6_resolver_integration() -> TestResult {
     // Skip if network is not ready
-    if !crate::virtio_net::virtio_net_is_ready() {
+    if !crate::driver_hooks::virtio_net_is_ready() {
         return pass!();
     }
 
@@ -318,7 +318,7 @@ pub fn test_dns_t6_resolver_integration() -> TestResult {
 
 pub fn test_dns_t7_resolver_timeout() -> TestResult {
     // Skip if network is not ready
-    if !crate::virtio_net::virtio_net_is_ready() {
+    if !crate::driver_hooks::virtio_net_is_ready() {
         return pass!();
     }
 
@@ -340,7 +340,7 @@ pub fn test_dns_t7_resolver_timeout() -> TestResult {
 pub fn test_dns_t8_regression_network_stack() -> TestResult {
     // Verify that the DNS interception in dispatch_rx_frame doesn't
     // break normal UDP socket delivery
-    use crate::net::socket::*;
+    use crate::socket::*;
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 
     socket_reset_all();

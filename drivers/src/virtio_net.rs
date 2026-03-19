@@ -10,16 +10,8 @@ use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
 use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
+use slopos_net as net;
 
-use crate::net::{
-    self, PACKET_POOL, dhcp, ingress,
-    napi::NapiContext,
-    netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
-    packetbuf::PacketBuf,
-    pool::PacketPool,
-    socket, tcp,
-    types::{MacAddr, NetError},
-};
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
     self, IrqEdgeEvent, VIRTIO_MSI_NO_VECTOR, VIRTQ_DESC_F_WRITE, VirtioMmioCaps, VirtioMsixState,
@@ -30,6 +22,17 @@ use crate::virtio::{
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 use slopos_lib::kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
+use slopos_net::{
+    self, PACKET_POOL, dhcp,
+    driver_hooks::{DriverHooks, register_driver_hooks},
+    ingress,
+    napi::NapiContext,
+    netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
+    packetbuf::PacketBuf,
+    pool::PacketPool,
+    socket, tcp,
+    types::{MacAddr, NetError},
+};
 
 use slopos_mm::page_alloc::OwnedPageFrame;
 
@@ -997,7 +1000,7 @@ fn virtnet_napi_poll_loop() {
 
     napi_complete();
 
-    crate::net::socket::socket_process_timers();
+    slopos_net::socket::socket_process_timers();
 
     // Fix NAPI race: if an RX IRQ fired while we were in Polling state,
     // napi_schedule() from the IRQ handler was a no-op (CAS Idle→Scheduled
@@ -1012,7 +1015,7 @@ fn virtnet_napi_poll_loop() {
 
     // Advance the network timer wheel — process ARP aging, TCP retransmit, etc.
     //
-    crate::net::timer::net_timer_process();
+    slopos_net::timer::net_timer_process();
 
     if (processed as u32) >= NAPI_CONTEXT.budget() {
         napi_schedule();
@@ -1026,8 +1029,8 @@ fn virtnet_napi_poll_loop() {
 /// stores TX'd packets internally; this function drains them back through
 /// `net_rx()` so they appear as received local traffic.
 fn poll_loopback() {
-    use crate::net::netdev::DEVICE_REGISTRY;
-    use crate::net::types::DevIndex;
+    use slopos_net::netdev::DEVICE_REGISTRY;
+    use slopos_net::types::DevIndex;
 
     // The loopback device is at DevIndex(0).  Use the registry to poll it.
     let lo_packets = DEVICE_REGISTRY.poll_rx_by_index(DevIndex(0), 32, &PACKET_POOL);
@@ -1037,17 +1040,17 @@ fn poll_loopback() {
         // to IPv4/ARP dispatch.  We call ipv4::handle_rx directly.
         let checksum_rx = true; // Loopback doesn't need checksum verification.
         let data = pkt.payload();
-        if data.len() >= crate::net::ETH_HEADER_LEN {
+        if data.len() >= slopos_net::ETH_HEADER_LEN {
             let ethertype_raw = u16::from_be_bytes([data[12], data[13]]);
             let mut pkt = pkt;
             // Set layer offsets.
             pkt.set_l2(pkt.head());
-            pkt.set_l3(pkt.head() + crate::net::ETH_HEADER_LEN as u16);
+            pkt.set_l3(pkt.head() + slopos_net::ETH_HEADER_LEN as u16);
             // Pull Ethernet header.
-            if pkt.pull_header(crate::net::ETH_HEADER_LEN).is_ok() {
-                match crate::net::EtherType::from_u16(ethertype_raw) {
-                    Some(crate::net::EtherType::Ipv4) => {
-                        crate::net::ipv4::handle_rx(DevIndex(0), pkt, checksum_rx);
+            if pkt.pull_header(slopos_net::ETH_HEADER_LEN).is_ok() {
+                match slopos_net::EtherType::from_u16(ethertype_raw) {
+                    Some(slopos_net::EtherType::Ipv4) => {
+                        slopos_net::ipv4::handle_rx(DevIndex(0), pkt, checksum_rx);
                     }
                     _ => {
                         // Loopback only handles IPv4 for now.
@@ -1074,7 +1077,7 @@ extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
     loop {
         napi_schedule();
         virtnet_napi_poll_loop();
-        crate::net::timer::net_timer_process();
+        slopos_net::timer::net_timer_process();
         sleep_current_task_ms(1);
     }
 }
@@ -1249,8 +1252,8 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
             // from the registry to predict the DevIndex.  (After
             // loopback at index 0, VirtIO-net will be index 1.)
             {
-                use crate::net::netstack::NET_STACK;
-                use crate::net::types::{DevIndex, Ipv4Addr};
+                use slopos_net::netstack::NET_STACK;
+                use slopos_net::types::{DevIndex, Ipv4Addr};
                 let dev_idx = DevIndex(DEVICE_REGISTRY.device_count());
                 NET_STACK.configure(
                     dev_idx,
@@ -1281,6 +1284,21 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
     }
 
     register_bottom_half(napi_bottom_half);
+    slopos_net::napi::register_kick(virtnet_force_napi_poll);
+    register_driver_hooks(DriverHooks {
+        virtio_net_ipv4_addr: Some(virtio_net_ipv4_addr),
+        virtio_net_dns: Some(virtio_net_dns),
+        dns_rx_clear: Some(dns_rx_clear),
+        transmit_udp_packet: Some(transmit_udp_packet),
+        dns_rx_wait: Some(dns_rx_wait),
+        dns_rx_read: Some(dns_rx_read),
+        virtio_net_mac: Some(virtio_net_mac),
+        get_device_handle: Some(get_device_handle),
+        dns_intercept_response: Some(dns_intercept_response),
+        virtio_net_is_ready: Some(virtio_net_is_ready),
+        virtio_net_transmit: Some(virtio_net_transmit),
+        virtnet_force_napi_poll: Some(virtnet_force_napi_poll),
+    });
 
     let netpoll_task = spawn_kernel_task(
         b"netpoll\0".as_ptr() as *const i8,
@@ -1431,7 +1449,7 @@ pub fn virtio_net_get_info(out: &mut UserNetInfo) {
     out.mtu = state.device.mtu;
 
     // prefer NetStack as the source of truth for IP config.
-    if let Some(iface) = crate::net::netstack::NET_STACK.first_iface() {
+    if let Some(iface) = slopos_net::netstack::NET_STACK.first_iface() {
         out.ipv4 = iface.ipv4_addr.0;
         out.subnet_mask = iface.netmask.0;
         out.gateway = iface.gateway.0;

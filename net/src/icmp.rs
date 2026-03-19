@@ -190,7 +190,7 @@ pub fn send_echo_request(
     sequence: u16,
     payload: &[u8],
 ) -> Result<usize, NetError> {
-    let src_ip = crate::net::netstack::NET_STACK
+    let src_ip = crate::netstack::NET_STACK
         .first_ipv4()
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
@@ -249,7 +249,7 @@ fn send_echo(
     {
         let eth_hdr = pkt.push_header(super::ETH_HEADER_LEN)?;
         eth_hdr[0..6].copy_from_slice(&[0xff; 6]);
-        eth_hdr[6..12].copy_from_slice(&crate::virtio_net::virtio_net_mac().unwrap_or([0; 6]));
+        eth_hdr[6..12].copy_from_slice(&crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]));
         eth_hdr[12..14].copy_from_slice(&super::ETHERTYPE_IPV4.to_be_bytes());
     }
 

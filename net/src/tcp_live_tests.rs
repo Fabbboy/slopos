@@ -6,7 +6,7 @@ use super::route::ROUTE_TABLE;
 use super::socket;
 use super::tcp;
 use super::types::Ipv4Addr;
-use crate::net::netstack::NET_STACK;
+use crate::netstack::NET_STACK;
 
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 const GATEWAY_PORT: u16 = 7;
@@ -58,7 +58,7 @@ fn test_arp_resolve_gateway() -> TestResult {
 
     for attempt in 0..20u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
         let cached = NEIGHBOR_CACHE.lookup(dev, next_hop);
         if cached.is_some() {
             klog_info!("tcp_live: ARP resolved after {}ms", (attempt + 1) * 100);
@@ -119,7 +119,7 @@ fn test_tcp_connect_does_not_hang() -> TestResult {
 
     for attempt in 0..30u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock_idx);
         let writable = socket::socket_poll_writable(sock_idx);
@@ -198,7 +198,7 @@ fn test_tcp_blocking_connect() -> TestResult {
 }
 
 fn test_tcp_http_get_e2e() -> TestResult {
-    use crate::net::dns;
+    use crate::dns;
     use slopos_abi::net::{AF_INET, SOCK_STREAM};
 
     socket::socket_reset_all();
@@ -259,7 +259,7 @@ fn test_tcp_http_get_e2e() -> TestResult {
 
     for _attempt in 0..50u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::virtio_net::virtnet_force_napi_poll();
+        crate::driver_hooks::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock_idx);
         if readable == 0 {

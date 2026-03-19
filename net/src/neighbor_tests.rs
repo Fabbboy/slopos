@@ -11,10 +11,10 @@ extern crate alloc;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
 
-use crate::net::neighbor::{NeighborAction, NeighborCache, ResolveOutcome};
-use crate::net::packetbuf::PacketBuf;
-use crate::net::pool::PACKET_POOL;
-use crate::net::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
+use crate::neighbor::{NeighborAction, NeighborCache, ResolveOutcome};
+use crate::packetbuf::PacketBuf;
+use crate::pool::PACKET_POOL;
+use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 // =============================================================================
 // Helpers

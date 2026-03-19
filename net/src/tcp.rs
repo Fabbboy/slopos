@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
 
-use crate::net::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
 // =============================================================================
 // Constants
@@ -1866,14 +1866,25 @@ fn process_established_and_closing(
         if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
             NET_TIMER_WHEEL.cancel(token);
         }
-        table.connections[idx].state = TcpState::Closed;
-        table.connections[idx].reset_received = true;
-        return TcpInputResult {
-            conn_idx: Some(idx),
-            new_state: Some(TcpState::Closed),
-            reset: true,
-            ..TcpInputResult::empty()
-        };
+
+        if table.connections[idx].socket_idx.is_some() {
+            table.connections[idx].state = TcpState::Closed;
+            table.connections[idx].reset_received = true;
+            return TcpInputResult {
+                conn_idx: Some(idx),
+                new_state: Some(TcpState::Closed),
+                reset: true,
+                ..TcpInputResult::empty()
+            };
+        } else {
+            table.release(idx);
+            return TcpInputResult {
+                conn_idx: None,
+                new_state: Some(TcpState::Closed),
+                reset: true,
+                ..TcpInputResult::empty()
+            };
+        }
     }
 
     // Step 2: Check SYN (unexpected in established+ states → RST).
