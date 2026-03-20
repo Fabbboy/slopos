@@ -7,7 +7,7 @@
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGTTOU, SIGWINCH};
-use slopos_abi::syscall::{B0, CBAUD, CcIndex, UserTermios, UserWinsize};
+use slopos_abi::syscall::{B0, CBAUD, CcIndex, InputFlags, UserTermios, UserWinsize};
 
 use slopos_lib::kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, has_pending_signal,
@@ -97,7 +97,7 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
     match guard.as_ref() {
         Some(tty) => {
             let mut t = *tty.ldisc.termios();
-            let speed = cflag_to_speed(t.c_cflag);
+            let speed = cflag_to_speed(t.c_cflag.bits());
             t.c_ispeed = speed;
             t.c_ospeed = speed;
             Ok(t)
@@ -311,8 +311,8 @@ pub(super) fn set_termios_mode(
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
-                let old_ixon = tty.ldisc.termios().c_iflag & slopos_abi::syscall::IXON;
-                let new_ixon = merged.c_iflag & slopos_abi::syscall::IXON;
+                let old_ixon = tty.ldisc.termios().c_iflag.contains(InputFlags::IXON);
+                let new_ixon = merged.c_iflag.contains(InputFlags::IXON);
 
                 if matches!(mode, TermiosSetMode::DrainAndFlushInput) {
                     tty.ldisc.flush_input();
@@ -320,11 +320,11 @@ pub(super) fn set_termios_mode(
                 }
                 tty.ldisc.set_termios(&merged);
                 tty.driver.set_termios(&merged);
-                defer_hangup = (merged.c_cflag & CBAUD) == B0;
+                defer_hangup = (merged.c_cflag.bits() & CBAUD) == B0;
 
-                if old_ixon == 0 && new_ixon != 0 {
+                if !old_ixon && new_ixon {
                     deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_DOSTOP);
-                } else if old_ixon != 0 && new_ixon == 0 {
+                } else if old_ixon && !new_ixon {
                     deferred.add_packet_event(idx, slopos_abi::syscall::TIOCPKT_NOSTOP);
                 }
 
