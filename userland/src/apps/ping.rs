@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::syscall::{SockAddrIn, UserPollFd, fs, net, process};
 use slopos_abi::signal::SIGPIPE;
-use slopos_abi::syscall::{ECHO, ICANON, ISIG, POLLIN};
+use slopos_abi::syscall::{LocalFlags, POLLIN};
 
 struct PingConfig {
     count: Option<u32>,
@@ -351,7 +351,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
-        raw.c_lflag &= !(ECHO | ICANON | ISIG);
+        raw.c_lflag &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         let _ = fs::tcsetattr(0, &raw);
     }
 

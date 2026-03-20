@@ -10,6 +10,7 @@ pub mod udp;
 use std::net::Ipv4Addr;
 
 use crate::syscall::{fs, process};
+use slopos_abi::syscall::LocalFlags;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -436,7 +437,7 @@ pub fn nc_main(args: Vec<String>) -> ! {
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
-        raw.c_lflag &= !(slopos_abi::syscall::ECHO | slopos_abi::syscall::ICANON);
+        raw.c_lflag &= !(LocalFlags::ECHO | LocalFlags::ICANON);
         let _ = fs::tcsetattr(0, &raw);
     }
 

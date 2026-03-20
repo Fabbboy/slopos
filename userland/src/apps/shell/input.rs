@@ -5,7 +5,7 @@ use core::ptr;
 use crate::runtime;
 use crate::syscall::core as sys_core;
 use crate::syscall::{InputEvent, InputEventType, UserPollFd, fs, input};
-use slopos_abi::syscall::{ECHO, ECHOE, ICANON, ISIG, POLLIN};
+use slopos_abi::syscall::{LocalFlags, POLLIN};
 use std::time::{Duration, Instant};
 
 use super::buffers;
@@ -69,7 +69,8 @@ pub fn read_command_line(
     let saved_termios = fs::tcgetattr(0).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
-        raw.c_lflag &= !(ICANON | ECHO | ISIG | ECHOE);
+        raw.c_lflag &=
+            !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG | LocalFlags::ECHOE);
         let _ = fs::tcsetattr(0, &raw);
     }
 
@@ -238,7 +239,7 @@ fn input_loop(
             shell_console_follow_bottom();
         }
 
-        let preserves_selection = matches!(
+        let preserves_selection = core::matches!(
             c,
             KEY_SHIFT_LEFT
                 | KEY_SHIFT_RIGHT
@@ -620,28 +621,32 @@ fn delete_selection(
 }
 
 fn delete_char_before_cursor(len: &mut usize, cursor_pos: &mut usize) {
-    buffers::with_line_buf(|buf| {
-        for i in *cursor_pos - 1..len.saturating_sub(1) {
-            buf[i] = buf[i + 1];
-        }
-        if *len > 0 {
-            buf[*len - 1] = 0;
-        }
-    });
+    buffers::with_line_buf(|buf| delete_char_before_cursor_in_buf(buf, *cursor_pos, *len));
     *len = len.saturating_sub(1);
     *cursor_pos -= 1;
 }
 
 fn delete_char_at_cursor(len: &mut usize, cursor_pos: usize) {
-    buffers::with_line_buf(|buf| {
-        for i in cursor_pos..len.saturating_sub(1) {
-            buf[i] = buf[i + 1];
-        }
-        if *len > 0 {
-            buf[*len - 1] = 0;
-        }
-    });
+    buffers::with_line_buf(|buf| delete_char_at_cursor_in_buf(buf, cursor_pos, *len));
     *len = len.saturating_sub(1);
+}
+
+fn delete_char_before_cursor_in_buf(buf: &mut [u8; 256], cursor_pos: usize, len: usize) {
+    for i in cursor_pos - 1..len.saturating_sub(1) {
+        buf[i] = buf[i + 1];
+    }
+    if len > 0 {
+        buf[len - 1] = 0;
+    }
+}
+
+fn delete_char_at_cursor_in_buf(buf: &mut [u8; 256], cursor_pos: usize, len: usize) {
+    for i in cursor_pos..len.saturating_sub(1) {
+        buf[i] = buf[i + 1];
+    }
+    if len > 0 {
+        buf[len - 1] = 0;
+    }
 }
 
 fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut usize) {
