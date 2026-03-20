@@ -3,15 +3,16 @@
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
 use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
+use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
 pub fn getpid() -> u32 {
-    unsafe { syscall0(SYSCALL_GETPID) as u32 }
+    Sys::getpid() as u32
 }
 
 #[inline(always)]
 pub fn getuid() -> u32 {
-    unsafe { syscall0(SYSCALL_GETUID) as u32 }
+    Sys::getuid()
 }
 
 #[inline(always)]
@@ -146,20 +147,10 @@ pub fn ignore_signal(signum: u8) -> i32 {
 
 #[inline(always)]
 pub fn halt() -> ! {
-    unsafe {
-        syscall0(SYSCALL_HALT);
-    }
-    loop {
-        core::hint::spin_loop();
-    }
+    Sys::halt()
 }
 
 #[inline(always)]
 pub fn reboot() -> ! {
-    unsafe {
-        syscall0(SYSCALL_REBOOT);
-    }
-    loop {
-        core::hint::spin_loop();
-    }
+    Sys::reboot()
 }

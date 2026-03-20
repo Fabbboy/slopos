@@ -2,44 +2,31 @@
 
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2};
+use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
 pub fn yield_now() {
-    unsafe {
-        syscall0(SYSCALL_YIELD);
-    }
+    let _ = Sys::yield_now();
 }
 
 #[inline(always)]
 pub fn exit() -> ! {
-    unsafe {
-        syscall1(SYSCALL_EXIT, 0);
-    }
-    loop {
-        core::hint::spin_loop();
-    }
+    Sys::exit(0)
 }
 
 #[inline(always)]
 pub fn exit_with_code(code: i32) -> ! {
-    unsafe {
-        syscall1(SYSCALL_EXIT, code as u64);
-    }
-    loop {
-        core::hint::spin_loop();
-    }
+    Sys::exit(code)
 }
 
 #[inline(always)]
 pub fn sleep_ms(ms: u32) {
-    unsafe {
-        syscall1(SYSCALL_SLEEP_MS, ms as u64);
-    }
+    let _ = Sys::sleep_ms(ms as u64);
 }
 
 #[inline(always)]
 pub fn get_time_ms() -> u64 {
-    unsafe { syscall0(SYSCALL_GET_TIME_MS) }
+    Sys::get_time_ms()
 }
 
 /// Query the monotonic clock with nanosecond precision.

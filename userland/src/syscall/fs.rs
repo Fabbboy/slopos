@@ -14,6 +14,7 @@ use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
 use slopos_abi::syscall::{TIOCSCTTY, UserPollFd, UserTermios, UserTimeval};
 use slopos_abi::{UserFsList, UserFsStat};
+use slopos_slibc::pal::{Pal, Sys};
 
 // =============================================================================
 // Typed Safe Wrappers (Public API)
@@ -34,8 +35,9 @@ use slopos_abi::{UserFsList, UserFsStat};
 /// * `EINVAL` - Invalid flags
 #[inline(always)]
 pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<RawFd> {
-    let result = unsafe { syscall2(SYSCALL_FS_OPEN, path as u64, flags as u64) };
-    demux(result).map(|v| v as RawFd)
+    Sys::open(path as *const u8, flags as i32, 0)
+        .map(|fd| fd as RawFd)
+        .map_err(Into::into)
 }
 
 /// Open a file using a CStr path.
@@ -50,8 +52,7 @@ pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<RawFd> {
 /// * `EBADF` - Invalid file descriptor
 #[inline(always)]
 pub fn close_fd(fd: RawFd) -> SyscallResult<()> {
-    let result = unsafe { syscall1(SYSCALL_FS_CLOSE, fd as u64) };
-    demux(result).map(|_| ())
+    Sys::close(fd).map_err(Into::into)
 }
 
 /// Read from a file descriptor into a buffer.
@@ -64,15 +65,7 @@ pub fn close_fd(fd: RawFd) -> SyscallResult<()> {
 /// * `EIO` - I/O error
 #[inline(always)]
 pub fn read_slice(fd: RawFd, buf: &mut [u8]) -> SyscallResult<usize> {
-    let result = unsafe {
-        syscall3(
-            SYSCALL_FS_READ,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    demux(result).map(|v| v as usize)
+    Sys::read(fd, buf.as_mut_ptr(), buf.len()).map_err(Into::into)
 }
 
 /// Write to a file descriptor from a buffer.
@@ -86,15 +79,7 @@ pub fn read_slice(fd: RawFd, buf: &mut [u8]) -> SyscallResult<usize> {
 /// * `ENOSPC` - No space left on device
 #[inline(always)]
 pub fn write_slice(fd: RawFd, buf: &[u8]) -> SyscallResult<usize> {
-    let result = unsafe {
-        syscall3(
-            SYSCALL_FS_WRITE,
-            fd as u64,
-            buf.as_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    demux(result).map(|v| v as usize)
+    Sys::write(fd, buf.as_ptr(), buf.len()).map_err(Into::into)
 }
 
 /// Get file status/metadata.
@@ -137,8 +122,7 @@ pub fn mkdir_path(path: *const c_char) -> SyscallResult<()> {
 /// * `EBUSY` - File is in use
 #[inline(always)]
 pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
-    let result = unsafe { syscall1(SYSCALL_FS_UNLINK, path as u64) };
-    demux(result).map(|_| ())
+    Sys::unlink(path as *const u8).map_err(Into::into)
 }
 
 /// Atomically rename/move a file or directory.
@@ -153,8 +137,7 @@ pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
 /// * `ENOTSUP` - Filesystem doesn't support rename
 #[inline(always)]
 pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_RENAME, old_path as u64, new_path as u64) };
-    demux(result).map(|_| ())
+    Sys::rename(old_path as *const u8, new_path as *const u8).map_err(Into::into)
 }
 
 /// List directory contents.
@@ -174,26 +157,24 @@ pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()>
 
 #[inline(always)]
 pub fn dup(fd: RawFd) -> SyscallResult<RawFd> {
-    let result = unsafe { syscall1(SYSCALL_DUP, fd as u64) };
-    demux(result).map(|v| v as RawFd)
+    Sys::dup(fd).map(|v| v as RawFd).map_err(Into::into)
 }
 
 #[inline(always)]
 pub fn dup2(old_fd: RawFd, new_fd: RawFd) -> SyscallResult<RawFd> {
-    let result = unsafe { syscall2(SYSCALL_DUP2, old_fd as u64, new_fd as u64) };
-    demux(result).map(|v| v as RawFd)
+    Sys::dup2(old_fd, new_fd)
+        .map(|v| v as RawFd)
+        .map_err(Into::into)
 }
 
 #[inline(always)]
 pub fn lseek(fd: RawFd, offset: i64, whence: u32) -> SyscallResult<i64> {
-    let result = unsafe { syscall3(SYSCALL_LSEEK, fd as u64, offset as u64, whence as u64) };
-    demux(result).map(|v| v as i64)
+    Sys::lseek(fd, offset, whence as i32).map_err(Into::into)
 }
 
 #[inline(always)]
 pub fn pipe(fds: &mut [i32; 2]) -> SyscallResult<()> {
-    let result = unsafe { syscall1(SYSCALL_PIPE, fds.as_mut_ptr() as u64) };
-    demux(result).map(|_| ())
+    Sys::pipe(fds as *mut [i32; 2]).map_err(Into::into)
 }
 
 #[inline(always)]

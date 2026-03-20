@@ -1,14 +1,10 @@
 use super::RawFd;
-use super::error::{SyscallResult, demux};
-use super::numbers::{
-    SYSCALL_ACCEPT, SYSCALL_BIND, SYSCALL_CONNECT, SYSCALL_FCNTL, SYSCALL_GETSOCKOPT,
-    SYSCALL_LISTEN, SYSCALL_NET_INFO, SYSCALL_NET_SCAN, SYSCALL_RECV, SYSCALL_RECVFROM,
-    SYSCALL_RESOLVE, SYSCALL_SEND, SYSCALL_SENDTO, SYSCALL_SETSOCKOPT, SYSCALL_SHUTDOWN,
-    SYSCALL_SOCKET,
-};
-use super::raw::{syscall1, syscall2, syscall3, syscall4, syscall5, syscall6};
+use super::error::{SyscallError, SyscallResult};
+use super::numbers::{SYSCALL_NET_INFO, SYSCALL_NET_SCAN, SYSCALL_RESOLVE};
+use super::raw::{syscall1, syscall3};
 use slopos_abi::net::{SockAddrIn, UserNetInfo, UserNetMember};
 use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
+use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
 pub fn net_scan(out: &mut [UserNetMember], active_probe: bool) -> i64 {
@@ -32,96 +28,66 @@ pub fn net_info(out: &mut UserNetInfo) -> i64 {
 }
 
 pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<RawFd> {
-    let result = unsafe {
-        syscall3(
-            SYSCALL_SOCKET,
-            domain as u64,
-            sock_type as u64,
-            protocol as u64,
-        )
-    };
-    demux(result).map(|v| v as RawFd)
+    Sys::socket(domain as i32, sock_type as i32, protocol as i32)
+        .map(|v| v as RawFd)
+        .map_err(Into::into)
 }
 
 pub fn bind(fd: RawFd, addr: &SockAddrIn) -> SyscallResult<()> {
-    let result = unsafe {
-        syscall3(
-            SYSCALL_BIND,
-            fd as u64,
-            addr as *const _ as u64,
-            core::mem::size_of::<SockAddrIn>() as u64,
-        )
-    };
-    demux(result).map(|_| ())
+    Sys::bind(
+        fd,
+        addr as *const _ as *const u8,
+        core::mem::size_of::<SockAddrIn>() as u32,
+    )
+    .map_err(Into::into)
 }
 
 pub fn listen(fd: RawFd, backlog: u32) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_LISTEN, fd as u64, backlog as u64) };
-    demux(result).map(|_| ())
+    Sys::listen(fd, backlog as i32).map_err(Into::into)
 }
 
 pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<RawFd> {
-    let peer_ptr = peer.map(|p| p as *mut _ as u64).unwrap_or(0);
-    let len: u64 = if peer_ptr != 0 {
-        core::mem::size_of::<SockAddrIn>() as u64
+    let mut addrlen = core::mem::size_of::<SockAddrIn>() as u32;
+    let peer_ptr = peer
+        .map(|p| p as *mut _ as *mut u8)
+        .unwrap_or(core::ptr::null_mut());
+    let addrlen_ptr = if peer_ptr.is_null() {
+        core::ptr::null_mut()
     } else {
-        0
+        &mut addrlen as *mut u32
     };
-    let result = unsafe { syscall3(SYSCALL_ACCEPT, fd as u64, peer_ptr, len) };
-    demux(result).map(|v| v as RawFd)
+    Sys::accept(fd, peer_ptr, addrlen_ptr)
+        .map(|v| v as RawFd)
+        .map_err(Into::into)
 }
 
 pub fn connect(fd: RawFd, addr: &SockAddrIn) -> SyscallResult<()> {
-    let result = unsafe {
-        syscall3(
-            SYSCALL_CONNECT,
-            fd as u64,
-            addr as *const _ as u64,
-            core::mem::size_of::<SockAddrIn>() as u64,
-        )
-    };
-    demux(result).map(|_| ())
+    Sys::connect(
+        fd,
+        addr as *const _ as *const u8,
+        core::mem::size_of::<SockAddrIn>() as u32,
+    )
+    .map_err(Into::into)
 }
 
 pub fn send(fd: RawFd, data: &[u8], flags: u32) -> SyscallResult<usize> {
-    let result = unsafe {
-        syscall4(
-            SYSCALL_SEND,
-            fd as u64,
-            data.as_ptr() as u64,
-            data.len() as u64,
-            flags as u64,
-        )
-    };
-    demux(result).map(|v| v as usize)
+    Sys::send(fd, data.as_ptr(), data.len(), flags as i32).map_err(Into::into)
 }
 
 pub fn recv(fd: RawFd, buf: &mut [u8], flags: u32) -> SyscallResult<usize> {
-    let result = unsafe {
-        syscall4(
-            SYSCALL_RECV,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-            flags as u64,
-        )
-    };
-    demux(result).map(|v| v as usize)
+    Sys::recv(fd, buf.as_mut_ptr(), buf.len(), flags as i32).map_err(Into::into)
 }
 
 pub fn sendto(fd: RawFd, data: &[u8], flags: u32, addr: &SockAddrIn) -> SyscallResult<usize> {
-    let result = unsafe {
-        syscall6(
-            SYSCALL_SENDTO,
-            fd as u64,
-            data.as_ptr() as u64,
-            data.len() as u64,
-            flags as u64,
-            addr as *const _ as u64,
-            core::mem::size_of::<SockAddrIn>() as u64,
-        )
-    };
-    demux(result).map(|v| v as usize)
+    Sys::sendto(
+        fd,
+        data.as_ptr(),
+        data.len(),
+        flags as i32,
+        addr as *const _ as *const u8,
+        core::mem::size_of::<SockAddrIn>() as u32,
+    )
+    .map_err(Into::into)
 }
 
 pub fn recvfrom(
@@ -130,57 +96,45 @@ pub fn recvfrom(
     flags: u32,
     src_addr: Option<&mut SockAddrIn>,
 ) -> SyscallResult<usize> {
-    let src_addr_ptr = src_addr.map(|a| a as *mut _ as u64).unwrap_or(0);
-    let result = unsafe {
-        syscall6(
-            SYSCALL_RECVFROM,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-            flags as u64,
-            src_addr_ptr,
-            if src_addr_ptr != 0 {
-                core::mem::size_of::<SockAddrIn>() as u64
-            } else {
-                0
-            },
-        )
+    let mut addrlen = core::mem::size_of::<SockAddrIn>() as u32;
+    let src_addr_ptr = src_addr
+        .map(|a| a as *mut _ as *mut u8)
+        .unwrap_or(core::ptr::null_mut());
+    let addrlen_ptr = if src_addr_ptr.is_null() {
+        core::ptr::null_mut()
+    } else {
+        &mut addrlen as *mut u32
     };
-    demux(result).map(|v| v as usize)
+    Sys::recvfrom(
+        fd,
+        buf.as_mut_ptr(),
+        buf.len(),
+        flags as i32,
+        src_addr_ptr,
+        addrlen_ptr,
+    )
+    .map_err(Into::into)
 }
 
 pub fn setsockopt(fd: RawFd, level: i32, optname: i32, val: &[u8]) -> SyscallResult<()> {
-    let result = unsafe {
-        syscall5(
-            SYSCALL_SETSOCKOPT,
-            fd as u64,
-            level as u64,
-            optname as u64,
-            val.as_ptr() as u64,
-            val.len() as u64,
-        )
-    };
-    demux(result).map(|_| ())
+    Sys::setsockopt(fd, level, optname, val.as_ptr(), val.len() as u32).map_err(Into::into)
 }
 
 pub fn getsockopt(fd: RawFd, level: i32, optname: i32, buf: &mut [u8]) -> SyscallResult<usize> {
     let mut optlen = buf.len() as u32;
-    let result = unsafe {
-        syscall5(
-            SYSCALL_GETSOCKOPT,
-            fd as u64,
-            level as u64,
-            optname as u64,
-            buf.as_mut_ptr() as u64,
-            &mut optlen as *mut u32 as u64,
-        )
-    };
-    demux(result).map(|_| optlen as usize)
+    Sys::getsockopt(
+        fd,
+        level,
+        optname,
+        buf.as_mut_ptr(),
+        &mut optlen as *mut u32,
+    )
+    .map(|_| optlen as usize)
+    .map_err(Into::into)
 }
 
 pub fn shutdown(fd: RawFd, how: i32) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_SHUTDOWN, fd as u64, how as u64) };
-    demux(result).map(|_| ())
+    Sys::shutdown(fd, how).map_err(Into::into)
 }
 
 pub fn set_reuse_addr(fd: RawFd) -> SyscallResult<()> {
@@ -230,9 +184,9 @@ pub fn bind_addr(fd: RawFd, ip: [u8; 4], port: u16) -> SyscallResult<()> {
 }
 
 pub fn set_nonblocking(fd: RawFd) -> SyscallResult<()> {
-    let current = demux(unsafe { syscall3(SYSCALL_FCNTL, fd as u64, F_GETFL, 0) })?;
+    let current = Sys::fcntl(fd, F_GETFL as i32, 0).map_err(SyscallError::from)?;
     let flags = (current as u64) | O_NONBLOCK;
-    let _ = demux(unsafe { syscall3(SYSCALL_FCNTL, fd as u64, F_SETFL, flags) })?;
+    let _ = Sys::fcntl(fd, F_SETFL as i32, flags).map_err(SyscallError::from)?;
     Ok(())
 }
 
