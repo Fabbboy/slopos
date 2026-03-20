@@ -40,6 +40,7 @@ pub mod types;
 pub mod udp_socket_tests;
 
 pub mod arp;
+pub mod checksum;
 pub mod dhcp;
 pub mod dns;
 pub mod icmp;
@@ -132,71 +133,5 @@ pub fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     Some((src_port, dst_port, &payload[8..udp_len]))
 }
 
-/// Compute the one's-complement checksum (RFC 1071).
-///
-/// Works for IPv4 headers, ICMP messages, and any other protocol that
-/// uses the standard internet checksum.  Handles odd-length data by
-/// padding the trailing byte with a zero.
-pub fn ipv4_header_checksum(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let mut i = 0usize;
-    while i + 1 < data.len() {
-        let word = u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-        sum = sum.wrapping_add(word);
-        i += 2;
-    }
-
-    // Handle trailing odd byte (pad with zero on the right).
-    if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
-    }
-
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    !(sum as u16)
-}
-
-pub fn udp_checksum(
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-    payload: &[u8],
-) -> u16 {
-    let udp_len = 8usize + payload.len();
-    let mut sum = 0u32;
-
-    let add_word = |sum: &mut u32, word: u16| {
-        *sum = sum.wrapping_add(word as u32);
-    };
-
-    add_word(&mut sum, u16::from_be_bytes([src_ip[0], src_ip[1]]));
-    add_word(&mut sum, u16::from_be_bytes([src_ip[2], src_ip[3]]));
-    add_word(&mut sum, u16::from_be_bytes([dst_ip[0], dst_ip[1]]));
-    add_word(&mut sum, u16::from_be_bytes([dst_ip[2], dst_ip[3]]));
-    add_word(&mut sum, IPPROTO_UDP as u16);
-    add_word(&mut sum, udp_len as u16);
-
-    add_word(&mut sum, src_port);
-    add_word(&mut sum, dst_port);
-    add_word(&mut sum, udp_len as u16);
-    add_word(&mut sum, 0);
-
-    let mut i = 0usize;
-    while i + 1 < payload.len() {
-        add_word(&mut sum, u16::from_be_bytes([payload[i], payload[i + 1]]));
-        i += 2;
-    }
-    if i < payload.len() {
-        add_word(&mut sum, u16::from_be_bytes([payload[i], 0]));
-    }
-
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    let checksum = !(sum as u16);
-    if checksum == 0 { 0xffff } else { checksum }
-}
+pub use checksum::internet_checksum as ipv4_header_checksum;
+pub use checksum::udp_checksum;

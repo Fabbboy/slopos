@@ -145,43 +145,20 @@ pub fn udp_sendto(
     let mut pkt = PacketBuf::alloc().ok_or(NetError::NoBufferSpace)?;
     pkt.append(payload)?;
 
-    let udp_len = (8 + payload.len()) as u16;
+    let udp_len = 8 + payload.len();
     {
         let udp_hdr = pkt.push_header(8)?;
         udp_hdr[0..2].copy_from_slice(&local_port.to_be_bytes());
         udp_hdr[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        udp_hdr[4..6].copy_from_slice(&udp_len.to_be_bytes());
+        udp_hdr[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
         udp_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
     }
 
-    let total_len = (super::IPV4_HEADER_LEN + udp_len as usize) as u16;
-    {
-        let ip_hdr = pkt.push_header(super::IPV4_HEADER_LEN)?;
-        ip_hdr[0] = 0x45;
-        ip_hdr[1] = 0;
-        ip_hdr[2..4].copy_from_slice(&total_len.to_be_bytes());
-        ip_hdr[4..6].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[8] = 64;
-        ip_hdr[9] = super::IPPROTO_UDP;
-        ip_hdr[10..12].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[12..16].copy_from_slice(&local_ip);
-        ip_hdr[16..20].copy_from_slice(&dst_ip);
-        let checksum = super::ipv4_header_checksum(ip_hdr);
-        ip_hdr[10..12].copy_from_slice(&checksum.to_be_bytes());
-    }
+    pkt.prepend_ipv4(local_ip, dst_ip, super::IPPROTO_UDP, udp_len)?;
 
-    {
-        let eth_hdr = pkt.push_header(super::ETH_HEADER_LEN)?;
-        eth_hdr[0..6].copy_from_slice(&[0xff; 6]);
-        eth_hdr[6..12].copy_from_slice(&crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]));
-        eth_hdr[12..14].copy_from_slice(&super::ETHERTYPE_IPV4.to_be_bytes());
-    }
-
-    let head = pkt.head();
-    pkt.set_l2(head);
-    pkt.set_l3(head + super::ETH_HEADER_LEN as u16);
-    pkt.set_l4(head + (super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN) as u16);
+    let src_mac = crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]);
+    pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
+    pkt.set_ipv4_offsets();
 
     let udp_checksum = pkt.compute_udp_checksum(Ipv4Addr(local_ip), Ipv4Addr(dst_ip));
     let udp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;

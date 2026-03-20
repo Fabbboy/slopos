@@ -14,9 +14,6 @@
 //! directly (broadcast/multicast/loopback) or delegates to the neighbor cache
 //! for ARP resolution.
 //!
-//! [`send_via`] is the lower-level egress path for callers that already have a
-//! [`DeviceHandle`] and know the next hop (e.g., timer-driven retransmits).
-//!
 //! # Scope
 //!
 //! - Full IPv4 header validation
@@ -85,7 +82,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         }
 
         // Header checksum verification (skip if device already verified).
-        if !checksum_rx && net::ipv4_header_checksum(&ip_data[..ihl]) != 0 {
+        if !checksum_rx && net::checksum::internet_checksum(&ip_data[..ihl]) != 0 {
             klog_debug!("ipv4: bad header checksum");
             return;
         }
@@ -209,14 +206,6 @@ fn dispatch_udp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
 // Route-aware IPv4 egress
 // =============================================================================
 
-/// Route-aware IPv4 send.
-///
-/// Performs a routing table lookup to determine the outgoing device and next
-/// hop, selects the source IP from the outgoing interface, then sends through
-/// the neighbor cache (or directly for loopback/broadcast/multicast).
-///
-/// This is the primary egress entry point for the socket layer.
-/// For callers that already hold a [`DeviceHandle`], use [`send_via`] instead.
 pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetError> {
     use super::netdev::DEVICE_REGISTRY;
     use super::route::ROUTE_TABLE;
@@ -226,83 +215,18 @@ pub fn send(dst_ip: super::types::Ipv4Addr, pkt: PacketBuf) -> Result<(), NetErr
         NetError::NetworkUnreachable
     })?;
 
-    // Loopback: skip neighbor resolution entirely — no ARP on lo.
     if next_hop.is_loopback() || dst_ip.is_loopback() {
         return DEVICE_REGISTRY.tx_by_index(dev, pkt);
     }
 
-    // Broadcast/multicast: skip neighbor resolution, TX directly.
     if dst_ip.is_broadcast() || dst_ip.is_multicast() {
         return DEVICE_REGISTRY.tx_by_index(dev, pkt);
     }
 
-    // Unicast on a physical device: neighbor cache resolution.
-    send_on_device(dev, next_hop, pkt)
+    resolve_neighbor_and_send(dev, next_hop, pkt)
 }
 
-/// Send an IPv4 packet through a specific device via neighbor cache.
-///
-/// This is the handle-based egress path, preserved for callers
-/// that already have a [`DeviceHandle`] (e.g., timer-driven ARP retransmit).
-/// For route-aware sending, prefer [`send`].
-pub fn send_via(
-    handle: &super::netdev::DeviceHandle,
-    dst_ip: super::types::Ipv4Addr,
-    pkt: PacketBuf,
-) -> Result<(), NetError> {
-    use super::arp;
-    use super::neighbor::{NEIGHBOR_CACHE, ResolveOutcome};
-
-    let dev = handle.index();
-    let next_hop = dst_ip;
-
-    // Broadcast/multicast: skip neighbor resolution, TX directly.
-    if dst_ip.is_broadcast() || dst_ip.is_multicast() {
-        if let Err(e) = handle.tx(pkt) {
-            klog_debug!("ipv4::send_via: broadcast tx failed: {}", e);
-            return Err(e);
-        }
-        return Ok(());
-    }
-
-    match NEIGHBOR_CACHE.resolve(dev, next_hop, pkt) {
-        ResolveOutcome::Resolved {
-            mac,
-            mut pkt,
-            action,
-        } => {
-            arp::set_dst_mac_in_eth_header(&mut pkt, mac);
-            if let Some(act) = action {
-                arp::execute_neighbor_action(handle, act);
-            }
-            if let Err(e) = handle.tx(pkt) {
-                klog_debug!("ipv4::send_via: tx failed: {}", e);
-                return Err(e);
-            }
-            Ok(())
-        }
-        ResolveOutcome::Queued => Ok(()),
-        ResolveOutcome::ArpNeeded(action) => {
-            arp::execute_neighbor_action(handle, action);
-            Ok(())
-        }
-        ResolveOutcome::Failed(e) => {
-            klog_debug!(
-                "ipv4::send_via: neighbor resolution failed for {}: {}",
-                dst_ip,
-                e
-            );
-            Err(e)
-        }
-    }
-}
-
-/// Internal: send a unicast packet on a specific device via neighbor cache.
-///
-/// Uses `DEVICE_REGISTRY` for TX (takes registry lock briefly).  This is the
-/// code path used by the route-aware [`send`] function for non-loopback,
-/// non-broadcast unicast traffic.
-fn send_on_device(
+fn resolve_neighbor_and_send(
     dev: DevIndex,
     next_hop: super::types::Ipv4Addr,
     pkt: PacketBuf,

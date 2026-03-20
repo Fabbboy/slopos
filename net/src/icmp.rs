@@ -85,10 +85,8 @@ impl IcmpDemuxTable {
 
 pub static ICMP_DEMUX: IrqMutex<IcmpDemuxTable> = IrqMutex::new(IcmpDemuxTable::new());
 
-/// Compute ICMP checksum over the full ICMP message (header + payload).
-/// Uses the standard one's-complement sum algorithm (same as IPv4 header checksum).
 pub fn icmp_checksum(data: &[u8]) -> u16 {
-    super::ipv4_header_checksum(data)
+    super::checksum::internet_checksum(data)
 }
 
 pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
@@ -219,7 +217,7 @@ fn send_echo(
     let mut pkt = PacketBuf::alloc().ok_or(NetError::NoBufferSpace)?;
     pkt.append(payload)?;
 
-    let icmp_len = (ICMP_HEADER_LEN + payload.len()) as u16;
+    let icmp_len = ICMP_HEADER_LEN + payload.len();
     {
         let icmp_hdr = pkt.push_header(ICMP_HEADER_LEN)?;
         icmp_hdr[0] = icmp_type;
@@ -229,34 +227,11 @@ fn send_echo(
         icmp_hdr[6..8].copy_from_slice(&sequence.to_be_bytes());
     }
 
-    let total_len = (super::IPV4_HEADER_LEN + icmp_len as usize) as u16;
-    {
-        let ip_hdr = pkt.push_header(super::IPV4_HEADER_LEN)?;
-        ip_hdr[0] = 0x45;
-        ip_hdr[1] = 0;
-        ip_hdr[2..4].copy_from_slice(&total_len.to_be_bytes());
-        ip_hdr[4..6].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[8] = 64;
-        ip_hdr[9] = super::IPPROTO_ICMP;
-        ip_hdr[10..12].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[12..16].copy_from_slice(&src_ip);
-        ip_hdr[16..20].copy_from_slice(&dst_ip);
-        let checksum = super::ipv4_header_checksum(ip_hdr);
-        ip_hdr[10..12].copy_from_slice(&checksum.to_be_bytes());
-    }
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IPPROTO_ICMP, icmp_len)?;
 
-    {
-        let eth_hdr = pkt.push_header(super::ETH_HEADER_LEN)?;
-        eth_hdr[0..6].copy_from_slice(&[0xff; 6]);
-        eth_hdr[6..12].copy_from_slice(&crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]));
-        eth_hdr[12..14].copy_from_slice(&super::ETHERTYPE_IPV4.to_be_bytes());
-    }
-
-    let head = pkt.head();
-    pkt.set_l2(head);
-    pkt.set_l3(head + super::ETH_HEADER_LEN as u16);
-    pkt.set_l4(head + (super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN) as u16);
+    let src_mac = crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]);
+    pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
+    pkt.set_ipv4_offsets();
 
     let icmp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
     let frame = pkt.payload_mut();

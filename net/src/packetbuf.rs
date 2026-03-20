@@ -408,79 +408,69 @@ impl PacketBuf {
     }
 }
 
-// =============================================================================
-// 1B.6 — Checksum helpers
-// =============================================================================
-
-/// Accumulate the one's-complement sum over a byte slice.
-///
-/// Used internally by the checksum methods.  The caller must fold the result
-/// via [`fold_checksum`] after accumulating all data.
-fn ones_complement_sum(data: &[u8]) -> u32 {
-    let mut sum = 0u32;
-    let mut i = 0usize;
-    while i + 1 < data.len() {
-        let word = u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-        sum = sum.wrapping_add(word);
-        i += 2;
-    }
-    // Odd trailing byte — pad with zero on the right.
-    if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
-    }
-    sum
-}
-
-/// Fold a 32-bit running sum into a 16-bit one's-complement checksum.
-fn fold_checksum(mut sum: u32) -> u16 {
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
-/// Accumulate the IPv4 pseudo-header into `sum`.
-fn add_pseudo_header(sum: &mut u32, src: &Ipv4Addr, dst: &Ipv4Addr, protocol: u8, l4_len: usize) {
-    *sum = sum.wrapping_add(u16::from_be_bytes([src.0[0], src.0[1]]) as u32);
-    *sum = sum.wrapping_add(u16::from_be_bytes([src.0[2], src.0[3]]) as u32);
-    *sum = sum.wrapping_add(u16::from_be_bytes([dst.0[0], dst.0[1]]) as u32);
-    *sum = sum.wrapping_add(u16::from_be_bytes([dst.0[2], dst.0[3]]) as u32);
-    *sum = sum.wrapping_add(protocol as u32);
-    *sum = sum.wrapping_add(l4_len as u32);
-}
+use super::checksum;
 
 impl PacketBuf {
-    /// Compute the IPv4 header checksum over the L3 header bytes.
-    ///
-    /// The checksum field (bytes 10–11) is treated as zero during computation.
-    /// Requires `l3_offset` and `l4_offset` to be set.
+    /// Prepend a standard IPv4 header (IHL=5, TTL=64, no options) and compute
+    /// the header checksum.  `l4_len` is the total size of everything already
+    /// pushed after this point (L4 header + L4 payload).
+    pub fn prepend_ipv4(
+        &mut self,
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        protocol: u8,
+        l4_len: usize,
+    ) -> Result<(), NetError> {
+        let total_len = (super::IPV4_HEADER_LEN + l4_len) as u16;
+        let ip_hdr = self.push_header(super::IPV4_HEADER_LEN)?;
+        ip_hdr[0] = 0x45;
+        ip_hdr[1] = 0;
+        ip_hdr[2..4].copy_from_slice(&total_len.to_be_bytes());
+        ip_hdr[4..8].copy_from_slice(&[0; 4]);
+        ip_hdr[8] = 64;
+        ip_hdr[9] = protocol;
+        ip_hdr[10..12].copy_from_slice(&[0; 2]);
+        ip_hdr[12..16].copy_from_slice(&src_ip);
+        ip_hdr[16..20].copy_from_slice(&dst_ip);
+        let csum = checksum::internet_checksum(ip_hdr);
+        ip_hdr[10..12].copy_from_slice(&csum.to_be_bytes());
+        Ok(())
+    }
+
+    /// Prepend an Ethernet header for an IPv4 frame.
+    pub fn prepend_eth(&mut self, src_mac: [u8; 6], dst_mac: [u8; 6]) -> Result<(), NetError> {
+        let eth_hdr = self.push_header(super::ETH_HEADER_LEN)?;
+        eth_hdr[0..6].copy_from_slice(&dst_mac);
+        eth_hdr[6..12].copy_from_slice(&src_mac);
+        eth_hdr[12..14].copy_from_slice(&super::ETHERTYPE_IPV4.to_be_bytes());
+        Ok(())
+    }
+
+    /// Set L2/L3/L4 layer offsets for a standard ETH+IPv4 frame.
+    /// Call after `prepend_eth()` + `prepend_ipv4()` + L4 header push.
+    pub fn set_ipv4_offsets(&mut self) {
+        let head = self.head();
+        self.set_l2(head);
+        self.set_l3(head + super::ETH_HEADER_LEN as u16);
+        self.set_l4(head + (super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN) as u16);
+    }
+
     pub fn compute_ipv4_checksum(&self) -> u16 {
         let header = self.l3_header();
         if header.len() < 20 {
             return 0;
         }
-        // Use IHL to determine actual header length (may include options).
         let ihl = ((header[0] & 0x0F) as usize) * 4;
         let header = &header[..ihl.min(header.len())];
 
         let mut sum = 0u32;
-        // Bytes before the checksum field (0..10).
-        sum = sum.wrapping_add(ones_complement_sum(&header[..10]));
-        // Skip bytes 10–11 (checksum field — treated as zero).
+        sum = sum.wrapping_add(checksum::ones_complement_sum(&header[..10]));
         if header.len() > 12 {
-            sum = sum.wrapping_add(ones_complement_sum(&header[12..]));
+            sum = sum.wrapping_add(checksum::ones_complement_sum(&header[12..]));
         }
-        fold_checksum(sum)
+        checksum::fold(sum)
     }
 
-    /// Compute the TCP checksum (pseudo-header + L4 segment).
-    ///
-    /// The checksum field at TCP header bytes 16–17 is treated as zero.
-    /// The L4 segment includes both the TCP header and its payload.
-    ///
-    /// Software checksum is always computed.  If `NetDeviceFeatures::CHECKSUM_TX`
-    /// is set, the driver may offload — but the stack does not skip computation
-    /// (simplicity over performance for now).
     pub fn compute_tcp_checksum(&self, src: Ipv4Addr, dst: Ipv4Addr) -> u16 {
         let segment = self.l4_header();
         if segment.len() < 20 {
@@ -488,20 +478,14 @@ impl PacketBuf {
         }
 
         let mut sum = 0u32;
-        add_pseudo_header(&mut sum, &src, &dst, 6, segment.len());
-
-        // TCP header bytes before the checksum field (0..16).
-        sum = sum.wrapping_add(ones_complement_sum(&segment[..16]));
-        // Skip bytes 16–17 (checksum field).
+        checksum::add_pseudo_header(&mut sum, src.0, dst.0, 6, segment.len());
+        sum = sum.wrapping_add(checksum::ones_complement_sum(&segment[..16]));
         if segment.len() > 18 {
-            sum = sum.wrapping_add(ones_complement_sum(&segment[18..]));
+            sum = sum.wrapping_add(checksum::ones_complement_sum(&segment[18..]));
         }
-        fold_checksum(sum)
+        checksum::fold(sum)
     }
 
-    /// Compute the UDP checksum (pseudo-header + L4 datagram).
-    ///
-    /// The checksum field at UDP header bytes 6–7 is treated as zero.
     /// Per RFC 768, a computed checksum of zero is transmitted as `0xFFFF`.
     pub fn compute_udp_checksum(&self, src: Ipv4Addr, dst: Ipv4Addr) -> u16 {
         let segment = self.l4_header();
@@ -510,17 +494,13 @@ impl PacketBuf {
         }
 
         let mut sum = 0u32;
-        add_pseudo_header(&mut sum, &src, &dst, 17, segment.len());
-
-        // UDP header bytes before the checksum field (0..6).
-        sum = sum.wrapping_add(ones_complement_sum(&segment[..6]));
-        // Skip bytes 6–7 (checksum field).
+        checksum::add_pseudo_header(&mut sum, src.0, dst.0, 17, segment.len());
+        sum = sum.wrapping_add(checksum::ones_complement_sum(&segment[..6]));
         if segment.len() > 8 {
-            sum = sum.wrapping_add(ones_complement_sum(&segment[8..]));
+            sum = sum.wrapping_add(checksum::ones_complement_sum(&segment[8..]));
         }
 
-        let csum = fold_checksum(sum);
-        // RFC 768: transmitted checksum of 0 is encoded as 0xFFFF.
+        let csum = checksum::fold(sum);
         if csum == 0 { 0xFFFF } else { csum }
     }
 }

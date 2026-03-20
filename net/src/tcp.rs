@@ -372,74 +372,20 @@ pub fn write_mss_option(mss: u16, out: &mut [u8]) -> Option<usize> {
     Some(4)
 }
 
-// =============================================================================
-// Checksum
-// =============================================================================
+use super::checksum;
 
-/// Compute the one's-complement sum over a byte slice (for checksum accumulation).
-fn ones_complement_sum(data: &[u8]) -> u32 {
-    let mut sum = 0u32;
-    let mut i = 0usize;
-    while i + 1 < data.len() {
-        sum = sum.wrapping_add(u16::from_be_bytes([data[i], data[i + 1]]) as u32);
-        i += 2;
-    }
-    // Handle trailing odd byte.
-    if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
-    }
-    sum
-}
-
-/// Fold a 32-bit accumulator into a 16-bit one's-complement value.
-fn fold_checksum(mut sum: u32) -> u16 {
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
-/// Compute the TCP checksum over a pseudo-header + TCP header + payload.
-///
-/// The pseudo-header includes `src_ip`, `dst_ip`, protocol (6 = TCP), and the
-/// TCP segment length (header + payload).
-///
-/// `tcp_segment` must contain the full TCP segment (header + payload) with the
-/// checksum field set to 0.
 pub fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
-    let tcp_len = tcp_segment.len() as u16;
-
-    // Pseudo-header: src_ip (4) + dst_ip (4) + zero (1) + proto (1) + tcp_len (2) = 12 bytes
     let mut sum = 0u32;
-    sum = sum.wrapping_add(u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32);
-    sum = sum.wrapping_add(6u32); // Protocol = TCP
-    sum = sum.wrapping_add(tcp_len as u32);
-
-    // Add TCP segment bytes.
-    sum = sum.wrapping_add(ones_complement_sum(tcp_segment));
-
-    fold_checksum(sum)
+    checksum::add_pseudo_header(&mut sum, src_ip, dst_ip, 6, tcp_segment.len());
+    sum = sum.wrapping_add(checksum::ones_complement_sum(tcp_segment));
+    checksum::fold(sum)
 }
 
-/// Verify a received TCP segment's checksum.
-///
-/// Returns `true` if the checksum is valid (folds to 0).
 pub fn verify_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> bool {
-    let tcp_len = tcp_segment.len() as u16;
-
     let mut sum = 0u32;
-    sum = sum.wrapping_add(u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32);
-    sum = sum.wrapping_add(u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32);
-    sum = sum.wrapping_add(6u32);
-    sum = sum.wrapping_add(tcp_len as u32);
-    sum = sum.wrapping_add(ones_complement_sum(tcp_segment));
-
-    fold_checksum(sum) == 0
+    checksum::add_pseudo_header(&mut sum, src_ip, dst_ip, 6, tcp_segment.len());
+    sum = sum.wrapping_add(checksum::ones_complement_sum(tcp_segment));
+    checksum::fold(sum) == 0
 }
 
 // =============================================================================

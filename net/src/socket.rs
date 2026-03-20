@@ -866,7 +866,6 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     }
     let padded_opt_len = (opt_len + 3) & !3;
     let tcp_len = TCP_HEADER_LEN + padded_opt_len + payload.len();
-    let ip_total_len = net::IPV4_HEADER_LEN + tcp_len;
 
     let mut tcp_segment = Vec::with_capacity(tcp_len);
     tcp_segment.resize(tcp_len, 0u8);
@@ -884,44 +883,24 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
         return map_net_err(NetError::NoBufferSpace);
     }
 
-    {
-        let ip_hdr = match pkt.push_header(net::IPV4_HEADER_LEN) {
-            Ok(hdr) => hdr,
-            Err(err) => return map_net_err(err),
-        };
-        ip_hdr[0] = 0x45;
-        ip_hdr[1] = 0;
-        ip_hdr[2..4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-        ip_hdr[4..6].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[8] = 64;
-        ip_hdr[9] = net::IPPROTO_TCP;
-        ip_hdr[10..12].copy_from_slice(&0u16.to_be_bytes());
-        ip_hdr[12..16].copy_from_slice(&seg.tuple.local_ip);
-        ip_hdr[16..20].copy_from_slice(&seg.tuple.remote_ip);
-        let checksum = net::ipv4_header_checksum(ip_hdr);
-        ip_hdr[10..12].copy_from_slice(&checksum.to_be_bytes());
+    if let Err(err) = pkt.prepend_ipv4(
+        seg.tuple.local_ip,
+        seg.tuple.remote_ip,
+        net::IPPROTO_TCP,
+        tcp_len,
+    ) {
+        return map_net_err(err);
     }
 
-    {
-        let dst = Ipv4Addr(seg.tuple.remote_ip);
-        let src_mac = net::route::ROUTE_TABLE
-            .lookup(dst)
-            .and_then(|(dev, _)| net::DEVICE_REGISTRY.mac_by_index(dev))
-            .unwrap_or(net::types::MacAddr::ZERO);
-        let eth_hdr = match pkt.push_header(net::ETH_HEADER_LEN) {
-            Ok(hdr) => hdr,
-            Err(err) => return map_net_err(err),
-        };
-        eth_hdr[0..6].copy_from_slice(&[0; 6]);
-        eth_hdr[6..12].copy_from_slice(&src_mac.0);
-        eth_hdr[12..14].copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
+    let dst = Ipv4Addr(seg.tuple.remote_ip);
+    let src_mac = net::route::ROUTE_TABLE
+        .lookup(dst)
+        .and_then(|(dev, _)| net::DEVICE_REGISTRY.mac_by_index(dev))
+        .unwrap_or(net::types::MacAddr::ZERO);
+    if let Err(err) = pkt.prepend_eth(src_mac.0, [0; 6]) {
+        return map_net_err(err);
     }
-
-    let head = pkt.head();
-    pkt.set_l2(head);
-    pkt.set_l3(head + net::ETH_HEADER_LEN as u16);
-    pkt.set_l4(head + (net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN) as u16);
+    pkt.set_ipv4_offsets();
 
     match net::ipv4::send(Ipv4Addr(seg.tuple.remote_ip), pkt) {
         Ok(()) => 0,
