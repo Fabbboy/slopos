@@ -21,8 +21,6 @@
 //! All trait methods take `&self`; implementations use interior mutability
 //! (e.g., `IrqMutex`) for their internal state.  This allows concurrent TX and
 //! RX without aliasing `&mut` references through the raw pointer in `DeviceHandle`.
-//!
-//! See CAD-2 in the Networking Evolution Plan for full rationale.
 
 extern crate alloc;
 

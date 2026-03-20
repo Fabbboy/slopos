@@ -292,7 +292,7 @@ pub fn test_dns_t5_cache() -> TestResult {
 
 pub fn test_dns_t6_resolver_integration() -> TestResult {
     // Skip if network is not ready
-    if !crate::driver_hooks::virtio_net_is_ready() {
+    if !crate::net_driver_service::virtio_net_is_ready() {
         return pass!();
     }
 
@@ -318,7 +318,7 @@ pub fn test_dns_t6_resolver_integration() -> TestResult {
 
 pub fn test_dns_t7_resolver_timeout() -> TestResult {
     // Skip if network is not ready
-    if !crate::driver_hooks::virtio_net_is_ready() {
+    if !crate::net_driver_service::virtio_net_is_ready() {
         return pass!();
     }
 

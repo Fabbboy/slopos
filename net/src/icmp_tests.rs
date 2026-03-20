@@ -107,7 +107,7 @@ fn test_icmp_ping_gateway_e2e() -> TestResult {
 
     for attempt in 0..30u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::driver_hooks::virtnet_force_napi_poll();
+        crate::net_driver_service::virtnet_force_napi_poll();
 
         let found = icmp::ICMP_DEMUX.lock().lookup(identifier);
         klog_info!(
@@ -170,7 +170,7 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
 
     for attempt in 0..30u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::driver_hooks::virtnet_force_napi_poll();
+        crate::net_driver_service::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock);
         klog_info!("icmp_test: attempt {} readable={}", attempt, readable);
@@ -309,7 +309,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
 
     for _attempt in 0..50u32 {
         slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
-        crate::driver_hooks::virtnet_force_napi_poll();
+        crate::net_driver_service::virtnet_force_napi_poll();
 
         let readable = socket::socket_poll_readable(sock);
         if readable != 0 {

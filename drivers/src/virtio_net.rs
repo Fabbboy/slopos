@@ -23,10 +23,9 @@ use crate::virtio::{
 };
 use slopos_lib::kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
 use slopos_net::{
-    self, PACKET_POOL, dhcp,
-    driver_hooks::{DriverHooks, register_driver_hooks},
-    ingress,
+    self, PACKET_POOL, dhcp, ingress,
     napi::NapiContext,
+    net_driver_service::{NetDriverServices, register_net_driver_services},
     netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
     packetbuf::PacketBuf,
     pool::PacketPool,
@@ -1285,20 +1284,21 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
     register_bottom_half(napi_bottom_half);
     slopos_net::napi::register_kick(virtnet_force_napi_poll);
-    register_driver_hooks(DriverHooks {
-        virtio_net_ipv4_addr: Some(virtio_net_ipv4_addr),
-        virtio_net_dns: Some(virtio_net_dns),
-        dns_rx_clear: Some(dns_rx_clear),
-        transmit_udp_packet: Some(transmit_udp_packet),
-        dns_rx_wait: Some(dns_rx_wait),
-        dns_rx_read: Some(dns_rx_read),
-        virtio_net_mac: Some(virtio_net_mac),
-        get_device_handle: Some(get_device_handle),
-        dns_intercept_response: Some(dns_intercept_response),
-        virtio_net_is_ready: Some(virtio_net_is_ready),
-        virtio_net_transmit: Some(virtio_net_transmit),
-        virtnet_force_napi_poll: Some(virtnet_force_napi_poll),
-    });
+    static NET_DRIVER_SVC: NetDriverServices = NetDriverServices {
+        virtio_net_ipv4_addr,
+        virtio_net_dns,
+        dns_rx_clear,
+        transmit_udp_packet,
+        dns_rx_wait,
+        dns_rx_read,
+        virtio_net_mac,
+        get_device_handle,
+        dns_intercept_response,
+        virtio_net_is_ready,
+        virtio_net_transmit,
+        virtnet_force_napi_poll,
+    };
+    register_net_driver_services(&NET_DRIVER_SVC);
 
     let netpoll_task = spawn_kernel_task(
         b"netpoll\0".as_ptr() as *const i8,

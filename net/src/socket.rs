@@ -9,32 +9,20 @@ use crate::tcp_socket;
 use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
 
 /// Internal storage for protocol-specific socket state.
-///
-/// this enum; legacy syscall paths continue on `KernelSocket`
-/// until migration activates this framework.
 pub enum SocketInner {
     /// UDP socket state (stateless at protocol level).
     Udp(UdpSocketInner),
     Icmp(IcmpSocketInner),
-    /// TCP socket state placeholder (expanded).
     Tcp(TcpSocketInner),
-    /// Raw socket state placeholder (expanded).
     Raw(RawSocketInner),
 }
 
-/// UDP protocol-specific state.
-///
-/// this empty because UDP per-socket protocol state is minimal.
 pub struct UdpSocketInner;
 
 pub struct IcmpSocketInner {
     pub identifier: u16,
 }
 
-/// TCP protocol-specific state placeholder.
-///
-/// `conn_id` links the socket to a transport connection in the future.
-/// `listen` holds the two-queue listen state for listening sockets.
 pub struct TcpSocketInner {
     /// Optional transport connection identifier.
     pub conn_id: Option<u32>,
@@ -42,9 +30,6 @@ pub struct TcpSocketInner {
     pub listen: Option<tcp_socket::TcpListenState>,
 }
 
-/// Raw socket protocol-specific state placeholder.
-///
-/// This remains empty and is expanded
 pub struct RawSocketInner;
 
 /// Socket status and mode flags.
@@ -90,9 +75,6 @@ impl SocketFlags {
 }
 
 /// Per-socket configurable options.
-///
-/// these fields; legacy syscall paths keep their existing
-/// option storage until migration activate this struct.
 pub struct SocketOptions {
     /// Allow local address reuse.
     pub reuse_addr: bool,
@@ -108,9 +90,9 @@ pub struct SocketOptions {
     pub recv_timeout: Option<u64>,
     /// Send timeout in milliseconds (`None` means infinite).
     pub send_timeout: Option<u64>,
-    /// Enable keepalive (TCP-only behavior in later).
+    /// Enable keepalive (TCP only).
     pub keepalive: bool,
-    /// Disable Nagle algorithm (TCP-only behavior in later).
+    /// Disable Nagle algorithm (TCP only).
     pub tcp_nodelay: bool,
 }
 
@@ -170,8 +152,8 @@ impl Default for SocketOptions {
 
 /// Fixed-capacity queue with ring-buffer semantics.
 ///
-/// this queue for per-socket packets. Push never overwrites:
-/// it returns `false` when full.
+/// Fixed-capacity queue with ring-buffer semantics.
+/// Push never overwrites; it returns `false` when full.
 pub struct BoundedQueue<T> {
     slots: Vec<Option<T>>,
     head: usize,
@@ -283,15 +265,8 @@ impl<T> fmt::Debug for BoundedQueue<T> {
     }
 }
 
-/// Next wait-queue hint used by `Socket::new` placeholders.
-///
-/// Replaces these indices with real queue registrations.
 static SOCKET_WQ_HINT: AtomicU16 = AtomicU16::new(0);
 
-/// Unified socket object for the new framework.
-///
-/// this object. Legacy code paths continue using
-/// `KernelSocket` until migration.
 pub struct Socket {
     /// Protocol-specific socket state.
     pub inner: SocketInner,
@@ -373,9 +348,6 @@ impl Socket {
 }
 
 /// Slab-like socket table with freelist allocation.
-///
-/// this table. Syscall handlers still use the legacy table
-/// until migration.
 pub struct SlabSocketTable {
     slots: Vec<Option<Socket>>,
     freelist: Vec<usize>,
@@ -619,24 +591,16 @@ impl Default for EphemeralPortAllocator {
     }
 }
 
-/// New slab-based socket table.
-///
-/// Initially unused by legacy socket syscalls. Migration occurs/4D.
+/// Global slab-based socket table.
 pub static NEW_SOCKET_TABLE: slopos_lib::IrqMutex<SlabSocketTable> =
     slopos_lib::IrqMutex::new(SlabSocketTable::empty());
 
 /// Ephemeral port allocator.
-///
-/// Shared infrastructure for both legacy and future socket paths.
 pub static EPHEMERAL_PORTS: slopos_lib::IrqMutex<EphemeralPortAllocator> =
     slopos_lib::IrqMutex::new(EphemeralPortAllocator::new());
 
 // =============================================================================
-// LEGACY: Existing socket infrastructure (legacy)
-//
-// The code below implements the current socket functionality using KernelSocket
-// and a fixed-size SocketTable. Future migration will move this to use the new
-// Socket framework above. Until then, both coexist.
+// Socket operations
 // =============================================================================
 
 use core::cmp;
@@ -648,14 +612,13 @@ use slopos_abi::syscall::{
     ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
     ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
-use slopos_lib::{IrqMutex, WaitQueue};
+use slopos_lib::WaitQueue;
 
 use crate as net;
 use crate::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
 
 const TCP_TX_MAX: usize = 1460;
 pub const UDP_DGRAM_MAX_PAYLOAD: usize = 1472;
-pub const UDP_RX_QUEUE_SIZE: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SocketState {
@@ -665,77 +628,6 @@ pub enum SocketState {
     Connecting,
     Connected,
     Closed,
-}
-
-#[derive(Clone, Copy)]
-pub struct UdpDatagram {
-    pub src_ip: [u8; 4],
-    pub src_port: u16,
-    pub len: u16,
-    pub data: [u8; UDP_DGRAM_MAX_PAYLOAD],
-}
-
-impl UdpDatagram {
-    pub const fn empty() -> Self {
-        Self {
-            src_ip: [0; 4],
-            src_port: 0,
-            len: 0,
-            data: [0; UDP_DGRAM_MAX_PAYLOAD],
-        }
-    }
-}
-
-pub struct UdpReceiveQueue {
-    slots: [UdpDatagram; UDP_RX_QUEUE_SIZE],
-    head: usize,
-    len: usize,
-}
-
-impl UdpReceiveQueue {
-    pub const fn new() -> Self {
-        Self {
-            slots: [UdpDatagram::empty(); UDP_RX_QUEUE_SIZE],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    pub fn push(&mut self, dgram: &UdpDatagram) {
-        if self.len == UDP_RX_QUEUE_SIZE {
-            self.slots[self.head] = *dgram;
-            self.head = (self.head + 1) % UDP_RX_QUEUE_SIZE;
-            return;
-        }
-
-        let tail = (self.head + self.len) % UDP_RX_QUEUE_SIZE;
-        self.slots[tail] = *dgram;
-        self.len += 1;
-    }
-
-    pub fn pop(&mut self) -> Option<UdpDatagram> {
-        if self.len == 0 {
-            return None;
-        }
-
-        let dgram = self.slots[self.head];
-        self.head = (self.head + 1) % UDP_RX_QUEUE_SIZE;
-        self.len -= 1;
-        Some(dgram)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn clear(&mut self) {
-        self.head = 0;
-        self.len = 0;
-    }
 }
 
 static RECV_WQS: [WaitQueue; MAX_SOCKETS] = {
@@ -750,9 +642,6 @@ static SEND_WQS: [WaitQueue; MAX_SOCKETS] = {
     const WAIT_QUEUE: WaitQueue = WaitQueue::new();
     [WAIT_QUEUE; MAX_SOCKETS]
 };
-pub static UDP_RX_QUEUES: [IrqMutex<UdpReceiveQueue>; MAX_SOCKETS] =
-    [const { IrqMutex::new(UdpReceiveQueue::new()) }; MAX_SOCKETS];
-
 fn errno_i32(errno: u64) -> i32 {
     errno as i64 as i32
 }

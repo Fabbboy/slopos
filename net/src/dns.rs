@@ -614,7 +614,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
     }
 
     // Get DNS server IP from DHCP lease
-    let dns_server = crate::driver_hooks::virtio_net_dns()?;
+    let dns_server = crate::net_driver_service::virtio_net_dns()?;
     if dns_server == [0; 4] {
         klog_debug!("dns: no DNS server configured");
         return None;
@@ -637,10 +637,10 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
         let src_port = 49152 + (id % 16384);
 
         // Clear any stale RX data
-        crate::driver_hooks::dns_rx_clear();
+        crate::net_driver_service::dns_rx_clear();
 
         // Send query
-        if !crate::driver_hooks::transmit_udp_packet(
+        if !crate::net_driver_service::transmit_udp_packet(
             src_ip,
             dns_server,
             src_port,
@@ -652,14 +652,14 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
         }
 
         // Wait for response
-        if !crate::driver_hooks::dns_rx_wait(DNS_TIMEOUT_MS) {
+        if !crate::net_driver_service::dns_rx_wait(DNS_TIMEOUT_MS) {
             klog_debug!("dns: timeout (attempt {})", attempt);
             continue;
         }
 
         // Read response
         let mut resp_buf = [0u8; DNS_MAX_RESPONSE];
-        let resp_len = crate::driver_hooks::dns_rx_read(&mut resp_buf);
+        let resp_len = crate::net_driver_service::dns_rx_read(&mut resp_buf);
         if resp_len == 0 {
             klog_debug!("dns: empty response (attempt {})", attempt);
             continue;

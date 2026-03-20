@@ -229,7 +229,7 @@ fn send_echo(
 
     pkt.prepend_ipv4(src_ip, dst_ip, super::IPPROTO_ICMP, icmp_len)?;
 
-    let src_mac = crate::driver_hooks::virtio_net_mac().unwrap_or([0; 6]);
+    let src_mac = crate::net_driver_service::virtio_net_mac().unwrap_or([0; 6]);
     pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
     pkt.set_ipv4_offsets();
 

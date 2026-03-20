@@ -9,11 +9,11 @@ extern crate alloc;
 
 #[cfg(feature = "itests")]
 pub mod dns_tests;
-pub mod driver_hooks;
 #[cfg(feature = "itests")]
 pub mod napi_tests;
 #[cfg(feature = "itests")]
 pub mod neighbor_tests;
+pub mod net_driver_service;
 #[cfg(feature = "itests")]
 pub mod net_types_tests;
 pub mod netdev;
@@ -36,8 +36,6 @@ pub mod tcp_tests;
 #[cfg(feature = "itests")]
 pub mod timer_tests;
 pub mod types;
-#[cfg(feature = "itests")]
-pub mod udp_socket_tests;
 
 pub mod arp;
 pub mod checksum;
@@ -80,10 +78,7 @@ pub use packetbuf::PacketBuf;
 pub use pool::{PACKET_POOL, PacketPool};
 pub use route::{ROUTE_TABLE, RouteEntry, RouteTable};
 pub use timer::{FiredTimer, NetTimerWheel, TimerKind, TimerToken};
-pub use types::{
-    DevIndex, EtherType, IoSlice, IoSliceMut, IpProtocol, Ipv4Addr, MacAddr, NetError, Port,
-    SockAddr,
-};
+pub use types::{DevIndex, EtherType, IpProtocol, Ipv4Addr, MacAddr, NetError, Port, SockAddr};
 
 // =============================================================================
 // Ethernet
