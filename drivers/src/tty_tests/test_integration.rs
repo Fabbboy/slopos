@@ -20,7 +20,7 @@ pub fn test_pty_data_roundtrip() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     if tty::set_termios(slave, &raw).is_err() {
         return TestResult::Fail;
     }
@@ -82,7 +82,7 @@ pub fn test_errno_background_maps_to_eio() -> TestResult {
 pub fn test_ldisc_ringbuf_integration() -> TestResult {
     let mut ld = LineDisc::new();
     let mut termios = *ld.termios();
-    termios.c_lflag &= !slopos_abi::syscall::ICANON;
+    termios.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&termios);
 
     for &b in b"ringbuf" {
@@ -270,7 +270,7 @@ pub fn test_keyboard_extended_up_arrow_reaches_tty() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     crate::ps2::keyboard::handle_scancode(0xE0);

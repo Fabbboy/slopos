@@ -252,7 +252,7 @@ pub fn test_ldisc_raw_mode() -> TestResult {
 
     // Switch to raw mode.
     let mut termios = *ld.termios();
-    termios.c_lflag &= !slopos_abi::syscall::ICANON;
+    termios.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&termios);
 
     // Each character should be immediately available.
@@ -286,7 +286,7 @@ pub fn test_ldisc_set_termios_flush() -> TestResult {
 
     // Switch to raw mode — edit buffer should flush.
     let mut termios = *ld.termios();
-    termios.c_lflag &= !slopos_abi::syscall::ICANON;
+    termios.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&termios);
 
     if !ld.has_data() {
@@ -446,7 +446,7 @@ pub fn test_ldisc_icrnl() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable ICRNL in c_iflag.
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::ICRNL;
+    t.c_iflag |= InputFlags::ICRNL;
     ld.set_termios(&t);
 
     // Feed CR — should be treated as NL and flush edit buffer.
@@ -476,7 +476,7 @@ pub fn test_ldisc_icrnl() -> TestResult {
 pub fn test_ldisc_igncr() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::IGNCR;
+    t.c_iflag |= InputFlags::IGNCR;
     ld.set_termios(&t);
 
     // Feed CR — should be silently discarded.
@@ -497,9 +497,9 @@ pub fn test_ldisc_igncr() -> TestResult {
 pub fn test_ldisc_inlcr() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::INLCR;
+    t.c_iflag |= InputFlags::INLCR;
     // Disable ICANON so we can inspect raw bytes.
-    t.c_lflag &= !slopos_abi::syscall::ICANON;
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     ld.input_char(b'\n'); // NL — should become CR
@@ -519,8 +519,8 @@ pub fn test_ldisc_inlcr() -> TestResult {
 pub fn test_ldisc_istrip() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::ISTRIP;
-    t.c_lflag &= !slopos_abi::syscall::ICANON;
+    t.c_iflag |= InputFlags::ISTRIP;
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     ld.input_char(0xC1); // 0xC1 with bit 7 set -> 0x41 = 'A'
@@ -544,7 +544,7 @@ pub fn test_ldisc_istrip() -> TestResult {
 pub fn test_ldisc_opost_onlcr() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     ld.set_termios(&t);
 
     match ld.process_output_byte(b'\n') {
@@ -566,7 +566,7 @@ pub fn test_ldisc_opost_onlcr() -> TestResult {
 pub fn test_ldisc_opost_ocrnl() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::OCRNL;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::OCRNL;
     ld.set_termios(&t);
 
     match ld.process_output_byte(b'\r') {
@@ -589,7 +589,7 @@ pub fn test_ldisc_output_raw() -> TestResult {
     let mut ld = LineDisc::new();
     // Explicitly disable OPOST (default now has OPOST|ONLCR).
     let mut t = *ld.termios();
-    t.c_oflag = 0;
+    t.c_oflag = OutputFlags::empty();
     ld.set_termios(&t);
 
     match ld.process_output_byte(b'\n') {
@@ -666,7 +666,7 @@ pub fn test_ldisc_signal_ctrl_z() -> TestResult {
 pub fn test_ldisc_flow_control_ixon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_iflag |= InputFlags::IXON;
     ld.set_termios(&t);
 
     // Ctrl+S (VSTOP = 0x13) should stop output.
@@ -693,9 +693,9 @@ pub fn test_ldisc_flow_control_ixon() -> TestResult {
 pub fn test_ldisc_echoctl() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::ECHOCTL;
+    t.c_lflag |= LocalFlags::ECHOCTL;
     // Disable ISIG so Ctrl+C is not caught as signal.
-    t.c_lflag &= !slopos_abi::syscall::ISIG;
+    t.c_lflag &= !LocalFlags::ISIG;
     ld.set_termios(&t);
 
     // Feed Ctrl+C (0x03) — should echo ^C (2 bytes).
@@ -728,7 +728,7 @@ pub fn test_ldisc_echoctl() -> TestResult {
 pub fn test_ldisc_vlnext() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // Press Ctrl+V (VLNEXT = 0x16).
@@ -768,7 +768,7 @@ pub fn test_ldisc_vlnext() -> TestResult {
 pub fn test_ldisc_vwerase() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // Type "hello world".
@@ -824,7 +824,7 @@ pub fn test_tty_write_returns_input_len() -> TestResult {
     // Enable OPOST+ONLCR on TTY 0.
     let mut t = tty::get_termios(TtyIndex(0)).unwrap();
     let saved = t;
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"hello\n";
@@ -882,7 +882,7 @@ pub fn test_keyboard_break_code_no_input() -> TestResult {
     // Switch to raw mode so any delivered byte is immediately readable.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Send break code for 'a' (0x1E | 0x80 = 0x9E).
@@ -913,7 +913,7 @@ pub fn test_keyboard_modifier_no_input() -> TestResult {
     // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press Left Shift (make code 0x2A), Left Ctrl (0x1D), Left Alt (0x38).
@@ -950,7 +950,7 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press 'a' (0x1E) then release 'a' (0x9E).
@@ -983,7 +983,7 @@ pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     // Switch to raw mode on TTY 1.
     let saved = tty::get_termios(TtyIndex(1)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(1), &raw).unwrap();
 
     // has_data should be false — no hardware polling for VConsole.
@@ -1006,7 +1006,7 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
     // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
     // Press 'h' (0x23), 'i' (0x17).
@@ -1042,7 +1042,7 @@ pub fn test_tty_write_output_processing() -> TestResult {
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     // Enable OPOST + ONLCR.
     let mut t = saved;
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"hello\nworld\n";
@@ -1067,7 +1067,7 @@ pub fn test_tty_write_raw_passthrough() -> TestResult {
     // Ensure c_oflag is 0 (no output processing — default).
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
-    t.c_oflag = 0;
+    t.c_oflag = OutputFlags::empty();
     tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"raw\ndata";
@@ -1111,7 +1111,7 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
 
     // Set OPOST on TTY 0 only.
     let mut t0_new = t0_saved;
-    t0_new.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    t0_new.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t0_new).unwrap();
 
     // Read back TTY 1 — it should still have its original c_oflag.
@@ -1512,7 +1512,7 @@ pub fn test_get_termios_returns_result() -> TestResult {
     tty::table::tty_table_init();
     match tty::get_termios(TtyIndex(0)) {
         Ok(t) => {
-            if (t.c_lflag & slopos_abi::syscall::ICANON) == 0 {
+            if (t.c_lflag & LocalFlags::ICANON) == 0 {
                 klog_info!("TTY_TEST: BUG - default termios should have ICANON");
                 return TestResult::Fail;
             }
@@ -1531,7 +1531,7 @@ pub fn test_vmin0_vtime0_immediate_return() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 0;
     raw.c_cc[5] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -1558,7 +1558,7 @@ pub fn test_vmin_enforcement() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 3;
     raw.c_cc[5] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -1589,7 +1589,7 @@ pub fn test_vmin0_vtime0_with_data_immediate_return() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 0;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -1619,7 +1619,7 @@ pub fn test_vmin_limited_by_buffer_size() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 8;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -1655,7 +1655,7 @@ pub fn test_canonical_to_noncanonical_preserves_buffered_data() -> TestResult {
     tty::push_input(TtyIndex(0), b'c');
 
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -1773,7 +1773,7 @@ pub fn test_split_write_returns_input_len() -> TestResult {
     // Enable OPOST+ONLCR on TTY 0 so NL expands to CR+NL.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"abc\ndef\n";
@@ -2006,7 +2006,7 @@ pub fn test_tty_write_foreground_with_tostop() -> TestResult {
     // verify the logic directly.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
-    t.c_lflag |= slopos_abi::syscall::TOSTOP;
+    t.c_lflag |= LocalFlags::TOSTOP;
     tty::set_termios(TtyIndex(0), &t).unwrap();
 
     let data = b"hello";
@@ -2037,7 +2037,7 @@ pub fn test_vmin_vtime_enough_data_returns_immediately() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 3; // VMIN = 3
     raw.c_cc[5] = 1; // VTIME = 1 (100ms)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -2071,7 +2071,7 @@ pub fn test_vmin_vtime_partial_nonblock() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 5; // VMIN = 5
     raw.c_cc[5] = 2; // VTIME = 2 (200ms)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -2116,7 +2116,7 @@ pub fn test_vmin_vtime_no_data_nonblock() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 3; // VMIN = 3
     raw.c_cc[5] = 1; // VTIME = 1 (100ms)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -2147,7 +2147,7 @@ pub fn test_vmin_vtime_interbyte_timeout_returns_partial() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[6] = 3; // VMIN = 3
     raw.c_cc[5] = 1; // VTIME = 1 (100ms inter-byte timeout)
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -2223,7 +2223,7 @@ pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
 pub fn test_default_termios_has_icrnl() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
-    if (t.c_iflag & slopos_abi::syscall::ICRNL) == 0 {
+    if (t.c_iflag & InputFlags::ICRNL) == 0 {
         klog_info!(
             "TTY_TEST: BUG - default c_iflag missing ICRNL (got 0x{:x})",
             t.c_iflag
@@ -2237,7 +2237,7 @@ pub fn test_default_termios_has_icrnl() -> TestResult {
 pub fn test_default_termios_has_opost_onlcr() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
-    let expected = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONLCR;
+    let expected = OutputFlags::OPOST | OutputFlags::ONLCR;
     if (t.c_oflag & expected) != expected {
         klog_info!(
             "TTY_TEST: BUG - default c_oflag missing OPOST|ONLCR (got 0x{:x})",
@@ -2252,13 +2252,13 @@ pub fn test_default_termios_has_opost_onlcr() -> TestResult {
 pub fn test_default_termios_has_full_lflag() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
-    let expected = slopos_abi::syscall::ISIG
-        | slopos_abi::syscall::ICANON
-        | slopos_abi::syscall::ECHO
-        | slopos_abi::syscall::ECHOE
-        | slopos_abi::syscall::ECHOK
-        | slopos_abi::syscall::ECHOCTL
-        | slopos_abi::syscall::ECHOKE;
+    let expected = LocalFlags::ISIG
+        | LocalFlags::ICANON
+        | LocalFlags::ECHO
+        | LocalFlags::ECHOE
+        | LocalFlags::ECHOK
+        | LocalFlags::ECHOCTL
+        | LocalFlags::ECHOKE;
     if (t.c_lflag & expected) != expected {
         klog_info!(
             "TTY_TEST: BUG - default c_lflag missing flags (got 0x{:x}, want 0x{:x})",
@@ -2326,7 +2326,7 @@ pub fn test_output_column_tracking_cr() -> TestResult {
     let mut ld = LineDisc::new();
     // Disable ONLCR so CR is not suppressed/converted.
     let mut t = *ld.termios();
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::XTABS; // OPOST + XTABS, no ONLCR
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::XTABS; // OPOST + XTABS, no ONLCR
     ld.set_termios(&t);
 
     for ch in b"ABCDE" {
@@ -2430,7 +2430,7 @@ pub fn test_output_column_tracking_backspace() -> TestResult {
 pub fn test_onocr_at_column_zero() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_oflag = slopos_abi::syscall::OPOST | slopos_abi::syscall::ONOCR;
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::ONOCR;
     ld.set_termios(&t);
 
     // At column 0, CR should be suppressed.
@@ -3004,7 +3004,7 @@ pub fn test_sigwinch_constant() -> TestResult {
 pub fn test_word_erase_path_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // Type "/usr/local/bin".
@@ -3035,7 +3035,7 @@ pub fn test_word_erase_path_boundary() -> TestResult {
 pub fn test_word_erase_mixed_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // Type "hello---world".
@@ -3066,7 +3066,7 @@ pub fn test_word_erase_mixed_boundary() -> TestResult {
 pub fn test_word_erase_trailing_spaces() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // Type "hello   " (hello + 3 spaces).
@@ -3142,7 +3142,7 @@ pub fn test_tcsetsw_preserves_pending_input() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -3150,7 +3150,7 @@ pub fn test_tcsetsw_preserves_pending_input() -> TestResult {
     tty::push_input(TtyIndex(0), b'a');
 
     let mut changed = raw;
-    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_wait(TtyIndex(0), &changed).unwrap();
 
     let mut out = [0u8; 8];
@@ -3175,7 +3175,7 @@ pub fn test_tcsetsf_flushes_pending_input() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -3183,7 +3183,7 @@ pub fn test_tcsetsf_flushes_pending_input() -> TestResult {
     tty::push_input(TtyIndex(0), b'a');
 
     let mut changed = raw;
-    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_flush(TtyIndex(0), &changed).unwrap();
 
     let mut out = [0u8; 8];
@@ -3209,7 +3209,7 @@ pub fn test_read_with_attach_false_skips_auto_attach() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -3241,7 +3241,7 @@ pub fn test_read_with_attach_true_skips_durable_attach() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -3332,7 +3332,7 @@ pub fn test_set_ldisc_round_trip_preserves_termios() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut configured = saved;
-    configured.c_lflag &= !slopos_abi::syscall::ICANON;
+    configured.c_lflag &= !LocalFlags::ICANON;
     configured.c_cc[slopos_abi::syscall::VMIN] = 7;
     configured.c_cc[slopos_abi::syscall::VTIME] = 3;
     tty::set_termios(TtyIndex(0), &configured).unwrap();
@@ -3442,7 +3442,7 @@ pub fn test_pty_master_to_slave_flow() -> TestResult {
 
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     let write_rc = tty::write(master, b"hello", false);
@@ -3558,7 +3558,7 @@ pub fn test_pty_canonical_editing_on_slave() -> TestResult {
 
     let saved = tty::get_termios(slave).unwrap();
     let mut no_echo = saved;
-    no_echo.c_lflag &= !slopos_abi::syscall::ECHO;
+    no_echo.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios(slave, &no_echo).unwrap();
 
     let write_rc = tty::write(master, b"foo\nbar\n", false);
@@ -4026,7 +4026,7 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
         // Verify data flows correctly on this pair.
         let saved = tty::get_termios(slave).unwrap();
         let mut raw = saved;
-        raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+        raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
         tty::set_termios(slave, &raw).unwrap();
 
         let write_ok = tty::write(master, b"x", false).is_ok();
@@ -4142,7 +4142,7 @@ pub fn test_poll_events_no_pollout_when_stopped() -> TestResult {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
             let mut t = *tty.ldisc.termios();
-            t.c_iflag |= slopos_abi::syscall::IXON;
+            t.c_iflag |= InputFlags::IXON;
             tty.ldisc.set_termios(&t);
         }
     }
@@ -4209,7 +4209,7 @@ pub fn test_ixon_stopped_state_via_push_input() -> TestResult {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
             let mut t = *tty.ldisc.termios();
-            t.c_iflag |= slopos_abi::syscall::IXON;
+            t.c_iflag |= InputFlags::IXON;
             tty.ldisc.set_termios(&t);
         }
     }
@@ -4259,7 +4259,7 @@ pub fn test_ixon_any_char_resumes() -> TestResult {
         let mut guard = TTY_SLOTS[idx.0 as usize].lock();
         if let Some(tty) = guard.as_mut() {
             let mut t = *tty.ldisc.termios();
-            t.c_iflag |= slopos_abi::syscall::IXON | slopos_abi::syscall::IXANY;
+            t.c_iflag |= InputFlags::IXON | InputFlags::IXANY;
             tty.ldisc.set_termios(&t);
         }
     }
@@ -4676,7 +4676,7 @@ pub fn test_isig_flush_with_noflsh() -> TestResult {
 
     // Set NOFLSH flag.
     let mut t = *ld.termios();
-    t.c_lflag |= slopos_abi::syscall::NOFLSH;
+    t.c_lflag |= LocalFlags::NOFLSH;
     ld.set_termios(&t);
 
     // Type "abc" into edit buffer.
@@ -5135,7 +5135,7 @@ pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
     // Switch to raw mode so we can observe single-byte input.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -5146,7 +5146,7 @@ pub fn test_tcsetsw_preserves_input_after_drain() -> TestResult {
 
     // Now use TCSETSW to change termios.  Input should survive.
     let mut changed = raw;
-    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_wait(TtyIndex(0), &changed).unwrap();
 
     // Verify input byte is still available.
@@ -5174,7 +5174,7 @@ pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -5185,7 +5185,7 @@ pub fn test_tcsetsf_flushes_input_after_drain() -> TestResult {
 
     // Use TCSETSF — should drain output AND flush input.
     let mut changed = raw;
-    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios_flush(TtyIndex(0), &changed).unwrap();
 
     // Verify input has been flushed.
@@ -5420,7 +5420,7 @@ pub fn test_tcsets_now_skips_drain() -> TestResult {
 
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !slopos_abi::syscall::ICANON;
+    raw.c_lflag &= !LocalFlags::ICANON;
     raw.c_cc[slopos_abi::syscall::VMIN] = 1;
     raw.c_cc[slopos_abi::syscall::VTIME] = 0;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
@@ -5430,7 +5430,7 @@ pub fn test_tcsets_now_skips_drain() -> TestResult {
 
     // TCSETS (Now) should apply immediately, input preserved.
     let mut changed = raw;
-    changed.c_lflag &= !slopos_abi::syscall::ECHO;
+    changed.c_lflag &= !LocalFlags::ECHO;
     tty::set_termios(TtyIndex(0), &changed).unwrap();
 
     let mut out = [0u8; 8];
@@ -5844,8 +5844,8 @@ pub fn test_multiple_pty_pairs() -> TestResult {
 pub fn test_ignbrk_discards_break() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = slopos_abi::syscall::IGNBRK;
-    t.c_lflag = slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO;
+    t.c_iflag = InputFlags::IGNBRK;
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     ld.set_termios(&t);
     let action = ld.input_char(0x00);
     if !matches!(action, InputAction::None) {
@@ -5864,8 +5864,8 @@ pub fn test_ignbrk_discards_break() -> TestResult {
 pub fn test_brkint_generates_sigint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = slopos_abi::syscall::BRKINT;
-    t.c_lflag = slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ISIG;
+    t.c_iflag = InputFlags::BRKINT;
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG;
     ld.set_termios(&t);
     // Push some data first, then break.
     ld.input_char(b'a');
@@ -5892,9 +5892,9 @@ pub fn test_brkint_generates_sigint() -> TestResult {
 pub fn test_parmrk_inserts_marker() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = slopos_abi::syscall::PARMRK;
+    t.c_iflag = InputFlags::PARMRK;
     // Non-canonical mode to read bytes directly.
-    t.c_lflag = 0;
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
     ld.input_char(0x00); // break
     let mut buf = [0u8; 8];
@@ -5914,8 +5914,8 @@ pub fn test_parmrk_inserts_marker() -> TestResult {
 pub fn test_nul_without_break_flags_passes_through() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = 0; // No break flags set.
-    t.c_lflag = 0; // Non-canonical mode.
+    t.c_iflag = InputFlags::empty(); // No break flags set.
+    t.c_lflag = LocalFlags::empty(); // Non-canonical mode.
     ld.set_termios(&t);
     ld.input_char(0x00);
     let mut buf = [0u8; 4];
@@ -5934,9 +5934,8 @@ pub fn test_nul_without_break_flags_passes_through() -> TestResult {
 pub fn test_echoke_visual_erase() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = 0;
-    t.c_lflag =
-        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOKE;
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOKE;
     ld.set_termios(&t);
     // Type "abc" (3 printable chars = 3 columns).
     ld.input_char(b'a');
@@ -5961,9 +5960,8 @@ pub fn test_echoke_visual_erase() -> TestResult {
 pub fn test_echok_newline_on_kill() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = 0;
-    t.c_lflag =
-        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOK;
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOK;
     ld.set_termios(&t);
     ld.input_char(b'a');
     ld.input_char(b'b');
@@ -5985,15 +5983,12 @@ pub fn test_echok_newline_on_kill() -> TestResult {
 pub fn test_echoctl_erase_two_columns() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = 0;
-    t.c_lflag = slopos_abi::syscall::ICANON
-        | slopos_abi::syscall::ECHO
-        | slopos_abi::syscall::ECHOE
-        | slopos_abi::syscall::ECHOCTL;
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOCTL;
     ld.set_termios(&t);
     // Insert a control char (Ctrl+A = 0x01) via literal next.
     // We need IEXTEN for VLNEXT.
-    t.c_lflag |= slopos_abi::syscall::IEXTEN;
+    t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
     // Type Ctrl+V first to enter literal mode, then Ctrl+A.
     ld.input_char(0x16); // VLNEXT (Ctrl+V)
@@ -6017,8 +6012,8 @@ pub fn test_echoctl_erase_two_columns() -> TestResult {
 pub fn test_bytes_available() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = 0; // non-canonical
-    t.c_iflag = 0;
+    t.c_lflag = LocalFlags::empty(); // non-canonical
+    t.c_iflag = InputFlags::empty();
     ld.set_termios(&t);
     if ld.bytes_available() != 0 {
         klog_info!("TTY_TEST: BUG - fresh LineDisc should have 0 bytes available");
@@ -6070,8 +6065,8 @@ pub fn test_ldisc_kind_bytes_available() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
     {
         let mut t = *lk.termios();
-        t.c_lflag = 0; // non-canonical
-        t.c_iflag = 0;
+        t.c_lflag = LocalFlags::empty(); // non-canonical
+        t.c_iflag = InputFlags::empty();
         lk.set_termios(&t);
     }
     if lk.bytes_available() != 0 {
@@ -6099,9 +6094,8 @@ pub fn test_fionread_constant() -> TestResult {
 pub fn test_kill_empty_line_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = 0;
-    t.c_lflag =
-        slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO | slopos_abi::syscall::ECHOKE;
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOKE;
     ld.set_termios(&t);
     // Kill with empty buffer.
     let action = ld.input_char(0x15);
@@ -6119,8 +6113,8 @@ pub fn test_kill_empty_line_no_echo() -> TestResult {
 pub fn test_ignbrk_takes_priority_over_brkint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = slopos_abi::syscall::IGNBRK | slopos_abi::syscall::BRKINT;
-    t.c_lflag = slopos_abi::syscall::ISIG;
+    t.c_iflag = InputFlags::IGNBRK | InputFlags::BRKINT;
+    t.c_lflag = LocalFlags::ISIG;
     ld.set_termios(&t);
     let action = ld.input_char(0x00);
     if !matches!(action, InputAction::None) {
@@ -6220,8 +6214,8 @@ pub fn test_tty_error_signal_interrupt() -> TestResult {
 
 pub fn test_user_termios_typed_accessors() -> TestResult {
     let mut t = slopos_abi::syscall::UserTermios::default();
-    t.c_iflag = slopos_abi::syscall::ICRNL;
-    t.c_lflag = LocalFlags::ECHO.bits();
+    t.c_iflag = InputFlags::ICRNL;
+    t.c_lflag = LocalFlags::ECHO;
     t.set_cc(CcIndex::Vintr, 0x03);
 
     if !t.input_flags().contains(InputFlags::ICRNL)
@@ -6850,7 +6844,7 @@ pub fn test_tcsetattr_kernel_task_bypass() -> TestResult {
     };
     // Modify termios (kernel task_id=0 should bypass foreground check).
     let mut t = saved;
-    t.c_iflag ^= 0x01; // toggle a bit
+    t.c_iflag ^= InputFlags::from_bits_retain(0x01); // toggle a bit
     match tty::set_termios(idx, &t) {
         Ok(()) => {}
         Err(e) => {
@@ -6881,7 +6875,7 @@ pub fn test_tcsetsw_tcsetsf_kernel_task_bypass() -> TestResult {
         }
     };
     let mut t = saved;
-    t.c_iflag ^= 0x01;
+    t.c_iflag ^= InputFlags::from_bits_retain(0x01);
     // TCSETSW path
     match tty::set_termios_wait(idx, &t) {
         Ok(()) => {}
@@ -7778,7 +7772,7 @@ pub fn test_veol_completes_line() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable canonical + echo, set VEOL to ';'.
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
@@ -7815,7 +7809,7 @@ pub fn test_veol_completes_line() -> TestResult {
 pub fn test_veol2_completes_line() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol2, b'|');
     ld.set_termios(&t);
 
@@ -7842,7 +7836,7 @@ pub fn test_veol2_completes_line() -> TestResult {
 pub fn test_veol_disabled_no_effect() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     // VEOL defaults to 0 (disabled).  Ensure typing a NUL doesn't
     // accidentally trigger line completion.
     t.set_cc(CcIndex::Veol, POSIX_VDISABLE);
@@ -7864,7 +7858,7 @@ pub fn test_veol_disabled_no_effect() -> TestResult {
 pub fn test_veol_and_newline_coexist() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
@@ -7902,7 +7896,7 @@ pub fn test_veol_and_newline_coexist() -> TestResult {
 pub fn test_veol_echo_behavior() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b'#');
     ld.set_termios(&t);
 
@@ -7930,7 +7924,7 @@ pub fn test_veol_echo_behavior() -> TestResult {
 pub fn test_veol_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits(); // ECHO off
+    t.c_lflag = LocalFlags::ICANON; // ECHO off
     t.set_cc(CcIndex::Veol, b'#');
     ld.set_termios(&t);
 
@@ -7968,7 +7962,7 @@ pub fn test_veol2_cc_index() -> TestResult {
 pub fn test_veol_veol2_both_active() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b';');
     t.set_cc(CcIndex::Veol2, b'|');
     ld.set_termios(&t);
@@ -8000,7 +7994,7 @@ pub fn test_veol_veol2_both_active() -> TestResult {
 pub fn test_veol_and_eof_coexist() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     t.set_cc(CcIndex::Veol, b';');
     ld.set_termios(&t);
 
@@ -8070,8 +8064,8 @@ pub fn test_utf8_char_width() -> TestResult {
 pub fn test_iutf8_backspace_ascii() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     ld.input_char(b'a');
@@ -8102,8 +8096,8 @@ pub fn test_iutf8_backspace_ascii() -> TestResult {
 pub fn test_iutf8_backspace_2byte() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type 'a' then 'é' (0xC3 0xA9).
@@ -8138,8 +8132,8 @@ pub fn test_iutf8_backspace_2byte() -> TestResult {
 pub fn test_iutf8_backspace_3byte_cjk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type 'a' then '中' (0xE4 0xB8 0xAD).
@@ -8177,8 +8171,8 @@ pub fn test_iutf8_backspace_3byte_cjk() -> TestResult {
 pub fn test_iutf8_backspace_4byte_emoji() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type emoji 😀 (0xF0 0x9F 0x98 0x80).
@@ -8211,9 +8205,9 @@ pub fn test_iutf8_backspace_4byte_emoji() -> TestResult {
 pub fn test_no_iutf8_backspace_multibyte() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOE.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE;
     // Explicitly do NOT set IUTF8.
-    t.c_iflag &= !InputFlags::IUTF8.bits();
+    t.c_iflag &= !InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type é (0xC3 0xA9).
@@ -8240,11 +8234,11 @@ pub fn test_no_iutf8_backspace_multibyte() -> TestResult {
 pub fn test_iutf8_insert_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits()
+    t.c_lflag = LocalFlags::ICANON
         | LocalFlags::ECHO.bits()
         | LocalFlags::ECHOE.bits()
         | LocalFlags::ECHOKE.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Insert 'a' (col=1), 'é' (col=2), '中' (col=4).
@@ -8272,8 +8266,8 @@ pub fn test_iutf8_insert_column_tracking() -> TestResult {
 pub fn test_iutf8_word_erase_mixed() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::IEXTEN.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type "hello中" — 'hello' is 5 ASCII bytes, '中' is 3 UTF-8 bytes (non-word).
@@ -8312,8 +8306,8 @@ pub fn test_iutf8_word_erase_mixed() -> TestResult {
 pub fn test_iutf8_word_erase_preserves_prefix() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::IEXTEN.bits();
-    t.c_iflag |= InputFlags::IUTF8.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN;
+    t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
     // Type "ab cd".
@@ -8372,7 +8366,7 @@ pub fn test_cread_disabled_input_discarded() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Clear CREAD in c_cflag.
-    t.c_cflag &= !ControlFlags::CREAD.bits();
+    t.c_cflag &= !ControlFlags::CREAD;
     ld.set_termios(&t);
 
     let action = ld.input_char(b'a');
@@ -8392,7 +8386,7 @@ pub fn test_cread_disabled_input_discarded() -> TestResult {
 pub fn test_cread_disabled_rawdisc() -> TestResult {
     let mut rd = RawDisc::new();
     let mut t = *rd.termios();
-    t.c_cflag |= ControlFlags::CREAD.bits();
+    t.c_cflag |= ControlFlags::CREAD;
     rd.set_termios(&t);
 
     // With CREAD set, input should be accepted.
@@ -8409,7 +8403,7 @@ pub fn test_cread_disabled_rawdisc() -> TestResult {
     // Clear CREAD — input should be discarded.
     let mut rd2 = RawDisc::new();
     let mut t2 = *rd2.termios();
-    t2.c_cflag &= !ControlFlags::CREAD.bits();
+    t2.c_cflag &= !ControlFlags::CREAD;
     rd2.set_termios(&t2);
 
     rd2.input_char(b'y');
@@ -8424,8 +8418,8 @@ pub fn test_cread_disabled_rawdisc() -> TestResult {
 pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
-    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
+    t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
     // Fill the edit buffer (4096 bytes after expansion).
@@ -8446,9 +8440,9 @@ pub fn test_imaxbel_buffer_full_rings_bell() -> TestResult {
 pub fn test_imaxbel_not_set_buffer_full_silent() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
     // Ensure IMAXBEL is NOT set.
-    t.c_iflag &= !InputFlags::IMAXBEL.bits();
+    t.c_iflag &= !InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
     // Fill the edit buffer.
@@ -8469,8 +8463,8 @@ pub fn test_imaxbel_not_set_buffer_full_silent() -> TestResult {
 pub fn test_imaxbel_buffer_not_full_normal() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
-    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
+    t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
     let action = ld.input_char(b'a');
@@ -8487,8 +8481,8 @@ pub fn test_imaxbel_raw_mode_buffer_full() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Non-canonical mode with ECHO + IMAXBEL.
-    t.c_lflag = LocalFlags::ECHO.bits(); // no ICANON
-    t.c_iflag |= InputFlags::IMAXBEL.bits();
+    t.c_lflag = LocalFlags::ECHO; // no ICANON
+    t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
     // Fill the cooked buffer (COOKED_BUF_SIZE = 8192 bytes).
@@ -8512,8 +8506,8 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
     // Use canonical mode: input fills the edit buffer first, then cooked
     // after newline.  This lets us exceed the IXOFF high-water mark which
     // is 80% of (EDIT_BUF_SIZE + COOKED_BUF_SIZE).
-    t.c_lflag = LocalFlags::ICANON.bits(); // canonical, no echo
-    t.c_iflag |= InputFlags::IXOFF.bits();
+    t.c_lflag = LocalFlags::ICANON; // canonical, no echo
+    t.c_iflag |= InputFlags::IXOFF;
     // Ensure VSTOP is Ctrl+S (0x13) — should be the default.
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     ld.set_termios(&t);
@@ -8553,8 +8547,8 @@ pub fn test_ixoff_high_water_sends_xoff() -> TestResult {
 pub fn test_ixoff_low_water_sends_xon() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits(); // canonical, no echo
-    t.c_iflag |= InputFlags::IXOFF.bits();
+    t.c_lflag = LocalFlags::ICANON; // canonical, no echo
+    t.c_iflag |= InputFlags::IXOFF;
     t.c_cc[CcIndex::Vstop.as_usize()] = 0x13;
     t.c_cc[CcIndex::Vstart.as_usize()] = 0x11;
     ld.set_termios(&t);
@@ -8611,8 +8605,8 @@ pub fn test_ixoff_low_water_sends_xon() -> TestResult {
 pub fn test_ixoff_not_set_no_flow_control() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = 0; // non-canonical
-    t.c_iflag &= !InputFlags::IXOFF.bits(); // ensure IXOFF is off
+    t.c_lflag = LocalFlags::empty(); // non-canonical
+    t.c_iflag &= !InputFlags::IXOFF; // ensure IXOFF is off
     ld.set_termios(&t);
 
     // Fill buffer and overflow by one byte.
@@ -8672,7 +8666,7 @@ pub fn test_pendin_auto_set_on_echo_change() -> TestResult {
 
     // Toggle ECHO off — this is an echo-affecting change.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHO.bits();
+    t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
 
     // The next input_char() should return ReprintLine (deferred reprint).
@@ -8691,7 +8685,7 @@ pub fn test_pendin_one_shot() -> TestResult {
 
     // Toggle ECHOE off to trigger PENDIN.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
     // First call: ReprintLine.
@@ -8717,7 +8711,7 @@ pub fn test_vreprint_clears_pendin() -> TestResult {
 
     // Trigger PENDIN via echo flag change.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHOK.bits();
+    t.c_lflag &= !LocalFlags::ECHOK;
     ld.set_termios(&t);
 
     // Manually reprint with VREPRINT (Ctrl+R).  This should also clear PENDIN.
@@ -8746,7 +8740,7 @@ pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
 
     // Toggle ISIG off — not echo-affecting.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ISIG.bits();
+    t.c_lflag &= !LocalFlags::ISIG;
     ld.set_termios(&t);
 
     // Should process input normally, no ReprintLine.
@@ -8765,7 +8759,7 @@ pub fn test_pendin_empty_edit_buffer() -> TestResult {
 
     // Toggle ECHO off.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHO.bits();
+    t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
 
     // Should process input normally since there's nothing to reprint.
@@ -8784,7 +8778,7 @@ pub fn test_flush_clears_pendin() -> TestResult {
 
     // Trigger PENDIN.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
     // Flush everything — should clear PENDIN.
@@ -8806,7 +8800,7 @@ pub fn test_flush_input_clears_pendin() -> TestResult {
 
     // Trigger PENDIN.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ECHOK.bits();
+    t.c_lflag &= !LocalFlags::ECHOK;
     ld.set_termios(&t);
 
     // Flush input — should clear PENDIN.
@@ -9057,7 +9051,7 @@ pub fn test_data_flow_after_unlock() -> TestResult {
     // Set slave to raw mode for simple data flow.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Master write -> slave read.
@@ -9289,8 +9283,8 @@ fn packet_mode_setup_pty() -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::U
     tty::pty_open_slave(slave).ok()?;
     let saved = tty::get_termios(slave).ok()?;
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    raw.c_iflag = 0; // clear all input flags including IXON
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    raw.c_iflag = InputFlags::empty(); // clear all input flags including IXON
     tty::set_termios(slave, &raw).ok()?;
     Some((master, slave, saved))
 }
@@ -9418,7 +9412,7 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
 
     // Enable IXON on the slave -> should produce DOSTOP.
     let mut t = tty::get_termios(slave).unwrap();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
     let mut buf = [0u8; 16];
@@ -9437,7 +9431,7 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
     }
 
     // Clear IXON -> should produce NOSTOP.
-    t.c_iflag &= !slopos_abi::syscall::IXON;
+    t.c_iflag &= !InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
     match tty::read(master, &mut buf, true) {
@@ -9470,7 +9464,7 @@ pub fn test_tiocpkt_disable_clears_events() -> TestResult {
 
     // Trigger an event.
     let mut t = tty::get_termios(slave).unwrap();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
     // Disable packet mode — should clear pending events.
@@ -9521,7 +9515,7 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
 
     // Trigger a packet event.
     let mut t = tty::get_termios(slave).unwrap();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
     // Now POLLIN should be set.
@@ -10022,7 +10016,7 @@ pub fn test_extproc_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     // Type a printable character.
@@ -10054,7 +10048,7 @@ pub fn test_extproc_no_canonical_editing() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO + ECHOE.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     // Type 'a', then DEL (VERASE character).
@@ -10092,7 +10086,7 @@ pub fn test_extproc_signals_still_delivered() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ISIG.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     // Ctrl+C should still deliver SIGINT.
@@ -10144,11 +10138,11 @@ pub fn test_extproc_cleared_resumes_normal() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC first.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
+    t.c_lflag |= LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     // Clear EXTPROC.
-    t.c_lflag &= !LocalFlags::EXTPROC.bits();
+    t.c_lflag &= !LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     // Now typing should echo normally.
@@ -10171,7 +10165,7 @@ pub fn test_extproc_bypasses_iexten_editing() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + ICANON + ECHO + IEXTEN.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits() | LocalFlags::IEXTEN.bits();
+    t.c_lflag |= LocalFlags::EXTPROC | LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
     // VLNEXT (Ctrl+V) should be passed through, not trigger literal-next.
@@ -10216,8 +10210,8 @@ pub fn test_extproc_flow_control_works() -> TestResult {
     let mut ld = LineDisc::new();
     // Enable EXTPROC + IXON.
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_lflag |= LocalFlags::EXTPROC;
+    t.c_iflag |= InputFlags::IXON;
     ld.set_termios(&t);
 
     // Ctrl+S (VSTOP) should stop output.
@@ -10242,9 +10236,9 @@ pub fn test_extproc_flow_control_works() -> TestResult {
 pub fn test_extproc_imaxbel() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag |= LocalFlags::EXTPROC.bits();
-    t.c_lflag &= !LocalFlags::ICANON.bits(); // non-canonical for direct read
-    t.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    t.c_lflag |= LocalFlags::EXTPROC;
+    t.c_lflag &= !LocalFlags::ICANON; // non-canonical for direct read
+    t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
 
     // Fill the cooked buffer.
@@ -10307,7 +10301,7 @@ pub fn test_extproc_raw_mode_same_behavior() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Non-canonical, no echo, EXTPROC.
-    t.c_lflag = LocalFlags::EXTPROC.bits();
+    t.c_lflag = LocalFlags::EXTPROC;
     ld.set_termios(&t);
 
     let action = ld.input_char(b'z');
@@ -10335,9 +10329,9 @@ pub fn test_extproc_raw_mode_same_behavior() -> TestResult {
 pub fn test_echoprt_erase_format() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOPRT;
     // Disable ECHOE to ensure ECHOPRT path is taken.
-    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
     // Type "abc".
@@ -10393,8 +10387,8 @@ pub fn test_echoprt_erase_format() -> TestResult {
 pub fn test_echoprt_close_on_input() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits() | LocalFlags::ECHOPRT.bits();
-    t.c_lflag &= !LocalFlags::ECHOE.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOPRT;
+    t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
     // Type "ab", erase 'b', then type 'x'.
@@ -10428,8 +10422,8 @@ pub fn test_echoprt_close_on_input() -> TestResult {
 pub fn test_iuclc_maps_upper_to_lower() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
-    t.c_iflag |= InputFlags::IUCLC.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
+    t.c_iflag |= InputFlags::IUCLC;
     ld.set_termios(&t);
 
     // Type 'H' — should be mapped to 'h'.
@@ -10470,8 +10464,8 @@ pub fn test_iuclc_maps_upper_to_lower() -> TestResult {
 pub fn test_iuclc_no_effect_non_alpha() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON.bits() | LocalFlags::ECHO.bits();
-    t.c_iflag |= InputFlags::IUCLC.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO;
+    t.c_iflag |= InputFlags::IUCLC;
     ld.set_termios(&t);
 
     // Type 'a' (already lowercase) — should remain 'a'.
@@ -10511,7 +10505,7 @@ pub fn test_iuclc_no_effect_non_alpha() -> TestResult {
 pub fn test_olcuc_maps_lower_to_upper() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_oflag = OutputFlags::OPOST.bits() | OutputFlags::OLCUC.bits();
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::OLCUC;
     ld.set_termios(&t);
 
     // Process 'h' through output — should become 'H'.
@@ -10821,7 +10815,7 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     // Put slave in raw mode so every byte goes straight to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Push bytes until we exceed the high-water mark.
@@ -10871,7 +10865,7 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     // Raw mode so bytes go directly to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill slave to just below high-water.
@@ -10961,7 +10955,7 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill past high-water to activate throttle.
@@ -11053,7 +11047,7 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Use master_write to push exactly N bytes, draining in between cycles.
@@ -11156,7 +11150,7 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Get peer handle.
@@ -11272,9 +11266,9 @@ pub fn test_imaxbel_bell_on_cooked_overflow() -> TestResult {
     // Put slave in raw mode with IMAXBEL enabled.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON);
-    raw.c_lflag &= !(slopos_abi::syscall::ECHO);
-    raw.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    raw.c_lflag &= !(LocalFlags::ICANON);
+    raw.c_lflag &= !(LocalFlags::ECHO);
+    raw.c_iflag |= InputFlags::IMAXBEL;
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the cooked buffer to capacity.
@@ -11339,8 +11333,8 @@ pub fn test_no_imaxbel_silent_drop() -> TestResult {
     // Raw mode WITHOUT IMAXBEL.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    raw.c_iflag &= !slopos_abi::syscall::IMAXBEL;
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    raw.c_iflag &= !InputFlags::IMAXBEL;
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the cooked buffer.
@@ -11442,7 +11436,9 @@ pub fn test_cflag_roundtrip() -> TestResult {
     let saved = tty::get_termios(idx).unwrap();
 
     let mut t = saved;
-    t.c_cflag = CS7 | PARENB | CREAD | B9600;
+    t.c_cflag = ControlFlags::from_bits_retain(
+        ControlFlags::CS7.bits() | ControlFlags::PARENB.bits() | ControlFlags::CREAD.bits() | B9600,
+    );
     tty::set_termios(idx, &t).unwrap();
 
     let got = tty::get_termios(idx).unwrap();
@@ -11484,7 +11480,7 @@ pub fn test_speed_follows_baud_change() -> TestResult {
 
     let mut t = saved;
     // Clear old baud bits and set B9600.
-    t.c_cflag = (t.c_cflag & !CBAUD) | B9600;
+    t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B9600);
     tty::set_termios(idx, &t).unwrap();
 
     let got = tty::get_termios(idx).unwrap();
@@ -12008,7 +12004,7 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     // Raw mode so every byte goes straight to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill past high-water to activate throttle.
@@ -12089,7 +12085,7 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
 
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Throttle the slave.
@@ -12149,7 +12145,7 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill slave to THROTTLE_HIGH_WATER - 10.  Only 10 more bytes until
@@ -12225,7 +12221,7 @@ pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
     // Set c_cflag to B38400, but c_ospeed to a different value.
     // c_cflag should remain authoritative.
     let mut t = saved;
-    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B38400);
     t.c_ospeed = 9600;
     t.c_ispeed = 0;
     tty::set_termios(idx, &t).unwrap();
@@ -12267,7 +12263,7 @@ pub fn test_review_speed_ispeed_fallback() -> TestResult {
     let saved = tty::get_termios(idx).unwrap();
 
     let mut t = saved;
-    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B38400);
     t.c_ospeed = 0;
     t.c_ispeed = 115200;
     tty::set_termios(idx, &t).unwrap();
@@ -12298,7 +12294,7 @@ pub fn test_review_speed_unrecognised_noop() -> TestResult {
     let saved = tty::get_termios(idx).unwrap();
 
     let mut t = saved;
-    t.c_cflag = (t.c_cflag & !CBAUD) | B38400;
+    t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B38400);
     t.c_ospeed = 12345;
     t.c_ispeed = 0;
     tty::set_termios(idx, &t).unwrap();
@@ -12415,7 +12411,7 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     let fill_count = 8192 - spare;
 
     let mut t = *ld.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     ld.set_termios(&t);
     for _ in 0..fill_count {
         ld.input_char(b'X');
@@ -12433,8 +12429,8 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     // Switch to canonical mode and push 20 bytes + newline.
     // Only `spare` (10) bytes + the newline fit in cooked; the rest (10)
     // should be preserved in the edit buffer with the fix.
-    t.c_lflag |= slopos_abi::syscall::ICANON;
-    t.c_lflag &= !slopos_abi::syscall::ECHO;
+    t.c_lflag |= LocalFlags::ICANON;
+    t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
 
     for i in 0..20u8 {
@@ -12505,7 +12501,7 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     // Put slave in raw mode so master writes flow into cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Fill the slave's cooked buffer past the throttle high-water mark
@@ -12555,7 +12551,7 @@ pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     // Put slave in raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
-    raw.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
     // Non-blocking write with an empty (unthrottled) slave should succeed.
@@ -12716,7 +12712,7 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
 
     // Fill cooked buffer to capacity via non-canonical mode.
     let mut t = *ld.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     ld.set_termios(&t);
     for _ in 0..8192 {
         ld.input_char(b'Z');
@@ -12746,8 +12742,8 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Enable PARMRK, disable canonical mode so we can read directly.
-    t.c_iflag = slopos_abi::syscall::PARMRK;
-    t.c_lflag = 0;
+    t.c_iflag = InputFlags::PARMRK;
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
     // Fill cooked buffer to capacity minus exactly 3 bytes.
@@ -12809,8 +12805,8 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Enable PARMRK only (no IMAXBEL), disable canonical mode.
-    t.c_iflag = slopos_abi::syscall::PARMRK;
-    t.c_lflag = 0;
+    t.c_iflag = InputFlags::PARMRK;
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
     // Fill cooked buffer to capacity minus 2 bytes — NOT enough for the
@@ -12869,8 +12865,8 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     // Enable PARMRK + IMAXBEL, disable canonical mode.
-    t.c_iflag = slopos_abi::syscall::PARMRK | slopos_abi::syscall::IMAXBEL;
-    t.c_lflag = 0;
+    t.c_iflag = InputFlags::PARMRK | InputFlags::IMAXBEL;
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
     // Fill cooked buffer to capacity minus 1 byte.
@@ -12925,8 +12921,8 @@ pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = slopos_abi::syscall::PARMRK;
-    t.c_lflag = 0;
+    t.c_iflag = InputFlags::PARMRK;
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
     // Fill cooked buffer completely.
@@ -13634,7 +13630,7 @@ pub fn test_noncanonical_no_wake_per_byte() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     for _ in 0..10 {
@@ -13655,7 +13651,7 @@ pub fn test_noncanonical_wake_at_threshold() -> TestResult {
     let mut ld = LineDisc::new();
     // Switch to non-canonical mode.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     // Push exactly WAKEUP_CHARS bytes.
@@ -13679,7 +13675,7 @@ pub fn test_noncanonical_wake_near_full() -> TestResult {
     let mut ld = LineDisc::new();
     // Switch to non-canonical mode.
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     // Fill cooked buffer to near capacity (8192 - 64 = 8128 bytes).
@@ -13707,7 +13703,7 @@ pub fn test_flush_input_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     for _ in 0..100 {
@@ -13736,7 +13732,7 @@ pub fn test_flush_all_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     for _ in 0..100 {
@@ -13766,7 +13762,7 @@ pub fn test_rawdisc_wake_batching() -> TestResult {
     let mut rd = RawDisc::new();
     // Enable CREAD so input is accepted.
     let mut t = *rd.termios();
-    t.c_cflag |= slopos_abi::syscall::CREAD;
+    t.c_cflag |= ControlFlags::CREAD;
     rd.set_termios(&t);
 
     // Push a few bytes — should NOT wake.
@@ -13795,7 +13791,7 @@ pub fn test_wake_resets_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag &= !LocalFlags::ICANON.bits();
+    t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
     if ld.should_wake_reader() {
@@ -13942,7 +13938,7 @@ pub fn test_tab0_passes_literal_tab() -> TestResult {
     let mut ld = LineDisc::new();
     // Clear TABDLY bits (set TAB0) while keeping OPOST.
     let mut t = *ld.termios();
-    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY.bits()) | OutputFlags::TAB0.bits();
+    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY) | OutputFlags::TAB0;
     ld.set_termios(&t);
 
     match ld.process_output_byte(b'\t') {
@@ -13975,7 +13971,7 @@ pub fn test_tab0_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
     // Set TAB0 (clear TABDLY bits).
     let mut t = *ld.termios();
-    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY.bits()) | OutputFlags::TAB0.bits();
+    t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY) | OutputFlags::TAB0;
     ld.set_termios(&t);
 
     // Print 3 chars (column=3), then tab => column advances to 8.
@@ -14006,7 +14002,7 @@ pub fn test_tab0_column_tracking() -> TestResult {
     // Column should be 17.  Tab from 17 => column 24 (7 advance).
     // We verify indirectly: switch to XTABS and check the space count.
     let mut t2 = *ld.termios();
-    t2.c_oflag |= OutputFlags::XTABS.bits();
+    t2.c_oflag |= OutputFlags::XTABS;
     ld.set_termios(&t2);
 
     match ld.process_output_byte(b'\t') {
@@ -14079,7 +14075,7 @@ pub fn test_tabdly_termios_roundtrip() -> TestResult {
 
     // Set TAB0 (clear XTABS).
     let mut t = *ld.termios();
-    t.c_oflag &= !OutputFlags::TABDLY.bits();
+    t.c_oflag &= !OutputFlags::TABDLY;
     ld.set_termios(&t);
 
     let readback = ld.termios().output_flags();
@@ -14090,7 +14086,7 @@ pub fn test_tabdly_termios_roundtrip() -> TestResult {
 
     // Set TAB3/XTABS back.
     let mut t2 = *ld.termios();
-    t2.c_oflag |= OutputFlags::XTABS.bits();
+    t2.c_oflag |= OutputFlags::XTABS;
     ld.set_termios(&t2);
 
     let readback2 = ld.termios().output_flags();
@@ -14107,7 +14103,7 @@ pub fn test_no_opost_tab_passthrough() -> TestResult {
     let mut ld = LineDisc::new();
     // Disable OPOST entirely.
     let mut t = *ld.termios();
-    t.c_oflag = 0;
+    t.c_oflag = OutputFlags::empty();
     ld.set_termios(&t);
 
     match ld.process_output_byte(b'\t') {
@@ -14488,8 +14484,8 @@ pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     // Put into raw mode with IMAXBEL.
     let mut t = *ld.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    t.c_iflag |= slopos_abi::syscall::IMAXBEL;
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
     // Fill cooked buffer.
     for _ in 0..8192 {
@@ -14555,8 +14551,8 @@ pub fn test_ldisc_kind_dispatch() -> TestResult {
     }
     // Fill via NTty's raw input to trigger overflow.
     let mut t = *lk.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    t.c_iflag &= !slopos_abi::syscall::IMAXBEL;
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    t.c_iflag &= !InputFlags::IMAXBEL;
     lk.set_termios(&t);
     for _ in 0..8193 {
         lk.input_char(b'Q');
@@ -14952,7 +14948,7 @@ pub fn test_input_event_normal_behavior() -> TestResult {
     let mut legacy = LineDisc::new();
     let mut typed = LineDisc::new();
     let mut t = *legacy.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     legacy.set_termios(&t);
     typed.set_termios(&t);
 
@@ -14973,8 +14969,8 @@ pub fn test_input_event_normal_behavior() -> TestResult {
 pub fn test_input_event_break_brkint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::BRKINT;
-    t.c_iflag &= !slopos_abi::syscall::IGNBRK;
+    t.c_iflag |= InputFlags::BRKINT;
+    t.c_iflag &= !InputFlags::IGNBRK;
     ld.set_termios(&t);
     match ld.input_char(InputEvent {
         byte: 0,
@@ -14994,7 +14990,7 @@ pub fn test_input_event_break_brkint() -> TestResult {
 pub fn test_input_event_break_ignbrk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::IGNBRK;
+    t.c_iflag |= InputFlags::IGNBRK;
     ld.set_termios(&t);
     let _ = ld.input_char(InputEvent {
         byte: 0,
@@ -15010,9 +15006,9 @@ pub fn test_input_event_break_ignbrk() -> TestResult {
 pub fn test_input_event_parity_parmrk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    t.c_iflag |= slopos_abi::syscall::INPCK | slopos_abi::syscall::PARMRK;
-    t.c_iflag &= !slopos_abi::syscall::IGNPAR;
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    t.c_iflag |= InputFlags::INPCK | InputFlags::PARMRK;
+    t.c_iflag &= !InputFlags::IGNPAR;
     ld.set_termios(&t);
 
     let _ = ld.input_char(InputEvent {
@@ -15034,7 +15030,7 @@ pub fn test_input_event_parity_parmrk() -> TestResult {
 pub fn test_input_event_parity_ignpar() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag |= slopos_abi::syscall::IGNPAR;
+    t.c_iflag |= InputFlags::IGNPAR;
     ld.set_termios(&t);
     let _ = ld.input_char(InputEvent {
         byte: b'X',
@@ -15113,7 +15109,9 @@ pub fn test_b0_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let mut t = tty::get_termios(idx).unwrap();
-    t.c_cflag = (t.c_cflag & !slopos_abi::syscall::CBAUD) | slopos_abi::syscall::B0;
+    t.c_cflag = ControlFlags::from_bits_retain(
+        (t.c_cflag.bits() & !slopos_abi::syscall::CBAUD) | slopos_abi::syscall::B0,
+    );
     match tty::set_termios(idx, &t) {
         Ok(()) => {}
         Err(e) => {
@@ -15135,7 +15133,7 @@ pub fn test_speed_roundtrip() -> TestResult {
     let saved = tty::get_termios(idx).unwrap();
 
     let mut t = saved;
-    t.c_cflag = (t.c_cflag & !CBAUD) | B9600;
+    t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B9600);
     if let Err(e) = tty::set_termios(idx, &t) {
         klog_info!(
             "TTY_TEST: BUG - set_termios speed roundtrip failed: {:?}",
@@ -15162,8 +15160,8 @@ pub fn test_batched_ingress_no_data_loss() -> TestResult {
     let mut ld = LineDisc::new();
     {
         let mut t = *ld.termios();
-        t.c_lflag = 0;
-        t.c_iflag = 0;
+        t.c_lflag = LocalFlags::empty();
+        t.c_iflag = InputFlags::empty();
         ld.set_termios(&t);
     }
 
@@ -15210,9 +15208,9 @@ pub fn test_batched_ingress_signal_in_middle() -> TestResult {
     };
 
     let mut t = saved;
-    t.c_lflag &= !(slopos_abi::syscall::ICANON | slopos_abi::syscall::ECHO);
-    t.c_lflag |= slopos_abi::syscall::ISIG;
-    t.c_lflag &= !slopos_abi::syscall::NOFLSH;
+    t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    t.c_lflag |= LocalFlags::ISIG;
+    t.c_lflag &= !LocalFlags::NOFLSH;
     if tty::set_termios(slave, &t).is_err() {
         packet_mode_teardown_pty(master, slave, &saved);
         return TestResult::Fail;
@@ -15791,7 +15789,7 @@ pub fn test_packet_mode_1byte_with_events() -> TestResult {
     tty::set_packet_mode(master, true).unwrap();
 
     let mut t = tty::get_termios(slave).unwrap();
-    t.c_iflag |= slopos_abi::syscall::IXON;
+    t.c_iflag |= InputFlags::IXON;
     tty::set_termios(slave, &t).unwrap();
 
     let mut buf = [0u8; 1];
@@ -15804,7 +15802,7 @@ pub fn test_packet_mode_1byte_with_events() -> TestResult {
                 buf[0]
             );
             let _ = tty::set_packet_mode(master, false);
-            t.c_iflag &= !slopos_abi::syscall::IXON;
+            t.c_iflag &= !InputFlags::IXON;
             let _ = tty::set_termios(slave, &t);
             packet_mode_teardown_pty(master, slave, &saved);
             return TestResult::Fail;
@@ -15812,7 +15810,7 @@ pub fn test_packet_mode_1byte_with_events() -> TestResult {
     }
 
     let _ = tty::set_packet_mode(master, false);
-    t.c_iflag &= !slopos_abi::syscall::IXON;
+    t.c_iflag &= !InputFlags::IXON;
     let _ = tty::set_termios(slave, &t);
     packet_mode_teardown_pty(master, slave, &saved);
     TestResult::Pass
@@ -16173,7 +16171,7 @@ pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
             return TestResult::Fail;
         }
     };
-    t.c_cflag |= slopos_abi::syscall::HUPCL;
+    t.c_cflag |= ControlFlags::HUPCL;
     let _ = tty::set_termios(idx, &t);
     let _ = tty::close_ref(idx);
     let hung = tty::is_hung_up(idx);
@@ -16198,7 +16196,7 @@ pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
             return TestResult::Fail;
         }
     };
-    t.c_cflag &= !slopos_abi::syscall::HUPCL;
+    t.c_cflag &= !ControlFlags::HUPCL;
     let _ = tty::set_termios(idx, &t);
     let _ = tty::close_ref(idx);
     let hung = tty::is_hung_up(idx);
@@ -16231,7 +16229,7 @@ pub fn test_excl_hupcl_hupcl_pty_no_double_hangup() -> TestResult {
             return TestResult::Fail;
         }
     };
-    t.c_cflag |= slopos_abi::syscall::HUPCL;
+    t.c_cflag |= ControlFlags::HUPCL;
     let _ = tty::set_termios(slave, &t);
 
     let _ = tty::close_ref(slave);
