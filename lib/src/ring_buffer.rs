@@ -9,6 +9,15 @@ pub struct RingBuffer<T, const N: usize> {
 }
 
 impl<T: Copy, const N: usize> RingBuffer<T, N> {
+    #[inline(always)]
+    const fn wrap(index: usize) -> usize {
+        if N.is_power_of_two() {
+            index & (N - 1)
+        } else {
+            index % N
+        }
+    }
+
     /// Create a new ring buffer with all elements set to the given value.
     /// This is const-compatible and can be used for static initialization.
     #[inline(always)]
@@ -47,6 +56,18 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         N - self.count
     }
 
+    /// Alias for `len()` - number of elements in the buffer.
+    #[inline(always)]
+    pub fn count(&self) -> usize {
+        self.len()
+    }
+
+    /// Alias for `free_space()` - number of free slots.
+    #[inline(always)]
+    pub fn free(&self) -> usize {
+        self.free_space()
+    }
+
     /// Peek at the oldest element without removing it.
     #[inline(always)]
     pub fn peek(&self) -> Option<&T> {
@@ -54,6 +75,16 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
             return None;
         }
         Some(&self.data[self.tail])
+    }
+
+    /// Peek at element at `offset` positions from the tail without removing.
+    #[inline(always)]
+    pub fn peek_at_one(&self, offset: usize) -> Option<&T> {
+        if offset >= self.count {
+            return None;
+        }
+        let idx = Self::wrap(self.tail + offset);
+        Some(&self.data[idx])
     }
 
     /// Expose internal slice for debugging/testing.
@@ -80,12 +111,18 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         self.count = 0;
     }
 
+    /// Alias for `reset()` - clear all elements.
+    #[inline(always)]
+    pub fn flush(&mut self) {
+        self.reset()
+    }
+
     /// Discard the oldest `n` elements without reading them.
     /// Saturates at the current element count.
     #[inline(always)]
     pub fn consume(&mut self, n: usize) {
         let consumed = n.min(self.count);
-        self.tail = (self.tail + consumed) % N;
+        self.tail = Self::wrap(self.tail + consumed);
         self.count -= consumed;
     }
 
@@ -93,11 +130,11 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
     #[inline(always)]
     pub fn push_overwrite(&mut self, value: T) {
         if self.is_full() {
-            self.tail = (self.tail + 1) % N;
+            self.tail = Self::wrap(self.tail + 1);
             self.count -= 1;
         }
         self.data[self.head] = value;
-        self.head = (self.head + 1) % N;
+        self.head = Self::wrap(self.head + 1);
         self.count += 1;
     }
 
@@ -108,7 +145,7 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
             return false;
         }
         self.data[self.head] = value;
-        self.head = (self.head + 1) % N;
+        self.head = Self::wrap(self.head + 1);
         self.count += 1;
         true
     }
@@ -120,7 +157,7 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
             return None;
         }
         let value = self.data[self.tail];
-        self.tail = (self.tail + 1) % N;
+        self.tail = Self::wrap(self.tail + 1);
         self.count -= 1;
         Some(value)
     }
@@ -157,7 +194,7 @@ impl<const N: usize> RingBuffer<u8, N> {
             self.data[..second].copy_from_slice(&data[first..first + second]);
         }
 
-        self.head = (self.head + to_write) % N;
+        self.head = Self::wrap(self.head + to_write);
         self.count += to_write;
         to_write
     }
@@ -178,7 +215,7 @@ impl<const N: usize> RingBuffer<u8, N> {
             out[first..first + second].copy_from_slice(&self.data[..second]);
         }
 
-        self.tail = (self.tail + to_read) % N;
+        self.tail = Self::wrap(self.tail + to_read);
         self.count -= to_read;
         to_read
     }
@@ -196,7 +233,7 @@ impl<const N: usize> RingBuffer<u8, N> {
             return 0;
         }
 
-        let start = (self.tail + offset) % N;
+        let start = Self::wrap(self.tail + offset);
         let first = to_read.min(N - start);
         out[..first].copy_from_slice(&self.data[start..start + first]);
 
