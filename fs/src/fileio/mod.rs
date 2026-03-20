@@ -17,8 +17,8 @@ use slopos_lib::kernel_services::driver_runtime::{
     current_task_sid, finish_wait, prepare_to_wait, scheduler_is_enabled,
     set_current_task_controlling_tty,
 };
-use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_lib::kernel_services::syscall_services::tty;
+use slopos_net::socket;
 
 use crate::pipe;
 use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
@@ -169,7 +169,7 @@ pub(super) fn with_tables<R>(
 
 pub(super) fn reset_descriptor(desc: &mut FileDescriptor) {
     if desc.valid && desc.socket_idx != INVALID_SOCKET_IDX {
-        let _ = socket::close(desc.socket_idx);
+        let _ = socket::socket_close(desc.socket_idx);
     }
 
     if desc.valid && desc.pipe_id != pipe::INVALID_PIPE_ID {

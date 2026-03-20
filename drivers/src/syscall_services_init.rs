@@ -1,15 +1,9 @@
-use slopos_lib::kernel_services::syscall_services::dns::{DnsServices, register_dns_services};
 use slopos_lib::kernel_services::syscall_services::input::{
     InputServices, register_input_services,
 };
-use slopos_lib::kernel_services::syscall_services::net::{NetServices, register_net_services};
-use slopos_lib::kernel_services::syscall_services::socket::{
-    SocketServices, register_socket_services,
-};
 use slopos_lib::kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
-use crate::{input_event, tty, virtio_net};
-use slopos_net::{dns, socket};
+use crate::{input_event, tty};
 
 // =============================================================================
 // Input services
@@ -520,152 +514,7 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_exclusive: tty_get_exclusive_adapter,
 };
 
-fn net_scan_members_adapter(
-    out: *mut slopos_abi::net::UserNetMember,
-    max: usize,
-    active: u32,
-) -> usize {
-    virtio_net::virtio_net_scan_members(out, max, active != 0)
-}
-
-fn net_is_ready_adapter() -> u32 {
-    if virtio_net::virtio_net_is_ready() {
-        1
-    } else {
-        0
-    }
-}
-
-fn net_get_info_adapter(out: *mut slopos_abi::net::UserNetInfo) -> u32 {
-    if out.is_null() {
-        return 0;
-    }
-    unsafe {
-        // SAFETY: null is checked above and caller provides writable UserNetInfo storage.
-        virtio_net::virtio_net_get_info(&mut *out);
-    }
-    1
-}
-
-static NET_SERVICES: NetServices = NetServices {
-    scan_members: net_scan_members_adapter,
-    is_ready: net_is_ready_adapter,
-    get_info: net_get_info_adapter,
-};
-
-fn socket_send_adapter(sock_idx: u32, data: *const u8, len: usize) -> i64 {
-    socket::socket_send(sock_idx, data, len)
-}
-
-fn socket_recv_adapter(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
-    socket::socket_recv(sock_idx, buf, len)
-}
-
-fn socket_sendto_adapter(
-    sock_idx: u32,
-    data: *const u8,
-    len: usize,
-    dst_ip: [u8; 4],
-    dst_port: u16,
-) -> i64 {
-    socket::socket_sendto(sock_idx, data, len, dst_ip, dst_port)
-}
-
-fn socket_recvfrom_adapter(
-    sock_idx: u32,
-    buf: *mut u8,
-    len: usize,
-    src_ip: *mut [u8; 4],
-    src_port: *mut u16,
-) -> i64 {
-    socket::socket_recvfrom(sock_idx, buf, len, src_ip, src_port)
-}
-
-fn socket_setsockopt_adapter(
-    sock_idx: u32,
-    level: i32,
-    optname: i32,
-    val: *const u8,
-    len: usize,
-) -> i32 {
-    if val.is_null() && len > 0 {
-        return -14;
-    }
-    let slice = if len > 0 {
-        unsafe { core::slice::from_raw_parts(val, len) }
-    } else {
-        &[]
-    };
-    socket::socket_setsockopt(sock_idx, level, optname, slice)
-}
-
-fn socket_getsockopt_adapter(
-    sock_idx: u32,
-    level: i32,
-    optname: i32,
-    out: *mut u8,
-    len: usize,
-) -> i32 {
-    if out.is_null() && len > 0 {
-        return -14;
-    }
-    let slice = if len > 0 {
-        unsafe { core::slice::from_raw_parts_mut(out, len) }
-    } else {
-        &mut []
-    };
-    socket::socket_getsockopt(sock_idx, level, optname, slice)
-}
-
-static SOCKET_SERVICES: SocketServices = SocketServices {
-    create: socket::socket_create,
-    bind: socket::socket_bind,
-    listen: socket::socket_listen,
-    accept: socket::socket_accept,
-    connect: socket::socket_connect,
-    send: socket_send_adapter,
-    recv: socket_recv_adapter,
-    sendto: socket_sendto_adapter,
-    recvfrom: socket_recvfrom_adapter,
-    close: socket::socket_close,
-    poll_readable: socket::socket_poll_readable,
-    poll_writable: socket::socket_poll_writable,
-    poll_enqueue_recv: socket::socket_poll_enqueue_recv,
-    poll_dequeue_recv: socket::socket_poll_dequeue_recv,
-    set_nonblocking: socket::socket_set_nonblocking,
-    setsockopt: socket_setsockopt_adapter,
-    getsockopt: socket_getsockopt_adapter,
-    shutdown: socket::socket_shutdown,
-};
-
-// =============================================================================
-// DNS services
-// =============================================================================
-
-fn dns_resolve_adapter(hostname: *const u8, hostname_len: usize, result: *mut [u8; 4]) -> i32 {
-    if hostname.is_null() || result.is_null() || hostname_len == 0 || hostname_len > 253 {
-        return -22; // EINVAL
-    }
-    let hostname_slice = unsafe { core::slice::from_raw_parts(hostname, hostname_len) };
-    match dns::dns_resolve(hostname_slice) {
-        Some(addr) => {
-            unsafe {
-                *result = addr;
-            }
-            0
-        }
-        None => -113, // EHOSTUNREACH
-    }
-}
-
-static DNS_SERVICES: DnsServices = DnsServices {
-    resolve: dns_resolve_adapter,
-};
-
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
-    register_net_services(&NET_SERVICES);
-    register_socket_services(&SOCKET_SERVICES);
-    register_dns_services(&DNS_SERVICES);
 }

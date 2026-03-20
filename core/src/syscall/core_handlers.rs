@@ -18,7 +18,7 @@ use crate::syscall::common::{
 };
 use crate::syscall::context::SyscallContext;
 use crate::task::{get_task_stats, task_terminate};
-use slopos_lib::kernel_services::syscall_services::{net, tty};
+use slopos_lib::kernel_services::syscall_services::tty;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
@@ -190,11 +190,11 @@ define_syscall!(syscall_net_scan(ctx, args) {
         return ctx.ok(0);
     }
 
-    let active_probe: u32 = if args.arg2 != 0 { 1 } else { 0 };
     let mut scratch = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
-    let discovered = net::scan_members(scratch.as_mut_ptr(), max_members, active_probe)
-        .min(max_members)
-        .min(USER_NET_MAX_MEMBERS);
+    let discovered =
+        slopos_net::netinfo::net_scan_members(scratch.as_mut_ptr(), max_members, args.arg2 != 0)
+            .min(max_members)
+            .min(USER_NET_MAX_MEMBERS);
 
     let mut i = 0usize;
     while i < discovered {
@@ -211,12 +211,12 @@ define_syscall!(syscall_net_scan(ctx, args) {
 define_syscall!(syscall_net_info(ctx, args) {
     require_nonzero!(ctx, args.arg0);
 
-    let ready = net::is_ready();
+    let ready = slopos_net::netinfo::net_is_ready();
     let mut info = UserNetInfo::default();
-    info.nic_ready = if ready != 0 { 1 } else { 0 };
+    info.nic_ready = u8::from(ready);
 
-    if ready != 0 {
-        let _ = net::get_info(&mut info as *mut UserNetInfo);
+    if ready {
+        let _ = slopos_net::netinfo::net_get_info(&mut info);
     }
 
     let user_ptr = try_or_err!(ctx, UserPtr::<UserNetInfo>::try_new(args.arg0));

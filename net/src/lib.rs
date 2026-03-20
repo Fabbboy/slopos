@@ -19,6 +19,7 @@ pub mod net_types_tests;
 pub mod netdev;
 #[cfg(feature = "itests")]
 pub mod netdev_tests;
+pub mod netinfo;
 #[cfg(feature = "itests")]
 pub mod netstack_tests;
 pub mod packetbuf;

@@ -4,11 +4,11 @@ use slopos_abi::net::{
     AF_INET, INVALID_SOCKET_IDX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn,
 };
 use slopos_abi::syscall::*;
-use slopos_lib::kernel_services::syscall_services::socket;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_net::{dns, socket};
 
 fn errno_i32(errno: i32) -> u64 {
     (errno as i64) as u64
@@ -52,14 +52,14 @@ define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
     }
     let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
-    let sock_idx = socket::create(domain, sock_type, protocol);
+    let sock_idx = socket::socket_create(domain, sock_type, protocol);
     if sock_idx < 0 {
         return ctx.err_with(errno_i32(sock_idx));
     }
 
     let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32);
     if fd < 0 {
-        let _ = socket::close(sock_idx as u32);
+        let _ = socket::socket_close(sock_idx as u32);
         return ctx.err_with(ERRNO_ENOMEM);
     }
 
@@ -83,7 +83,7 @@ define_syscall!(syscall_bind(ctx, args) requires(let process_id) {
     let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
     let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
     let port = u16::from_be(sock_addr.port);
-    rc_i32(&ctx, socket::bind(sock_idx, sock_addr.addr, port))
+    rc_i32(&ctx, socket::socket_bind(sock_idx, sock_addr.addr, port))
 });
 
 define_syscall!(syscall_listen(ctx, args) requires(let process_id) {
@@ -93,7 +93,7 @@ define_syscall!(syscall_listen(ctx, args) requires(let process_id) {
         Ok(idx) => idx,
         Err(errno) => return ctx.err_with(errno),
     };
-    rc_i32(&ctx, socket::listen(sock_idx, backlog))
+    rc_i32(&ctx, socket::socket_listen(sock_idx, backlog))
 });
 
 define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
@@ -110,7 +110,7 @@ define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
         return ctx.err_with(ERRNO_EINVAL);
     }
 
-    let accepted_idx = socket::accept(
+    let accepted_idx = socket::socket_accept(
         sock_idx,
         if want_peer {
             &mut peer_ip as *mut [u8; 4]
@@ -129,7 +129,7 @@ define_syscall!(syscall_accept(ctx, args) requires(let process_id) {
 
     let new_fd = slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32);
     if new_fd < 0 {
-        let _ = socket::close(accepted_idx as u32);
+        let _ = socket::socket_close(accepted_idx as u32);
         return ctx.err_with(ERRNO_ENOMEM);
     }
 
@@ -164,7 +164,7 @@ define_syscall!(syscall_connect(ctx, args) requires(let process_id) {
     let user_addr = try_or_err!(ctx, UserPtr::<SockAddrIn>::try_new(args.arg1));
     let sock_addr = try_or_err!(ctx, copy_from_user(user_addr));
     let port = u16::from_be(sock_addr.port);
-    rc_i32(&ctx, socket::connect(sock_idx, sock_addr.addr, port))
+    rc_i32(&ctx, socket::socket_connect(sock_idx, sock_addr.addr, port))
 });
 
 define_syscall!(syscall_send(ctx, args) requires(let process_id) {
@@ -183,10 +183,10 @@ define_syscall!(syscall_send(ctx, args) requires(let process_id) {
     if len > 0 {
         let user_data = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg1, len));
         let copied = try_or_err!(ctx, slopos_mm::user_copy::copy_bytes_from_user(user_data, &mut scratch[..len]));
-        return rc_i64(&ctx, socket::send(sock_idx, scratch.as_ptr(), copied));
+        return rc_i64(&ctx, socket::socket_send(sock_idx, scratch.as_ptr(), copied));
     }
 
-    rc_i64(&ctx, socket::send(sock_idx, core::ptr::null(), 0))
+    rc_i64(&ctx, socket::socket_send(sock_idx, core::ptr::null(), 0))
 });
 
 define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
@@ -202,7 +202,7 @@ define_syscall!(syscall_recv(ctx, args) requires(let process_id) {
 
     let len = args.arg2_usize().min(4096);
     let mut scratch = [0u8; 4096];
-    let rc = socket::recv(sock_idx, scratch.as_mut_ptr(), len);
+    let rc = socket::socket_recv(sock_idx, scratch.as_mut_ptr(), len);
     if rc < 0 {
         return ctx.err_with(rc as u64);
     }
@@ -249,7 +249,7 @@ define_syscall!(syscall_sendto(ctx, args) requires(let process_id) {
 
     rc_i64(
         &ctx,
-        socket::sendto(
+        socket::socket_sendto(
             sock_idx,
             if copied == 0 {
                 core::ptr::null()
@@ -284,7 +284,7 @@ define_syscall!(syscall_recvfrom(ctx, args) requires(let process_id) {
     let mut src_ip = [0u8; 4];
     let mut src_port = 0u16;
 
-    let rc = socket::recvfrom(
+    let rc = socket::socket_recvfrom(
         sock_idx,
         if len == 0 {
             core::ptr::null_mut()
@@ -352,7 +352,7 @@ define_syscall!(syscall_setsockopt(ctx, args) requires(let process_id) {
 
     rc_i32(
         &ctx,
-        socket::setsockopt(sock_idx, level, optname, scratch[..optlen].as_ptr(), optlen),
+        socket::socket_setsockopt(sock_idx, level, optname, &scratch[..optlen]),
     )
 });
 
@@ -377,7 +377,7 @@ define_syscall!(syscall_getsockopt(ctx, args) requires(let process_id) {
     let optlen = optlen.min(64);
 
     let mut scratch = [0u8; 64];
-    let rc = socket::getsockopt(sock_idx, level, optname, scratch.as_mut_ptr(), optlen);
+    let rc = socket::socket_getsockopt(sock_idx, level, optname, &mut scratch[..optlen]);
     if rc < 0 {
         return ctx.err_with(errno_i32(rc));
     }
@@ -402,7 +402,7 @@ define_syscall!(syscall_shutdown(ctx, args) requires(let process_id) {
     };
 
     let how = args.arg1 as i32;
-    rc_i32(&ctx, socket::shutdown(sock_idx, how))
+    rc_i32(&ctx, socket::socket_shutdown(sock_idx, how))
 });
 
 define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
@@ -424,18 +424,11 @@ define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
         return ctx.err_with(ERRNO_EFAULT);
     }
 
-    // Call DNS resolver via service
-    use slopos_lib::kernel_services::syscall_services::dns;
-    let mut result_addr = [0u8; 4];
-    let rc = dns::resolve(
-        hostname_buf[..hostname_len].as_ptr(),
-        hostname_len,
-        &mut result_addr as *mut [u8; 4],
-    );
-
-    if rc < 0 {
-        return ctx.err_with(ERRNO_EHOSTUNREACH);
-    }
+    let resolved = dns::dns_resolve(&hostname_buf[..hostname_len]);
+    let result_addr = match resolved {
+        Some(addr) => addr,
+        None => return ctx.err_with(ERRNO_EHOSTUNREACH),
+    };
 
     // Copy result to user memory
     let user_result = try_or_err!(ctx, slopos_mm::user_ptr::UserBytes::try_new(args.arg2, 4));

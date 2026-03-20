@@ -97,7 +97,9 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     };
 
     if src_port == super::dns::DNS_PORT {
-        crate::net_driver_service::dns_intercept_response(udp_payload);
+        if let Some(d) = crate::net_driver_service::net_driver() {
+            (d.dns_intercept_response)(udp_payload);
+        }
     }
 
     let sock_idx = UDP_DEMUX.lock().lookup(Ipv4Addr(dst_ip), Port(dst_port));
@@ -156,7 +158,9 @@ pub fn udp_sendto(
 
     pkt.prepend_ipv4(local_ip, dst_ip, super::IPPROTO_UDP, udp_len)?;
 
-    let src_mac = crate::net_driver_service::virtio_net_mac().unwrap_or([0; 6]);
+    let src_mac = crate::net_driver_service::net_driver()
+        .and_then(|d| (d.virtio_net_mac)())
+        .unwrap_or([0; 6]);
     pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
     pkt.set_ipv4_offsets();
 

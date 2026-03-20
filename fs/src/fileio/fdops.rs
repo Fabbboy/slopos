@@ -304,7 +304,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             if desc.socket_idx != INVALID_SOCKET_IDX {
                 let socket_idx = desc.socket_idx;
                 drop(guard);
-                return socket::recv(socket_idx, buffer as *mut u8, count) as ssize_t;
+                return socket::socket_recv(socket_idx, buffer as *mut u8, count) as ssize_t;
             }
 
             let fs = match desc.fs {
@@ -457,7 +457,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
             if desc.socket_idx != INVALID_SOCKET_IDX {
                 let socket_idx = desc.socket_idx;
                 drop(guard);
-                return socket::send(socket_idx, buffer as *const u8, count) as ssize_t;
+                return socket::socket_send(socket_idx, buffer as *const u8, count) as ssize_t;
             }
 
             let fs = match desc.fs {
@@ -549,7 +549,7 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
             return -1;
         };
         if desc.socket_idx != INVALID_SOCKET_IDX {
-            let _ = socket::close(desc.socket_idx);
+            let _ = socket::socket_close(desc.socket_idx);
             desc.socket_idx = INVALID_SOCKET_IDX;
         }
         reset_descriptor(desc);
@@ -1110,7 +1110,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             }
             desc.flags = next_flags;
             if desc.socket_idx != INVALID_SOCKET_IDX {
-                let _ = socket::set_nonblocking(desc.socket_idx, (arg & O_NONBLOCK) != 0);
+                let _ = socket::socket_set_nonblocking(desc.socket_idx, (arg & O_NONBLOCK) != 0);
             }
             drop(guard);
             0
@@ -1201,7 +1201,7 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
             pipe_read_end: false,
             pipe_write_end: false,
         };
-        let _ = socket::set_nonblocking(socket_idx, false);
+        let _ = socket::socket_set_nonblocking(socket_idx, false);
         drop(guard);
         slot_idx as i32
     })

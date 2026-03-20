@@ -71,7 +71,9 @@ pub fn test_napi_budget_limiting() -> TestResult {
 
 pub fn test_tx_fire_and_forget() -> TestResult {
     let start = slopos_lib::clock::uptime_ms();
-    let _ = crate::net_driver_service::virtio_net_transmit(&[0u8; 64]);
+    let _ = crate::net_driver_service::net_driver()
+        .map(|d| (d.virtio_net_transmit)(&[0u8; 64]))
+        .unwrap_or(false);
     let end = slopos_lib::clock::uptime_ms();
     assert_test!(
         end.saturating_sub(start) < 1000,

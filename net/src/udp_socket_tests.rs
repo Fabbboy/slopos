@@ -89,8 +89,9 @@ pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
     reset();
 
     let payload = [1u8, 2, 3, 4];
-    let ok =
-        crate::net_driver_service::transmit_udp_packet([10, 0, 2, 15], [8, 8, 8, 8], 50000, 53, &payload);
+    let ok = crate::net_driver_service::net_driver()
+        .map(|d| (d.transmit_udp_packet)([10, 0, 2, 15], [8, 8, 8, 8], 50000, 53, &payload))
+        .unwrap_or(false);
     assert_test!(ok || !ok, "transmit call returns without panic");
 
     pass!()

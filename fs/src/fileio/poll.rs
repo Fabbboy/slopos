@@ -91,7 +91,7 @@ pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollReg
             let sock_idx = desc.socket_idx;
             drop(guard);
             let ok = if (events & POLLIN) != 0 {
-                socket::poll_enqueue_recv(sock_idx)
+                socket::socket_poll_enqueue_recv(sock_idx)
             } else {
                 false
             };
@@ -115,7 +115,7 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
             tty::poll_dequeue(tty_idx);
         }
         PollRegKind::Socket(sock_idx) => {
-            socket::poll_dequeue_recv(sock_idx);
+            socket::socket_poll_dequeue_recv(sock_idx);
         }
         PollRegKind::None => {}
     }
@@ -149,8 +149,8 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
 
         if desc.socket_idx != INVALID_SOCKET_IDX {
             let socket_idx = desc.socket_idx;
-            let readable = socket::poll_readable(socket_idx) as u16;
-            let writable = socket::poll_writable(socket_idx) as u16;
+            let readable = socket::socket_poll_readable(socket_idx) as u16;
+            let writable = socket::socket_poll_writable(socket_idx) as u16;
             let mut revents = 0u16;
             if (events & POLLIN) != 0 {
                 if (readable & 1) != 0 {

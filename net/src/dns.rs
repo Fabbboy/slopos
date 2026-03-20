@@ -614,7 +614,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
     }
 
     // Get DNS server IP from DHCP lease
-    let dns_server = crate::net_driver_service::virtio_net_dns()?;
+    let dns_server = crate::net_driver_service::net_driver().and_then(|d| (d.virtio_net_dns)())?;
     if dns_server == [0; 4] {
         klog_debug!("dns: no DNS server configured");
         return None;
@@ -637,29 +637,41 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
         let src_port = 49152 + (id % 16384);
 
         // Clear any stale RX data
-        crate::net_driver_service::dns_rx_clear();
+        if let Some(d) = crate::net_driver_service::net_driver() {
+            (d.dns_rx_clear)();
+        }
 
         // Send query
-        if !crate::net_driver_service::transmit_udp_packet(
-            src_ip,
-            dns_server,
-            src_port,
-            DNS_PORT,
-            &query_buf[..query_len],
-        ) {
+        let transmitted = crate::net_driver_service::net_driver()
+            .map(|d| {
+                (d.transmit_udp_packet)(
+                    src_ip,
+                    dns_server,
+                    src_port,
+                    DNS_PORT,
+                    &query_buf[..query_len],
+                )
+            })
+            .unwrap_or(false);
+        if !transmitted {
             klog_debug!("dns: transmit failed (attempt {})", attempt);
             continue;
         }
 
         // Wait for response
-        if !crate::net_driver_service::dns_rx_wait(DNS_TIMEOUT_MS) {
+        let got_response = crate::net_driver_service::net_driver()
+            .map(|d| (d.dns_rx_wait)(DNS_TIMEOUT_MS))
+            .unwrap_or(false);
+        if !got_response {
             klog_debug!("dns: timeout (attempt {})", attempt);
             continue;
         }
 
         // Read response
         let mut resp_buf = [0u8; DNS_MAX_RESPONSE];
-        let resp_len = crate::net_driver_service::dns_rx_read(&mut resp_buf);
+        let resp_len = crate::net_driver_service::net_driver()
+            .map(|d| (d.dns_rx_read)(&mut resp_buf))
+            .unwrap_or(0);
         if resp_len == 0 {
             klog_debug!("dns: empty response (attempt {})", attempt);
             continue;

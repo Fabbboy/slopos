@@ -1297,6 +1297,9 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         virtio_net_is_ready,
         virtio_net_transmit,
         virtnet_force_napi_poll,
+        scan_members: virtio_net_scan_members,
+        is_ready: virtio_net_is_ready,
+        get_info: virtio_net_get_info,
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 

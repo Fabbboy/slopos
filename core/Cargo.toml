@@ -23,4 +23,5 @@ slopos-abi = { workspace = true }
 slopos-lib = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }
+slopos-net = { workspace = true }
 paste.workspace = true
