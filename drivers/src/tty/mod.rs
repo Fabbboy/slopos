@@ -43,7 +43,6 @@
 pub mod driver;
 pub mod ldisc;
 pub mod pty;
-pub mod ringbuf;
 pub mod session;
 pub mod table;
 pub mod vconsole;

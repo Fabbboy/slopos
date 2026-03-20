@@ -24,6 +24,7 @@ use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
+use slopos_lib::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
 
@@ -476,7 +477,7 @@ pub struct LineDisc {
     edit_len: usize,
 
     // -- Cooked output ring buffer (ready for userland read) --
-    cooked: super::ringbuf::RingBuf<COOKED_BUF_SIZE>,
+    cooked: RingBuffer<u8, COOKED_BUF_SIZE>,
 
     // -- Canonical line boundary tracking --
     /// Number of complete lines in the cooked buffer (delimited by newline or
@@ -565,21 +566,27 @@ impl LineDisc {
         ];
         Self {
             termios: UserTermios {
-                c_iflag: slopos_abi::syscall::ICRNL,
-                c_oflag: slopos_abi::syscall::OPOST
-                    | slopos_abi::syscall::ONLCR
-                    | slopos_abi::syscall::XTABS,
-                c_cflag: slopos_abi::syscall::CS8
-                    | slopos_abi::syscall::CREAD
-                    | slopos_abi::syscall::HUPCL
-                    | slopos_abi::syscall::B38400,
-                c_lflag: slopos_abi::syscall::ISIG
-                    | slopos_abi::syscall::ICANON
-                    | slopos_abi::syscall::ECHO
-                    | slopos_abi::syscall::ECHOE
-                    | slopos_abi::syscall::ECHOK
-                    | slopos_abi::syscall::ECHOCTL
-                    | slopos_abi::syscall::ECHOKE,
+                c_iflag: InputFlags::ICRNL,
+                c_oflag: OutputFlags::from_bits_retain(
+                    OutputFlags::OPOST.bits()
+                        | OutputFlags::ONLCR.bits()
+                        | OutputFlags::XTABS.bits(),
+                ),
+                c_cflag: ControlFlags::from_bits_retain(
+                    ControlFlags::CS8.bits()
+                        | ControlFlags::CREAD.bits()
+                        | ControlFlags::HUPCL.bits()
+                        | slopos_abi::syscall::B38400,
+                ),
+                c_lflag: LocalFlags::from_bits_retain(
+                    LocalFlags::ISIG.bits()
+                        | LocalFlags::ICANON.bits()
+                        | LocalFlags::ECHO.bits()
+                        | LocalFlags::ECHOE.bits()
+                        | LocalFlags::ECHOK.bits()
+                        | LocalFlags::ECHOCTL.bits()
+                        | LocalFlags::ECHOKE.bits(),
+                ),
                 c_line: N_TTY as u8,
                 c_cc: cc,
                 c_ispeed: 0,
@@ -587,7 +594,7 @@ impl LineDisc {
             },
             edit_buf: [0; EDIT_BUF_SIZE],
             edit_len: 0,
-            cooked: super::ringbuf::RingBuf::new(),
+            cooked: RingBuffer::new_zeroed(),
             line_count: 0,
             stopped: false,
             literal_next: false,
@@ -625,7 +632,7 @@ impl LineDisc {
     pub fn set_termios(&mut self, t: &UserTermios) {
         let old_lflag = self.termios.local_flags();
         let was_canon = old_lflag.contains(LocalFlags::ICANON);
-        let new_lflag = LocalFlags::from_bits_truncate(t.c_lflag);
+        let new_lflag = t.c_lflag;
         let is_canon = new_lflag.contains(LocalFlags::ICANON);
 
         // Detect echo-affecting flag changes and set PENDIN so
@@ -679,17 +686,17 @@ impl LineDisc {
         // keeps returning true (line_count > 0) and `read()` returns 0 bytes
         // without decrementing, creating a phantom-readable state.  Fix: detect
         // the zero-byte line and consume it immediately.
-        if canonical && self.line_count > 0 && self.cooked.peek_at(0).is_none() {
+        if canonical && self.line_count > 0 && self.cooked.peek_at_one(0).is_none() {
             self.line_count -= 1;
             return 0;
         }
 
         let mut copied = 0usize;
         while copied < out.len() {
-            let Some(byte) = self.cooked.peek() else {
+            let Some(byte) = self.cooked.peek().copied() else {
                 break;
             };
-            let _ = self.cooked.pop();
+            let _ = self.cooked.try_pop();
             out[copied] = byte;
             copied += 1;
 
@@ -1724,7 +1731,7 @@ impl LineDisc {
             self.overflow_count = self.overflow_count.saturating_add(1);
             return false;
         }
-        let _ = self.cooked.push(c);
+        let _ = self.cooked.try_push(c);
         self.wake_chars_pending += 1;
         true
     }
@@ -1950,7 +1957,7 @@ const RAW_BUF_SIZE: usize = 4096;
 /// output bytes pass through without `c_oflag` processing.
 pub struct RawDisc {
     termios: UserTermios,
-    buf: super::ringbuf::RingBuf<RAW_BUF_SIZE>,
+    buf: RingBuffer<u8, RAW_BUF_SIZE>,
     // Input wake batching (same as LineDisc).
     wake_chars_pending: usize,
 
@@ -1966,19 +1973,21 @@ impl RawDisc {
     pub const fn new() -> Self {
         Self {
             termios: UserTermios {
-                c_iflag: 0,
-                c_oflag: 0,
-                c_cflag: slopos_abi::syscall::CS8
-                    | slopos_abi::syscall::CREAD
-                    | slopos_abi::syscall::HUPCL
-                    | slopos_abi::syscall::B38400,
-                c_lflag: 0,
+                c_iflag: InputFlags::empty(),
+                c_oflag: OutputFlags::empty(),
+                c_cflag: ControlFlags::from_bits_retain(
+                    ControlFlags::CS8.bits()
+                        | ControlFlags::CREAD.bits()
+                        | ControlFlags::HUPCL.bits()
+                        | slopos_abi::syscall::B38400,
+                ),
+                c_lflag: LocalFlags::empty(),
                 c_line: N_RAW as u8,
                 c_cc: [0; NCCS],
                 c_ispeed: 0,
                 c_ospeed: 0,
             },
-            buf: super::ringbuf::RingBuf::new(),
+            buf: RingBuffer::new_zeroed(),
             wake_chars_pending: 0,
             no_room: false,
             overflow_count: 0,
@@ -2093,7 +2102,7 @@ impl RawDisc {
         if !self.termios.control_flags().contains(ControlFlags::CREAD) {
             return InputAction::None;
         }
-        if self.buf.push(event.byte) {
+        if self.buf.try_push(event.byte) {
             self.wake_chars_pending += 1;
         } else {
             // Record overflow state.
