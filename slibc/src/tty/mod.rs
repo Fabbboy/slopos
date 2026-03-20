@@ -6,8 +6,7 @@ pub mod tests;
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
 use slopos_abi::syscall::{
-    ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, IEXTEN, IGNBRK, INPCK, ISIG, ISTRIP, IXON, OPOST,
-    TCGETS, TCSETS, TCSETSF, TCSETSW, UserTermios, VMIN, VTIME,
+    InputFlags, LocalFlags, OutputFlags, TCGETS, TCSETS, TCSETSF, TCSETSW, UserTermios, VMIN, VTIME,
 };
 
 // =============================================================================
@@ -98,11 +97,22 @@ pub unsafe extern "C" fn cfmakeraw(termios: *mut UserTermios) {
     }
 
     // Clear input flags
-    (*termios).c_iflag &= !(IGNBRK | INPCK | ISTRIP | INPCK | ICRNL | IXON);
+    (*termios).c_iflag &= !(InputFlags::IGNBRK
+        | InputFlags::INPCK
+        | InputFlags::ISTRIP
+        | InputFlags::INPCK
+        | InputFlags::ICRNL
+        | InputFlags::IXON);
     // Clear output flags
-    (*termios).c_oflag &= !OPOST;
+    (*termios).c_oflag &= !OutputFlags::OPOST;
     // Clear local flags
-    (*termios).c_lflag &= !(ECHO | ECHOE | ECHOK | ECHONL | ICANON | ISIG | IEXTEN);
+    (*termios).c_lflag &= !(LocalFlags::ECHO
+        | LocalFlags::ECHOE
+        | LocalFlags::ECHOK
+        | LocalFlags::ECHONL
+        | LocalFlags::ICANON
+        | LocalFlags::ISIG
+        | LocalFlags::IEXTEN);
     // Set minimum input: 1 byte, no timeout
     (*termios).c_cc[VMIN] = 1;
     (*termios).c_cc[VTIME] = 0;

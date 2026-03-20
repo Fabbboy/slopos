@@ -96,6 +96,13 @@ impl fmt::Display for SyscallError {
     }
 }
 
+impl From<crate::errno::Errno> for SyscallError {
+    #[inline]
+    fn from(e: crate::errno::Errno) -> Self {
+        SyscallError::from_errno(e.raw())
+    }
+}
+
 pub type SyscallResult<T> = Result<T, SyscallError>;
 
 /// Convert raw syscall return value to Result.

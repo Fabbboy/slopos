@@ -1,5 +1,5 @@
 use super::*;
-use slopos_abi::syscall::UserTermios;
+use slopos_abi::syscall::{ControlFlags, InputFlags, LocalFlags, OutputFlags, UserTermios};
 
 pub fn run_tty_tests() -> (u32, u32) {
     let mut pass = 0u32;
@@ -31,24 +31,21 @@ pub fn run_tty_tests() -> (u32, u32) {
 
     check!("cfmakeraw_clears_flags", unsafe {
         let mut t = UserTermios {
-            c_iflag: 0xFFFF_FFFF,
-            c_oflag: 0xFFFF_FFFF,
-            c_cflag: 0,
-            c_lflag: 0xFFFF_FFFF,
+            c_iflag: InputFlags::from_bits_retain(0xFFFF_FFFF),
+            c_oflag: OutputFlags::from_bits_retain(0xFFFF_FFFF),
+            c_cflag: ControlFlags::empty(),
+            c_lflag: LocalFlags::from_bits_retain(0xFFFF_FFFF),
             c_line: 0,
             c_cc: [0; slopos_abi::syscall::NCCS],
             c_ispeed: 0,
             c_ospeed: 0,
         };
         cfmakeraw(&mut t);
-        let iflags_cleared =
-            (t.c_iflag & (slopos_abi::syscall::ICRNL | slopos_abi::syscall::IXON)) == 0;
-        let oflags_cleared = (t.c_oflag & slopos_abi::syscall::OPOST) == 0;
-        let lflags_cleared = (t.c_lflag
-            & (slopos_abi::syscall::ICANON
-                | slopos_abi::syscall::ECHO
-                | slopos_abi::syscall::ISIG))
-            == 0;
+        let iflags_cleared = !t.c_iflag.intersects(InputFlags::ICRNL | InputFlags::IXON);
+        let oflags_cleared = !t.c_oflag.contains(OutputFlags::OPOST);
+        let lflags_cleared = !t
+            .c_lflag
+            .intersects(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG);
         let vmin_set = t.c_cc[slopos_abi::syscall::VMIN] == 1;
         let vtime_set = t.c_cc[slopos_abi::syscall::VTIME] == 0;
         iflags_cleared && oflags_cleared && lflags_cleared && vmin_set && vtime_set
@@ -56,10 +53,10 @@ pub fn run_tty_tests() -> (u32, u32) {
 
     check!("cfgetispeed_returns_value", unsafe {
         let t = UserTermios {
-            c_iflag: 0,
-            c_oflag: 0,
-            c_cflag: 0,
-            c_lflag: 0,
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::empty(),
+            c_lflag: LocalFlags::empty(),
             c_line: 0,
             c_cc: [0; slopos_abi::syscall::NCCS],
             c_ispeed: 9600,
@@ -70,10 +67,10 @@ pub fn run_tty_tests() -> (u32, u32) {
 
     check!("cfsetispeed_sets_value", unsafe {
         let mut t = UserTermios {
-            c_iflag: 0,
-            c_oflag: 0,
-            c_cflag: 0,
-            c_lflag: 0,
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::empty(),
+            c_lflag: LocalFlags::empty(),
             c_line: 0,
             c_cc: [0; slopos_abi::syscall::NCCS],
             c_ispeed: 0,
@@ -84,10 +81,10 @@ pub fn run_tty_tests() -> (u32, u32) {
 
     check!("cfsetospeed_sets_value", unsafe {
         let mut t = UserTermios {
-            c_iflag: 0,
-            c_oflag: 0,
-            c_cflag: 0,
-            c_lflag: 0,
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::empty(),
+            c_lflag: LocalFlags::empty(),
             c_line: 0,
             c_cc: [0; slopos_abi::syscall::NCCS],
             c_ispeed: 0,
@@ -114,10 +111,10 @@ pub fn run_tty_tests() -> (u32, u32) {
 
     check!("tcsetattr_invalid_action", unsafe {
         let t = UserTermios {
-            c_iflag: 0,
-            c_oflag: 0,
-            c_cflag: 0,
-            c_lflag: 0,
+            c_iflag: InputFlags::empty(),
+            c_oflag: OutputFlags::empty(),
+            c_cflag: ControlFlags::empty(),
+            c_lflag: LocalFlags::empty(),
             c_line: 0,
             c_cc: [0; slopos_abi::syscall::NCCS],
             c_ispeed: 0,
