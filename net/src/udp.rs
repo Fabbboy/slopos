@@ -91,8 +91,24 @@ impl UdpDemuxTable {
 
 pub static UDP_DEMUX: IrqMutex<UdpDemuxTable> = IrqMutex::new(UdpDemuxTable::new());
 
+pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
+    if payload.len() < 8 {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([payload[0], payload[1]]);
+    let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+
+    if udp_len < 8 || udp_len > payload.len() {
+        return None;
+    }
+
+    Some((src_port, dst_port, &payload[8..udp_len]))
+}
+
 pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
-    let Some((src_port, dst_port, udp_payload)) = super::parse_udp_header(pkt.payload()) else {
+    let Some((src_port, dst_port, udp_payload)) = parse_udp_header(pkt.payload()) else {
         return;
     };
 
@@ -156,12 +172,12 @@ pub fn udp_sendto(
         udp_hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(local_ip, dst_ip, super::IPPROTO_UDP, udp_len)?;
+    pkt.prepend_ipv4(local_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
 
     let src_mac = crate::net_driver_service::net_driver()
         .and_then(|d| (d.virtio_net_mac)())
         .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
+    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let udp_checksum = pkt.compute_udp_checksum(Ipv4Addr(local_ip), Ipv4Addr(dst_ip));

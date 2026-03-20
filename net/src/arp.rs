@@ -14,11 +14,16 @@ use slopos_lib::klog_debug;
 use super::neighbor::{NEIGHBOR_CACHE, NeighborAction};
 use super::netdev::DeviceHandle;
 use super::packetbuf::PacketBuf;
-use super::types::{Ipv4Addr, MacAddr};
-use super::{
-    ARP_HEADER_LEN, ARP_HLEN_ETHERNET, ARP_HTYPE_ETHERNET, ARP_OPER_REPLY, ARP_OPER_REQUEST,
-    ARP_PLEN_IPV4, ARP_PTYPE_IPV4, ETH_ADDR_LEN, ETH_HEADER_LEN, ETHERTYPE_ARP,
-};
+use super::types::{EtherType, Ipv4Addr, MacAddr};
+use super::{ETH_ADDR_LEN, ETH_HEADER_LEN};
+
+const ARP_HTYPE_ETHERNET: u16 = 1;
+const ARP_PTYPE_IPV4: u16 = EtherType::Ipv4.as_u16();
+const ARP_HLEN_ETHERNET: u8 = 6;
+const ARP_PLEN_IPV4: u8 = 4;
+const ARP_OPER_REQUEST: u16 = 1;
+const ARP_OPER_REPLY: u16 = 2;
+const ARP_HEADER_LEN: usize = 28;
 
 // =============================================================================
 // 2C.1 — handle_rx
@@ -126,7 +131,7 @@ pub fn send_request(handle: &DeviceHandle, target_ip: Ipv4Addr) {
     };
     eth[0..ETH_ADDR_LEN].copy_from_slice(&MacAddr::BROADCAST.0);
     eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
-    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&EtherType::Arp.to_be_bytes());
 
     // Build ARP payload (append at tail).
     let mut arp_data = [0u8; ARP_HEADER_LEN];
@@ -176,7 +181,7 @@ fn send_reply(handle: &DeviceHandle, target_ip: Ipv4Addr, target_mac: MacAddr) {
     };
     eth[0..ETH_ADDR_LEN].copy_from_slice(&target_mac.0);
     eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
-    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&EtherType::Arp.to_be_bytes());
 
     let mut arp_data = [0u8; ARP_HEADER_LEN];
     arp_data[0..2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
@@ -319,7 +324,7 @@ pub fn send_request_via_registry(dev: super::types::DevIndex, target_ip: Ipv4Add
     };
     eth[0..ETH_ADDR_LEN].copy_from_slice(&MacAddr::BROADCAST.0);
     eth[ETH_ADDR_LEN..ETH_ADDR_LEN * 2].copy_from_slice(&our_mac.0);
-    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    eth[ETH_ADDR_LEN * 2..ETH_HEADER_LEN].copy_from_slice(&EtherType::Arp.to_be_bytes());
 
     // Build ARP payload.
     let mut arp_data = [0u8; ARP_HEADER_LEN];

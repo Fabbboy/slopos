@@ -4,6 +4,7 @@
 //! DevIndex identity, NetError errno mapping, SockAddr user conversion,
 //! EtherType/IpProtocol parsing.
 
+use slopos_abi::KernelErrno;
 use slopos_abi::net::{AF_INET, SockAddrIn};
 use slopos_lib::testing::TestResult;
 use slopos_lib::{assert_eq_test, assert_test, pass};
@@ -427,11 +428,6 @@ pub fn test_ether_type_from_u16() -> TestResult {
         Some(EtherType::Arp),
         "0x0806 = ARP"
     );
-    assert_eq_test!(
-        EtherType::from_u16(0x86DD),
-        Some(EtherType::Ipv6),
-        "0x86DD = IPv6"
-    );
     assert_eq_test!(EtherType::from_u16(0x1234), None, "unknown type = None");
     assert_eq_test!(EtherType::from_u16(0x0000), None, "0x0000 = None");
     pass!()
@@ -440,7 +436,6 @@ pub fn test_ether_type_from_u16() -> TestResult {
 pub fn test_ether_type_as_u16() -> TestResult {
     assert_eq_test!(EtherType::Ipv4.as_u16(), 0x0800u16, "IPv4 as u16");
     assert_eq_test!(EtherType::Arp.as_u16(), 0x0806u16, "ARP as u16");
-    assert_eq_test!(EtherType::Ipv6.as_u16(), 0x86DDu16, "IPv6 as u16");
     pass!()
 }
 

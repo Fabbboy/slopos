@@ -2,6 +2,13 @@
 
 use core::ffi::c_int;
 
+/// Trait for kernel error types that map to POSIX errno at the syscall boundary.
+///
+/// Implementors return a **negative** errno value (e.g., -EINVAL = -22).
+pub trait KernelErrno {
+    fn to_errno(&self) -> i32;
+}
+
 /// Implement common methods for kernel error enums.
 ///
 /// Generates `as_c_int()`, `from_c_int()`, `is_success()`, and `is_error()` methods
@@ -34,6 +41,13 @@ macro_rules! impl_kernel_error {
             #[inline]
             pub fn is_error(self) -> bool {
                 !self.is_success()
+            }
+        }
+
+        impl $crate::KernelErrno for $ty {
+            #[inline]
+            fn to_errno(&self) -> i32 {
+                self.as_c_int()
             }
         }
     };

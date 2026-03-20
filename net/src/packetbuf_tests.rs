@@ -458,7 +458,7 @@ pub fn test_ipv4_checksum() -> TestResult {
     // Recompute over the whole header (including the checksum field).
     // Use the standalone ipv4_header_checksum from mod.rs for verification.
     let hdr = &pkt.payload()[l3_off..l3_off + 20];
-    let verify = crate::ipv4_header_checksum(hdr);
+    let verify = crate::checksum::internet_checksum(hdr);
     assert_eq_test!(verify, 0, "checksum verifies to 0");
 
     pass!()
@@ -497,7 +497,7 @@ pub fn test_udp_checksum() -> TestResult {
     assert_test!(csum != 0, "UDP checksum should be non-zero");
 
     // Cross-check with the existing udp_checksum function from mod.rs.
-    let expected = crate::udp_checksum(src.0, dst.0, 1234, 53, payload);
+    let expected = crate::checksum::udp_checksum(src.0, dst.0, 1234, 53, payload);
     assert_eq_test!(csum, expected, "matches existing udp_checksum function");
 
     pass!()

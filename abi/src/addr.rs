@@ -103,26 +103,14 @@ impl PhysAddr {
         }
     }
 
-    /// Align address down to the given alignment.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `align` is not a power of two.
     #[inline]
     pub const fn align_down(self, align: u64) -> Self {
-        debug_assert!(align.is_power_of_two(), "align must be power of two");
-        Self(self.0 & !(align - 1))
+        Self(crate::alignment::align_down_u64(self.0, align))
     }
 
-    /// Align address up to the given alignment.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `align` is not a power of two.
     #[inline]
     pub const fn align_up(self, align: u64) -> Self {
-        debug_assert!(align.is_power_of_two(), "align must be power of two");
-        Self((self.0 + align - 1) & !(align - 1))
+        Self(crate::alignment::align_up_u64(self.0, align))
     }
 
     /// Check if address is aligned to the given alignment.
@@ -214,16 +202,14 @@ impl VirtAddr {
         }
     }
 
-    /// Align address down to the given alignment.
     #[inline]
     pub const fn align_down(self, align: u64) -> Self {
-        Self(self.0 & !(align - 1))
+        Self(crate::alignment::align_down_u64(self.0, align))
     }
 
-    /// Align address up to the given alignment.
     #[inline]
     pub const fn align_up(self, align: u64) -> Self {
-        Self((self.0 + align - 1) & !(align - 1))
+        Self(crate::alignment::align_up_u64(self.0, align))
     }
 
     /// Check if address is aligned to the given alignment.

@@ -775,7 +775,7 @@ pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
     if let Err(err) = pkt.prepend_ipv4(
         seg.tuple.local_ip,
         seg.tuple.remote_ip,
-        net::IPPROTO_TCP,
+        net::IpProtocol::Tcp.as_u8(),
         tcp_len,
     ) {
         return map_net_err(err);

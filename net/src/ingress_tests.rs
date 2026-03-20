@@ -12,11 +12,11 @@ use alloc::vec::Vec;
 use slopos_lib::testing::TestResult;
 use slopos_lib::{IrqMutex, pass};
 
+use crate::ETH_HEADER_LEN;
 use crate::netdev::*;
 use crate::packetbuf::PacketBuf;
 use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::*;
-use crate::{ETH_HEADER_LEN, ETHERTYPE_IPV4};
 
 // =============================================================================
 // Mock NetDevice for testing
@@ -120,7 +120,7 @@ fn build_ipv4_header(proto: u8, src: [u8; 4], dst: [u8; 4], payload_len: usize) 
     hdr[12..16].copy_from_slice(&src);
     hdr[16..20].copy_from_slice(&dst);
     // Compute checksum
-    let csum = crate::ipv4_header_checksum(&hdr);
+    let csum = crate::checksum::internet_checksum(&hdr);
     hdr[10..12].copy_from_slice(&csum.to_be_bytes());
     hdr
 }
@@ -186,7 +186,7 @@ pub fn test_ingress_drops_wrong_destination_mac() -> TestResult {
     let frame = build_frame(
         wrong_dst_mac,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &payload,
     );
 
@@ -217,7 +217,7 @@ pub fn test_ingress_accepts_broadcast_mac() -> TestResult {
     let frame = build_frame(
         broadcast_mac,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &payload,
     );
 
@@ -247,7 +247,7 @@ pub fn test_ingress_accepts_our_mac() -> TestResult {
     let frame = build_frame(
         device_mac.0,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &payload,
     );
 
@@ -276,7 +276,7 @@ pub fn test_ingress_ipv4_bad_version() -> TestResult {
     let mut ipv4_hdr = build_ipv4_header(17, [192, 168, 1, 100], [192, 168, 1, 1], 8);
     ipv4_hdr[0] = 0x65; // version 6, IHL 5
     // Recompute checksum
-    let csum = crate::ipv4_header_checksum(&ipv4_hdr);
+    let csum = crate::checksum::internet_checksum(&ipv4_hdr);
     ipv4_hdr[10..12].copy_from_slice(&csum.to_be_bytes());
 
     let mut payload = Vec::new();
@@ -286,7 +286,7 @@ pub fn test_ingress_ipv4_bad_version() -> TestResult {
     let frame = build_frame(
         device_mac.0,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &payload,
     );
 
@@ -312,7 +312,7 @@ pub fn test_ingress_ipv4_short_header() -> TestResult {
     let frame = build_frame(
         device_mac.0,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &short_ip_data,
     );
 
@@ -345,7 +345,7 @@ pub fn test_ingress_ipv4_bad_checksum() -> TestResult {
     let frame = build_frame(
         device_mac.0,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        ETHERTYPE_IPV4,
+        EtherType::Ipv4.as_u16(),
         &payload,
     );
 

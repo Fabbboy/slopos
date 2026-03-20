@@ -252,7 +252,7 @@ pub fn test_udp_t9_parse_udp_header_valid_invalid() -> TestResult {
     let valid = [
         0x12, 0x34, 0x56, 0x78, 0x00, 0x0C, 0x00, 0x00, 0xAA, 0xBB, 0xCC, 0xDD,
     ];
-    let parsed = match crate::parse_udp_header(&valid) {
+    let parsed = match crate::udp::parse_udp_header(&valid) {
         Some(v) => v,
         None => return fail!("valid UDP header should parse"),
     };
@@ -262,13 +262,13 @@ pub fn test_udp_t9_parse_udp_header_valid_invalid() -> TestResult {
 
     let too_short = [0u8; 7];
     assert_test!(
-        crate::parse_udp_header(&too_short).is_none(),
+        crate::udp::parse_udp_header(&too_short).is_none(),
         "short header rejected"
     );
 
     let bad_len = [0x00, 0x01, 0x00, 0x02, 0x00, 0x20, 0x00, 0x00, 0xAA];
     assert_test!(
-        crate::parse_udp_header(&bad_len).is_none(),
+        crate::udp::parse_udp_header(&bad_len).is_none(),
         "oversized UDP length rejected"
     );
 

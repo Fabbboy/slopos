@@ -63,6 +63,12 @@ const PACKET_BUFFER_SIZE: usize = 2048;
 const MAX_NET_MEMBERS: usize = 32;
 
 const UDP_HEADER_LEN: usize = 8;
+const ARP_HEADER_LEN: usize = 28;
+const ARP_HTYPE_ETHERNET: u16 = 1;
+const ARP_PTYPE_IPV4: u16 = net::EtherType::Ipv4.as_u16();
+const ARP_HLEN_ETHERNET: u8 = 6;
+const ARP_PLEN_IPV4: u8 = 4;
+const ARP_OPER_REQUEST: u16 = 1;
 
 const DHCP_RX_MAX_POLLS: usize = 64;
 const RX_RING_SIZE: usize = 64;
@@ -417,17 +423,17 @@ fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
     let src_mac: [u8; 6] = frame[6..12].try_into().unwrap();
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
-    if ethertype == net::ETHERTYPE_ARP {
-        if frame.len() < net::ETH_HEADER_LEN + net::ARP_HEADER_LEN {
+    if ethertype == net::EtherType::Arp.as_u16() {
+        if frame.len() < net::ETH_HEADER_LEN + ARP_HEADER_LEN {
             return;
         }
-        let arp = &frame[net::ETH_HEADER_LEN..net::ETH_HEADER_LEN + net::ARP_HEADER_LEN];
+        let arp = &frame[net::ETH_HEADER_LEN..net::ETH_HEADER_LEN + ARP_HEADER_LEN];
         let htype = u16::from_be_bytes([arp[0], arp[1]]);
         let ptype = u16::from_be_bytes([arp[2], arp[3]]);
-        if htype != net::ARP_HTYPE_ETHERNET
-            || ptype != net::ARP_PTYPE_IPV4
-            || arp[4] != net::ARP_HLEN_ETHERNET
-            || arp[5] != net::ARP_PLEN_IPV4
+        if htype != ARP_HTYPE_ETHERNET
+            || ptype != ARP_PTYPE_IPV4
+            || arp[4] != ARP_HLEN_ETHERNET
+            || arp[5] != ARP_PLEN_IPV4
         {
             return;
         }
@@ -437,7 +443,7 @@ fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
         return;
     }
 
-    if ethertype == net::ETHERTYPE_IPV4 {
+    if ethertype == net::EtherType::Ipv4.as_u16() {
         if frame.len() < net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN {
             return;
         }
@@ -521,7 +527,7 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
     };
 
     let hdr_len = size_of::<VirtioNetHdrV1>();
-    let frame_len = net::ETH_HEADER_LEN + net::ARP_HEADER_LEN;
+    let frame_len = net::ETH_HEADER_LEN + ARP_HEADER_LEN;
     let total_len = hdr_len + frame_len;
 
     if total_len > PACKET_BUFFER_SIZE {
@@ -533,18 +539,18 @@ fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool 
             core::slice::from_raw_parts_mut(tx_page.as_mut_ptr::<u8>().add(hdr_len), frame_len);
 
         // Ethernet header
-        frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::ETH_BROADCAST);
+        frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::MacAddr::BROADCAST.0);
         frame[net::ETH_ADDR_LEN..net::ETH_ADDR_LEN * 2].copy_from_slice(&state.device.mac);
         frame[net::ETH_ADDR_LEN * 2..net::ETH_HEADER_LEN]
-            .copy_from_slice(&net::ETHERTYPE_ARP.to_be_bytes());
+            .copy_from_slice(&net::EtherType::Arp.to_be_bytes());
 
         // ARP payload
         let a = net::ETH_HEADER_LEN;
-        frame[a..a + 2].copy_from_slice(&net::ARP_HTYPE_ETHERNET.to_be_bytes());
-        frame[a + 2..a + 4].copy_from_slice(&net::ARP_PTYPE_IPV4.to_be_bytes());
-        frame[a + 4] = net::ARP_HLEN_ETHERNET;
-        frame[a + 5] = net::ARP_PLEN_IPV4;
-        frame[a + 6..a + 8].copy_from_slice(&net::ARP_OPER_REQUEST.to_be_bytes());
+        frame[a..a + 2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
+        frame[a + 2..a + 4].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());
+        frame[a + 4] = ARP_HLEN_ETHERNET;
+        frame[a + 5] = ARP_PLEN_IPV4;
+        frame[a + 6..a + 8].copy_from_slice(&ARP_OPER_REQUEST.to_be_bytes());
         frame[a + 8..a + 14].copy_from_slice(&state.device.mac);
         frame[a + 14..a + 18].copy_from_slice(&state.ipv4_addr);
         frame[a + 18..a + 24].copy_from_slice(&[0; net::ETH_ADDR_LEN]);
@@ -592,6 +598,22 @@ fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
     }
 }
 
+fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
+    if payload.len() < UDP_HEADER_LEN {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([payload[0], payload[1]]);
+    let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+
+    if udp_len < UDP_HEADER_LEN || udp_len > payload.len() {
+        return None;
+    }
+
+    Some((src_port, dst_port, &payload[UDP_HEADER_LEN..udp_len]))
+}
+
 fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
     sniff_frame_for_members(state, frame);
     if frame.len() < net::ETH_HEADER_LEN {
@@ -599,7 +621,7 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
     }
 
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    if ethertype != net::ETHERTYPE_IPV4 {
+    if ethertype != net::EtherType::Ipv4.as_u16() {
         return;
     }
     if frame.len() < net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN {
@@ -618,7 +640,7 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
     let ip_payload = &frame[ip_off + ihl..];
 
     match proto {
-        net::IPPROTO_TCP => {
+        p if p == net::IpProtocol::Tcp.as_u8() => {
             let Some(hdr) = tcp::parse_header(ip_payload) else {
                 return;
             };
@@ -635,8 +657,8 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
             }
             socket::socket_notify_tcp_activity(&result);
         }
-        net::IPPROTO_UDP => {
-            if let Some((src_port, dst_port, udp_payload)) = net::parse_udp_header(ip_payload) {
+        p if p == net::IpProtocol::Udp.as_u8() => {
+            if let Some((src_port, dst_port, udp_payload)) = parse_udp_header(ip_payload) {
                 // Intercept DNS responses (src port 53) for the in-kernel resolver
                 if src_port == net::dns::DNS_PORT {
                     let copy_len = udp_payload.len().min(512);
@@ -657,7 +679,7 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
                 );
             }
         }
-        net::IPPROTO_ICMP => {
+        p if p == net::IpProtocol::Icmp.as_u8() => {
             let _ = (src_ip, dst_ip, ip_payload);
         }
         _ => {}
@@ -801,10 +823,10 @@ fn transmit_udp_packet_locked(
         let frame =
             core::slice::from_raw_parts_mut(tx_page.as_mut_ptr::<u8>().add(hdr_len), frame_len);
 
-        frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::ETH_BROADCAST);
+        frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::MacAddr::BROADCAST.0);
         frame[net::ETH_ADDR_LEN..net::ETH_ADDR_LEN * 2].copy_from_slice(&state.device.mac);
         frame[net::ETH_ADDR_LEN * 2..net::ETH_HEADER_LEN]
-            .copy_from_slice(&net::ETHERTYPE_IPV4.to_be_bytes());
+            .copy_from_slice(&net::EtherType::Ipv4.to_be_bytes());
 
         let ip = net::ETH_HEADER_LEN;
         let ip_total = net::IPV4_HEADER_LEN + UDP_HEADER_LEN + payload.len();
@@ -814,11 +836,11 @@ fn transmit_udp_packet_locked(
         frame[ip + 4..ip + 6].copy_from_slice(&0u16.to_be_bytes());
         frame[ip + 6..ip + 8].copy_from_slice(&0u16.to_be_bytes());
         frame[ip + 8] = 64;
-        frame[ip + 9] = net::IPPROTO_UDP;
+        frame[ip + 9] = net::IpProtocol::Udp.as_u8();
         frame[ip + 10..ip + 12].copy_from_slice(&0u16.to_be_bytes());
         frame[ip + 12..ip + 16].copy_from_slice(&src_ip);
         frame[ip + 16..ip + 20].copy_from_slice(&dst_ip);
-        let ip_csum = net::ipv4_header_checksum(&frame[ip..ip + net::IPV4_HEADER_LEN]);
+        let ip_csum = net::checksum::internet_checksum(&frame[ip..ip + net::IPV4_HEADER_LEN]);
         frame[ip + 10..ip + 12].copy_from_slice(&ip_csum.to_be_bytes());
 
         let udp = ip + net::IPV4_HEADER_LEN;
@@ -829,7 +851,7 @@ fn transmit_udp_packet_locked(
         frame[udp + 6..udp + 8].copy_from_slice(&0u16.to_be_bytes());
         frame[udp + UDP_HEADER_LEN..udp + UDP_HEADER_LEN + payload.len()].copy_from_slice(payload);
 
-        let udp_csum = net::udp_checksum(src_ip, dst_ip, src_port, dst_port, payload);
+        let udp_csum = net::checksum::udp_checksum(src_ip, dst_ip, src_port, dst_port, payload);
         frame[udp + 6..udp + 8].copy_from_slice(&udp_csum.to_be_bytes());
     }
 
@@ -855,7 +877,7 @@ fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
     transmit_udp_packet_locked(
         state,
         [0; 4],
-        net::IPV4_BROADCAST,
+        net::Ipv4Addr::BROADCAST.0,
         dhcp::UDP_PORT_CLIENT,
         dhcp::UDP_PORT_SERVER,
         payload,
@@ -868,7 +890,7 @@ fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::D
     if frame.len() < min_len {
         return None;
     }
-    if u16::from_be_bytes([frame[12], frame[13]]) != net::ETHERTYPE_IPV4 {
+    if u16::from_be_bytes([frame[12], frame[13]]) != net::EtherType::Ipv4.as_u16() {
         return None;
     }
 
@@ -879,7 +901,7 @@ fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::D
     {
         return None;
     }
-    if frame[ip_off + 9] != net::IPPROTO_UDP {
+    if frame[ip_off + 9] != net::IpProtocol::Udp.as_u8() {
         return None;
     }
 

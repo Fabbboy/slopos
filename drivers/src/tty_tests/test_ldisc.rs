@@ -12,6 +12,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
+use slopos_abi::KernelErrno;
 use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,

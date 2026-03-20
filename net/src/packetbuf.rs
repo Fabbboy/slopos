@@ -442,7 +442,7 @@ impl PacketBuf {
         let eth_hdr = self.push_header(super::ETH_HEADER_LEN)?;
         eth_hdr[0..6].copy_from_slice(&dst_mac);
         eth_hdr[6..12].copy_from_slice(&src_mac);
-        eth_hdr[12..14].copy_from_slice(&super::ETHERTYPE_IPV4.to_be_bytes());
+        eth_hdr[12..14].copy_from_slice(&super::EtherType::Ipv4.to_be_bytes());
         Ok(())
     }
 

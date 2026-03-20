@@ -350,26 +350,25 @@ pub enum TtyError {
     Restart,
 }
 
-impl TtyError {
-    /// Map this error to a negative errno value for the syscall boundary.
+impl slopos_abi::KernelErrno for TtyError {
     #[inline]
-    pub const fn to_errno(self) -> i32 {
+    fn to_errno(&self) -> i32 {
         use slopos_abi::syscall::*;
         match self {
-            TtyError::InvalidIndex => ERRNO_EINVAL as i32,
-            TtyError::NotAllocated => ERRNO_ENXIO as i32,
-            TtyError::BackgroundRead => ERRNO_EIO as i32,
-            TtyError::BackgroundWrite => ERRNO_EIO as i32,
-            TtyError::HungUp => ERRNO_EIO as i32,
-            TtyError::WouldBlock => ERRNO_EAGAIN as i32,
-            TtyError::PermissionDenied => ERRNO_EPERM as i32,
-            TtyError::UnsupportedLineDiscipline => ERRNO_EINVAL as i32,
-            TtyError::CrossSessionDenied => ERRNO_EIO as i32,
-            TtyError::SignalInterrupt => ERRNO_EINTR as i32,
-            TtyError::OrphanedProcessGroup => ERRNO_EIO as i32,
-            TtyError::InvalidArg => ERRNO_EINVAL as i32,
-            TtyError::DeviceBusy => ERRNO_EBUSY as i32,
-            TtyError::Restart => ERRNO_ERESTARTSYS as i32,
+            Self::InvalidIndex => ERRNO_EINVAL as i32,
+            Self::NotAllocated => ERRNO_ENXIO as i32,
+            Self::BackgroundRead => ERRNO_EIO as i32,
+            Self::BackgroundWrite => ERRNO_EIO as i32,
+            Self::HungUp => ERRNO_EIO as i32,
+            Self::WouldBlock => ERRNO_EAGAIN as i32,
+            Self::PermissionDenied => ERRNO_EPERM as i32,
+            Self::UnsupportedLineDiscipline => ERRNO_EINVAL as i32,
+            Self::CrossSessionDenied => ERRNO_EIO as i32,
+            Self::SignalInterrupt => ERRNO_EINTR as i32,
+            Self::OrphanedProcessGroup => ERRNO_EIO as i32,
+            Self::InvalidArg => ERRNO_EINVAL as i32,
+            Self::DeviceBusy => ERRNO_EBUSY as i32,
+            Self::Restart => ERRNO_ERESTARTSYS as i32,
         }
     }
 }

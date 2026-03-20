@@ -70,9 +70,6 @@ pub fn net_rx(handle: &DeviceHandle, mut pkt: PacketBuf) {
     match EtherType::from_u16(ethertype_raw) {
         Some(EtherType::Arp) => arp::handle_rx(handle, pkt),
         Some(EtherType::Ipv4) => ipv4::handle_rx(dev, pkt, checksum_rx),
-        Some(EtherType::Ipv6) => {
-            // IPv6 not supported yet — silently drop.
-        }
         None => {
             klog_debug!(
                 "ingress: unknown EtherType 0x{:04x}, dropping",

@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod addr;
+pub mod alignment;
 pub mod auxv;
 pub mod damage;
 pub mod display;
@@ -35,6 +36,7 @@ pub mod window;
 pub const PAGE_SIZE: u64 = 0x1000;
 
 pub use addr::*;
+pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};
 pub use display::{DisplayInfo, FramebufferData};
 pub use draw::{Canvas, Color32, EncodedPixel};

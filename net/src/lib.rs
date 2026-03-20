@@ -85,49 +85,11 @@ pub use types::{DevIndex, EtherType, IpProtocol, Ipv4Addr, MacAddr, NetError, Po
 // Ethernet
 // =============================================================================
 
-pub const ETHERTYPE_IPV4: u16 = 0x0800;
-pub const ETHERTYPE_ARP: u16 = 0x0806;
 pub const ETH_HEADER_LEN: usize = 14;
 pub const ETH_ADDR_LEN: usize = 6;
-pub const ETH_BROADCAST: [u8; 6] = [0xff; 6];
-
-// =============================================================================
-// ARP (Ethernet + IPv4 only)
-// =============================================================================
-
-pub const ARP_HTYPE_ETHERNET: u16 = 1;
-pub const ARP_PTYPE_IPV4: u16 = ETHERTYPE_IPV4;
-pub const ARP_HLEN_ETHERNET: u8 = 6;
-pub const ARP_PLEN_IPV4: u8 = 4;
-pub const ARP_OPER_REQUEST: u16 = 1;
-pub const ARP_OPER_REPLY: u16 = 2;
-pub const ARP_HEADER_LEN: usize = 28;
 
 // =============================================================================
 // IPv4
 // =============================================================================
 
 pub const IPV4_HEADER_LEN: usize = 20;
-pub const IPV4_BROADCAST: [u8; 4] = [255, 255, 255, 255];
-pub const IPPROTO_TCP: u8 = 6;
-pub const IPPROTO_UDP: u8 = 17;
-pub const IPPROTO_ICMP: u8 = 1;
-
-pub fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
-    if payload.len() < 8 {
-        return None;
-    }
-
-    let src_port = u16::from_be_bytes([payload[0], payload[1]]);
-    let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
-    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
-
-    if udp_len < 8 || udp_len > payload.len() {
-        return None;
-    }
-
-    Some((src_port, dst_port, &payload[8..udp_len]))
-}
-
-pub use checksum::internet_checksum as ipv4_header_checksum;
-pub use checksum::udp_checksum;

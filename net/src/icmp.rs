@@ -227,12 +227,12 @@ fn send_echo(
         icmp_hdr[6..8].copy_from_slice(&sequence.to_be_bytes());
     }
 
-    pkt.prepend_ipv4(src_ip, dst_ip, super::IPPROTO_ICMP, icmp_len)?;
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Icmp.as_u8(), icmp_len)?;
 
     let src_mac = crate::net_driver_service::net_driver()
         .and_then(|d| (d.virtio_net_mac)())
         .unwrap_or([0; 6]);
-    pkt.prepend_eth(src_mac, super::ETH_BROADCAST)?;
+    pkt.prepend_eth(src_mac, super::MacAddr::BROADCAST.0)?;
     pkt.set_ipv4_offsets();
 
     let icmp_start = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;

@@ -78,7 +78,13 @@ pub fn udp_checksum(
     let udp_len = 8 + payload.len();
     let mut sum = 0u32;
 
-    add_pseudo_header(&mut sum, src_ip, dst_ip, super::IPPROTO_UDP, udp_len);
+    add_pseudo_header(
+        &mut sum,
+        src_ip,
+        dst_ip,
+        super::IpProtocol::Udp.as_u8(),
+        udp_len,
+    );
 
     sum = sum.wrapping_add(src_port as u32);
     sum = sum.wrapping_add(dst_port as u32);

@@ -1,4 +1,5 @@
 use super::*;
+use slopos_abi::KernelErrno;
 
 pub fn test_pty_data_roundtrip() -> TestResult {
     tty::table::tty_table_init();

@@ -1,3 +1,4 @@
+use slopos_abi::KernelErrno;
 use slopos_lib::kernel_services::syscall_services::input::{
     InputServices, register_input_services,
 };

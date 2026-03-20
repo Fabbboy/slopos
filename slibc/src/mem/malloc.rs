@@ -12,17 +12,14 @@ use slopos_abi::syscall::{
     MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE, SYSCALL_MMAP, SYSCALL_MUNMAP,
 };
 
+use slopos_abi::alignment::align_up_usize;
+
 pub const ALIGNMENT: usize = 16;
 const INITIAL_HEAP_SIZE: usize = 64 * 1024;
 const EXTEND_MIN_SIZE: usize = 64 * 1024;
 const MMAP_THRESHOLD: usize = 128 * 1024;
 const MMAP_FLAG: u32 = 1;
 const PAGE_SIZE: usize = 4096;
-
-#[inline]
-pub(crate) const fn align_up_usize(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
-}
 
 #[repr(transparent)]
 struct SyncBlockPtr(*mut BlockHeader);

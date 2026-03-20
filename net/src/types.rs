@@ -298,32 +298,30 @@ pub enum NetError {
     Shutdown,
 }
 
-impl NetError {
-    /// Convert to a POSIX errno value (negative) for the syscall boundary.
-    ///
-    /// Each variant maps to exactly one Linux errno constant.
-    pub const fn to_errno(&self) -> i32 {
+impl slopos_abi::KernelErrno for NetError {
+    fn to_errno(&self) -> i32 {
+        use slopos_abi::syscall::*;
         match self {
-            Self::WouldBlock => -11,                // EAGAIN
-            Self::ConnectionRefused => -111,        // ECONNREFUSED
-            Self::ConnectionReset => -104,          // ECONNRESET
-            Self::ConnectionAborted => -103,        // ECONNABORTED
-            Self::TimedOut => -110,                 // ETIMEDOUT
-            Self::AddressInUse => -98,              // EADDRINUSE
-            Self::AddressNotAvailable => -99,       // EADDRNOTAVAIL
-            Self::NotConnected => -107,             // ENOTCONN
-            Self::AlreadyConnected => -106,         // EISCONN
-            Self::NetworkUnreachable => -101,       // ENETUNREACH
-            Self::HostUnreachable => -113,          // EHOSTUNREACH
-            Self::PermissionDenied => -1,           // EPERM
-            Self::InvalidArgument => -22,           // EINVAL
-            Self::NoBufferSpace => -105,            // ENOBUFS
-            Self::ProtocolNotSupported => -93,      // EPROTONOSUPPORT
-            Self::AddressFamilyNotSupported => -97, // EAFNOSUPPORT
-            Self::SocketNotBound => -22,            // EINVAL (bind not called)
-            Self::InProgress => -115,               // EINPROGRESS
-            Self::OperationNotSupported => -95,     // EOPNOTSUPP
-            Self::Shutdown => -32,                  // EPIPE
+            Self::WouldBlock => ERRNO_EAGAIN as i32,
+            Self::ConnectionRefused => ERRNO_ECONNREFUSED as i32,
+            Self::ConnectionReset => ERRNO_ECONNRESET as i32,
+            Self::ConnectionAborted => ERRNO_ECONNABORTED as i32,
+            Self::TimedOut => ERRNO_ETIMEDOUT as i32,
+            Self::AddressInUse => ERRNO_EADDRINUSE as i32,
+            Self::AddressNotAvailable => ERRNO_EADDRNOTAVAIL as i32,
+            Self::NotConnected => ERRNO_ENOTCONN as i32,
+            Self::AlreadyConnected => ERRNO_EISCONN as i32,
+            Self::NetworkUnreachable => ERRNO_ENETUNREACH as i32,
+            Self::HostUnreachable => ERRNO_EHOSTUNREACH as i32,
+            Self::PermissionDenied => ERRNO_EPERM as i32,
+            Self::InvalidArgument => ERRNO_EINVAL as i32,
+            Self::NoBufferSpace => ERRNO_ENOBUFS as i32,
+            Self::ProtocolNotSupported => ERRNO_EPROTONOSUPPORT as i32,
+            Self::AddressFamilyNotSupported => ERRNO_EAFNOSUPPORT as i32,
+            Self::SocketNotBound => ERRNO_EINVAL as i32,
+            Self::InProgress => ERRNO_EINPROGRESS as i32,
+            Self::OperationNotSupported => ERRNO_EOPNOTSUPP as i32,
+            Self::Shutdown => ERRNO_EPIPE as i32,
         }
     }
 }
@@ -427,8 +425,6 @@ pub enum EtherType {
     Ipv4 = 0x0800,
     /// ARP (`0x0806`).
     Arp = 0x0806,
-    /// IPv6 (`0x86DD`).
-    Ipv6 = 0x86DD,
 }
 
 impl EtherType {
@@ -438,7 +434,6 @@ impl EtherType {
         match val {
             0x0800 => Some(Self::Ipv4),
             0x0806 => Some(Self::Arp),
-            0x86DD => Some(Self::Ipv6),
             _ => None,
         }
     }
@@ -448,6 +443,11 @@ impl EtherType {
     pub const fn as_u16(self) -> u16 {
         self as u16
     }
+
+    #[inline]
+    pub const fn to_be_bytes(self) -> [u8; 2] {
+        (self as u16).to_be_bytes()
+    }
 }
 
 impl fmt::Display for EtherType {
@@ -455,7 +455,6 @@ impl fmt::Display for EtherType {
         match self {
             Self::Ipv4 => write!(f, "IPv4"),
             Self::Arp => write!(f, "ARP"),
-            Self::Ipv6 => write!(f, "IPv6"),
         }
     }
 }
