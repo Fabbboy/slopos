@@ -17,6 +17,7 @@ pub mod ioapic;
 pub mod irq;
 // line_disc is now a submodule of tty/ (drivers/src/tty/ldisc.rs)
 pub mod msi;
+pub mod msi_common;
 pub mod msix;
 #[cfg(feature = "itests")]
 pub mod msix_tests;

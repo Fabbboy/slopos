@@ -37,8 +37,9 @@
 //! +0x0C   32    Vector Control (bit 0 = mask)
 //! ```
 
+use crate::msi_common;
 use crate::pci::{PciDeviceInfo, pci_config_read16, pci_config_read32, pci_config_write16};
-use crate::pci_defs::{PCI_COMMAND_INTX_DISABLE, PCI_COMMAND_OFFSET, PCI_MAX_BARS};
+use crate::pci_defs::PCI_MAX_BARS;
 use slopos_abi::addr::PhysAddr;
 use slopos_lib::klog_info;
 use slopos_mm::mmio::MmioRegion;
@@ -97,22 +98,6 @@ const MSIX_ENTRY_SIZE: usize = 16;
 
 /// Vector Control: mask bit (bit 0).  When set, the entry is masked.
 const MSIX_ENTRY_CTRL_MASK: u32 = 1;
-
-// =============================================================================
-// x86 LAPIC message address/data format (Intel SDM Vol. 3A §10.11)
-// =============================================================================
-
-/// Fixed base address for MSI/MSI-X messages on x86 — the LAPIC doorbell region.
-const MSIX_ADDR_BASE: u32 = 0xFEE0_0000;
-
-/// Shift for the destination APIC ID in the message address.
-const MSIX_ADDR_DEST_ID_SHIFT: u32 = 12;
-
-/// Delivery mode: Fixed (000b in bits 10:8).
-const MSIX_DATA_DELIVERY_FIXED: u32 = 0b000 << 8;
-
-/// Trigger mode: Edge (0 in bit 15).
-const MSIX_DATA_TRIGGER_EDGE: u32 = 0 << 15;
 
 // =============================================================================
 // Public types
@@ -375,7 +360,7 @@ pub fn msix_configure(
     vector: u8,
     target_apic_id: u8,
 ) -> Result<(), MsixError> {
-    if vector < 32 {
+    if !msi_common::is_valid_vector(vector) {
         return Err(MsixError::InvalidVector);
     }
     if entry_idx >= table.table_size {
@@ -392,16 +377,17 @@ pub fn msix_configure(
         .table
         .write::<u32>(base + MSIX_ENTRY_VECTOR_CTRL, MSIX_ENTRY_CTRL_MASK);
 
-    // 2. Message Address — physical mode, target APIC ID.
-    let addr_lo = MSIX_ADDR_BASE | ((target_apic_id as u32) << MSIX_ADDR_DEST_ID_SHIFT);
-    table.table.write::<u32>(base + MSIX_ENTRY_ADDR_LO, addr_lo);
-
-    // 3. Message Upper Address — always 0 on x86 (LAPIC at 0xFEE0_0000).
+    // 2–3. Message Address (lo = LAPIC target, hi = 0 on x86).
+    table.table.write::<u32>(
+        base + MSIX_ENTRY_ADDR_LO,
+        msi_common::lapic_msg_addr(target_apic_id),
+    );
     table.table.write::<u32>(base + MSIX_ENTRY_ADDR_HI, 0);
 
-    // 4. Message Data — vector, fixed delivery mode, edge triggered.
-    let data = (vector as u32) | MSIX_DATA_DELIVERY_FIXED | MSIX_DATA_TRIGGER_EDGE;
-    table.table.write::<u32>(base + MSIX_ENTRY_DATA, data);
+    // 4. Message Data.
+    table
+        .table
+        .write::<u32>(base + MSIX_ENTRY_DATA, msi_common::lapic_msg_data(vector));
 
     // 5. Unmask the entry.
     table.table.write::<u32>(base + MSIX_ENTRY_VECTOR_CTRL, 0);
@@ -458,21 +444,12 @@ pub fn msix_unmask_entry(table: &MsixTable, entry_idx: u16) -> bool {
 pub fn msix_enable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
 
-    // Enable MSI-X, clear function mask.
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);
     ctrl |= MSIX_CTRL_ENABLE;
     ctrl &= !MSIX_CTRL_FUNCTION_MASK;
     pci_config_write16(bus, dev, func, cap_off + MSIX_REG_CONTROL, ctrl);
 
-    // Disable legacy INTx (PCI Command register bit 10).
-    let cmd = pci_config_read16(bus, dev, func, PCI_COMMAND_OFFSET);
-    pci_config_write16(
-        bus,
-        dev,
-        func,
-        PCI_COMMAND_OFFSET,
-        cmd | PCI_COMMAND_INTX_DISABLE,
-    );
+    msi_common::disable_intx(bus, dev, func);
 
     klog_info!(
         "MSI-X: Enabled for BDF {}:{}.{} ({} entries)",
@@ -487,20 +464,11 @@ pub fn msix_enable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
 pub fn msix_disable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
 
-    // Clear MSI-X enable bit.
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);
     ctrl &= !MSIX_CTRL_ENABLE;
     pci_config_write16(bus, dev, func, cap_off + MSIX_REG_CONTROL, ctrl);
 
-    // Re-enable legacy INTx.
-    let cmd = pci_config_read16(bus, dev, func, PCI_COMMAND_OFFSET);
-    pci_config_write16(
-        bus,
-        dev,
-        func,
-        PCI_COMMAND_OFFSET,
-        cmd & !PCI_COMMAND_INTX_DISABLE,
-    );
+    msi_common::restore_intx(bus, dev, func);
 
     klog_info!("MSI-X: Disabled for BDF {}:{}.{}", bus, dev, func);
 }

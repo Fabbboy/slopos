@@ -29,26 +29,18 @@
 //! +0x14/18 32   Pending Bits — only if per-vector masking capable
 //! ```
 
+use crate::msi_common;
 use crate::pci::{pci_config_read16, pci_config_read32, pci_config_write16, pci_config_write32};
-use crate::pci_defs::{PCI_COMMAND_INTX_DISABLE, PCI_COMMAND_OFFSET};
 use slopos_lib::klog_info;
 
 // =============================================================================
 // MSI Message Control register bits (offset +2 from capability base)
 // =============================================================================
 
-/// MSI enable bit (bit 0 of Message Control).
 const MSI_CTRL_ENABLE: u16 = 1 << 0;
-
 const MSI_CTRL_MMC_SHIFT: u16 = 1;
-
-/// Multi-message enable mask (bits 6:4) — log₂ of granted vectors.
 const MSI_CTRL_MME_MASK: u16 = 0x7 << 4;
-
-/// 64-bit address capable (bit 7).
 const MSI_CTRL_64BIT: u16 = 1 << 7;
-
-/// Per-vector masking capable (bit 8).
 const MSI_CTRL_PVM: u16 = 1 << 8;
 
 // =============================================================================
@@ -57,35 +49,11 @@ const MSI_CTRL_PVM: u16 = 1 << 8;
 
 const MSI_REG_CONTROL: u16 = 0x02;
 const MSI_REG_ADDR_LO: u16 = 0x04;
-const MSI_REG_ADDR_HI: u16 = 0x08; // only if 64-bit
-
-// Data register offset depends on 64-bit capability:
+const MSI_REG_ADDR_HI: u16 = 0x08;
 const MSI_REG_DATA_32: u16 = 0x08;
 const MSI_REG_DATA_64: u16 = 0x0C;
-
-// Mask register offset depends on 64-bit capability:
 const MSI_REG_MASK_32: u16 = 0x10;
 const MSI_REG_MASK_64: u16 = 0x14;
-
-// =============================================================================
-// x86 LAPIC message address format (Intel SDM Vol. 3A §10.11.1)
-// =============================================================================
-
-/// Fixed base address for MSI messages on x86 — the LAPIC doorbell region.
-const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
-
-/// Shift for the destination APIC ID in the message address.
-const MSI_ADDR_DEST_ID_SHIFT: u32 = 12;
-
-// =============================================================================
-// x86 LAPIC message data format (Intel SDM Vol. 3A §10.11.2)
-// =============================================================================
-
-/// Delivery mode: Fixed (000b in bits 10:8).
-const MSI_DATA_DELIVERY_FIXED: u16 = 0b000 << 8;
-
-/// Trigger mode: Edge (0 in bit 15).
-const MSI_DATA_TRIGGER_EDGE: u16 = 0 << 15;
 
 // =============================================================================
 // Public types
@@ -203,7 +171,7 @@ pub fn msi_configure(
     vector: u8,
     target_apic_id: u8,
 ) -> Result<(), MsiError> {
-    if vector < 32 {
+    if !msi_common::is_valid_vector(vector) {
         return Err(MsiError::InvalidVector);
     }
 
@@ -215,33 +183,36 @@ pub fn msi_configure(
     pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
 
     // 2. Message Address — physical mode, target APIC ID.
-    let addr = MSI_ADDR_BASE | ((target_apic_id as u32) << MSI_ADDR_DEST_ID_SHIFT);
-    pci_config_write32(bus, dev, func, cap_off + MSI_REG_ADDR_LO, addr);
+    pci_config_write32(
+        bus,
+        dev,
+        func,
+        cap_off + MSI_REG_ADDR_LO,
+        msi_common::lapic_msg_addr(target_apic_id),
+    );
 
-    // 3. Message Upper Address — always 0 on x86 (LAPIC at 0xFEE0_0000).
+    // 3. Message Upper Address — always 0 on x86.
     if cap.is_64bit {
         pci_config_write32(bus, dev, func, cap_off + MSI_REG_ADDR_HI, 0);
     }
 
     // 4. Message Data — vector, fixed delivery mode, edge triggered.
-    let data = (vector as u16) | MSI_DATA_DELIVERY_FIXED | MSI_DATA_TRIGGER_EDGE;
-    pci_config_write16(bus, dev, func, cap.data_offset(), data);
-
-    // 5. Request exactly 1 vector (multi-message enable = 0).
-    ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
-    ctrl &= !MSI_CTRL_ENABLE; // keep disabled
-    ctrl &= !MSI_CTRL_MME_MASK; // clear MME bits → 1 vector
-    pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
-
-    // 6. Disable legacy INTx assertion (PCI Command register bit 10).
-    let cmd = pci_config_read16(bus, dev, func, PCI_COMMAND_OFFSET);
     pci_config_write16(
         bus,
         dev,
         func,
-        PCI_COMMAND_OFFSET,
-        cmd | PCI_COMMAND_INTX_DISABLE,
+        cap.data_offset(),
+        msi_common::lapic_msg_data(vector) as u16,
     );
+
+    // 5. Request exactly 1 vector (multi-message enable = 0).
+    ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
+    ctrl &= !MSI_CTRL_ENABLE;
+    ctrl &= !MSI_CTRL_MME_MASK;
+    pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
+
+    // 6. Disable legacy INTx.
+    msi_common::disable_intx(bus, dev, func);
 
     // 7. Enable MSI.
     ctrl |= MSI_CTRL_ENABLE;
@@ -269,20 +240,11 @@ pub fn msi_configure(
 pub fn msi_disable(bus: u8, dev: u8, func: u8, cap: &MsiCapability) {
     let cap_off = cap.cap_offset;
 
-    // Clear MSI enable bit.
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
     ctrl &= !MSI_CTRL_ENABLE;
     pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
 
-    // Re-enable legacy INTx.
-    let cmd = pci_config_read16(bus, dev, func, PCI_COMMAND_OFFSET);
-    pci_config_write16(
-        bus,
-        dev,
-        func,
-        PCI_COMMAND_OFFSET,
-        cmd & !PCI_COMMAND_INTX_DISABLE,
-    );
+    msi_common::restore_intx(bus, dev, func);
 
     klog_info!("MSI: Disabled for BDF {}:{}.{}", bus, dev, func);
 }
