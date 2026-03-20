@@ -1122,7 +1122,7 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
 
     if t1_check.c_oflag != t1_saved.c_oflag {
         klog_info!(
-            "TTY_TEST: BUG - TTY 1 c_oflag changed when TTY 0 was modified ({} vs {})",
+            "TTY_TEST: BUG - TTY 1 c_oflag changed when TTY 0 was modified ({:?} vs {:?})",
             t1_check.c_oflag,
             t1_saved.c_oflag
         );
@@ -1512,7 +1512,7 @@ pub fn test_get_termios_returns_result() -> TestResult {
     tty::table::tty_table_init();
     match tty::get_termios(TtyIndex(0)) {
         Ok(t) => {
-            if (t.c_lflag & LocalFlags::ICANON) == 0 {
+            if !t.c_lflag.contains(LocalFlags::ICANON) {
                 klog_info!("TTY_TEST: BUG - default termios should have ICANON");
                 return TestResult::Fail;
             }
@@ -2223,10 +2223,10 @@ pub fn test_ldisc_vmin_vtime_helper() -> TestResult {
 pub fn test_default_termios_has_icrnl() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
-    if (t.c_iflag & InputFlags::ICRNL) == 0 {
+    if !t.c_iflag.contains(InputFlags::ICRNL) {
         klog_info!(
             "TTY_TEST: BUG - default c_iflag missing ICRNL (got 0x{:x})",
-            t.c_iflag
+            t.c_iflag.bits()
         );
         return TestResult::Fail;
     }
@@ -6551,7 +6551,7 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
         }
     };
     // Verify it returns a valid termios (ICANON should be set by default).
-    if termios.c_lflag & 0x2 == 0 {
+    if !termios.c_lflag.contains(LocalFlags::ICANON) {
         klog_info!("TTY_TEST: BUG - termios from /dev/tty FD missing ICANON");
         let _ = tty::close_ref(idx);
         return TestResult::Fail;
@@ -8234,10 +8234,7 @@ pub fn test_no_iutf8_backspace_multibyte() -> TestResult {
 pub fn test_iutf8_insert_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::ICANON
-        | LocalFlags::ECHO.bits()
-        | LocalFlags::ECHOE.bits()
-        | LocalFlags::ECHOKE.bits();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOKE;
     t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
@@ -11376,21 +11373,28 @@ pub fn test_no_imaxbel_silent_drop() -> TestResult {
 pub fn test_control_flag_values() -> TestResult {
     use slopos_abi::syscall::*;
     // Character size.
-    if CS5 != 0o000000 || CS6 != 0o000020 || CS7 != 0o000040 || CS8 != 0o000060 {
+    if ControlFlags::CS5.bits() != 0o000000
+        || ControlFlags::CS6.bits() != 0o000020
+        || ControlFlags::CS7.bits() != 0o000040
+        || ControlFlags::CS8.bits() != 0o000060
+    {
         klog_info!("TTY_TEST: BUG - CS5/6/7/8 values wrong");
         return TestResult::Fail;
     }
-    if CSIZE != 0o000060 {
+    if ControlFlags::CSIZE.bits() != 0o000060 {
         klog_info!("TTY_TEST: BUG - CSIZE value wrong");
         return TestResult::Fail;
     }
     // Parity.
-    if PARENB != 0o000400 || PARODD != 0o001000 {
+    if ControlFlags::PARENB.bits() != 0o000400 || ControlFlags::PARODD.bits() != 0o001000 {
         klog_info!("TTY_TEST: BUG - PARENB/PARODD values wrong");
         return TestResult::Fail;
     }
     // Stop/modem.
-    if CSTOPB != 0o000100 || HUPCL != 0o002000 || CLOCAL != 0o004000 {
+    if ControlFlags::CSTOPB.bits() != 0o000100
+        || ControlFlags::HUPCL.bits() != 0o002000
+        || ControlFlags::CLOCAL.bits() != 0o004000
+    {
         klog_info!("TTY_TEST: BUG - CSTOPB/HUPCL/CLOCAL values wrong");
         return TestResult::Fail;
     }
@@ -11404,7 +11408,7 @@ pub fn test_control_flag_values() -> TestResult {
         return TestResult::Fail;
     }
     // Hardware flow control.
-    if CRTSCTS != 0o020000000 {
+    if ControlFlags::CRTSCTS.bits() != 0o020000000 {
         klog_info!("TTY_TEST: BUG - CRTSCTS value wrong");
         return TestResult::Fail;
     }
@@ -11416,12 +11420,14 @@ pub fn test_default_cflag() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let t = tty::get_termios(TtyIndex(0)).unwrap();
-    let expected = CS8 | CREAD | HUPCL | B38400;
+    let expected = ControlFlags::from_bits_retain(
+        ControlFlags::CS8.bits() | ControlFlags::CREAD.bits() | ControlFlags::HUPCL.bits() | B38400,
+    );
     if t.c_cflag != expected {
         klog_info!(
             "TTY_TEST: BUG - default c_cflag 0x{:x}, expected 0x{:x}",
-            t.c_cflag,
-            expected
+            t.c_cflag.bits(),
+            expected.bits()
         );
         return TestResult::Fail;
     }
@@ -11445,8 +11451,8 @@ pub fn test_cflag_roundtrip() -> TestResult {
     if got.c_cflag != t.c_cflag {
         klog_info!(
             "TTY_TEST: BUG - roundtrip c_cflag 0x{:x} vs 0x{:x}",
-            got.c_cflag,
-            t.c_cflag
+            got.c_cflag.bits(),
+            t.c_cflag.bits()
         );
         tty::set_termios(idx, &saved).unwrap();
         return TestResult::Fail;
@@ -12227,7 +12233,7 @@ pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
     tty::set_termios(idx, &t).unwrap();
 
     let got = tty::get_termios(idx).unwrap();
-    let got_baud_bits = got.c_cflag & CBAUD;
+    let got_baud_bits = got.c_cflag.bits() & CBAUD;
     if got_baud_bits != B38400 {
         klog_info!(
             "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B38400=0o{:o} (cflag authoritative)",
@@ -12269,7 +12275,7 @@ pub fn test_review_speed_ispeed_fallback() -> TestResult {
     tty::set_termios(idx, &t).unwrap();
 
     let got = tty::get_termios(idx).unwrap();
-    let got_baud_bits = got.c_cflag & CBAUD;
+    let got_baud_bits = got.c_cflag.bits() & CBAUD;
     if got_baud_bits != B38400 {
         klog_info!(
             "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B38400=0o{:o} (cflag authoritative)",
@@ -12300,7 +12306,7 @@ pub fn test_review_speed_unrecognised_noop() -> TestResult {
     tty::set_termios(idx, &t).unwrap();
 
     let got = tty::get_termios(idx).unwrap();
-    let got_baud_bits = got.c_cflag & CBAUD;
+    let got_baud_bits = got.c_cflag.bits() & CBAUD;
     if got_baud_bits != B38400 {
         klog_info!(
             "TTY_TEST: BUG - c_cflag CBAUD=0o{:o}, expected B38400=0o{:o} (unrecognised speed)",
@@ -13839,35 +13845,42 @@ pub fn test_canonical_eof_wakes() -> TestResult {
 
 /// ABI constants have correct Linux-compatible values.
 pub fn test_tabdly_abi_constants() -> TestResult {
-    use slopos_abi::syscall::{TAB0, TAB3, TABDLY, XTABS};
-
-    if TABDLY != 0x1800 {
-        klog_info!("TTY_TEST: BUG - TABDLY != 0x1800, got 0x{:x}", TABDLY);
+    if OutputFlags::TABDLY.bits() != 0x1800 {
+        klog_info!(
+            "TTY_TEST: BUG - TABDLY != 0x1800, got 0x{:x}",
+            OutputFlags::TABDLY.bits()
+        );
         return TestResult::Fail;
     }
-    if TAB0 != 0x0000 {
-        klog_info!("TTY_TEST: BUG - TAB0 != 0x0000, got 0x{:x}", TAB0);
+    if OutputFlags::TAB0.bits() != 0x0000 {
+        klog_info!(
+            "TTY_TEST: BUG - TAB0 != 0x0000, got 0x{:x}",
+            OutputFlags::TAB0.bits()
+        );
         return TestResult::Fail;
     }
-    if TAB3 != 0x1800 {
-        klog_info!("TTY_TEST: BUG - TAB3 != 0x1800, got 0x{:x}", TAB3);
+    if OutputFlags::TAB3.bits() != 0x1800 {
+        klog_info!(
+            "TTY_TEST: BUG - TAB3 != 0x1800, got 0x{:x}",
+            OutputFlags::TAB3.bits()
+        );
         return TestResult::Fail;
     }
-    if XTABS != TAB3 {
+    if OutputFlags::XTABS.bits() != OutputFlags::TAB3.bits() {
         klog_info!("TTY_TEST: BUG - XTABS != TAB3");
         return TestResult::Fail;
     }
 
     // Verify bitflags variants agree with raw constants.
-    if OutputFlags::TABDLY.bits() != TABDLY {
+    if OutputFlags::TABDLY.bits() != 0x1800 {
         klog_info!("TTY_TEST: BUG - OutputFlags::TABDLY mismatch");
         return TestResult::Fail;
     }
-    if OutputFlags::TAB3.bits() != TAB3 {
+    if OutputFlags::TAB3.bits() != 0x1800 {
         klog_info!("TTY_TEST: BUG - OutputFlags::TAB3 mismatch");
         return TestResult::Fail;
     }
-    if OutputFlags::XTABS.bits() != XTABS {
+    if OutputFlags::XTABS.bits() != OutputFlags::TAB3.bits() {
         klog_info!("TTY_TEST: BUG - OutputFlags::XTABS mismatch");
         return TestResult::Fail;
     }
@@ -15143,7 +15156,7 @@ pub fn test_speed_roundtrip() -> TestResult {
         return TestResult::Fail;
     }
     let got = tty::get_termios(idx).unwrap();
-    if (got.c_cflag & CBAUD) != B9600 || got.c_ispeed != 9600 || got.c_ospeed != 9600 {
+    if (got.c_cflag.bits() & CBAUD) != B9600 || got.c_ispeed != 9600 || got.c_ospeed != 9600 {
         klog_info!(
             "TTY_TEST: BUG - speed={}/{}, expected 9600",
             got.c_ispeed,
