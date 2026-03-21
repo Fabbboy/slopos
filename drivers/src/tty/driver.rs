@@ -17,7 +17,7 @@
 //! safely discarded.
 
 use slopos_abi::syscall::UserTermios;
-use slopos_utils::ports::COM1;
+use slopos_utils::ports::{COM1, serial_write_batch};
 
 use crate::serial;
 use crate::tty::pty;
@@ -256,8 +256,10 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
         }
         DriverId::VConsole => {
             super::vconsole::write(data);
-            for &b in data {
-                serial::serial_putc_com1(b);
+            if super::vconsole::serial_mirror_enabled() {
+                unsafe {
+                    serial_write_batch(COM1, data);
+                }
             }
             data.len()
         }
@@ -317,8 +319,10 @@ pub struct VConsoleDriver;
 impl TtyDriver for VConsoleDriver {
     fn write_output(&self, buf: &[u8]) -> usize {
         super::vconsole::write(buf);
-        for &b in buf {
-            serial::serial_putc_com1(b);
+        if super::vconsole::serial_mirror_enabled() {
+            unsafe {
+                serial_write_batch(COM1, buf);
+            }
         }
         buf.len()
     }

@@ -87,3 +87,20 @@ pub unsafe fn serial_write_bytes(base: Port<u8>, bytes: &[u8]) {
         unsafe { serial_putc(base, b) };
     }
 }
+
+#[inline]
+pub unsafe fn serial_write_batch(base: Port<u8>, data: &[u8]) {
+    let lsr = base.offset(UART_REG_LSR);
+    let thr = base.offset(UART_REG_THR);
+    let mut i = 0usize;
+    while i < data.len() {
+        while (unsafe { lsr.read() } & UART_LSR_TX_EMPTY) == 0 {
+            core::hint::spin_loop();
+        }
+        let end = (i + 16).min(data.len());
+        while i < end {
+            unsafe { thr.write(data[i]) };
+            i += 1;
+        }
+    }
+}

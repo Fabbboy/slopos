@@ -69,6 +69,22 @@ fn boot_video_backend() -> video::VideoBackend {
     video::VideoBackend::Framebuffer
 }
 
+fn apply_serial_mirror_cmdline() {
+    let cmdline = boot_get_cmdline();
+    if cmdline.is_null() {
+        return;
+    }
+    let Ok(cmdline) = (unsafe { CStr::from_ptr(cmdline) }).to_str() else {
+        return;
+    };
+    if cmdline
+        .split_ascii_whitespace()
+        .any(|arg| arg == "serial_mirror=off")
+    {
+        slopos_drivers::tty::vconsole::set_serial_mirror(false);
+    }
+}
+
 fn boot_step_idt_setup_fn() {
     klog_debug!("Initializing IDT...");
     serial_note("boot: idt setup start");
@@ -83,6 +99,7 @@ fn boot_step_irq_setup_fn() {
     klog_debug!("Configuring IRQ dispatcher...");
     slopos_drivers::irq::init();
     slopos_drivers::tty::init();
+    apply_serial_mirror_cmdline();
     // Register input cleanup so exec() and task termination tear down
     // keyboard/pointer focus and event queues for the old process image.
     slopos_core::task::register_task_resource_cleanup_hook(
