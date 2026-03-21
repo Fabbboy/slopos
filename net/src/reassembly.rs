@@ -94,6 +94,12 @@ impl ReassemblyTable {
         }
     }
 
+    pub fn reset(&mut self) {
+        for i in 0..MAX_REASSEMBLY_GROUPS {
+            self.clear_group(i);
+        }
+    }
+
     pub fn insert(
         &mut self,
         src_ip: Ipv4Addr,

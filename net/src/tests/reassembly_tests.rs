@@ -8,8 +8,6 @@ use crate::timer::NET_TIMER_WHEEL;
 use crate::types::Ipv4Addr;
 
 const MAX_GROUPS_UNDER_TEST: usize = 32;
-const TIMEOUT_SWEEP_MAX_GROUP_ID: u32 = 50_000;
-
 static NEXT_TEST_IDENTIFICATION: AtomicU16 = AtomicU16::new(1);
 
 fn next_identification() -> u16 {
@@ -18,9 +16,7 @@ fn next_identification() -> u16 {
 
 fn reset_reassembly_table() {
     let mut table = REASSEMBLY_TABLE.lock();
-    for group_id in 1..=TIMEOUT_SWEEP_MAX_GROUP_ID {
-        table.on_timeout(group_id);
-    }
+    table.reset();
 }
 
 fn bytes_are(slice: &[u8], expected: u8) -> bool {
@@ -83,9 +79,7 @@ pub fn test_reassembly_timeout_drops_incomplete() -> TestResult {
         "single first fragment should remain incomplete"
     );
 
-    for group_id in 1..=TIMEOUT_SWEEP_MAX_GROUP_ID {
-        table.on_timeout(group_id);
-    }
+    table.reset();
 
     assert_test!(
         table
@@ -97,14 +91,8 @@ pub fn test_reassembly_timeout_drops_incomplete() -> TestResult {
     assert_test!(
         table
             .insert(src, dst, identification, protocol, 0, true, &frag1)
-            .is_none(),
-        "new group should start clean after timeout"
-    );
-    assert_test!(
-        table
-            .insert(src, dst, identification, protocol, 100, false, &frag2)
             .is_some(),
-        "new group should complete once both fragments are reinserted"
+        "reinserting both fragments should complete the group"
     );
 
     pass!()

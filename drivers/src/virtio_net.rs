@@ -1247,7 +1247,8 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
         state.router = [0; 4];
         state.dns = [0; 4];
 
-        if let Some(lease) = dhcp_acquire_lease(&mut state) {
+        let dhcp_lease = dhcp_acquire_lease(&mut state);
+        if let Some(ref lease) = dhcp_lease {
             state.ipv4_addr = lease.ipv4;
             state.subnet_mask = lease.subnet_mask;
             state.router = lease.router;
@@ -1267,24 +1268,6 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
                 lease.dns[2],
                 lease.dns[3]
             );
-
-            // propagate DHCP lease to the centralised NetStack.
-            // The DeviceHandle hasn't been created yet, but we know VirtIO-net
-            // will get the next available slot.  We read the current count
-            // from the registry to predict the DevIndex.  (After
-            // loopback at index 0, VirtIO-net will be index 1.)
-            {
-                use slopos_net::netstack::NET_STACK;
-                use slopos_net::types::{DevIndex, Ipv4Addr};
-                let dev_idx = DevIndex(DEVICE_REGISTRY.device_count());
-                NET_STACK.configure(
-                    dev_idx,
-                    Ipv4Addr::from_bytes(lease.ipv4),
-                    Ipv4Addr::from_bytes(lease.subnet_mask),
-                    Ipv4Addr::from_bytes(lease.router),
-                    [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
-                );
-            }
         } else {
             klog_info!("virtio-net: DHCP lease unavailable");
         }
@@ -1295,10 +1278,24 @@ fn virtio_net_probe(info: *const PciDeviceInfo, _context: *mut core::ffi::c_void
 
         let dev = Box::new(VirtioNetDev);
         if let Some(handle) = DEVICE_REGISTRY.register(dev) {
+            let actual_idx = handle.index();
             klog_info!(
                 "virtio-net: registered as dev {} in device registry",
-                handle.index()
+                actual_idx
             );
+
+            if let Some(ref lease) = dhcp_lease {
+                use slopos_net::netstack::NET_STACK;
+                use slopos_net::types::Ipv4Addr;
+                NET_STACK.configure(
+                    actual_idx,
+                    Ipv4Addr::from_bytes(lease.ipv4),
+                    Ipv4Addr::from_bytes(lease.subnet_mask),
+                    Ipv4Addr::from_bytes(lease.router),
+                    [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
+                );
+            }
+
             set_device_handle(handle);
         } else {
             klog_info!("virtio-net: failed to register in device registry");
