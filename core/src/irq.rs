@@ -21,8 +21,8 @@ use slopos_sync::IrqMutex;
 use slopos_utils::string::cstr_to_str;
 use slopos_utils::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
-use crate::platform;
 use crate::scheduler::scheduler::{TrapExitSource, scheduler_handoff_on_trap_exit};
+use slopos_kernel_services::platform;
 
 /// IRQ handler function signature.
 pub type IrqHandler = extern "C" fn(u8, *mut InterruptFrame, *mut c_void);

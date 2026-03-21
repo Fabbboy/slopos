@@ -24,56 +24,6 @@ fn runtime_current_task() -> DriverTaskHandle {
     scheduler::scheduler_get_current_task().cast()
 }
 
-fn runtime_current_task_id() -> u32 {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).task_id }
-}
-
-fn runtime_current_task_pgid() -> u32 {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).pgid }
-}
-
-fn runtime_current_task_sid() -> u32 {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return 0;
-    }
-    unsafe { (*task).sid }
-}
-
-fn runtime_current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return None;
-    }
-    unsafe { (*task).controlling_tty }
-}
-
-fn runtime_set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
-        return false;
-    }
-    unsafe {
-        (*task).controlling_tty = tty;
-    }
-    true
-}
-
-fn runtime_clear_session_controlling_tty(
-    session_id: u32,
-    tty: slopos_abi::syscall::TtyIndex,
-) -> usize {
-    task::task_clear_controlling_tty_for_session(session_id, tty)
-}
-
 fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
     scheduler::unblock_task(handle_to_task(task))
 }
@@ -341,12 +291,12 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     request_reschedule_from_interrupt: scheduler::scheduler_request_reschedule_from_interrupt,
     scheduler_is_enabled: scheduler::scheduler_is_enabled,
     current_task: runtime_current_task,
-    current_task_id: runtime_current_task_id,
-    current_task_pgid: runtime_current_task_pgid,
-    current_task_sid: runtime_current_task_sid,
-    current_task_controlling_tty: runtime_current_task_controlling_tty,
-    set_current_task_controlling_tty: runtime_set_current_task_controlling_tty,
-    clear_session_controlling_tty: runtime_clear_session_controlling_tty,
+    current_task_id: scheduler::current_task_id,
+    current_task_pgid: scheduler::current_task_pgid,
+    current_task_sid: scheduler::current_task_sid,
+    current_task_controlling_tty: scheduler::current_task_controlling_tty,
+    set_current_task_controlling_tty: scheduler::set_current_task_controlling_tty,
+    clear_session_controlling_tty: scheduler::clear_session_controlling_tty,
     block_current_task: scheduler::block_current_task,
     block_current_task_with_timeout: scheduler::block_current_task_with_timeout,
     sleep_current_task_ms: scheduler::sleep_current_task_ms,

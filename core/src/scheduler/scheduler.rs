@@ -8,7 +8,7 @@ use slopos_sync::preempt::PreemptGuard;
 use slopos_utils::kdiag_timestamp;
 use slopos_utils::klog_info;
 
-use crate::platform;
+use slopos_kernel_services::platform;
 
 pub use super::lifecycle::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
@@ -1021,6 +1021,22 @@ pub fn scheduler_get_current_task() -> *mut Task {
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task()).unwrap_or(ptr::null_mut())
 }
 
+pub fn current_task_id() -> u32 {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return 0;
+    }
+    unsafe { (*task).task_id }
+}
+
+pub fn current_task_pgid() -> u32 {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return 0;
+    }
+    unsafe { (*task).pgid }
+}
+
 /// Get the current task's session ID (SID).
 ///
 /// Returns 0 if there is no current task or the scheduler is not yet active.
@@ -1030,6 +1046,29 @@ pub fn current_task_sid() -> u32 {
         return 0;
     }
     unsafe { (*task).sid }
+}
+
+pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return None;
+    }
+    unsafe { (*task).controlling_tty }
+}
+
+pub fn set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool {
+    let task = scheduler_get_current_task();
+    if task.is_null() {
+        return false;
+    }
+    unsafe {
+        (*task).controlling_tty = tty;
+    }
+    true
+}
+
+pub fn clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize {
+    crate::scheduler::task::task_clear_controlling_tty_for_session(session_id, tty)
 }
 
 pub fn scheduler_set_preemption_enabled(enabled: c_int) {

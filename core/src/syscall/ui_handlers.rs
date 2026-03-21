@@ -4,7 +4,7 @@ use slopos_abi::task::INVALID_TASK_ID;
 use slopos_abi::{DisplayInfo, InputEvent, WindowInfo};
 
 use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
-use crate::platform;
+use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::{input, tty, video};
 
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
@@ -211,7 +211,7 @@ define_syscall!(syscall_input_request_close(ctx, args) requires(compositor) {
     }
 
     let timestamp_ms = platform::get_time_ms();
-    if input::request_close(target_task_id, timestamp_ms) != 0 {
+    if !input::request_close(target_task_id, timestamp_ms) {
         return ctx.err();
     }
 
@@ -263,7 +263,10 @@ define_syscall!(syscall_set_cursor_shape(ctx, args) requires(let task_id) {
 
 define_syscall!(syscall_tty_set_focus(ctx, args) requires(compositor) {
     let target = args.arg0_u32();
-    ctx.from_bool_value(tty::set_compositor_focus(target) == 0, tty::get_compositor_focus() as u64)
+    ctx.from_bool_value(
+        tty::set_compositor_focus(target).is_ok(),
+        tty::get_compositor_focus().unwrap_or(0) as u64,
+    )
 });
 
 define_syscall!(syscall_enumerate_windows(ctx, args) requires(compositor) {

@@ -71,7 +71,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
     }
 
     let base_ptr = args.arg0;
-    let start_ms = crate::platform::get_time_ms();
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
 
     loop {
         run_bottom_halves();
@@ -109,7 +109,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             return ctx.ok(0);
         }
         if timeout_ms > 0 {
-            let now = crate::platform::get_time_ms();
+            let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
                 return ctx.ok(0);
             }
@@ -144,7 +144,8 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         let sleep_ms = if timeout_ms < 0 {
             100u32
         } else {
-            let remaining = timeout_ms - (crate::platform::get_time_ms().wrapping_sub(start_ms) as i64);
+            let remaining =
+                timeout_ms - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
             (remaining.max(0) as u32).min(100)
         };
 
@@ -217,7 +218,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             .saturating_add(tv.tv_usec / 1000)
     };
 
-    let start_ms = crate::platform::get_time_ms();
+    let start_ms = slopos_kernel_services::platform::get_time_ms();
     loop {
         read_out[..bytes_len].fill(0);
         write_out[..bytes_len].fill(0);
@@ -296,7 +297,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             return ctx.ok(0);
         }
         if timeout_ms > 0 {
-            let now = crate::platform::get_time_ms();
+            let now = slopos_kernel_services::platform::get_time_ms();
             if now.wrapping_sub(start_ms) as i64 >= timeout_ms {
                 if args.arg1 != 0 {
                     let out = try_or_err!(ctx, UserBytes::try_new(args.arg1, bytes_len));
@@ -352,7 +353,8 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         let sleep_ms = if timeout_ms < 0 {
             100u32
         } else {
-            let remaining = timeout_ms - (crate::platform::get_time_ms().wrapping_sub(start_ms) as i64);
+            let remaining =
+                timeout_ms - (slopos_kernel_services::platform::get_time_ms().wrapping_sub(start_ms) as i64);
             (remaining.max(0) as u32).min(100)
         };
 
@@ -399,8 +401,10 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         TCGETS => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
-            let mut t = UserTermios::default();
-            tty::get_termios(tty_idx, &mut t as *mut UserTermios);
+            let t = match tty::get_termios(tty_idx) {
+                Ok(v) => v,
+                Err(_) => return ctx.err(),
+            };
             try_or_err!(ctx, copy_to_user(ptr, &t));
             ctx.ok(0)
         }
@@ -408,14 +412,17 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            tty::set_termios(tty_idx, &val as *const UserTermios);
-            ctx.ok(0)
+            if tty::set_termios(tty_idx, &val).is_ok() {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         TCSETSW => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_termios_wait(tty_idx, &val as *const UserTermios) == 0 {
+            if tty::set_termios_wait(tty_idx, &val).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -425,7 +432,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserTermios>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_termios_flush(tty_idx, &val as *const UserTermios) == 0 {
+            if tty::set_termios_flush(tty_idx, &val).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -434,43 +441,39 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         TIOCGETD => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let ldisc_id = tty::get_ldisc(tty_idx);
+            let ldisc_id = tty::get_ldisc(tty_idx).unwrap_or(slopos_abi::syscall::N_TTY);
             try_or_err!(ctx, copy_to_user(ptr, &ldisc_id));
             ctx.ok(0)
         }
         TIOCGPTN => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let pty_number = tty::get_pty_number(tty_idx);
-            if pty_number < 0 {
-                ctx.err()
-            } else {
-                let pty_number = pty_number as u32;
+            if let Ok(pty_number) = tty::get_pty_number(tty_idx) {
                 try_or_err!(ctx, copy_to_user(ptr, &pty_number));
                 ctx.ok(0)
+            } else {
+                ctx.err()
             }
         }
         TIOCGPTPEER => {
-            let peer_tty = tty::open_pty_peer(tty_idx);
-            if peer_tty < 0 {
+            let peer_tty = match tty::open_pty_peer(tty_idx) {
+                Ok(idx) => idx,
+                Err(_) => return ctx.err(),
+            };
+            let open_flags = arg as u32;
+            let new_fd = file_open_tty_fd(pid, peer_tty, open_flags);
+            if new_fd < 0 {
+                let _ = tty::close_ref(peer_tty);
                 ctx.err()
             } else {
-                let slave_idx = slopos_abi::syscall::TtyIndex(peer_tty as u8);
-                let open_flags = arg as u32;
-                let new_fd = file_open_tty_fd(pid, slave_idx, open_flags);
-                if new_fd < 0 {
-                    tty::close_ref(slave_idx);
-                    ctx.err()
-                } else {
-                    ctx.ok(new_fd as u64)
-                }
+                ctx.ok(new_fd as u64)
             }
         }
         TIOCSETD => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
             let ldisc_id = try_or_err!(ctx, copy_from_user(ptr));
-            if tty::set_ldisc(tty_idx, ldisc_id) == 0 {
+            if tty::set_ldisc(tty_idx, ldisc_id).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -479,8 +482,10 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         TIOCGWINSZ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
-            let mut ws = UserWinsize::default();
-            tty::get_winsize(tty_idx, &mut ws as *mut UserWinsize);
+            let ws = match tty::get_winsize(tty_idx) {
+                Ok(v) => v,
+                Err(_) => return ctx.err(),
+            };
             try_or_err!(ctx, copy_to_user(ptr, &ws));
             ctx.ok(0)
         }
@@ -488,13 +493,16 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<UserWinsize>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
-            tty::set_winsize(tty_idx, &val as *const UserWinsize);
-            ctx.ok(0)
+            if tty::set_winsize(tty_idx, &val).is_ok() {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         TIOCGPGRP => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let fg_pgrp = tty::get_foreground_pgrp(tty_idx);
+            let fg_pgrp = tty::get_foreground_pgrp(tty_idx).unwrap_or(0);
             try_or_err!(ctx, copy_to_user(ptr, &fg_pgrp));
             ctx.ok(0)
         }
@@ -517,8 +525,8 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let caller_pgid = current_task_pgid();
             let caller_sid = crate::sched::current_task_sid();
 
-            let tty_sid = tty::get_session_id(tty_idx);
-            let fg_pgrp = tty::get_foreground_pgrp(tty_idx);
+            let tty_sid = tty::get_session_id(tty_idx).unwrap_or(0);
+            let fg_pgrp = tty::get_foreground_pgrp(tty_idx).unwrap_or(0);
             if tty_sid != 0 && tty_sid == caller_sid && caller_pgid != 0 && fg_pgrp != 0 && caller_pgid != fg_pgrp {
                 if !is_current_signal_blocked_or_ignored(SIGTTOU) {
                     if is_pgrp_orphaned(caller_pgid, caller_sid) {
@@ -529,8 +537,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 }
             }
 
-            let rc = tty::set_foreground_pgrp_checked(tty_idx, pgrp, caller_sid);
-            if rc == 0 {
+            if tty::set_foreground_pgrp_checked(tty_idx, pgrp, caller_sid).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -558,12 +565,12 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 return ctx.err();
             }
 
-            let tty_sid = tty::get_session_id(tty_idx);
+            let tty_sid = tty::get_session_id(tty_idx).unwrap_or(0);
             if tty_sid != 0 && tty_sid != task.sid {
                 return ctx.err();
             }
 
-            if tty::acquire_controlling_terminal(tty_idx, task.sid, task.pgid) != 0 {
+            if tty::acquire_controlling_terminal(tty_idx, task.sid, task.pgid).is_err() {
                 return ctx.err();
             }
             task.controlling_tty = Some(tty_idx);
@@ -582,7 +589,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 _ => return ctx.err(), // ENOTTY
             }
             let ptr = try_or_err!(ctx, UserPtr::<u32>::try_new(arg));
-            let sid = tty::get_session_id(tty_idx);
+            let sid = tty::get_session_id(tty_idx).unwrap_or(0);
             try_or_err!(ctx, copy_to_user(ptr, &sid));
             ctx.ok(0)
         }
@@ -617,13 +624,12 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         FIONREAD => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let count = tty::bytes_available(tty_idx);
-            if count < 0 {
-                ctx.err()
-            } else {
+            if let Ok(count) = tty::bytes_available(tty_idx) {
                 let count = count as i32;
                 try_or_err!(ctx, copy_to_user(ptr, &count));
                 ctx.ok(0)
+            } else {
+                ctx.err()
             }
         }
         // PTY slave lock ioctls.
@@ -632,7 +638,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
             let locked = val != 0;
-            if tty::set_pty_lock(tty_idx, locked) == 0 {
+            if tty::set_pty_lock(tty_idx, locked).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -641,13 +647,12 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         TIOCGPTLCK => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let state = tty::get_pty_lock(tty_idx);
-            if state < 0 {
-                ctx.err()
-            } else {
-                let state = state as i32;
+            if let Ok(state) = tty::get_pty_lock(tty_idx) {
+                let state = i32::from(state);
                 try_or_err!(ctx, copy_to_user(ptr, &state));
                 ctx.ok(0)
+            } else {
+                ctx.err()
             }
         }
         // PTY packet mode.
@@ -656,7 +661,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
             let val = try_or_err!(ctx, copy_from_user(ptr));
             let enable = val != 0;
-            if tty::set_packet_mode(tty_idx, enable) == 0 {
+            if tty::set_packet_mode(tty_idx, enable).is_ok() {
                 ctx.ok(0)
             } else {
                 ctx.err()
@@ -665,48 +670,56 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
         // Missing ioctls.
         TCFLSH => {
             let queue = arg as i32;
-            let rc = tty::tcflush(tty_idx, queue);
-            if rc == 0 { ctx.ok(0) } else { ctx.err() }
+            if tty::tcflush(tty_idx, queue).is_ok() {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         TCSBRK => {
             let brk_arg = arg as i32;
-            let rc = tty::tcsbrk(tty_idx, brk_arg);
-            if rc == 0 { ctx.ok(0) } else { ctx.err() }
+            if tty::tcsbrk(tty_idx, brk_arg).is_ok() {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         TCXONC => {
             let action = arg as i32;
-            let rc = tty::tcxonc(tty_idx, action);
-            if rc == 0 { ctx.ok(0) } else { ctx.err() }
+            if tty::tcxonc(tty_idx, action).is_ok() {
+                ctx.ok(0)
+            } else {
+                ctx.err()
+            }
         }
         // Output queue visibility.
         TIOCOUTQ => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let count = tty::output_queued_bytes(tty_idx);
-            if count < 0 {
-                ctx.err()
-            } else {
+            if let Ok(count) = tty::output_queued_bytes(tty_idx) {
                 let count = count as i32;
                 try_or_err!(ctx, copy_to_user(ptr, &count));
                 ctx.ok(0)
+            } else {
+                ctx.err()
             }
         }
         TIOCEXCL => {
-            if tty::set_exclusive(tty_idx, true) == 0 { ctx.ok(0) } else { ctx.err() }
+            if tty::set_exclusive(tty_idx, true).is_ok() { ctx.ok(0) } else { ctx.err() }
         }
         TIOCNXCL => {
-            if tty::set_exclusive(tty_idx, false) == 0 { ctx.ok(0) } else { ctx.err() }
+            if tty::set_exclusive(tty_idx, false).is_ok() { ctx.ok(0) } else { ctx.err() }
         }
         TIOCGEXCL => {
             require_nonzero!(ctx, arg);
             let ptr = try_or_err!(ctx, UserPtr::<i32>::try_new(arg));
-            let state = tty::get_exclusive(tty_idx);
-            if state < 0 {
-                ctx.err()
-            } else {
-                let state = state as i32;
-                try_or_err!(ctx, copy_to_user(ptr, &state));
-                ctx.ok(0)
+            match tty::get_exclusive(tty_idx) {
+                Ok(v) => {
+                    let state = i32::from(v);
+                    try_or_err!(ctx, copy_to_user(ptr, &state));
+                    ctx.ok(0)
+                }
+                Err(_) => ctx.err()
             }
         }
         _ => ctx.err(),

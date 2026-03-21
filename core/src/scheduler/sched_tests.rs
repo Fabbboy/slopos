@@ -1542,7 +1542,7 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         zero: 0,
     };
     let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
-    if crate::platform::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
+    if slopos_kernel_services::platform::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
         klog_info!("SCHED_TEST: cannot read syscall gate");
         return TestResult::Fail;
     }

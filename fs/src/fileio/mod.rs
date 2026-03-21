@@ -1,6 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::slice;
 
+use slopos_abi::KernelErrno;
 use slopos_sync::{InitFlag, IrqMutex};
 
 use slopos_abi::fs::{
@@ -434,7 +435,7 @@ pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u3
         return;
     }
 
-    if tty::acquire_controlling_terminal(tty_idx, sid, pgid) == 0 {
+    if tty::acquire_controlling_terminal(tty_idx, sid, pgid).is_ok() {
         let _ = set_current_task_controlling_tty(Some(tty_idx));
     }
 }

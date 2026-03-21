@@ -3,11 +3,11 @@ use core::mem::size_of;
 
 use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
+use slopos_abi::tty_error::TtyError;
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
 use slopos_arch::InterruptFrame;
 use slopos_utils::klog_debug;
 
-use crate::platform;
 use crate::sched::{
     clear_scheduler_current_task, get_scheduler_stats, schedule, scheduler_is_preemption_enabled,
     sleep_current_task_ms, yield_,
@@ -19,6 +19,7 @@ use crate::syscall::common::{
 };
 use crate::syscall::context::SyscallContext;
 use crate::task::{get_task_stats, task_terminate};
+use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::tty;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
@@ -81,7 +82,7 @@ define_syscall!(syscall_sleep_ms(ctx, args) {
     let rc = if scheduler_is_preemption_enabled() != 0 {
         sleep_current_task_ms(ms as u32)
     } else {
-        crate::platform::timer_poll_delay_ms(ms as u32);
+        slopos_kernel_services::platform::timer_poll_delay_ms(ms as u32);
         0
     };
     if rc == 0 {
@@ -130,15 +131,14 @@ define_syscall!(syscall_user_read(ctx, args) {
     let max_len = args.arg1_usize().min(USER_IO_MAX_BYTES);
 
     let read_len = tty::read_cooked(TtyIndex(0), tmp.as_mut_ptr(), max_len, false);
-    if read_len < 0 {
-        // Propagate ERESTARTSYS directly.
-        if read_len == -512 {
+    let n = match read_len {
+        Ok(n) => n,
+        Err(TtyError::Restart) => {
             return ctx.err_with(slopos_abi::syscall::ERRNO_ERESTARTSYS);
         }
-        return ctx.err();
-    }
+        Err(_) => return ctx.err(),
+    };
 
-    let n = read_len as usize;
     try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg0, &tmp[..n]));
     ctx.ok(n as u64)
 });

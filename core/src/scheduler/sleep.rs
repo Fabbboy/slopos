@@ -10,7 +10,7 @@ use super::task::{
     INVALID_TASK_ID, TaskStatus, task_find_by_id, task_is_blocked, task_is_invalid,
     task_is_terminated, task_is_will_block, task_set_state_with_reason,
 };
-use crate::platform;
+use slopos_kernel_services::platform;
 
 #[derive(Copy, Clone)]
 struct SleepEntry {

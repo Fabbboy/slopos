@@ -2399,11 +2399,11 @@ pub fn test_grantpt_unlocks_slave() -> TestResult {
     let rc = (tty_services().grantpt)(master);
     let locked_after = tty::get_pty_lock(master).unwrap_or(true);
     let _ = tty::close_ref(master);
-    if !locked_before || rc != 0 || locked_after {
+    if !locked_before || rc.is_err() || locked_after {
         klog_info!(
-            "TTY_TEST: BUG - grantpt should unlock slave (before={}, rc={}, after={})",
+            "TTY_TEST: BUG - grantpt should unlock slave (before={}, rc_ok={}, after={})",
             locked_before,
-            rc,
+            rc.is_ok(),
             locked_after
         );
         return TestResult::Fail;

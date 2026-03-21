@@ -477,7 +477,8 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     let ctty = unsafe { (*task_ptr).controlling_tty };
     assert_eq_test!(ctty, Some(TtyIndex(0)), "controlling_tty should be tty0");
 
-    let tty_sid = slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    let tty_sid =
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     assert_eq_test!(tty_sid, sid, "tty session should match caller sid");
 
     task_terminate(task_id);
@@ -605,7 +606,8 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
         "parent should retain controlling tty"
     );
 
-    let tty_sid = slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    let tty_sid =
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     assert_eq_test!(
         tty_sid,
         parent_id,
@@ -651,7 +653,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
         "child ctty should clear on hangup"
     );
     assert_eq_test!(
-        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)).unwrap_or(0),
         0,
         "tty session should detach on hangup"
     );
@@ -669,12 +671,15 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx_raw = slopos_kernel_services::syscall_services::tty::alloc_pty();
-    assert_test!(master_idx_raw >= 0, "alloc_pty failed");
-    let master_idx = TtyIndex(master_idx_raw as u8);
-    let slave_number = slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx);
-    assert_test!(slave_number >= 0, "get_pty_number failed");
-    let slave_number = slave_number as u32;
+    let master_idx = match slopos_kernel_services::syscall_services::tty::alloc_pty() {
+        Ok(idx) => idx,
+        Err(_) => return TestResult::Fail,
+    };
+    let slave_number =
+        match slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx) {
+            Ok(n) => n,
+            Err(_) => return TestResult::Fail,
+        };
     let path = match pts_path_for(slave_number) {
         Some(path) => path,
         None => {
@@ -684,7 +689,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     };
 
     // Unlock slave so /dev/pts/N open succeeds.
-    slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+    let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -699,7 +704,8 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
         "PTY slave open should acquire controlling tty"
     );
     assert_eq_test!(
-        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8)),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8))
+            .unwrap_or(0),
         task_id,
         "PTY slave session should match task session"
     );
@@ -717,12 +723,15 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx_raw = slopos_kernel_services::syscall_services::tty::alloc_pty();
-    assert_test!(master_idx_raw >= 0, "alloc_pty failed");
-    let master_idx = TtyIndex(master_idx_raw as u8);
-    let slave_number = slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx);
-    assert_test!(slave_number >= 0, "get_pty_number failed");
-    let slave_number = slave_number as u32;
+    let master_idx = match slopos_kernel_services::syscall_services::tty::alloc_pty() {
+        Ok(idx) => idx,
+        Err(_) => return TestResult::Fail,
+    };
+    let slave_number =
+        match slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx) {
+            Ok(n) => n,
+            Err(_) => return TestResult::Fail,
+        };
     let path = match pts_path_for(slave_number) {
         Some(path) => path,
         None => {
@@ -732,7 +741,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     };
 
     // Unlock slave so /dev/pts/N open succeeds.
-    slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+    let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -751,7 +760,8 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
         "O_NOCTTY should prevent ctty acquire"
     );
     assert_eq_test!(
-        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8)),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8))
+            .unwrap_or(0),
         0,
         "O_NOCTTY open should leave PTY session unattached"
     );

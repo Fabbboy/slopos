@@ -58,7 +58,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
             desc.pipe_read_end = false;
             desc.pipe_write_end = false;
 
-            if tty::open_ref(tty_idx) < 0 {
+            if tty::open_ref(tty_idx).is_err() {
                 reset_descriptor(desc);
                 drop(guard);
                 return -1;
@@ -71,11 +71,10 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
 
     if path_bytes == b"/dev/ptmx" {
         return with_tables(|kernel, processes| {
-            let master_idx_raw = tty::alloc_pty();
-            if master_idx_raw < 0 {
-                return -1;
-            }
-            let master_idx = TtyIndex(master_idx_raw as u8);
+            let master_idx = match tty::alloc_pty() {
+                Ok(idx) => idx,
+                Err(_) => return -1,
+            };
 
             let kernel_ptr = kernel as *mut FileTableSlot;
             let table_ptr = if let Some(t) = table_for_pid(kernel, processes, process_id) {
@@ -114,7 +113,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
             desc.pipe_read_end = false;
             desc.pipe_write_end = false;
 
-            if tty::open_ref(master_idx) < 0 {
+            if tty::open_ref(master_idx).is_err() {
                 reset_descriptor(desc);
                 drop(guard);
                 return -1;
@@ -150,7 +149,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
                 return -1;
             };
 
-            if tty::open_pty_slave(slave_idx) < 0 {
+            if tty::open_pty_slave(slave_idx).is_err() {
                 drop(guard);
                 return -1;
             }
@@ -298,7 +297,10 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
             if let Some(tty_idx) = desc.tty_index {
                 let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
                 drop(guard);
-                return tty::read_cooked(tty_idx, buffer as *mut u8, count, is_nonblock);
+                return match tty::read_cooked(tty_idx, buffer as *mut u8, count, is_nonblock) {
+                    Ok(n) => n as ssize_t,
+                    Err(e) => e.to_errno() as ssize_t,
+                };
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {
@@ -450,8 +452,10 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
             if let Some(tty_idx) = desc.tty_index {
                 let is_nonblock = (desc.flags & O_NONBLOCK as u32) != 0;
                 drop(guard);
-                let result = tty::write_bytes(tty_idx, buffer as *const u8, count, is_nonblock);
-                return result as ssize_t;
+                return match tty::write_bytes(tty_idx, buffer as *const u8, count, is_nonblock) {
+                    Ok(n) => n as ssize_t,
+                    Err(e) => e.to_errno() as ssize_t,
+                };
             }
 
             if desc.socket_idx != INVALID_SOCKET_IDX {

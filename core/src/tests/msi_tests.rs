@@ -16,7 +16,7 @@ use crate::irq::{
     msi_alloc_vector, msi_allocated_count, msi_free_vector, msi_register_handler,
     msi_unregister_handler, msi_vector_is_allocated,
 };
-use crate::platform::idt_get_gate;
+use slopos_kernel_services::platform::idt_get_gate;
 
 const MSI_SAMPLE_VECTORS: [u8; 5] = [48, 100, 150, 200, 223];
 
