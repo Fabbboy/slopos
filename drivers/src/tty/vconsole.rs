@@ -15,6 +15,7 @@ extern crate alloc;
 
 use alloc::vec;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::font::{
     FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_for_codepoint, get_glyph_or_space, is_double_width,
@@ -388,7 +389,15 @@ pub(crate) struct VConsoleState {
     pub(crate) in_alt_screen: bool,
     pub(crate) scroll_top: u16,
     pub(crate) scroll_bottom: u16,
+    /// Shadow framebuffer — cached RAM, same dimensions as hardware FB.
+    /// All glyph rendering targets this buffer; `flush_dirty()` blits to HW.
+    shadow: Option<alloc::boxed::Box<[u8]>>,
+    shadow_pitch: usize,
+    /// Bitmask of rows modified since last flush. Bit N = row N is dirty.
+    dirty_rows: u128,
 }
+
+static SERIAL_MIRROR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 impl VConsoleState {
     pub(crate) const fn new() -> Self {
@@ -411,6 +420,9 @@ impl VConsoleState {
             in_alt_screen: false,
             scroll_top: 0,
             scroll_bottom: 0,
+            shadow: None,
+            shadow_pitch: 0,
+            dirty_rows: 0,
         }
     }
 
@@ -487,6 +499,7 @@ impl VConsoleState {
             );
             self.render_cell(self.cursor_row, self.cursor_col);
             self.render_cell(self.cursor_row, self.cursor_col + 1);
+            self.mark_row_dirty(self.cursor_row);
             self.cursor_col = self.cursor_col.saturating_add(2);
         } else if wide {
             self.cells.set(
@@ -498,6 +511,7 @@ impl VConsoleState {
                 },
             );
             self.render_cell(self.cursor_row, self.cursor_col);
+            self.mark_row_dirty(self.cursor_row);
             self.cursor_col = self.cursor_col.saturating_add(1);
         } else {
             self.cells.set(
@@ -509,6 +523,7 @@ impl VConsoleState {
                 },
             );
             self.render_cell(self.cursor_row, self.cursor_col);
+            self.mark_row_dirty(self.cursor_row);
             self.cursor_col = self.cursor_col.saturating_add(1);
         }
         self.check_wrap_and_scroll();
@@ -535,6 +550,7 @@ impl VConsoleState {
                         }
                         self.cells.set(row, col, Cell::blank());
                         self.render_cell(self.cursor_row, self.cursor_col);
+                        self.mark_row_dirty(self.cursor_row);
                     }
                 }
             }
@@ -606,14 +622,21 @@ impl VConsoleState {
                         self.cells.set(cr, c, clear_cell);
                     }
                     self.render_row_range(cr, cc, cols);
+                    self.mark_row_dirty(cr as u16);
                 }
                 for r in (cr + 1)..rows {
                     self.clear_row_with_attr(r, clear_cell.attrs);
+                }
+                if cr + 1 < rows {
+                    self.mark_rows_dirty((cr + 1) as u16, (rows - 1) as u16);
                 }
             }
             EraseMode::ToStart => {
                 for r in 0..cr {
                     self.clear_row_with_attr(r, clear_cell.attrs);
+                }
+                if cr > 0 {
+                    self.mark_rows_dirty(0, (cr - 1) as u16);
                 }
                 if cr < rows {
                     let end = if cc < cols { cc + 1 } else { cols };
@@ -621,12 +644,14 @@ impl VConsoleState {
                         self.cells.set(cr, c, clear_cell);
                     }
                     self.render_row_range(cr, 0, end);
+                    self.mark_row_dirty(cr as u16);
                 }
             }
             EraseMode::All => {
                 for r in 0..rows {
                     self.clear_row_with_attr(r, clear_cell.attrs);
                 }
+                self.mark_all_dirty();
                 self.cursor_row = 0;
                 self.cursor_col = 0;
             }
@@ -654,6 +679,7 @@ impl VConsoleState {
                     self.cells.set(cr, c, clear_cell);
                 }
                 self.render_row_range(cr, cc, cols);
+                self.mark_row_dirty(self.cursor_row);
             }
             EraseMode::ToStart => {
                 let end = if cc < cols { cc + 1 } else { cols };
@@ -661,9 +687,11 @@ impl VConsoleState {
                     self.cells.set(cr, c, clear_cell);
                 }
                 self.render_row_range(cr, 0, end);
+                self.mark_row_dirty(self.cursor_row);
             }
             EraseMode::All => {
                 self.clear_row_with_attr(cr, clear_cell.attrs);
+                self.mark_row_dirty(self.cursor_row);
             }
         }
     }
@@ -706,10 +734,30 @@ impl VConsoleState {
             }
         }
 
-        for r in sr_top..=sr_bottom {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
+        if let Some(ref mut shadow) = self.shadow {
+            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+            let shift_bytes = shift.saturating_mul(row_bytes);
+            let region_start = sr_top.saturating_mul(row_bytes);
+            let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
+            if shift_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                shadow.copy_within(
+                    region_start..region_end - shift_bytes,
+                    region_start + shift_bytes,
+                );
             }
+            let clear_end = (region_start + shift_bytes).min(shadow.len());
+            if region_start < clear_end {
+                shadow[region_start..clear_end].fill(0);
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
+        } else {
+            for r in sr_top..=sr_bottom {
+                for c in 0..cols {
+                    self.render_cell(r as u16, c as u16);
+                }
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
         }
     }
 
@@ -804,11 +852,19 @@ impl VConsoleState {
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.in_alt_screen = true;
-        for r in 0..rows {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
+        if let Some(ref mut shadow) = self.shadow {
+            let row_bytes = (FONT_CHAR_HEIGHT as usize).saturating_mul(self.shadow_pitch);
+            let byte_count = rows.saturating_mul(row_bytes);
+            let end = byte_count.min(shadow.len());
+            shadow[..end].fill(0);
+        } else {
+            for r in 0..rows {
+                for c in 0..cols {
+                    self.render_cell_to_fb(r as u16, c as u16);
+                }
             }
         }
+        self.mark_all_dirty();
     }
 
     fn leave_alt_screen(&mut self) {
@@ -821,11 +877,8 @@ impl VConsoleState {
         self.cursor_row = self.alt_screen_cursor_row;
         self.cursor_col = self.alt_screen_cursor_col;
         self.in_alt_screen = false;
-        for r in 0..rows {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
-            }
-        }
+        self.render_all_cells();
+        self.mark_all_dirty();
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -867,10 +920,31 @@ impl VConsoleState {
                 }
             }
         }
-        for r in sr_top..=sr_bottom {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
+
+        if let Some(ref mut shadow) = self.shadow {
+            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+            let shift_bytes = shift.saturating_mul(row_bytes);
+            let region_start = cur.saturating_mul(row_bytes);
+            let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
+            if shift_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                shadow.copy_within(
+                    region_start..region_end - shift_bytes,
+                    region_start + shift_bytes,
+                );
             }
+            let clear_end = (region_start + shift_bytes).min(shadow.len());
+            if region_start < clear_end {
+                shadow[region_start..clear_end].fill(0);
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
+        } else {
+            for r in sr_top..=sr_bottom {
+                for c in 0..cols {
+                    self.render_cell(r as u16, c as u16);
+                }
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
         }
     }
 
@@ -894,6 +968,7 @@ impl VConsoleState {
         for c in col..cols {
             self.render_cell(self.cursor_row, c as u16);
         }
+        self.mark_row_dirty(self.cursor_row);
     }
 
     fn insert_chars(&mut self, n: u16) {
@@ -917,6 +992,7 @@ impl VConsoleState {
         for c in col..cols {
             self.render_cell(self.cursor_row, c as u16);
         }
+        self.mark_row_dirty(self.cursor_row);
     }
 
     fn erase_chars(&mut self, n: u16) {
@@ -939,6 +1015,7 @@ impl VConsoleState {
             self.cells.set(row, c, clear_cell);
             self.render_cell(self.cursor_row, c as u16);
         }
+        self.mark_row_dirty(self.cursor_row);
     }
 
     fn delete_lines(&mut self, n: u16) {
@@ -961,10 +1038,30 @@ impl VConsoleState {
                 }
             }
         }
-        for r in sr_top..=sr_bottom {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
+
+        if let Some(ref mut shadow) = self.shadow {
+            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+            let shift_bytes = shift.saturating_mul(row_bytes);
+            let region_start = cur.saturating_mul(row_bytes);
+            let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
+            if shift_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                shadow.copy_within(region_start + shift_bytes..region_end, region_start);
             }
+            let clear_start = region_end.saturating_sub(shift_bytes);
+            let clear_start = clear_start.min(shadow.len());
+            let clear_end = region_end.min(shadow.len());
+            if clear_start < clear_end {
+                shadow[clear_start..clear_end].fill(0);
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
+        } else {
+            for r in sr_top..=sr_bottom {
+                for c in 0..cols {
+                    self.render_cell(r as u16, c as u16);
+                }
+            }
+            self.mark_rows_dirty(sr_top as u16, sr_bottom as u16);
         }
     }
 
@@ -973,6 +1070,31 @@ impl VConsoleState {
             self.rows.saturating_sub(1)
         } else {
             self.scroll_bottom
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Dirty tracking
+    // -----------------------------------------------------------------------
+
+    #[inline(always)]
+    fn mark_row_dirty(&mut self, row: u16) {
+        if (row as u32) < 128 {
+            self.dirty_rows |= 1u128 << row;
+        }
+    }
+
+    #[inline(always)]
+    fn mark_rows_dirty(&mut self, from: u16, to: u16) {
+        for r in from..=to {
+            self.mark_row_dirty(r);
+        }
+    }
+
+    #[inline(always)]
+    fn mark_all_dirty(&mut self) {
+        if self.rows > 0 {
+            self.mark_rows_dirty(0, self.rows.saturating_sub(1));
         }
     }
 
@@ -1014,9 +1136,10 @@ impl VConsoleState {
         for c in 0..cols {
             self.render_cell(row as u16, c as u16);
         }
+        self.mark_row_dirty(row as u16);
     }
 
-    fn render_row_range(&self, row: usize, col_start: usize, col_end: usize) {
+    fn render_row_range(&mut self, row: usize, col_start: usize, col_end: usize) {
         for c in col_start..col_end {
             self.render_cell(row as u16, c as u16);
         }
@@ -1047,6 +1170,7 @@ impl VConsoleState {
                     if row < self.rows as usize && col < self.cols as usize {
                         self.cells.set(row, col, Cell::blank());
                         self.render_cell(self.cursor_row, self.cursor_col);
+                        self.mark_row_dirty(self.cursor_row);
                     }
                 }
             }
@@ -1070,6 +1194,7 @@ impl VConsoleState {
                         },
                     );
                     self.render_cell(self.cursor_row, self.cursor_col);
+                    self.mark_row_dirty(self.cursor_row);
                     self.cursor_col = self.cursor_col.saturating_add(1);
                 }
             }
@@ -1106,38 +1231,32 @@ impl VConsoleState {
             self.cells.set(sr_bottom, c, Cell::blank());
         }
 
-        let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
-        if let Some(fb) = self.fb {
-            if full_screen {
+        if self.shadow.is_some() {
+            if let Some(ref mut shadow) = self.shadow {
                 let row_px = FONT_CHAR_HEIGHT as usize;
-                let pitch = fb.pitch as usize;
-                let rows = self.rows as usize;
-                let copy_rows = rows.saturating_sub(1).saturating_mul(row_px);
-                let copy_bytes = copy_rows.saturating_mul(pitch);
-                if copy_bytes > 0 {
-                    unsafe {
-                        let src = fb.base.add(row_px.saturating_mul(pitch));
-                        ptr::copy(src, fb.base, copy_bytes);
-                    }
+                let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+                let region_start = sr_top.saturating_mul(row_bytes);
+                let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
+                if row_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                    shadow.copy_within(region_start + row_bytes..region_end, region_start);
                 }
-                let clear_start_y = rows.saturating_sub(1).saturating_mul(row_px);
-                let width = fb.width as usize;
-                for y in clear_start_y..clear_start_y.saturating_add(row_px) {
-                    for x in 0..width {
-                        self.put_pixel(&fb, x, y, BG_COLOR);
-                    }
+                let clear_start = region_end.saturating_sub(row_bytes).min(shadow.len());
+                let clear_end = region_end.min(shadow.len());
+                if clear_start < clear_end {
+                    shadow[clear_start..clear_end].fill(0);
                 }
-            } else {
-                for r in sr_top..=sr_bottom {
-                    for c in 0..cols {
-                        self.render_cell(r as u16, c as u16);
-                    }
+            }
+            self.mark_all_dirty();
+        } else if self.fb.is_some() {
+            for r in sr_top..=sr_bottom {
+                for c in 0..cols {
+                    self.render_cell(r as u16, c as u16);
                 }
             }
         }
     }
 
-    fn redraw_from_scrollback(&self) {
+    fn redraw_from_scrollback(&mut self) {
         let guard = SCROLLBACK.lock();
         let Some(ref sb) = *guard else { return };
         if !sb.viewing_history() {
@@ -1166,9 +1285,17 @@ impl VConsoleState {
                 self.render_cell((sb_lines + r) as u16, c as u16);
             }
         }
+        self.mark_all_dirty();
+        self.flush_dirty();
     }
 
-    fn redraw_all(&self) {
+    fn redraw_all(&mut self) {
+        self.render_all_cells();
+        self.mark_all_dirty();
+        self.flush_dirty();
+    }
+
+    fn render_all_cells(&mut self) {
         let rows = self.rows as usize;
         let cols = self.cols as usize;
         for r in 0..rows {
@@ -1178,7 +1305,15 @@ impl VConsoleState {
         }
     }
 
-    fn render_cell_direct(&self, row: u16, col: u16, cell: &Cell) {
+    fn render_cell_direct(&mut self, row: u16, col: u16, cell: &Cell) {
+        if self.shadow.is_some() {
+            self.render_cell_direct_to_shadow(row, col, cell);
+            return;
+        }
+        self.render_cell_direct_to_fb(row, col, cell);
+    }
+
+    fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
         let Some(fb) = self.fb else { return };
         let (r, c) = (row as usize, col as usize);
         if r >= self.rows as usize || c >= self.cols as usize {
@@ -1207,7 +1342,56 @@ impl VConsoleState {
         }
     }
 
-    pub(crate) fn render_cell(&self, row: u16, col: u16) {
+    fn render_cell_direct_to_shadow(&mut self, row: u16, col: u16, cell: &Cell) {
+        let (r, c) = (row as usize, col as usize);
+        if r >= self.rows as usize || c >= self.cols as usize {
+            return;
+        }
+        let Some(ref mut shadow) = self.shadow else {
+            self.render_cell_direct_to_fb(row, col, cell);
+            return;
+        };
+        let glyph = if cell.codepoint == CONTINUATION_CODEPOINT {
+            get_glyph_or_space(b' ')
+        } else if cell.codepoint <= 0x7E {
+            get_glyph_or_space(cell.codepoint as u8)
+        } else {
+            get_glyph_for_codepoint(cell.codepoint)
+        };
+        let x0 = c.saturating_mul(FONT_CHAR_WIDTH as usize);
+        let y0 = r.saturating_mul(FONT_CHAR_HEIGHT as usize);
+        for gy in 0..FONT_CHAR_HEIGHT as usize {
+            let bits = glyph[gy];
+            let row_offset = (y0 + gy)
+                .saturating_mul(self.shadow_pitch)
+                .saturating_add(x0.saturating_mul(4));
+            if row_offset + 32 <= shadow.len() {
+                Self::expand_and_write_row(
+                    &mut shadow[row_offset..row_offset + 32],
+                    bits,
+                    cell.attrs.fg,
+                    cell.attrs.bg,
+                );
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn expand_and_write_row(dst: &mut [u8], bits: u8, fg: u32, bg: u32) {
+        let mut row_pixels = [0u32; 8];
+        for (gx, pixel) in row_pixels.iter_mut().enumerate() {
+            *pixel = if ((bits >> (7 - gx as u8)) & 1) != 0 {
+                fg
+            } else {
+                bg
+            };
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(row_pixels.as_ptr() as *const u8, dst.as_mut_ptr(), 32);
+        }
+    }
+
+    pub(crate) fn render_cell_to_fb(&self, row: u16, col: u16) {
         let Some(fb) = self.fb else {
             return;
         };
@@ -1245,6 +1429,72 @@ impl VConsoleState {
         }
     }
 
+    pub(crate) fn render_cell(&mut self, row: u16, col: u16) {
+        if self.shadow.is_some() {
+            let row_usize = row as usize;
+            let col_usize = col as usize;
+            if row_usize >= self.rows as usize || col_usize >= self.cols as usize {
+                return;
+            }
+            let cell = self.cells.get(row_usize, col_usize);
+            self.render_cell_direct_to_shadow(row, col, &cell);
+            return;
+        }
+        self.render_cell_to_fb(row, col);
+    }
+
+    fn flush_dirty(&mut self) {
+        if self.dirty_rows == 0 {
+            return;
+        }
+        let dirty = self.dirty_rows;
+        let Some(fb) = self.fb else {
+            self.dirty_rows = 0;
+            return;
+        };
+        let Some(ref shadow) = self.shadow else {
+            self.dirty_rows = 0;
+            return;
+        };
+
+        let row_height = FONT_CHAR_HEIGHT as usize;
+        let pitch = fb.pitch as usize;
+        let max_rows = self.rows as usize;
+        let mut bits = dirty;
+
+        while bits != 0 {
+            let start = bits.trailing_zeros() as usize;
+            if start >= max_rows {
+                break;
+            }
+            bits &= !(1u128 << start);
+            let mut end = start;
+            while end + 1 < max_rows && (bits & (1u128 << (end + 1))) != 0 {
+                end += 1;
+                bits &= !(1u128 << end);
+            }
+
+            let y_start = start.saturating_mul(row_height);
+            let y_end = (end + 1).saturating_mul(row_height);
+            let byte_offset = y_start.saturating_mul(pitch);
+            let byte_count = y_end.saturating_sub(y_start).saturating_mul(pitch);
+
+            if byte_offset + byte_count <= shadow.len() {
+                unsafe {
+                    let src = shadow.as_ptr().add(byte_offset);
+                    let dst = fb.base.add(byte_offset);
+                    ptr::copy_nonoverlapping(src, dst, byte_count);
+                }
+            }
+        }
+
+        self.dirty_rows = 0;
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::x86_64::_mm_sfence();
+        }
+    }
+
     pub(crate) fn recalculate_dimensions(&mut self) {
         if let Some(fb) = self.fb {
             let char_w = FONT_CHAR_WIDTH as u32;
@@ -1263,6 +1513,7 @@ impl VConsoleState {
         self.cells.allocate(self.rows as usize, self.cols as usize);
         self.alt_cells
             .allocate(self.rows as usize, self.cols as usize);
+        self.mark_all_dirty();
 
         self.scroll_top = 0;
         self.scroll_bottom = self.rows.saturating_sub(1);
@@ -1330,6 +1581,7 @@ pub fn register_framebuffer(
         return;
     }
 
+    let shadow_size = (pitch as usize).saturating_mul(height as usize);
     let cols = {
         let mut state = VCONSOLE_STATE.lock();
         state.fb = Some(VConsoleFbInfo {
@@ -1349,10 +1601,40 @@ pub fn register_framebuffer(
     // Heap allocation outside the IrqMutex — allocating with interrupts
     // disabled triggers UB checks in the global allocator.
     let scrollback = alloc::boxed::Box::new(ScrollbackBuf::new(cols));
+    let shadow = {
+        let mut bytes = alloc::vec::Vec::new();
+        if shadow_size > 0 && bytes.try_reserve_exact(shadow_size).is_ok() {
+            bytes.resize(shadow_size, 0);
+            Some(bytes.into_boxed_slice())
+        } else {
+            None
+        }
+    };
+
+    {
+        let mut state = VCONSOLE_STATE.lock();
+        state.shadow = shadow;
+        state.shadow_pitch = if state.shadow.is_some() {
+            pitch as usize
+        } else {
+            0
+        };
+    }
     *SCROLLBACK.lock() = Some(scrollback);
 }
 
 pub fn write(data: &[u8]) {
+    let was_viewing_history = {
+        let sb_guard = SCROLLBACK.lock();
+        sb_guard.as_ref().is_some_and(|sb| sb.viewing_history())
+    };
+
+    if was_viewing_history {
+        if let Some(ref mut sb) = *SCROLLBACK.lock() {
+            sb.reset_view();
+        }
+    }
+
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
         for &b in data {
@@ -1361,20 +1643,15 @@ pub fn write(data: &[u8]) {
         return;
     }
 
-    {
-        let mut sb_guard = SCROLLBACK.lock();
-        if let Some(ref mut sb) = *sb_guard {
-            if sb.viewing_history() {
-                sb.reset_view();
-                drop(sb_guard);
-                state.redraw_all();
-            }
-        }
+    if was_viewing_history {
+        state.redraw_all();
     }
 
     for &b in data {
         state.process_byte(b);
     }
+
+    state.flush_dirty();
 }
 
 pub fn has_framebuffer() -> bool {
@@ -1385,14 +1662,24 @@ pub fn scroll_view_up(lines: usize) {
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.scroll_up(lines);
     }
-    VCONSOLE_STATE.lock().redraw_from_scrollback();
+    let mut state = VCONSOLE_STATE.lock();
+    state.redraw_from_scrollback();
 }
 
 pub fn scroll_view_down(lines: usize) {
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.scroll_down(lines);
     }
-    VCONSOLE_STATE.lock().redraw_from_scrollback();
+    let mut state = VCONSOLE_STATE.lock();
+    state.redraw_from_scrollback();
+}
+
+pub fn set_serial_mirror(enabled: bool) {
+    SERIAL_MIRROR_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn serial_mirror_enabled() -> bool {
+    SERIAL_MIRROR_ENABLED.load(Ordering::Relaxed)
 }
 
 pub fn scrollback_line_count() -> usize {
@@ -1424,6 +1711,9 @@ pub(crate) fn reset_for_tests() {
     state.in_alt_screen = false;
     state.scroll_top = 0;
     state.scroll_bottom = DEFAULT_ROWS.saturating_sub(1);
+    state.shadow = None;
+    state.shadow_pitch = 0;
+    state.dirty_rows = 0;
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.clear();
     }
