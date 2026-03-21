@@ -5,11 +5,12 @@ use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use slopos_abi::PhysAddr;
 use slopos_acpi::mcfg::{Mcfg, McfgEntry};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
-use slopos_lib::kernel_services::platform;
-use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InitFlag, IrqMutex, klog_info};
+use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
+use slopos_sync::{InitFlag, IrqMutex};
+use slopos_utils::klog_info;
+use slopos_utils::string::cstr_to_str;
 
 pub use crate::pci_defs::*;
 

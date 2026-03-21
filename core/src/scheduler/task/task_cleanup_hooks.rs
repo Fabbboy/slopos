@@ -1,5 +1,5 @@
-use slopos_lib::IrqMutex;
-use slopos_lib::klog_info;
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_info;
 
 use slopos_mm::shared_memory::shm_cleanup_task;
 

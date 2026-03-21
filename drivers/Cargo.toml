@@ -22,8 +22,12 @@ itests = ["slopos-net/itests"]
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-acpi = { workspace = true }
+slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-kernel-services = { workspace = true }
+slopos-testing = { workspace = true }
+slopos-sync = { workspace = true }
+slopos-utils = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-net = { workspace = true }
 bitflags = { workspace = true }

@@ -12,7 +12,6 @@ use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
 use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
-use slopos_lib::klog_info;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -21,6 +20,7 @@ use slopos_mm::process_vm::{
     process_vm_get_page_dir, process_vm_get_stack_top, process_vm_load_elf_data,
     process_vm_reset_stack,
 };
+use slopos_utils::klog_info;
 
 use crate::sched::schedule_task;
 use crate::scheduler::task_struct::Task;

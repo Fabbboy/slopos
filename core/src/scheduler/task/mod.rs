@@ -15,7 +15,7 @@ pub use slopos_abi::task::{
     TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW, TASK_PRIORITY_NORMAL, TASK_STACK_SIZE, TaskExitReason,
     TaskExitRecord, TaskFaultReason, TaskStatus,
 };
-pub use slopos_lib::arch::idt::IdtEntry;
+pub use slopos_arch::arch::idt::IdtEntry;
 
 pub use task_cleanup_hooks::*;
 pub use task_lifecycle::*;

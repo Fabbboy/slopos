@@ -10,8 +10,8 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
 
 use super::per_cpu::{pause_all_aps, resume_all_aps_if_not_nested};
 use super::runtime::{self, IdleStackResolveError};
@@ -25,8 +25,8 @@ use super::task::{
     TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
     task_get_info, task_set_state, task_shutdown_all, task_terminate,
 };
-use slopos_lib::arch::gdt::SegmentSelector;
-use slopos_lib::arch::idt::SYSCALL_VECTOR;
+use slopos_arch::arch::gdt::SegmentSelector;
+use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 
 // =============================================================================
@@ -269,7 +269,7 @@ pub fn test_create_max_tasks() -> TestResult {
         MAX_TASKS
     );
 
-    let cpu_count = slopos_lib::get_cpu_count() as usize;
+    let cpu_count = slopos_arch::pcr::get_cpu_count() as usize;
     let reserved_idle_slots = cpu_count.max(1);
     let min_expected = MAX_TASKS.saturating_sub(reserved_idle_slots + 1);
     if success_count < min_expected {
@@ -367,9 +367,9 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
 /// Test: Schedule task to empty queue
 pub fn test_schedule_to_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    slopos_lib::mark_cpu_online(cpu_id);
+    slopos_arch::pcr::mark_cpu_online(cpu_id);
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Failed to enable scheduler precondition on CPU {}",
@@ -847,7 +847,7 @@ pub fn test_schedule_while_disabled() -> TestResult {
 /// but not yet enabled.
 pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.disable()).is_none() {
         klog_info!(
@@ -1157,7 +1157,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Get ready count before
     let ready_before =
@@ -1232,7 +1232,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
         task_get_info(task_ids[i], &mut task_ptrs[i]);
     }
 
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Push all to inbox
     for i in 0..NUM_TASKS {
@@ -1290,7 +1290,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Push to inbox (bypassing normal schedule_task)
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -1326,7 +1326,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 /// Test: Draining remote inbox must not enqueue non-ready tasks.
 pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     let task_id = task_create(
         b"InboxBlocked\0".as_ptr() as *const c_char,
@@ -1393,13 +1393,13 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
 pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_count < 2 {
         klog_info!("SCHED_TEST: Skipping cross-CPU test (only 1 CPU)");
         return TestResult::Pass; // Skip on single-CPU systems
     }
 
-    let current_cpu = slopos_lib::get_current_cpu() as usize;
+    let current_cpu = slopos_arch::pcr::get_current_cpu() as usize;
     let target_cpu =
         match (0..cpu_count).find(|cpu| *cpu != current_cpu && *cpu < u32::BITS as usize) {
             Some(cpu) => cpu,
@@ -1413,7 +1413,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         };
     let target_cpu_u8 = target_cpu as u8;
 
-    slopos_lib::mark_cpu_online(target_cpu);
+    slopos_arch::pcr::mark_cpu_online(target_cpu);
     if super::per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Failed to enable target CPU {} scheduler",
@@ -1602,7 +1602,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     sched_core,
     [
         test_state_transition_ready_to_running,

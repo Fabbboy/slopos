@@ -23,7 +23,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{MAX_CPUS, cpu, klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_arch::pcr::MAX_CPUS;
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::paging_defs::PAGE_SIZE_4KB;
 
@@ -49,13 +51,13 @@ pub fn register_ipi_sender(sender: SendIpiFn) {
 /// Beyond this threshold, a full TLB flush (CR3 reload) is cheaper.
 const INVLPG_THRESHOLD: usize = 32;
 
-pub use slopos_lib::arch::idt::TLB_SHOOTDOWN_VECTOR;
+pub use slopos_arch::arch::idt::TLB_SHOOTDOWN_VECTOR;
 
 // =============================================================================
 // CPU Feature Detection
 // =============================================================================
 
-use slopos_lib::cpu::cpuid::{
+use slopos_arch::cpu::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
 };
 
@@ -256,8 +258,8 @@ pub fn get_active_cpu_count() -> u32 {
 /// Notify the TLB subsystem that a new CPU is online.
 ///
 /// Called during AP startup after the CPU's topology has been registered
-/// via `slopos_lib::pcr::init_ap_pcr`. This only updates the TLB
-/// shootdown active-CPU count; topology lives in `slopos_lib::pcr`.
+/// via `slopos_arch::pcr::init_ap_pcr`. This only updates the TLB
+/// shootdown active-CPU count; topology lives in `slopos_arch::pcr`.
 pub fn notify_cpu_online() {
     TLB_STATE.active_cpu_count.fetch_add(1, Ordering::AcqRel);
 }
@@ -351,7 +353,7 @@ pub fn flush_page(vaddr: VirtAddr) {
     flush_page_local(vaddr);
 
     if is_smp_active() {
-        let initiator = slopos_lib::get_current_cpu();
+        let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
         send_shootdown_ipi();
@@ -367,7 +369,7 @@ pub fn flush_range(start: VirtAddr, end: VirtAddr) {
     flush_range_local(start, end);
 
     if is_smp_active() {
-        let initiator = slopos_lib::get_current_cpu();
+        let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi();
@@ -383,7 +385,7 @@ pub fn flush_all() {
     flush_tlb_local_full();
 
     if is_smp_active() {
-        let initiator = slopos_lib::get_current_cpu();
+        let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi();
@@ -403,7 +405,7 @@ pub fn flush_asid(asid: u64) {
     }
 
     if is_smp_active() {
-        let initiator = slopos_lib::get_current_cpu();
+        let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, asid);
         send_shootdown_ipi();

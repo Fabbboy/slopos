@@ -1,1 +1,1 @@
-pub use slopos_lib::kernel_services::platform::*;
+pub use slopos_kernel_services::platform::*;

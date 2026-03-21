@@ -19,5 +19,10 @@ itests = []
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-arch = { workspace = true }
+slopos-kernel-services = { workspace = true }
+slopos-testing = { workspace = true }
+slopos-sync = { workspace = true }
+slopos-utils = { workspace = true }
+slopos-service-core = { path = "../service-core" }
 bitflags = { workspace = true }

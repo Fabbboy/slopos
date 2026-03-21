@@ -7,7 +7,7 @@
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
-use slopos_lib::kernel_services::driver_runtime::scheduler_is_enabled;
+use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
 
 use super::table::{TTY_INPUT_WAITERS, TTY_POLL_WAITERS, TTY_SLOTS};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
@@ -170,12 +170,12 @@ pub fn poll_dequeue(idx: TtyIndex) {
 pub fn poll_sleep_on(slots: &[u8]) {
     if scheduler_is_enabled() == 0 {
         // Pre-scheduler fallback: yield briefly.
-        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
     if slots.is_empty() {
-        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
@@ -190,11 +190,11 @@ pub fn poll_sleep_on(slots: &[u8]) {
 
     if registered == 0 {
         // Could not enqueue on any queue — fall back to brief delay.
-        slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+        slopos_kernel_services::platform::timer_poll_delay_ms(1);
         return;
     }
 
-    slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(100);
+    slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
 
     // Clean up: remove ourselves from all registered queues.
     for &slot in slots {

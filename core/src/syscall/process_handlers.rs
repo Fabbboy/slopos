@@ -14,7 +14,7 @@ use slopos_abi::syscall::*;
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitRecord};
 use slopos_fs::vfs::traits::VfsError;
 
-use slopos_lib::{InterruptFrame, cpu};
+use slopos_arch::{InterruptFrame, cpu};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 
@@ -300,7 +300,7 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
             unsafe {
                 if tls_tp != 0 {
                     (*task).fs_base = tls_tp;
-                    slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, tls_tp);
+                    slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
                 }
                 (*frame).rip = entry_point;
                 (*frame).rsp = stack_ptr;
@@ -327,12 +327,12 @@ pub fn syscall_exec(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDispo
 
 define_syscall!(syscall_get_cpu_count(ctx, args) {
     let _ = args;
-    ctx.ok(slopos_lib::get_cpu_count() as u64)
+    ctx.ok(slopos_arch::pcr::get_cpu_count() as u64)
 });
 
 define_syscall!(syscall_get_current_cpu(ctx, args) {
     let _ = args;
-    ctx.ok(slopos_lib::get_current_cpu() as u64)
+    ctx.ok(slopos_arch::pcr::get_current_cpu() as u64)
 });
 
 define_syscall!(syscall_set_cpu_affinity(ctx, args) requires(let task_id) {
@@ -539,7 +539,7 @@ pub fn syscall_arch_prctl(task: *mut Task, frame: *mut InterruptFrame) -> Syscal
             }
             let t = some_or_err!(ctx, ctx.task_mut());
             t.fs_base = addr;
-            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, addr);
+            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, addr);
             ctx.ok(0)
         }
         ARCH_GET_FS => {
@@ -642,6 +642,6 @@ define_syscall!(syscall_vhangup(ctx, args) requires(let task_id) {
     // Delegate to the TTY subsystem's existing hangup infrastructure
     //.  This flushes buffers, detaches the session,
     // signals SIGHUP + SIGCONT, and wakes all blocked readers/writers.
-    slopos_lib::kernel_services::syscall_services::tty::hangup(ctty);
+    slopos_kernel_services::syscall_services::tty::hangup(ctty);
     ctx.ok(0)
 });

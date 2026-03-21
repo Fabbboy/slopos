@@ -1,0 +1,15 @@
+[package]
+name = "slopos-utils"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+bitflags.workspace = true
+slopos-abi = { path = "../abi" }
+slopos-arch = { path = "../karch" }
+slopos-kernel-services = { path = "../kernel-services" }

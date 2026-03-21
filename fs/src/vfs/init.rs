@@ -1,4 +1,4 @@
-use slopos_lib::InitFlag;
+use slopos_sync::InitFlag;
 
 use crate::devfs::DevFs;
 use crate::ext2_vfs::{EXT2_VFS_STATIC, ext2_vfs_is_initialized};

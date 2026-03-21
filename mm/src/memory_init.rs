@@ -23,11 +23,13 @@ use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use slopos_abi::DisplayInfo;
-use slopos_lib::boot_info::LimineMemmapResponse;
-use slopos_lib::cpu::apic_msr::ApicBaseMsr;
-use slopos_lib::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
-use slopos_lib::cpu::msr::Msr;
-use slopos_lib::{InitFlag, align_down_u64, align_up_u64, cpu, klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_arch::cpu::apic_msr::ApicBaseMsr;
+use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
+use slopos_arch::cpu::msr::Msr;
+use slopos_sync::InitFlag;
+use slopos_utils::boot_info::LimineMemmapResponse;
+use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 const LIMINE_MEMMAP_USABLE: u64 = 0;
 const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
@@ -491,7 +493,7 @@ fn log_reserved_regions() {
             }
             let region_ref = &*region;
             let label_str = if region_ref.label[0] != 0 {
-                slopos_lib::string::bytes_as_str(&region_ref.label)
+                slopos_utils::string::bytes_as_str(&region_ref.label)
             } else {
                 mm_reservation_type_name(region_ref.type_)
             };
@@ -624,7 +626,7 @@ pub fn init_memory_system(
             klog_info!("MM: WARNING - page allocator finalization reported issues");
         }
 
-        slopos_lib::panic_recovery::register_panic_cleanup(mm_panic_cleanup);
+        slopos_utils::panic_recovery::register_panic_cleanup(mm_panic_cleanup);
 
         init_paging();
         crate::pat::pat_init();

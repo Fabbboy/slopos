@@ -1,13 +1,13 @@
 use core::ffi::c_char;
 
-use slopos_lib::testing::{TestSuiteDesc, TestSuiteResult, measure_elapsed_ms};
+use slopos_testing::{TestSuiteDesc, TestSuiteResult, measure_elapsed_ms};
 
 const FPU_NAME: &[u8] = b"fpu_sse\0";
 
 fn run_fpu_suite(_config: *const (), out: *mut TestSuiteResult) -> i32 {
     use core::arch::x86_64::{__m128i, _mm_set_epi64x, _mm_storeu_si128};
 
-    let start = slopos_lib::tsc::rdtsc();
+    let start = slopos_arch::tsc::rdtsc();
     let total = 2u32;
     let mut passed = 0u32;
 
@@ -62,7 +62,7 @@ fn run_fpu_suite(_config: *const (), out: *mut TestSuiteResult) -> i32 {
         passed += 1;
     }
 
-    let elapsed = measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+    let elapsed = measure_elapsed_ms(start, slopos_arch::tsc::rdtsc());
     if let Some(out_ref) = unsafe { out.as_mut() } {
         out_ref.name = FPU_NAME.as_ptr() as *const c_char;
         out_ref.total = total;

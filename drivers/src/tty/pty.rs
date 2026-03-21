@@ -30,7 +30,7 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use super::driver::{InputEvent, TtyDriverKind};
 use super::table::{

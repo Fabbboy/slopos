@@ -592,12 +592,12 @@ impl Default for EphemeralPortAllocator {
 }
 
 /// Global slab-based socket table.
-pub static NEW_SOCKET_TABLE: slopos_lib::IrqMutex<SlabSocketTable> =
-    slopos_lib::IrqMutex::new(SlabSocketTable::empty());
+pub static NEW_SOCKET_TABLE: slopos_sync::IrqMutex<SlabSocketTable> =
+    slopos_sync::IrqMutex::new(SlabSocketTable::empty());
 
 /// Ephemeral port allocator.
-pub static EPHEMERAL_PORTS: slopos_lib::IrqMutex<EphemeralPortAllocator> =
-    slopos_lib::IrqMutex::new(EphemeralPortAllocator::new());
+pub static EPHEMERAL_PORTS: slopos_sync::IrqMutex<EphemeralPortAllocator> =
+    slopos_sync::IrqMutex::new(EphemeralPortAllocator::new());
 
 // =============================================================================
 // Socket operations
@@ -612,7 +612,7 @@ use slopos_abi::syscall::{
     ERRNO_ENETUNREACH, ERRNO_ENOMEM, ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE,
     ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN, POLLOUT,
 };
-use slopos_lib::WaitQueue;
+use slopos_sync::WaitQueue;
 
 use crate as net;
 use crate::tcp::{self, TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
@@ -1619,10 +1619,10 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
         return errno_i32(ERRNO_EINPROGRESS);
     }
 
-    let deadline_ms = slopos_lib::clock::uptime_ms().saturating_add(30_000);
+    let deadline_ms = slopos_utils::clock::uptime_ms().saturating_add(30_000);
 
     loop {
-        if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::has_pending_signal() {
             let _ = tcp::tcp_abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
@@ -1656,7 +1656,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             }
         }
 
-        if slopos_lib::clock::uptime_ms() >= deadline_ms {
+        if slopos_utils::clock::uptime_ms() >= deadline_ms {
             let _ = tcp::tcp_abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
@@ -1665,7 +1665,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             return errno_i32(ERRNO_ETIMEDOUT);
         }
 
-        slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(50);
+        slopos_kernel_services::driver_runtime::sleep_current_task_ms(50);
         crate::napi::kick();
     }
 }
@@ -1895,7 +1895,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     }
 
     let mut tx_payload = [0u8; TCP_TX_MAX];
-    let now_ms = slopos_lib::clock::uptime_ms();
+    let now_ms = slopos_utils::clock::uptime_ms();
     loop {
         let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
@@ -2199,7 +2199,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
-    slopos_lib::kernel_services::driver_runtime::run_bottom_halves();
+    slopos_kernel_services::driver_runtime::run_bottom_halves();
 
     let (state, is_datagram, tcp_idx, has_dgram_data) = {
         let mut table = NEW_SOCKET_TABLE.lock();
@@ -2680,7 +2680,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
     };
 
     let mut tx_payload = [0u8; TCP_TX_MAX];
-    let now_ms = slopos_lib::clock::uptime_ms();
+    let now_ms = slopos_utils::clock::uptime_ms();
     loop {
         let Some((seg, n)) = tcp::tcp_poll_transmit(tcp_idx, &mut tx_payload, now_ms) else {
             break;
@@ -2694,7 +2694,7 @@ pub fn socket_send_queued(sock_idx: u32) -> i32 {
 }
 
 pub fn socket_process_timers() {
-    let now_ms = slopos_lib::clock::uptime_ms();
+    let now_ms = slopos_utils::clock::uptime_ms();
     if let Some(idx) = tcp::tcp_retransmit_check(now_ms)
         && let Some(sock_idx) = socket_from_tcp_idx(idx)
     {
@@ -2728,6 +2728,14 @@ pub fn socket_dispatch_syn_ack_retransmit(key: u32) -> Option<tcp::TcpOutSegment
 /// Public wrapper for socket_from_tcp_idx (used by timer dispatch).
 pub fn socket_from_tcp_idx_pub(tcp_idx: usize) -> Option<u32> {
     socket_from_tcp_idx(tcp_idx)
+}
+
+pub fn socket_keepalive_enabled_by_index(sock_idx: usize) -> bool {
+    let table = NEW_SOCKET_TABLE.lock();
+    table
+        .get(sock_idx)
+        .map(|sock| sock.options.keepalive)
+        .unwrap_or(false)
 }
 
 fn socket_from_tcp_idx(tcp_idx: usize) -> Option<u32> {

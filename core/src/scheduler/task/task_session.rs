@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};
 use slopos_abi::syscall::TtyIndex;
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 use super::super::scheduler;
 use super::task_state::task_is_blocked;

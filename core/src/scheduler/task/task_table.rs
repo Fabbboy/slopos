@@ -2,9 +2,9 @@ use core::ffi::{c_int, c_void};
 use core::mem;
 use core::ptr;
 
-use slopos_lib::IrqMutex;
-use slopos_lib::string::bytes_as_str;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_sync::IrqMutex;
+use slopos_utils::string::bytes_as_str;
+use slopos_utils::{klog_debug, klog_info};
 
 use super::super::scheduler;
 use super::{
@@ -18,7 +18,8 @@ use slopos_mm::kernel_heap::kfree;
 
 /// List of terminated tasks waiting to be freed when refcount hits zero.
 /// Protected by IrqMutex for interrupt safety.
-static ZOMBIE_LIST: slopos_lib::IrqMutex<ZombieList> = slopos_lib::IrqMutex::new(ZombieList::new());
+static ZOMBIE_LIST: slopos_sync::IrqMutex<ZombieList> =
+    slopos_sync::IrqMutex::new(ZombieList::new());
 
 struct ZombieList {
     tasks: [Option<*mut Task>; MAX_TASKS],

@@ -17,11 +17,11 @@
 //! codepath tested here, so regressions in the instruction encoding or
 //! component mask will be caught.
 
-use slopos_lib::cpu::control_regs::{Cr4Flags, Xcr0Flags, read_cr4, xcr0_read};
-use slopos_lib::cpu::cpuid::XsaveFeatures;
-use slopos_lib::cpu::xsave;
-use slopos_lib::testing::TestResult;
-use slopos_lib::{fail, pass};
+use slopos_arch::cpu::control_regs::{Cr4Flags, Xcr0Flags, read_cr4, xcr0_read};
+use slopos_arch::cpu::cpuid::XsaveFeatures;
+use slopos_arch::cpu::xsave;
+use slopos_testing::TestResult;
+use slopos_testing::{fail, pass};
 
 // =============================================================================
 // 1. XSAVE Detection Sanity
@@ -496,7 +496,7 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
 /// features currently enabled in XCR0.
 pub fn test_xsave_area_size_matches_cpuid() -> TestResult {
     // CPUID.0Dh.0:EBX = size for currently-enabled XCR0 features.
-    let cpuid_size = slopos_lib::cpu::cpuid::xsave_area_size();
+    let cpuid_size = slopos_arch::cpu::cpuid::xsave_area_size();
     let runtime_size = xsave::area_size();
 
     if cpuid_size == 0 {
@@ -559,7 +559,7 @@ pub fn test_xsave_variant_flags_consistent() -> TestResult {
 // Suite Registration
 // =============================================================================
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     xsave,
     [
         // Detection sanity

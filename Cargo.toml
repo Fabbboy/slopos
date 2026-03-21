@@ -2,15 +2,20 @@
 members = [
   "abi",
   "acpi",
+  "karch",
   "boot",
   "core",
   "drivers",
   "fs",
   "gfx",
   "kernel",
-  "lib",
+  "kernel-services",
   "mm",
   "net",
+  "service-core",
+  "utils",
+  "sync",
+  "ktesting",
   "slibc",
   "userland",
   "video",
@@ -36,6 +41,7 @@ non_camel_case_types = "deny"
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }
 limine = { version = "0.5.0", default-features = false }
+slopos-arch = { path = "karch" }
 slopos-abi = { path = "abi" }
 slopos-acpi = { path = "acpi" }
 slopos-boot = { path = "boot" }
@@ -43,7 +49,10 @@ slopos-core = { path = "core" }
 slopos-drivers = { path = "drivers" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
-slopos-lib = { path = "lib" }
+  slopos-utils = { path = "utils" }
+  slopos-testing = { path = "ktesting" }
+  slopos-kernel-services = { path = "kernel-services" }
+slopos-sync = { path = "sync" }
 slopos-mm = { path = "mm" }
 slopos-net = { path = "net" }
 slopos-slibc = { path = "slibc" }

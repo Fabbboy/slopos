@@ -20,4 +20,7 @@ itests = []
 [dependencies]
 bitflags.workspace = true
 slopos-abi = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-arch = { workspace = true }
+slopos-testing = { workspace = true }
+slopos-utils = { workspace = true }
+slopos-sync = { workspace = true }

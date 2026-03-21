@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_lib::{InitFlag, klog_debug};
+use slopos_sync::InitFlag;
+use slopos_utils::klog_debug;
 
 use crate::symbols;
 

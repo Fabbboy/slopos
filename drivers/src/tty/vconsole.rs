@@ -19,7 +19,7 @@ use core::ptr;
 use slopos_abi::font::{
     FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_for_codepoint, get_glyph_or_space, is_double_width,
 };
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use crate::serial::serial_putc_com1;
 

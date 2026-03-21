@@ -1,11 +1,13 @@
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 
-use slopos_lib::arch::gdt::{
+use slopos_arch::arch::gdt::{
     GDT_STANDARD_ENTRIES, GdtDescriptor, GdtLayout, SegmentSelector, Tss64,
 };
-use slopos_lib::cpu::msr::{EFER_SCE, Msr};
-use slopos_lib::{MAX_CPUS, cpu, get_current_cpu, klog_debug};
+use slopos_arch::cpu;
+use slopos_arch::cpu::msr::{EFER_SCE, Msr};
+use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use slopos_utils::klog_debug;
 
 #[repr(C)]
 struct PerCpuSyscallData {
@@ -71,7 +73,7 @@ pub fn gdt_init_for_cpu(cpu_id: usize) {
         return;
     }
 
-    if slopos_lib::pcr::is_pcr_initialized() {
+    if slopos_arch::pcr::is_pcr_initialized() {
         klog_debug!("GDT: Skipped - using PCR-based GDT for CPU {}", cpu_id);
         return;
     }
@@ -108,7 +110,7 @@ pub fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
         (*PER_CPU_TSS.get())[cpu_id].rsp0 = rsp0;
         (*PER_CPU_SYSCALL_DATA.get())[cpu_id].kernel_rsp = rsp0;
     }
-    if let Some(pcr) = unsafe { slopos_lib::pcr::get_pcr_mut(cpu_id) } {
+    if let Some(pcr) = unsafe { slopos_arch::pcr::get_pcr_mut(cpu_id) } {
         pcr.kernel_rsp = rsp0;
         pcr.sync_tss_rsp0();
     }
@@ -126,7 +128,7 @@ pub fn gdt_set_ist_for_cpu(cpu_id: usize, index: u8, stack_top: u64) {
     unsafe {
         (*PER_CPU_TSS.get())[cpu_id].ist[(index - 1) as usize] = stack_top;
     }
-    if let Some(pcr) = unsafe { slopos_lib::pcr::get_pcr_mut(cpu_id) } {
+    if let Some(pcr) = unsafe { slopos_arch::pcr::get_pcr_mut(cpu_id) } {
         pcr.set_ist(index, stack_top);
     }
 }
@@ -166,7 +168,7 @@ pub fn syscall_msr_init() {
 }
 
 fn syscall_gs_base_init() {
-    if slopos_lib::pcr::is_pcr_initialized() {
+    if slopos_arch::pcr::is_pcr_initialized() {
         klog_debug!("SYSCALL: Skipped GS_BASE init - using PCR");
         return;
     }

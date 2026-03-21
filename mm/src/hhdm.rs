@@ -30,7 +30,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_lib::InitFlag;
+use slopos_sync::InitFlag;
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 static HHDM_INIT: InitFlag = InitFlag::new();

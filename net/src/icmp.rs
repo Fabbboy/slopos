@@ -1,5 +1,6 @@
 use slopos_abi::net::MAX_SOCKETS;
-use slopos_lib::{IrqMutex, klog_debug};
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
 use super::types::{Ipv4Addr, NetError};

@@ -5,9 +5,9 @@ use core::ptr;
 
 use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
-use slopos_lib::{
-    InterruptFrame, assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult,
-};
+use slopos_arch::InterruptFrame;
+use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
+use slopos_utils::klog_info;
 
 use super::scheduler::{
     init_scheduler, save_task_context_from_interrupt_frame, scheduler_shutdown,
@@ -17,7 +17,7 @@ use super::task::{
     task_shutdown_all, task_terminate,
 };
 use super::task_struct::TaskContext;
-use slopos_lib::arch::gdt::SegmentSelector;
+use slopos_arch::arch::gdt::SegmentSelector;
 
 struct ContextFixture;
 
@@ -474,7 +474,7 @@ pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestR
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     context,
     [
         test_task_context_initial_state,

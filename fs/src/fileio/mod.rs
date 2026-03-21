@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int};
 use core::slice;
 
-use slopos_lib::{InitFlag, IrqMutex};
+use slopos_sync::{InitFlag, IrqMutex};
 
 use slopos_abi::fs::{
     FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY, UserFsEntry, UserFsStat,
@@ -12,12 +12,12 @@ use slopos_abi::syscall::{
     POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
 };
 
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     block_current_task, current_task_controlling_tty, current_task_id, current_task_pgid,
     current_task_sid, finish_wait, prepare_to_wait, scheduler_is_enabled,
     set_current_task_controlling_tty,
 };
-use slopos_lib::kernel_services::syscall_services::tty;
+use slopos_kernel_services::syscall_services::tty;
 use slopos_net::socket;
 
 use crate::pipe;

@@ -4,12 +4,13 @@ use crate::ioapic::regs::{
     IOAPIC_FLAG_DELIVERY_FIXED, IOAPIC_FLAG_DEST_PHYSICAL, IOAPIC_FLAG_MASK,
     IOAPIC_FLAG_POLARITY_LOW, IOAPIC_FLAG_TRIGGER_LEVEL,
 };
-use slopos_lib::arch::idt::IRQ_BASE_VECTOR;
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_arch::arch::idt::IRQ_BASE_VECTOR;
+use slopos_arch::{InterruptFrame, cpu};
+use slopos_kernel_services::driver_runtime::{
     IRQ_LINES, LEGACY_IRQ_COM1, LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE,
     irq_increment_keyboard_events, irq_init, irq_is_masked, irq_register_handler, irq_set_route,
 };
-use slopos_lib::{InterruptFrame, cpu, klog_info};
+use slopos_utils::klog_info;
 
 use crate::{apic, ioapic, ps2};
 

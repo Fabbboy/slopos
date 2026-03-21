@@ -2,7 +2,7 @@ use core::ffi::{c_char, c_int, c_void};
 
 use crate::{early_init, gdt, idt, limine_protocol, shutdown};
 use slopos_drivers::{apic, hpet, ioapic, random, serial};
-use slopos_lib::kernel_services::platform::{PlatformServices, register_platform_services};
+use slopos_kernel_services::platform::{PlatformServices, register_platform_services};
 
 fn kernel_shutdown_fn(reason: *const c_char) -> ! {
     shutdown::kernel_shutdown(reason)

@@ -5,13 +5,14 @@ pub mod tests;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
+use slopos_sync::{InitFlag, StateFlag};
+use slopos_utils::{klog_debug, klog_info};
 
 use regs::*;
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMode};
 use slopos_acpi::tables::{AcpiTables, Rsdp};
-use slopos_lib::kernel_services::platform;
+use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
 

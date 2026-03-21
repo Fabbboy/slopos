@@ -1,5 +1,5 @@
-use slopos_lib::tsc;
-use slopos_lib::{IrqMutex, OnceLock};
+use slopos_arch::tsc;
+use slopos_sync::{IrqMutex, OnceLock};
 
 const DEFAULT_LFSR_SEED: u64 = 0xACE1u64;
 

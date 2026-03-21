@@ -55,11 +55,11 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::arch::idt::{
+use slopos_arch::arch::idt::{
     EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_PAGE_FAULT,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };
-use slopos_lib::{MAX_CPUS, get_current_cpu, klog_debug, klog_info};
+use slopos_arch::{MAX_CPUS, get_current_cpu};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::{
     EXCEPTION_STACK_GUARD_SIZE, EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE,
@@ -68,6 +68,7 @@ use slopos_mm::memory_layout_defs::{
 use slopos_mm::page_alloc::alloc_page_frame;
 use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::gdt::gdt_set_ist;
 use crate::idt::idt_set_ist;

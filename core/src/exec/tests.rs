@@ -3,14 +3,14 @@
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
 use slopos_mm::elf::{ELF_MAGIC, ElfExecInfo, ElfValidator};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging::virt_to_phys_in_dir;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm;
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
 
 use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 
@@ -699,7 +699,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     exec,
     [
         test_elf_invalid_magic,

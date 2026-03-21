@@ -260,7 +260,7 @@ impl PostLockWork {
         {
             self.executed = true;
         }
-        use slopos_lib::kernel_services::driver_runtime::signal_process_group;
+        use slopos_kernel_services::driver_runtime::signal_process_group;
 
         if let Some((pgid, sig)) = self.signal {
             let _ = signal_process_group(pgid, sig);

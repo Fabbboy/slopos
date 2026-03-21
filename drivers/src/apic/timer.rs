@@ -13,7 +13,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_lib::{klog_debug, klog_info};
+use slopos_utils::{klog_debug, klog_info};
 
 use super::regs::*;
 use super::{

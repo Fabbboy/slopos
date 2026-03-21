@@ -2,8 +2,8 @@ use core::mem;
 use core::ptr::read_unaligned;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::klog_info;
 use slopos_mm::hhdm::{self, PhysAddrHhdm};
+use slopos_utils::klog_info;
 
 #[repr(C, packed)]
 pub struct Rsdp {

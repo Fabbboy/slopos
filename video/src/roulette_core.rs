@@ -14,7 +14,7 @@ use slopos_abi::font::FONT_CHAR_WIDTH;
 use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::hpet;
 use slopos_gfx::{canvas_font, canvas_ops};
-use slopos_lib::numfmt;
+use slopos_utils::numfmt;
 
 use crate::graphics::GraphicsContext;
 

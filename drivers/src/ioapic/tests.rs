@@ -1,8 +1,8 @@
 //! IOAPIC/APIC tests - targeting untested initialization and routing edge cases.
 
 use super::regs::*;
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
 
 use crate::{apic, ioapic};
 
@@ -225,7 +225,7 @@ pub fn test_ioapic_gsi_range() -> TestResult {
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     ioapic,
     [
         test_ioapic_ready_state,

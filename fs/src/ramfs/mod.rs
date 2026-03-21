@@ -1,5 +1,5 @@
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 const MAX_INODES: usize = 64;
 const RAMFS_MAX_FILE_SIZE: usize = 4096;

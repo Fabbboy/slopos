@@ -18,15 +18,15 @@ use slopos_abi::signal::{SIGCONT, SIGHUP, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIG
 use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, OutputFlags, POSIX_VDISABLE,
 };
-use slopos_lib::RingBuffer;
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
+use slopos_utils::ring_buffer::RingBuffer;
 
 use crate::tty;
 use crate::tty::TtyError;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
-use crate::tty::ldisc::{InputAction, LdiscKind, LdiscOps, LineDisc, OutputAction, RawDisc};
+use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
 use crate::tty::session::TtySession;
 use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
@@ -93,31 +93,54 @@ pub(crate) fn drain_tty_nonblock(idx: TtyIndex) {
     }
 }
 
+pub mod fixtures;
 pub mod test_driver;
 pub mod test_integration;
 pub mod test_ioctls;
-pub mod test_ldisc;
+pub mod test_ioctls_ext;
+pub mod test_ldisc_core;
+pub mod test_ldisc_flags;
+pub mod test_ldisc_flow;
+pub mod test_ldisc_noncanon;
+pub mod test_ldisc_regression;
+pub mod test_ldisc_signals;
+pub mod test_ldisc_utf8;
 pub mod test_poll;
 pub mod test_pty;
+pub mod test_pty_core;
+pub mod test_pty_packet;
 pub mod test_rawdisc;
 pub mod test_ringbuf;
 pub mod test_session;
+pub mod test_session_fg;
 pub mod test_table;
 pub mod test_vconsole;
+pub mod test_vtparser;
 
 pub use test_driver::*;
 pub use test_integration::*;
 pub use test_ioctls::*;
-pub use test_ldisc::*;
+pub use test_ioctls_ext::*;
+pub use test_ldisc_core::*;
+pub use test_ldisc_flags::*;
+pub use test_ldisc_flow::*;
+pub use test_ldisc_noncanon::*;
+pub use test_ldisc_regression::*;
+pub use test_ldisc_signals::*;
+pub use test_ldisc_utf8::*;
 pub use test_poll::*;
 pub use test_pty::*;
+pub use test_pty_core::*;
+pub use test_pty_packet::*;
 pub use test_rawdisc::*;
 pub use test_ringbuf::*;
 pub use test_session::*;
+pub use test_session_fg::*;
 pub use test_table::*;
 pub use test_vconsole::*;
+pub use test_vtparser::*;
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     tty,
     [
         test_ringbuf_new_is_empty,
@@ -600,12 +623,6 @@ slopos_lib::define_test_suite!(
         test_olcuc_maps_lower_to_upper,
         test_flags_disabled_by_default,
         // Per-TTY Poll Notification
-        test_poll_waiters_exist,
-        test_push_input_wakes_correct_poll_waiter,
-        test_push_input_does_not_wake_other_slot,
-        test_hangup_wakes_correct_poll_waiter,
-        test_pty_packet_event_wakes_master_poll_waiter,
-        test_poll_sleep_on_empty_slots_does_not_panic,
         // PTY Flow Control (Throttle Mechanism)
         test_throttle_watermark_constants,
         test_pty_initially_unthrottled,
@@ -616,11 +633,6 @@ slopos_lib::define_test_suite!(
         test_console_not_throttled,
         test_master_write_full_when_not_throttled,
         // Cooked Buffer Overflow Hardening
-        test_push_cooked_returns_false_when_full,
-        test_push_cooked_returns_true_when_space,
-        test_canonical_flush_fits_in_cooked,
-        test_imaxbel_bell_on_cooked_overflow,
-        test_no_imaxbel_silent_drop,
         // c_cflag ABI Completion
         test_control_flag_values,
         test_default_cflag,

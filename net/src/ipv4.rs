@@ -20,11 +20,11 @@
 //! - Protocol dispatch to existing TCP/UDP handlers via the socket layer
 //! - DNS response interception for the in-kernel resolver
 
-use slopos_lib::klog_debug;
+use slopos_utils::klog_debug;
 
 use super::socket;
 use super::tcp;
-use super::types::{DevIndex, IpProtocol};
+use super::types::{DevIndex, IpProtocol, Ipv4Addr};
 use crate::{self as net, NetError, packetbuf::PacketBuf};
 
 /// Handle an incoming IPv4 packet.
@@ -43,6 +43,9 @@ use crate::{self as net, NetError, packetbuf::PacketBuf};
 ///
 /// Packets failing any check are silently dropped with a debug log.
 pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
+    let mut reassembled: Option<super::reassembly::ReassembledPacket> = None;
+    let mut is_fragmented = false;
+
     // Extract all fields we need while borrowing the payload immutably.
     // We must drop this borrow before calling pkt.set_l4() / pkt.pull_header().
     let (proto, src_ip, dst_ip, ihl, ip_total_len) = {
@@ -81,6 +84,11 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
             return;
         }
 
+        if total_len < ihl {
+            klog_debug!("ipv4: total_len {} < ihl {}", total_len, ihl);
+            return;
+        }
+
         // Header checksum verification (skip if device already verified).
         if !checksum_rx && net::checksum::internet_checksum(&ip_data[..ihl]) != 0 {
             klog_debug!("ipv4: bad header checksum");
@@ -98,9 +106,52 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         let src_ip: [u8; 4] = ip_data[12..16].try_into().unwrap_or([0; 4]);
         let dst_ip: [u8; 4] = ip_data[16..20].try_into().unwrap_or([0; 4]);
 
+        let identification = u16::from_be_bytes([ip_data[4], ip_data[5]]);
+        let flags_fragment = u16::from_be_bytes([ip_data[6], ip_data[7]]);
+        let more_fragments = (flags_fragment & 0x2000) != 0;
+        let frag_offset = (flags_fragment & 0x1fff) * 8;
+        if more_fragments || frag_offset > 0 {
+            is_fragmented = true;
+            reassembled = super::reassembly::REASSEMBLY_TABLE.lock().insert(
+                Ipv4Addr(src_ip),
+                Ipv4Addr(dst_ip),
+                identification,
+                proto,
+                frag_offset,
+                more_fragments,
+                &ip_data[ihl..total_len],
+            );
+        }
+
         (proto, src_ip, dst_ip, ihl, total_len)
     };
     // Immutable borrow of pkt dropped here.
+
+    if is_fragmented {
+        let Some(assembled) = reassembled else {
+            return;
+        };
+
+        let Some(assembled_pkt) =
+            PacketBuf::from_raw_copy(&assembled.data[..assembled.len as usize])
+        else {
+            klog_debug!(
+                "ipv4: failed to allocate packet for reassembled datagram len={}",
+                assembled.len
+            );
+            return;
+        };
+
+        dispatch_l4(
+            assembled.protocol,
+            src_ip,
+            dst_ip,
+            &assembled_pkt,
+            checksum_rx,
+        );
+        let _ = dev;
+        return;
+    }
 
     // Trim packet to IP total_length so L4 handlers never see Ethernet padding.
     pkt.trim(ip_total_len);
@@ -113,14 +164,7 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
         return;
     }
 
-    match IpProtocol::from_u8(proto) {
-        Some(IpProtocol::Tcp) => dispatch_tcp(src_ip, dst_ip, &pkt, checksum_rx),
-        Some(IpProtocol::Udp) => dispatch_udp(src_ip, dst_ip, &pkt),
-        Some(IpProtocol::Icmp) => super::icmp::handle_rx(src_ip, dst_ip, &pkt),
-        None => {
-            klog_debug!("ipv4: unknown protocol {}, dropping", proto);
-        }
-    }
+    dispatch_l4(proto, src_ip, dst_ip, &pkt, checksum_rx);
 
     let _ = dev;
 }
@@ -128,6 +172,17 @@ pub fn handle_rx(dev: DevIndex, mut pkt: PacketBuf, checksum_rx: bool) {
 // =============================================================================
 // L4 dispatch helpers
 // =============================================================================
+
+fn dispatch_l4(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: bool) {
+    match IpProtocol::from_u8(proto) {
+        Some(IpProtocol::Tcp) => dispatch_tcp(src_ip, dst_ip, pkt, checksum_rx),
+        Some(IpProtocol::Udp) => dispatch_udp(src_ip, dst_ip, pkt),
+        Some(IpProtocol::Icmp) => super::icmp::handle_rx(src_ip, dst_ip, pkt),
+        None => {
+            klog_debug!("ipv4: unknown protocol {}, dropping", proto);
+        }
+    }
+}
 
 /// Dispatch a TCP segment to the TCP state machine and socket layer.
 ///
@@ -151,7 +206,7 @@ fn dispatch_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf, checksum_rx: 
 
     let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
     let payload = &ip_payload[hdr_len..];
-    let now_ms = slopos_lib::clock::uptime_ms();
+    let now_ms = slopos_utils::clock::uptime_ms();
 
     // Demux table pre-lookup for debug/fast-path validation.
     // The demux table provides O(n) lookup by 4-tuple (established) or

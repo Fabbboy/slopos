@@ -18,7 +18,7 @@ pub extern "C" fn kernel_main() {
     crate::early_init::kernel_main_impl();
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn common_exception_handler(frame: *mut slopos_lib::InterruptFrame) {
+pub extern "C" fn common_exception_handler(frame: *mut slopos_arch::InterruptFrame) {
     crate::idt::common_exception_handler_impl(frame);
 }
 
@@ -39,6 +39,6 @@ unsafe extern "C" {
     pub static __stop_boot_init_services: crate::early_init::BootInitStep;
     pub static __start_boot_init_optional: crate::early_init::BootInitStep;
     pub static __stop_boot_init_optional: crate::early_init::BootInitStep;
-    pub static __start_test_registry: slopos_lib::testing::TestSuiteDesc;
-    pub static __stop_test_registry: slopos_lib::testing::TestSuiteDesc;
+    pub static __start_test_registry: slopos_testing::TestSuiteDesc;
+    pub static __stop_test_registry: slopos_testing::TestSuiteDesc;
 }

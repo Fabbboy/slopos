@@ -1,5 +1,5 @@
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;

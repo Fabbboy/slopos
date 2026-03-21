@@ -5,7 +5,7 @@
 //! leak outside the `drivers` crate.
 //!
 //! CPU-architectural APIC definitions (the IA32_APIC_BASE MSR) live in
-//! `slopos_lib::cpu::apic_msr` — a separate abstraction layer consumed by
+//! `slopos_arch::cpu::apic_msr` — a separate abstraction layer consumed by
 //! subsystems that need to discover the APIC base address without touching
 //! LAPIC registers directly (e.g. the memory manager's reservation logic).
 

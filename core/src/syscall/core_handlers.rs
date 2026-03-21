@@ -4,7 +4,8 @@ use core::mem::size_of;
 use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
-use slopos_lib::{InterruptFrame, klog_debug};
+use slopos_arch::InterruptFrame;
+use slopos_utils::klog_debug;
 
 use crate::platform;
 use crate::sched::{
@@ -18,7 +19,7 @@ use crate::syscall::common::{
 };
 use crate::syscall::context::SyscallContext;
 use crate::task::{get_task_stats, task_terminate};
-use slopos_lib::kernel_services::syscall_services::tty;
+use slopos_kernel_services::syscall_services::tty;
 
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
@@ -35,7 +36,7 @@ pub fn syscall_yield(task: *mut Task, frame: *mut InterruptFrame) -> SyscallDisp
 
 define_syscall!(syscall_get_time_ms(ctx, args) {
     let _ = args;
-    let ms = slopos_lib::clock::uptime_ms();
+    let ms = slopos_utils::clock::uptime_ms();
     ctx.ok(ms)
 });
 
@@ -49,7 +50,7 @@ define_syscall!(syscall_clock_gettime(ctx, args) {
 
     require_nonzero!(ctx, args.arg1);
 
-    let ns = slopos_lib::clock::monotonic_ns();
+    let ns = slopos_utils::clock::monotonic_ns();
     let ts = Timespec {
         tv_sec: ns / 1_000_000_000,
         tv_nsec: ns % 1_000_000_000,
@@ -156,8 +157,8 @@ define_syscall!(syscall_sys_info(ctx, args) {
         scheduler_yields: 0,
         ready_tasks: 0,
         schedule_calls: 0,
-        wl_balance: slopos_lib::wl_currency::check_balance(),
-        boot_flags: slopos_lib::boot_flags::get_flags(),
+        wl_balance: slopos_utils::wl_currency::check_balance(),
+        boot_flags: slopos_utils::boot_flags::get_flags(),
     };
 
     get_page_allocator_stats(
@@ -204,7 +205,7 @@ define_syscall!(syscall_net_scan(ctx, args) {
         i += 1;
     }
 
-    slopos_lib::wl_currency::adjust_balance(slopos_lib::wl_currency::WL_DELTA);
+    slopos_utils::wl_currency::adjust_balance(slopos_utils::wl_currency::WL_DELTA);
     ctx.ok(discovered as u64)
 });
 

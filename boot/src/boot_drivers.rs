@@ -2,11 +2,11 @@ use core::ffi::CStr;
 #[cfg(feature = "xe-gpu")]
 use core::ffi::c_char;
 
-use slopos_lib::klog::{self, KlogLevel};
-use slopos_lib::{klog_debug, klog_info};
 use slopos_tests::{
     TestRunSummary, tests_request_shutdown, tests_reset_panic_state, tests_run_all,
 };
+use slopos_utils::klog::{self, KlogLevel};
+use slopos_utils::{klog_debug, klog_info};
 use slopos_video as video;
 
 use crate::early_init::{boot_get_cmdline, boot_init_priority};
@@ -164,7 +164,7 @@ fn boot_step_apic_setup_fn() {
 
 fn boot_step_xsave_setup_fn() {
     klog_debug!("Detecting XSAVE support...");
-    let rc = slopos_lib::cpu::xsave::init();
+    let rc = slopos_arch::cpu::xsave::init();
     if rc != 0 {
         panic!("XSAVE initialization failed");
     }
@@ -205,7 +205,7 @@ fn boot_step_lapic_calibration_fn() {
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 
 fn boot_step_lapic_timer_start_fn() {
-    use slopos_lib::arch::idt::LAPIC_TIMER_VECTOR;
+    use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
 
     if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS) {
         panic!(
@@ -276,7 +276,7 @@ fn boot_step_pci_init_fn() {
     }
 }
 
-use slopos_lib::testing::config_from_cmdline;
+use slopos_testing::config_from_cmdline;
 
 fn boot_step_interrupt_tests_fn() -> i32 {
     // Parse command line to get test config
@@ -303,9 +303,8 @@ fn boot_step_interrupt_tests_fn() -> i32 {
     tests_reset_panic_state();
 
     use crate::ffi_boundary::{__start_test_registry, __stop_test_registry};
-    let registry_start: *const slopos_lib::testing::TestSuiteDesc =
-        unsafe { &__start_test_registry };
-    let registry_end: *const slopos_lib::testing::TestSuiteDesc = unsafe { &__stop_test_registry };
+    let registry_start: *const slopos_testing::TestSuiteDesc = unsafe { &__start_test_registry };
+    let registry_end: *const slopos_testing::TestSuiteDesc = unsafe { &__stop_test_registry };
 
     let mut summary = TestRunSummary::default();
 

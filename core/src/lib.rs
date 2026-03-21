@@ -10,12 +10,10 @@ global_asm!(include_str!("../context_switch.s"), options(att_syntax));
 pub mod driver_hooks;
 pub mod exec;
 pub mod irq;
-#[cfg(feature = "itests")]
-pub mod irq_tests;
-#[cfg(feature = "itests")]
-pub mod msi_tests;
 pub mod platform;
 pub mod scheduler;
+#[cfg(feature = "itests")]
+pub mod tests;
 #[macro_use]
 pub mod syscall;
 

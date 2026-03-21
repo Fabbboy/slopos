@@ -1,0 +1,26 @@
+// Test modules for net.
+// The parent lib.rs gates this entire module behind #[cfg(feature = "itests")].
+
+pub mod dns_tests;
+pub mod icmp_tests;
+pub mod ingress_tests;
+pub mod loopback_tests;
+pub mod napi_tests;
+pub mod neighbor_tests;
+pub mod net_types_tests;
+pub mod netdev_tests;
+pub mod netstack_tests;
+pub mod packetbuf_tests;
+pub mod reassembly_tests;
+pub mod route_tests;
+pub mod socket_framework_tests;
+pub mod socket_option_tests;
+pub mod socket_tests;
+pub mod tcp_data_tests;
+pub mod tcp_keepalive_tests;
+pub mod tcp_live_tests;
+pub mod tcp_socket_tests;
+pub mod tcp_tests;
+pub mod timer_tests;
+pub mod udp_demux_tests;
+pub mod udp_socket_tests;

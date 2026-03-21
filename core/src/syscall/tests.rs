@@ -30,14 +30,15 @@ use slopos_abi::syscall::{
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
-use slopos_lib::InterruptFrame;
-use slopos_lib::{assert_eq_test, assert_not_null, assert_test, klog_info, testing::TestResult};
+use slopos_arch::InterruptFrame;
 use slopos_mm::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frame};
 use slopos_mm::paging::map_page_4kb_in_dir;
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_syscall_process_id};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
+use slopos_utils::klog_info;
 
 use crate::scheduler::scheduler::{init_scheduler, scheduler_shutdown};
 use crate::scheduler::task::{
@@ -476,7 +477,7 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     let ctty = unsafe { (*task_ptr).controlling_tty };
     assert_eq_test!(ctty, Some(TtyIndex(0)), "controlling_tty should be tty0");
 
-    let tty_sid = slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    let tty_sid = slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
     assert_eq_test!(tty_sid, sid, "tty session should match caller sid");
 
     task_terminate(task_id);
@@ -540,7 +541,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
 
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
     let fd = file_open_for_process(
         pid,
@@ -604,7 +605,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
         "parent should retain controlling tty"
     );
 
-    let tty_sid = slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
+    let tty_sid = slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0));
     assert_eq_test!(
         tty_sid,
         parent_id,
@@ -637,7 +638,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     let child_ptr = task_find_by_id(child_id);
     assert_not_null!(child_ptr, "child lookup failed");
 
-    slopos_lib::kernel_services::syscall_services::tty::hangup(TtyIndex(0));
+    slopos_kernel_services::syscall_services::tty::hangup(TtyIndex(0));
 
     assert_eq_test!(
         unsafe { (*leader_ptr).controlling_tty },
@@ -650,7 +651,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
         "child ctty should clear on hangup"
     );
     assert_eq_test!(
-        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(0)),
         0,
         "tty session should detach on hangup"
     );
@@ -668,11 +669,10 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx_raw = slopos_lib::kernel_services::syscall_services::tty::alloc_pty();
+    let master_idx_raw = slopos_kernel_services::syscall_services::tty::alloc_pty();
     assert_test!(master_idx_raw >= 0, "alloc_pty failed");
     let master_idx = TtyIndex(master_idx_raw as u8);
-    let slave_number =
-        slopos_lib::kernel_services::syscall_services::tty::get_pty_number(master_idx);
+    let slave_number = slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx);
     assert_test!(slave_number >= 0, "get_pty_number failed");
     let slave_number = slave_number as u32;
     let path = match pts_path_for(slave_number) {
@@ -684,10 +684,10 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     };
 
     // Unlock slave so /dev/pts/N open succeeds.
-    slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+    slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -699,9 +699,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
         "PTY slave open should acquire controlling tty"
     );
     assert_eq_test!(
-        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(
-            slave_number as u8
-        )),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8)),
         task_id,
         "PTY slave session should match task session"
     );
@@ -719,11 +717,10 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx_raw = slopos_lib::kernel_services::syscall_services::tty::alloc_pty();
+    let master_idx_raw = slopos_kernel_services::syscall_services::tty::alloc_pty();
     assert_test!(master_idx_raw >= 0, "alloc_pty failed");
     let master_idx = TtyIndex(master_idx_raw as u8);
-    let slave_number =
-        slopos_lib::kernel_services::syscall_services::tty::get_pty_number(master_idx);
+    let slave_number = slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx);
     assert_test!(slave_number >= 0, "get_pty_number failed");
     let slave_number = slave_number as u32;
     let path = match pts_path_for(slave_number) {
@@ -735,10 +732,10 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     };
 
     // Unlock slave so /dev/pts/N open succeeds.
-    slopos_lib::kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+    slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
     let pid = unsafe { (*task_ptr).process_id };
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
     let fd = file_open_for_process(
         pid,
@@ -754,9 +751,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
         "O_NOCTTY should prevent ctty acquire"
     );
     assert_eq_test!(
-        slopos_lib::kernel_services::syscall_services::tty::get_session_id(TtyIndex(
-            slave_number as u8
-        )),
+        slopos_kernel_services::syscall_services::tty::get_session_id(TtyIndex(slave_number as u8)),
         0,
         "O_NOCTTY open should leave PTY session unattached"
     );
@@ -2102,7 +2097,7 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
 
     // Make task1 appear as current so task_terminate() takes the current-task
     // cleanup path (the path that previously leaked file descriptors).
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(p1));
     assert_eq_test!(task::task_terminate(t1), 0, "current-task terminate failed");
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -2223,7 +2218,7 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
 
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -2264,7 +2259,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     // Now open /dev/tty — should succeed.
     let pid = unsafe { (*task_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(task_ptr));
     let fd = file_open_for_process(pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -2323,7 +2318,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     // Now child tries to open /dev/tty — should fail with ENXIO.
     let child_pid = unsafe { (*child_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
     let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -2376,7 +2371,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     // Child opens /dev/tty — should succeed (inherits parent's ctty).
     let child_pid = unsafe { (*child_ptr).process_id };
     let path = b"/dev/tty\0";
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(child_ptr));
     let fd = file_open_for_process(child_pid, path.as_ptr() as *const c_char, O_RDONLY);
     let _ = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.set_current_task(ptr::null_mut()));
@@ -2403,7 +2398,7 @@ pub fn test_vhangup_syscall_in_dispatch_table() -> TestResult {
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     syscall_valid,
     [
         test_syscall_lookup_invalid_number,
@@ -2466,7 +2461,7 @@ slopos_lib::define_test_suite!(
     ]
 );
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     syscall_compat_smoke,
     [
         test_syscall_lookup_valid,

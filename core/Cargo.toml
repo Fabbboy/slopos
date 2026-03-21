@@ -20,7 +20,11 @@ itests = ["slopos-mm/itests"]
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-arch = { workspace = true }
+slopos-kernel-services = { workspace = true }
+slopos-testing = { workspace = true }
+slopos-sync = { workspace = true }
+slopos-utils = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-net = { workspace = true }

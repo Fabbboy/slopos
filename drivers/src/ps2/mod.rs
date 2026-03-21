@@ -45,9 +45,9 @@
 //! | 7   | PARE | Parity error |
 pub mod keyboard;
 pub mod mouse;
-use slopos_lib::cpu;
-use slopos_lib::ports::{PS2_COMMAND, PS2_DATA, PS2_STATUS};
-use slopos_lib::{klog_debug, klog_info, klog_warn};
+use slopos_arch::cpu;
+use slopos_utils::ports::{PS2_COMMAND, PS2_DATA, PS2_STATUS};
+use slopos_utils::{klog_debug, klog_info, klog_warn};
 
 // =============================================================================
 // Status Register Bits

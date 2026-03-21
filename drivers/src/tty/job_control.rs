@@ -7,7 +7,7 @@
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
 
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     clear_session_controlling_tty, scheduler_is_enabled, signal_process_group,
 };
 
@@ -90,7 +90,7 @@ pub fn set_foreground_pgrp_checked(
         drop(guard);
 
         if session_id != 0 {
-            use slopos_lib::kernel_services::driver_runtime::pgrp_exists_in_session;
+            use slopos_kernel_services::driver_runtime::pgrp_exists_in_session;
             if !pgrp_exists_in_session(pgid, session_id) {
                 return Err(TtyError::PermissionDenied);
             }

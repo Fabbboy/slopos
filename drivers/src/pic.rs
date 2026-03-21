@@ -1,4 +1,4 @@
-use slopos_lib::io::Port;
+use slopos_utils::io::Port;
 
 const PIC1_COMMAND: Port<u8> = Port::new(0x20);
 const PIC1_DATA: Port<u8> = Port::new(0x21);

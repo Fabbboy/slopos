@@ -30,8 +30,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_lib::IrqMutex;
-use slopos_lib::klog_debug;
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 use super::types::{DevIndex, Ipv4Addr};
 

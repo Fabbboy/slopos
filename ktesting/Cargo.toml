@@ -1,0 +1,14 @@
+[package]
+name = "slopos-testing"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+slopos-arch = { path = "../karch" }
+slopos-service-core = { path = "../service-core" }
+slopos-utils = { path = "../utils" }

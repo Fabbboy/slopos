@@ -1,4 +1,4 @@
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use crate::framebuffer;
 use crate::graphics::{GraphicsContext, GraphicsResult};

@@ -1,8 +1,8 @@
 use core::ptr;
 
 use slopos_abi::fs::UserFsEntry;
-use slopos_lib::klog_info;
-use slopos_lib::testing::TestResult;
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::ext2::{Ext2Error, Ext2Fs};
@@ -576,8 +576,8 @@ fn ext2_tests_init() -> bool {
 
 const EXT2_SUITE_NAME: &[u8] = b"ext2\0";
 
-fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteResult) -> i32 {
-    let start = slopos_lib::tsc::rdtsc();
+fn run_ext2_suite(_config: *const (), out: *mut slopos_testing::TestSuiteResult) -> i32 {
+    let start = slopos_arch::tsc::rdtsc();
 
     if !ext2_tests_init() {
         if let Some(out_ref) = unsafe { out.as_mut() } {
@@ -593,25 +593,25 @@ fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteRe
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    slopos_lib::run_test!(passed, total, test_vfs_initialized);
-    slopos_lib::run_test!(passed, total, test_vfs_root_stat);
-    slopos_lib::run_test!(passed, total, test_vfs_file_roundtrip);
-    slopos_lib::run_test!(passed, total, test_vfs_list);
-    slopos_lib::run_test!(passed, total, test_vfs_unlink);
-    slopos_lib::run_test!(passed, total, test_vfs_storage_contention_stress_baseline);
-    slopos_lib::run_test!(passed, total, test_ext2_invalid_superblock_magic);
-    slopos_lib::run_test!(passed, total, test_ext2_unsupported_block_size);
-    slopos_lib::run_test!(passed, total, test_ext2_directory_format_error);
-    slopos_lib::run_test!(passed, total, test_ext2_invalid_inode);
-    slopos_lib::run_test!(passed, total, test_ext2_read_file_not_regular);
-    slopos_lib::run_test!(passed, total, test_ext2_device_read_error);
-    slopos_lib::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
-    slopos_lib::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
-    slopos_lib::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
-    slopos_lib::run_test!(passed, total, test_ext2_path_resolution_not_found);
-    slopos_lib::run_test!(passed, total, test_ext2_remove_path_not_file);
+    slopos_testing::run_test!(passed, total, test_vfs_initialized);
+    slopos_testing::run_test!(passed, total, test_vfs_root_stat);
+    slopos_testing::run_test!(passed, total, test_vfs_file_roundtrip);
+    slopos_testing::run_test!(passed, total, test_vfs_list);
+    slopos_testing::run_test!(passed, total, test_vfs_unlink);
+    slopos_testing::run_test!(passed, total, test_vfs_storage_contention_stress_baseline);
+    slopos_testing::run_test!(passed, total, test_ext2_invalid_superblock_magic);
+    slopos_testing::run_test!(passed, total, test_ext2_unsupported_block_size);
+    slopos_testing::run_test!(passed, total, test_ext2_directory_format_error);
+    slopos_testing::run_test!(passed, total, test_ext2_invalid_inode);
+    slopos_testing::run_test!(passed, total, test_ext2_read_file_not_regular);
+    slopos_testing::run_test!(passed, total, test_ext2_device_read_error);
+    slopos_testing::run_test!(passed, total, test_ext2_device_write_error_on_metadata);
+    slopos_testing::run_test!(passed, total, test_ext2_read_block_out_of_bounds);
+    slopos_testing::run_test!(passed, total, test_ext2_read_file_data_roundtrip);
+    slopos_testing::run_test!(passed, total, test_ext2_path_resolution_not_found);
+    slopos_testing::run_test!(passed, total, test_ext2_remove_path_not_file);
 
-    let elapsed = slopos_lib::testing::measure_elapsed_ms(start, slopos_lib::tsc::rdtsc());
+    let elapsed = slopos_testing::measure_elapsed_ms(start, slopos_arch::tsc::rdtsc());
 
     if let Some(out_ref) = unsafe { out.as_mut() } {
         out_ref.name = EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char;
@@ -629,7 +629,7 @@ fn run_ext2_suite(_config: *const (), out: *mut slopos_lib::testing::TestSuiteRe
 
 #[used]
 #[unsafe(link_section = ".test_registry")]
-static EXT2_SUITE_DESC: slopos_lib::testing::TestSuiteDesc = slopos_lib::testing::TestSuiteDesc {
+static EXT2_SUITE_DESC: slopos_testing::TestSuiteDesc = slopos_testing::TestSuiteDesc {
     name: EXT2_SUITE_NAME.as_ptr() as *const core::ffi::c_char,
     run: Some(run_ext2_suite),
 };

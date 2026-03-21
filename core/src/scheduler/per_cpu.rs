@@ -20,7 +20,9 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use super::task_struct::{Task, TaskContext};
 use slopos_abi::task::TaskStatus;
-use slopos_lib::{InitFlag, IrqMutex, MAX_CPUS, klog_debug, klog_info};
+use slopos_arch::MAX_CPUS;
+use slopos_sync::{InitFlag, IrqMutex};
+use slopos_utils::{klog_debug, klog_info};
 
 const NUM_PRIORITY_LEVELS: usize = 4;
 
@@ -604,7 +606,7 @@ pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
 }
 
 pub fn with_local_scheduler<R>(f: impl FnOnce(&PerCpuScheduler) -> R) -> R {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     // SAFETY: cpu_id < MAX_CPUS guaranteed by get_current_cpu; shared ref only
     let sched = unsafe { &(*CPU_SCHEDULERS.get())[cpu_id] };
     f(sched)
@@ -652,7 +654,7 @@ pub fn get_cpu_ready_count(cpu_id: usize) -> u32 {
 
 pub fn get_total_ready_tasks() -> u32 {
     let mut total = 0u32;
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
             total += count;
@@ -663,7 +665,7 @@ pub fn get_total_ready_tasks() -> u32 {
 
 pub fn get_total_switches() -> u64 {
     let mut total = 0u64;
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.total_switches.load(Ordering::Relaxed))
@@ -676,7 +678,7 @@ pub fn get_total_switches() -> u64 {
 
 pub fn get_total_yields() -> u64 {
     let mut total = 0u64;
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.total_yields.load(Ordering::Relaxed))
@@ -689,7 +691,7 @@ pub fn get_total_yields() -> u64 {
 
 pub fn get_total_schedule_calls() -> u32 {
     let mut total = 0u32;
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.schedule_calls.load(Ordering::Relaxed))
@@ -701,7 +703,7 @@ pub fn get_total_schedule_calls() -> u32 {
 }
 
 pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
-    let current_cpu = slopos_lib::get_current_cpu();
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
     if task.is_null() {
         return if is_schedulable_cpu(current_cpu, 0)
             || is_local_enqueue_fallback_cpu(current_cpu, 0)
@@ -757,7 +759,7 @@ pub(crate) fn affinity_allows_cpu(affinity: u32, cpu_id: usize) -> bool {
 }
 
 fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_id >= cpu_count {
         return false;
     }
@@ -770,7 +772,7 @@ fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
         return false;
     }
 
-    if !slopos_lib::is_cpu_online(cpu_id) {
+    if !slopos_arch::pcr::is_cpu_online(cpu_id) {
         return false;
     }
 
@@ -778,7 +780,7 @@ fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
 }
 
 fn is_local_enqueue_fallback_cpu(cpu_id: usize, affinity: u32) -> bool {
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_id >= cpu_count {
         return false;
     }
@@ -791,7 +793,7 @@ fn is_local_enqueue_fallback_cpu(cpu_id: usize, affinity: u32) -> bool {
 }
 
 fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     let mut best_cpu: Option<usize> = None;
     let mut min_load = u32::MAX;
 
@@ -828,7 +830,7 @@ pub fn is_idle_task(task: *const Task) -> bool {
         return false;
     }
 
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(is_idle) =
             with_cpu_scheduler(cpu_id, |sched| sched.idle_task() == task as *mut Task)
@@ -854,7 +856,7 @@ pub fn pause_all_aps() -> bool {
     let was_paused = AP_PAUSED.swap(true, Ordering::SeqCst);
     if !was_paused {
         core::sync::atomic::fence(Ordering::SeqCst);
-        let cpu_count = slopos_lib::get_cpu_count();
+        let cpu_count = slopos_arch::pcr::get_cpu_count();
         let max_wait_iterations = 100_000;
         for iteration in 0..max_wait_iterations {
             let mut all_idle = true;
@@ -883,14 +885,14 @@ pub fn resume_all_aps() {
     core::sync::atomic::fence(Ordering::SeqCst);
     AP_PAUSED.store(false, Ordering::SeqCst);
 
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 1..cpu_count {
         if let Some(count) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
             if count > 0 {
-                if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(cpu_id) {
-                    slopos_lib::send_ipi_to_cpu(
+                if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_id) {
+                    slopos_arch::pcr::send_ipi_to_cpu(
                         apic_id,
-                        slopos_lib::arch::idt::RESCHEDULE_IPI_VECTOR,
+                        slopos_arch::arch::idt::RESCHEDULE_IPI_VECTOR,
                     );
                 }
             }
@@ -937,7 +939,7 @@ pub fn clear_cpu_queues(cpu_id: usize) {
 
 /// Clear all per-CPU ready queues across all CPUs. Used during scheduler shutdown.
 pub fn clear_all_cpu_queues() {
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         clear_cpu_queues(cpu_id);
     }

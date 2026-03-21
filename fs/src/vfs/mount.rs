@@ -1,5 +1,5 @@
 use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
-use slopos_lib::IrqRwLock;
+use slopos_sync::IrqRwLock;
 
 use crate::MAX_PATH_LEN;
 

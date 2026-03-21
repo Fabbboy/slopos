@@ -19,8 +19,11 @@ xe-gpu = ["slopos-drivers/xe-gpu"]
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
+slopos-kernel-services = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-drivers = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-sync = { workspace = true }
 slopos-mm = { workspace = true }
+slopos-utils = { workspace = true }

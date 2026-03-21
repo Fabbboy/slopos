@@ -3,11 +3,12 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_drivers::interrupt_test::interrupt_test_request_shutdown;
-pub use slopos_lib::testing::{
+use slopos_sync::StateFlag;
+pub use slopos_testing::{
     HARNESS_MAX_SUITES, TestConfig, TestRunSummary, TestSuiteDesc, TestSuiteResult, Verbosity,
     measure_elapsed_ms,
 };
-use slopos_lib::{StateFlag, klog_info};
+use slopos_utils::klog_info;
 
 pub mod exception_tests;
 pub mod fpu_tests;
@@ -51,7 +52,7 @@ pub fn tests_run_all(
 
     klog_info!("TESTS: Starting test suites");
 
-    let start_cycles = slopos_lib::tsc::rdtsc();
+    let start_cycles = slopos_arch::tsc::rdtsc();
     let mut idx = 0usize;
     let mut cursor = registry_start;
     while cursor < registry_end {
@@ -66,7 +67,7 @@ pub fn tests_run_all(
 
         let desc = unsafe { &*cursor };
 
-        let suite_start = slopos_lib::tsc::rdtsc();
+        let suite_start = slopos_arch::tsc::rdtsc();
         let mut res = TestSuiteResult::default();
         res.name = desc.name;
 
@@ -87,7 +88,7 @@ pub fn tests_run_all(
         }
 
         if cfg.timeout_ms != 0 {
-            let elapsed = measure_elapsed_ms(suite_start, slopos_lib::tsc::rdtsc());
+            let elapsed = measure_elapsed_ms(suite_start, slopos_arch::tsc::rdtsc());
             if elapsed > cfg.timeout_ms {
                 res.timed_out = 1;
                 res.failed = res.failed.saturating_add(1);
@@ -115,7 +116,7 @@ pub fn tests_run_all(
         idx += 1;
         cursor = unsafe { cursor.add(1) };
     }
-    let end_cycles = slopos_lib::tsc::rdtsc();
+    let end_cycles = slopos_arch::tsc::rdtsc();
     let overall_ms = measure_elapsed_ms(start_cycles, end_cycles);
     if overall_ms > summary.elapsed_ms {
         summary.elapsed_ms = overall_ms;

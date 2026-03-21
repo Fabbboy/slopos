@@ -1,9 +1,9 @@
-use slopos_lib::cpu;
-use slopos_lib::cpu::cpuid::{
+use slopos_arch::cpu;
+use slopos_arch::cpu::cpuid::{
     CPUID_EXT_FEAT_EDX_LM, CPUID_FEAT_EDX_PAE, CPUID_FEAT_EDX_PGE, CPUID_LEAF_EXT_INFO,
     CPUID_LEAF_FEATURES,
 };
-use slopos_lib::cpu::msr::{EFER_LMA, EFER_LME, Msr};
+use slopos_arch::cpu::msr::{EFER_LMA, EFER_LME, Msr};
 use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 use slopos_mm::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_4KB};
 

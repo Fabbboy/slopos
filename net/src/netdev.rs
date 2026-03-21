@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use bitflags::bitflags;
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;

@@ -28,7 +28,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::{IrqMutex, klog_debug};
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, MAX_CONNECTIONS, TCP_FLAG_ACK, TCP_FLAG_SYN,

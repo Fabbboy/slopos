@@ -7,7 +7,7 @@
 //! This module replaces the inline `dispatch_rx_frame()` that was previously
 //! embedded in the VirtIO-net driver, establishing a clean driver–stack boundary.
 
-use slopos_lib::klog_debug;
+use slopos_utils::klog_debug;
 
 use super::netdev::{DeviceHandle, NetDeviceFeatures};
 use super::packetbuf::PacketBuf;

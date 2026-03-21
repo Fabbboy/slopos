@@ -265,7 +265,7 @@ impl FpuState {
     /// Always ≤ `FPU_STATE_SIZE`.
     #[inline]
     pub fn active_area_size() -> usize {
-        slopos_lib::cpu::xsave::area_size()
+        slopos_arch::cpu::xsave::area_size()
     }
 }
 
@@ -290,7 +290,7 @@ const _: () = {
 /// Call once from a boot step (after `xsave::init()`) to fail early rather
 /// than silently corrupting adjacent task memory.
 pub fn validate_fpu_state_size() {
-    let hw_size = slopos_lib::cpu::xsave::area_size();
+    let hw_size = slopos_arch::cpu::xsave::area_size();
     assert!(
         hw_size <= FPU_STATE_SIZE,
         "XSAVE area size ({} B) exceeds compile-time FPU_STATE_SIZE ({} B) — \

@@ -7,7 +7,8 @@
 //!
 //! Events are routed to the focused task for each input type.
 
-use slopos_lib::{IrqMutex, RingBuffer};
+use slopos_sync::IrqMutex;
+use slopos_utils::RingBuffer;
 
 /// Monotonic millisecond timestamp for input events.
 ///

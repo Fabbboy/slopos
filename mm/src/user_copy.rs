@@ -2,8 +2,8 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::pcr;
-use slopos_lib::{InitFlag, IrqMutex};
+use slopos_arch::pcr;
+use slopos_sync::{InitFlag, IrqMutex};
 
 use crate::memory_layout_defs::KERNEL_HEAP_VBASE;
 use crate::paging::paging_is_user_accessible;

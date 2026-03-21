@@ -1,7 +1,8 @@
 //! Work Stealing for SMP Load Balancing
 
 use super::task_struct::Task;
-use slopos_lib::{get_cpu_count, get_current_cpu, klog_debug};
+use slopos_arch::{get_cpu_count, get_current_cpu};
+use slopos_utils::klog_debug;
 
 use super::per_cpu::{
     affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,

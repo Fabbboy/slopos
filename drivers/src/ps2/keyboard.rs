@@ -1,9 +1,10 @@
-use slopos_lib::{IrqMutex, RingBuffer, klog_debug, klog_info, klog_warn};
+use slopos_sync::IrqMutex;
+use slopos_utils::{RingBuffer, klog_debug, klog_info, klog_warn};
 
 use crate::ps2;
 use crate::tty::vconsole;
 use crate::tty::{active_tty, push_input};
-use slopos_lib::kernel_services::driver_runtime::request_reschedule_from_interrupt;
+use slopos_kernel_services::driver_runtime::request_reschedule_from_interrupt;
 
 const BUFFER_SIZE: usize = 256;
 type Buffer = RingBuffer<u8, BUFFER_SIZE>;
@@ -309,7 +310,7 @@ pub fn get_scancode() -> u8 {
 }
 
 pub fn poll_wait_enter() {
-    use slopos_lib::cpu;
+    use slopos_arch::cpu;
     const ENTER_MAKE_CODE: u8 = 0x1C;
 
     loop {

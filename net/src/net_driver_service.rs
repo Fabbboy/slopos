@@ -1,7 +1,7 @@
 use crate::DeviceHandle;
 use slopos_abi::net::{UserNetInfo, UserNetMember};
 
-slopos_lib::define_service! {
+slopos_service_core::define_service! {
     net_driver => NetDriverServices {
         @no_wrapper virtio_net_ipv4_addr() -> Option<[u8; 4]>;
         @no_wrapper virtio_net_dns() -> Option<[u8; 4]>;

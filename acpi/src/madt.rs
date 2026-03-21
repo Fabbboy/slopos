@@ -1,6 +1,6 @@
 use core::mem;
 
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 use crate::tables::{AcpiTables, SdtHeader};
 

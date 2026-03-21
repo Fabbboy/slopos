@@ -2,11 +2,11 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::cpu;
-use slopos_lib::preempt::PreemptGuard;
+use slopos_arch::cpu;
+use slopos_sync::preempt::PreemptGuard;
 
-use slopos_lib::kdiag_timestamp;
-use slopos_lib::klog_info;
+use slopos_utils::kdiag_timestamp;
+use slopos_utils::klog_info;
 
 use crate::platform;
 
@@ -293,7 +293,7 @@ fn mark_preempt_if_ready(cpu_id: usize) {
 }
 
 pub fn clear_scheduler_current_task() {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     set_scheduler_current_task(cpu_id, ptr::null_mut());
 }
 
@@ -312,7 +312,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
     let Some(target_cpu) = per_cpu::select_target_cpu(task) else {
         return -1;
     };
-    let current_cpu = slopos_lib::get_current_cpu();
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
 
     if target_cpu == current_cpu {
         let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
@@ -332,7 +332,7 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        if slopos_lib::is_cpu_online(target_cpu) {
+        if slopos_arch::pcr::is_cpu_online(target_cpu) {
             send_reschedule_ipi(target_cpu);
         }
         0
@@ -344,7 +344,7 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
         return -1;
     }
 
-    let cpu_count = slopos_lib::get_cpu_count();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.remove_task(task);
@@ -413,12 +413,12 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         if is_user_mode {
             let fs = (*to_task).fs_base;
             if fs == 0 || slopos_abi::addr::VirtAddr::is_canonical(fs) {
-                slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, fs);
+                slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
             } else {
-                slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, 0);
+                slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, 0);
             }
         } else {
-            slopos_lib::cpu::msr::write_msr(slopos_lib::cpu::msr::Msr::FS_BASE, 0);
+            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, 0);
         }
 
         let kernel_rsp = if is_user_mode && (*to_task).kernel_stack_top != 0 {
@@ -723,7 +723,7 @@ fn validate_kernel_context(ctx: &TaskContext, task: *const Task) -> bool {
 }
 
 fn schedule_internal(allow_user_frame_resume: bool) {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let irq_flags = cpu::save_flags_cli();
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
@@ -762,7 +762,7 @@ pub fn schedule() {
 }
 
 pub fn r#yield() {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let current = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task())
         .unwrap_or(ptr::null_mut());
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -937,7 +937,7 @@ pub fn try_wake_from_task_wait(task: *mut Task, completed_id: u32) -> bool {
 /// Terminates the current task and switches to idle via schedule().
 pub fn scheduler_task_exit_impl() -> ! {
     let current = scheduler_get_current_task();
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     if current.is_null() {
         klog_info!("scheduler_task_exit: No current task on CPU {}", cpu_id);
@@ -994,9 +994,9 @@ pub fn init_scheduler() -> c_int {
     per_cpu::init_all_percpu_schedulers();
     reset_sleep_queue();
 
-    slopos_lib::preempt::register_reschedule_callback(deferred_reschedule_callback);
+    slopos_sync::preempt::register_reschedule_callback(deferred_reschedule_callback);
 
-    slopos_lib::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
+    slopos_utils::panic_recovery::register_panic_cleanup(sched_panic_cleanup);
 
     0
 }
@@ -1017,7 +1017,7 @@ pub fn scheduler_is_enabled() -> c_int {
 }
 
 pub fn scheduler_get_current_task() -> *mut Task {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.current_task()).unwrap_or(ptr::null_mut())
 }
 
@@ -1050,7 +1050,7 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
-    let cpu_id = slopos_lib::get_current_cpu();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
     let preempt_active = PreemptGuard::is_active();

@@ -7,7 +7,7 @@ use core::cell::SyncUnsafeCell;
 
 use crate::memory_layout_defs::ProcessMemoryLayout;
 use crate::paging_defs::PAGE_SIZE_4KB;
-use slopos_lib::tsc;
+use slopos_arch::tsc;
 
 #[derive(Clone, Copy)]
 pub struct AslrConfig {

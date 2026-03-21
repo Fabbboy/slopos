@@ -2,7 +2,8 @@ use core::ffi::c_int;
 use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_lib::{IrqMutex, align_down, align_up, klog_debug, klog_info};
+use slopos_sync::IrqMutex;
+use slopos_utils::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};

@@ -12,10 +12,8 @@ use slopos_abi::video_traits::VideoResult;
 use slopos_core::task::register_task_resource_cleanup_hook;
 #[cfg(feature = "xe-gpu")]
 use slopos_drivers::xe;
-use slopos_lib::kernel_services::syscall_services::video::{
-    VideoServices, register_video_services,
-};
-use slopos_lib::{klog_info, klog_warn};
+use slopos_kernel_services::syscall_services::video::{VideoServices, register_video_services};
+use slopos_utils::{klog_info, klog_warn};
 
 pub mod compositor_context;
 pub mod framebuffer;

@@ -1,6 +1,7 @@
-use slopos_lib::arch::exception::{exception_is_critical, get_exception_name};
-use slopos_lib::testing::TestResult;
-use slopos_lib::{InterruptFrame, klog_info};
+use slopos_arch::InterruptFrame;
+use slopos_arch::arch::exception::{exception_is_critical, get_exception_name};
+use slopos_testing::TestResult;
+use slopos_utils::klog_info;
 
 fn create_test_frame(vector: u8, from_user: bool) -> InterruptFrame {
     InterruptFrame {
@@ -259,7 +260,7 @@ pub fn test_known_exception_names() -> TestResult {
     TestResult::Pass
 }
 
-slopos_lib::define_test_suite!(
+slopos_testing::define_test_suite!(
     exception,
     [
         test_exception_names_valid,

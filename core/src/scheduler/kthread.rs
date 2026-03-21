@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
-use slopos_lib::klog_info;
-use slopos_lib::string;
+use slopos_utils::klog_info;
+use slopos_utils::string;
 
 use super::scheduler;
 use super::scheduler::task_wait_for;

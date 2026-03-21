@@ -14,9 +14,9 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_utils::{klog_debug, klog_info};
 
-pub use slopos_lib::boot_info::{
+pub use slopos_utils::boot_info::{
     BootFramebuffer, BootInfo, LimineMemmapEntry, LimineMemmapResponse, MemoryRegion,
     MemoryRegionKind,
 };
@@ -324,9 +324,9 @@ pub fn init_limine_protocol() -> i32 {
     0
 }
 
-pub fn boot_info() -> slopos_lib::boot_info::BootInfo {
+pub fn boot_info() -> slopos_utils::boot_info::BootInfo {
     let info = sysinfo();
-    slopos_lib::boot_info::BootInfo {
+    slopos_utils::boot_info::BootInfo {
         hhdm_offset: info.hhdm_offset,
         cmdline: info.cmdline,
         framebuffer: info.framebuffer,

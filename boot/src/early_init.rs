@@ -6,9 +6,9 @@ use core::{
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_drivers::serial;
-use slopos_lib::klog::{self, KlogLevel};
-use slopos_lib::wl_currency;
-use slopos_lib::{klog_debug, klog_info, klog_set_level};
+use slopos_utils::klog::{self, KlogLevel};
+use slopos_utils::wl_currency;
+use slopos_utils::{klog_debug, klog_info, klog_set_level};
 use slopos_video::splash;
 
 use crate::limine_protocol;
@@ -459,7 +459,7 @@ fn boot_step_boot_config_fn() {
     }
 
     if cmdline.contains("roulette=skip") {
-        slopos_lib::boot_flags::set_flag(slopos_lib::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
+        slopos_utils::boot_flags::set_flag(slopos_utils::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
         boot_info(b"Boot option: roulette skip enabled\0");
     }
 }
@@ -496,8 +496,8 @@ pub fn kernel_main_impl() {
 
     unsafe {
         let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
-        slopos_lib::pcr::init_bsp_pcr(bsp_apic_id);
-        let pcr = slopos_lib::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
+        slopos_arch::pcr::init_bsp_pcr(bsp_apic_id);
+        let pcr = slopos_arch::pcr::get_pcr_mut(0).expect("BSP PCR not initialized");
         pcr.init_gdt();
         pcr.install();
     }

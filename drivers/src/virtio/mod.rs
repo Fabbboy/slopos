@@ -180,7 +180,7 @@ fn hpet_poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
     };
 
     let start = hpet::read_counter();
-    let allow_hlt = slopos_lib::get_current_cpu() == 0;
+    let allow_hlt = slopos_arch::pcr::get_current_cpu() == 0;
 
     loop {
         unsafe { core::arch::asm!("cli", options(nomem, nostack)) };

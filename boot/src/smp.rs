@@ -2,10 +2,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
 
+use slopos_arch::{cpu, is_cpu_online, pcr};
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
 use slopos_drivers::apic;
-use slopos_lib::{cpu, is_cpu_online, klog_info, pcr};
 use slopos_mm::tlb;
+use slopos_utils::klog_info;
 
 use crate::gdt::syscall_msr_init;
 use crate::idt::idt_load;
@@ -22,7 +23,7 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     cpu::enable_sse();
 
     // Replicate the BSP's XSAVE configuration (CR4.OSXSAVE + XCR0).
-    slopos_lib::cpu::xsave::enable_on_current_cpu();
+    slopos_arch::cpu::xsave::enable_on_current_cpu();
 
     apic::enable();
 
@@ -48,7 +49,7 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     // The LAPIC_TIMER_FREQ_HZ global atomic is already set by boot-time
     // calibration, so set_periodic_ms will compute the correct count.
     {
-        use slopos_lib::arch::idt::LAPIC_TIMER_VECTOR;
+        use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
         if apic::timer::is_calibrated() {
             if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, 10) {
                 klog_info!("MP: CPU {} LAPIC timer start failed", cpu_idx);

@@ -9,8 +9,9 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use slopos_abi::net::{
     USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
 };
-use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
 use slopos_net as net;
+use slopos_sync::{InitFlag, IrqMutex};
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
@@ -21,7 +22,7 @@ use crate::virtio::{
     },
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
-use slopos_lib::kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
+use slopos_kernel_services::driver_runtime::{register_bottom_half, spawn_kernel_task};
 use slopos_net::{
     self, PACKET_POOL, dhcp, ingress,
     napi::NapiContext,
@@ -650,7 +651,7 @@ fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
             }
             let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
             let payload = &ip_payload[hdr_len..];
-            let now_ms = slopos_lib::clock::uptime_ms();
+            let now_ms = slopos_utils::clock::uptime_ms();
             let result = tcp::tcp_input(src_ip, dst_ip, &hdr, options, payload, now_ms);
             if let Some(seg) = result.response {
                 let _ = socket::socket_send_tcp_segment(&seg, &[]);
@@ -1094,7 +1095,7 @@ fn napi_bottom_half() {
 }
 
 extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
-    use slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms;
+    use slopos_kernel_services::driver_runtime::sleep_current_task_ms;
     loop {
         napi_schedule();
         virtnet_napi_poll_loop();
@@ -1109,7 +1110,7 @@ extern "C" fn napi_thread_entry(_arg: *mut core::ffi::c_void) {
 /// The handler signals the matching queue completion event.
 extern "C" fn virtio_net_irq_handler(
     _vector: u8,
-    _frame: *mut slopos_lib::InterruptFrame,
+    _frame: *mut slopos_arch::InterruptFrame,
     ctx: *mut core::ffi::c_void,
 ) {
     match ctx as usize {
@@ -1557,13 +1558,13 @@ pub fn dns_rx_clear() {
 /// poll NAPI inline after each wakeup to process RX frames; NAPI's
 /// `dispatch_rx_frame` intercepts DNS replies and signals `DNS_RX_EVENT`.
 pub fn dns_rx_wait(timeout_ms: u32) -> bool {
-    let start = slopos_lib::clock::uptime_ms();
+    let start = slopos_utils::clock::uptime_ms();
     loop {
         // Already arrived?
         if DNS_RX_EVENT.try_consume() {
             return true;
         }
-        let elapsed = slopos_lib::clock::uptime_ms() - start;
+        let elapsed = slopos_utils::clock::uptime_ms() - start;
         if elapsed >= timeout_ms as u64 {
             return false;
         }

@@ -33,7 +33,7 @@ macro_rules! define_syscall {
     (@impl $name:ident, $ctx:ident, $args:ident, [$($req:tt)*], $body:block) => {
         pub fn $name(
             task: *mut $crate::scheduler::task_struct::Task,
-            frame: *mut slopos_lib::InterruptFrame,
+            frame: *mut slopos_arch::InterruptFrame,
         ) -> $crate::syscall::common::SyscallDisposition {
             #[allow(unused_variables)]
             let Some($ctx) = $crate::syscall::context::SyscallContext::new(task, frame) else {

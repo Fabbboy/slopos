@@ -1,0 +1,11 @@
+[package]
+name = "slopos-service-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+paste = "1"

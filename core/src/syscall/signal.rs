@@ -9,7 +9,7 @@ use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL, ERRNO_ESRCH};
 use slopos_abi::task::{
     INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
 };
-use slopos_lib::InterruptFrame;
+use slopos_arch::InterruptFrame;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr;
 

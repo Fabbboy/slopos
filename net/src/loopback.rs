@@ -21,7 +21,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
 use super::packetbuf::PacketBuf;
@@ -123,7 +123,7 @@ impl NetDevice for LoopbackDev {
 // =============================================================================
 
 use alloc::boxed::Box;
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 /// Register the loopback device in the global device registry and configure
 /// its IPv4 address and route.

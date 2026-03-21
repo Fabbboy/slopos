@@ -39,8 +39,8 @@ use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
-use slopos_lib::IrqMutex;
-use slopos_lib::WaitQueue;
+use slopos_sync::IrqMutex;
+use slopos_sync::WaitQueue;
 
 // ---------------------------------------------------------------------------
 // Per-TTY slots

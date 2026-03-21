@@ -4,8 +4,8 @@ use core::arch::{asm, global_asm};
 use core::cell::SyncUnsafeCell;
 use core::ffi::c_void;
 
-use slopos_lib::cpu;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::exception::*;
 use crate::ist_stacks;
@@ -13,7 +13,7 @@ use crate::user_fault::*;
 
 global_asm!(include_str!("../idt_handlers.s"));
 
-pub use slopos_lib::arch::idt::{
+pub use slopos_arch::arch::idt::{
     EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
     EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
     EXCEPTION_FPU_ERROR, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_INVALID_OPCODE,
@@ -30,7 +30,7 @@ struct IdtPtr {
     base: u64,
 }
 
-type ExceptionHandler = fn(*mut slopos_lib::InterruptFrame);
+type ExceptionHandler = fn(*mut slopos_arch::InterruptFrame);
 
 static IDT: SyncUnsafeCell<[IdtEntry; IDT_ENTRIES]> = SyncUnsafeCell::new(
     [IdtEntry {
@@ -299,7 +299,7 @@ pub fn exception_set_mode(mode: ExceptionMode) {
     }
 }
 pub fn exception_is_critical(vector: u8) -> i32 {
-    slopos_lib::arch::exception::exception_is_critical(vector) as i32
+    slopos_arch::arch::exception::exception_is_critical(vector) as i32
 }
 pub fn idt_load() {
     unsafe {
@@ -312,7 +312,7 @@ pub fn idt_load() {
 
 fn handle_tlb_shootdown_ipi() {
     let apic_id = slopos_drivers::apic::get_id();
-    if let Some(cpu_idx) = slopos_lib::cpu_index_from_apic_id(apic_id) {
+    if let Some(cpu_idx) = slopos_arch::pcr::cpu_index_from_apic_id(apic_id) {
         tlb::handle_shootdown_ipi(cpu_idx);
     } else {
         klog_debug!(
@@ -336,7 +336,7 @@ impl IstPreemptHold {
     fn new(active: bool) -> Self {
         if active {
             unsafe {
-                slopos_lib::pcr::current_pcr()
+                slopos_arch::pcr::current_pcr()
                     .preempt_count
                     .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
@@ -353,7 +353,7 @@ impl Drop for IstPreemptHold {
             // Any pending reschedule will be handled naturally by the next
             // timer tick or voluntary yield after we return via IRET.
             unsafe {
-                slopos_lib::pcr::current_pcr()
+                slopos_arch::pcr::current_pcr()
                     .preempt_count
                     .fetch_sub(1, core::sync::atomic::Ordering::Release);
             }
@@ -362,7 +362,7 @@ impl Drop for IstPreemptHold {
 }
 
 /// Implementation of common_exception_handler - called from FFI boundary
-pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
+pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     let frame_ref = unsafe { &mut *frame };
     let vector = (frame_ref.vector & 0xFF) as u8;
 
@@ -447,7 +447,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_lib::InterruptFrame) {
     let critical = is_critical_exception_internal(vector);
     unsafe {
         if critical || !matches!(*CURRENT_EXCEPTION_MODE.get(), ExceptionMode::Test) {
-            let name = slopos_lib::arch::exception::get_exception_name(vector);
+            let name = slopos_arch::arch::exception::get_exception_name(vector);
             klog_info!("EXCEPTION: Vector {} ({})", vector, name);
         }
     }
@@ -510,7 +510,7 @@ fn initialize_handler_tables() {
 /// hits, missing task/page-dir, or failed resolution) — the caller must then
 /// fall through to the diagnostic / terminate / panic path in
 /// `exception_page_fault`.
-fn try_handle_page_fault(frame: *mut slopos_lib::InterruptFrame) -> bool {
+fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };
 

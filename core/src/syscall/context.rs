@@ -2,8 +2,8 @@ use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
-use slopos_lib::InterruptFrame;
-use slopos_lib::wl_currency::{self, WL_DELTA};
+use slopos_arch::InterruptFrame;
+use slopos_utils::wl_currency::{self, WL_DELTA};
 
 #[derive(Clone, Copy)]
 pub struct SyscallArgs {

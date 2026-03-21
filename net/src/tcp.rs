@@ -10,7 +10,8 @@
 
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
-use slopos_lib::{IrqMutex, RingBuffer, klog_debug};
+use slopos_sync::IrqMutex;
+use slopos_utils::{RingBuffer, klog_debug};
 
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 
@@ -53,6 +54,10 @@ pub const DELAYED_ACK_MS: u64 = 200;
 pub const DELAYED_ACK_SEGMENTS: u8 = 2;
 /// Zero-window probe interval in milliseconds.
 pub const ZWP_INTERVAL_MS: u64 = 5000;
+const TICKS_PER_SEC: u64 = 100;
+const TCP_KEEPALIVE_IDLE_TICKS: u64 = 7_200 * TICKS_PER_SEC;
+const TCP_KEEPALIVE_INTERVAL_TICKS: u64 = 75 * TICKS_PER_SEC;
+const TCP_KEEPALIVE_PROBES_MAX: u8 = 9;
 
 // ---------------------------------------------------------------------------
 // TCP flag bits (in the flags byte of the header)
@@ -559,6 +564,10 @@ pub struct TcpConnection {
     /// Timer token for the pending retransmit timer.
     pub retransmit_timer_token: Option<TimerToken>,
 
+    pub keepalive_timer_token: Option<TimerToken>,
+    pub keepalive_probes_sent: u8,
+    pub last_data_activity_tick: u64,
+
     /// Timestamp (ms) when TIME_WAIT entered (for 2×MSL expiry).
     pub time_wait_start_ms: u64,
 
@@ -593,6 +602,9 @@ impl TcpConnection {
             rto_ms: INITIAL_RTO_MS,
             retransmits: 0,
             retransmit_timer_token: None,
+            keepalive_timer_token: None,
+            keepalive_probes_sent: 0,
+            last_data_activity_tick: 0,
             time_wait_start_ms: 0,
             time_wait_timer_token: None,
             active: false,
@@ -1066,6 +1078,9 @@ impl TcpConnectionTable {
             if let Some(token) = conn.retransmit_timer_token.take() {
                 NET_TIMER_WHEEL.cancel(token);
             }
+            if let Some(token) = conn.keepalive_timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
             if let Some(token) = conn.time_wait_timer_token.take() {
                 NET_TIMER_WHEEL.cancel(token);
             }
@@ -1075,6 +1090,55 @@ impl TcpConnectionTable {
             bufs.clear();
         }
     }
+}
+
+fn tcp_cancel_keepalive(conn: &mut TcpConnection) {
+    if let Some(token) = conn.keepalive_timer_token.take() {
+        NET_TIMER_WHEEL.cancel(token);
+    }
+    conn.keepalive_probes_sent = 0;
+}
+
+fn tcp_maybe_schedule_keepalive_established(table: &mut TcpConnectionTable, idx: usize) {
+    let socket_idx = table.connections[idx].socket_idx;
+    let Some(socket_idx) = socket_idx else {
+        return;
+    };
+    if !super::socket::socket_keepalive_enabled_by_index(socket_idx) {
+        return;
+    }
+
+    let current_tick = slopos_kernel_services::platform::timer_ticks();
+    let conn = &mut table.connections[idx];
+    tcp_cancel_keepalive(conn);
+    let token = NET_TIMER_WHEEL.schedule(
+        TCP_KEEPALIVE_IDLE_TICKS,
+        TimerKind::TcpKeepalive,
+        idx as u32,
+    );
+    conn.keepalive_timer_token = Some(token);
+    conn.keepalive_probes_sent = 0;
+    conn.last_data_activity_tick = current_tick;
+}
+
+fn tcp_reset_keepalive_on_inbound_data(table: &mut TcpConnectionTable, idx: usize) {
+    if table.connections[idx].state != TcpState::Established {
+        return;
+    }
+    if table.connections[idx].keepalive_timer_token.is_none() {
+        return;
+    }
+
+    let current_tick = slopos_kernel_services::platform::timer_ticks();
+    let conn = &mut table.connections[idx];
+    tcp_cancel_keepalive(conn);
+    let token = NET_TIMER_WHEEL.schedule(
+        TCP_KEEPALIVE_IDLE_TICKS,
+        TimerKind::TcpKeepalive,
+        idx as u32,
+    );
+    conn.keepalive_timer_token = Some(token);
+    conn.last_data_activity_tick = current_tick;
 }
 
 // =============================================================================
@@ -1191,6 +1255,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
             conn.snd_nxt = seq.wrapping_add(1); // FIN consumes one sequence number
             let prev = conn.state;
             conn.state = TcpState::FinWait1;
+            tcp_cancel_keepalive(conn);
 
             let seg = TcpOutSegment {
                 tuple: conn.tuple,
@@ -1215,6 +1280,7 @@ pub fn tcp_close(idx: usize) -> Result<Option<TcpOutSegment>, TcpError> {
             let seq = conn.snd_nxt;
             conn.snd_nxt = seq.wrapping_add(1);
             conn.state = TcpState::LastAck;
+            tcp_cancel_keepalive(conn);
 
             let seg = TcpOutSegment {
                 tuple: conn.tuple,
@@ -1287,6 +1353,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
             conn.snd_nxt = seq.wrapping_add(1);
             let prev = conn.state;
             conn.state = TcpState::FinWait1;
+            tcp_cancel_keepalive(conn);
 
             let seg = TcpOutSegment {
                 tuple: conn.tuple,
@@ -1310,6 +1377,7 @@ pub fn tcp_shutdown_write(idx: usize) -> Result<Option<TcpOutSegment>, TcpError>
             let seq = conn.snd_nxt;
             conn.snd_nxt = seq.wrapping_add(1);
             conn.state = TcpState::LastAck;
+            tcp_cancel_keepalive(conn);
 
             let seg = TcpOutSegment {
                 tuple: conn.tuple,
@@ -1559,6 +1627,7 @@ fn process_listen(
 
     let iss = generate_isn();
     let peer_mss = parse_mss_option(options).unwrap_or(DEFAULT_MSS);
+    let listener_socket_idx = table.connections[listen_idx].socket_idx;
 
     let child = &mut table.connections[new_idx];
     child.tuple = *incoming_tuple;
@@ -1574,6 +1643,7 @@ fn process_listen(
     child.rto_ms = INITIAL_RTO_MS;
     child.retransmits = 0;
     child.active = true;
+    child.socket_idx = listener_socket_idx;
 
     klog_debug!(
         "tcp: LISTEN -> SYN_RECEIVED idx={} ISS={} IRS={}",
@@ -1686,15 +1756,23 @@ fn process_syn_sent(
         // Our SYN has been ACKed → ESTABLISHED.
         conn.state = TcpState::Established;
         conn.retransmits = 0;
+    }
 
-        klog_debug!("tcp: SYN_SENT -> ESTABLISHED idx={} IRS={}", idx, conn.irs);
+    if table.connections[idx].state == TcpState::Established {
+        tcp_maybe_schedule_keepalive_established(table, idx);
+
+        klog_debug!(
+            "tcp: SYN_SENT -> ESTABLISHED idx={} IRS={}",
+            idx,
+            table.connections[idx].irs
+        );
 
         let seg = TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.snd_nxt,
-            ack_num: conn.rcv_nxt,
+            tuple: table.connections[idx].tuple,
+            seq_num: table.connections[idx].snd_nxt,
+            ack_num: table.connections[idx].rcv_nxt,
             flags: TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
+            window_size: table.connections[idx].rcv_wnd,
             mss: 0,
             wscale: 255,
         };
@@ -1708,7 +1786,7 @@ fn process_syn_sent(
         }
     } else {
         // Simultaneous open: SYN without ACK → SYN_RECEIVED.
-        conn.state = TcpState::SynReceived;
+        table.connections[idx].state = TcpState::SynReceived;
 
         klog_debug!(
             "tcp: SYN_SENT -> SYN_RECEIVED idx={} (simultaneous open)",
@@ -1716,11 +1794,11 @@ fn process_syn_sent(
         );
 
         let seg = TcpOutSegment {
-            tuple: conn.tuple,
-            seq_num: conn.iss,
-            ack_num: conn.rcv_nxt,
+            tuple: table.connections[idx].tuple,
+            seq_num: table.connections[idx].iss,
+            ack_num: table.connections[idx].rcv_nxt,
             flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
-            window_size: conn.rcv_wnd,
+            window_size: table.connections[idx].rcv_wnd,
             mss: DEFAULT_MSS,
             wscale: 255,
         };
@@ -1784,6 +1862,7 @@ fn process_syn_received(
     conn.snd_wnd = hdr.window_size as u32;
     conn.state = TcpState::Established;
     conn.retransmits = 0;
+    tcp_maybe_schedule_keepalive_established(table, idx);
 
     klog_debug!("tcp: SYN_RECEIVED -> ESTABLISHED idx={}", idx);
 
@@ -1812,6 +1891,7 @@ fn process_established_and_closing(
         if let Some(token) = table.connections[idx].retransmit_timer_token.take() {
             NET_TIMER_WHEEL.cancel(token);
         }
+        tcp_cancel_keepalive(&mut table.connections[idx]);
 
         if table.connections[idx].socket_idx.is_some() {
             table.connections[idx].state = TcpState::Closed;
@@ -1969,6 +2049,10 @@ fn process_established_and_closing(
         let recv_window = table.buffers[idx].recv.window();
         table.connections[idx].rcv_wnd = recv_window;
 
+        if accepted_payload_len > 0 {
+            tcp_reset_keepalive_on_inbound_data(table, idx);
+        }
+
         if table.buffers[idx].recv.should_ack_now(now_ms) {
             let conn = &table.connections[idx];
             let seg = TcpOutSegment {
@@ -2120,6 +2204,7 @@ fn process_established_and_closing(
 
         let new_state = match current_state {
             TcpState::Established => {
+                tcp_cancel_keepalive(conn);
                 conn.state = TcpState::CloseWait;
                 klog_debug!("tcp: ESTABLISHED -> CLOSE_WAIT idx={}", idx);
                 TcpState::CloseWait
@@ -2253,6 +2338,62 @@ pub fn tcp_timer_tick(now_ms: u64) -> usize {
     reaped
 }
 
+pub fn tcp_on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
+    let mut table = TCP_TABLE.lock();
+    let idx = conn_id as usize;
+    if idx >= MAX_CONNECTIONS {
+        return None;
+    }
+
+    let conn = table.connections.get(idx)?;
+    if !conn.active || conn.state != TcpState::Established {
+        return None;
+    }
+
+    table.connections[idx].keepalive_timer_token = None;
+
+    if table.connections[idx].keepalive_probes_sent >= TCP_KEEPALIVE_PROBES_MAX {
+        let _rst_seg = TcpOutSegment {
+            tuple: table.connections[idx].tuple,
+            seq_num: table.connections[idx].snd_nxt,
+            ack_num: table.connections[idx].rcv_nxt,
+            flags: TCP_FLAG_RST,
+            window_size: 0,
+            mss: 0,
+            wscale: 255,
+        };
+        klog_debug!(
+            "tcp: keepalive max probes reached idx={} conn_id={} -> closing",
+            idx,
+            conn_id
+        );
+        table.release(idx);
+        return None;
+    }
+
+    let probe_seg = TcpOutSegment {
+        tuple: table.connections[idx].tuple,
+        seq_num: table.connections[idx].snd_una.wrapping_sub(1),
+        ack_num: table.connections[idx].rcv_nxt,
+        flags: TCP_FLAG_ACK,
+        window_size: table.connections[idx].rcv_wnd,
+        mss: 0,
+        wscale: 255,
+    };
+
+    table.connections[idx].keepalive_probes_sent = table.connections[idx]
+        .keepalive_probes_sent
+        .saturating_add(1);
+    let token = NET_TIMER_WHEEL.schedule(
+        TCP_KEEPALIVE_INTERVAL_TICKS,
+        TimerKind::TcpKeepalive,
+        conn_id,
+    );
+    table.connections[idx].keepalive_timer_token = Some(token);
+
+    Some(probe_seg)
+}
+
 /// Handle a retransmit timer firing for connection `conn_id`.
 ///
 /// Validates the connection still exists and has unacknowledged in-flight data.
@@ -2304,7 +2445,7 @@ pub fn tcp_on_retransmit(conn_id: u32) -> Option<usize> {
     let token = NET_TIMER_WHEEL.schedule(delay_ticks, TimerKind::TcpRetransmit, conn_id);
     table.connections[idx].retransmit_timer_token = Some(token);
 
-    let now_ms = slopos_lib::clock::uptime_ms();
+    let now_ms = slopos_utils::clock::uptime_ms();
     table.buffers[idx].send.rto_deadline_ms =
         now_ms.saturating_add(table.connections[idx].rto_ms as u64);
 
@@ -2620,6 +2761,9 @@ pub fn tcp_reset_all() {
         // Without this, timers scheduled (retransmit, TIME_WAIT)
         // remain in the wheel and fire during later test suites.
         if let Some(token) = table.connections[i].retransmit_timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
+        if let Some(token) = table.connections[i].keepalive_timer_token.take() {
             NET_TIMER_WHEEL.cancel(token);
         }
         if let Some(token) = table.connections[i].time_wait_timer_token.take() {

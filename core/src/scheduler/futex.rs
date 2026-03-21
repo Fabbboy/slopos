@@ -11,7 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use super::scheduler::{
     block_current_task, finish_wait, prepare_to_wait, scheduler_get_current_task, unblock_task,

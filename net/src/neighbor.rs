@@ -35,8 +35,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_lib::IrqMutex;
-use slopos_lib::klog_debug;
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 use super::packetbuf::PacketBuf;
 use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
@@ -627,5 +627,5 @@ pub enum ResolveOutcome {
 /// Used for timestamping neighbor entries.  This is an approximation — the
 /// actual tick may advance between reading and storing.
 fn current_tick_approx() -> u64 {
-    slopos_lib::kernel_services::platform::timer_ticks()
+    slopos_kernel_services::platform::timer_ticks()
 }

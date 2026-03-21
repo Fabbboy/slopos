@@ -1,12 +1,13 @@
 use core::ffi::CStr;
 
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
+use slopos_arch::InterruptFrame;
+use slopos_arch::cpu;
 use slopos_core::sched::{schedule, scheduler_get_current_task};
 use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
 use slopos_core::scheduler::task_struct::Task;
 use slopos_core::task::task_terminate;
-use slopos_lib::cpu;
-use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_info};
+use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::panic::set_panic_cpu_state;
 

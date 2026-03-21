@@ -3,14 +3,16 @@ pub mod timer;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_lib::OnceLock;
-use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_sync::InitFlag;
+use slopos_sync::OnceLock;
+use slopos_utils::{klog_debug, klog_info};
 
 use regs::*;
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::cpu::apic_msr::ApicBaseMsr;
-use slopos_lib::cpu::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
-use slopos_lib::cpu::msr::Msr;
+use slopos_arch::cpu::apic_msr::ApicBaseMsr;
+use slopos_arch::cpu::cpuid::{CPUID_FEAT_ECX_X2APIC, CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
+use slopos_arch::cpu::msr::Msr;
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 
@@ -89,8 +91,8 @@ pub fn init() -> i32 {
 
     klog_debug!("APIC: Initializing Local APIC");
 
-    slopos_lib::register_lapic_id_fn(get_id);
-    slopos_lib::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
+    slopos_arch::pcr::register_lapic_id_fn(get_id);
+    slopos_arch::pcr::register_send_ipi_to_cpu_fn(send_ipi_to_cpu);
 
     let mut apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
     if apic_base_msr & ApicBaseMsr::GLOBAL_ENABLE == 0 {

@@ -3,7 +3,8 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_lib::{InitFlag, IrqMutex, klog_debug, klog_info};
+use slopos_sync::{InitFlag, IrqMutex};
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::pci::{PciDeviceInfo, PciDriver, pci_register_driver};
 use crate::virtio::{
@@ -253,7 +254,7 @@ fn do_request(sector: u64, buffer: *mut u8, len: usize, write: bool) -> bool {
 /// The handler signals the queue completion event used by [`do_request`].
 extern "C" fn virtio_blk_irq_handler(
     _vector: u8,
-    _frame: *mut slopos_lib::InterruptFrame,
+    _frame: *mut slopos_arch::InterruptFrame,
     _ctx: *mut core::ffi::c_void,
 ) {
     BLK_QUEUE_EVENT.signal();

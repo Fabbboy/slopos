@@ -1,11 +1,13 @@
 use core::arch::asm;
 use core::ffi::c_char;
 
-use slopos_lib::ports::{
+use slopos_arch::cpu;
+use slopos_sync::StateFlag;
+use slopos_utils::klog_info;
+use slopos_utils::ports::{
     ACPI_PM1A_CNT, ACPI_PM1A_CNT_BOCHS, ACPI_PM1A_CNT_VBOX, COM1, PS2_COMMAND,
 };
-use slopos_lib::string::cstr_to_str;
-use slopos_lib::{StateFlag, cpu, klog_info};
+use slopos_utils::string::cstr_to_str;
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
 static INTERRUPTS_QUIESCED: StateFlag = StateFlag::new();

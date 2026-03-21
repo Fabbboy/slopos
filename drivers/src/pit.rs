@@ -9,7 +9,7 @@
 //! never called.  The hardware counter free-runs at its base oscillator
 //! frequency (~1.193 182 MHz) after power-on reset.
 
-use slopos_lib::ports::{PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND};
+use slopos_utils::ports::{PIT_BASE_FREQUENCY_HZ, PIT_CHANNEL0, PIT_COMMAND};
 
 /// Hardware default reload value (counter wraps at 0x10000 = 65 536).
 const DEFAULT_RELOAD: u32 = 0x10000;
@@ -19,14 +19,14 @@ const DEFAULT_RELOAD: u32 = 0x10000;
 /// Interrupts are briefly disabled to prevent a stale two-byte read.
 /// Safe to call at any point — the counter free-runs from power-on.
 fn pit_read_count() -> u16 {
-    let flags = slopos_lib::cpu::save_flags_cli();
+    let flags = slopos_arch::cpu::save_flags_cli();
     let count = unsafe {
         PIT_COMMAND.write(0x00); // latch channel 0
         let low = PIT_CHANNEL0.read();
         let high = PIT_CHANNEL0.read();
         ((high as u16) << 8) | (low as u16)
     };
-    slopos_lib::cpu::restore_flags(flags);
+    slopos_arch::cpu::restore_flags(flags);
     count
 }
 

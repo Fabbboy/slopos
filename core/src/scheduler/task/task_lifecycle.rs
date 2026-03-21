@@ -2,10 +2,10 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-use slopos_lib::cpu;
-use slopos_lib::kdiag_timestamp;
-use slopos_lib::string::bytes_as_str;
-use slopos_lib::{klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_utils::kdiag_timestamp;
+use slopos_utils::string::bytes_as_str;
+use slopos_utils::{klog_debug, klog_info};
 
 use super::super::ffi_boundary::task_entry_wrapper;
 use super::super::scheduler;
@@ -25,7 +25,7 @@ use slopos_fs::fileio::{
     fileio_clone_table_for_process, fileio_create_table_for_process,
     fileio_destroy_table_for_process,
 };
-use slopos_lib::kernel_services::syscall_services::tty;
+use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm::{
@@ -620,7 +620,7 @@ pub fn task_shutdown_all() -> c_int {
     result
 }
 
-pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_lib::InterruptFrame) -> u32 {
+pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::InterruptFrame) -> u32 {
     if parent_task.is_null() {
         klog_info!("task_fork: null parent task");
         return INVALID_TASK_ID;

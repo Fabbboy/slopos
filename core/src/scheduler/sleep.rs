@@ -1,7 +1,7 @@
 use core::ffi::c_int;
 
 use slopos_abi::task::{BlockReason, MAX_TASKS};
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 use super::scheduler::{
     is_scheduling_active, schedule, schedule_task, scheduler_get_current_task, unschedule_task,

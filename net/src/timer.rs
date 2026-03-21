@@ -40,8 +40,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_lib::IrqMutex;
-use slopos_lib::klog_debug;
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 /// Number of slots in the timer wheel.
 const NUM_SLOTS: usize = 256;
@@ -423,7 +423,7 @@ pub static NET_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::new();
 /// Dispatch is currently stubbed — TODO: add neighbor cache dispatch,
 /// TODO: add TCP engine dispatch, TODO: add reassembly dispatch.
 pub fn net_timer_process() {
-    use slopos_lib::kernel_services::platform;
+    use slopos_kernel_services::platform;
 
     let kernel_ticks = platform::timer_ticks();
     let fired = NET_TIMER_WHEEL.advance_to(kernel_ticks);
@@ -467,7 +467,7 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         TimerKind::TcpDelayedAck => {
             klog_debug!("net_timer: TCP delayed ACK fired, key={}", timer.key);
             if let Some((_idx, seg)) =
-                super::tcp::tcp_delayed_ack_check(slopos_lib::clock::uptime_ms())
+                super::tcp::tcp_delayed_ack_check(slopos_utils::clock::uptime_ms())
             {
                 let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
             }
@@ -478,11 +478,15 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpKeepalive => {
             klog_debug!("net_timer: TCP keepalive fired, key={}", timer.key);
-            // tcp_engine.on_keepalive(timer.key)
+            if let Some(probe_seg) = super::tcp::tcp_on_keepalive(timer.key) {
+                let _ = super::socket::socket_send_tcp_segment(&probe_seg, &[]);
+            }
         }
         TimerKind::ReassemblyTimeout => {
             klog_debug!("net_timer: reassembly timeout fired, key={}", timer.key);
-            // reassembly.on_timeout(timer.key)
+            super::reassembly::REASSEMBLY_TABLE
+                .lock()
+                .on_timeout(timer.key);
         }
     }
 }

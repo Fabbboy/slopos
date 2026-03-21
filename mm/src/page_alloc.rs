@@ -41,9 +41,9 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_lib::{
-    InitFlag, IrqMutex, MAX_CPUS, align_down_u64, align_up_u64, klog_debug, klog_info,
-};
+use slopos_arch::pcr::MAX_CPUS;
+use slopos_sync::{InitFlag, IrqMutex};
+use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_reservations::{
@@ -498,7 +498,7 @@ const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
 #[inline]
 fn get_current_cpu() -> usize {
-    slopos_lib::get_current_cpu()
+    slopos_arch::pcr::get_current_cpu()
 }
 
 fn pcp_try_alloc(cpu: usize) -> u32 {

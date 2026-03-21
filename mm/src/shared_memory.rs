@@ -6,7 +6,7 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_lib::IrqRwLock;
+use slopos_sync::IrqRwLock;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 pub use slopos_abi::pixel::PixelFormat;
@@ -15,7 +15,7 @@ use crate::page_alloc::{ALLOC_FLAG_ZERO, alloc_page_frames, free_page_frame};
 use crate::paging::{map_page_4kb_in_dir, unmap_page_in_dir};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::process_vm_get_page_dir;
-use slopos_lib::{align_up, klog_debug, klog_info};
+use slopos_utils::{align_up, klog_debug, klog_info};
 
 pub const SUPPORTED_FORMATS_BITMAP: u32 = (1 << PixelFormat::Argb8888 as u32)
     | (1 << PixelFormat::Xrgb8888 as u32)

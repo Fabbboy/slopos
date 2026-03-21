@@ -2,7 +2,7 @@ use core::cell::SyncUnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::ptr;
 
-use slopos_lib::{align_down_u64, align_up_u64, klog_info};
+use slopos_utils::{align_down_u64, align_up_u64, klog_info};
 
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 use crate::paging_defs::PAGE_SIZE_4KB;

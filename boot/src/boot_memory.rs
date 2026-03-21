@@ -1,5 +1,5 @@
-use slopos_lib::klog::{self, KlogLevel};
-use slopos_lib::{klog_debug, klog_info};
+use slopos_utils::klog::{self, KlogLevel};
+use slopos_utils::{klog_debug, klog_info};
 
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap};
 

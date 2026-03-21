@@ -9,7 +9,7 @@
 //! All other Rust-to-Rust calls should use regular Rust functions without extern "C".
 
 use super::task::TaskContext;
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 // ============================================================================
 // Functions called FROM assembly (must be extern "C")

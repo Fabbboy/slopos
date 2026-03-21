@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use slopos_lib::klog_debug;
+use slopos_utils::klog_debug;
 
 use super::neighbor::{NEIGHBOR_CACHE, NeighborAction};
 use super::netdev::DeviceHandle;
@@ -71,7 +71,7 @@ pub fn handle_rx(handle: &DeviceHandle, pkt: PacketBuf) {
     let our_ip = get_our_ip();
 
     // RFC 826: opportunistically update the cache if the sender is already known.
-    let current_tick = slopos_lib::kernel_services::platform::timer_ticks();
+    let current_tick = slopos_kernel_services::platform::timer_ticks();
     let update_action = NEIGHBOR_CACHE.insert_or_update(dev, sender_ip, sender_mac, current_tick);
     execute_neighbor_action(handle, update_action);
 

@@ -11,14 +11,15 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_lib::InitFlag;
-use slopos_lib::IrqMutex;
-use slopos_lib::arch::idt::{
+use slopos_arch::arch::idt::{
     IRQ_BASE_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, MSI_VECTOR_END, SYSCALL_VECTOR,
 };
-pub use slopos_lib::kernel_services::driver_runtime::IRQ_LINES;
-use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_debug, klog_info, tsc};
+use slopos_arch::{InterruptFrame, tsc};
+pub use slopos_kernel_services::driver_runtime::IRQ_LINES;
+use slopos_sync::InitFlag;
+use slopos_sync::IrqMutex;
+use slopos_utils::string::cstr_to_str;
+use slopos_utils::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
 use crate::platform;
 use crate::scheduler::scheduler::{TrapExitSource, scheduler_handoff_on_trap_exit};

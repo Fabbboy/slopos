@@ -23,9 +23,11 @@
 //! This layout is Linux-compatible and places WC at index 1 (PWT=1, PCD=0, PAT=0),
 //! which corresponds to the `WRITE_THROUGH` page flag when PAT bit is clear.
 
-use slopos_lib::cpu::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES};
-use slopos_lib::cpu::msr::Msr;
-use slopos_lib::{InitFlag, cpu, klog_debug, klog_info};
+use slopos_arch::cpu;
+use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES};
+use slopos_arch::cpu::msr::Msr;
+use slopos_sync::InitFlag;
+use slopos_utils::{klog_debug, klog_info};
 
 // =============================================================================
 // Memory Type Constants

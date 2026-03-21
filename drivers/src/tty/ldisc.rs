@@ -24,7 +24,7 @@ use slopos_abi::syscall::{
     CcIndex, ControlFlags, InputFlags, LocalFlags, N_RAW, N_TTY, NCCS, OutputFlags, POSIX_VDISABLE,
     UserTermios,
 };
-use slopos_lib::RingBuffer;
+use slopos_utils::ring_buffer::RingBuffer;
 
 use super::driver::{InputEvent, InputStatus};
 
@@ -137,46 +137,6 @@ pub enum OutputAction {
     Suppress,
 }
 
-// ---------------------------------------------------------------------------
-// LdiscOps — shared contract for line discipline variants
-// ---------------------------------------------------------------------------
-
-/// Trait formalising the shared API surface of every line-discipline variant.
-///
-/// `LdiscKind` delegates to this trait via the `dispatch_ldisc!` macro so that
-/// adding a new method only requires one signature change instead of a manual
-/// match arm in every wrapper.
-///
-/// **Crate-internal only** — external API surface is unchanged.
-#[expect(
-    dead_code,
-    reason = "trait bounds used by forward_ldisc_ops! macro impls"
-)]
-pub(crate) trait LdiscOps {
-    fn termios(&self) -> &UserTermios;
-    fn vmin_vtime(&self) -> (u8, u8);
-    fn is_canonical(&self) -> bool;
-    fn set_termios(&mut self, t: &UserTermios);
-    fn has_data(&self) -> bool;
-    fn bytes_available(&self) -> usize;
-    fn read(&mut self, out: &mut [u8]) -> usize;
-    fn flush_all(&mut self);
-    fn flush_input(&mut self);
-    fn edit_content(&self) -> &[u8];
-    fn is_stopped(&self) -> bool;
-    fn input_char(&mut self, event: InputEvent) -> InputAction;
-    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult;
-    fn process_output_byte(&mut self, c: u8) -> OutputAction;
-    fn ixoff_check_xoff(&mut self) -> Option<u8>;
-    fn ixoff_check_xon(&mut self) -> Option<u8>;
-    fn input_full(&self) -> bool;
-    fn should_wake_reader(&mut self) -> bool;
-    fn no_room(&self) -> bool;
-    fn overflow_count(&self) -> u32;
-    fn check_no_room_recovery(&mut self) -> bool;
-    fn clear_flusho(&mut self);
-}
-
 const ECHO_BUF_CAP: usize = 256;
 
 pub struct EchoBuf {
@@ -241,81 +201,6 @@ impl BatchResult {
             throttle_check: false,
         }
     }
-}
-
-/// Zero-cost enum dispatch for `LdiscKind` → inner variant methods.
-///
-/// Adding a new shared method requires four touch-points:
-///   1. `LdiscOps` trait — add the signature
-///   2. `forward_ldisc_ops!` — add the forwarding impl
-///   3. `dispatch_ldisc!` invocation in `impl LdiscKind` — add the entry
-///   4. Each variant (`LineDisc`, `RawDisc`) — implement the inherent method
-///
-/// Uses compile-time enum match instead of `enum_dispatch` (which needs `alloc`).
-macro_rules! dispatch_ldisc {
-    // &self, with return type
-    (@one &, $name:ident, ($($arg:ident : $argty:ty),*), $ret:ty) => {
-        #[inline]
-        pub fn $name(&self $(, $arg: $argty)*) -> $ret {
-            match self {
-                LdiscKind::NTty(inner) => inner.$name($($arg),*),
-                LdiscKind::Raw(inner) => inner.$name($($arg),*),
-            }
-        }
-    };
-    // &self, no return type
-    (@one &, $name:ident, ($($arg:ident : $argty:ty),*), ()) => {
-        #[inline]
-        pub fn $name(&self $(, $arg: $argty)*) {
-            match self {
-                LdiscKind::NTty(inner) => inner.$name($($arg),*),
-                LdiscKind::Raw(inner) => inner.$name($($arg),*),
-            }
-        }
-    };
-    // &mut self, with return type
-    (@one &mut, $name:ident, ($($arg:ident : $argty:ty),*), $ret:ty) => {
-        #[inline]
-        pub fn $name(&mut self $(, $arg: $argty)*) -> $ret {
-            match self {
-                LdiscKind::NTty(inner) => inner.$name($($arg),*),
-                LdiscKind::Raw(inner) => inner.$name($($arg),*),
-            }
-        }
-    };
-    // &mut self, no return type
-    (@one &mut, $name:ident, ($($arg:ident : $argty:ty),*), ()) => {
-        #[inline]
-        pub fn $name(&mut self $(, $arg: $argty)*) {
-            match self {
-                LdiscKind::NTty(inner) => inner.$name($($arg),*),
-                LdiscKind::Raw(inner) => inner.$name($($arg),*),
-            }
-        }
-    };
-    // ── Entry arms ──────────────────────────────────────────────────────
-    // &self with return type
-    (fn $name:ident(&self $(, $arg:ident : $argty:ty)*) -> $ret:ty; $($tail:tt)*) => {
-        dispatch_ldisc!(@one &, $name, ($($arg : $argty),*), $ret);
-        dispatch_ldisc!($($tail)*);
-    };
-    // &self no return type
-    (fn $name:ident(&self $(, $arg:ident : $argty:ty)*); $($tail:tt)*) => {
-        dispatch_ldisc!(@one &, $name, ($($arg : $argty),*), ());
-        dispatch_ldisc!($($tail)*);
-    };
-    // &mut self with return type
-    (fn $name:ident(&mut self $(, $arg:ident : $argty:ty)*) -> $ret:ty; $($tail:tt)*) => {
-        dispatch_ldisc!(@one &mut, $name, ($($arg : $argty),*), $ret);
-        dispatch_ldisc!($($tail)*);
-    };
-    // &mut self no return type
-    (fn $name:ident(&mut self $(, $arg:ident : $argty:ty)*); $($tail:tt)*) => {
-        dispatch_ldisc!(@one &mut, $name, ($($arg : $argty),*), ());
-        dispatch_ldisc!($($tail)*);
-    };
-    // base case: empty
-    () => {};
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,109 +1692,13 @@ impl LineDisc {
         }
         self.line_count += 1;
     }
-}
-
-/// Generates the pure-forwarding `impl LdiscOps` methods that delegate to
-/// identically-named inherent methods.  Only `receive_buf` is excluded
-/// because its implementation differs between `LineDisc` and `RawDisc`.
-macro_rules! forward_ldisc_ops {
-    ($T:ty) => {
-        #[inline]
-        fn termios(&self) -> &UserTermios {
-            self.termios()
-        }
-        #[inline]
-        fn vmin_vtime(&self) -> (u8, u8) {
-            self.vmin_vtime()
-        }
-        #[inline]
-        fn is_canonical(&self) -> bool {
-            self.is_canonical()
-        }
-        #[inline]
-        fn set_termios(&mut self, t: &UserTermios) {
-            self.set_termios(t)
-        }
-        #[inline]
-        fn has_data(&self) -> bool {
-            self.has_data()
-        }
-        #[inline]
-        fn bytes_available(&self) -> usize {
-            self.bytes_available()
-        }
-        #[inline]
-        fn read(&mut self, out: &mut [u8]) -> usize {
-            self.read(out)
-        }
-        #[inline]
-        fn flush_all(&mut self) {
-            self.flush_all()
-        }
-        #[inline]
-        fn flush_input(&mut self) {
-            self.flush_input()
-        }
-        #[inline]
-        fn edit_content(&self) -> &[u8] {
-            self.edit_content()
-        }
-        #[inline]
-        fn is_stopped(&self) -> bool {
-            self.is_stopped()
-        }
-        #[inline]
-        fn input_char(&mut self, event: InputEvent) -> InputAction {
-            self.input_char(event)
-        }
-        #[inline]
-        fn process_output_byte(&mut self, c: u8) -> OutputAction {
-            self.process_output_byte(c)
-        }
-        #[inline]
-        fn ixoff_check_xoff(&mut self) -> Option<u8> {
-            self.ixoff_check_xoff()
-        }
-        #[inline]
-        fn ixoff_check_xon(&mut self) -> Option<u8> {
-            self.ixoff_check_xon()
-        }
-        #[inline]
-        fn input_full(&self) -> bool {
-            self.input_full()
-        }
-        #[inline]
-        fn should_wake_reader(&mut self) -> bool {
-            self.should_wake_reader()
-        }
-        #[inline]
-        fn no_room(&self) -> bool {
-            self.no_room()
-        }
-        #[inline]
-        fn overflow_count(&self) -> u32 {
-            self.overflow_count()
-        }
-        #[inline]
-        fn check_no_room_recovery(&mut self) -> bool {
-            self.check_no_room_recovery()
-        }
-        #[inline]
-        fn clear_flusho(&mut self) {
-            self.clear_flusho()
-        }
-    };
-}
-
-impl LdiscOps for LineDisc {
-    forward_ldisc_ops!(LineDisc);
 
     /// Process a batch of input events, collecting echo output and at most
     /// one signal.  Stops on the first signal-generating character — if
     /// multiple signal chars arrive in one batch (rare in practice), only the
     /// first is captured.  This is acceptable because keyboard input rarely
     /// produces multiple signal chars per ISR batch.
-    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+    pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         let mut result = BatchResult::new();
         for &event in events {
             match self.input_char(event) {
@@ -2129,12 +1918,8 @@ impl RawDisc {
     pub fn ixoff_check_xon(&mut self) -> Option<u8> {
         None
     }
-}
 
-impl LdiscOps for RawDisc {
-    forward_ldisc_ops!(RawDisc);
-
-    fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
+    pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         for &event in events {
             let _ = self.input_char(event);
         }
@@ -2162,6 +1947,7 @@ pub enum LdiscKind {
 
 impl LdiscKind {
     /// Returns the numeric line-discipline identifier (e.g. `N_TTY`, `N_RAW`).
+    #[inline]
     pub fn id(&self) -> u32 {
         match self {
             LdiscKind::NTty(_) => N_TTY,
@@ -2186,6 +1972,7 @@ impl LdiscKind {
         }
     }
 
+    #[inline]
     pub fn input_char<E: Into<InputEvent>>(&mut self, event: E) -> InputAction {
         let event = event.into();
         match self {
@@ -2194,6 +1981,7 @@ impl LdiscKind {
         }
     }
 
+    #[inline]
     pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         match self {
             LdiscKind::NTty(inner) => inner.receive_buf(events),
@@ -2201,32 +1989,163 @@ impl LdiscKind {
         }
     }
 
-    // --- Dispatched methods ---
-    // All methods below are generated by the `dispatch_ldisc!` macro, which
-    // delegates to the inner variant via matching.  Adding a new shared method
-    // only requires a single signature line here and `impl LdiscOps` entries
-    // for each variant.
+    #[inline]
+    pub fn termios(&self) -> &UserTermios {
+        match self {
+            LdiscKind::NTty(inner) => inner.termios(),
+            LdiscKind::Raw(inner) => inner.termios(),
+        }
+    }
 
-    dispatch_ldisc! {
-        fn termios(&self) -> &UserTermios;
-        fn vmin_vtime(&self) -> (u8, u8);
-        fn is_canonical(&self) -> bool;
-        fn set_termios(&mut self, t: &UserTermios);
-        fn has_data(&self) -> bool;
-        fn bytes_available(&self) -> usize;
-        fn read(&mut self, out: &mut [u8]) -> usize;
-        fn flush_all(&mut self);
-        fn flush_input(&mut self);
-        fn edit_content(&self) -> &[u8];
-        fn is_stopped(&self) -> bool;
-        fn process_output_byte(&mut self, c: u8) -> OutputAction;
-        fn ixoff_check_xoff(&mut self) -> Option<u8>;
-        fn ixoff_check_xon(&mut self) -> Option<u8>;
-        fn input_full(&self) -> bool;
-        fn should_wake_reader(&mut self) -> bool;
-        fn no_room(&self) -> bool;
-        fn overflow_count(&self) -> u32;
-        fn check_no_room_recovery(&mut self) -> bool;
-        fn clear_flusho(&mut self);
+    #[inline]
+    pub fn vmin_vtime(&self) -> (u8, u8) {
+        match self {
+            LdiscKind::NTty(inner) => inner.vmin_vtime(),
+            LdiscKind::Raw(inner) => inner.vmin_vtime(),
+        }
+    }
+
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.is_canonical(),
+            LdiscKind::Raw(inner) => inner.is_canonical(),
+        }
+    }
+
+    #[inline]
+    pub fn set_termios(&mut self, t: &UserTermios) {
+        match self {
+            LdiscKind::NTty(inner) => inner.set_termios(t),
+            LdiscKind::Raw(inner) => inner.set_termios(t),
+        }
+    }
+
+    #[inline]
+    pub fn has_data(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.has_data(),
+            LdiscKind::Raw(inner) => inner.has_data(),
+        }
+    }
+
+    #[inline]
+    pub fn bytes_available(&self) -> usize {
+        match self {
+            LdiscKind::NTty(inner) => inner.bytes_available(),
+            LdiscKind::Raw(inner) => inner.bytes_available(),
+        }
+    }
+
+    #[inline]
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        match self {
+            LdiscKind::NTty(inner) => inner.read(out),
+            LdiscKind::Raw(inner) => inner.read(out),
+        }
+    }
+
+    #[inline]
+    pub fn flush_all(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.flush_all(),
+            LdiscKind::Raw(inner) => inner.flush_all(),
+        }
+    }
+
+    #[inline]
+    pub fn flush_input(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.flush_input(),
+            LdiscKind::Raw(inner) => inner.flush_input(),
+        }
+    }
+
+    #[inline]
+    pub fn edit_content(&self) -> &[u8] {
+        match self {
+            LdiscKind::NTty(inner) => inner.edit_content(),
+            LdiscKind::Raw(inner) => inner.edit_content(),
+        }
+    }
+
+    #[inline]
+    pub fn is_stopped(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.is_stopped(),
+            LdiscKind::Raw(inner) => inner.is_stopped(),
+        }
+    }
+
+    #[inline]
+    pub fn process_output_byte(&mut self, c: u8) -> OutputAction {
+        match self {
+            LdiscKind::NTty(inner) => inner.process_output_byte(c),
+            LdiscKind::Raw(inner) => inner.process_output_byte(c),
+        }
+    }
+
+    #[inline]
+    pub fn ixoff_check_xoff(&mut self) -> Option<u8> {
+        match self {
+            LdiscKind::NTty(inner) => inner.ixoff_check_xoff(),
+            LdiscKind::Raw(inner) => inner.ixoff_check_xoff(),
+        }
+    }
+
+    #[inline]
+    pub fn ixoff_check_xon(&mut self) -> Option<u8> {
+        match self {
+            LdiscKind::NTty(inner) => inner.ixoff_check_xon(),
+            LdiscKind::Raw(inner) => inner.ixoff_check_xon(),
+        }
+    }
+
+    #[inline]
+    pub fn input_full(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.input_full(),
+            LdiscKind::Raw(inner) => inner.input_full(),
+        }
+    }
+
+    #[inline]
+    pub fn should_wake_reader(&mut self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.should_wake_reader(),
+            LdiscKind::Raw(inner) => inner.should_wake_reader(),
+        }
+    }
+
+    #[inline]
+    pub fn no_room(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.no_room(),
+            LdiscKind::Raw(inner) => inner.no_room(),
+        }
+    }
+
+    #[inline]
+    pub fn overflow_count(&self) -> u32 {
+        match self {
+            LdiscKind::NTty(inner) => inner.overflow_count(),
+            LdiscKind::Raw(inner) => inner.overflow_count(),
+        }
+    }
+
+    #[inline]
+    pub fn check_no_room_recovery(&mut self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.check_no_room_recovery(),
+            LdiscKind::Raw(inner) => inner.check_no_room_recovery(),
+        }
+    }
+
+    #[inline]
+    pub fn clear_flusho(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.clear_flusho(),
+            LdiscKind::Raw(inner) => inner.clear_flusho(),
+        }
     }
 }

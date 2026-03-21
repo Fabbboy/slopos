@@ -5,7 +5,7 @@ use slopos_abi::{DisplayInfo, InputEvent, WindowInfo};
 
 use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 use crate::platform;
-use slopos_lib::kernel_services::syscall_services::{input, tty, video};
+use slopos_kernel_services::syscall_services::{input, tty, video};
 
 use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_mm::process_vm::process_vm_get_page_dir;

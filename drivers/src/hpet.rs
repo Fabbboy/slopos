@@ -15,10 +15,11 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_abi::addr::PhysAddr;
 use slopos_acpi::hpet::Hpet;
 use slopos_acpi::tables::{AcpiTables, Rsdp};
-use slopos_lib::kernel_services::platform;
-use slopos_lib::{InitFlag, StateFlag, klog_debug, klog_info};
+use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
 use slopos_mm::mmio::MmioRegion;
+use slopos_sync::{InitFlag, StateFlag};
+use slopos_utils::{klog_debug, klog_info};
 
 /// General Capabilities and ID (64-bit RO).
 /// [63:32] CLK_PERIOD (fs), [15] LEG_RT_CAP, [13] COUNT_SIZE_CAP,

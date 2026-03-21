@@ -2,7 +2,7 @@ use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIG_IGN, sig_bit};
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     DriverRuntimeServices, DriverTaskHandle, register_driver_runtime_services,
 };
 

@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
 
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     clear_session_controlling_tty, scheduler_is_enabled, signal_session,
 };
 

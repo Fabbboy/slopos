@@ -7,7 +7,7 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
 use slopos_gfx::canvas_font;
-use slopos_lib::numfmt;
+use slopos_utils::numfmt;
 
 use crate::framebuffer;
 use crate::graphics::GraphicsContext;

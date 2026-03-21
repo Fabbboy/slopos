@@ -7,7 +7,8 @@
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-use slopos_lib::{IrqMutex, klog_debug};
+use slopos_sync::IrqMutex;
+use slopos_utils::klog_debug;
 
 // =============================================================================
 // Constants
@@ -478,7 +479,7 @@ impl DnsCache {
 
     fn lookup(&mut self, hostname: &[u8]) -> Option<[u8; 4]> {
         let hash = fnv1a_hash(hostname);
-        let now = slopos_lib::clock::uptime_ms();
+        let now = slopos_utils::clock::uptime_ms();
 
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.hostname_hash == hash {
@@ -497,7 +498,7 @@ impl DnsCache {
 
     fn insert(&mut self, hostname: &[u8], addr: [u8; 4], ttl_secs: u32) {
         let hash = fnv1a_hash(hostname);
-        let now = slopos_lib::clock::uptime_ms();
+        let now = slopos_utils::clock::uptime_ms();
         // Minimum TTL of 60s to avoid thrashing
         let ttl_ms = (ttl_secs.max(60) as u64) * 1000;
 

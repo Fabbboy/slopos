@@ -9,7 +9,7 @@ use core::sync::atomic::Ordering;
 use slopos_abi::signal::{SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{B0, CBAUD, CcIndex, InputFlags, UserTermios, UserWinsize};
 
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, has_pending_signal,
     is_current_signal_blocked_or_ignored, is_pgrp_orphaned, scheduler_is_enabled,
     signal_process_group,

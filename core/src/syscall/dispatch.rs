@@ -2,7 +2,7 @@ use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 use crate::sched::save_task_context_from_interrupt_frame;
 use crate::sched::scheduler_get_current_task;
@@ -10,7 +10,7 @@ use crate::syscall::handlers::syscall_lookup;
 
 use crate::scheduler::task_struct::Task;
 use slopos_abi::task::{TASK_FLAG_NO_PREEMPT, TASK_FLAG_USER_MODE};
-use slopos_lib::InterruptFrame;
+use slopos_arch::InterruptFrame;
 
 struct NoPreemptGuard {
     task: *mut Task,

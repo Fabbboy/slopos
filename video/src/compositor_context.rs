@@ -21,7 +21,7 @@ use slopos_abi::{
     WINDOW_STATE_NORMAL, WindowInfo,
 };
 use slopos_gfx::damage::InternalDamageTracker;
-use slopos_lib::IrqMutex;
+use slopos_sync::IrqMutex;
 
 type DamageTracker = InternalDamageTracker;
 

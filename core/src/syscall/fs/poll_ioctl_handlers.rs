@@ -15,11 +15,11 @@ use slopos_fs::fileio::{
     file_poll_register_pipes, file_poll_unregister_fd, file_poll_unregister_pipes,
 };
 
-use slopos_lib::kernel_services::driver_runtime::{
+use slopos_kernel_services::driver_runtime::{
     current_task_pgid, is_current_signal_blocked_or_ignored, is_pgrp_orphaned, run_bottom_halves,
     signal_process_group,
 };
-use slopos_lib::kernel_services::syscall_services::tty;
+use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
@@ -149,9 +149,9 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
         };
 
         if reg_count > 0 || pipe_registered > 0 {
-            slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
         } else {
-            slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+            slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
         for reg in &regs[..reg_count] {
@@ -162,7 +162,7 @@ define_syscall!(syscall_poll(ctx, args) requires(let pid: process_id) {
             file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
         }
 
-        if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return ctx.err_with(ERRNO_EINTR as u64);
         }
     }
@@ -357,9 +357,9 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
         };
 
         if reg_count > 0 || pipe_registered > 0 {
-            slopos_lib::kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
+            slopos_kernel_services::driver_runtime::sleep_current_task_ms(sleep_ms);
         } else {
-            slopos_lib::kernel_services::platform::timer_poll_delay_ms(1);
+            slopos_kernel_services::platform::timer_poll_delay_ms(1);
         }
 
         for reg in &regs[..reg_count] {
@@ -369,7 +369,7 @@ define_syscall!(syscall_select(ctx, args) requires(let pid: process_id) {
             file_poll_unregister_pipes(pid, &pipe_fds[..pipe_fd_count]);
         }
 
-        if slopos_lib::kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::has_pending_signal() {
             return ctx.err_with(ERRNO_EINTR as u64);
         }
     }

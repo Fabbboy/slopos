@@ -14,8 +14,6 @@ pub mod memory_layout;
 pub mod memory_layout_defs;
 mod memory_reservations;
 pub mod mmio;
-#[cfg(feature = "itests")]
-pub mod mmio_tests;
 pub mod page_alloc;
 pub mod page_fault;
 pub mod paging;
@@ -25,18 +23,8 @@ pub mod process_vm;
 pub mod shared_memory;
 pub mod symbols;
 #[cfg(feature = "itests")]
-pub mod test_fixtures;
-#[cfg(feature = "itests")]
 pub mod tests;
-#[cfg(feature = "itests")]
-pub mod tests_cow_edge;
-#[cfg(feature = "itests")]
-pub mod tests_demand;
-#[cfg(feature = "itests")]
-pub mod tests_oom;
 pub mod tlb;
-#[cfg(feature = "itests")]
-pub mod tlb_tests;
 pub mod user_copy;
 pub mod user_ptr;
 pub mod vma_flags;
@@ -47,7 +35,7 @@ use core::cell::SyncUnsafeCell;
 use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use slopos_lib::{align_up, align_up_usize};
+use slopos_utils::{align_up, align_up_usize};
 
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 

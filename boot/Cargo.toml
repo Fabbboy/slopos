@@ -23,8 +23,12 @@ itests = ["slopos-core/itests", "slopos-mm/itests", "slopos-drivers/itests"]
 [dependencies]
 limine = { workspace = true }
 slopos-abi = { workspace = true }
+slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
-slopos-lib = { workspace = true }
+slopos-kernel-services = { workspace = true }
+slopos-testing = { workspace = true }
+slopos-sync = { workspace = true }
+slopos-utils = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-mm = { workspace = true }

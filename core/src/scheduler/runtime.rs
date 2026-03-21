@@ -1,8 +1,8 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
-use slopos_lib::klog_info;
-use slopos_lib::{IrqMutex, OnceLock};
+use slopos_sync::{IrqMutex, OnceLock};
+use slopos_utils::klog_info;
 
 use super::per_cpu;
 use super::scheduler::{run_ready_task_from_idle, schedule_task, set_scheduler_enabled, r#yield};
@@ -126,7 +126,7 @@ fn unified_idle_loop(_: *mut c_void) {
             r#yield();
             continue;
         }
-        let cpu_id = slopos_lib::get_current_cpu();
+        let cpu_id = slopos_arch::pcr::get_current_cpu();
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
@@ -228,7 +228,7 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
 
     set_scheduler_enabled(true);
 
-    slopos_lib::mark_cpu_online(cpu_id);
+    slopos_arch::pcr::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
     let (idle_task, idle_stack_top) = match resolve_idle_stack_for_cpu(cpu_id) {

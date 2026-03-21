@@ -2,11 +2,12 @@ use core::ffi::c_char;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::task::TaskFaultReason;
-use slopos_lib::cpu;
-use slopos_lib::string::cstr_to_str;
-use slopos_lib::{InterruptFrame, kdiag_dump_interrupt_frame, klog_info};
+use slopos_arch::InterruptFrame;
+use slopos_arch::cpu;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::{paging, process_vm};
+use slopos_utils::string::cstr_to_str;
+use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::ist_stacks;
 use crate::user_fault::*;
@@ -32,7 +33,7 @@ pub(crate) fn exception_nonfatal(frame: *mut InterruptFrame) {
 
 pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
     let vector = (unsafe { &*frame }.vector & 0xFF) as u8;
-    slopos_lib::arch::exception::get_exception_name(vector)
+    slopos_arch::arch::exception::get_exception_name(vector)
 }
 
 pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
@@ -191,5 +192,5 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
 }
 
 pub(crate) fn is_critical_exception_internal(vector: u8) -> bool {
-    slopos_lib::arch::exception::exception_is_critical(vector)
+    slopos_arch::arch::exception::exception_is_critical(vector)
 }

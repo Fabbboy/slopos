@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_lib::align_up_u64;
+use slopos_utils::alignment::align_up_u64;
 
 use crate::memory_layout_defs::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE};
 use crate::paging::map_page_4kb;

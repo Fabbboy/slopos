@@ -1,6 +1,6 @@
 use core::sync::atomic::Ordering;
 
-use slopos_lib::klog_info;
+use slopos_utils::klog_info;
 
 use super::per_cpu;
 use super::runtime::{create_idle_task, create_idle_task_for_cpu};
@@ -84,14 +84,14 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
 }
 
 pub fn send_reschedule_ipi(target_cpu: usize) {
-    use slopos_lib::arch::idt::RESCHEDULE_IPI_VECTOR;
+    use slopos_arch::arch::idt::RESCHEDULE_IPI_VECTOR;
 
-    let current_cpu = slopos_lib::get_current_cpu();
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
     if target_cpu == current_cpu {
         return;
     }
 
-    if let Some(apic_id) = slopos_lib::apic_id_from_cpu_index(target_cpu) {
-        slopos_lib::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
+    if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(target_cpu) {
+        slopos_arch::pcr::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
     }
 }

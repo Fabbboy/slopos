@@ -8,7 +8,7 @@
 //! lock simultaneously.
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
-use slopos_lib::{IrqMutex, WaitQueue};
+use slopos_sync::{IrqMutex, WaitQueue};
 
 pub(crate) const MAX_PIPES: usize = 64;
 pub(crate) const PIPE_BUFFER_SIZE: usize = 4096;
