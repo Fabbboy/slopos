@@ -394,9 +394,6 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         return None;
     }
     let spec = registry_spec_for_command(cmd)?;
-    // For text programs, redirect our fd 1 to a pipe before spawning so
-    // the child (which inherits our fd table) writes into the pipe.
-    // After spawning, restore fd 1 and drain the pipe into shell_write.
     let capture = !spec.gui && !background;
     let mut pipe_fds = [-1i32; 2];
     let mut backup_fd = -1i32;

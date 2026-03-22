@@ -49,6 +49,8 @@ static CWD: SyncUnsafeCell<[u8; CWD_MAX]> = SyncUnsafeCell::new([0; CWD_MAX]);
 static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
 static SHELL_PID: AtomicU32 = AtomicU32::new(0);
+static SHELL_PTY_MASTER: AtomicI32 = AtomicI32::new(-1);
+static SHELL_PTY_SLAVE: AtomicI32 = AtomicI32::new(-1);
 
 pub fn cwd_bytes() -> [u8; CWD_MAX] {
     unsafe { *CWD.get() }
@@ -79,6 +81,21 @@ pub fn set_last_bg_pid(pid: u32) {
 
 pub fn shell_pid() -> u32 {
     SHELL_PID.load(Ordering::Relaxed)
+}
+
+pub fn set_shell_pty_pair(master_idx: u32, slave_idx: u32) {
+    SHELL_PTY_MASTER.store(master_idx as i32, Ordering::Relaxed);
+    SHELL_PTY_SLAVE.store(slave_idx as i32, Ordering::Relaxed);
+}
+
+pub fn shell_pty_pair() -> Option<(u32, u32)> {
+    let master = SHELL_PTY_MASTER.load(Ordering::Relaxed);
+    let slave = SHELL_PTY_SLAVE.load(Ordering::Relaxed);
+    if master < 0 || slave < 0 {
+        None
+    } else {
+        Some((master as u32, slave as u32))
+    }
 }
 
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
@@ -274,6 +291,9 @@ fn shell_interactive_main() {
     cwd_set(b"/");
     env::initialize_defaults();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
+    if let Ok((master, slave)) = process::openpty() {
+        set_shell_pty_pair(master, slave);
+    }
     exec::initialize_job_control();
     let _ = process::ignore_signal(SIGINT);
 

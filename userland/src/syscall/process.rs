@@ -67,6 +67,48 @@ pub fn waitpid(task_id: u32) -> i32 {
 }
 
 #[inline(always)]
+pub fn openpty() -> Result<(u32, u32), i64> {
+    let mut master: u32 = 0;
+    let mut slave: u32 = 0;
+    let ret = unsafe {
+        syscall2(
+            SYSCALL_OPENPTY,
+            (&mut master as *mut u32) as u64,
+            (&mut slave as *mut u32) as u64,
+        )
+    } as i64;
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok((master, slave))
+    }
+}
+
+#[inline(always)]
+pub fn tty_read(idx: u32, buf: &mut [u8]) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_TTY_READ,
+            idx as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
+pub fn tty_write(idx: u32, buf: &[u8]) -> i64 {
+    unsafe {
+        syscall3(
+            SYSCALL_TTY_WRITE,
+            idx as u64,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
 pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
     let rc = unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 1) as i64 };
     if rc == ERRNO_EAGAIN as i64 {

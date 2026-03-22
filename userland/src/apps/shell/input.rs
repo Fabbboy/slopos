@@ -127,8 +127,15 @@ fn input_loop(
 
         let mut events = [InputEvent::default(); MOUSE_EVENT_BUF_SIZE];
         let count = input::poll_batch(&mut events) as usize;
+        let mut key_event: Option<u8> = None;
         for i in 0..count.min(MOUSE_EVENT_BUF_SIZE) {
             match events[i].event_type {
+                InputEventType::KeyPress => {
+                    let ascii = events[i].key_ascii();
+                    if ascii != 0 && key_event.is_none() {
+                        key_event = Some(ascii);
+                    }
+                }
                 InputEventType::PointerMotion | InputEventType::PointerEnter => {
                     last_ptr_x = events[i].pointer_x();
                     last_ptr_y = events[i].pointer_y();
@@ -194,20 +201,27 @@ fn input_loop(
             rd!();
         }
 
-        let mut pfds = [UserPollFd {
-            fd: 0,
-            events: POLLIN,
-            revents: 0,
-        }];
-        let _ = fs::poll(&mut pfds, 0);
-        let rc = if (pfds[0].revents & POLLIN) != 0 {
-            let mut ch = [0u8; 1];
-            match fs::read_slice(0, &mut ch) {
-                Ok(1) => ch[0] as i64,
-                _ => -1,
+        let rc = if DISPLAY.enabled.get() {
+            match key_event {
+                Some(c) => c as i64,
+                None => -1,
             }
         } else {
-            -1i64
+            let mut pfds = [UserPollFd {
+                fd: 0,
+                events: POLLIN,
+                revents: 0,
+            }];
+            let _ = fs::poll(&mut pfds, 0);
+            if (pfds[0].revents & POLLIN) != 0 {
+                let mut ch = [0u8; 1];
+                match fs::read_slice(0, &mut ch) {
+                    Ok(1) => ch[0] as i64,
+                    _ => -1,
+                }
+            } else {
+                -1i64
+            }
         };
         if rc < 0 {
             let now = Instant::now();
