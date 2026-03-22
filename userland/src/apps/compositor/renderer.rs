@@ -439,9 +439,58 @@ impl Renderer {
     }
 
     fn draw_cursor_default(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const CURSOR_SIZE: i32 = 9;
-        gfx::fill_rect_clipped(buf, mx - 4, my, CURSOR_SIZE, 1, COLOR_CURSOR, clip);
-        gfx::fill_rect_clipped(buf, mx, my - 4, 1, CURSOR_SIZE, COLOR_CURSOR, clip);
+        // Classic arrow pointer (12×17, hotspot at top-left corner)
+        // 0 = transparent, 1 = border (black), 2 = fill (white)
+        const W: usize = 12;
+        const H: usize = 17;
+        #[rustfmt::skip]
+        const ARROW: [[u8; W]; H] = [
+            [1,0,0,0,0,0,0,0,0,0,0,0],
+            [1,1,0,0,0,0,0,0,0,0,0,0],
+            [1,2,1,0,0,0,0,0,0,0,0,0],
+            [1,2,2,1,0,0,0,0,0,0,0,0],
+            [1,2,2,2,1,0,0,0,0,0,0,0],
+            [1,2,2,2,2,1,0,0,0,0,0,0],
+            [1,2,2,2,2,2,1,0,0,0,0,0],
+            [1,2,2,2,2,2,2,1,0,0,0,0],
+            [1,2,2,2,2,2,2,2,1,0,0,0],
+            [1,2,2,2,2,2,2,2,2,1,0,0],
+            [1,2,2,2,2,2,1,1,1,1,1,0],
+            [1,2,2,1,2,2,1,0,0,0,0,0],
+            [1,2,1,0,1,2,2,1,0,0,0,0],
+            [1,1,0,0,1,2,2,1,0,0,0,0],
+            [1,0,0,0,0,1,2,2,1,0,0,0],
+            [0,0,0,0,0,1,2,2,1,0,0,0],
+            [0,0,0,0,0,0,1,1,0,0,0,0],
+        ];
+
+        const BORDER: Color32 = Color32::rgb(0x00, 0x00, 0x00);
+
+        for row in 0..H {
+            let py = my + row as i32;
+            let mut col = 0;
+            while col < W {
+                let pixel = ARROW[row][col];
+                if pixel == 0 {
+                    col += 1;
+                    continue;
+                }
+                let color = if pixel == 1 { BORDER } else { COLOR_CURSOR };
+                let start = col;
+                while col < W && ARROW[row][col] == pixel {
+                    col += 1;
+                }
+                gfx::fill_rect_clipped(
+                    buf,
+                    mx + start as i32,
+                    py,
+                    (col - start) as i32,
+                    1,
+                    color,
+                    clip,
+                );
+            }
+        }
     }
 
     fn draw_cursor_text(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
@@ -616,10 +665,10 @@ fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
             y1: my + 7,
         },
         _ => DamageRect {
-            x0: mx - 4,
-            y0: my - 4,
-            x1: mx + 4,
-            y1: my + 4,
+            x0: mx,
+            y0: my,
+            x1: mx + 11,
+            y1: my + 16,
         },
     }
 }

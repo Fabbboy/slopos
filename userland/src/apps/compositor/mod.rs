@@ -341,7 +341,7 @@ impl WindowManager {
     }
 
     fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
-        self.output_damage.add_rect(x - 4, y - 8, x + 4, y + 8);
+        self.output_damage.add_rect(x - 3, y - 9, x + 12, y + 17);
     }
 
     fn needs_redraw(&self) -> bool {
