@@ -7,6 +7,7 @@
 //!
 //! Events are routed to the focused task for each input type.
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_sync::IrqMutex;
 use slopos_utils::RingBuffer;
 
@@ -113,13 +114,14 @@ impl InputManager {
 }
 
 static INPUT_MANAGER: IrqMutex<InputManager> = IrqMutex::new(InputManager::new());
+static KEYBOARD_FOCUS_FAST: AtomicU32 = AtomicU32::new(0);
 
 // =============================================================================
 // Public API - Focus Management (Compositor Operations)
 // =============================================================================
 
-/// Set keyboard focus to a task (called by compositor)
 pub fn input_set_keyboard_focus(task_id: u32) {
+    KEYBOARD_FOCUS_FAST.store(task_id, Ordering::Release);
     INPUT_MANAGER.lock().keyboard_focus = task_id;
 }
 
@@ -229,6 +231,10 @@ pub fn input_get_button_state() -> u8 {
 /// Called from IRQ context (keyboard interrupt handler). IrqMutex handles
 /// interrupt safety automatically.
 pub fn input_route_key_event(scancode: u8, ascii: u8, pressed: bool, timestamp_ms: u64) {
+    if KEYBOARD_FOCUS_FAST.load(Ordering::Acquire) == 0 {
+        return;
+    }
+
     let mut mgr = INPUT_MANAGER.lock();
     let focus = mgr.keyboard_focus;
 
@@ -425,6 +431,7 @@ pub fn input_cleanup_task(task_id: u32) {
     // Clear focus if this task had it
     if mgr.keyboard_focus == task_id {
         mgr.keyboard_focus = 0;
+        KEYBOARD_FOCUS_FAST.store(0, Ordering::Release);
     }
     if mgr.pointer_focus == task_id {
         mgr.pointer_focus = 0;

@@ -233,7 +233,7 @@ slopos_testing::define_test_suite!(
         // Output processing via TTY write
         test_tty_write_returns_input_len,
         // Input pipeline cleanup
-        test_keyboard_no_input_event_delivery,
+        test_keyboard_input_event_delivery,
         test_keyboard_break_code_no_input,
         test_keyboard_modifier_no_input,
         test_keyboard_press_release_single_char,

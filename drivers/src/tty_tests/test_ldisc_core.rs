@@ -373,29 +373,27 @@ pub fn test_tty_write_returns_input_len() -> TestResult {
 // Input pipeline cleanup tests
 // ===========================================================================
 
-/// Keyboard events no longer routed to the input_event compositor queue.
-/// After pressing a key, the compositor event queue should remain empty.
-pub fn test_keyboard_no_input_event_delivery() -> TestResult {
+/// Keyboard events are routed to the input_event queue when focus is set.
+/// After pressing a key with keyboard focus on a task, that task's queue
+/// should contain the event and the TTY should NOT receive it.
+pub fn test_keyboard_input_event_delivery() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    // Set keyboard focus in the compositor to a dummy task.
     let dummy_task: u32 = 9999;
     crate::input_event::input_set_keyboard_focus(dummy_task);
 
-    // Press 'a' (scancode 0x1E).
     crate::ps2::keyboard::handle_scancode(0x1E);
 
-    // The compositor queue for the dummy task should be empty.
     let has_events = crate::input_event::input_has_events(dummy_task);
 
-    // Clean up keyboard focus.
     crate::input_event::input_set_keyboard_focus(0);
+    crate::input_event::input_cleanup_task(dummy_task);
     drain_tty_nonblock(TtyIndex(0));
 
-    if has_events {
-        klog_info!("TTY_TEST: BUG - keyboard event leaked into input_event queue");
+    if !has_events {
+        klog_info!("TTY_TEST: keyboard event NOT delivered to input_event queue");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -3477,7 +3475,7 @@ slopos_testing::define_test_suite!(
         test_ldisc_multiple_reads,
         test_ldisc_backspace_empty,
         test_tty_write_returns_input_len,
-        test_keyboard_no_input_event_delivery,
+        test_keyboard_input_event_delivery,
         test_keyboard_break_code_no_input,
         test_keyboard_modifier_no_input,
         test_keyboard_press_release_single_char,

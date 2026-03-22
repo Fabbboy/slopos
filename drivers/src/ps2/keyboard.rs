@@ -1,6 +1,7 @@
 use slopos_sync::IrqMutex;
 use slopos_utils::{RingBuffer, klog_debug, klog_info, klog_warn};
 
+use crate::input_event::input_route_key_event;
 use crate::ps2;
 use crate::tty::vconsole;
 use crate::tty::{active_tty, push_input};
@@ -283,23 +284,27 @@ pub fn handle_scancode(scancode: u8) {
         };
         if extended_key != 0 {
             drop(state);
+            let ts = slopos_utils::clock::uptime_ms();
+            input_route_key_event(scancode, extended_key, true, ts);
             push_input(active_tty(), extended_key);
             request_reschedule_from_interrupt();
         }
         return;
     }
 
-    // Only key-press events produce characters.
     if !is_press {
+        drop(state);
+        input_route_key_event(make_code, 0, false, slopos_utils::clock::uptime_ms());
         return;
     }
 
     let ascii = translate_scancode(scancode, &state.modifiers);
-    klog_debug!("[KBD] ASCII: 0x{:02x}", ascii);
+    drop(state);
+
+    let ts = slopos_utils::clock::uptime_ms();
+    input_route_key_event(make_code, ascii, true, ts);
 
     if ascii != 0 {
-        klog_debug!("[KBD] Adding to buffer");
-        drop(state);
         push_input(active_tty(), ascii);
         request_reschedule_from_interrupt();
     }
