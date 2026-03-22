@@ -1,4 +1,4 @@
-use core::ffi::c_char;
+use core::ffi::{c_char, c_void};
 use core::mem::size_of;
 
 use slopos_abi::syscall::{ERRNO_EINVAL, TtyIndex, UserSysInfo};
@@ -223,4 +223,122 @@ define_syscall!(syscall_net_info(ctx, args) {
     let user_ptr = try_or_err!(ctx, UserPtr::<UserNetInfo>::try_new(args.arg0));
     try_or_err!(ctx, copy_to_user(user_ptr, &info));
     ctx.ok(0)
+});
+
+define_syscall!(syscall_process_list(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+    require_nonzero!(ctx, args.arg1);
+
+    use slopos_abi::syscall::UserTaskEntry;
+    use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
+    use crate::task::task_iterate_active;
+
+    struct IterCtx {
+        entries: [UserTaskEntry; MAX_TASKS],
+        count: usize,
+        max: usize,
+    }
+
+    fn collect_task(task_ptr: *mut crate::scheduler::task_struct::Task, ctx_ptr: *mut c_void) {
+        let iter_ctx = unsafe { &mut *(ctx_ptr as *mut IterCtx) };
+        if iter_ctx.count >= iter_ctx.max {
+            return;
+        }
+
+        let task = unsafe { &*task_ptr };
+        if task.task_id == INVALID_TASK_ID {
+            return;
+        }
+
+        let entry = &mut iter_ctx.entries[iter_ctx.count];
+        entry.task_id = task.task_id;
+        entry.parent_task_id = task.parent_task_id;
+        entry.process_id = task.process_id;
+        entry.state = task.status().as_u8();
+        entry.block_reason = task.block_reason.as_u8();
+        entry.priority = task.priority;
+        entry.last_cpu = task.last_cpu;
+        entry.cpu_affinity = task.cpu_affinity;
+        entry.total_runtime_us = slopos_utils::clock::ticks_to_microseconds(task.total_runtime);
+        entry.creation_time_ms = task.creation_time;
+        entry.yield_count = task.yield_count;
+        entry.name = task.name;
+        iter_ctx.count += 1;
+    }
+
+    let max_entries = (args.arg1 as usize).min(slopos_abi::task::MAX_TASKS);
+    let mut iter_ctx = IterCtx {
+        entries: [UserTaskEntry::default(); MAX_TASKS],
+        count: 0,
+        max: max_entries,
+    };
+
+    task_iterate_active(Some(collect_task), (&mut iter_ctx as *mut IterCtx).cast());
+
+    let count = iter_ctx.count;
+    for i in 0..count {
+        let dst_addr = args
+            .arg0
+            .wrapping_add((i * core::mem::size_of::<UserTaskEntry>()) as u64);
+        let user_ptr = try_or_err!(ctx, UserPtr::<UserTaskEntry>::try_new(dst_addr));
+        try_or_err!(ctx, copy_to_user(user_ptr, &iter_ctx.entries[i]));
+    }
+
+    ctx.ok(count as u64)
+});
+
+define_syscall!(syscall_cpu_info(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+
+    use slopos_abi::syscall::UserCpuInfo;
+    use slopos_arch::cpu::cpuid;
+
+    let mut info = UserCpuInfo::default();
+    info.vendor = cpuid::cpu_vendor_string();
+    info.brand_string = cpuid::cpu_brand_string();
+    info.cpu_count = slopos_arch::pcr::get_cpu_count() as u32;
+    let (family, model, stepping) = cpuid::cpu_family_model_stepping();
+    info.family = family;
+    info.model = model;
+    info.stepping = stepping;
+    info.features = cpuid::cpu_features_bitmask();
+
+    let user_ptr = try_or_err!(ctx, UserPtr::<UserCpuInfo>::try_new(args.arg0));
+    try_or_err!(ctx, copy_to_user(user_ptr, &info));
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_percpu_stats(ctx, args) {
+    require_nonzero!(ctx, args.arg0);
+    require_nonzero!(ctx, args.arg1);
+
+    use core::sync::atomic::Ordering;
+    use slopos_abi::syscall::UserPerCpuStats;
+
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let max_entries = (args.arg1 as usize).min(cpu_count);
+
+    for i in 0..max_entries {
+        let stats = crate::per_cpu::with_cpu_scheduler(i, |sched| UserPerCpuStats {
+            cpu_id: i as u32,
+            _pad: 0,
+            total_switches: sched.total_switches.load(Ordering::Relaxed),
+            total_ticks: sched.total_ticks.load(Ordering::Relaxed),
+            idle_ticks: sched.idle_time.load(Ordering::Relaxed),
+            ready_count: sched.total_ready_count(),
+            _pad2: 0,
+        })
+        .unwrap_or(UserPerCpuStats {
+            cpu_id: i as u32,
+            ..UserPerCpuStats::default()
+        });
+
+        let dst_addr = args
+            .arg0
+            .wrapping_add((i * core::mem::size_of::<UserPerCpuStats>()) as u64);
+        let user_ptr = try_or_err!(ctx, UserPtr::<UserPerCpuStats>::try_new(dst_addr));
+        try_or_err!(ctx, copy_to_user(user_ptr, &stats));
+    }
+
+    ctx.ok(max_entries as u64)
 });
