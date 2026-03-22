@@ -116,6 +116,11 @@ impl InputManager {
 static INPUT_MANAGER: IrqMutex<InputManager> = IrqMutex::new(InputManager::new());
 static KEYBOARD_FOCUS_FAST: AtomicU32 = AtomicU32::new(0);
 
+#[inline]
+pub fn has_keyboard_focus() -> bool {
+    KEYBOARD_FOCUS_FAST.load(Ordering::Acquire) != 0
+}
+
 // =============================================================================
 // Public API - Focus Management (Compositor Operations)
 // =============================================================================

@@ -1,7 +1,7 @@
 use slopos_sync::IrqMutex;
 use slopos_utils::{RingBuffer, klog_debug, klog_info, klog_warn};
 
-use crate::input_event::input_route_key_event;
+use crate::input_event::{has_keyboard_focus, input_route_key_event};
 use crate::ps2;
 use crate::tty::vconsole;
 use crate::tty::{active_tty, push_input};
@@ -286,8 +286,10 @@ pub fn handle_scancode(scancode: u8) {
             drop(state);
             let ts = slopos_utils::clock::uptime_ms();
             input_route_key_event(scancode, extended_key, true, ts);
-            push_input(active_tty(), extended_key);
-            request_reschedule_from_interrupt();
+            if !has_keyboard_focus() {
+                push_input(active_tty(), extended_key);
+                request_reschedule_from_interrupt();
+            }
         }
         return;
     }
@@ -304,7 +306,7 @@ pub fn handle_scancode(scancode: u8) {
     let ts = slopos_utils::clock::uptime_ms();
     input_route_key_event(make_code, ascii, true, ts);
 
-    if ascii != 0 {
+    if ascii != 0 && !has_keyboard_focus() {
         push_input(active_tty(), ascii);
         request_reschedule_from_interrupt();
     }
