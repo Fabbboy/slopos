@@ -30,8 +30,8 @@ name = "file_manager"
 path = "src/bin/file_manager.rs"
 
 [[bin]]
-name = "sysinfo"
-path = "src/bin/sysinfo.rs"
+name = "sysmon"
+path = "src/bin/sysmon.rs"
 
 [[bin]]
 name = "init"
@@ -63,6 +63,10 @@ path = "src/bin/tests/fork_test.rs"
 [[bin]]
 name = "io_capture_test"
 path = "src/bin/tests/io_capture_test.rs"
+
+[[bin]]
+name = "heap_allocator_test"
+path = "src/bin/tests/heap_allocator_test.rs"
 
 [features]
 default = []

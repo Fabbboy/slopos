@@ -8,4 +8,4 @@ pub mod nmap;
 pub mod ping;
 pub mod roulette;
 pub mod shell;
-pub mod sysinfo;
+pub mod sysmon;

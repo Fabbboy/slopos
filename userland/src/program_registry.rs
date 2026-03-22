@@ -55,11 +55,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         gui: true,
     },
     ProgramSpec {
-        name: "sysinfo",
-        path: "/bin/sysinfo",
+        name: "sysmon",
+        path: "/bin/sysmon",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
-        desc: "System information panel",
+        desc: "System Monitor",
         gui: true,
     },
     ProgramSpec {
@@ -115,6 +115,15 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "io_capture_test",
         path: "/bin/io_capture_test",
+        priority: 5,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "",
+        gui: false,
+    },
+    #[cfg(feature = "testbins")]
+    ProgramSpec {
+        name: "heap_allocator_test",
+        path: "/bin/heap_allocator_test",
         priority: 5,
         flags: TASK_FLAG_USER_MODE,
         desc: "",

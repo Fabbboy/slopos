@@ -73,3 +73,30 @@ pub fn random_next() -> u32 {
 pub fn sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall1(SYSCALL_SYS_INFO, info as *mut _ as u64) as i64 }
 }
+
+#[inline(always)]
+pub fn process_list(buf: &mut [UserTaskEntry]) -> i64 {
+    unsafe {
+        syscall2(
+            SYSCALL_PROCESS_LIST,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
+pub fn cpu_info(info: &mut UserCpuInfo) -> i64 {
+    unsafe { syscall1(SYSCALL_CPU_INFO, info as *mut _ as u64) as i64 }
+}
+
+#[inline(always)]
+pub fn percpu_stats(buf: &mut [UserPerCpuStats]) -> i64 {
+    unsafe {
+        syscall2(
+            SYSCALL_PERCPU_STATS,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}

@@ -46,7 +46,7 @@ pub use error::{SyscallError, SyscallResult};
 pub use numbers::*;
 
 // Re-export ABI types used by syscalls
-pub use slopos_abi::syscall::{Timespec, UserSysInfo};
+pub use slopos_abi::syscall::{Timespec, UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry};
 pub use slopos_abi::{
     DamageRect, DisplayInfo, INPUT_FOCUS_KEYBOARD, INPUT_FOCUS_POINTER, InputEvent, InputEventData,
     InputEventType, MAX_WINDOW_DAMAGE_REGIONS, PixelFormat, SHM_ACCESS_RO, SHM_ACCESS_RW, ShmError,

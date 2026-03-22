@@ -21,9 +21,9 @@ pub const START_MENU_ITEMS: [StartMenuItem; 3] = [
         program_name: "file_manager",
     },
     StartMenuItem {
-        label: "Info",
-        window_title: Some(b"Sysinfo"),
-        program_name: "sysinfo",
+        label: "Monitor",
+        window_title: Some(b"System Monitor"),
+        program_name: "sysmon",
     },
     StartMenuItem {
         label: "Shell",
