@@ -161,10 +161,7 @@ impl InputHandler {
 
         // Only issue the kernel syscall when focus actually changed.
         if self.focused_task != self.kernel_keyboard_focus {
-            if self.focused_task != 0 {
-                input::set_keyboard_focus(self.focused_task);
-                tty::set_focus(self.focused_task);
-            }
+            input::set_keyboard_focus(self.focused_task);
             self.kernel_keyboard_focus = self.focused_task;
             self.needs_full_redraw = true;
         }
@@ -352,7 +349,6 @@ impl InputHandler {
         self.focused_task = task_id;
         if task_id != self.kernel_keyboard_focus {
             input::set_keyboard_focus(task_id);
-            tty::set_focus(task_id);
             self.kernel_keyboard_focus = task_id;
         }
     }
