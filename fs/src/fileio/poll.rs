@@ -1,8 +1,9 @@
+use super::open_file_table::get_open_file_mut;
 use super::*;
 
 pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
     let mut registered = 0usize;
-    with_tables(|kernel, processes| {
+    with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return;
         };
@@ -11,31 +12,39 @@ pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize 
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
+
         for &(fd, events) in fds {
-            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+            let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
                 continue;
             };
-            if desc.pipe_id == pipe::INVALID_PIPE_ID {
+            let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
                 continue;
-            }
-            if desc.pipe_read_end && (events & POLLIN) != 0 {
-                if pipe::reader_wq(desc.pipe_id).enqueue_current() {
-                    registered += 1;
+            };
+            let Some(ops) = open_file.ops else {
+                continue;
+            };
+            match ops.kind() {
+                FileKind::PipeRead if (events & POLLIN) != 0 => {
+                    if ops.poll_wait(open_file.handle) {
+                        registered += 1;
+                    }
                 }
-            }
-            if desc.pipe_write_end && (events & POLLOUT) != 0 {
-                if pipe::writer_wq(desc.pipe_id).enqueue_current() {
-                    registered += 1;
+                FileKind::PipeWrite if (events & POLLOUT) != 0 => {
+                    if ops.poll_wait(open_file.handle) {
+                        registered += 1;
+                    }
                 }
+                _ => {}
             }
         }
+
         drop(guard);
     });
     registered
 }
 
 pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
-    with_tables(|kernel, processes| {
+    with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return;
         };
@@ -44,26 +53,30 @@ pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
+
         for &(fd, events) in fds {
-            let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+            let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
                 continue;
             };
-            if desc.pipe_id == pipe::INVALID_PIPE_ID {
+            let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
                 continue;
-            }
-            if desc.pipe_read_end && (events & POLLIN) != 0 {
-                pipe::reader_wq(desc.pipe_id).remove_current();
-            }
-            if desc.pipe_write_end && (events & POLLOUT) != 0 {
-                pipe::writer_wq(desc.pipe_id).remove_current();
+            };
+            let Some(ops) = open_file.ops else {
+                continue;
+            };
+            match ops.kind() {
+                FileKind::PipeRead if (events & POLLIN) != 0 => ops.poll_unwait(open_file.handle),
+                FileKind::PipeWrite if (events & POLLOUT) != 0 => ops.poll_unwait(open_file.handle),
+                _ => {}
             }
         }
+
         drop(guard);
     });
 }
 
 pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollRegInfo {
-    with_tables(|kernel, processes| {
+    with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return PollRegInfo::NONE;
         };
@@ -73,36 +86,30 @@ pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollReg
 
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
+        let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
+            drop(guard);
+            return PollRegInfo::NONE;
+        };
+        let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
+            drop(guard);
+            return PollRegInfo::NONE;
+        };
+        let Some(ops) = open_file.ops else {
             drop(guard);
             return PollRegInfo::NONE;
         };
 
-        if let Some(tty_idx) = desc.tty_index {
-            drop(guard);
-            let ok = tty::poll_enqueue(tty_idx);
-            return PollRegInfo {
-                kind: PollRegKind::Tty(tty_idx),
-                registered: ok,
-            };
-        }
-
-        if desc.socket_idx != INVALID_SOCKET_IDX {
-            let sock_idx = desc.socket_idx;
-            drop(guard);
-            let ok = if (events & POLLIN) != 0 {
-                socket::socket_poll_enqueue_recv(sock_idx)
-            } else {
-                false
-            };
-            return PollRegInfo {
-                kind: PollRegKind::Socket(sock_idx),
-                registered: ok,
-            };
-        }
-
+        let registered = match ops.kind() {
+            FileKind::Tty => ops.poll_wait(open_file.handle),
+            FileKind::Socket if (events & POLLIN) != 0 => ops.poll_wait(open_file.handle),
+            _ => false,
+        };
+        let reg = PollRegInfo {
+            open_file_idx: fd_entry.open_file_idx,
+            registered,
+        };
         drop(guard);
-        PollRegInfo::NONE
+        reg
     })
 }
 
@@ -110,19 +117,18 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
     if !reg.registered {
         return;
     }
-    match reg.kind {
-        PollRegKind::Tty(tty_idx) => {
-            tty::poll_dequeue(tty_idx);
+    with_tables(|_, _, open_files, _| {
+        let Some(open_file) = get_open_file_mut(open_files, reg.open_file_idx) else {
+            return;
+        };
+        if let Some(ops) = open_file.ops {
+            ops.poll_unwait(open_file.handle);
         }
-        PollRegKind::Socket(sock_idx) => {
-            socket::socket_poll_dequeue_recv(sock_idx);
-        }
-        PollRegKind::None => {}
-    }
+    });
 }
 
 pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
-    with_tables(|kernel, processes| {
+    with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
             return POLLNVAL;
         };
@@ -132,55 +138,14 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
 
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
-        let Some(desc) = (unsafe { get_descriptor(&mut *table_ptr, fd) }) else {
-            drop(guard);
-            return POLLNVAL;
-        };
-
-        if desc.pipe_id != pipe::INVALID_PIPE_ID {
-            let mut pipe_state = pipe::PIPE_STATE.lock();
-            let revents = match pipe::slot_mut(&mut pipe_state, desc.pipe_id) {
-                Some(slot) => slot.revents(desc.pipe_read_end, desc.pipe_write_end, events),
-                None => POLLERR,
-            };
-            drop(guard);
-            return revents;
-        }
-
-        if desc.socket_idx != INVALID_SOCKET_IDX {
-            let socket_idx = desc.socket_idx;
-            let readable = socket::socket_poll_readable(socket_idx) as u16;
-            let writable = socket::socket_poll_writable(socket_idx) as u16;
-            let mut revents = 0u16;
-            if (events & POLLIN) != 0 {
-                if (readable & 1) != 0 {
-                    revents |= POLLIN;
-                }
-                revents |= readable & (POLLIN | POLLERR | POLLHUP);
-            }
-            if (events & POLLOUT) != 0 {
-                if (writable & 1) != 0 {
-                    revents |= POLLOUT;
-                }
-                revents |= writable & (POLLOUT | POLLERR | POLLHUP);
-            }
-            drop(guard);
-            return revents;
-        }
-
-        if let Some(tty_idx) = desc.tty_index {
-            let revents = tty::poll_events(tty_idx, events);
-            drop(guard);
-            return revents;
-        }
-
-        let mut revents = 0u16;
-        if (events & POLLIN) != 0 {
-            revents |= POLLIN;
-        }
-        if (events & POLLOUT) != 0 {
-            revents |= POLLOUT;
-        }
+        let revents = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
+            .and_then(|fd_entry| get_open_file_mut(open_files, fd_entry.open_file_idx))
+            .and_then(|open_file| {
+                open_file
+                    .ops
+                    .map(|ops| ops.poll_events(open_file.handle, events))
+            })
+            .unwrap_or(POLLNVAL);
         drop(guard);
         revents
     })

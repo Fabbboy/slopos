@@ -24,6 +24,7 @@ pub mod random;
 pub mod serial;
 pub mod syscall_services_init;
 pub mod tty;
+pub mod tty_file_ops;
 #[cfg(feature = "itests")]
 pub mod tty_tests;
 pub mod virtio;

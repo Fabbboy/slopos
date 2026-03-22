@@ -11,6 +11,9 @@ use slopos_fs::{
 };
 
 fn boot_step_fs_init() -> i32 {
+    slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
+    slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
+
     if virtio_blk::virtio_blk_is_ready() {
         if ext2_vfs_init_with_callbacks(
             virtio_blk::virtio_blk_read,

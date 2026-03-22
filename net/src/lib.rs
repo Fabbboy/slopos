@@ -30,6 +30,7 @@ pub mod netstack;
 pub mod reassembly;
 pub mod route;
 pub mod socket;
+pub mod socket_file_ops;
 pub mod tcp;
 pub mod tcp_socket;
 pub mod timer;

@@ -141,6 +141,7 @@ pub fn tty_table_init() {
     for i in 0..MAX_TTYS {
         let mut slot = TTY_SLOTS[i].lock();
         *slot = None;
+        TTY_ALLOC_BITMAP.clear(i);
     }
 
     {

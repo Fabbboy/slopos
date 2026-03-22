@@ -20,5 +20,4 @@ slopos-kernel-services = { workspace = true }
 slopos-testing = { workspace = true }
 slopos-sync = { workspace = true }
 slopos-mm = { workspace = true }
-slopos-net = { workspace = true }
 slopos-utils = { workspace = true }

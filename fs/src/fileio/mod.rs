@@ -2,30 +2,26 @@ use core::ffi::{c_char, c_int};
 use core::slice;
 
 use slopos_abi::KernelErrno;
+use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::fs::{
+    FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY,
+    UserFsStat,
+};
+use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
 use slopos_sync::{InitFlag, IrqMutex};
 
-use slopos_abi::fs::{
-    FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY, UserFsEntry, UserFsStat,
-};
-use slopos_abi::net::INVALID_SOCKET_IDX;
-use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
-    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, SEEK_CUR, SEEK_END, SEEK_SET, TtyIndex,
-};
-
+use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
-    block_current_task, current_task_controlling_tty, current_task_id, current_task_pgid,
-    current_task_sid, finish_wait, prepare_to_wait, scheduler_is_enabled,
+    current_task_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
     set_current_task_controlling_tty,
 };
 use slopos_kernel_services::syscall_services::tty;
-use slopos_net::socket;
+use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
-use crate::pipe;
-use crate::vfs::{FileSystem, InodeId, vfs_list, vfs_mkdir, vfs_open, vfs_stat, vfs_unlink};
+use crate::MAX_PATH_LEN;
 
-#[allow(non_camel_case_types)]
-pub(super) type ssize_t = isize;
+pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
+pub(super) const FILEIO_MAX_OPEN_FILE_ENTRIES: usize = 256;
 
 pub(super) const FILE_OPEN_READ: u32 = 1 << 0;
 pub(super) const FILE_OPEN_WRITE: u32 = 1 << 1;
@@ -49,73 +45,66 @@ pub(super) fn posix_to_internal_flags(posix: u32) -> u32 {
     f | (posix & !(O_ACCMODE | O_CREAT | O_APPEND))
 }
 
-use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_mm::memory_layout_defs::MAX_PROCESSES;
-
-use crate::MAX_PATH_LEN;
-
-pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
-
 #[derive(Clone, Copy)]
 pub struct PollRegInfo {
-    pub kind: PollRegKind,
+    pub open_file_idx: u16,
     pub registered: bool,
-}
-
-#[derive(Clone, Copy)]
-pub enum PollRegKind {
-    None,
-    Tty(TtyIndex),
-    Socket(u32),
 }
 
 impl PollRegInfo {
     pub const NONE: Self = Self {
-        kind: PollRegKind::None,
+        open_file_idx: u16::MAX,
         registered: false,
     };
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct FileDescriptor {
-    pub(super) inode: InodeId,
-    pub(super) fs: Option<&'static dyn FileSystem>,
-    pub(super) position: usize,
-    pub(super) flags: u32,
+pub(super) struct OpenFileEntry {
+    pub(super) ops: Option<&'static dyn FileOps>,
+    pub(super) handle: usize,
+    pub(super) position: u64,
+    pub(super) status_flags: u32,
+    pub(super) refcount: u16,
+    pub(super) generation: u16,
     pub(super) valid: bool,
-    pub(super) cloexec: bool,
-    pub(super) tty_index: Option<TtyIndex>,
-    pub(super) pipe_id: u32,
-    pub(super) socket_idx: u32,
-    pub(super) pipe_read_end: bool,
-    pub(super) pipe_write_end: bool,
 }
 
-impl FileDescriptor {
+impl OpenFileEntry {
     const fn new() -> Self {
         Self {
-            inode: 0,
-            fs: None,
+            ops: None,
+            handle: 0,
             position: 0,
-            flags: 0,
+            status_flags: 0,
+            refcount: 0,
+            generation: 0,
             valid: false,
-            cloexec: false,
-            tty_index: None,
-            pipe_id: pipe::INVALID_PIPE_ID,
-            socket_idx: INVALID_SOCKET_IDX,
-            pipe_read_end: false,
-            pipe_write_end: false,
         }
     }
 }
 
-unsafe impl Send for FileDescriptor {}
+#[derive(Clone, Copy)]
+pub(super) struct FdEntry {
+    pub(super) open_file_idx: u16,
+    pub(super) cloexec: bool,
+    pub(super) valid: bool,
+}
+
+impl FdEntry {
+    const fn new() -> Self {
+        Self {
+            open_file_idx: 0,
+            cloexec: false,
+            valid: false,
+        }
+    }
+}
 
 pub(super) struct FileTableSlot {
     pub(super) process_id: u32,
     pub(super) in_use: bool,
     pub(super) lock: IrqMutex<()>,
-    pub(super) descriptors: [FileDescriptor; FILEIO_MAX_OPEN_FILES],
+    pub(super) descriptors: [FdEntry; FILEIO_MAX_OPEN_FILES],
 }
 
 impl FileTableSlot {
@@ -124,17 +113,34 @@ impl FileTableSlot {
             process_id: INVALID_PROCESS_ID,
             in_use,
             lock: IrqMutex::new(()),
-            descriptors: [FileDescriptor::new(); FILEIO_MAX_OPEN_FILES],
+            descriptors: [FdEntry::new(); FILEIO_MAX_OPEN_FILES],
         }
     }
 }
 
 unsafe impl Send for FileTableSlot {}
 
+#[derive(Clone, Copy)]
+pub(super) struct ExternalOpsState {
+    pub(super) tty_ops: Option<&'static dyn FileOps>,
+    pub(super) socket_ops: Option<&'static dyn FileOps>,
+}
+
+impl ExternalOpsState {
+    const fn new() -> Self {
+        Self {
+            tty_ops: None,
+            socket_ops: None,
+        }
+    }
+}
+
 pub(super) struct FileioState {
     pub(super) initialized: bool,
     pub(super) kernel: FileTableSlot,
     pub(super) processes: [FileTableSlot; MAX_PROCESSES],
+    pub(super) open_files: [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
+    pub(super) external_ops: ExternalOpsState,
 }
 
 impl FileioState {
@@ -143,6 +149,8 @@ impl FileioState {
             initialized: false,
             kernel: FileTableSlot::new(true),
             processes: [const { FileTableSlot::new(false) }; MAX_PROCESSES],
+            open_files: [const { OpenFileEntry::new() }; FILEIO_MAX_OPEN_FILE_ENTRIES],
+            external_ops: ExternalOpsState::new(),
         }
     }
 }
@@ -152,101 +160,46 @@ unsafe impl Send for FileioState {}
 pub(super) static FILEIO_STATE: IrqMutex<FileioState> = IrqMutex::new(FileioState::uninitialized());
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
+pub fn fileio_register_tty_ops(ops: &'static dyn FileOps) {
+    let mut guard = FILEIO_STATE.lock();
+    guard.external_ops.tty_ops = Some(ops);
+}
+
+pub fn fileio_register_socket_ops(ops: &'static dyn FileOps) {
+    let mut guard = FILEIO_STATE.lock();
+    guard.external_ops.socket_ops = Some(ops);
+}
+
 pub(super) fn with_state<R>(f: impl FnOnce(&mut FileioState) -> R) -> R {
     let mut guard = FILEIO_STATE.lock();
     f(&mut *guard)
 }
 
 pub(super) fn with_tables<R>(
-    f: impl FnOnce(&mut FileTableSlot, &mut [FileTableSlot; MAX_PROCESSES]) -> R,
+    f: impl FnOnce(
+        &mut FileTableSlot,
+        &mut [FileTableSlot; MAX_PROCESSES],
+        &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
+        &mut ExternalOpsState,
+    ) -> R,
 ) -> R {
     with_state(|state| {
         ensure_initialized(state);
         let kernel = &mut state.kernel;
         let processes = &mut state.processes;
-        f(kernel, processes)
+        let open_files = &mut state.open_files;
+        let external_ops = &mut state.external_ops;
+        f(kernel, processes, open_files, external_ops)
     })
 }
 
-pub(super) fn reset_descriptor(desc: &mut FileDescriptor) {
-    if desc.valid && desc.socket_idx != INVALID_SOCKET_IDX {
-        let _ = socket::socket_close(desc.socket_idx);
-    }
-
-    if desc.valid && desc.pipe_id != pipe::INVALID_PIPE_ID {
-        let pipe_id = desc.pipe_id;
-        let mut wake_readers = false;
-        let mut wake_writers = false;
-        {
-            let mut pipe_state = pipe::PIPE_STATE.lock();
-            if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
-                if desc.pipe_read_end && slot.readers > 0 {
-                    slot.readers -= 1;
-                    if slot.readers == 0 {
-                        wake_writers = true;
-                    }
-                }
-                if desc.pipe_write_end && slot.writers > 0 {
-                    slot.writers -= 1;
-                    if slot.writers == 0 {
-                        wake_readers = true;
-                    }
-                }
-                if slot.readers == 0 && slot.writers == 0 {
-                    *slot = pipe::PipeSlot::new();
-                }
-            }
-        }
-        if wake_readers {
-            pipe::reader_wq(pipe_id).wake_all();
-        }
-        if wake_writers {
-            pipe::writer_wq(pipe_id).wake_all();
-        }
-    }
-
-    if desc.valid {
-        if let Some(idx) = desc.tty_index {
-            let _ = tty::close_ref(idx);
-        }
-    }
-
-    desc.inode = 0;
-    desc.fs = None;
-    desc.position = 0;
-    desc.flags = 0;
-    desc.valid = false;
-    desc.cloexec = false;
-    desc.tty_index = None;
-    desc.pipe_id = pipe::INVALID_PIPE_ID;
-    desc.socket_idx = INVALID_SOCKET_IDX;
-    desc.pipe_read_end = false;
-    desc.pipe_write_end = false;
-}
-
-pub(super) fn clone_descriptor_for_dup(src: &FileDescriptor) -> Option<FileDescriptor> {
-    let copy = *src;
-    if let Some(idx) = copy.tty_index {
-        let _ = tty::open_ref(idx);
-    }
-    if copy.pipe_id == pipe::INVALID_PIPE_ID {
-        return Some(copy);
-    }
-
-    let mut pipe_state = pipe::PIPE_STATE.lock();
-    let slot = pipe::slot_mut(&mut pipe_state, copy.pipe_id)?;
-    if copy.pipe_read_end {
-        slot.readers = slot.readers.saturating_add(1);
-    }
-    if copy.pipe_write_end {
-        slot.writers = slot.writers.saturating_add(1);
-    }
-    Some(copy)
+pub(super) fn reset_fd_entry(entry: &mut FdEntry) {
+    *entry = FdEntry::new();
 }
 
 pub(super) fn reset_table(table: &mut FileTableSlot) {
-    for desc in table.descriptors.iter_mut() {
-        reset_descriptor(desc);
+    for entry in table.descriptors.iter_mut() {
+        reset_fd_entry(entry);
     }
 }
 
@@ -277,18 +230,15 @@ pub(super) fn table_for_pid<'a>(
     None
 }
 
-pub(super) fn get_descriptor<'a>(
-    table: &'a mut FileTableSlot,
-    fd: c_int,
-) -> Option<&'a mut FileDescriptor> {
+pub(super) fn get_fd_entry(table: &mut FileTableSlot, fd: c_int) -> Option<&mut FdEntry> {
     if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
         return None;
     }
-    let desc = &mut table.descriptors[fd as usize];
-    if !desc.valid {
+    let entry = &mut table.descriptors[fd as usize];
+    if !entry.valid {
         return None;
     }
-    Some(desc)
+    Some(entry)
 }
 
 pub(super) fn find_free_slot(table: &FileTableSlot) -> Option<usize> {
@@ -313,14 +263,17 @@ pub(super) fn ensure_initialized(state: &mut FileioState) {
     for slot in state.processes.iter_mut() {
         *slot = FileTableSlot::new(false);
     }
-    let kernel = &mut state.kernel;
-    reset_table(kernel);
-    let processes = &mut state.processes;
-    for slot in processes.iter_mut() {
+    for open in state.open_files.iter_mut() {
+        *open = OpenFileEntry::new();
+    }
+
+    reset_table(&mut state.kernel);
+    for slot in state.processes.iter_mut() {
         reset_table(slot);
         slot.process_id = INVALID_PROCESS_ID;
         slot.in_use = false;
     }
+
     state.initialized = true;
 }
 
@@ -372,54 +325,6 @@ pub(super) fn parse_pts_path(path: &[u8]) -> Option<TtyIndex> {
     Some(TtyIndex(idx))
 }
 
-pub(super) fn bootstrap_console_fds(table: &mut FileTableSlot) {
-    let console_tty = tty::default_console_tty();
-
-    table.descriptors[0] = FileDescriptor {
-        inode: 0,
-        fs: None,
-        position: 0,
-        flags: FILE_OPEN_READ,
-        valid: true,
-        cloexec: false,
-        tty_index: Some(console_tty),
-        pipe_id: pipe::INVALID_PIPE_ID,
-        socket_idx: INVALID_SOCKET_IDX,
-        pipe_read_end: false,
-        pipe_write_end: false,
-    };
-    table.descriptors[1] = FileDescriptor {
-        inode: 0,
-        fs: None,
-        position: 0,
-        flags: FILE_OPEN_WRITE,
-        valid: true,
-        cloexec: false,
-        tty_index: Some(console_tty),
-        pipe_id: pipe::INVALID_PIPE_ID,
-        socket_idx: INVALID_SOCKET_IDX,
-        pipe_read_end: false,
-        pipe_write_end: false,
-    };
-    table.descriptors[2] = FileDescriptor {
-        inode: 0,
-        fs: None,
-        position: 0,
-        flags: FILE_OPEN_WRITE,
-        valid: true,
-        cloexec: false,
-        tty_index: Some(console_tty),
-        pipe_id: pipe::INVALID_PIPE_ID,
-        socket_idx: INVALID_SOCKET_IDX,
-        pipe_read_end: false,
-        pipe_write_end: false,
-    };
-
-    let _ = tty::open_ref(console_tty);
-    let _ = tty::open_ref(console_tty);
-    let _ = tty::open_ref(console_tty);
-}
-
 pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u32) {
     if (flags & O_NOCTTY as u32) != 0 {
         return;
@@ -440,8 +345,84 @@ pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u3
     }
 }
 
+struct LocalTtyOps;
+
+static LOCAL_TTY_OPS: LocalTtyOps = LocalTtyOps;
+
+impl FileOps for LocalTtyOps {
+    fn kind(&self) -> FileKind {
+        FileKind::Tty
+    }
+
+    fn read(&self, handle: usize, buf: &mut [u8], _offset: u64, flags: u32) -> isize {
+        let tty_idx = TtyIndex(handle as u8);
+        let nonblock = (flags & O_NONBLOCK as u32) != 0;
+        match tty::read_cooked(tty_idx, buf.as_mut_ptr(), buf.len(), nonblock) {
+            Ok(n) => n as isize,
+            Err(e) => e.to_errno() as isize,
+        }
+    }
+
+    fn write(&self, handle: usize, buf: &[u8], _offset: u64, flags: u32) -> isize {
+        let tty_idx = TtyIndex(handle as u8);
+        let nonblock = (flags & O_NONBLOCK as u32) != 0;
+        match tty::write_bytes(tty_idx, buf.as_ptr(), buf.len(), nonblock) {
+            Ok(n) => n as isize,
+            Err(e) => e.to_errno() as isize,
+        }
+    }
+
+    fn release(&self, handle: usize) {
+        let _ = tty::close_ref(TtyIndex(handle as u8));
+    }
+
+    fn dup(&self, handle: usize) -> Option<usize> {
+        let tty_idx = TtyIndex(handle as u8);
+        if tty::open_ref(tty_idx).is_ok() {
+            Some(handle)
+        } else {
+            None
+        }
+    }
+
+    fn poll_events(&self, handle: usize, events: u16) -> u16 {
+        tty::poll_events(TtyIndex(handle as u8), events)
+    }
+
+    fn poll_wait(&self, handle: usize) -> bool {
+        tty::poll_enqueue(TtyIndex(handle as u8))
+    }
+
+    fn poll_unwait(&self, handle: usize) {
+        tty::poll_dequeue(TtyIndex(handle as u8));
+    }
+
+    fn stat(&self, _handle: usize, out: &mut UserFsStat) -> i32 {
+        out.type_ = FS_TYPE_CHARDEV;
+        out.size = 0;
+        0
+    }
+}
+
+pub(super) fn external_tty_ops(external_ops: &ExternalOpsState) -> Option<&'static dyn FileOps> {
+    external_ops.tty_ops
+}
+
+pub(super) fn effective_tty_ops(external_ops: &ExternalOpsState) -> &'static dyn FileOps {
+    external_tty_ops(external_ops).unwrap_or(&LOCAL_TTY_OPS)
+}
+
+pub(super) fn external_socket_ops(external_ops: &ExternalOpsState) -> Option<&'static dyn FileOps> {
+    external_ops.socket_ops
+}
+
+pub(super) fn kind_is_tty(kind: FileKind) -> bool {
+    kind == FileKind::Tty
+}
+
 mod fdops;
 mod fdtable;
+pub mod open_file_table;
 mod poll;
 
 pub use fdops::*;

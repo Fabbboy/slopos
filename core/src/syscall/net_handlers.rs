@@ -1,8 +1,7 @@
 use crate::syscall::common::SyscallDisposition;
 use crate::syscall::context::SyscallContext;
-use slopos_abi::net::{
-    AF_INET, INVALID_SOCKET_IDX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn,
-};
+use slopos_abi::file_ops::FileKind;
+use slopos_abi::net::{AF_INET, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::*;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
@@ -31,12 +30,13 @@ fn rc_i64(ctx: &SyscallContext, rc: i64) -> SyscallDisposition {
 }
 
 fn socket_idx_for_fd(process_id: u32, fd: i32) -> Result<u32, u64> {
-    let idx = slopos_fs::fileio_get_socket_idx(process_id, fd).unwrap_or(INVALID_SOCKET_IDX);
-    if idx == INVALID_SOCKET_IDX {
-        Err(ERRNO_ENOTSOCK)
-    } else {
-        Ok(idx)
+    let Some((kind, handle)) = slopos_fs::fileio_get_open_file_handle(process_id, fd) else {
+        return Err(ERRNO_ENOTSOCK);
+    };
+    if kind != FileKind::Socket {
+        return Err(ERRNO_ENOTSOCK);
     }
+    Ok(handle as u32)
 }
 
 define_syscall!(syscall_socket(ctx, args) requires(let process_id) {
