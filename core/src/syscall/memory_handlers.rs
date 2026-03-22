@@ -1,7 +1,11 @@
 define_syscall!(syscall_brk(ctx, args) requires(let process_id) {
     let new_brk = args.arg0;
     let result = slopos_mm::process_vm::process_vm_brk(process_id, new_brk);
-    ctx.ok(result)
+    if result == 0 && new_brk != 0 {
+        ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM)
+    } else {
+        ctx.ok(result)
+    }
 });
 
 define_syscall!(syscall_mmap(ctx, args) requires(let process_id) {

@@ -1420,59 +1420,71 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
 }
 
 pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
-    let process_ptr = find_process_vm(process_id);
-    if process_ptr.is_null() {
+    let pp = find_process_vm(process_id);
+    if pp.is_null() {
         return 0;
     }
-    let process = unsafe { &mut *process_ptr };
+
+    macro_rules! pvm {
+        () => {
+            unsafe { &mut *pp }
+        };
+    }
+
     if new_brk == 0 {
-        return process.heap_end;
+        return pvm!().heap_end;
     }
 
     let aligned_brk = match new_brk.checked_add(PAGE_SIZE_4KB - 1) {
         Some(v) => v & !(PAGE_SIZE_4KB - 1),
-        None => return process.heap_end,
+        None => return pvm!().heap_end,
     };
 
-    if aligned_brk < process.heap_start {
-        return process.heap_end;
+    if aligned_brk < pvm!().heap_start || aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
+        return pvm!().heap_end;
     }
 
-    if aligned_brk > DEFAULT_PROCESS_LAYOUT.heap_max {
-        return process.heap_end;
-    }
-
-    if aligned_brk > process.heap_end {
-        let start_addr = process.heap_end;
+    if aligned_brk > pvm!().heap_end {
+        let start_addr = pvm!().heap_end;
         let end_addr = aligned_brk;
-        let heap_vma_flags = VmaFlags::READ
-            | VmaFlags::WRITE
-            | VmaFlags::USER
-            | VmaFlags::HEAP
-            | VmaFlags::LAZY
-            | VmaFlags::ANON;
+        let heap_vma_flags =
+            VmaFlags::READ | VmaFlags::WRITE | VmaFlags::USER | VmaFlags::HEAP | VmaFlags::ANON;
 
-        if add_vma_to_process(process_ptr, start_addr, end_addr, heap_vma_flags) != 0 {
-            return process.heap_end;
+        if add_vma_to_process(pp, start_addr, end_addr, heap_vma_flags) != 0 {
+            return 0;
         }
 
-        process.heap_end = aligned_brk;
-    } else if aligned_brk < process.heap_end {
+        let heap_map_flags = heap_vma_flags.to_page_flags().bits();
+        let mut pages_mapped: u32 = 0;
+        if map_user_range(
+            pvm!().page_dir,
+            start_addr,
+            end_addr,
+            heap_map_flags,
+            &mut pages_mapped,
+        ) != 0
+        {
+            remove_vma_from_process(pp, start_addr, end_addr);
+            return 0;
+        }
+        pvm!().total_pages += pages_mapped;
+        pvm!().heap_end = aligned_brk;
+    } else if aligned_brk < pvm!().heap_end {
         let start_addr = aligned_brk;
-        let end_addr = process.heap_end;
+        let end_addr = pvm!().heap_end;
 
-        let freed = unmap_and_free_range(process_ptr, start_addr, end_addr);
-        remove_vma_from_process(process_ptr, start_addr, end_addr);
+        let freed = unmap_and_free_range(pp, start_addr, end_addr);
+        remove_vma_from_process(pp, start_addr, end_addr);
 
-        if process.total_pages >= freed {
-            process.total_pages -= freed;
+        if pvm!().total_pages >= freed {
+            pvm!().total_pages -= freed;
         } else {
-            process.total_pages = 0;
+            pvm!().total_pages = 0;
         }
-        process.heap_end = aligned_brk;
+        pvm!().heap_end = aligned_brk;
     }
 
-    process.heap_end
+    pvm!().heap_end
 }
 
 // =============================================================================
