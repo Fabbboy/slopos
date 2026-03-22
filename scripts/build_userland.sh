@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage: build_userland.sh <build_dir> <cargo_target_dir> [--test]
 #
-# With --test:    also builds fork_test (requires testbins feature)
+# With --test:    also builds userland test binaries (requires testbins feature)
 #
 # Environment:
 #   CARGO        - cargo binary (default: cargo)
@@ -22,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell compositor roulette file_manager sysinfo nmap ifconfig nc curl ping"
+BINS="init shell compositor roulette file_manager sysmon nmap ifconfig nc curl ping"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied
@@ -71,6 +71,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --package slopos-userland \
         --bin fork_test \
         --bin io_capture_test \
+        --bin heap_allocator_test \
         --features testbins \
         --no-default-features \
         --release
@@ -81,6 +82,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/io_capture_test" ]; then
         cp "$RELEASE_DIR/io_capture_test" "$BUILD_DIR/io_capture_test.elf"
     fi
+    if [ -f "$RELEASE_DIR/heap_allocator_test" ]; then
+        cp "$RELEASE_DIR/heap_allocator_test" "$BUILD_DIR/heap_allocator_test.elf"
+    fi
 
-    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf"
+    echo "Userland test binaries built: $BUILD_DIR/fork_test.elf $BUILD_DIR/io_capture_test.elf $BUILD_DIR/heap_allocator_test.elf"
 fi
