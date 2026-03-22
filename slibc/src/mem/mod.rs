@@ -1,4 +1,6 @@
-pub mod free_list;
+pub mod bins;
+pub mod chunk;
+pub mod dlmalloc;
 pub mod global_alloc;
 pub mod malloc;
 
