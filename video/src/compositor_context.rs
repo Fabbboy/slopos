@@ -521,8 +521,14 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
     let ctx = CONTEXT.lock();
     let mut count = 0u32;
 
-    // First pass: collect task IDs and their info (need to look up parents)
-    for (&task_id, surface) in ctx.surfaces.iter() {
+    let n = ctx.surfaces.len();
+    slopos_utils::klog_info!(
+        "enumerate_windows: surfaces.len()={}, btree ptr={:p}",
+        n,
+        &ctx.surfaces as *const _
+    );
+    for (i, (&task_id, surface)) in ctx.surfaces.iter().enumerate() {
+        slopos_utils::klog_info!("  iter[{}] task_id={}", i, task_id);
         if count >= max_count {
             break;
         }

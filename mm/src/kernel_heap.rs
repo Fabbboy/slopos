@@ -12,10 +12,18 @@ use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 const NUM_SIZE_CLASSES: usize = 8;
+const SLAB_DEBUG: bool = true;
 const MAX_ALLOC_SIZE: usize = 0x100000;
 const SLAB_MAGIC: u32 = 0x534C_4142;
 const LARGE_MAGIC: u32 = 0x4C_4152_47;
 const LARGE_FREE_MAGIC: u32 = 0x4C_4652_45;
+const SLAB_POISON_FREED: u8 = 0x6B;
+#[allow(dead_code)]
+const SLAB_POISON_ALLOC: u8 = 0x5A;
+#[allow(dead_code)]
+const SLAB_REDZONE_HEAD: u32 = 0xBB_BB_BB_BB;
+#[allow(dead_code)]
+const SLAB_REDZONE_TAIL: u32 = 0xCC_CC_CC_CC;
 const SIZE_CLASSES: [usize; NUM_SIZE_CLASSES] = [16, 32, 64, 128, 256, 512, 1024, 2048];
 
 #[repr(C)]
@@ -140,6 +148,19 @@ fn slab_object_start() -> usize {
     align_up_usize(mem::size_of::<SlabHeader>(), 16)
 }
 
+unsafe fn slab_poison_object_body(obj: *mut u8, object_size: usize) {
+    let link_bytes = mem::size_of::<*mut u8>();
+    if object_size > link_bytes {
+        unsafe {
+            ptr::write_bytes(
+                obj.add(link_bytes),
+                SLAB_POISON_FREED,
+                object_size.saturating_sub(link_bytes),
+            );
+        }
+    }
+}
+
 fn size_class_index(size: usize) -> Option<usize> {
     for (idx, class) in SIZE_CLASSES.iter().enumerate() {
         if size <= *class {
@@ -222,6 +243,13 @@ fn slab_build_free_list(base: *mut u8, object_size: usize, total_count: usize) -
         unsafe { *(current as *mut *mut u8) = ptr::null_mut() };
     }
 
+    if SLAB_DEBUG {
+        for i in 0..total_count {
+            let obj = unsafe { base.add(i * object_size) };
+            unsafe { slab_poison_object_body(obj, object_size) };
+        }
+    }
+
     head
 }
 
@@ -245,6 +273,13 @@ fn slab_create(heap: &mut KernelHeap, object_size: usize) -> *mut SlabHeader {
     let header = slab_addr as *mut SlabHeader;
     let data_base = unsafe { (slab_addr as *mut u8).add(start) };
     let free_list = slab_build_free_list(data_base, object_size, total_count);
+
+    if SLAB_DEBUG {
+        for i in 0..total_count {
+            let obj = unsafe { data_base.add(i * object_size) };
+            unsafe { slab_poison_object_body(obj, object_size) };
+        }
+    }
 
     unsafe {
         (*header).magic = SLAB_MAGIC;
@@ -291,9 +326,61 @@ fn slab_alloc_from_cache(heap: &mut KernelHeap, idx: usize) -> *mut c_void {
                         return obj as *mut c_void;
                     }
                 }
+
+                if SLAB_DEBUG {
+                    let _ = (SLAB_REDZONE_HEAD, SLAB_REDZONE_TAIL);
+                    let object_size = (*slab).object_size as usize;
+                    let body_offset = mem::size_of::<*mut u8>();
+                    if object_size > body_offset {
+                        let body_len = object_size - body_offset;
+                        let body = obj.add(body_offset);
+                        let mut corrupt_off: Option<usize> = None;
+                        let mut corrupt_byte: u8 = 0;
+
+                        for off in 0..body_len {
+                            let actual = *body.add(off);
+                            if actual != SLAB_POISON_FREED {
+                                corrupt_off = Some(off);
+                                corrupt_byte = actual;
+                                break;
+                            }
+                        }
+
+                        if corrupt_off.is_some() {
+                            klog_info!(
+                                "slab_alloc: POISON CHECK FAILED at 0x{:x}, expected 0x{:02X} found 0x{:02X}, obj_size={}",
+                                obj as usize,
+                                SLAB_POISON_FREED,
+                                corrupt_byte,
+                                object_size
+                            );
+                            klog_info!(
+                                "slab_alloc: first16={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                *obj.add(0),
+                                *obj.add(1),
+                                *obj.add(2),
+                                *obj.add(3),
+                                *obj.add(4),
+                                *obj.add(5),
+                                *obj.add(6),
+                                *obj.add(7),
+                                *obj.add(8),
+                                *obj.add(9),
+                                *obj.add(10),
+                                *obj.add(11),
+                                *obj.add(12),
+                                *obj.add(13),
+                                *obj.add(14),
+                                *obj.add(15)
+                            );
+                        }
+                    }
+                }
+
                 (*slab).free_list = next;
                 (*slab).free_count = (*slab).free_count.saturating_sub(1);
                 heap.stats.record_slab_alloc((*slab).object_size as u64);
+
                 return obj as *mut c_void;
             }
             slab = (*slab).next;
@@ -331,6 +418,34 @@ fn alloc_large(heap: &mut KernelHeap, size: usize) -> *mut c_void {
                     (*prev).next = (*current).next;
                 }
                 let base = current as u64;
+
+                if SLAB_DEBUG {
+                    let body = (base as *mut u8).add(header_size);
+                    let check_len = size
+                        .min(((*current).pages as usize) * PAGE_SIZE_4KB as usize - header_size);
+                    let mut corrupt_off: Option<usize> = None;
+                    let mut corrupt_byte: u8 = 0;
+                    for off in 0..check_len.min(64) {
+                        let actual = *body.add(off);
+                        if actual != SLAB_POISON_FREED {
+                            corrupt_off = Some(off);
+                            corrupt_byte = actual;
+                            break;
+                        }
+                    }
+                    if let Some(off) = corrupt_off {
+                        klog_info!(
+                            "alloc_large: POISON CHECK FAILED at 0x{:x}+{}, expected 0x{:02X} found 0x{:02X}, size={}, pages={}",
+                            base,
+                            off,
+                            SLAB_POISON_FREED,
+                            corrupt_byte,
+                            size,
+                            (*current).pages
+                        );
+                    }
+                }
+
                 (*current).magic = LARGE_MAGIC;
                 (*current).size = size as u32;
                 (*current).next = ptr::null_mut();
@@ -373,6 +488,16 @@ fn free_large(heap: &mut KernelHeap, base: u64) -> c_int {
         (*header).next = heap.large_free_list;
         heap.large_free_list = header;
         heap.stats.record_large_free(size);
+
+        if SLAB_DEBUG {
+            let hdr_sz = align_up_usize(mem::size_of::<LargeAllocHeader>(), 16);
+            let total_bytes = ((*header).pages as usize) * PAGE_SIZE_4KB as usize;
+            if total_bytes > hdr_sz {
+                let body = (base as *mut u8).add(hdr_sz);
+                let body_len = total_bytes - hdr_sz;
+                ptr::write_bytes(body, SLAB_POISON_FREED, body_len);
+            }
+        }
     }
 
     0
@@ -430,6 +555,12 @@ fn slab_free(heap: &mut KernelHeap, ptr_in: *mut c_void) -> c_int {
         *(ptr_in as *mut *mut u8) = (*base).free_list;
         (*base).free_list = ptr_in as *mut u8;
         (*base).free_count = (*base).free_count.saturating_add(1);
+
+        if SLAB_DEBUG {
+            let _ = (SLAB_REDZONE_HEAD, SLAB_REDZONE_TAIL);
+            slab_poison_object_body(ptr_in as *mut u8, object_size);
+        }
+
         heap.stats.record_slab_free((*base).object_size as u64);
     }
 
@@ -481,7 +612,12 @@ pub fn kfree(ptr_in: *mut c_void) {
 
     let base = align_down_u64(ptr_in as u64, PAGE_SIZE_4KB);
     if base < heap.start_addr || base >= heap.current_break {
-        klog_info!("kfree: Invalid block or double free detected");
+        klog_info!(
+            "kfree: ptr 0x{:x} outside heap [0x{:x}..0x{:x}]",
+            ptr_in as u64,
+            heap.start_addr,
+            heap.current_break
+        );
         return;
     }
     let slab_result = slab_free(&mut heap, ptr_in);
@@ -494,7 +630,15 @@ pub fn kfree(ptr_in: *mut c_void) {
         return;
     }
 
-    klog_info!("kfree: Invalid block or double free detected");
+    let magic_at_base = unsafe { *(base as *const u32) };
+    klog_info!(
+        "kfree: no owner for ptr 0x{:x} base 0x{:x} magic=0x{:08x} (slab_rc={} large_rc={})",
+        ptr_in as u64,
+        base,
+        magic_at_base,
+        slab_result,
+        large_result
+    );
 }
 
 /// Minimum pages required for soft reboot coherency fix.
