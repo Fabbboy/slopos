@@ -58,6 +58,9 @@ pub const SYSCALL_HALT: u64 = 23;
 pub const SYSCALL_NET_SCAN: u64 = 120;
 pub const SYSCALL_NET_INFO: u64 = 123;
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
+pub const SYSCALL_OPENPTY: u64 = 145;
+pub const SYSCALL_TTY_READ: u64 = 146;
+pub const SYSCALL_TTY_WRITE: u64 = 147;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_REBOOT: u64 = 85;
 
@@ -614,7 +617,7 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 144;
+pub const SYSCALL_TABLE_SIZE: usize = 148;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

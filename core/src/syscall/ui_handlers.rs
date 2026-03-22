@@ -1,5 +1,7 @@
+use slopos_abi::KernelErrno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
+use slopos_abi::syscall::{ERRNO_ERESTARTSYS, TtyIndex};
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_abi::{DisplayInfo, InputEvent, WindowInfo};
 
@@ -261,12 +263,85 @@ define_syscall!(syscall_set_cursor_shape(ctx, args) requires(let task_id) {
     ctx.from_result(video::surface_set_cursor_shape(task_id, shape))
 });
 
-define_syscall!(syscall_tty_set_focus(ctx, args) requires(compositor) {
-    let target = args.arg0_u32();
-    ctx.from_bool_value(
-        tty::set_compositor_focus(target).is_ok(),
-        tty::get_compositor_focus().unwrap_or(0) as u64,
-    )
+define_syscall!(syscall_openpty(ctx, args) {
+    let master_out = try_or_err!(ctx, UserPtr::<u32>::try_new(args.arg0));
+    let slave_out = try_or_err!(ctx, UserPtr::<u32>::try_new(args.arg1));
+
+    let master_idx = match tty::alloc_pty() {
+        Ok(idx) => idx,
+        Err(e) => return ctx.ok_i64(e.to_errno() as i64),
+    };
+
+    let slave_num = match tty::get_pty_number(master_idx) {
+        Ok(n) => n,
+        Err(e) => return ctx.ok_i64(e.to_errno() as i64),
+    };
+
+    if let Err(e) = tty::grantpt(master_idx) {
+        return ctx.ok_i64(e.to_errno() as i64);
+    }
+
+    try_or_err!(ctx, copy_to_user(master_out, &(master_idx.0 as u32)));
+    try_or_err!(ctx, copy_to_user(slave_out, &slave_num));
+    ctx.ok(0)
+});
+
+define_syscall!(syscall_tty_read(ctx, args) {
+    let tty_idx = TtyIndex(args.arg0 as u8);
+    let user_ptr = args.arg1;
+    let max_len = args.arg2_usize();
+
+    if user_ptr == 0 || max_len == 0 {
+        return ctx.ok(0);
+    }
+
+    const MAX_COPY: usize = 512;
+    let mut scratch = [0u8; MAX_COPY];
+    let read_len = max_len.min(MAX_COPY);
+
+    match tty::read_cooked(tty_idx, scratch.as_mut_ptr(), read_len, true) {
+        Ok(n) => {
+            let user_bytes = try_or_err!(ctx, UserBytes::try_new(user_ptr, n));
+            try_or_err!(ctx, copy_bytes_to_user(user_bytes, &scratch[..n]));
+            ctx.ok(n as u64)
+        }
+        Err(e) => {
+            let errno = e.to_errno() as i64;
+            if errno == -512 {
+                ctx.err_with(ERRNO_ERESTARTSYS)
+            } else {
+                ctx.ok_i64(errno)
+            }
+        }
+    }
+});
+
+define_syscall!(syscall_tty_write(ctx, args) {
+    let tty_idx = TtyIndex(args.arg0 as u8);
+    let user_ptr = args.arg1;
+    let len = args.arg2_usize();
+
+    if user_ptr == 0 || len == 0 {
+        return ctx.ok(0);
+    }
+
+    const MAX_COPY: usize = 512;
+    let mut scratch = [0u8; MAX_COPY];
+    let write_len = len.min(MAX_COPY);
+    let user_bytes = try_or_err!(ctx, UserBytes::try_new(user_ptr, write_len));
+    try_or_err!(ctx, copy_bytes_from_user(user_bytes, &mut scratch[..write_len]));
+
+    match tty::write_bytes(tty_idx, scratch.as_ptr(), write_len, true) {
+        Ok(n) => ctx.ok(n as u64),
+        Err(e) => {
+            let errno = e.to_errno() as i64;
+            if errno == -512 {
+                ctx.err_with(ERRNO_ERESTARTSYS)
+            } else {
+                ctx.ok_i64(errno)
+            }
+        }
+    }
 });
 
 define_syscall!(syscall_enumerate_windows(ctx, args) requires(compositor) {
