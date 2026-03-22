@@ -12,7 +12,7 @@ use crate::paging::{map_page_4kb, paging_bump_kernel_mapping_gen, unmap_page};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 const NUM_SIZE_CLASSES: usize = 8;
-const SLAB_DEBUG: bool = true;
+const SLAB_DEBUG: bool = false;
 const MAX_ALLOC_SIZE: usize = 0x100000;
 const SLAB_MAGIC: u32 = 0x534C_4142;
 const LARGE_MAGIC: u32 = 0x4C_4152_47;

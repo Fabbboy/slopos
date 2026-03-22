@@ -14,7 +14,7 @@
 //! - Compositor reads directly from client buffer via shm_token
 //! - NO kernel-side buffer copies
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 
 use slopos_abi::{
     CompositorError, DamageRect, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole,
@@ -24,6 +24,7 @@ use slopos_gfx::damage::InternalDamageTracker;
 use slopos_sync::IrqMutex;
 
 type DamageTracker = InternalDamageTracker;
+const MAX_SURFACES: usize = 32;
 
 fn export_damage_to_window_format(
     tracker: &DamageTracker,
@@ -113,6 +114,7 @@ impl ClientOp {
 /// The compositor reads directly from the client's buffer.
 /// This struct only tracks metadata and damage regions.
 struct SurfaceState {
+    task_id: u32,
     /// Token referencing client's shared memory buffer
     shm_token: u32,
     /// Surface dimensions (from client's buffer)
@@ -157,6 +159,7 @@ impl SurfaceState {
     /// Create a new surface state. No kernel buffer allocation - just metadata.
     fn new(width: u32, height: u32, shm_token: u32) -> Self {
         Self {
+            task_id: 0,
             shm_token,
             width,
             height,
@@ -217,7 +220,8 @@ impl SurfaceState {
 // =============================================================================
 
 struct CompositorContext {
-    surfaces: BTreeMap<u32, SurfaceState>,
+    surfaces: [Option<SurfaceState>; MAX_SURFACES],
+    surface_count: usize,
     queue: VecDeque<ClientOp>,
     next_z_order: u32,
 }
@@ -225,36 +229,100 @@ struct CompositorContext {
 impl CompositorContext {
     const fn new() -> Self {
         Self {
-            surfaces: BTreeMap::new(),
+            surfaces: [const { None }; MAX_SURFACES],
+            surface_count: 0,
             queue: VecDeque::new(),
             next_z_order: 1,
         }
     }
 
+    fn find_surface(&self, task_id: u32) -> Option<usize> {
+        self.surfaces.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|surface| surface.task_id == task_id)
+        })
+    }
+
+    fn find_surface_mut(&mut self, task_id: u32) -> Option<&mut SurfaceState> {
+        for slot in self.surfaces.iter_mut() {
+            if let Some(surface) = slot.as_mut() {
+                if surface.task_id == task_id {
+                    return Some(surface);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_surface(&self, task_id: u32) -> Option<&SurfaceState> {
+        self.find_surface(task_id)
+            .and_then(|index| self.surfaces[index].as_ref())
+    }
+
+    fn get_surface_mut(&mut self, task_id: u32) -> Option<&mut SurfaceState> {
+        self.find_surface_mut(task_id)
+    }
+
+    fn insert_surface(&mut self, task_id: u32, mut surface: SurfaceState) -> bool {
+        if self.find_surface(task_id).is_some() {
+            return false;
+        }
+
+        if let Some(slot) = self.surfaces.iter_mut().find(|slot| slot.is_none()) {
+            surface.task_id = task_id;
+            *slot = Some(surface);
+            self.surface_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove_surface(&mut self, task_id: u32) -> Option<SurfaceState> {
+        let index = self.find_surface(task_id)?;
+        let removed = self.surfaces[index].take();
+        if removed.is_some() {
+            self.surface_count = self.surface_count.saturating_sub(1);
+        }
+        removed
+    }
+
     /// Normalize z-order values to prevent overflow.
     /// Called automatically when z-order gets too high.
     fn normalize_z_order(&mut self) {
-        use alloc::vec::Vec;
-
-        // Collect (task_id, z_order) pairs
-        let mut ordered: Vec<(u32, u32)> = self
-            .surfaces
-            .iter()
-            .map(|(&task_id, s)| (task_id, s.z_order))
-            .collect();
+        let mut ordered = [(0u32, 0u32); MAX_SURFACES];
+        let mut len = 0usize;
+        for surface in self.surfaces.iter().filter_map(|slot| slot.as_ref()) {
+            ordered[len] = (surface.task_id, surface.z_order);
+            len += 1;
+        }
 
         // Sort by z_order
-        ordered.sort_by_key(|(_, z)| *z);
+        let mut i = 0usize;
+        while i < len {
+            let mut min = i;
+            let mut j = i + 1;
+            while j < len {
+                if ordered[j].1 < ordered[min].1 {
+                    min = j;
+                }
+                j += 1;
+            }
+            if min != i {
+                ordered.swap(i, min);
+            }
+            i += 1;
+        }
 
         // Reassign sequential z_order values starting from 1
-        for (i, (task_id, _)) in ordered.iter().enumerate() {
-            if let Some(surface) = self.surfaces.get_mut(task_id) {
-                surface.z_order = (i + 1) as u32;
+        for (index, (task_id, _)) in ordered.iter().take(len).enumerate() {
+            if let Some(surface) = self.get_surface_mut(*task_id) {
+                surface.z_order = (index + 1) as u32;
             }
         }
 
         // Reset next_z_order
-        self.next_z_order = (ordered.len() + 1) as u32;
+        self.next_z_order = (len + 1) as u32;
     }
 
     /// Check if z-order normalization is needed (approaching u32 overflow)
@@ -301,7 +369,7 @@ pub fn register_surface_for_task(
 /// Unregister a surface for a task (called on task exit or surface destruction).
 pub fn unregister_surface_for_task(task_id: u32) {
     let mut ctx = CONTEXT.lock();
-    ctx.surfaces.remove(&task_id);
+    ctx.remove_surface(task_id);
 
     let mut filtered = VecDeque::new();
     while let Some(op) = ctx.queue.pop_front() {
@@ -337,7 +405,7 @@ pub fn drain_queue() {
 
         match op {
             ClientOp::Commit { task_id } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.commit();
                 }
             }
@@ -348,7 +416,7 @@ pub fn drain_queue() {
                 shm_token,
             } => {
                 // Skip if already registered
-                if ctx.surfaces.contains_key(&task_id) {
+                if ctx.find_surface(task_id).is_some() {
                     processed += 1;
                     continue;
                 }
@@ -365,10 +433,15 @@ pub fn drain_queue() {
                 surface.window_x = 50 + offset;
                 surface.window_y = 50 + offset;
 
-                ctx.surfaces.insert(task_id, surface);
+                if !ctx.insert_surface(task_id, surface) {
+                    slopos_utils::klog_warn!(
+                        "register_surface_for_task: no free surface slots for task {}",
+                        task_id
+                    );
+                }
             }
             ClientOp::RequestFrameCallback { task_id } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.frame_callback_pending = true;
                 }
             }
@@ -379,12 +452,12 @@ pub fn drain_queue() {
                 width,
                 height,
             } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.add_damage(x, y, width, height);
                 }
             }
             ClientOp::SetRole { task_id, role } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     // Can only set role once (Wayland semantics)
                     if surface.role == SurfaceRole::None {
                         surface.role = role;
@@ -396,7 +469,7 @@ pub fn drain_queue() {
                 parent_task_id,
             } => {
                 // First verify parent exists and has capacity
-                let can_add = if let Some(parent) = ctx.surfaces.get(&parent_task_id) {
+                let can_add = if let Some(parent) = ctx.get_surface(parent_task_id) {
                     (parent.child_count as usize) < MAX_CHILDREN
                 } else {
                     false
@@ -404,7 +477,7 @@ pub fn drain_queue() {
 
                 if can_add {
                     // Set parent on child surface
-                    if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                    if let Some(surface) = ctx.get_surface_mut(task_id) {
                         // Only subsurfaces can have parents
                         if surface.role == SurfaceRole::Subsurface {
                             surface.parent_task = Some(parent_task_id);
@@ -412,7 +485,7 @@ pub fn drain_queue() {
                     }
 
                     // Add child to parent's children list
-                    if let Some(parent) = ctx.surfaces.get_mut(&parent_task_id) {
+                    if let Some(parent) = ctx.get_surface_mut(parent_task_id) {
                         for slot in parent.children.iter_mut() {
                             if slot.is_none() {
                                 *slot = Some(task_id);
@@ -428,7 +501,7 @@ pub fn drain_queue() {
                 rel_x,
                 rel_y,
             } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     // Only subsurfaces use relative positioning
                     if surface.role == SurfaceRole::Subsurface {
                         surface.relative_x = rel_x;
@@ -438,13 +511,13 @@ pub fn drain_queue() {
                 }
             }
             ClientOp::SetTitle { task_id, title } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.title = title;
                     surface.dirty = true;
                 }
             }
             ClientOp::SetCursorShape { task_id, shape } => {
-                if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.cursor_shape = shape;
                 }
             }
@@ -457,7 +530,7 @@ pub fn drain_queue() {
 /// Set window position. IMMEDIATE - called by COMPOSITOR only.
 pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+    if let Some(surface) = ctx.get_surface_mut(task_id) {
         surface.window_x = x;
         surface.window_y = y;
         surface.dirty = true;
@@ -470,7 +543,7 @@ pub fn surface_set_window_position(task_id: u32, x: i32, y: i32) -> Result<(), C
 /// Set window state. IMMEDIATE - called by COMPOSITOR only.
 pub fn surface_set_window_state(task_id: u32, state: u8) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+    if let Some(surface) = ctx.get_surface_mut(task_id) {
         surface.window_state = state;
         surface.dirty = true;
         Ok(())
@@ -489,7 +562,7 @@ pub fn surface_set_cursor_shape(task_id: u32, shape: u8) -> Result<(), Composito
 /// Raise window (increase z-order). IMMEDIATE - called by COMPOSITOR only.
 pub fn surface_raise_window(task_id: u32) -> Result<(), CompositorError> {
     let mut ctx = CONTEXT.lock();
-    if !ctx.surfaces.contains_key(&task_id) {
+    if ctx.find_surface(task_id).is_none() {
         return Err(CompositorError::SurfaceNotFound);
     }
 
@@ -500,7 +573,7 @@ pub fn surface_raise_window(task_id: u32) -> Result<(), CompositorError> {
 
     let new_z = ctx.next_z_order;
     ctx.next_z_order += 1;
-    if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+    if let Some(surface) = ctx.get_surface_mut(task_id) {
         surface.z_order = new_z;
     }
     Ok(())
@@ -521,14 +594,7 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
     let ctx = CONTEXT.lock();
     let mut count = 0u32;
 
-    let n = ctx.surfaces.len();
-    slopos_utils::klog_info!(
-        "enumerate_windows: surfaces.len()={}, btree ptr={:p}",
-        n,
-        &ctx.surfaces as *const _
-    );
-    for (i, (&task_id, surface)) in ctx.surfaces.iter().enumerate() {
-        slopos_utils::klog_info!("  iter[{}] task_id={}", i, task_id);
+    for surface in ctx.surfaces.iter().filter_map(|slot| slot.as_ref()) {
         if count >= max_count {
             break;
         }
@@ -543,7 +609,7 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
         // For toplevel/popup: use window_x/window_y directly
         let (abs_x, abs_y) = if surface.role == SurfaceRole::Subsurface {
             if let Some(parent_id) = surface.parent_task {
-                if let Some(parent) = ctx.surfaces.get(&parent_id) {
+                if let Some(parent) = ctx.get_surface(parent_id) {
                     (
                         parent.window_x + surface.relative_x,
                         parent.window_y + surface.relative_y,
@@ -564,7 +630,7 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
 
         unsafe {
             let info = &mut *out_buffer.add(count as usize);
-            info.task_id = task_id;
+            info.task_id = surface.task_id;
             info.x = abs_x;
             info.y = abs_y;
             info.width = surface.width;
@@ -605,7 +671,7 @@ pub fn surface_request_frame_callback(task_id: u32) -> Result<(), CompositorErro
 pub fn surface_mark_frames_done(present_time_ms: u64) {
     let mut ctx = CONTEXT.lock();
 
-    for surface in ctx.surfaces.values_mut() {
+    for surface in ctx.surfaces.iter_mut().filter_map(|slot| slot.as_mut()) {
         // Compositor only calls this after a successful present. At this point,
         // the previously committed damage has been consumed and can be cleared.
         surface.committed_damage.clear();
@@ -622,7 +688,7 @@ pub fn surface_mark_frames_done(present_time_ms: u64) {
 pub fn surface_poll_frame_done(task_id: u32) -> u64 {
     let mut ctx = CONTEXT.lock();
 
-    if let Some(surface) = ctx.surfaces.get_mut(&task_id) {
+    if let Some(surface) = ctx.get_surface_mut(task_id) {
         let timestamp = surface.last_present_time_ms;
         if timestamp > 0 {
             surface.last_present_time_ms = 0; // Clear after reading
