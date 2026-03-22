@@ -242,3 +242,61 @@ pub fn xcr0_supported() -> u64 {
     let (eax, _, _, edx) = cpuid_count(CPUID_LEAF_XSAVE, 0);
     (eax as u64) | ((edx as u64) << 32)
 }
+
+// =============================================================================
+// CPU Identification for System Monitor
+// =============================================================================
+
+/// Read the CPU vendor string from CPUID leaf 0 (e.g., "GenuineIntel", "AuthenticAMD").
+pub fn cpu_vendor_string() -> [u8; 16] {
+    let mut vendor = [0u8; 16];
+    let (_, ebx, ecx, edx) = cpuid(0);
+    vendor[0..4].copy_from_slice(&ebx.to_le_bytes());
+    vendor[4..8].copy_from_slice(&edx.to_le_bytes());
+    vendor[8..12].copy_from_slice(&ecx.to_le_bytes());
+    vendor
+}
+
+/// Read the CPU brand string from CPUID leaves 0x80000002-0x80000004.
+/// Returns up to 48 bytes (e.g., "Intel(R) Core(TM) i7-...").
+/// Returns all zeros if extended CPUID is not supported.
+pub fn cpu_brand_string() -> [u8; 48] {
+    let mut brand = [0u8; 48];
+    let (max_ext, _, _, _) = cpuid(0x8000_0000);
+    if max_ext < 0x8000_0004 {
+        return brand;
+    }
+    for i in 0u32..3 {
+        let (eax, ebx, ecx, edx) = cpuid(0x8000_0002 + i);
+        let off = (i as usize) * 16;
+        brand[off..off + 4].copy_from_slice(&eax.to_le_bytes());
+        brand[off + 4..off + 8].copy_from_slice(&ebx.to_le_bytes());
+        brand[off + 8..off + 12].copy_from_slice(&ecx.to_le_bytes());
+        brand[off + 12..off + 16].copy_from_slice(&edx.to_le_bytes());
+    }
+    brand
+}
+
+/// Extract CPU family, model, stepping from CPUID leaf 1.
+pub fn cpu_family_model_stepping() -> (u8, u8, u8) {
+    let (eax, _, _, _) = cpuid(CPUID_LEAF_FEATURES);
+    let stepping = (eax & 0xF) as u8;
+    let mut model = ((eax >> 4) & 0xF) as u8;
+    let mut family = ((eax >> 8) & 0xF) as u8;
+    let ext_model = ((eax >> 16) & 0xF) as u8;
+    let ext_family = ((eax >> 20) & 0xFF) as u8;
+    if family == 0x06 || family == 0x0F {
+        model += ext_model << 4;
+    }
+    if family == 0x0F {
+        family += ext_family;
+    }
+    (family, model, stepping)
+}
+
+/// Build a 64-bit bitmask of CPU feature flags from CPUID leaf 1.
+/// Bits 0-31 = ECX features, bits 32-63 = EDX features.
+pub fn cpu_features_bitmask() -> u64 {
+    let (_, _, ecx, edx) = cpuid(CPUID_LEAF_FEATURES);
+    (ecx as u64) | ((edx as u64) << 32)
+}

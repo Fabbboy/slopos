@@ -574,11 +574,47 @@ pub const SYSCALL_FUTEX: u64 = 106;
 pub const SYSCALL_ARCH_PRCTL: u64 = 107;
 
 // =============================================================================
+// System monitoring
+// =============================================================================
+
+/// List all active tasks with their status information.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to UserTaskEntry array (output buffer)
+/// * rsi (arg1): maximum number of entries the buffer can hold
+///
+/// # Returns
+/// * Number of entries written on success
+/// * Negative errno on failure
+pub const SYSCALL_PROCESS_LIST: u64 = 141;
+
+/// Get CPU identification and feature information.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to UserCpuInfo struct (output)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative errno on failure
+pub const SYSCALL_CPU_INFO: u64 = 142;
+
+/// Get per-CPU scheduler statistics.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to UserPerCpuStats array (output buffer)
+/// * rsi (arg1): maximum number of entries the buffer can hold
+///
+/// # Returns
+/// * Number of entries written on success
+/// * Negative errno on failure
+pub const SYSCALL_PERCPU_STATS: u64 = 143;
+
+// =============================================================================
 // Syscall ABI stability
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
-pub const SYSCALL_TABLE_SIZE: usize = 140;
+pub const SYSCALL_TABLE_SIZE: usize = 144;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
