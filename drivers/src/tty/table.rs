@@ -41,6 +41,7 @@ use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::syscall::UserWinsize;
 use slopos_sync::IrqMutex;
 use slopos_sync::WaitQueue;
+use slopos_utils::{AtomicBitmap, words_for};
 
 // ---------------------------------------------------------------------------
 // Per-TTY slots
@@ -124,7 +125,7 @@ pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }
 /// bitmap, and O(popcount) idle-callback iteration via `trailing_zeros()`
 /// on the bitmap itself.  Bits 0–1 are always set after init (serial +
 /// vconsole).  Updated atomically alongside `TTY_SLOTS` mutations.
-pub(crate) static TTY_ALLOC_BITMAP: AtomicU32 = AtomicU32::new(0);
+pub(crate) static TTY_ALLOC_BITMAP: AtomicBitmap<{ words_for(MAX_TTYS) }> = AtomicBitmap::new();
 
 // ---------------------------------------------------------------------------
 // Initialisation
@@ -137,7 +138,6 @@ pub(crate) static TTY_ALLOC_BITMAP: AtomicU32 = AtomicU32::new(0);
 /// - TTY 0  → SerialConsoleDriver (COM1)
 /// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
 pub fn tty_table_init() {
-    TTY_ALLOC_BITMAP.store(0, Ordering::Release);
     for i in 0..MAX_TTYS {
         let mut slot = TTY_SLOTS[i].lock();
         *slot = None;
@@ -157,7 +157,8 @@ pub fn tty_table_init() {
             TtyDriverKind::VConsole(VConsoleDriver),
         ));
     }
-    TTY_ALLOC_BITMAP.store(0b11, Ordering::Release);
+    TTY_ALLOC_BITMAP.set(0);
+    TTY_ALLOC_BITMAP.set(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,9 +252,8 @@ impl Tty {
 }
 
 pub fn find_free_slot() -> Option<usize> {
-    let bitmap = TTY_ALLOC_BITMAP.load(Ordering::Acquire);
-    // Mask out slots 0-1 (reserved for serial + vconsole).
-    let free = !bitmap & !0b11u32;
+    let word = TTY_ALLOC_BITMAP.load_word(0);
+    let free = !word & !0b11usize;
     if free == 0 {
         return None;
     }
@@ -262,10 +262,10 @@ pub fn find_free_slot() -> Option<usize> {
 }
 
 pub fn find_free_slot_excluding(excluded: usize) -> Option<usize> {
-    let bitmap = TTY_ALLOC_BITMAP.load(Ordering::Acquire);
-    let mut free = !bitmap & !0b11u32;
-    if excluded < 32 {
-        free &= !(1u32 << excluded);
+    let word = TTY_ALLOC_BITMAP.load_word(0);
+    let mut free = !word & !0b11usize;
+    if excluded < MAX_TTYS {
+        free &= !(1usize << excluded);
     }
     if free == 0 {
         return None;
@@ -277,23 +277,19 @@ pub fn find_free_slot_excluding(excluded: usize) -> Option<usize> {
 /// Mark a slot as allocated in the bitmap.
 #[inline]
 pub(crate) fn mark_slot_allocated(slot: usize) {
-    if slot < 32 {
-        TTY_ALLOC_BITMAP.fetch_or(1u32 << slot, Ordering::Release);
-    }
+    TTY_ALLOC_BITMAP.set(slot);
 }
 
 /// Mark a slot as free in the bitmap.
 #[inline]
 pub(crate) fn mark_slot_free(slot: usize) {
-    if slot < 32 {
-        TTY_ALLOC_BITMAP.fetch_and(!(1u32 << slot), Ordering::Release);
-    }
+    TTY_ALLOC_BITMAP.clear(slot);
 }
 
 /// Returns the current allocation bitmap for iteration.
 #[inline]
-pub(crate) fn active_slots_bitmap() -> u32 {
-    TTY_ALLOC_BITMAP.load(Ordering::Acquire)
+pub(crate) fn active_slots_bitmap() -> usize {
+    TTY_ALLOC_BITMAP.load_word(0)
 }
 
 // ---------------------------------------------------------------------------

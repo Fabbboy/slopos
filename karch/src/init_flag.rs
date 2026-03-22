@@ -19,8 +19,28 @@ impl InitFlag {
     }
 
     #[inline]
+    pub fn claim(&self) -> bool {
+        self.init_once()
+    }
+
+    #[inline]
     pub fn is_set(&self) -> bool {
         self.flag.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn is_set_relaxed(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn mark_set(&self) {
+        self.flag.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::Release);
     }
 }
 
@@ -29,6 +49,3 @@ impl Default for InitFlag {
         Self::new()
     }
 }
-
-unsafe impl Send for InitFlag {}
-unsafe impl Sync for InitFlag {}

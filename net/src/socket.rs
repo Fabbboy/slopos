@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::packetbuf::PacketBuf;
 use crate::tcp_socket;
 use crate::types::{Ipv4Addr, NetError, Port, SockAddr};
+use slopos_utils::{Bitmap, words_for};
 
 /// Internal storage for protocol-specific socket state.
 pub enum SocketInner {
@@ -481,7 +482,7 @@ impl SlabSocketTable {
 /// this allocator and both old/new socket paths may use it.
 /// Access must be serialized by the outer lock (no internal atomics).
 pub struct EphemeralPortAllocator {
-    bitmap: [u8; Self::BITMAP_SIZE],
+    bitmap: Bitmap<{ words_for(Self::EPHEMERAL_PORT_COUNT) }>,
     next_port: u16,
     allocated_count: usize,
 }
@@ -493,13 +494,11 @@ impl EphemeralPortAllocator {
     pub const EPHEMERAL_PORT_END: u16 = 65_535;
     /// Total number of ephemeral ports.
     pub const EPHEMERAL_PORT_COUNT: usize = 16_384;
-    /// Bitmap size in bytes (`EPHEMERAL_PORT_COUNT / 8`).
-    pub const BITMAP_SIZE: usize = 2048;
 
     /// Create a fresh allocator with no allocated ports.
     pub const fn new() -> Self {
         Self {
-            bitmap: [0; Self::BITMAP_SIZE],
+            bitmap: Bitmap::new(),
             next_port: Self::EPHEMERAL_PORT_START,
             allocated_count: 0,
         }
@@ -513,24 +512,21 @@ impl EphemeralPortAllocator {
             return None;
         }
 
-        let start = self.next_port;
-        for offset in 0..Self::EPHEMERAL_PORT_COUNT {
-            let candidate = Self::EPHEMERAL_PORT_START
-                + ((start - Self::EPHEMERAL_PORT_START + offset as u16)
-                    % Self::EPHEMERAL_PORT_COUNT as u16);
-            if !self.is_allocated(candidate) {
-                self.set_allocated(candidate);
-                self.allocated_count += 1;
-                self.next_port = if candidate == Self::EPHEMERAL_PORT_END {
-                    Self::EPHEMERAL_PORT_START
-                } else {
-                    candidate + 1
-                };
-                return Some(Port(candidate));
-            }
-        }
+        let cursor = (self.next_port - Self::EPHEMERAL_PORT_START) as usize;
+        let bit_idx = self
+            .bitmap
+            .find_next_zero(cursor, Self::EPHEMERAL_PORT_COUNT)
+            .or_else(|| self.bitmap.find_next_zero(0, cursor))?;
 
-        None
+        let candidate = Self::EPHEMERAL_PORT_START + bit_idx as u16;
+        self.bitmap.set(bit_idx);
+        self.allocated_count += 1;
+        self.next_port = if candidate == Self::EPHEMERAL_PORT_END {
+            Self::EPHEMERAL_PORT_START
+        } else {
+            candidate + 1
+        };
+        Some(Port(candidate))
     }
 
     /// Release a previously allocated ephemeral port.
@@ -539,8 +535,9 @@ impl EphemeralPortAllocator {
         if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
             return;
         }
-        if self.is_allocated(p) {
-            self.clear_allocated(p);
+        let bit_idx = (p - Self::EPHEMERAL_PORT_START) as usize;
+        if self.bitmap.test(bit_idx) {
+            self.bitmap.clear(bit_idx);
             self.allocated_count -= 1;
         }
     }
@@ -551,37 +548,12 @@ impl EphemeralPortAllocator {
         if !(Self::EPHEMERAL_PORT_START..=Self::EPHEMERAL_PORT_END).contains(&p) {
             return false;
         }
-        self.is_allocated(p)
+        self.bitmap.test((p - Self::EPHEMERAL_PORT_START) as usize)
     }
 
     /// Number of currently available ephemeral ports.
     pub fn available(&self) -> usize {
         Self::EPHEMERAL_PORT_COUNT - self.allocated_count
-    }
-
-    fn port_to_bit_index(port: u16) -> usize {
-        (port - Self::EPHEMERAL_PORT_START) as usize
-    }
-
-    fn is_allocated(&self, port: u16) -> bool {
-        let bit = Self::port_to_bit_index(port);
-        let byte = bit / 8;
-        let mask = 1u8 << (bit % 8);
-        (self.bitmap[byte] & mask) != 0
-    }
-
-    fn set_allocated(&mut self, port: u16) {
-        let bit = Self::port_to_bit_index(port);
-        let byte = bit / 8;
-        let mask = 1u8 << (bit % 8);
-        self.bitmap[byte] |= mask;
-    }
-
-    fn clear_allocated(&mut self, port: u16) {
-        let bit = Self::port_to_bit_index(port);
-        let byte = bit / 8;
-        let mask = 1u8 << (bit % 8);
-        self.bitmap[byte] &= !mask;
     }
 }
 

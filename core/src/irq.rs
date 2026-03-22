@@ -19,7 +19,7 @@ pub use slopos_kernel_services::driver_runtime::IRQ_LINES;
 use slopos_sync::InitFlag;
 use slopos_sync::IrqMutex;
 use slopos_utils::string::cstr_to_str;
-use slopos_utils::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
+use slopos_utils::{AtomicBitmap, kdiag_dump_interrupt_frame, klog_debug, klog_info, words_for};
 
 use crate::scheduler::scheduler::{TrapExitSource, scheduler_handoff_on_trap_exit};
 use slopos_kernel_services::platform;
@@ -453,15 +453,7 @@ impl MsiEntry {
     }
 }
 
-/// Bitmap words covering MSI_VECTOR_COUNT bits.
-/// 176 vectors → 3 × u64 = 192 bits (top 16 bits unused).
-const MSI_BITMAP_WORDS: usize = (MSI_VECTOR_COUNT + 63) / 64;
-
-static MSI_BITMAP: [AtomicU64; MSI_BITMAP_WORDS] = {
-    // const-initialise each word to 0 (all free).
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MSI_BITMAP_WORDS]
-};
+static MSI_BITMAP: AtomicBitmap<{ words_for(MSI_VECTOR_COUNT) }> = AtomicBitmap::new();
 
 /// MSI handler table container.
 struct MsiTables {
@@ -482,6 +474,17 @@ impl MsiTables {
 
 static MSI_TABLE: MsiTables = MsiTables::new();
 static MSI_TABLE_LOCK: IrqMutex<()> = IrqMutex::new(());
+static MSI_INIT: InitFlag = InitFlag::new();
+
+/// Initialize MSI subsystem (pre-reserve SYSCALL_VECTOR).
+fn msi_init() {
+    if MSI_INIT.is_set_relaxed() {
+        return;
+    }
+    let syscall_bit = (SYSCALL_VECTOR - MSI_VECTOR_BASE) as usize;
+    MSI_BITMAP.set(syscall_bit);
+    MSI_INIT.mark_set();
+}
 
 /// Access the MSI handler table under lock.
 #[inline]
@@ -498,41 +501,9 @@ fn with_msi_table<R>(f: impl FnOnce(&mut [MsiEntry; MSI_VECTOR_COUNT]) -> R) -> 
 ///
 /// Returns the IDT vector number (48–223) or `None` if exhausted.
 pub fn msi_alloc_vector() -> Option<u8> {
-    for word_idx in 0..MSI_BITMAP_WORDS {
-        loop {
-            let current = MSI_BITMAP[word_idx].load(Ordering::Relaxed);
-            if current == u64::MAX {
-                break; // this word is full
-            }
-            let bit = (!current).trailing_zeros() as usize;
-            let abs_bit = word_idx * 64 + bit;
-            if abs_bit >= MSI_VECTOR_COUNT {
-                return None; // past the valid range
-            }
-            let vector = MSI_VECTOR_BASE + abs_bit as u8;
-            let new = current | (1u64 << bit);
-            if vector == SYSCALL_VECTOR {
-                // SYSCALL_VECTOR (0x80) lives inside the MSI range but is
-                // reserved for the INT 0x80 trap gate.  Mark the bit as used
-                // so future scans skip it, and continue searching.
-                let _ = MSI_BITMAP[word_idx].compare_exchange_weak(
-                    current,
-                    new,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                );
-                break; // move to next word (or retry if CAS failed)
-            }
-            if MSI_BITMAP[word_idx]
-                .compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Some(vector);
-            }
-            // CAS raced — retry this word.
-        }
-    }
-    None
+    msi_init();
+    let idx = MSI_BITMAP.alloc(MSI_VECTOR_COUNT)?;
+    Some(MSI_VECTOR_BASE + idx as u8)
 }
 
 /// Free a previously-allocated MSI vector.
@@ -543,9 +514,7 @@ pub fn msi_free_vector(vector: u8) {
         return;
     }
     let idx = (vector - MSI_VECTOR_BASE) as usize;
-    let word_idx = idx / 64;
-    let bit = idx % 64;
-    MSI_BITMAP[word_idx].fetch_and(!(1u64 << bit), Ordering::Release);
+    MSI_BITMAP.free(idx);
     with_msi_table(|table| {
         table[idx] = MsiEntry::empty();
     });
@@ -635,11 +604,7 @@ fn msi_dispatch_inner(vector: u8, frame: *mut InterruptFrame) {
 
 /// Return the number of currently-allocated MSI vectors.
 pub fn msi_allocated_count() -> usize {
-    let mut count = 0usize;
-    for word_idx in 0..MSI_BITMAP_WORDS {
-        count += MSI_BITMAP[word_idx].load(Ordering::Relaxed).count_ones() as usize;
-    }
-    count
+    MSI_BITMAP.count_ones(MSI_VECTOR_COUNT)
 }
 
 /// Check whether a specific vector is allocated.
@@ -648,7 +613,5 @@ pub fn msi_vector_is_allocated(vector: u8) -> bool {
         return false;
     }
     let idx = (vector - MSI_VECTOR_BASE) as usize;
-    let word_idx = idx / 64;
-    let bit = idx % 64;
-    (MSI_BITMAP[word_idx].load(Ordering::Relaxed) & (1u64 << bit)) != 0
+    MSI_BITMAP.test(idx)
 }

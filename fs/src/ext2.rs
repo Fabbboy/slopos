@@ -2,6 +2,7 @@ use core::cmp;
 use core::mem;
 
 use crate::blockdev::BlockDevice;
+use slopos_utils::bitmap_slice;
 
 const EXT2_MIN_BLOCK_SIZE: u32 = 1024;
 const EXT2_MAX_BLOCK_SIZE: u32 = 4096;
@@ -1013,8 +1014,10 @@ impl<'a> Ext2Fs<'a> {
             self.read_block(bitmap_blk, block_slice)?;
 
             let start_bit = self.alloc_start_bit(kind, group);
-            if let Some(bit) = find_free_bit_from(block_slice, start_bit) {
-                set_bit(block_slice, bit);
+            if let Some(bit) =
+                bitmap_slice::find_first_zero(block_slice, block_slice.len() * 8, start_bit)
+            {
+                bitmap_slice::set_bit(block_slice, bit);
                 self.write_block(bitmap_blk, block_slice)?;
 
                 Self::decrement_free_count(&mut desc, kind);
@@ -1041,7 +1044,7 @@ impl<'a> Ext2Fs<'a> {
         let block_slice = &mut block_buf[..self.block_size as usize];
         self.read_block(bitmap_blk, block_slice)?;
 
-        clear_bit(block_slice, bit);
+        bitmap_slice::clear_bit(block_slice, bit);
         self.write_block(bitmap_blk, block_slice)?;
 
         Self::increment_free_count(&mut desc, kind);
@@ -1194,43 +1197,6 @@ fn split_parent(path: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     }
     Some((parent, name))
-}
-
-fn find_free_bit_from(bitmap: &[u8], start_bit: usize) -> Option<usize> {
-    let start_byte = start_bit / 8;
-    let start_offset = start_bit % 8;
-    for (byte_idx, byte) in bitmap.iter().enumerate().skip(start_byte) {
-        if *byte == 0xFF {
-            continue;
-        }
-        let bit_start = if byte_idx == start_byte {
-            start_offset
-        } else {
-            0
-        };
-        for bit in bit_start..8 {
-            if (*byte & (1 << bit)) == 0 {
-                return Some(byte_idx * 8 + bit);
-            }
-        }
-    }
-    None
-}
-
-fn set_bit(bitmap: &mut [u8], bit: usize) {
-    let byte_idx = bit / 8;
-    let bit_idx = bit % 8;
-    if let Some(byte) = bitmap.get_mut(byte_idx) {
-        *byte |= 1 << bit_idx;
-    }
-}
-
-fn clear_bit(bitmap: &mut [u8], bit: usize) {
-    let byte_idx = bit / 8;
-    let bit_idx = bit % 8;
-    if let Some(byte) = bitmap.get_mut(byte_idx) {
-        *byte &= !(1 << bit_idx);
-    }
 }
 
 const MODE_FILE: u16 = 0x8000;

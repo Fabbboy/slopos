@@ -3,6 +3,9 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod alignment;
+pub mod atomic_bitmap;
+pub mod bitmap;
+pub mod bitmap_slice;
 pub mod boot_flags;
 pub mod boot_info;
 pub mod clock;
@@ -20,6 +23,9 @@ pub mod wl_currency;
 
 pub use alignment::{align_down_u64, align_down_usize, align_up_u64, align_up_usize};
 pub use alignment::{align_down_usize as align_down, align_up_usize as align_up};
+pub use atomic_bitmap::AtomicBitmap;
+pub use bitmap::words_for;
+pub use bitmap::Bitmap;
 pub use kdiag::kdiag_dump_interrupt_frame;
 pub use kdiag::{kdiag_timestamp, KDIAG_STACK_TRACE_DEPTH};
 pub use klog::{
