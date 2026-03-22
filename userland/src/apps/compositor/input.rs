@@ -24,6 +24,10 @@ pub struct InputHandler {
 
     pub start_menu_open: bool,
     pub focused_task: u32,
+    /// The task that the kernel currently routes keyboard events to.
+    /// Kept in sync with `focused_task`; the syscall is only issued when
+    /// these two diverge, avoiding redundant kernel calls every frame.
+    kernel_keyboard_focus: u32,
     pub needs_full_redraw: bool,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
@@ -48,6 +52,7 @@ impl InputHandler {
             drag_offset_y: 0,
             start_menu_open: false,
             focused_task: 0,
+            kernel_keyboard_focus: 0,
             needs_full_redraw: false,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
@@ -115,6 +120,56 @@ impl InputHandler {
         input::set_pointer_focus(0);
     }
 
+    pub fn sync_keyboard_focus(
+        &mut self,
+        windows: &[UserWindowInfo; MAX_WINDOWS],
+        window_count: u32,
+        prev_windows: &[UserWindowInfo; MAX_WINDOWS],
+        prev_window_count: u32,
+    ) {
+        // Auto-focus newly appeared windows (not in prev snapshot).
+        for i in 0..window_count as usize {
+            let task_id = windows[i].task_id;
+            if windows[i].state == WINDOW_STATE_MINIMIZED {
+                continue;
+            }
+            let existed_before =
+                (0..prev_window_count as usize).any(|j| prev_windows[j].task_id == task_id);
+            if !existed_before {
+                self.focused_task = task_id;
+                break;
+            }
+        }
+
+        // If the focused window no longer exists or is minimized, pick the
+        // topmost visible window (last in the z-ordered array).
+        if self.focused_task != 0 {
+            let still_visible = (0..window_count as usize).any(|i| {
+                windows[i].task_id == self.focused_task
+                    && windows[i].state != WINDOW_STATE_MINIMIZED
+            });
+            if !still_visible {
+                self.focused_task = 0;
+                for i in (0..window_count as usize).rev() {
+                    if windows[i].state != WINDOW_STATE_MINIMIZED {
+                        self.focused_task = windows[i].task_id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Only issue the kernel syscall when focus actually changed.
+        if self.focused_task != self.kernel_keyboard_focus {
+            if self.focused_task != 0 {
+                input::set_keyboard_focus(self.focused_task);
+                tty::set_focus(self.focused_task);
+            }
+            self.kernel_keyboard_focus = self.focused_task;
+            self.needs_full_redraw = true;
+        }
+    }
+
     pub fn handle_mouse_events(
         &mut self,
         fb_height: i32,
@@ -175,21 +230,21 @@ impl InputHandler {
 
                 self.start_drag(&window);
                 window::raise_window(window.task_id);
-                tty::set_focus(window.task_id);
-                input::set_keyboard_focus(window.task_id);
-                self.focused_task = window.task_id;
+                self.set_focused(window.task_id);
                 return;
             }
 
             if self.hit_test_content_area(&window) {
                 window::raise_window(window.task_id);
-                tty::set_focus(window.task_id);
-                input::set_keyboard_focus(window.task_id);
                 input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
-                self.focused_task = window.task_id;
+                self.set_focused(window.task_id);
                 return;
             }
         }
+
+        // Clicked on desktop background (no window hit) — clear GUI keyboard
+        // focus so keystrokes go to the VConsole/TTY instead.
+        self.set_focused(0);
     }
 
     pub fn process_pending_close_requests(
@@ -293,6 +348,15 @@ impl InputHandler {
         }
     }
 
+    fn set_focused(&mut self, task_id: u32) {
+        self.focused_task = task_id;
+        if task_id != self.kernel_keyboard_focus {
+            input::set_keyboard_focus(task_id);
+            tty::set_focus(task_id);
+            self.kernel_keyboard_focus = task_id;
+        }
+    }
+
     fn start_drag(&mut self, window: &UserWindowInfo) {
         self.dragging = true;
         self.drag_task = window.task_id;
@@ -368,9 +432,7 @@ impl InputHandler {
         if let Some(title) = window_title {
             if let Some(task_id) = find_window_by_title(windows, window_count, title) {
                 window::raise_window(task_id);
-                tty::set_focus(task_id);
-                input::set_keyboard_focus(task_id);
-                self.focused_task = task_id;
+                self.set_focused(task_id);
                 return;
             }
         }
@@ -381,6 +443,8 @@ impl InputHandler {
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {
+                // Window doesn't exist yet; sync_keyboard_focus will pick it
+                // up once it appears in the next refresh_windows cycle.
                 self.focused_task = tid as u32;
             }
         } else {
@@ -435,9 +499,7 @@ impl InputHandler {
                 window::set_window_state(w.task_id, new_state);
                 if new_state == WINDOW_STATE_NORMAL {
                     window::raise_window(w.task_id);
-                    tty::set_focus(w.task_id);
-                    input::set_keyboard_focus(w.task_id);
-                    self.focused_task = w.task_id;
+                    self.set_focused(w.task_id);
                 }
                 self.needs_full_redraw = true;
                 return;

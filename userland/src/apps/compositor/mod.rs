@@ -394,6 +394,12 @@ pub fn compositor_user_main() {
 
         wm.input.update_mouse();
         wm.refresh_windows();
+        wm.input.sync_keyboard_focus(
+            &wm.windows,
+            wm.window_count,
+            &wm.prev_windows,
+            wm.prev_window_count,
+        );
         wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
