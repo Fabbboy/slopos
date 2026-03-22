@@ -389,6 +389,30 @@ fn print_background_job_started(job_id: u16, pid: u32) {
     shell_write(b"\n");
 }
 
+fn drain_compositor_signals() {
+    use crate::syscall::{InputEvent, InputEventType, input};
+    use slopos_abi::signal::SIGINT;
+
+    if !super::display::DISPLAY.enabled.get() {
+        return;
+    }
+    let mut events = [InputEvent::default(); 8];
+    let count = input::poll_batch(&mut events) as usize;
+    for i in 0..count.min(8) {
+        if events[i].event_type == InputEventType::KeyPress {
+            let ascii = events[i].key_ascii();
+            if ascii == 0x03 {
+                let fg = foreground_pgid();
+                if fg != 0 {
+                    if let Ok(group) = i32::try_from(fg) {
+                        let _ = process::kill_pid(-group, SIGINT);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> {
     if cmd.redirect_count != 0 {
         return None;
@@ -482,7 +506,9 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
                 events: POLLIN,
                 revents: 0,
             }];
-            let _ = fs::poll(&mut pfds, 50);
+            let _ = fs::poll(&mut pfds, 10);
+
+            drain_compositor_signals();
 
             loop {
                 match fs::read_slice(pipe_fds[0], &mut buf) {
@@ -512,8 +538,15 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         }
         let _ = fs::close_fd(pipe_fds[0]);
         exit_status
+    } else if super::display::DISPLAY.enabled.get() {
+        loop {
+            if let Some(st) = process::waitpid_nohang(pid) {
+                break st;
+            }
+            drain_compositor_signals();
+            sys_core::sleep_ms(5);
+        }
     } else {
-        // No capture — just wait for the child directly.
         process::waitpid(pid)
     };
     leave_foreground();
@@ -888,7 +921,18 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
 
     let mut status = 0;
     for pid in pids.iter().take(pipeline.command_count) {
-        status = process::waitpid(*pid);
+        if super::display::DISPLAY.enabled.get() {
+            loop {
+                if let Some(st) = process::waitpid_nohang(*pid) {
+                    status = st;
+                    break;
+                }
+                drain_compositor_signals();
+                sys_core::sleep_ms(5);
+            }
+        } else {
+            status = process::waitpid(*pid);
+        }
     }
     leave_foreground();
     status
