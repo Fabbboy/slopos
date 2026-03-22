@@ -20,6 +20,12 @@ unsafe extern "C" {
     fn close(fd: i32) -> i32;
     fn slopos_dup2(old: i32, new: i32) -> i32;
     fn slopos_kill(pid: i32, sig: i32) -> i32;
+    #[link_name = "getpid"]
+    fn libc_getpid() -> i32;
+}
+
+pub fn getpid() -> u32 {
+    unsafe { libc_getpid() as u32 }
 }
 
 pub struct Command {

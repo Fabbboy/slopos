@@ -5,7 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STD_PAL_SRC="$REPO_ROOT/slibc/std_pal"
 
-SYSROOT="$(rustc +nightly-2026-02-20 --print sysroot 2>/dev/null || rustc --print sysroot)"
+# Resolve sysroot from the active toolchain (follows rust-toolchain.toml).
+# This avoids hardcoding a specific nightly date so the patch survives
+# toolchain upgrades without manual edits.
+RUST_CHANNEL="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")"
+SYSROOT="$(rustc +"$RUST_CHANNEL" --print sysroot 2>/dev/null || rustc --print sysroot)"
 STD_SYS="$SYSROOT/lib/rustlib/src/rust/library/std/src/sys"
 
 if [ ! -d "$STD_SYS" ]; then
@@ -223,10 +227,14 @@ pub mod os {\
     echo "  Patched env_consts.rs"
 fi
 
-# 3f. thread_local guard — add slopos to the hermit/xous no-op arm
+# 3f. thread_local — slopos needs the no_threads storage (no real TLS)
+#     and a no-op guard::enable() (hermit/xous arm).
 TL_MOD="$STD_SYS/thread_local/mod.rs"
 if ! grep -q 'target_os = "slopos"' "$TL_MOD" 2>/dev/null; then
-    sed -i '/target_os = "xous",/{/guard/!{s/target_os = "xous",/target_os = "xous",\n        target_os = "slopos",/}}' "$TL_MOD"
+    # Add slopos to the no_threads arm (first vexos occurrence = main cfg_select)
+    sed -i '0,/target_os = "vexos",/{s/target_os = "vexos",/target_os = "vexos",\n        target_os = "slopos",/}' "$TL_MOD"
+    # Add slopos to the guard hermit/xous no-op arm (hermit immediately followed by xous)
+    sed -i '/target_os = "hermit",/{n;s/target_os = "xous",/target_os = "xous",\n            target_os = "slopos",/}' "$TL_MOD"
     echo "  Patched thread_local/mod.rs"
 fi
 
@@ -235,6 +243,19 @@ IO_ERROR="$STD_SYS/io/error/mod.rs"
 if ! grep -q 'target_os = "slopos"' "$IO_ERROR" 2>/dev/null; then
     sed -i 's/target_os = "vexos",/target_os = "vexos",\n        target_os = "slopos",/' "$IO_ERROR"
     echo "  Patched io/error/mod.rs"
+fi
+
+# 3h. sys/exit.rs — route slopos exit() to PAL instead of the intrinsics::abort() fallback.
+#     Anchors on "xous" (last arm before the fallback in fn exit) to avoid the
+#     unrelated unique_thread_exit cfg_select.
+EXIT_RS="$STD_SYS/exit.rs"
+if [ -f "$EXIT_RS" ] && ! grep -q 'target_os = "slopos"' "$EXIT_RS" 2>/dev/null; then
+    sed -i '/crate::os::xous::ffi::exit/,/^[[:space:]]*}$/{
+        /^[[:space:]]*}$/a\        target_os = "slopos" => {\
+            crate::sys::pal::os::exit(code)\
+        }
+    }' "$EXIT_RS"
+    echo "  Patched exit.rs"
 fi
 
 # 4. Create marker file
