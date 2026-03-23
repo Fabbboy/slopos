@@ -45,9 +45,12 @@ impl GlyphAtlas {
         let hhea = renderer.font.hhea();
         let ascender = libm::ceilf(hhea.ascender as f32 * scale) as i32;
         let descender = libm::floorf(hhea.descender as f32 * scale) as i32;
-        let cell_h = (ascender - descender) as u16;
+        let line_gap = libm::roundf(hhea.line_gap as f32 * scale) as i32;
+        // Cell height includes ascender, descender, and half of line_gap
+        // for inter-line padding.
+        let cell_h = (ascender - descender + line_gap / 2) as u16;
 
-        // Cell width = max advance across all ASCII printable chars.
+        // Cell width = max ceil'd advance across all ASCII printable chars.
         let mut max_advance: u16 = 0;
         for cp in ASCII_FIRST..=ASCII_LAST {
             if let Some(gid) = renderer.font.glyph_index(cp) {

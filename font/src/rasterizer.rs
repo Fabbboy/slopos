@@ -83,10 +83,16 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
             let t = (y - ey0) / (ey1 - ey0);
             let x = ex0 + t * (ex1 - ex0);
 
-            // Round to nearest pixel (not truncate) for correct boundary placement
+            // Clamp x-intercept into [0, width) so edges at the right
+            // boundary are not silently lost.
             let xi = libm::floorf(x) as i32;
             if xi >= 0 && (xi as usize) < width {
                 winding[xi as usize] += dir;
+            } else if xi >= width as i32 {
+                // Edge is at or past the right boundary — record at the
+                // last valid pixel so the winding count is still correct
+                // for pixels to its left.
+                winding[width.saturating_sub(1)] += dir;
             }
         }
 

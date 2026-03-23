@@ -14,17 +14,19 @@ pub fn measure_text(font: &TtfFont<'_>, text: &str, size_px: u16) -> (i32, i32) 
     let scale = size_px as f32 / upem;
 
     let hhea = font.hhea();
-    let height = ((hhea.ascender as i32 - hhea.descender as i32) as f32 * scale) as i32;
+    let height =
+        libm::ceilf((hhea.ascender as f32 - hhea.descender as f32) * scale) as i32;
 
-    let mut width = 0i32;
+    // Accumulate width in float to avoid per-character truncation error.
+    let mut width_f = 0.0f32;
 
     for ch in text.chars() {
         if let Some(glyph_id) = font.glyph_index(ch as u32) {
             if let Some(hm) = font.h_metrics(glyph_id) {
-                width += (hm.advance_width as f32 * scale) as i32;
+                width_f += hm.advance_width as f32 * scale;
             }
         }
     }
 
-    (width, height.max(1))
+    (libm::ceilf(width_f) as i32, height.max(1))
 }

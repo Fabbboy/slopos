@@ -5,14 +5,19 @@ use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
 
 /// Default console font size (pixels).
-const FONT_SIZE_PX: u16 = 14;
+const FONT_SIZE_PX: u16 = 16;
+
+/// Monospace font paths — prefer JetBrains Mono, fall back to Inter.
+const MONOSPACE_FONT_PATH: &str = "/usr/share/fonts/JetBrainsMono-Regular.ttf";
+const FALLBACK_FONT_PATH: &str = "/usr/share/fonts/Inter-Regular.ttf";
 
 static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
 
 fn atlas() -> &'static GlyphAtlas {
     ATLAS.get_or_init(|| {
-        let data = std::fs::read("/usr/share/fonts/Inter-Regular.ttf")
-            .expect("font: failed to load Inter-Regular.ttf");
+        let data = std::fs::read(MONOSPACE_FONT_PATH)
+            .or_else(|_| std::fs::read(FALLBACK_FONT_PATH))
+            .expect("font: failed to load any font");
         GlyphAtlas::new(&data, FONT_SIZE_PX).expect("font: failed to create glyph atlas")
     })
 }

@@ -71,9 +71,9 @@ impl<'a> FontRenderer<'a> {
         let scale = size_px as f32 / upem;
 
         let hhea = self.font.hhea();
-        let ascender = (hhea.ascender as f32 * scale) as i32;
+        let ascender = libm::roundf(hhea.ascender as f32 * scale) as i32;
 
-        let mut cursor_x = x;
+        let mut cursor_x = x as f32;
         let mut damage: Option<DamageRect> = None;
 
         for ch in text.chars() {
@@ -87,6 +87,12 @@ impl<'a> FontRenderer<'a> {
                 }
             }
 
+            // Get the true advance from font metrics (full float precision).
+            let true_advance = self.font.glyph_index(codepoint)
+                .and_then(|gid| self.font.h_metrics(gid))
+                .map(|hm| hm.advance_width as f32 * scale)
+                .unwrap_or(size_px as f32 * 0.5);
+
             // Extract glyph info from cache to avoid overlapping borrows
             let glyph_info = self.cache.get(codepoint, size_px).map(|g| {
                 (
@@ -94,13 +100,12 @@ impl<'a> FontRenderer<'a> {
                     g.bearing_y,
                     g.width,
                     g.height,
-                    g.advance,
                     g.coverage.clone(),
                 )
             });
 
-            if let Some((bearing_x, bearing_y, gw, gh, advance, cov)) = glyph_info {
-                let gx = cursor_x + bearing_x as i32;
+            if let Some((bearing_x, bearing_y, gw, gh, cov)) = glyph_info {
+                let gx = libm::roundf(cursor_x) as i32 + bearing_x as i32;
                 let gy = y + ascender - bearing_y as i32;
 
                 let glyph_damage = Self::draw_glyph_coverage_static(
@@ -117,12 +122,9 @@ impl<'a> FontRenderer<'a> {
                     (None, g) => g,
                     (d, None) => d,
                 };
-
-                cursor_x += advance as i32;
-            } else {
-                // Fallback: skip unknown glyphs with a small advance
-                cursor_x += (size_px / 2) as i32;
             }
+
+            cursor_x += true_advance;
         }
 
         if let Some(d) = damage {
@@ -153,21 +155,26 @@ impl<'a> FontRenderer<'a> {
         let hm = self.font.h_metrics(glyph_id)?;
         let outline = self.font.glyph_outline(glyph_id);
 
+        let scaled_advance = libm::roundf(hm.advance_width as f32 * scale) as u16;
+
         match outline {
             Some(ref out) if !out.contours.is_empty() => {
+                // +1 for anti-aliasing margin (ceilf already rounds up).
                 let glyph_width =
-                    libm::ceilf((out.x_max as i32 - out.x_min as i32) as f32 * scale) as i32 + 2;
+                    libm::ceilf((out.x_max as f32 - out.x_min as f32) * scale) as i32 + 1;
                 let glyph_height =
-                    libm::ceilf((out.y_max as i32 - out.y_min as i32) as f32 * scale) as i32 + 2;
+                    libm::ceilf((out.y_max as f32 - out.y_min as f32) * scale) as i32 + 1;
 
                 if glyph_width <= 0 || glyph_height <= 0 {
                     return None;
                 }
 
-                let bearing_x = (out.x_min as f32 * scale) as i16;
-                let bearing_y = (out.y_max as f32 * scale) as i16;
+                // Use left_side_bearing from hmtx (the font's intended spacing),
+                // not x_min from the outline (visual bbox edge).
+                let bearing_x = libm::roundf(hm.left_side_bearing as f32 * scale) as i16;
+                let bearing_y = libm::roundf(out.y_max as f32 * scale) as i16;
 
-                // Offset edges so the glyph starts at pixel (0, 0)
+                // Offset edges so the glyph bitmap starts at pixel (0, 0).
                 let x_offset = -(out.x_min as f32 * scale);
                 let y_offset = out.y_max as f32 * scale;
 
@@ -192,7 +199,7 @@ impl<'a> FontRenderer<'a> {
                     height: glyph_height as u16,
                     bearing_x,
                     bearing_y,
-                    advance: (hm.advance_width as f32 * scale) as u16,
+                    advance: scaled_advance,
                     coverage,
                 })
             }
@@ -203,7 +210,7 @@ impl<'a> FontRenderer<'a> {
                     height: 0,
                     bearing_x: 0,
                     bearing_y: 0,
-                    advance: (hm.advance_width as f32 * scale) as u16,
+                    advance: scaled_advance,
                     coverage: alloc::vec::Vec::new(),
                 })
             }
