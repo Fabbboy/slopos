@@ -153,25 +153,7 @@ test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
 
 [doc("Run unit tests for abi, gfx, and font crates on the host")]
 test-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Must run from a temp dir to escape the workspace .cargo/config.toml
-    # which sets build-std and a custom target that conflict with host tests.
-    repo_root="$(pwd)"
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' EXIT
-    mkdir -p "$tmp_dir/.cargo"
-    printf '[build]\ntarget = "x86_64-unknown-linux-gnu"\n' > "$tmp_dir/.cargo/config.toml"
-    cd "$tmp_dir"
-    SLOPOS_ROOT="$repo_root" cargo +{{rust_channel}} test \
-        --manifest-path "$repo_root/abi/Cargo.toml" \
-        --target-dir "$tmp_dir/target" 2>&1
-    SLOPOS_ROOT="$repo_root" cargo +{{rust_channel}} test \
-        --manifest-path "$repo_root/gfx/Cargo.toml" \
-        --target-dir "$tmp_dir/target" 2>&1
-    SLOPOS_ROOT="$repo_root" cargo +{{rust_channel}} test \
-        --manifest-path "$repo_root/font/Cargo.toml" \
-        --target-dir "$tmp_dir/target" 2>&1
+    SLOPOS_ROOT="$(pwd)" {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 

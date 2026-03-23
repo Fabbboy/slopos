@@ -38,6 +38,7 @@ CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
 RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS" \
 $CARGO +"$RUST_CHANNEL" build \
     -Zbuild-std=core,alloc \
+    -Zbuild-std-features=compiler-builtins-mem \
     -Zunstable-options \
     --target "$RUST_TARGET" \
     --package kernel \
