@@ -201,6 +201,26 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*process_ptr).page_dir }
 }
 
+pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
+    let cr3_phys = cr3 & !0xFFF;
+    if cr3_phys == 0 {
+        return INVALID_PROCESS_ID;
+    }
+
+    let manager = VM_MANAGER.lock();
+    for process in manager.processes.iter() {
+        if process.process_id == INVALID_PROCESS_ID || process.page_dir.is_null() {
+            continue;
+        }
+        let matches = unsafe { (*process.page_dir).pml4_phys.as_u64() == cr3_phys };
+        if matches {
+            return process.process_id;
+        }
+    }
+
+    INVALID_PROCESS_ID
+}
+
 pub fn process_vm_sync_kernel_mappings(process_id: u32) {
     let page_dir = process_vm_get_page_dir(process_id);
     if page_dir.is_null() {
@@ -1161,6 +1181,7 @@ pub fn create_process_vm() -> u32 {
         manager.num_processes += 1;
         klog_info!("Created process VM space for PID {}", process_id);
     }
+    tlb::register_process_tlb(process_id);
     process_id
 }
 pub fn destroy_process_vm(process_id: u32) -> c_int {
@@ -1174,6 +1195,9 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         }
         klog_info!("Destroying process VM space for PID {}", process_id);
     }
+
+    tlb::flush_all_for_process(process_id);
+    tlb::unregister_process_tlb(process_id);
 
     unsafe {
         klog_debug!(
@@ -2026,6 +2050,8 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         child_id,
         cow_pages
     );
+
+    tlb::register_process_tlb(child_id);
 
     child_id
 }

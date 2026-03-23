@@ -71,6 +71,7 @@ pub(crate) fn is_scheduling_active() -> bool {
 
 use slopos_mm::paging::paging_get_kernel_directory;
 use slopos_mm::process_vm::{process_vm_get_page_dir, process_vm_sync_kernel_mappings};
+use slopos_mm::tlb;
 use slopos_mm::user_copy;
 
 use super::ffi_boundary::{
@@ -176,6 +177,7 @@ fn requeue_running_task(cpu_id: usize, current: *mut Task) {
 }
 
 fn switch_to_kernel_address_space(task: *mut Task) {
+    tlb::enter_lazy_tlb(slopos_arch::pcr::get_current_cpu());
     unsafe {
         let kernel_dir = paging_get_kernel_directory();
         if !(*kernel_dir).pml4_phys.is_null() && !task.is_null() {
@@ -234,6 +236,13 @@ fn switch_from_current_to_idle(
     switch_to_kernel_address_space(idle_task);
 
     unsafe {
+        let old_pid = if !current.is_null() {
+            (*current).process_id
+        } else {
+            INVALID_PROCESS_ID
+        };
+        tlb::notify_mm_switch(old_pid, INVALID_PROCESS_ID, cpu_id);
+
         if !ensure_idle_context_valid(idle_task) {
             klog_info!(
                 "SCHED: CPU {} cannot recover idle context for task {}",
@@ -409,6 +418,22 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
 
     unsafe {
         let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;
+        let old_pid = if !from_task.is_null() {
+            (*from_task).process_id
+        } else {
+            INVALID_PROCESS_ID
+        };
+        let new_pid = if is_user_mode && (*to_task).process_id != INVALID_PROCESS_ID {
+            (*to_task).process_id
+        } else {
+            INVALID_PROCESS_ID
+        };
+        tlb::notify_mm_switch(old_pid, new_pid, cpu_id);
+        if is_user_mode {
+            tlb::exit_lazy_tlb(cpu_id);
+        } else {
+            tlb::enter_lazy_tlb(cpu_id);
+        }
 
         if is_user_mode {
             let fs = (*to_task).fs_base;

@@ -30,7 +30,7 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     let apic_id = apic::get_id();
     let cpu_idx = NEXT_CPU_ID.fetch_add(1, Ordering::AcqRel);
 
-    tlb::notify_cpu_online();
+    tlb::notify_cpu_online_id(cpu_idx);
 
     unsafe {
         let ap_pcr = pcr::init_ap_pcr(cpu_idx, apic_id);

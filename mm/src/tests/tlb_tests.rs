@@ -13,8 +13,9 @@ use slopos_testing::TestResult;
 use slopos_utils::klog_info;
 
 use crate::tlb::{
-    FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, flush_all, flush_asid, flush_page, flush_range,
-    get_active_cpu_count, handle_shootdown_ipi, has_invpcid, has_pcid, is_smp_active,
+    CpuMask, FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, enter_lazy_tlb, exit_lazy_tlb,
+    flush_all, flush_asid, flush_page, flush_range, get_active_cpu_count, handle_shootdown_ipi,
+    has_invpcid, has_pcid, is_smp_active, should_flush_tlb,
 };
 
 // =============================================================================
@@ -349,6 +350,103 @@ pub fn test_flush_type_from_invalid() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_cpumask_set_clear() -> TestResult {
+    let mask = CpuMask::new();
+    mask.set(3);
+    mask.set(129);
+    if !mask.contains(3) || !mask.contains(129) {
+        return TestResult::Fail;
+    }
+    mask.clear(3);
+    if mask.contains(3) || !mask.contains(129) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_cpumask_iter_set() -> TestResult {
+    let mask = CpuMask::new();
+    mask.set(1);
+    mask.set(65);
+    mask.set(130);
+    let mut found = [false; 3];
+    let mut count = 0usize;
+
+    for cpu in mask.iter_set() {
+        match cpu {
+            1 => found[0] = true,
+            65 => found[1] = true,
+            130 => found[2] = true,
+            _ => return TestResult::Fail,
+        }
+        count += 1;
+    }
+
+    if count != 3 || !found[0] || !found[1] || !found[2] {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_cpumask_boundary_cpus() -> TestResult {
+    let boundary = [0usize, 63, 64, 127, 128, 191, 192, 255];
+    let mask = CpuMask::new();
+    for cpu in boundary {
+        mask.set(cpu);
+    }
+    for cpu in boundary {
+        if !mask.contains(cpu) {
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_cpumask_clear_all() -> TestResult {
+    let mask = CpuMask::new();
+    for cpu in [0usize, 4, 67, 129, 255] {
+        mask.set(cpu);
+    }
+    mask.clear_all();
+    if mask.count() != 0 {
+        return TestResult::Fail;
+    }
+    for cpu in [0usize, 4, 67, 129, 255] {
+        if mask.contains(cpu) {
+            return TestResult::Fail;
+        }
+    }
+    TestResult::Pass
+}
+
+pub fn test_lazy_tlb_flag() -> TestResult {
+    let cpu = 0usize;
+    exit_lazy_tlb(cpu);
+    if !should_flush_tlb(cpu) {
+        return TestResult::Fail;
+    }
+    enter_lazy_tlb(cpu);
+    if should_flush_tlb(cpu) {
+        return TestResult::Fail;
+    }
+    exit_lazy_tlb(cpu);
+    if !should_flush_tlb(cpu) {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+pub fn test_should_flush_tlb_lazy_skips() -> TestResult {
+    let cpu = 0usize;
+    enter_lazy_tlb(cpu);
+    let result = should_flush_tlb(cpu);
+    exit_lazy_tlb(cpu);
+    if result {
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 // =============================================================================
 // STRESS TESTS
 // =============================================================================
@@ -417,6 +515,12 @@ slopos_testing::define_test_suite!(
         test_max_cpus_reasonable,
         test_flush_type_from_valid,
         test_flush_type_from_invalid,
+        test_cpumask_set_clear,
+        test_cpumask_iter_set,
+        test_cpumask_boundary_cpus,
+        test_cpumask_clear_all,
+        test_lazy_tlb_flag,
+        test_should_flush_tlb_lazy_skips,
         test_rapid_flush_pages,
         test_rapid_flush_all,
         test_interleaved_flush_operations,
