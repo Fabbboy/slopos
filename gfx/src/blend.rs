@@ -203,3 +203,99 @@ pub fn fill_rect_blended<T: Canvas>(
     target.report_damage(damage);
     Some(damage)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blend_fully_opaque_src_returns_src() {
+        let src = Color32::rgb(200, 100, 50).to_u32();
+        let dst = Color32::rgb(10, 20, 30).to_u32();
+        assert_eq!(alpha_blend(src, dst), src);
+    }
+
+    #[test]
+    fn blend_fully_transparent_src_returns_dst() {
+        let src = Color32::new(200, 100, 50, 0).to_u32();
+        let dst = Color32::rgb(10, 20, 30).to_u32();
+        assert_eq!(alpha_blend(src, dst), dst);
+    }
+
+    #[test]
+    fn blend_50_percent_alpha_on_opaque_dst() {
+        let src = Color32::new(200, 0, 0, 128).to_u32();
+        let dst = Color32::rgb(100, 0, 0).to_u32();
+        let result = alpha_blend(src, dst);
+        let c = Color32(result);
+        assert_eq!(c.alpha(), 255);
+        let r = c.red() as i32;
+        assert!((r - 150).abs() <= 2, "Expected red ~150, got {r}");
+    }
+
+    #[test]
+    fn blend_regression_not_premultiplied() {
+        // Old bug: treated src channels as premultiplied, producing r=250 instead of ~150
+        let src = Color32::new(200, 0, 0, 128).to_u32();
+        let dst = Color32::rgb(100, 0, 0).to_u32();
+        let result = alpha_blend(src, dst);
+        let r = Color32(result).red();
+        assert!(r < 200, "red={r} too bright — premultiplied bug");
+    }
+
+    #[test]
+    fn blend_25_percent_alpha() {
+        let src = Color32::new(255, 0, 0, 64).to_u32();
+        let dst = Color32::rgb(0, 0, 255).to_u32();
+        let c = Color32(alpha_blend(src, dst));
+        assert_eq!(c.alpha(), 255);
+        assert!((c.red() as i32 - 64).abs() <= 2, "red={}", c.red());
+        assert!((c.blue() as i32 - 191).abs() <= 2, "blue={}", c.blue());
+    }
+
+    #[test]
+    fn blend_both_semitransparent() {
+        let src = Color32::new(255, 0, 0, 128).to_u32();
+        let dst = Color32::new(0, 0, 255, 128).to_u32();
+        let c = Color32(alpha_blend(src, dst));
+        assert!((c.alpha() as i32 - 192).abs() <= 2, "alpha={}", c.alpha());
+    }
+
+    #[test]
+    fn blend_black_on_white() {
+        let src = Color32::new(0, 0, 0, 128).to_u32();
+        let dst = Color32::WHITE.to_u32();
+        let c = Color32(alpha_blend(src, dst));
+        assert!((c.red() as i32 - 127).abs() <= 3, "r={}", c.red());
+    }
+
+    #[test]
+    fn blend_white_on_black() {
+        let src = Color32::new(255, 255, 255, 128).to_u32();
+        let dst = Color32::BLACK.to_u32();
+        let c = Color32(alpha_blend(src, dst));
+        assert!((c.red() as i32 - 128).abs() <= 3, "r={}", c.red());
+    }
+
+    #[test]
+    fn coverage_zero_returns_dst() {
+        let dst = Color32::rgb(0, 0, 255).to_u32();
+        assert_eq!(blend_coverage(0, Color32::rgb(255, 0, 0), dst), dst);
+    }
+
+    #[test]
+    fn coverage_full_opaque_returns_fg() {
+        let fg = Color32::rgb(255, 0, 0);
+        let dst = Color32::rgb(0, 0, 255).to_u32();
+        assert_eq!(blend_coverage(255, fg, dst), fg.to_u32());
+    }
+
+    #[test]
+    fn coverage_half() {
+        let fg = Color32::rgb(200, 0, 0);
+        let dst = Color32::rgb(0, 0, 100).to_u32();
+        let c = Color32(blend_coverage(128, fg, dst));
+        assert!((c.red() as i32 - 100).abs() <= 3, "r={}", c.red());
+        assert!((c.blue() as i32 - 50).abs() <= 3, "b={}", c.blue());
+    }
+}

@@ -258,3 +258,154 @@ impl<'a> FontRenderer<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slopos_abi::draw::{Canvas, EncodedPixel};
+    use slopos_abi::pixel::PixelFormat;
+
+    const INTER_TTF: &[u8] = include_bytes!(concat!(env!("SLOPOS_ROOT"), "/assets/fonts/Inter-Regular.ttf"));
+
+    struct TestCanvas {
+        data: alloc::vec::Vec<u8>,
+        width: u32,
+        height: u32,
+    }
+
+    impl TestCanvas {
+        fn new(width: u32, height: u32) -> Self {
+            Self {
+                data: alloc::vec![0u8; (width * height * 4) as usize],
+                width,
+                height,
+            }
+        }
+
+        fn has_any_nonzero(&self) -> bool {
+            self.data.iter().any(|&b| b != 0)
+        }
+
+        fn read_pixel(&self, x: u32, y: u32) -> Color32 {
+            let off = (y * self.width + x) as usize * 4;
+            let raw = u32::from_le_bytes([
+                self.data[off], self.data[off + 1],
+                self.data[off + 2], self.data[off + 3],
+            ]);
+            PixelFormat::Argb8888.decode(raw)
+        }
+    }
+
+    impl Canvas for TestCanvas {
+        fn width(&self) -> u32 { self.width }
+        fn height(&self) -> u32 { self.height }
+        fn pitch_bytes(&self) -> usize { self.width as usize * 4 }
+        fn bytes_per_pixel(&self) -> u8 { 4 }
+        fn pixel_format(&self) -> PixelFormat { PixelFormat::Argb8888 }
+        fn write_encoded_at(&mut self, off: usize, pixel: EncodedPixel) {
+            let bytes = pixel.to_u32().to_le_bytes();
+            if off + 4 <= self.data.len() {
+                self.data[off..off + 4].copy_from_slice(&bytes);
+            }
+        }
+        fn read_encoded_at(&self, off: usize) -> u32 {
+            if off + 4 <= self.data.len() {
+                u32::from_le_bytes([self.data[off], self.data[off+1], self.data[off+2], self.data[off+3]])
+            } else { 0 }
+        }
+    }
+
+    #[test]
+    fn parse_inter_font() {
+        let font = ttf_parser::TtfFont::parse(INTER_TTF).unwrap();
+        assert!(font.units_per_em() > 0);
+        assert!(font.num_glyphs() > 100);
+    }
+
+    #[test]
+    fn glyph_index_ascii() {
+        let font = ttf_parser::TtfFont::parse(INTER_TTF).unwrap();
+        let gid = font.glyph_index('A' as u32).unwrap();
+        assert!(gid > 0);
+        assert!(font.glyph_index(' ' as u32).is_some());
+    }
+
+    #[test]
+    fn glyph_outline_has_contours() {
+        let font = ttf_parser::TtfFont::parse(INTER_TTF).unwrap();
+        let gid = font.glyph_index('A' as u32).unwrap();
+        let outline = font.glyph_outline(gid).unwrap();
+        assert!(!outline.contours.is_empty());
+    }
+
+    #[test]
+    fn h_metrics_for_ascii() {
+        let font = ttf_parser::TtfFont::parse(INTER_TTF).unwrap();
+        let gid = font.glyph_index('A' as u32).unwrap();
+        let hm = font.h_metrics(gid).unwrap();
+        assert!(hm.advance_width > 0);
+    }
+
+    #[test]
+    fn measure_text_nonzero() {
+        let renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let (w, h) = renderer.measure_text("Hello", 16);
+        assert!(w > 0 && h > 0, "w={w}, h={h}");
+    }
+
+    #[test]
+    fn measure_empty_text_zero_width() {
+        let renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let (w, _) = renderer.measure_text("", 16);
+        assert_eq!(w, 0);
+    }
+
+    #[test]
+    fn draw_text_produces_pixels() {
+        let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let mut canvas = TestCanvas::new(200, 50);
+        let d = renderer.draw_text(&mut canvas, 10, 10, "Hello", 16, Color32::WHITE);
+        assert!(d.is_some());
+        assert!(canvas.has_any_nonzero());
+    }
+
+    #[test]
+    fn draw_text_damage_rect_sane() {
+        let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let mut canvas = TestCanvas::new(200, 50);
+        let d = renderer.draw_text(&mut canvas, 10, 10, "AB", 16, Color32::WHITE).unwrap();
+        assert!(d.x0 >= 0 && d.y0 >= 0 && d.x1 < 200 && d.y1 < 50);
+        assert!(d.x1 - d.x0 > 5, "width {} too small", d.x1 - d.x0);
+    }
+
+    #[test]
+    fn rasterizer_full_coverage_reaches_255() {
+        let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let mut canvas = TestCanvas::new(100, 100);
+        renderer.draw_text(&mut canvas, 10, 10, "O", 48, Color32::WHITE);
+        let max_a = (0..100u32)
+            .flat_map(|y| (0..100u32).map(move |x| (x, y)))
+            .map(|(x, y)| canvas.read_pixel(x, y).alpha())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(max_a, 255, "max coverage={max_a}, expected 255");
+    }
+
+    #[test]
+    fn different_sizes_produce_different_metrics() {
+        let r1 = FontRenderer::new(INTER_TTF).unwrap();
+        let r2 = FontRenderer::new(INTER_TTF).unwrap();
+        let (w1, h1) = r1.measure_text("A", 12);
+        let (w2, h2) = r2.measure_text("A", 24);
+        assert!(w2 > w1, "24px should be wider than 12px");
+        assert!(h2 > h1, "24px should be taller than 12px");
+    }
+
+    #[test]
+    fn space_advances_cursor() {
+        let renderer = FontRenderer::new(INTER_TTF).unwrap();
+        let (w_a, _) = renderer.measure_text("A", 16);
+        let (w_aa, _) = renderer.measure_text("A A", 16);
+        assert!(w_aa > w_a * 2 - 5, "A={w_a}, A_A={w_aa}");
+    }
+}

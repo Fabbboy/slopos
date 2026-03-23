@@ -759,3 +759,145 @@ pub fn rounded_rect_filled<T: Canvas>(
     };
     emit(target, damage)
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use super::*;
+    use slopos_abi::draw::EncodedPixel;
+    use slopos_abi::pixel::PixelFormat;
+
+    struct TestCanvas {
+        data: alloc::vec::Vec<u8>,
+        width: u32,
+        height: u32,
+    }
+
+    impl TestCanvas {
+        fn new(width: u32, height: u32) -> Self {
+            Self {
+                data: alloc::vec![0u8; (width * height * 4) as usize],
+                width,
+                height,
+            }
+        }
+
+        fn read_pixel(&self, x: u32, y: u32) -> Color32 {
+            let off = (y * self.width + x) as usize * 4;
+            let raw = u32::from_le_bytes([
+                self.data[off], self.data[off + 1],
+                self.data[off + 2], self.data[off + 3],
+            ]);
+            PixelFormat::Argb8888.decode(raw)
+        }
+    }
+
+    impl Canvas for TestCanvas {
+        fn width(&self) -> u32 { self.width }
+        fn height(&self) -> u32 { self.height }
+        fn pitch_bytes(&self) -> usize { self.width as usize * 4 }
+        fn bytes_per_pixel(&self) -> u8 { 4 }
+        fn pixel_format(&self) -> PixelFormat { PixelFormat::Argb8888 }
+
+        fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
+            let bytes = pixel.to_u32().to_le_bytes();
+            if byte_offset + 4 <= self.data.len() {
+                self.data[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
+            }
+        }
+
+        fn read_encoded_at(&self, byte_offset: usize) -> u32 {
+            if byte_offset + 4 <= self.data.len() {
+                u32::from_le_bytes([
+                    self.data[byte_offset], self.data[byte_offset + 1],
+                    self.data[byte_offset + 2], self.data[byte_offset + 3],
+                ])
+            } else { 0 }
+        }
+    }
+
+    #[test]
+    fn line_draws_horizontal() {
+        let mut c = TestCanvas::new(10, 10);
+        line(&mut c, 0, 0, 9, 0, Color32::WHITE);
+        for x in 0..10 {
+            assert_eq!(c.read_pixel(x, 0), Color32::WHITE);
+        }
+        assert_eq!(c.read_pixel(0, 1).red(), 0);
+    }
+
+    #[test]
+    fn fill_rect_fills_area() {
+        let mut c = TestCanvas::new(20, 20);
+        let red = Color32::rgb(255, 0, 0);
+        fill_rect(&mut c, 5, 5, 3, 3, red);
+        assert_eq!(c.read_pixel(5, 5), red);
+        assert_eq!(c.read_pixel(7, 7), red);
+        assert_ne!(c.read_pixel(4, 5), red);
+        assert_ne!(c.read_pixel(8, 5), red);
+    }
+
+    #[test]
+    fn line_aa_produces_output() {
+        let mut c = TestCanvas::new(20, 20);
+        let d = line_aa(&mut c, 0, 0, 19, 10, Color32::WHITE);
+        assert!(d.is_some());
+        assert!(c.read_pixel(0, 0).red() > 0);
+    }
+
+    #[test]
+    fn circle_aa_outline_not_filled() {
+        let mut c = TestCanvas::new(50, 50);
+        circle_aa(&mut c, 25, 25, 10, Color32::WHITE);
+        assert!(c.read_pixel(25, 15).red() > 0, "boundary should be drawn");
+        assert_eq!(c.read_pixel(25, 25).red(), 0, "center should be empty");
+    }
+
+    #[test]
+    fn rounded_rect_edge_and_interior() {
+        let mut c = TestCanvas::new(60, 40);
+        rounded_rect(&mut c, 5, 5, 50, 30, 8, Color32::WHITE);
+        assert_eq!(c.read_pixel(30, 5), Color32::WHITE, "top edge");
+        assert_eq!(c.read_pixel(30, 20).red(), 0, "interior empty");
+    }
+
+    #[test]
+    fn rounded_rect_filled_interior() {
+        let mut c = TestCanvas::new(60, 40);
+        let color = Color32::rgb(100, 150, 200);
+        rounded_rect_filled(&mut c, 5, 5, 50, 30, 8, color);
+        assert_eq!(c.read_pixel(30, 20), color, "interior filled");
+        assert_eq!(c.read_pixel(0, 0).red(), 0, "outside empty");
+    }
+
+    #[test]
+    fn rounded_rect_zero_radius_equals_rect() {
+        let mut c1 = TestCanvas::new(30, 30);
+        let mut c2 = TestCanvas::new(30, 30);
+        let color = Color32::rgb(50, 100, 150);
+        rounded_rect(&mut c1, 5, 5, 20, 20, 0, color);
+        rect(&mut c2, 5, 5, 20, 20, color);
+        assert_eq!(c1.data, c2.data);
+    }
+
+    #[test]
+    fn blend_put_pixel_on_canvas() {
+        let mut c = TestCanvas::new(10, 10);
+        fill_rect(&mut c, 0, 0, 10, 10, Color32::rgb(0, 0, 255));
+        crate::blend::put_pixel_blended(&mut c, 5, 5, Color32::new(255, 0, 0, 128));
+        let px = c.read_pixel(5, 5);
+        assert!(px.red() > 50 && px.red() < 200, "r={}", px.red());
+        assert!(px.blue() > 50, "b={}", px.blue());
+    }
+
+    #[test]
+    fn fill_rect_blended_semitransparent() {
+        let mut c = TestCanvas::new(10, 10);
+        fill_rect(&mut c, 0, 0, 10, 10, Color32::WHITE);
+        crate::blend::fill_rect_blended(&mut c, 2, 2, 6, 6, Color32::new(0, 0, 0, 128));
+        let px = c.read_pixel(5, 5);
+        assert!((px.red() as i32 - 127).abs() <= 5, "r={}", px.red());
+        assert_eq!(c.read_pixel(0, 0), Color32::WHITE, "outside untouched");
+    }
+}

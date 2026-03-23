@@ -1,5 +1,0 @@
-# Override the workspace's custom target/build-std settings.
-# This crate uses the host target with the pre-built standard library.
-[build]
-target = "x86_64-unknown-linux-gnu"
-target-dir = "target"

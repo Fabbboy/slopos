@@ -12,7 +12,6 @@ workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
-test = false
 doctest = false
 
 [dependencies]
