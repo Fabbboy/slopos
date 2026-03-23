@@ -22,6 +22,7 @@ slopos-abi = { workspace = true }
 slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
 slopos-kernel-services = { workspace = true }
+slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-sync = { workspace = true }

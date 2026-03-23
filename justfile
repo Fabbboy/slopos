@@ -151,6 +151,10 @@ boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_T
 [doc("Run interrupt test harness in QEMU")]
 test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
 
+[doc("Run unit tests for abi, gfx, and font crates on the host")]
+test-host:
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font
+
 # ── Utilities ────────────────────────────────────────────────────────────────
 
 [doc("Show detected QEMU framebuffer resolution")]

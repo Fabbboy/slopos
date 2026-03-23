@@ -19,5 +19,9 @@ pub fn draw_button(
     };
 
     gfx::fill_rect(buf, x, y, size, size, color);
-    gfx::font::draw_string(buf, x + size / 4, y + size / 4, label, COLOR_TEXT, color);
+    let tw = crate::gfx::font::string_width(label);
+    let th = crate::gfx::font::cell_height();
+    let tx = x + (size - tw) / 2;
+    let ty = y + (size - th) / 2;
+    crate::gfx::font::draw_string(buf, tx, ty, label, COLOR_TEXT, color);
 }

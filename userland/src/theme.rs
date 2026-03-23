@@ -7,7 +7,6 @@ pub const BUTTON_PADDING: i32 = 2;
 
 // Taskbar Sizes
 pub const TASKBAR_HEIGHT: i32 = 32;
-pub const TASKBAR_BUTTON_WIDTH: i32 = 120;
 pub const TASKBAR_BUTTON_PADDING: i32 = 4;
 pub const START_BUTTON_WIDTH: i32 = 56;
 pub const START_APPS_GAP: i32 = 14;

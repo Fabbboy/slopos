@@ -5,7 +5,7 @@ use slopos_slibc::mem::malloc::heap_stats;
 
 use crate::gfx::DrawBuffer;
 use crate::gfx::draw_rect;
-use crate::gfx::font::FONT_CHAR_HEIGHT;
+use crate::gfx::font;
 
 use super::{
     COLOR_BG, COLOR_BRIGHT, COLOR_DIM, COLOR_STATE_BLOCK, COLOR_STATE_RUN, COLOR_TEXT, SysmonApp,
@@ -14,13 +14,17 @@ use super::{
 
 impl SysmonApp {
     pub(crate) fn draw_hardware(&self, fb: &mut DrawBuffer<'_>, width: i32, _height: i32) {
-        let mut y = super::TAB_HEIGHT + 8;
+        let mut y = super::tab_height() + 4;
         let lx = 10;
         let vx = 130;
         let bar_w = (width - 170).max(80);
+        let ch = font::cell_height();
+        // Tighter row height for the dense hardware tab.
+        let rh = ch;
+        let divider_gap = 4;
 
         self.draw_section_title(fb, lx, y, "PROCESSOR");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         Self::text(fb, lx + 4, y, "Model", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -30,7 +34,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Vendor", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -40,7 +44,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Cores", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -50,7 +54,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Family/Model", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -63,7 +67,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Features", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -73,13 +77,13 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 6;
+        y += rh + divider_gap;
 
         draw_rect(fb, lx, y, width - 20, 1, COLOR_DIM);
-        y += 6;
+        y += divider_gap;
 
         self.draw_section_title(fb, lx, y, "MEMORY");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
         let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
             .saturating_mul(PAGE_SIZE);
@@ -95,8 +99,8 @@ impl SysmonApp {
             format_bytes_mib(total_bytes),
             mem_pct
         );
-        self.draw_usage_bar(fb, lx, y, bar_w, 14, mem_pct, &mem_bar);
-        y += 18;
+        self.draw_usage_bar(fb, lx, y, bar_w, rh, mem_pct, &mem_bar);
+        y += rh + 2;
         Self::text(fb, lx + 4, y, "Total", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -110,7 +114,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Free", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -120,7 +124,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Allocated", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -130,13 +134,13 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 6;
+        y += rh + divider_gap;
 
         draw_rect(fb, lx, y, width - 20, 1, COLOR_DIM);
-        y += 6;
+        y += divider_gap;
 
         self.draw_section_title(fb, lx, y, "SCHEDULER");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         Self::text(fb, lx + 4, y, "Ctx switches", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -146,7 +150,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Sched switches", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -156,7 +160,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Yields", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -166,7 +170,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Schedule calls", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -176,13 +180,13 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 6;
+        y += rh + divider_gap;
 
         draw_rect(fb, lx, y, width - 20, 1, COLOR_DIM);
-        y += 6;
+        y += divider_gap;
 
         self.draw_section_title(fb, lx, y, "HEAP");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         let stats = heap_stats();
         Self::text(fb, lx + 4, y, "Heap size", COLOR_DIM, COLOR_BG);
         Self::text(
@@ -193,7 +197,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Wilderness", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -203,7 +207,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Mmap allocs", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -213,13 +217,13 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 6;
+        y += rh + divider_gap;
 
         draw_rect(fb, lx, y, width - 20, 1, COLOR_DIM);
-        y += 6;
+        y += divider_gap;
 
         self.draw_section_title(fb, lx, y, "NETWORK");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         Self::text(fb, lx + 4, y, "Status", COLOR_DIM, COLOR_BG);
         let net_status = if self.net_info.nic_ready != 0 {
             if self.net_info.link_up != 0 {
@@ -236,7 +240,7 @@ impl SysmonApp {
             COLOR_STATE_BLOCK
         };
         Self::text(fb, vx, y, net_status, status_color, COLOR_BG);
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "IP", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -252,7 +256,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "MAC", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -270,13 +274,13 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 6;
+        y += rh + divider_gap;
 
         draw_rect(fb, lx, y, width - 20, 1, COLOR_DIM);
-        y += 6;
+        y += divider_gap;
 
         self.draw_section_title(fb, lx, y, "BOOT");
-        y += FONT_CHAR_HEIGHT + 2;
+        y += ch;
         Self::text(fb, lx + 4, y, "Uptime", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -286,7 +290,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "Boot flags", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,
@@ -296,7 +300,7 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT;
+        y += rh;
         Self::text(fb, lx + 4, y, "W/L Balance", COLOR_DIM, COLOR_BG);
         Self::text(
             fb,

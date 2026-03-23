@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_arch::cpu;
 use slopos_utils::{klog_debug, klog_info};
 
@@ -16,6 +17,7 @@ use crate::page_alloc::{
     ALLOC_FLAG_ZERO, alloc_page_frame, free_page_frame, page_frame_can_free, page_frame_is_tracked,
 };
 use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB};
+
 use crate::tlb;
 
 static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
@@ -139,6 +141,21 @@ fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
 fn is_user_address(vaddr: VirtAddr) -> bool {
     let raw = vaddr.as_u64();
     raw < KERNEL_VIRTUAL_BASE && raw >= crate::memory_layout_defs::USER_SPACE_START_VA
+}
+
+#[inline]
+fn flush_page_for_directory(_page_dir: *mut ProcessPageDir, vaddr: VirtAddr) {
+    // Page table modifications happen inside IrqMutex-locked sections.
+    // Targeted IPIs cannot be used here because the ack wait would deadlock
+    // against other CPUs spinning for the same lock with interrupts disabled.
+    // Broadcast flush is safe: the LAPIC delivers the IPI to all CPUs that
+    // have interrupts enabled, and wait_for_acks re-enables interrupts on
+    // the initiator so it can still service incoming IPIs from others.
+    //
+    // The gold-standard targeted path (cpumask + tlb_gen + lazy) is used by
+    // process lifecycle operations (destroy_process_vm, flush_all_for_process)
+    // which run OUTSIDE locked sections.
+    tlb::flush_page(vaddr);
 }
 
 #[inline(always)]
@@ -280,7 +297,7 @@ fn map_page_in_directory(
                 return -1;
             }
             pdpt_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
-            tlb::flush_page(vaddr);
+            flush_page_for_directory(page_dir, vaddr);
             return 0;
         }
 
@@ -315,7 +332,7 @@ fn map_page_in_directory(
                 return -1;
             }
             pd_entry.set(paddr, flags | PageFlags::PRESENT | PageFlags::HUGE);
-            tlb::flush_page(vaddr);
+            flush_page_for_directory(page_dir, vaddr);
             return 0;
         }
 
@@ -356,7 +373,7 @@ fn map_page_in_directory(
         pt_entry.set(paddr, flags | PageFlags::PRESENT);
 
         if was_present {
-            tlb::flush_page(vaddr);
+            flush_page_for_directory(page_dir, vaddr);
         }
     }
     0
@@ -432,7 +449,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         if pdpt_entry.is_huge() {
             let phys = pdpt_entry.address();
             pdpt_entry.clear();
-            tlb::flush_page(vaddr);
+            flush_page_for_directory(page_dir, vaddr);
             if table_empty(&*pdpt) {
                 pml4_entry.clear();
                 if page_frame_can_free(pml4_entry_phys) != 0 {
@@ -454,7 +471,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
         if pd_entry.is_huge() {
             unmapped_phys = pd_entry.address();
             pd_entry.clear();
-            tlb::flush_page(vaddr);
+            flush_page_for_directory(page_dir, vaddr);
         } else {
             let pd_entry_phys = pd_entry.address();
             let pt = phys_to_table(pd_entry_phys);
@@ -465,7 +482,7 @@ fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> Ph
             if pt_entry.is_present() {
                 unmapped_phys = pt_entry.address();
                 pt_entry.clear();
-                tlb::flush_page(vaddr);
+                flush_page_for_directory(page_dir, vaddr);
             } else {
                 unmapped_phys = PhysAddr::NULL;
             }
@@ -507,8 +524,16 @@ pub fn switch_page_directory(page_dir: *mut ProcessPageDir) -> c_int {
     if page_dir.is_null() {
         return -1;
     }
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let old_process_id = tlb::current_process_on_cpu(cpu);
     unsafe {
         set_cr3((*page_dir).pml4_phys);
+        let new_process_id = if (*page_dir).process_id == 0 {
+            INVALID_PROCESS_ID
+        } else {
+            (*page_dir).process_id
+        };
+        tlb::notify_mm_switch(old_process_id, new_process_id, cpu);
     }
     0
 }
@@ -812,7 +837,7 @@ pub fn paging_update_range_protection(
                 } else {
                     pt_entry.remove_flags(PageFlags::NO_EXECUTE);
                 }
-                tlb::flush_page(vaddr);
+                flush_page_for_directory(page_dir, vaddr);
             }
             addr += PAGE_SIZE_4KB;
         }
@@ -937,7 +962,7 @@ pub fn paging_resolve_cow(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> c_i
 
         pt_entry.remove_flags(PageFlags::COW);
         pt_entry.add_flags(PageFlags::WRITABLE);
-        tlb::flush_page(aligned_vaddr);
+        flush_page_for_directory(page_dir, aligned_vaddr);
     }
 
     0

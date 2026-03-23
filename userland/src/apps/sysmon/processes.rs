@@ -9,11 +9,11 @@ use crate::gfx::{DrawBuffer, draw_rect, fill_rect, fill_rect_clipped};
 use crate::syscall::process as sys_proc;
 
 use super::{
-    COL_CPU_PCT_X, COL_CPU_X, COL_NAME_X, COL_PID_X, COL_PRI_X, COL_RUNTIME_X, COL_STATE_X,
     COLOR_BG, COLOR_BRIGHT, COLOR_DIM, COLOR_HEADER, COLOR_KILL_RED, COLOR_ROW_EVEN, COLOR_ROW_ODD,
-    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, PROCESS_HEADER_H, PROCESS_HEADER_Y,
-    PROCESS_ROW_H, PROCESS_ROWS_Y, PROCESS_STATUS_H, SysmonApp, Tab, format_pct, format_runtime,
-    priority_label, task_name_string, task_state, truncate_name,
+    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, SysmonApp, Tab, col_cpu_pct_x, col_cpu_x,
+    col_name_x, col_pid_x, col_pri_x, col_runtime_x, col_state_x, format_pct, format_runtime,
+    priority_label, process_header_h, process_header_y, process_row_h, process_rows_y,
+    process_status_h, task_name_string, task_state, truncate_name,
 };
 
 const CONTEXT_MENU_W: i32 = 140;
@@ -44,70 +44,70 @@ impl SysmonApp {
         fill_rect(
             fb,
             0,
-            PROCESS_HEADER_Y,
+            process_header_y(),
             width,
-            PROCESS_HEADER_H + 2,
+            process_header_h() + 2,
             COLOR_HEADER,
         );
 
         self.draw_header_cell(
             fb,
-            COL_PID_X,
-            PROCESS_HEADER_Y,
+            col_pid_x(),
+            process_header_y(),
             "PID",
             super::SortColumn::Pid,
         );
         self.draw_header_cell(
             fb,
-            COL_NAME_X,
-            PROCESS_HEADER_Y,
+            col_name_x(),
+            process_header_y(),
             "Name",
             super::SortColumn::Name,
         );
         self.draw_header_cell(
             fb,
-            COL_STATE_X,
-            PROCESS_HEADER_Y,
+            col_state_x(),
+            process_header_y(),
             "State",
             super::SortColumn::State,
         );
         self.draw_header_cell(
             fb,
-            COL_CPU_PCT_X,
-            PROCESS_HEADER_Y,
+            col_cpu_pct_x(),
+            process_header_y(),
             "CPU%",
             super::SortColumn::CpuPct,
         );
         self.draw_header_cell(
             fb,
-            COL_PRI_X,
-            PROCESS_HEADER_Y,
+            col_pri_x(),
+            process_header_y(),
             "Pri",
             super::SortColumn::Priority,
         );
         self.draw_header_cell(
             fb,
-            COL_CPU_X,
-            PROCESS_HEADER_Y,
+            col_cpu_x(),
+            process_header_y(),
             "CPU",
             super::SortColumn::Cpu,
         );
         self.draw_header_cell(
             fb,
-            COL_RUNTIME_X,
-            PROCESS_HEADER_Y,
+            col_runtime_x(),
+            process_header_y(),
             "Runtime",
             super::SortColumn::Runtime,
         );
 
-        let rows_h = (height - PROCESS_ROWS_Y - PROCESS_STATUS_H).max(0);
+        let rows_h = (height - process_rows_y() - process_status_h()).max(0);
         let clip = DamageRect {
             x0: 0,
-            y0: PROCESS_ROWS_Y,
+            y0: process_rows_y(),
             x1: width - 1,
-            y1: PROCESS_ROWS_Y + rows_h - 1,
+            y1: process_rows_y() + rows_h - 1,
         };
-        fill_rect(fb, 0, PROCESS_ROWS_Y, width, rows_h, COLOR_BG);
+        fill_rect(fb, 0, process_rows_y(), width, rows_h, COLOR_BG);
 
         for row in 0..max_rows {
             let task_row = self.scroll_offset + row;
@@ -118,7 +118,7 @@ impl SysmonApp {
                 continue;
             };
             let task = &self.tasks[idx];
-            let y = PROCESS_ROWS_Y + (row as i32) * PROCESS_ROW_H;
+            let y = process_rows_y() + (row as i32) * process_row_h();
 
             let row_bg = if task_row == self.selected_row {
                 COLOR_ROW_SELECTED
@@ -127,33 +127,33 @@ impl SysmonApp {
             } else {
                 COLOR_ROW_ODD
             };
-            fill_rect_clipped(fb, 0, y, width, PROCESS_ROW_H, row_bg, &clip);
+            fill_rect_clipped(fb, 0, y, width, process_row_h(), row_bg, &clip);
 
             let (state, state_color) = task_state(task.state);
 
             let pid = format!("{}", task.task_id);
-            Self::text(fb, COL_PID_X, y, &pid, super::COLOR_TEXT, row_bg);
+            Self::text(fb, col_pid_x(), y, &pid, super::COLOR_TEXT, row_bg);
             let name = truncate_name(&task_name_string(task), 16);
-            Self::text(fb, COL_NAME_X, y, &name, super::COLOR_TEXT, row_bg);
-            Self::text(fb, COL_STATE_X, y, state, state_color, row_bg);
+            Self::text(fb, col_name_x(), y, &name, super::COLOR_TEXT, row_bg);
+            Self::text(fb, col_state_x(), y, state, state_color, row_bg);
             let cpu_pct = format_pct(self.task_cpu_pct[idx]);
-            Self::text(fb, COL_CPU_PCT_X, y, &cpu_pct, super::COLOR_TEXT, row_bg);
+            Self::text(fb, col_cpu_pct_x(), y, &cpu_pct, super::COLOR_TEXT, row_bg);
             Self::text(
                 fb,
-                COL_PRI_X,
+                col_pri_x(),
                 y,
                 priority_label(task.priority),
                 super::COLOR_TEXT,
                 row_bg,
             );
             let last_cpu = format!("{}", task.last_cpu);
-            Self::text(fb, COL_CPU_X, y, &last_cpu, super::COLOR_TEXT, row_bg);
+            Self::text(fb, col_cpu_x(), y, &last_cpu, super::COLOR_TEXT, row_bg);
             let runtime = format_runtime(task.total_runtime_us);
-            Self::text(fb, COL_RUNTIME_X, y, &runtime, super::COLOR_TEXT, row_bg);
+            Self::text(fb, col_runtime_x(), y, &runtime, super::COLOR_TEXT, row_bg);
         }
 
-        let status_y = height - PROCESS_STATUS_H;
-        fill_rect(fb, 0, status_y, width, PROCESS_STATUS_H, COLOR_HEADER);
+        let status_y = height - process_status_h();
+        fill_rect(fb, 0, status_y, width, process_status_h(), COLOR_HEADER);
         Self::text(
             fb,
             6,
@@ -175,18 +175,18 @@ impl SysmonApp {
     }
 
     pub(crate) fn handle_tab_click(&mut self, x: i32, y: i32) -> bool {
-        if y >= super::TAB_HEIGHT {
+        if y >= super::tab_height() {
             return false;
         }
 
-        let tab_step = super::TAB_WIDTH + 2;
+        let tab_step = super::tab_width() + 2;
         if x < 4 {
             return false;
         }
 
         let idx = (x - 4) / tab_step;
         let tab_x = 4 + idx * tab_step;
-        if idx < 0 || idx >= 3 || x >= tab_x + super::TAB_WIDTH {
+        if idx < 0 || idx >= 3 || x >= tab_x + super::tab_width() {
             return false;
         }
 
@@ -412,7 +412,7 @@ impl SysmonApp {
             String::from("unknown")
         };
         let title = format!("Kill task '{}' (PID {})?", task_name, pid);
-        let text_x = layout.x + ((layout.w - (title.len() as i32 * 8)) / 2).max(8);
+        let text_x = layout.x + ((layout.w - crate::gfx::font::string_width(&title)) / 2).max(8);
         Self::text(
             fb,
             text_x,
@@ -466,8 +466,10 @@ impl SysmonApp {
             COLOR_DIM,
         );
 
-        let kill_text_x = layout.kill_x + (KILL_BUTTON_W - (4 * 8)) / 2;
-        let cancel_text_x = layout.cancel_x + (KILL_BUTTON_W - (6 * 8)) / 2;
+        let kill_text_x =
+            layout.kill_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Kill")) / 2;
+        let cancel_text_x =
+            layout.cancel_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Cancel")) / 2;
         Self::text(
             fb,
             kill_text_x,

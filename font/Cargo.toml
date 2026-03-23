@@ -1,7 +1,7 @@
 [package]
-name = "slopos-gfx"
-edition.workspace = true
+name = "slopos-font"
 version.workspace = true
+edition.workspace = true
 license.workspace = true
 
 [lints]
@@ -15,3 +15,5 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-gfx = { workspace = true }
+libm = { workspace = true }

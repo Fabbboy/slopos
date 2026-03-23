@@ -2,11 +2,15 @@ use slopos_sync::IrqMutex;
 
 use crate::framebuffer;
 use crate::graphics::{GraphicsContext, GraphicsResult};
+use crate::kernel_font;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::VideoError;
-use slopos_gfx::{canvas_font, canvas_ops};
+use slopos_gfx::canvas_ops;
 
-const SPLASH_BG_COLOR: Color32 = Color32(0x0000_0000);
+/// Splash background: opaque black.  Previous value 0x00000000 was
+/// transparent-black which broke anti-aliased text blending on the
+/// write-only MMIO framebuffer (read-back returns 0 → dark fringe).
+const SPLASH_BG_COLOR: Color32 = Color32(0xFF00_0000);
 const SPLASH_TEXT_COLOR: Color32 = Color32(0xE6E6_E6FF);
 const SPLASH_SUBTEXT_COLOR: Color32 = Color32(0x9A9A_9AFF);
 const SPLASH_ACCENT_COLOR: Color32 = Color32(0x00C2_7FFF);
@@ -21,9 +25,14 @@ const SPLASH_MESSAGE_MIN_WIDTH: i32 = 240;
 const SPLASH_MESSAGE_MAX_WIDTH: i32 = 420;
 const SPLASH_MESSAGE_HEIGHT: i32 = 18;
 
-const TEXT_TITLE: &[u8] = b"SLOPOS\0";
-const TEXT_SUBTITLE: &[u8] = b"Safe boot\0";
-const TEXT_INIT: &[u8] = b"Starting services...\0";
+/// Font size for splash screen text (proportional renderer).
+const SPLASH_TITLE_SIZE: u16 = 22;
+const SPLASH_SUBTITLE_SIZE: u16 = 14;
+const SPLASH_MESSAGE_SIZE: u16 = 12;
+
+const TEXT_TITLE: &str = "SLOPOS";
+const TEXT_SUBTITLE: &str = "Safe boot";
+const TEXT_INIT: &str = "Starting services...";
 
 struct SplashState {
     active: bool,
@@ -58,9 +67,9 @@ struct SplashLayout {
     progress_h: i32,
 }
 
-fn text_center_x(center_x: i32, text: &[u8]) -> i32 {
-    let chars = text.len().saturating_sub(1) as i32;
-    center_x - (chars * 8 / 2)
+fn measure_center_x(center_x: i32, text: &str, size_px: u16) -> i32 {
+    let w = kernel_font::with_renderer(|r| r.measure_text(text, size_px).0).unwrap_or(0);
+    center_x - w / 2
 }
 
 fn splash_layout(width: i32, height: i32) -> SplashLayout {
@@ -69,7 +78,7 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
     let center_x = width / 2;
     let ring_center_y = height / 2 - (min_dim / 8).clamp(30, 60);
     let title_y = ring_center_y + ring_radius + 12;
-    let subtitle_y = title_y + 18;
+    let subtitle_y = title_y + 26;
     let message_y = subtitle_y + 22;
     let progress_w = (min_dim * 5 / 10).clamp(SPLASH_PROGRESS_MIN_WIDTH, SPLASH_PROGRESS_MAX_WIDTH);
     let progress_h = (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
@@ -82,9 +91,9 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
         center_x,
         ring_center_y,
         ring_radius,
-        title_x: text_center_x(center_x, TEXT_TITLE),
+        title_x: measure_center_x(center_x, TEXT_TITLE, SPLASH_TITLE_SIZE),
         title_y,
-        subtitle_x: text_center_x(center_x, TEXT_SUBTITLE),
+        subtitle_x: measure_center_x(center_x, TEXT_SUBTITLE, SPLASH_SUBTITLE_SIZE),
         subtitle_y,
         message_x,
         message_y,
@@ -145,6 +154,12 @@ fn splash_draw_progress_bar(
     }
 }
 
+fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, size: u16, color: Color32) {
+    kernel_font::with_renderer(|r| {
+        r.draw_text(ctx, x, y, text, size, color, SPLASH_BG_COLOR);
+    });
+}
+
 pub fn splash_show_boot_screen() -> GraphicsResult<()> {
     ensure_framebuffer_ready()?;
     let mut ctx = GraphicsContext::new()?;
@@ -164,29 +179,29 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.ring_radius,
     );
 
-    canvas_font::draw_string(
+    draw_text(
         &mut ctx,
         layout.title_x,
         layout.title_y,
         TEXT_TITLE,
+        SPLASH_TITLE_SIZE,
         SPLASH_TEXT_COLOR,
-        Color32(0),
     );
-    canvas_font::draw_string(
+    draw_text(
         &mut ctx,
         layout.subtitle_x,
         layout.subtitle_y,
         TEXT_SUBTITLE,
+        SPLASH_SUBTITLE_SIZE,
         SPLASH_SUBTEXT_COLOR,
-        Color32(0),
     );
-    canvas_font::draw_string(
+    draw_text(
         &mut ctx,
         layout.message_x,
         layout.message_y,
         TEXT_INIT,
+        SPLASH_MESSAGE_SIZE,
         SPLASH_SUBTEXT_COLOR,
-        Color32(0),
     );
 
     splash_draw_progress_bar(
@@ -221,14 +236,21 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
     );
 
     if !message.is_empty() {
-        canvas_font::draw_string(
-            &mut ctx,
-            layout.message_x,
-            layout.message_y,
-            message,
-            SPLASH_SUBTEXT_COLOR,
-            Color32(0),
-        );
+        // Convert &[u8] to &str (strip null terminator).
+        let end = message
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(message.len());
+        if let Ok(s) = core::str::from_utf8(&message[..end]) {
+            draw_text(
+                &mut ctx,
+                layout.message_x,
+                layout.message_y,
+                s,
+                SPLASH_MESSAGE_SIZE,
+                SPLASH_SUBTEXT_COLOR,
+            );
+        }
     }
 
     splash_draw_progress_bar(

@@ -502,7 +502,7 @@ pub fn test_256color_grayscale_mapping() -> TestResult {
 }
 
 pub fn test_is_double_width_ranges() -> TestResult {
-    use slopos_abi::font::is_double_width;
+    use slopos_abi::unicode::is_double_width;
     // CJK Unified Ideographs
     if !is_double_width(0x4E2D) {
         return TestResult::Fail;
@@ -639,30 +639,30 @@ pub fn test_vtparser_fuzz_no_panic() -> TestResult {
 }
 
 pub fn test_replacement_glyph_exists() -> TestResult {
-    use slopos_abi::font::{FONT_CHAR_HEIGHT, get_glyph_for_codepoint};
-    let glyph = get_glyph_for_codepoint(0xFFFD);
-    // The replacement glyph should not be all zeros (it's a filled diamond).
-    let mut has_nonzero = false;
-    for i in 0..FONT_CHAR_HEIGHT as usize {
-        if glyph[i] != 0 {
-            has_nonzero = true;
-            break;
-        }
-    }
+    let Some(atlas) = slopos_font::atlas::global() else {
+        klog_info!("TTY_TEST: glyph atlas not initialised");
+        return TestResult::Fail;
+    };
+    let coverage = atlas.get_coverage(0xFFFD);
+    // The replacement glyph should not be all zeros.
+    let has_nonzero = coverage.iter().any(|&b| b != 0);
     if !has_nonzero {
-        klog_info!("TTY_TEST: replacement glyph is all zeros");
+        klog_info!("TTY_TEST: replacement glyph coverage is all zeros");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
 pub fn test_get_glyph_for_codepoint_ascii() -> TestResult {
-    use slopos_abi::font::{get_glyph_for_codepoint, get_glyph_or_space};
-    // For ASCII chars, get_glyph_for_codepoint should return same as get_glyph_or_space
-    let cp_glyph = get_glyph_for_codepoint(b'A' as u32);
-    let ascii_glyph = get_glyph_or_space(b'A');
-    if !core::ptr::eq(cp_glyph, ascii_glyph) {
-        klog_info!("TTY_TEST: codepoint glyph for 'A' differs from ASCII glyph");
+    let Some(atlas) = slopos_font::atlas::global() else {
+        klog_info!("TTY_TEST: glyph atlas not initialised");
+        return TestResult::Fail;
+    };
+    // For ASCII 'A', coverage should have non-zero pixels (it's a visible character).
+    let coverage = atlas.get_coverage(b'A' as u32);
+    let has_nonzero = coverage.iter().any(|&b| b != 0);
+    if !has_nonzero {
+        klog_info!("TTY_TEST: glyph for 'A' has zero coverage");
         return TestResult::Fail;
     }
     TestResult::Pass

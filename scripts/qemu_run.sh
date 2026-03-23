@@ -43,6 +43,37 @@ else
     QEMU_CPU="${QEMU_CPU:-host}"
 fi
 
+# ── Auto-detect KVM and fix CPU model ────────────────────────────────────────
+# -cpu host requires KVM (or HVF on macOS). When the hypervisor is not
+# available QEMU falls back to TCG, but -cpu host is incompatible with TCG
+# and causes an immediate exit — which the test harness misreads as "pass".
+# Detect this and switch to -cpu max (TCG's full-feature model) instead.
+needs_tcg_cpu=0
+if [ "$QEMU_CPU" = "host" ]; then
+    case "$QEMU_ACCEL" in
+        tcg) needs_tcg_cpu=1 ;;  # explicit TCG-only — host won't work
+    esac
+    if [ "$needs_tcg_cpu" = "0" ]; then
+        case "$(uname -s)" in
+            Linux)
+                if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+                    needs_tcg_cpu=1
+                fi
+                ;;
+            Darwin)
+                if ! "$QEMU_BIN" -accel help 2>/dev/null | grep -q hvf; then
+                    needs_tcg_cpu=1
+                fi
+                ;;
+        esac
+    fi
+    if [ "$needs_tcg_cpu" = "1" ]; then
+        QEMU_CPU="max"
+        QEMU_ACCEL="tcg"
+        echo "No hardware acceleration — using TCG with -cpu max" >&2
+    fi
+fi
+
 VIDEO="${VIDEO:-0}"
 QEMU_FB_WIDTH="${QEMU_FB_WIDTH:-1920}"
 QEMU_FB_HEIGHT="${QEMU_FB_HEIGHT:-1080}"

@@ -20,7 +20,6 @@ pub mod draw;
 pub mod error;
 pub mod fate;
 pub mod file_ops;
-pub mod font;
 pub mod fs;
 pub mod input;
 pub mod net;
@@ -31,6 +30,7 @@ pub mod surface;
 pub mod syscall;
 pub mod task;
 pub mod tty_error;
+pub mod unicode;
 pub mod video_traits;
 pub mod window;
 

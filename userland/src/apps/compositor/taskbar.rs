@@ -75,6 +75,24 @@ impl TaskbarState {
 
 // ── Layout geometry helpers ─────────────────────────────────────────────────
 
+use crate::gfx::font;
+
+/// Minimum button width so very short titles don't look too cramped.
+const MIN_APP_BUTTON_WIDTH: i32 = 60;
+/// Maximum button width so a single long title doesn't eat the bar.
+const MAX_APP_BUTTON_WIDTH: i32 = 200;
+
+/// Compute the width of a taskbar button for a given window title.
+///
+/// Width = text pixel width + 8px horizontal padding, clamped to
+/// [`MIN_APP_BUTTON_WIDTH`, `MAX_APP_BUTTON_WIDTH`].
+#[inline]
+pub fn app_button_width(title: &[u8; 32]) -> i32 {
+    let len = title.iter().position(|&b| b == 0).unwrap_or(32);
+    let text_w = (len as i32) * font::cell_width();
+    (text_w + 8).clamp(MIN_APP_BUTTON_WIDTH, MAX_APP_BUTTON_WIDTH)
+}
+
 #[inline]
 pub fn start_button_x() -> i32 {
     TASKBAR_BUTTON_PADDING

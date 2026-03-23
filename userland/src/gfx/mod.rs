@@ -11,4 +11,26 @@ pub use slopos_gfx::canvas_ops::{
     line as draw_line, rect as draw_rect,
 };
 
-pub use slopos_gfx::canvas_font::{draw_char_clipped, draw_str_clipped};
+pub fn draw_char_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    ch: u8,
+    fg: slopos_abi::draw::Color32,
+    bg: slopos_abi::draw::Color32,
+    clip: &DamageRect,
+) {
+    font::draw_char_clipped(target, x, y, ch, fg, bg, clip);
+}
+
+pub fn draw_str_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    text: &str,
+    fg: slopos_abi::draw::Color32,
+    bg: slopos_abi::draw::Color32,
+    clip: &DamageRect,
+) {
+    font::draw_str_clipped(target, x, y, text, fg, bg, clip);
+}

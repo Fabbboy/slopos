@@ -1,10 +1,12 @@
 [build]
-target = "targets/x86_64-slos.json"
 target-dir = "builddir/target"
 
+# NOTE: build-std and default target are intentionally NOT set here.
+# Build scripts (scripts/build_kernel.sh, scripts/build_userland.sh) pass
+# -Zbuild-std and --target explicitly. Keeping them out of config.toml
+# allows `cargo test` to work on the host without conflicts.
+
 [unstable]
-build-std = ["core", "alloc"]
-build-std-features = ["compiler-builtins-mem"]
 json-target-spec = true
 
 [target."targets/x86_64-slos.json"]

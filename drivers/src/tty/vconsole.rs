@@ -17,9 +17,8 @@ use alloc::vec;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_abi::font::{
-    FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH, get_glyph_for_codepoint, get_glyph_or_space, is_double_width,
-};
+use slopos_abi::unicode::is_double_width;
+use slopos_font::atlas::{self, blend_coverage_u32};
 use slopos_sync::IrqMutex;
 
 use crate::serial::serial_putc_com1;
@@ -37,6 +36,16 @@ const SCROLLBACK_LINES: usize = 200;
 
 /// Continuation marker for the right half of a double-width character.
 const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
+
+/// Cell width from the global atlas, with a fallback for early boot.
+fn cell_width() -> i32 {
+    atlas::global().map_or(8, |a| a.cell_width())
+}
+
+/// Cell height from the global atlas, with a fallback for early boot.
+fn cell_height() -> i32 {
+    atlas::global().map_or(16, |a| a.cell_height())
+}
 
 // ---------------------------------------------------------------------------
 // ANSI color tables (standard 8 + bright 8)
@@ -735,7 +744,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_px = cell_height() as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = sr_top.saturating_mul(row_bytes);
@@ -853,7 +862,7 @@ impl VConsoleState {
         self.cursor_col = 0;
         self.in_alt_screen = true;
         if let Some(ref mut shadow) = self.shadow {
-            let row_bytes = (FONT_CHAR_HEIGHT as usize).saturating_mul(self.shadow_pitch);
+            let row_bytes = (cell_height() as usize).saturating_mul(self.shadow_pitch);
             let byte_count = rows.saturating_mul(row_bytes);
             let end = byte_count.min(shadow.len());
             shadow[..end].fill(0);
@@ -922,7 +931,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_px = cell_height() as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = cur.saturating_mul(row_bytes);
@@ -1040,7 +1049,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = FONT_CHAR_HEIGHT as usize;
+            let row_px = cell_height() as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = cur.saturating_mul(row_bytes);
@@ -1233,7 +1242,7 @@ impl VConsoleState {
 
         if self.shadow.is_some() {
             if let Some(ref mut shadow) = self.shadow {
-                let row_px = FONT_CHAR_HEIGHT as usize;
+                let row_px = cell_height() as usize;
                 let row_bytes = row_px.saturating_mul(self.shadow_pitch);
                 let region_start = sr_top.saturating_mul(row_bytes);
                 let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
@@ -1315,28 +1324,25 @@ impl VConsoleState {
 
     fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
         let Some(fb) = self.fb else { return };
+        let Some(atlas) = atlas::global() else { return };
         let (r, c) = (row as usize, col as usize);
         if r >= self.rows as usize || c >= self.cols as usize {
             return;
         }
-        let glyph = if cell.codepoint == CONTINUATION_CODEPOINT {
-            get_glyph_or_space(b' ')
-        } else if cell.codepoint <= 0x7E {
-            get_glyph_or_space(cell.codepoint as u8)
+        let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
+            b' ' as u32
         } else {
-            get_glyph_for_codepoint(cell.codepoint)
+            cell.codepoint
         };
-        let x0 = c * FONT_CHAR_WIDTH as usize;
-        let y0 = r * FONT_CHAR_HEIGHT as usize;
-        for gy in 0..FONT_CHAR_HEIGHT as usize {
-            let bits = glyph[gy];
-            for gx in 0..FONT_CHAR_WIDTH as usize {
-                let mask = 1u8 << (7 - gx as u8);
-                let color = if (bits & mask) != 0 {
-                    cell.attrs.fg
-                } else {
-                    cell.attrs.bg
-                };
+        let cw = atlas.cell_width() as usize;
+        let ch = atlas.cell_height() as usize;
+        let coverage = atlas.get_coverage(cp);
+        let x0 = c * cw;
+        let y0 = r * ch;
+        for gy in 0..ch {
+            for gx in 0..cw {
+                let cov = coverage[gy * cw + gx];
+                let color = blend_coverage_u32(cov, cell.attrs.fg, cell.attrs.bg);
                 self.put_pixel(&fb, x0 + gx, y0 + gy, color);
             }
         }
@@ -1351,24 +1357,26 @@ impl VConsoleState {
             self.render_cell_direct_to_fb(row, col, cell);
             return;
         };
-        let glyph = if cell.codepoint == CONTINUATION_CODEPOINT {
-            get_glyph_or_space(b' ')
-        } else if cell.codepoint <= 0x7E {
-            get_glyph_or_space(cell.codepoint as u8)
+        let Some(atlas) = atlas::global() else { return };
+        let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
+            b' ' as u32
         } else {
-            get_glyph_for_codepoint(cell.codepoint)
+            cell.codepoint
         };
-        let x0 = c.saturating_mul(FONT_CHAR_WIDTH as usize);
-        let y0 = r.saturating_mul(FONT_CHAR_HEIGHT as usize);
-        for gy in 0..FONT_CHAR_HEIGHT as usize {
-            let bits = glyph[gy];
+        let cw = atlas.cell_width() as usize;
+        let ch = atlas.cell_height() as usize;
+        let coverage = atlas.get_coverage(cp);
+        let x0 = c.saturating_mul(cw);
+        let y0 = r.saturating_mul(ch);
+        let row_bytes = cw.saturating_mul(4);
+        for gy in 0..ch {
             let row_offset = (y0 + gy)
                 .saturating_mul(self.shadow_pitch)
                 .saturating_add(x0.saturating_mul(4));
-            if row_offset + 32 <= shadow.len() {
-                Self::expand_and_write_row(
-                    &mut shadow[row_offset..row_offset + 32],
-                    bits,
+            if row_offset + row_bytes <= shadow.len() {
+                Self::expand_coverage_row(
+                    &mut shadow[row_offset..row_offset + row_bytes],
+                    &coverage[gy * cw..(gy + 1) * cw],
                     cell.attrs.fg,
                     cell.attrs.bg,
                 );
@@ -1377,17 +1385,17 @@ impl VConsoleState {
     }
 
     #[inline(always)]
-    fn expand_and_write_row(dst: &mut [u8], bits: u8, fg: u32, bg: u32) {
-        let mut row_pixels = [0u32; 8];
-        for (gx, pixel) in row_pixels.iter_mut().enumerate() {
-            *pixel = if ((bits >> (7 - gx as u8)) & 1) != 0 {
-                fg
-            } else {
-                bg
-            };
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(row_pixels.as_ptr() as *const u8, dst.as_mut_ptr(), 32);
+    fn expand_coverage_row(dst: &mut [u8], coverage: &[u8], fg: u32, bg: u32) {
+        for (gx, &cov) in coverage.iter().enumerate() {
+            let pixel = blend_coverage_u32(cov, fg, bg);
+            let off = gx * 4;
+            if off + 4 <= dst.len() {
+                let bytes = pixel.to_ne_bytes();
+                dst[off] = bytes[0];
+                dst[off + 1] = bytes[1];
+                dst[off + 2] = bytes[2];
+                dst[off + 3] = bytes[3];
+            }
         }
     }
 
@@ -1395,6 +1403,7 @@ impl VConsoleState {
         let Some(fb) = self.fb else {
             return;
         };
+        let Some(atlas) = atlas::global() else { return };
 
         let row_usize = row as usize;
         let col_usize = col as usize;
@@ -1403,27 +1412,21 @@ impl VConsoleState {
         }
 
         let cell = self.cells.get(row_usize, col_usize);
-        let attrs = &cell.attrs;
-        let cp = cell.codepoint;
-        let glyph = if cp == CONTINUATION_CODEPOINT {
-            get_glyph_or_space(b' ')
-        } else if cp <= 0x7E {
-            get_glyph_or_space(cp as u8)
+        let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
+            b' ' as u32
         } else {
-            get_glyph_for_codepoint(cp)
+            cell.codepoint
         };
-        let x0 = col_usize.saturating_mul(FONT_CHAR_WIDTH as usize);
-        let y0 = row_usize.saturating_mul(FONT_CHAR_HEIGHT as usize);
+        let cw = atlas.cell_width() as usize;
+        let ch = atlas.cell_height() as usize;
+        let coverage = atlas.get_coverage(cp);
+        let x0 = col_usize.saturating_mul(cw);
+        let y0 = row_usize.saturating_mul(ch);
 
-        for gy in 0..FONT_CHAR_HEIGHT as usize {
-            let bits = glyph[gy];
-            for gx in 0..FONT_CHAR_WIDTH as usize {
-                let mask = 1u8 << (7 - gx as u8);
-                let color = if (bits & mask) != 0 {
-                    attrs.fg
-                } else {
-                    attrs.bg
-                };
+        for gy in 0..ch {
+            for gx in 0..cw {
+                let cov = coverage[gy * cw + gx];
+                let color = blend_coverage_u32(cov, cell.attrs.fg, cell.attrs.bg);
                 self.put_pixel(&fb, x0 + gx, y0 + gy, color);
             }
         }
@@ -1457,7 +1460,7 @@ impl VConsoleState {
             return;
         };
 
-        let row_height = FONT_CHAR_HEIGHT as usize;
+        let row_height = cell_height() as usize;
         let pitch = fb.pitch as usize;
         let max_rows = self.rows as usize;
         let mut bits = dirty;
@@ -1497,8 +1500,8 @@ impl VConsoleState {
 
     pub(crate) fn recalculate_dimensions(&mut self) {
         if let Some(fb) = self.fb {
-            let char_w = FONT_CHAR_WIDTH as u32;
-            let char_h = FONT_CHAR_HEIGHT as u32;
+            let char_w = cell_width() as u32;
+            let char_h = cell_height() as u32;
 
             let calc_cols = (fb.width / char_w).max(1) as usize;
             let calc_rows = (fb.height / char_h).max(1) as usize;

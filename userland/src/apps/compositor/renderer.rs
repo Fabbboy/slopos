@@ -1,4 +1,5 @@
 use slopos_abi::draw::Color32;
+use slopos_font::FontRenderer;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
@@ -14,11 +15,16 @@ use super::taskbar::{self, START_MENU_ITEMS};
 
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 
+/// Default TTF font size for title bar text (in pixels).
+const TITLE_FONT_SIZE: u16 = 14;
+
 pub struct Renderer {
     pub output_width: u32,
     pub output_height: u32,
     pub output_bytes_pp: u8,
     pub output_pitch: usize,
+    ttf_font: Option<FontRenderer<'static>>,
+    ttf_init_attempted: bool,
 }
 
 impl Renderer {
@@ -28,6 +34,21 @@ impl Renderer {
             output_height: 0,
             output_bytes_pp: 4,
             output_pitch: 0,
+            ttf_font: None,
+            ttf_init_attempted: false,
+        }
+    }
+
+    /// Try to load the TTF font from the filesystem (once).
+    fn ensure_font(&mut self) {
+        if self.ttf_init_attempted {
+            return;
+        }
+        self.ttf_init_attempted = true;
+
+        if let Ok(data) = std::fs::read("/usr/share/fonts/Inter-Regular.ttf") {
+            let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+            self.ttf_font = FontRenderer::new(leaked);
         }
     }
 
@@ -39,7 +60,7 @@ impl Renderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         windows: &[UserWindowInfo],
         window_count: usize,
@@ -108,7 +129,7 @@ impl Renderer {
     }
 
     fn draw_partial_region(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         damage: &DamageRect,
         windows: &[UserWindowInfo],
@@ -201,7 +222,7 @@ impl Renderer {
     }
 
     fn draw_title_bar(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         window: &UserWindowInfo,
         focused_task: u32,
@@ -227,15 +248,25 @@ impl Renderer {
         );
 
         let title = title_to_str(&window.title);
-        gfx::draw_str_clipped(
-            buf,
-            window.x + 8,
-            title_y + 4,
-            title,
-            COLOR_TEXT,
-            color,
-            clip,
-        );
+
+        // Render title bar text with TTF font, blending against the
+        // title-bar colour so AA is crisp on both readable and write-only
+        // surfaces.
+        let text_y = title_y + (TITLE_BAR_HEIGHT - TITLE_FONT_SIZE as i32) / 2;
+        self.ensure_font();
+        if let Some(ref mut font) = self.ttf_font {
+            font.draw_text(
+                buf,
+                window.x + 8,
+                text_y,
+                title,
+                TITLE_FONT_SIZE,
+                COLOR_TEXT,
+                color, // title-bar bg for AA blending
+            );
+        } else {
+            gfx::draw_str_clipped(buf, window.x + 8, text_y, title, COLOR_TEXT, color, clip);
+        }
 
         draw_button_clipped(
             buf,
@@ -302,10 +333,11 @@ impl Renderer {
             start_color,
             clip,
         );
+        let text_vpad = (btn_height - gfx::font::cell_height()) / 2;
         gfx::draw_str_clipped(
             buf,
             start_btn_x + 4,
-            btn_y + 4,
+            btn_y + text_vpad,
             "Start",
             COLOR_TEXT,
             start_color,
@@ -334,37 +366,25 @@ impl Renderer {
                 COLOR_BUTTON
             };
 
+            let btn_w = taskbar::app_button_width(&window.title);
             let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
             let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-            gfx::fill_rect_clipped(
-                buf,
-                x,
-                btn_y,
-                TASKBAR_BUTTON_WIDTH,
-                btn_height,
-                btn_color,
-                clip,
-            );
+            gfx::fill_rect_clipped(buf, x, btn_y, btn_w, btn_height, btn_color, clip);
 
             let title = title_to_str(&window.title);
-            let max_chars = (TASKBAR_BUTTON_WIDTH / 8 - 1) as usize;
-            let truncated: &str = if title.len() > max_chars {
-                &title[..max_chars]
-            } else {
-                title
-            };
+            let text_vpad = (btn_height - gfx::font::cell_height()) / 2;
             gfx::draw_str_clipped(
                 buf,
                 x + 4,
-                btn_y + 4,
-                truncated,
+                btn_y + text_vpad,
+                title,
                 COLOR_TEXT,
                 btn_color,
                 clip,
             );
 
-            x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+            x += btn_w + TASKBAR_BUTTON_PADDING;
         }
     }
 
@@ -412,10 +432,11 @@ impl Renderer {
                 item_color,
                 clip,
             );
+            let menu_text_vpad = (START_MENU_ITEM_HEIGHT - gfx::font::cell_height()) / 2;
             gfx::draw_str_clipped(
                 buf,
                 menu_x + START_MENU_PADDING + 4,
-                item_y + 6,
+                item_y + menu_text_vpad,
                 item.label,
                 COLOR_TEXT,
                 item_color,
@@ -691,13 +712,10 @@ fn draw_button_clipped(
         COLOR_BUTTON
     };
     gfx::fill_rect_clipped(buf, x, y, size, size, color, clip);
-    gfx::draw_str_clipped(
-        buf,
-        x + size / 4,
-        y + size / 4,
-        label,
-        COLOR_TEXT,
-        color,
-        clip,
-    );
+    // Center the label within the button using actual font metrics.
+    let tw = gfx::font::string_width(label);
+    let th = gfx::font::cell_height();
+    let tx = x + (size - tw) / 2;
+    let ty = y + (size - th) / 2;
+    gfx::draw_str_clipped(buf, tx, ty, label, COLOR_TEXT, color, clip);
 }
