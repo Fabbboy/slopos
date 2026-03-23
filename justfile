@@ -151,6 +151,38 @@ boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_T
 [doc("Run interrupt test harness in QEMU")]
 test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
 
+[doc("Run host-side unit tests (pixel, blend, AA, font)")]
+test-host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Run from /tmp to escape workspace .cargo/config.toml (build-std, custom target)
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    cp -r tests-host/src "$tmp_dir/src"
+    cp tests-host/.cargo "$tmp_dir/.cargo" -r 2>/dev/null || true
+    cat > "$tmp_dir/Cargo.toml" <<'TOML'
+    [package]
+    name = "slopos-tests-host"
+    version = "0.1.0"
+    edition = "2024"
+    publish = false
+    [dependencies]
+    slopos-abi = { path = "SLOPOS_ROOT/abi" }
+    slopos-gfx = { path = "SLOPOS_ROOT/gfx" }
+    slopos-font = { path = "SLOPOS_ROOT/font" }
+    [lints.rust]
+    warnings = "deny"
+    TOML
+    repo_root="$(pwd)"
+    sed -i "s|SLOPOS_ROOT|${repo_root}|g" "$tmp_dir/Cargo.toml"
+    mkdir -p "$tmp_dir/.cargo"
+    cat > "$tmp_dir/.cargo/config.toml" <<'CFG'
+    [build]
+    target = "x86_64-unknown-linux-gnu"
+    CFG
+    cd "$tmp_dir"
+    SLOPOS_ROOT="$repo_root" cargo +{{rust_channel}} test
+
 # ── Utilities ────────────────────────────────────────────────────────────────
 
 [doc("Show detected QEMU framebuffer resolution")]

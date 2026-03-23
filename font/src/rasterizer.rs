@@ -43,11 +43,13 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
     let sub_height = height * SUPERSAMPLE;
     let mut coverage = vec![0u8; width * height];
 
-    // For each sub-scanline, compute winding at each pixel
-    // We accumulate sub-pixel coverage and divide by SUPERSAMPLE at the end.
+    // For each sub-scanline, compute winding at each pixel.
+    // Accumulate hit counts per pixel, then convert to 0-255 coverage.
 
-    // Pre-allocate a winding buffer for one scanline
+    // Pre-allocate a winding buffer for one scanline and a hit-count
+    // accumulator per pixel (u16 to avoid overflow at high supersample).
     let mut winding = vec![0i32; width + 1];
+    let mut hits = vec![0u16; width * height];
 
     for sub_y in 0..sub_height {
         let y = sub_y as f32 / SUPERSAMPLE as f32 + 0.5 / SUPERSAMPLE as f32;
@@ -81,27 +83,28 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
             let t = (y - ey0) / (ey1 - ey0);
             let x = ex0 + t * (ex1 - ex0);
 
-            let xi = x as i32;
+            // Round to nearest pixel (not truncate) for correct boundary placement
+            let xi = libm::floorf(x) as i32;
             if xi >= 0 && (xi as usize) < width {
                 winding[xi as usize] += dir;
             }
         }
 
-        // Accumulate winding number left-to-right and add to coverage
+        // Accumulate winding number left-to-right and count hits
         let pixel_row = sub_y / SUPERSAMPLE;
         let mut wind = 0i32;
         for px in 0..width {
             wind += winding[px];
             if wind != 0 {
-                // This pixel is inside the glyph for this sub-scanline
-                let idx = pixel_row * width + px;
-                // Each sub-scanline contributes 255/SUPERSAMPLE to the coverage
-                // We'll accumulate as u16 then clamp
-                let current = coverage[idx] as u16;
-                let add = (255 / SUPERSAMPLE as u16).min(255 - current);
-                coverage[idx] = (current + add) as u8;
+                hits[pixel_row * width + px] += 1;
             }
         }
+    }
+
+    // Convert hit counts to 0-255 coverage: coverage = hits * 255 / SUPERSAMPLE
+    for (idx, &hit) in hits.iter().enumerate() {
+        coverage[idx] = ((hit as u32 * 255 + (SUPERSAMPLE as u32 / 2)) / SUPERSAMPLE as u32)
+            .min(255) as u8;
     }
 
     coverage

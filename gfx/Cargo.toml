@@ -16,4 +16,3 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
-libm = { workspace = true }

@@ -325,8 +325,63 @@ pub fn triangle_filled<T: Canvas>(
 }
 
 // ---------------------------------------------------------------------------
-// Anti-aliased drawing primitives
+// Anti-aliased drawing primitives (integer-only arithmetic)
 // ---------------------------------------------------------------------------
+
+/// Integer square root via Newton's method. Returns floor(sqrt(n)).
+fn isqrt(n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// Compute coverage for a circle boundary pixel using integer math.
+///
+/// Given (x, y) relative to the circle center and radius r, computes how
+/// much of this pixel is "on the circle outline". Uses the distance error
+/// from the ideal radius in 8.8 fixed-point space.
+///
+/// Returns 0-255 coverage value.
+#[inline]
+fn circle_coverage(x: i32, y: i32, r_x256: i32) -> u8 {
+    // dist * 256 ≈ isqrt(dist_sq * 65536)
+    let dist_sq = x * x + y * y;
+    let dist_x256 = isqrt((dist_sq as u32) << 16) as i32;
+    // err_x256 = dist*256 - r*256
+    let err_x256 = dist_x256 - r_x256;
+    // coverage = clamp(256 - err_x256, 0, 256) * 255 / 256
+    let cov = (256 - err_x256).clamp(0, 256);
+    ((cov * 255 + 128) >> 8) as u8
+}
+
+/// Compute inner-pixel coverage (for the pixel one step inside the circle).
+#[inline]
+fn circle_coverage_inner(x: i32, y: i32, r_x256: i32) -> u8 {
+    let dist_sq = x * x + y * y;
+    let dist_x256 = isqrt((dist_sq as u32) << 16) as i32;
+    // err = r - dist (positive when inside)
+    let err_x256 = r_x256 - dist_x256;
+    let cov = (256 - err_x256).clamp(0, 256);
+    ((cov * 255 + 128) >> 8) as u8
+}
+
+/// Should the midpoint circle stepper move y inward?
+/// Uses integer comparison: (x+1)^2 + y^2 > (r + 0.5)^2
+/// Scaled by 4 to avoid fractions: (2x+2)^2 + (2y)^2 > (2r+1)^2
+#[inline]
+fn circle_should_step_y(x: i32, y: i32, r: i32) -> bool {
+    let a = 2 * (x + 1);
+    let b = 2 * y;
+    let c = 2 * r + 1;
+    a * a + b * b > c * c
+}
 
 /// Xiaolin Wu's anti-aliased line algorithm.
 ///
@@ -430,7 +485,7 @@ pub fn line_aa<T: Canvas>(
     emit(target, damage)
 }
 
-/// Anti-aliased circle outline using midpoint algorithm with coverage.
+/// Anti-aliased circle outline using integer-only distance computation.
 pub fn circle_aa<T: Canvas>(
     target: &mut T,
     cx: i32,
@@ -442,15 +497,13 @@ pub fn circle_aa<T: Canvas>(
         return None;
     }
 
-    let r_f64 = radius as f64;
+    let r_x256 = radius * 256;
 
     let mut x = 0i32;
     let mut y = radius;
 
     while x <= y {
-        let dist = libm::sqrt((x as f64) * (x as f64) + (y as f64) * (y as f64));
-        let err = dist - r_f64;
-        let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+        let cov = circle_coverage(x, y, r_x256);
 
         let pairs: [(i32, i32); 8] = [
             (cx + x, cy + y),
@@ -467,11 +520,7 @@ pub fn circle_aa<T: Canvas>(
         }
 
         if y > 0 {
-            let dist_inner = libm::sqrt(
-                (x as f64) * (x as f64) + ((y - 1) as f64) * ((y - 1) as f64),
-            );
-            let err_inner = r_f64 - dist_inner;
-            let cov_inner = ((1.0 - err_inner).clamp(0.0, 1.0) * 255.0) as u8;
+            let cov_inner = circle_coverage_inner(x, y - 1, r_x256);
             if cov_inner > 0 {
                 let inner_pairs: [(i32, i32); 8] = [
                     (cx + x, cy + y - 1),
@@ -490,9 +539,7 @@ pub fn circle_aa<T: Canvas>(
         }
 
         x += 1;
-        let next_dist =
-            libm::sqrt((x as f64) * (x as f64) + (y as f64) * (y as f64));
-        if next_dist - r_f64 > 0.5 {
+        if circle_should_step_y(x - 1, y, radius) {
             y -= 1;
         }
     }
@@ -517,10 +564,7 @@ pub fn circle_aa<T: Canvas>(
     emit(target, damage)
 }
 
-/// Draw a rounded rectangle outline.
-///
-/// Draws four straight edges connected by anti-aliased quarter-circle arcs
-/// of the given corner `radius`.
+/// Draw a rounded rectangle outline with anti-aliased corners (integer-only).
 pub fn rounded_rect<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -556,17 +600,14 @@ pub fn rounded_rect<T: Canvas>(
         (x + w - 1 - r, y + h - 1 - r, 1, 1),
     ];
 
-    let r_f64 = r as f64;
+    let r_x256 = r * 256;
 
     for &(ccx, ccy, sx, sy) in &corners {
         let mut ci = 0i32;
         let mut cj = r;
 
         while ci <= cj {
-            let dist =
-                libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
-            let err = dist - r_f64;
-            let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+            let cov = circle_coverage(ci, cj, r_x256);
 
             put_pixel_coverage(target, ccx + ci * sx, ccy + cj * sy, color, cov);
             if ci != cj {
@@ -574,11 +615,7 @@ pub fn rounded_rect<T: Canvas>(
             }
 
             if cj > 0 {
-                let dist_inner = libm::sqrt(
-                    (ci as f64) * (ci as f64) + ((cj - 1) as f64) * ((cj - 1) as f64),
-                );
-                let err_inner = r_f64 - dist_inner;
-                let cov_inner = ((1.0 - err_inner).clamp(0.0, 1.0) * 255.0) as u8;
+                let cov_inner = circle_coverage_inner(ci, cj - 1, r_x256);
                 if cov_inner > 0 {
                     put_pixel_coverage(
                         target,
@@ -600,9 +637,7 @@ pub fn rounded_rect<T: Canvas>(
             }
 
             ci += 1;
-            let next_dist =
-                libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
-            if next_dist - r_f64 > 0.5 {
+            if circle_should_step_y(ci - 1, cj, r) {
                 cj -= 1;
             }
         }
@@ -628,7 +663,7 @@ pub fn rounded_rect<T: Canvas>(
     emit(target, damage)
 }
 
-/// Draw a filled rounded rectangle with anti-aliased corners.
+/// Draw a filled rounded rectangle with anti-aliased corners (integer-only).
 pub fn rounded_rect_filled<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -659,15 +694,13 @@ pub fn rounded_rect_filled<T: Canvas>(
     let tr_cx = x + w - 1 - r;
     let tl_cy = y + r;
     let bl_cy = y + h - 1 - r;
-    let r_f64 = r as f64;
+    let r_x256 = r * 256;
 
     let mut ci = 0i32;
     let mut cj = r;
 
     while ci <= cj {
-        let dist = libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
-        let err = dist - r_f64;
-        let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+        let cov = circle_coverage(ci, cj, r_x256);
 
         let row_top = tl_cy - cj;
         let row_bot = bl_cy + cj;
@@ -702,9 +735,7 @@ pub fn rounded_rect_filled<T: Canvas>(
         }
 
         ci += 1;
-        let next_dist =
-            libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
-        if next_dist - r_f64 > 0.5 {
+        if circle_should_step_y(ci - 1, cj, r) {
             cj -= 1;
         }
     }

@@ -22,6 +22,7 @@ members = [
   "video",
   "tests"
 ]
+exclude = ["tests-host"]
 resolver = "2"
 
 [workspace.package]

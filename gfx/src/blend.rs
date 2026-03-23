@@ -7,12 +7,15 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-/// Porter-Duff "source over" compositing operator.
+/// Porter-Duff "source over" compositing operator (straight alpha).
 ///
-/// Both `src` and `dst` are in 0xAARRGGBB format. Returns the composited
-/// pixel in the same format.
+/// Both `src` and `dst` are in 0xAARRGGBB format with **straight**
+/// (non-premultiplied) alpha. Returns the composited pixel in the same
+/// format.
 ///
-/// Formula (per channel): out = src + dst * (1 - src_alpha)
+/// Formula (per channel):
+///   out_a = sa + da * (1 - sa/255)
+///   out_c = (src_c * sa + dst_c * da * (255 - sa) / 255) / out_a
 #[inline]
 pub fn alpha_blend(src: u32, dst: u32) -> u32 {
     let sa = (src >> 24) & 0xFF;
@@ -34,17 +37,19 @@ pub fn alpha_blend(src: u32, dst: u32) -> u32 {
     let db = dst & 0xFF;
     let da = (dst >> 24) & 0xFF;
 
-    // out_c = src_c * src_a + dst_c * inv_sa, all divided by 255
-    // Using the (x + 128 + (x >> 8)) >> 8 approximation for /255
-    let r = sr + ((dr * inv_sa + 127) / 255);
-    let g = sg + ((dg * inv_sa + 127) / 255);
-    let b = sb + ((db * inv_sa + 127) / 255);
-    let a = sa + ((da * inv_sa + 127) / 255);
+    // out_a = sa + da * inv_sa / 255
+    let out_a = sa + ((da * inv_sa + 127) / 255);
+    if out_a == 0 {
+        return 0;
+    }
 
-    let r = r.min(255);
-    let g = g.min(255);
-    let b = b.min(255);
-    let a = a.min(255);
+    // out_c = (src_c * sa + dst_c * da * inv_sa / 255) / out_a
+    // For the common case of opaque destination (da == 255), this simplifies to:
+    //   out_c = (src_c * sa + dst_c * inv_sa) / 255   (since out_a == 255)
+    let r = ((sr * sa + ((dr * da * inv_sa + 127) / 255) + out_a / 2) / out_a).min(255);
+    let g = ((sg * sa + ((dg * da * inv_sa + 127) / 255) + out_a / 2) / out_a).min(255);
+    let b = ((sb * sa + ((db * da * inv_sa + 127) / 255) + out_a / 2) / out_a).min(255);
+    let a = out_a.min(255);
 
     (a << 24) | (r << 16) | (g << 8) | b
 }

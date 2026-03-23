@@ -1,0 +1,17 @@
+[package]
+name = "slopos-tests-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This crate exists solely for `cargo test` on the host.
+# It links the no_std abi/gfx/font crates but runs tests
+# under std so we can use #[test] and assertions.
+
+[dependencies]
+slopos-abi = { path = "../abi" }
+slopos-gfx = { path = "../gfx" }
+slopos-font = { path = "../font" }
+
+[lints.rust]
+warnings = "deny"
