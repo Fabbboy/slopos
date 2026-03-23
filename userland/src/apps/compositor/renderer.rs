@@ -249,22 +249,26 @@ impl Renderer {
 
         let title = title_to_str(&window.title);
 
-        // Render title bar text with TTF font.
+        // Render title bar text with TTF font, blending against the
+        // title-bar colour so AA is crisp on both readable and write-only
+        // surfaces.
+        let text_y = title_y + (TITLE_BAR_HEIGHT - TITLE_FONT_SIZE as i32) / 2;
         self.ensure_font();
         if let Some(ref mut font) = self.ttf_font {
             font.draw_text(
                 buf,
                 window.x + 8,
-                title_y + 3,
+                text_y,
                 title,
                 TITLE_FONT_SIZE,
                 COLOR_TEXT,
+                color, // title-bar bg for AA blending
             );
         } else {
             gfx::draw_str_clipped(
                 buf,
                 window.x + 8,
-                title_y + 4,
+                text_y,
                 title,
                 COLOR_TEXT,
                 color,
@@ -337,10 +341,11 @@ impl Renderer {
             start_color,
             clip,
         );
+        let text_vpad = (btn_height - gfx::font::cell_height()) / 2;
         gfx::draw_str_clipped(
             buf,
             start_btn_x + 4,
-            btn_y + 4,
+            btn_y + text_vpad,
             "Start",
             COLOR_TEXT,
             start_color,
@@ -389,10 +394,11 @@ impl Renderer {
             } else {
                 title
             };
+            let text_vpad = (btn_height - gfx::font::cell_height()) / 2;
             gfx::draw_str_clipped(
                 buf,
                 x + 4,
-                btn_y + 4,
+                btn_y + text_vpad,
                 truncated,
                 COLOR_TEXT,
                 btn_color,
@@ -447,10 +453,11 @@ impl Renderer {
                 item_color,
                 clip,
             );
+            let menu_text_vpad = (START_MENU_ITEM_HEIGHT - gfx::font::cell_height()) / 2;
             gfx::draw_str_clipped(
                 buf,
                 menu_x + START_MENU_PADDING + 4,
-                item_y + 6,
+                item_y + menu_text_vpad,
                 item.label,
                 COLOR_TEXT,
                 item_color,
@@ -726,13 +733,10 @@ fn draw_button_clipped(
         COLOR_BUTTON
     };
     gfx::fill_rect_clipped(buf, x, y, size, size, color, clip);
-    gfx::draw_str_clipped(
-        buf,
-        x + size / 4,
-        y + size / 4,
-        label,
-        COLOR_TEXT,
-        color,
-        clip,
-    );
+    // Center the label within the button using actual font metrics.
+    let tw = gfx::font::string_width(label);
+    let th = gfx::font::cell_height();
+    let tx = x + (size - tw) / 2;
+    let ty = y + (size - th) / 2;
+    gfx::draw_str_clipped(buf, tx, ty, label, COLOR_TEXT, color, clip);
 }

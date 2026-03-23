@@ -7,7 +7,10 @@ use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::video_traits::VideoError;
 use slopos_gfx::canvas_ops;
 
-const SPLASH_BG_COLOR: Color32 = Color32(0x0000_0000);
+/// Splash background: opaque black.  Previous value 0x00000000 was
+/// transparent-black which broke anti-aliased text blending on the
+/// write-only MMIO framebuffer (read-back returns 0 → dark fringe).
+const SPLASH_BG_COLOR: Color32 = Color32(0xFF00_0000);
 const SPLASH_TEXT_COLOR: Color32 = Color32(0xE6E6_E6FF);
 const SPLASH_SUBTEXT_COLOR: Color32 = Color32(0x9A9A_9AFF);
 const SPLASH_ACCENT_COLOR: Color32 = Color32(0x00C2_7FFF);
@@ -156,7 +159,7 @@ fn splash_draw_progress_bar(
 
 fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, size: u16, color: Color32) {
     kernel_font::with_renderer(|r| {
-        r.draw_text(ctx, x, y, text, size, color);
+        r.draw_text(ctx, x, y, text, size, color, SPLASH_BG_COLOR);
     });
 }
 

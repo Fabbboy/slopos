@@ -9,7 +9,7 @@
 //! ```ignore
 //! let font_data: &[u8] = /* load .ttf file */;
 //! let mut renderer = FontRenderer::new(font_data).unwrap();
-//! renderer.draw_text(&mut canvas, 10, 20, "Hello", 16, Color32::WHITE);
+//! renderer.draw_text(&mut canvas, 10, 20, "Hello", 16, Color32::WHITE, Color32::BLACK);
 //! ```
 
 #![no_std]
@@ -53,7 +53,10 @@ impl<'a> FontRenderer<'a> {
     /// Draw a text string onto a canvas at the given position.
     ///
     /// `(x, y)` is the top-left corner of the text. `size_px` is the font
-    /// size in pixels. Returns the damage rectangle covering all rendered
+    /// size in pixels. `bg` is the background colour for anti-alias blending;
+    /// pass an opaque colour for MMIO/write-only surfaces, or
+    /// `Color32::TRANSPARENT` to composite over existing content (requires a
+    /// readable surface).  Returns the damage rectangle covering all rendered
     /// glyphs.
     pub fn draw_text<T: Canvas>(
         &mut self,
@@ -63,6 +66,7 @@ impl<'a> FontRenderer<'a> {
         text: &str,
         size_px: u16,
         color: Color32,
+        bg: Color32,
     ) -> Option<DamageRect> {
         let upem = self.font.units_per_em() as f32;
         if upem == 0.0 {
@@ -109,7 +113,7 @@ impl<'a> FontRenderer<'a> {
                 let gy = y + ascender - bearing_y as i32;
 
                 let glyph_damage = Self::draw_glyph_coverage_static(
-                    target, gx, gy, gw as i32, gh as i32, &cov, color,
+                    target, gx, gy, gw as i32, gh as i32, &cov, color, bg,
                 );
 
                 damage = match (damage, glyph_damage) {
@@ -217,7 +221,11 @@ impl<'a> FontRenderer<'a> {
         }
     }
 
-    /// Draw a coverage bitmap onto a canvas using alpha blending.
+    /// Draw a coverage bitmap onto a canvas.
+    ///
+    /// When `bg` is opaque, blends fg/bg directly (no framebuffer read-back,
+    /// safe for MMIO).  When `bg` is transparent, composites onto the
+    /// existing pixel (requires a readable surface like `DrawBuffer`).
     fn draw_glyph_coverage_static<T: Canvas>(
         target: &mut T,
         x: i32,
@@ -226,6 +234,7 @@ impl<'a> FontRenderer<'a> {
         h: i32,
         coverage: &[u8],
         color: Color32,
+        bg: Color32,
     ) -> Option<DamageRect> {
         if w <= 0 || h <= 0 || coverage.is_empty() {
             return None;
@@ -243,6 +252,10 @@ impl<'a> FontRenderer<'a> {
             return None;
         }
 
+        let has_bg = bg.0 != 0;
+        let blend_bg = if has_bg { bg } else { Color32::BLACK };
+        let fmt = target.pixel_format();
+
         for row in y0..=y1 {
             for col in x0..=x1 {
                 let cov_x = (col - x) as usize;
@@ -251,8 +264,14 @@ impl<'a> FontRenderer<'a> {
 
                 if idx < coverage.len() {
                     let cov = coverage[idx];
-                    if cov > 0 {
-                        slopos_gfx::blend::put_pixel_coverage(target, col, row, color, cov);
+                    if cov == 0 {
+                        continue;
+                    }
+                    if cov == 255 {
+                        target.put_pixel(col, row, fmt.encode(color));
+                    } else {
+                        let blended = atlas::blend_color32_pub(cov, color, blend_bg);
+                        target.put_pixel(col, row, fmt.encode(blended));
                     }
                 }
             }
@@ -372,7 +391,7 @@ mod tests {
     fn draw_text_produces_pixels() {
         let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
         let mut canvas = TestCanvas::new(200, 50);
-        let d = renderer.draw_text(&mut canvas, 10, 10, "Hello", 16, Color32::WHITE);
+        let d = renderer.draw_text(&mut canvas, 10, 10, "Hello", 16, Color32::WHITE, Color32::BLACK);
         assert!(d.is_some());
         assert!(canvas.has_any_nonzero());
     }
@@ -381,7 +400,7 @@ mod tests {
     fn draw_text_damage_rect_sane() {
         let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
         let mut canvas = TestCanvas::new(200, 50);
-        let d = renderer.draw_text(&mut canvas, 10, 10, "AB", 16, Color32::WHITE).unwrap();
+        let d = renderer.draw_text(&mut canvas, 10, 10, "AB", 16, Color32::WHITE, Color32::BLACK).unwrap();
         assert!(d.x0 >= 0 && d.y0 >= 0 && d.x1 < 200 && d.y1 < 50);
         assert!(d.x1 - d.x0 > 5, "width {} too small", d.x1 - d.x0);
     }
@@ -390,7 +409,7 @@ mod tests {
     fn rasterizer_full_coverage_reaches_255() {
         let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
         let mut canvas = TestCanvas::new(100, 100);
-        renderer.draw_text(&mut canvas, 10, 10, "O", 48, Color32::WHITE);
+        renderer.draw_text(&mut canvas, 10, 10, "O", 48, Color32::WHITE, Color32::BLACK);
         let max_a = (0..100u32)
             .flat_map(|y| (0..100u32).map(move |x| (x, y)))
             .map(|(x, y)| canvas.read_pixel(x, y).alpha())

@@ -151,8 +151,10 @@ impl GlyphAtlas {
     // Drawing helpers (Canvas-based)
     // -----------------------------------------------------------------------
 
-    /// Draw a single character at (x, y). Uses bg for uncovered pixels when
-    /// `bg.0 != 0`; otherwise blends onto the existing framebuffer content.
+    /// Draw a single character at (x, y). Blends fg/bg directly using
+    /// coverage — never reads back from the framebuffer (safe for MMIO).
+    /// When `bg` is transparent (`bg.0 == 0`), uncovered pixels are left
+    /// untouched and edge pixels blend against opaque black.
     pub fn draw_char<T: Canvas>(
         &self,
         target: &mut T,
@@ -169,6 +171,10 @@ impl GlyphAtlas {
         let fmt = target.pixel_format();
         let fg_px = fmt.encode(fg);
         let bg_px = fmt.encode(bg);
+        // For anti-aliased edge blending when no explicit bg is given,
+        // use opaque black (the typical cleared-screen colour) to avoid
+        // dark fringe from blending against transparent-black (alpha=0).
+        let blend_bg = if has_bg { bg } else { Color32::BLACK };
 
         let buf_w = target.width() as i32;
         let buf_h = target.height() as i32;
@@ -190,11 +196,9 @@ impl GlyphAtlas {
                     }
                 } else if cov == 255 {
                     target.put_pixel(px, py, fg_px);
-                } else if has_bg {
-                    let blended = blend_color32(cov, fg, bg);
-                    target.put_pixel(px, py, fmt.encode(blended));
                 } else {
-                    slopos_gfx::blend::put_pixel_coverage(target, px, py, fg, cov);
+                    let blended = blend_color32(cov, fg, blend_bg);
+                    target.put_pixel(px, py, fmt.encode(blended));
                 }
             }
         }
@@ -302,6 +306,7 @@ impl GlyphAtlas {
         let fmt = target.pixel_format();
         let fg_px = fmt.encode(fg);
         let bg_px = fmt.encode(bg);
+        let blend_bg = if has_bg { bg } else { Color32::BLACK };
 
         for row in 0..ch {
             let py = y + row;
@@ -320,11 +325,9 @@ impl GlyphAtlas {
                     }
                 } else if cov == 255 {
                     target.put_pixel(px, py, fg_px);
-                } else if has_bg {
-                    let blended = blend_color32(cov, fg, bg);
-                    target.put_pixel(px, py, fmt.encode(blended));
                 } else {
-                    slopos_gfx::blend::put_pixel_coverage(target, px, py, fg, cov);
+                    let blended = blend_color32(cov, fg, blend_bg);
+                    target.put_pixel(px, py, fmt.encode(blended));
                 }
             }
         }
@@ -404,6 +407,11 @@ impl GlyphAtlas {
 // ---------------------------------------------------------------------------
 
 /// Blend fg and bg Color32 values by coverage (0-255).
+#[inline]
+pub fn blend_color32_pub(cov: u8, fg: Color32, bg: Color32) -> Color32 {
+    blend_color32(cov, fg, bg)
+}
+
 #[inline]
 fn blend_color32(cov: u8, fg: Color32, bg: Color32) -> Color32 {
     let a = cov as u32;
