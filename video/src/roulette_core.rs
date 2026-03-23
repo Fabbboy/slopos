@@ -10,13 +10,13 @@
 //! monomorphised generic calls.
 
 use slopos_abi::draw::{Canvas, Color32};
-use slopos_abi::font::FONT_CHAR_WIDTH;
 use slopos_abi::video_traits::{VideoError, VideoResult};
 use slopos_drivers::hpet;
-use slopos_gfx::{canvas_font, canvas_ops};
+use slopos_gfx::canvas_ops;
 use slopos_utils::numfmt;
 
 use crate::graphics::GraphicsContext;
+use crate::kernel_font;
 
 // ---------------------------------------------------------------------------
 // Color palette
@@ -56,7 +56,7 @@ const SPIN_DURATION_MS: i32 = 7200;
 const SPIN_FRAME_DELAY_MS: i32 = 12;
 
 // ---------------------------------------------------------------------------
-// Text constants (null-terminated for the bitmap font renderer)
+// Text constants (null-terminated for atlas byte-string rendering)
 // ---------------------------------------------------------------------------
 
 const TEXT_UNKNOWN: &[u8] = b"Hidden\0";
@@ -221,17 +221,15 @@ impl WheelLayout {
 // Text drawing helpers
 // ---------------------------------------------------------------------------
 
-fn text_width_px(text: &[u8]) -> i32 {
-    canvas_font::string_width(text)
-}
-
 fn even_px(x: i32) -> i32 {
     x & !1
 }
 
 fn draw_text_centered<T: Canvas>(ctx: &mut T, cx: i32, y: i32, text: &[u8], fg: Color32) {
-    let x = even_px(cx - text_width_px(text) / 2);
-    canvas_font::draw_string(ctx, x, y, text, fg, Color32(0));
+    if let Some(atlas) = kernel_font::atlas() {
+        let x = even_px(cx - atlas.bytes_width(text) / 2);
+        atlas.draw_bytes(ctx, x, y, text, fg, Color32(0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,9 +419,11 @@ fn draw_fate_number<T: Canvas>(ctx: &mut T, cx: i32, y_pos: i32, fate_number: u3
 
     let mut num_buf = numfmt::NumBuf::<12>::new();
     let num_text = num_buf.format_u32(fate_number);
-    let printable_len = num_text.iter().take_while(|&&b| b != 0).count() as i32;
-    let text_x = cx - (printable_len * FONT_CHAR_WIDTH) / 2;
-    canvas_font::draw_string(ctx, text_x, number_y, num_text, CARD_TEXT, Color32(0));
+    if let Some(atlas) = kernel_font::atlas() {
+        let text_w = atlas.bytes_width(num_text);
+        let text_x = cx - text_w / 2;
+        atlas.draw_bytes(ctx, text_x, number_y, num_text, CARD_TEXT, Color32(0));
+    }
 }
 
 // ---------------------------------------------------------------------------

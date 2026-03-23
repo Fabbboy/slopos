@@ -4,7 +4,7 @@ use slopos_abi::DamageRect;
 use std::string::String;
 
 use crate::gfx::draw_str_clipped;
-use crate::gfx::font::string_width;
+use crate::gfx::font;
 use crate::gfx::{DrawBuffer, draw_rect, fill_rect};
 
 use super::{
@@ -55,7 +55,7 @@ impl SysmonApp {
         draw_rect(fb, x, 2, TAB_WIDTH, TAB_HEIGHT - 3, COLOR_DIM);
         Self::text(
             fb,
-            x + ((TAB_WIDTH - string_width(label)) / 2).max(4),
+            x + ((TAB_WIDTH - font::string_width(label)) / 2).max(4),
             6,
             label,
             fg,

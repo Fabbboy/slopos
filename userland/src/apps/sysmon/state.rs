@@ -10,7 +10,8 @@ use crate::syscall::{
 
 use super::{
     COL_CPU_PCT_X, COL_CPU_X, COL_NAME_X, COL_PID_X, COL_PRI_X, COL_RUNTIME_X, COL_STATE_X,
-    MAX_CPUS, PROCESS_HEADER_H, PROCESS_HEADER_Y, PROCESS_ROW_H, PROCESS_ROWS_Y, PROCESS_STATUS_H,
+    MAX_CPUS, PROCESS_HEADER_Y, PROCESS_STATUS_H,
+    process_header_h, process_row_h, process_rows_y,
     REFRESH_INTERVAL_MS, task_name_bytes,
 };
 
@@ -301,8 +302,8 @@ impl SysmonApp {
     }
 
     pub(crate) fn process_max_rows(&self, height: i32) -> usize {
-        let rows_h = (height - PROCESS_ROWS_Y - PROCESS_STATUS_H).max(0);
-        (rows_h / PROCESS_ROW_H).max(0) as usize
+        let rows_h = (height - process_rows_y() - PROCESS_STATUS_H).max(0);
+        (rows_h / process_row_h()).max(0) as usize
     }
 
     pub(crate) fn ensure_process_scroll(&mut self, max_rows: usize) {
@@ -319,14 +320,14 @@ impl SysmonApp {
     }
 
     pub(crate) fn process_row_from_pointer(&self, height: i32, pointer_y: i32) -> Option<usize> {
-        if pointer_y < PROCESS_ROWS_Y {
+        if pointer_y < process_rows_y() {
             return None;
         }
         let max_rows = self.process_max_rows(height);
         if max_rows == 0 {
             return None;
         }
-        let row = ((pointer_y - PROCESS_ROWS_Y) / PROCESS_ROW_H) as usize;
+        let row = ((pointer_y - process_rows_y()) / process_row_h()) as usize;
         if row >= max_rows {
             return None;
         }
@@ -342,7 +343,7 @@ impl SysmonApp {
         pointer_x: i32,
         pointer_y: i32,
     ) -> Option<SortColumn> {
-        if pointer_y < PROCESS_HEADER_Y || pointer_y >= PROCESS_HEADER_Y + PROCESS_HEADER_H {
+        if pointer_y < PROCESS_HEADER_Y || pointer_y >= PROCESS_HEADER_Y + process_header_h() {
             return None;
         }
 

@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+pub mod atlas;
 pub mod cache;
 pub mod metrics;
 pub mod outline;
@@ -33,7 +34,7 @@ use ttf_parser::TtfFont;
 
 /// High-level font renderer that combines parsing, rasterization, and caching.
 pub struct FontRenderer<'a> {
-    font: TtfFont<'a>,
+    pub(crate) font: TtfFont<'a>,
     cache: GlyphCache,
 }
 
@@ -136,7 +137,7 @@ impl<'a> FontRenderer<'a> {
     }
 
     /// Rasterize a single glyph at the given size.
-    fn rasterize_glyph(
+    pub(crate) fn rasterize_glyph(
         &self,
         codepoint: u32,
         _size_px: u16,

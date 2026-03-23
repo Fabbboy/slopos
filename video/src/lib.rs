@@ -18,6 +18,7 @@ use slopos_utils::{klog_info, klog_warn};
 pub mod compositor_context;
 pub mod framebuffer;
 pub mod graphics;
+pub mod kernel_font;
 pub mod panic_screen;
 pub mod roulette_core;
 pub mod splash;
@@ -103,6 +104,9 @@ pub fn init(framebuffer: Option<FramebufferData>, _backend: VideoBackend) {
     }
 
     let fb_to_use = framebuffer;
+
+    // Initialise the font subsystem (atlas + renderer) before any rendering.
+    kernel_font::init();
 
     if let Some(fb) = fb_to_use {
         klog_info!(

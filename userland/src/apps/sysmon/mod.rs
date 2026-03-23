@@ -3,7 +3,7 @@ use slopos_abi::draw::Color32;
 use crate::appkit::{self, ControlFlow, Event, Window, WindowedApp};
 use crate::gfx::DrawBuffer;
 use crate::gfx::fill_rect;
-use crate::gfx::font::FONT_CHAR_HEIGHT;
+use crate::gfx::font;
 
 mod format;
 mod hardware;
@@ -42,9 +42,9 @@ pub(crate) const TAB_HEIGHT: i32 = 26;
 pub(crate) const TAB_WIDTH: i32 = 120;
 
 pub(crate) const PROCESS_HEADER_Y: i32 = TAB_HEIGHT + 2;
-pub(crate) const PROCESS_HEADER_H: i32 = FONT_CHAR_HEIGHT;
-pub(crate) const PROCESS_ROWS_Y: i32 = PROCESS_HEADER_Y + PROCESS_HEADER_H;
-pub(crate) const PROCESS_ROW_H: i32 = FONT_CHAR_HEIGHT;
+pub(crate) fn process_header_h() -> i32 { font::cell_height() }
+pub(crate) fn process_rows_y() -> i32 { PROCESS_HEADER_Y + process_header_h() }
+pub(crate) fn process_row_h() -> i32 { font::cell_height() }
 pub(crate) const PROCESS_STATUS_H: i32 = 20;
 
 pub(crate) const COL_PID_X: i32 = 8;

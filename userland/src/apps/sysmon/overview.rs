@@ -3,7 +3,7 @@ use std::format;
 use slopos_abi::PAGE_SIZE;
 
 use crate::gfx::DrawBuffer;
-use crate::gfx::font::FONT_CHAR_HEIGHT;
+use crate::gfx::font;
 
 use super::{
     COLOR_BG, COLOR_TEXT, SysmonApp, format_bytes_mib, format_pct, format_uptime, task_name_string,
@@ -14,7 +14,7 @@ impl SysmonApp {
         let mut y = super::TAB_HEIGHT + 8;
 
         self.draw_section_title(fb, 10, y, "SYSTEM");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         Self::text(
             fb,
             10,
@@ -23,10 +23,10 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 4;
+        y += font::cell_height() + 4;
 
         self.draw_section_title(fb, 10, y, "CPU");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         let bar_w = (width - 170).max(80);
         for i in 0..self.cpu_count {
             let usage = self.cpu_usage_pct[i];
@@ -37,7 +37,7 @@ impl SysmonApp {
         y += 4;
 
         self.draw_section_title(fb, 10, y, "MEMORY");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
         let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
             .saturating_mul(PAGE_SIZE);
@@ -56,7 +56,7 @@ impl SysmonApp {
         y += 18;
 
         self.draw_section_title(fb, 10, y, "TASKS");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         let mut blocked = 0usize;
         for i in 0..self.task_count {
             if self.tasks[i].state == 3 {
@@ -76,10 +76,10 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 4;
+        y += font::cell_height() + 4;
 
         self.draw_section_title(fb, 10, y, "NETWORK");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         Self::text(
             fb,
             10,
@@ -88,10 +88,10 @@ impl SysmonApp {
             COLOR_TEXT,
             COLOR_BG,
         );
-        y += FONT_CHAR_HEIGHT + 4;
+        y += font::cell_height() + 4;
 
         self.draw_section_title(fb, 10, y, "TOP PROCESSES");
-        y += FONT_CHAR_HEIGHT;
+        y += font::cell_height();
         let mut top = [usize::MAX; 3];
         for i in 0..self.task_count {
             for slot in 0..3 {
@@ -127,7 +127,7 @@ impl SysmonApp {
                 task.task_id
             );
             Self::text(fb, 10, y, &line, COLOR_TEXT, COLOR_BG);
-            y += FONT_CHAR_HEIGHT;
+            y += font::cell_height();
         }
     }
 }

@@ -11,8 +11,9 @@ use crate::syscall::process as sys_proc;
 use super::{
     COL_CPU_PCT_X, COL_CPU_X, COL_NAME_X, COL_PID_X, COL_PRI_X, COL_RUNTIME_X, COL_STATE_X,
     COLOR_BG, COLOR_BRIGHT, COLOR_DIM, COLOR_HEADER, COLOR_KILL_RED, COLOR_ROW_EVEN, COLOR_ROW_ODD,
-    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, PROCESS_HEADER_H, PROCESS_HEADER_Y,
-    PROCESS_ROW_H, PROCESS_ROWS_Y, PROCESS_STATUS_H, SysmonApp, Tab, format_pct, format_runtime,
+    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, PROCESS_HEADER_Y,
+    PROCESS_STATUS_H, SysmonApp, Tab, format_pct, format_runtime,
+    process_header_h, process_row_h, process_rows_y,
     priority_label, task_name_string, task_state, truncate_name,
 };
 
@@ -46,7 +47,7 @@ impl SysmonApp {
             0,
             PROCESS_HEADER_Y,
             width,
-            PROCESS_HEADER_H + 2,
+            process_header_h() + 2,
             COLOR_HEADER,
         );
 
@@ -100,14 +101,14 @@ impl SysmonApp {
             super::SortColumn::Runtime,
         );
 
-        let rows_h = (height - PROCESS_ROWS_Y - PROCESS_STATUS_H).max(0);
+        let rows_h = (height - process_rows_y() - PROCESS_STATUS_H).max(0);
         let clip = DamageRect {
             x0: 0,
-            y0: PROCESS_ROWS_Y,
+            y0: process_rows_y(),
             x1: width - 1,
-            y1: PROCESS_ROWS_Y + rows_h - 1,
+            y1: process_rows_y() + rows_h - 1,
         };
-        fill_rect(fb, 0, PROCESS_ROWS_Y, width, rows_h, COLOR_BG);
+        fill_rect(fb, 0, process_rows_y(), width, rows_h, COLOR_BG);
 
         for row in 0..max_rows {
             let task_row = self.scroll_offset + row;
@@ -118,7 +119,7 @@ impl SysmonApp {
                 continue;
             };
             let task = &self.tasks[idx];
-            let y = PROCESS_ROWS_Y + (row as i32) * PROCESS_ROW_H;
+            let y = process_rows_y() + (row as i32) * process_row_h();
 
             let row_bg = if task_row == self.selected_row {
                 COLOR_ROW_SELECTED
@@ -127,7 +128,7 @@ impl SysmonApp {
             } else {
                 COLOR_ROW_ODD
             };
-            fill_rect_clipped(fb, 0, y, width, PROCESS_ROW_H, row_bg, &clip);
+            fill_rect_clipped(fb, 0, y, width, process_row_h(), row_bg, &clip);
 
             let (state, state_color) = task_state(task.state);
 

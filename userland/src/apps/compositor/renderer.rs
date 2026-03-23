@@ -249,9 +249,9 @@ impl Renderer {
 
         let title = title_to_str(&window.title);
 
-        // Try TTF font first, fall back to bitmap
+        // Render title bar text with TTF font.
         self.ensure_font();
-        let used_ttf = if let Some(ref mut font) = self.ttf_font {
+        if let Some(ref mut font) = self.ttf_font {
             font.draw_text(
                 buf,
                 window.x + 8,
@@ -260,12 +260,7 @@ impl Renderer {
                 TITLE_FONT_SIZE,
                 COLOR_TEXT,
             );
-            true
         } else {
-            false
-        };
-
-        if !used_ttf {
             gfx::draw_str_clipped(
                 buf,
                 window.x + 8,
@@ -388,7 +383,7 @@ impl Renderer {
             );
 
             let title = title_to_str(&window.title);
-            let max_chars = (TASKBAR_BUTTON_WIDTH / 8 - 1) as usize;
+            let max_chars = (TASKBAR_BUTTON_WIDTH / crate::gfx::font::cell_width() - 1) as usize;
             let truncated: &str = if title.len() > max_chars {
                 &title[..max_chars]
             } else {

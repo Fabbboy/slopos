@@ -589,8 +589,7 @@ fn input_loop(
 /// Convert a pixel x-coordinate to a character offset within the input buffer.
 /// Returns `None` if the click is outside the input area (e.g. on the prompt).
 fn pixel_to_input_offset(px: i32, prompt_len: usize, input_len: usize) -> Option<usize> {
-    use crate::gfx::font::FONT_CHAR_WIDTH;
-    let col = px / FONT_CHAR_WIDTH;
+    let col = px / crate::gfx::font::cell_width();
     if col < 0 {
         return None;
     }
@@ -604,8 +603,7 @@ fn pixel_to_input_offset(px: i32, prompt_len: usize, input_len: usize) -> Option
 
 /// Check whether a pixel y-coordinate falls on the current input line row.
 fn is_on_input_row(py: i32, line_row: i32) -> bool {
-    use crate::gfx::font::FONT_CHAR_HEIGHT;
-    let row = py / FONT_CHAR_HEIGHT;
+    let row = py / crate::gfx::font::cell_height();
     row == line_row
 }
 

@@ -4,7 +4,7 @@ use core::cell::Cell;
 
 use slopos_abi::draw::Color32;
 
-use crate::gfx::font::{FONT_CHAR_HEIGHT, FONT_CHAR_WIDTH};
+use crate::gfx::font;
 use crate::gfx::{self, DrawBuffer};
 use crate::syscall::{DisplayInfo, fs, window};
 
@@ -297,13 +297,13 @@ pub mod scrollback {
 // =============================================================================
 
 fn draw_char_at(buf: &mut DrawBuffer, col: i32, row: i32, c: u8, fg: Color32, bg: Color32) {
-    let x = col * FONT_CHAR_WIDTH;
-    let y = row * FONT_CHAR_HEIGHT;
+    let x = col * font::cell_width();
+    let y = row * font::cell_height();
     gfx::font::draw_char(buf, x, y, c, fg, bg);
 }
 
 fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: Color32) {
-    gfx::fill_rect(buf, 0, row * FONT_CHAR_HEIGHT, width, FONT_CHAR_HEIGHT, bg);
+    gfx::fill_rect(buf, 0, row * font::cell_height(), width, font::cell_height(), bg);
 }
 
 fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logical: i32, row: i32) {
@@ -358,18 +358,18 @@ fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
     let height = display.height.get();
     let bg = display.bg.get();
 
-    if height <= FONT_CHAR_HEIGHT {
+    if height <= font::cell_height() {
         return false;
     }
 
-    buf.blit(0, FONT_CHAR_HEIGHT, 0, 0, width, height - FONT_CHAR_HEIGHT);
+    buf.blit(0, font::cell_height(), 0, 0, width, height - font::cell_height());
 
     gfx::fill_rect(
         buf,
         0,
-        height - FONT_CHAR_HEIGHT,
+        height - font::cell_height(),
         width,
-        FONT_CHAR_HEIGHT,
+        font::cell_height(),
         bg,
     );
 
@@ -578,7 +578,7 @@ fn scroll_view(display: &DisplayState, delta: i32) {
 
     surface::draw(|buf| {
         if abs_delta < rows {
-            let shift = abs_delta * FONT_CHAR_HEIGHT;
+            let shift = abs_delta * font::cell_height();
             let width = display.width.get();
             let height = display.height.get();
 
@@ -757,8 +757,8 @@ pub fn shell_console_init() {
     DISPLAY.bytes_pp.set(bytes_pp);
     DISPLAY.pitch.set((width as usize) * (bytes_pp as usize));
 
-    let cols = width / FONT_CHAR_WIDTH;
-    let rows = height / FONT_CHAR_HEIGHT;
+    let cols = width / font::cell_width();
+    let rows = height / font::cell_height();
     DISPLAY
         .cols
         .set(cols.clamp(1, SHELL_SCROLLBACK_COLS as i32));
