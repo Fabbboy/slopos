@@ -10,7 +10,7 @@ use crate::gfx::{DrawBuffer, draw_rect, fill_rect};
 use super::{
     COLOR_BAR_BG, COLOR_BAR_HIGH, COLOR_BAR_LOW, COLOR_BAR_MED, COLOR_BRIGHT, COLOR_DIM,
     COLOR_HEADER, COLOR_SECTION, COLOR_TAB_ACTIVE, COLOR_TAB_BAR, COLOR_TAB_INACTIVE, SortColumn,
-    SysmonApp, TAB_HEIGHT, TAB_WIDTH, Tab,
+    SysmonApp, Tab, tab_height, tab_width,
 };
 
 impl SysmonApp {
@@ -25,23 +25,23 @@ impl SysmonApp {
     }
 
     pub(crate) fn draw_tab_bar(&self, fb: &mut DrawBuffer<'_>, width: i32) {
-        fill_rect(fb, 0, 0, width, TAB_HEIGHT, COLOR_TAB_BAR);
+        fill_rect(fb, 0, 0, width, tab_height(), COLOR_TAB_BAR);
 
         self.draw_tab(fb, 4, "Overview", self.active_tab == Tab::Overview);
         self.draw_tab(
             fb,
-            4 + TAB_WIDTH + 2,
+            4 + tab_width() + 2,
             "Processes",
             self.active_tab == Tab::Processes,
         );
         self.draw_tab(
             fb,
-            4 + (TAB_WIDTH + 2) * 2,
+            4 + (tab_width() + 2) * 2,
             "Hardware",
             self.active_tab == Tab::Hardware,
         );
 
-        draw_rect(fb, 0, TAB_HEIGHT - 1, width, 1, COLOR_DIM);
+        draw_rect(fb, 0, tab_height() - 1, width, 1, COLOR_DIM);
     }
 
     pub(crate) fn draw_tab(&self, fb: &mut DrawBuffer<'_>, x: i32, label: &str, active: bool) {
@@ -51,11 +51,11 @@ impl SysmonApp {
             COLOR_TAB_INACTIVE
         };
         let fg = if active { COLOR_BRIGHT } else { COLOR_DIM };
-        fill_rect(fb, x, 2, TAB_WIDTH, TAB_HEIGHT - 3, bg);
-        draw_rect(fb, x, 2, TAB_WIDTH, TAB_HEIGHT - 3, COLOR_DIM);
+        fill_rect(fb, x, 2, tab_width(), tab_height() - 3, bg);
+        draw_rect(fb, x, 2, tab_width(), tab_height() - 3, COLOR_DIM);
         Self::text(
             fb,
-            x + ((TAB_WIDTH - font::string_width(label)) / 2).max(4),
+            x + ((tab_width() - font::string_width(label)) / 2).max(4),
             6,
             label,
             fg,

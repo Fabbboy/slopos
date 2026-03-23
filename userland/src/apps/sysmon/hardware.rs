@@ -14,7 +14,7 @@ use super::{
 
 impl SysmonApp {
     pub(crate) fn draw_hardware(&self, fb: &mut DrawBuffer<'_>, width: i32, _height: i32) {
-        let mut y = super::TAB_HEIGHT + 8;
+        let mut y = super::tab_height() + 8;
         let lx = 10;
         let vx = 130;
         let bar_w = (width - 170).max(80);

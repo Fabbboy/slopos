@@ -9,10 +9,9 @@ use crate::syscall::{
 };
 
 use super::{
-    COL_CPU_PCT_X, COL_CPU_X, COL_NAME_X, COL_PID_X, COL_PRI_X, COL_RUNTIME_X, COL_STATE_X,
-    MAX_CPUS, PROCESS_HEADER_Y, PROCESS_STATUS_H,
-    process_header_h, process_row_h, process_rows_y,
-    REFRESH_INTERVAL_MS, task_name_bytes,
+    col_cpu_pct_x, col_cpu_x, col_name_x, col_pid_x, col_pri_x, col_runtime_x, col_state_x,
+    MAX_CPUS, process_header_h, process_header_y, process_row_h, process_rows_y,
+    process_status_h, REFRESH_INTERVAL_MS, task_name_bytes,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -302,7 +301,7 @@ impl SysmonApp {
     }
 
     pub(crate) fn process_max_rows(&self, height: i32) -> usize {
-        let rows_h = (height - process_rows_y() - PROCESS_STATUS_H).max(0);
+        let rows_h = (height - process_rows_y() - process_status_h()).max(0);
         (rows_h / process_row_h()).max(0) as usize
     }
 
@@ -343,23 +342,23 @@ impl SysmonApp {
         pointer_x: i32,
         pointer_y: i32,
     ) -> Option<SortColumn> {
-        if pointer_y < PROCESS_HEADER_Y || pointer_y >= PROCESS_HEADER_Y + process_header_h() {
+        if pointer_y < process_header_y() || pointer_y >= process_header_y() + process_header_h() {
             return None;
         }
 
-        if pointer_x >= COL_PID_X && pointer_x < COL_NAME_X {
+        if pointer_x >= col_pid_x() && pointer_x < col_name_x() {
             Some(SortColumn::Pid)
-        } else if pointer_x >= COL_NAME_X && pointer_x < COL_STATE_X {
+        } else if pointer_x >= col_name_x() && pointer_x < col_state_x() {
             Some(SortColumn::Name)
-        } else if pointer_x >= COL_STATE_X && pointer_x < COL_CPU_PCT_X {
+        } else if pointer_x >= col_state_x() && pointer_x < col_cpu_pct_x() {
             Some(SortColumn::State)
-        } else if pointer_x >= COL_CPU_PCT_X && pointer_x < COL_PRI_X {
+        } else if pointer_x >= col_cpu_pct_x() && pointer_x < col_pri_x() {
             Some(SortColumn::CpuPct)
-        } else if pointer_x >= COL_PRI_X && pointer_x < COL_CPU_X {
+        } else if pointer_x >= col_pri_x() && pointer_x < col_cpu_x() {
             Some(SortColumn::Priority)
-        } else if pointer_x >= COL_CPU_X && pointer_x < COL_RUNTIME_X {
+        } else if pointer_x >= col_cpu_x() && pointer_x < col_runtime_x() {
             Some(SortColumn::Cpu)
-        } else if pointer_x >= COL_RUNTIME_X {
+        } else if pointer_x >= col_runtime_x() {
             Some(SortColumn::Runtime)
         } else {
             None

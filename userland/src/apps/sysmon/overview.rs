@@ -11,7 +11,7 @@ use super::{
 
 impl SysmonApp {
     pub(crate) fn draw_overview(&self, fb: &mut DrawBuffer<'_>, width: i32, _height: i32) {
-        let mut y = super::TAB_HEIGHT + 8;
+        let mut y = super::tab_height() + 8;
 
         self.draw_section_title(fb, 10, y, "SYSTEM");
         y += font::cell_height();

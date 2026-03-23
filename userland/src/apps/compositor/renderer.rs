@@ -388,7 +388,9 @@ impl Renderer {
             );
 
             let title = title_to_str(&window.title);
-            let max_chars = (TASKBAR_BUTTON_WIDTH / crate::gfx::font::cell_width() - 1) as usize;
+            let text_space = TASKBAR_BUTTON_WIDTH - 8; // 4px padding each side
+            let cw = crate::gfx::font::cell_width().max(1);
+            let max_chars = (text_space / cw) as usize;
             let truncated: &str = if title.len() > max_chars {
                 &title[..max_chars]
             } else {
