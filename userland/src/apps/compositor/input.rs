@@ -486,7 +486,8 @@ impl InputHandler {
         let mut x = taskbar::app_buttons_start_x();
         for i in 0..window_count as usize {
             let w = &windows[i];
-            if self.mouse_x >= x && self.mouse_x < x + TASKBAR_BUTTON_WIDTH {
+            let btn_w = taskbar::app_button_width(&w.title);
+            if self.mouse_x >= x && self.mouse_x < x + btn_w {
                 let new_state = if w.state == WINDOW_STATE_MINIMIZED {
                     WINDOW_STATE_NORMAL
                 } else {
@@ -501,7 +502,7 @@ impl InputHandler {
                 return;
             }
 
-            x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+            x += btn_w + TASKBAR_BUTTON_PADDING;
         }
 
         if self.start_menu_open {

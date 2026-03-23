@@ -31,8 +31,9 @@ impl SysmonApp {
         for i in 0..self.cpu_count {
             let usage = self.cpu_usage_pct[i];
             let label = format!("CPU{} {:>3}%", self.percpu[i].cpu_id, usage);
-            self.draw_usage_bar(fb, 10, y, bar_w, 14, usage, &label);
-            y += 16;
+            let bar_h = font::cell_height();
+            self.draw_usage_bar(fb, 10, y, bar_w, bar_h, usage, &label);
+            y += bar_h + 2;
         }
         y += 4;
 
@@ -52,8 +53,9 @@ impl SysmonApp {
             format_bytes_mib(total_bytes),
             mem_pct
         );
-        self.draw_usage_bar(fb, 10, y, bar_w, 14, mem_pct, &mem_label);
-        y += 18;
+        let bar_h = font::cell_height();
+        self.draw_usage_bar(fb, 10, y, bar_w, bar_h, mem_pct, &mem_label);
+        y += bar_h + 4;
 
         self.draw_section_title(fb, 10, y, "TASKS");
         y += font::cell_height();

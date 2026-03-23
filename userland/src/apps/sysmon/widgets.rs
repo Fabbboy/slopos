@@ -53,10 +53,11 @@ impl SysmonApp {
         let fg = if active { COLOR_BRIGHT } else { COLOR_DIM };
         fill_rect(fb, x, 2, tab_width(), tab_height() - 3, bg);
         draw_rect(fb, x, 2, tab_width(), tab_height() - 3, COLOR_DIM);
+        let text_y = 2 + (tab_height() - 3 - font::cell_height()) / 2;
         Self::text(
             fb,
             x + ((tab_width() - font::string_width(label)) / 2).max(4),
-            6,
+            text_y,
             label,
             fg,
             bg,
@@ -88,7 +89,8 @@ impl SysmonApp {
         };
         fill_rect(fb, x, y, fill_w, h, color);
         draw_rect(fb, x, y, w, h, COLOR_DIM);
-        Self::text(fb, x + 4, y + 1, label, COLOR_BRIGHT, COLOR_BAR_BG);
+        let text_y = y + (h - font::cell_height()) / 2;
+        Self::text(fb, x + 4, text_y, label, COLOR_BRIGHT, COLOR_BAR_BG);
     }
 
     pub(crate) fn draw_header_cell(

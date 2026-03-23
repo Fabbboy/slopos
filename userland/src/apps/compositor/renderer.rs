@@ -374,6 +374,7 @@ impl Renderer {
                 COLOR_BUTTON
             };
 
+            let btn_w = taskbar::app_button_width(&window.title);
             let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
             let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
@@ -381,33 +382,25 @@ impl Renderer {
                 buf,
                 x,
                 btn_y,
-                TASKBAR_BUTTON_WIDTH,
+                btn_w,
                 btn_height,
                 btn_color,
                 clip,
             );
 
             let title = title_to_str(&window.title);
-            let text_space = TASKBAR_BUTTON_WIDTH - 8; // 4px padding each side
-            let cw = crate::gfx::font::cell_width().max(1);
-            let max_chars = (text_space / cw) as usize;
-            let truncated: &str = if title.len() > max_chars {
-                &title[..max_chars]
-            } else {
-                title
-            };
             let text_vpad = (btn_height - gfx::font::cell_height()) / 2;
             gfx::draw_str_clipped(
                 buf,
                 x + 4,
                 btn_y + text_vpad,
-                truncated,
+                title,
                 COLOR_TEXT,
                 btn_color,
                 clip,
             );
 
-            x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+            x += btn_w + TASKBAR_BUTTON_PADDING;
         }
     }
 

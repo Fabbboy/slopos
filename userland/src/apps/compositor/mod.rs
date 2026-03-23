@@ -194,8 +194,9 @@ impl WindowManager {
         let app_btn_h = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
         for i in 0..self.window_count as usize {
             let w = self.windows[i];
+            let btn_w = taskbar::app_button_width(&w.title);
             let hovered = self.input.mouse_x >= app_x
-                && self.input.mouse_x < app_x + TASKBAR_BUTTON_WIDTH
+                && self.input.mouse_x < app_x + btn_w
                 && self.input.mouse_y >= app_btn_y
                 && self.input.mouse_y < app_btn_y + app_btn_h;
             self.hover_registry.register(
@@ -203,12 +204,12 @@ impl WindowManager {
                 DamageRect {
                     x0: app_x,
                     y0: app_btn_y,
-                    x1: app_x + TASKBAR_BUTTON_WIDTH - 1,
+                    x1: app_x + btn_w - 1,
                     y1: app_btn_y + app_btn_h - 1,
                 },
                 hovered,
             );
-            app_x += TASKBAR_BUTTON_WIDTH + TASKBAR_BUTTON_PADDING;
+            app_x += btn_w + TASKBAR_BUTTON_PADDING;
         }
 
         let mut deco_hit_consumed = false;
