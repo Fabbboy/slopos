@@ -27,11 +27,7 @@ pub struct Edge {
 /// 4. Translated so the glyph's bounding box starts near (0, 0)
 ///
 /// Returns a list of edges suitable for the scan-line rasterizer.
-pub fn outline_to_edges(
-    outline: &GlyphOutline,
-    scale: f32,
-    y_offset: f32,
-) -> Vec<Edge> {
+pub fn outline_to_edges(outline: &GlyphOutline, scale: f32, y_offset: f32) -> Vec<Edge> {
     let mut edges = Vec::new();
 
     for contour in &outline.contours {

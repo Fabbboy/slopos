@@ -303,7 +303,14 @@ fn draw_char_at(buf: &mut DrawBuffer, col: i32, row: i32, c: u8, fg: Color32, bg
 }
 
 fn clear_row(buf: &mut DrawBuffer, row: i32, width: i32, bg: Color32) {
-    gfx::fill_rect(buf, 0, row * font::cell_height(), width, font::cell_height(), bg);
+    gfx::fill_rect(
+        buf,
+        0,
+        row * font::cell_height(),
+        width,
+        font::cell_height(),
+        bg,
+    );
 }
 
 fn draw_row_from_scrollback(buf: &mut DrawBuffer, display: &DisplayState, logical: i32, row: i32) {
@@ -362,7 +369,14 @@ fn scroll_up_fast(buf: &mut DrawBuffer, display: &DisplayState) -> bool {
         return false;
     }
 
-    buf.blit(0, font::cell_height(), 0, 0, width, height - font::cell_height());
+    buf.blit(
+        0,
+        font::cell_height(),
+        0,
+        0,
+        width,
+        height - font::cell_height(),
+    );
 
     gfx::fill_rect(
         buf,

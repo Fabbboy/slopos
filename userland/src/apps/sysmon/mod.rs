@@ -38,24 +38,52 @@ pub(crate) const COLOR_KILL_RED: Color32 = Color32::rgb(0xDD, 0x33, 0x33);
 
 pub(crate) const MAX_CPUS: usize = 16;
 pub(crate) const REFRESH_INTERVAL_MS: u64 = 1000;
-pub(crate) fn tab_height() -> i32 { font::cell_height() + 10 }
-pub(crate) fn tab_width() -> i32 { font::cell_width() * 12 }
+pub(crate) fn tab_height() -> i32 {
+    font::cell_height() + 10
+}
+pub(crate) fn tab_width() -> i32 {
+    font::cell_width() * 12
+}
 
-pub(crate) fn process_header_y() -> i32 { tab_height() + 2 }
-pub(crate) fn process_header_h() -> i32 { font::cell_height() }
-pub(crate) fn process_rows_y() -> i32 { process_header_y() + process_header_h() }
-pub(crate) fn process_row_h() -> i32 { font::cell_height() }
-pub(crate) fn process_status_h() -> i32 { font::cell_height() + 4 }
+pub(crate) fn process_header_y() -> i32 {
+    tab_height() + 2
+}
+pub(crate) fn process_header_h() -> i32 {
+    font::cell_height()
+}
+pub(crate) fn process_rows_y() -> i32 {
+    process_header_y() + process_header_h()
+}
+pub(crate) fn process_row_h() -> i32 {
+    font::cell_height()
+}
+pub(crate) fn process_status_h() -> i32 {
+    font::cell_height() + 4
+}
 
 // Column positions derived from font cell width so the table adapts
 // to any monospace font size.
-pub(crate) fn col_pid_x() -> i32 { font::cell_width() }
-pub(crate) fn col_name_x() -> i32 { col_pid_x() + font::cell_width() * 6 }
-pub(crate) fn col_state_x() -> i32 { col_name_x() + font::cell_width() * 16 }
-pub(crate) fn col_cpu_pct_x() -> i32 { col_state_x() + font::cell_width() * 8 }
-pub(crate) fn col_pri_x() -> i32 { col_cpu_pct_x() + font::cell_width() * 8 }
-pub(crate) fn col_cpu_x() -> i32 { col_pri_x() + font::cell_width() * 6 }
-pub(crate) fn col_runtime_x() -> i32 { col_cpu_x() + font::cell_width() * 5 }
+pub(crate) fn col_pid_x() -> i32 {
+    font::cell_width()
+}
+pub(crate) fn col_name_x() -> i32 {
+    col_pid_x() + font::cell_width() * 6
+}
+pub(crate) fn col_state_x() -> i32 {
+    col_name_x() + font::cell_width() * 16
+}
+pub(crate) fn col_cpu_pct_x() -> i32 {
+    col_state_x() + font::cell_width() * 8
+}
+pub(crate) fn col_pri_x() -> i32 {
+    col_cpu_pct_x() + font::cell_width() * 8
+}
+pub(crate) fn col_cpu_x() -> i32 {
+    col_pri_x() + font::cell_width() * 6
+}
+pub(crate) fn col_runtime_x() -> i32 {
+    col_cpu_x() + font::cell_width() * 5
+}
 
 impl WindowedApp for SysmonApp {
     fn init(&mut self, win: &mut Window) {

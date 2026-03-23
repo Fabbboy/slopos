@@ -126,13 +126,7 @@ pub fn put_pixel_blended<T: Canvas>(target: &mut T, x: i32, y: i32, color: Color
 /// Like `put_pixel_blended` but applies the coverage as an additional
 /// alpha multiplier, useful for anti-aliased drawing primitives.
 #[inline]
-pub fn put_pixel_coverage<T: Canvas>(
-    target: &mut T,
-    x: i32,
-    y: i32,
-    color: Color32,
-    coverage: u8,
-) {
+pub fn put_pixel_coverage<T: Canvas>(target: &mut T, x: i32, y: i32, color: Color32, coverage: u8) {
     if coverage == 0 {
         return;
     }
@@ -194,12 +188,7 @@ pub fn fill_rect_blended<T: Canvas>(
         }
     }
 
-    let damage = DamageRect {
-        x0,
-        y0,
-        x1,
-        y1,
-    };
+    let damage = DamageRect { x0, y0, x1, y1 };
     target.report_damage(damage);
     Some(damage)
 }

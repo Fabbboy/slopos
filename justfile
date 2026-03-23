@@ -153,7 +153,7 @@ test: _iso-tests (_qemu-boot "test" "0" iso_tests fs_image_tests)
 
 [doc("Run unit tests for abi, gfx, and font crates on the host")]
 test-host:
-    SLOPOS_ROOT="$(pwd)" {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 

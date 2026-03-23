@@ -265,15 +265,7 @@ impl Renderer {
                 color, // title-bar bg for AA blending
             );
         } else {
-            gfx::draw_str_clipped(
-                buf,
-                window.x + 8,
-                text_y,
-                title,
-                COLOR_TEXT,
-                color,
-                clip,
-            );
+            gfx::draw_str_clipped(buf, window.x + 8, text_y, title, COLOR_TEXT, color, clip);
         }
 
         draw_button_clipped(
@@ -378,15 +370,7 @@ impl Renderer {
             let btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
             let btn_height = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
 
-            gfx::fill_rect_clipped(
-                buf,
-                x,
-                btn_y,
-                btn_w,
-                btn_height,
-                btn_color,
-                clip,
-            );
+            gfx::fill_rect_clipped(buf, x, btn_y, btn_w, btn_height, btn_color, clip);
 
             let title = title_to_str(&window.title);
             let text_vpad = (btn_height - gfx::font::cell_height()) / 2;

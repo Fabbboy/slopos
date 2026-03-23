@@ -204,8 +204,8 @@ impl<'a> TtfFont<'a> {
             let encoding_id = read_u16(data, record + 2)?;
             let subtable_offset = read_u32(data, record + 4)? as usize;
 
-            let is_unicode = platform_id == 0
-                || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+            let is_unicode =
+                platform_id == 0 || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
 
             if !is_unicode {
                 continue;

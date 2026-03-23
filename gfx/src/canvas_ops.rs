@@ -398,8 +398,7 @@ pub fn line_aa<T: Canvas>(
     let w = target.width() as i32;
     let h = target.height() as i32;
 
-    if (x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= w && x1 >= w) || (y0 >= h && y1 >= h)
-    {
+    if (x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= w && x1 >= w) || (y0 >= h && y1 >= h) {
         return None;
     }
 
@@ -786,19 +785,31 @@ mod tests {
         fn read_pixel(&self, x: u32, y: u32) -> Color32 {
             let off = (y * self.width + x) as usize * 4;
             let raw = u32::from_le_bytes([
-                self.data[off], self.data[off + 1],
-                self.data[off + 2], self.data[off + 3],
+                self.data[off],
+                self.data[off + 1],
+                self.data[off + 2],
+                self.data[off + 3],
             ]);
             PixelFormat::Argb8888.decode(raw)
         }
     }
 
     impl Canvas for TestCanvas {
-        fn width(&self) -> u32 { self.width }
-        fn height(&self) -> u32 { self.height }
-        fn pitch_bytes(&self) -> usize { self.width as usize * 4 }
-        fn bytes_per_pixel(&self) -> u8 { 4 }
-        fn pixel_format(&self) -> PixelFormat { PixelFormat::Argb8888 }
+        fn width(&self) -> u32 {
+            self.width
+        }
+        fn height(&self) -> u32 {
+            self.height
+        }
+        fn pitch_bytes(&self) -> usize {
+            self.width as usize * 4
+        }
+        fn bytes_per_pixel(&self) -> u8 {
+            4
+        }
+        fn pixel_format(&self) -> PixelFormat {
+            PixelFormat::Argb8888
+        }
 
         fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
             let bytes = pixel.to_u32().to_le_bytes();
@@ -810,10 +821,14 @@ mod tests {
         fn read_encoded_at(&self, byte_offset: usize) -> u32 {
             if byte_offset + 4 <= self.data.len() {
                 u32::from_le_bytes([
-                    self.data[byte_offset], self.data[byte_offset + 1],
-                    self.data[byte_offset + 2], self.data[byte_offset + 3],
+                    self.data[byte_offset],
+                    self.data[byte_offset + 1],
+                    self.data[byte_offset + 2],
+                    self.data[byte_offset + 3],
                 ])
-            } else { 0 }
+            } else {
+                0
+            }
         }
     }
 

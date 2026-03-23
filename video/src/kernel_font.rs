@@ -12,8 +12,7 @@ const INTER_TTF: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
 
 /// Embedded JetBrains Mono Regular TTF (SIL Open Font License) — monospace
 /// console/terminal font.
-const JETBRAINS_MONO_TTF: &[u8] =
-    include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+const JETBRAINS_MONO_TTF: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 /// Default font size (pixels) for the console glyph atlas.
 const CONSOLE_FONT_SIZE: u16 = 16;

@@ -92,7 +92,9 @@ impl<'a> FontRenderer<'a> {
             }
 
             // Get the true advance from font metrics (full float precision).
-            let true_advance = self.font.glyph_index(codepoint)
+            let true_advance = self
+                .font
+                .glyph_index(codepoint)
                 .and_then(|gid| self.font.h_metrics(gid))
                 .map(|hm| hm.advance_width as f32 * scale)
                 .unwrap_or(size_px as f32 * 0.5);
@@ -277,12 +279,7 @@ impl<'a> FontRenderer<'a> {
             }
         }
 
-        Some(DamageRect {
-            x0,
-            y0,
-            x1,
-            y1,
-        })
+        Some(DamageRect { x0, y0, x1, y1 })
     }
 }
 
@@ -292,7 +289,10 @@ mod tests {
     use slopos_abi::draw::{Canvas, EncodedPixel};
     use slopos_abi::pixel::PixelFormat;
 
-    const INTER_TTF: &[u8] = include_bytes!(concat!(env!("SLOPOS_ROOT"), "/assets/fonts/Inter-Regular.ttf"));
+    const INTER_TTF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/fonts/Inter-Regular.ttf"
+    ));
 
     struct TestCanvas {
         data: alloc::vec::Vec<u8>,
@@ -316,19 +316,31 @@ mod tests {
         fn read_pixel(&self, x: u32, y: u32) -> Color32 {
             let off = (y * self.width + x) as usize * 4;
             let raw = u32::from_le_bytes([
-                self.data[off], self.data[off + 1],
-                self.data[off + 2], self.data[off + 3],
+                self.data[off],
+                self.data[off + 1],
+                self.data[off + 2],
+                self.data[off + 3],
             ]);
             PixelFormat::Argb8888.decode(raw)
         }
     }
 
     impl Canvas for TestCanvas {
-        fn width(&self) -> u32 { self.width }
-        fn height(&self) -> u32 { self.height }
-        fn pitch_bytes(&self) -> usize { self.width as usize * 4 }
-        fn bytes_per_pixel(&self) -> u8 { 4 }
-        fn pixel_format(&self) -> PixelFormat { PixelFormat::Argb8888 }
+        fn width(&self) -> u32 {
+            self.width
+        }
+        fn height(&self) -> u32 {
+            self.height
+        }
+        fn pitch_bytes(&self) -> usize {
+            self.width as usize * 4
+        }
+        fn bytes_per_pixel(&self) -> u8 {
+            4
+        }
+        fn pixel_format(&self) -> PixelFormat {
+            PixelFormat::Argb8888
+        }
         fn write_encoded_at(&mut self, off: usize, pixel: EncodedPixel) {
             let bytes = pixel.to_u32().to_le_bytes();
             if off + 4 <= self.data.len() {
@@ -337,8 +349,15 @@ mod tests {
         }
         fn read_encoded_at(&self, off: usize) -> u32 {
             if off + 4 <= self.data.len() {
-                u32::from_le_bytes([self.data[off], self.data[off+1], self.data[off+2], self.data[off+3]])
-            } else { 0 }
+                u32::from_le_bytes([
+                    self.data[off],
+                    self.data[off + 1],
+                    self.data[off + 2],
+                    self.data[off + 3],
+                ])
+            } else {
+                0
+            }
         }
     }
 
@@ -391,7 +410,15 @@ mod tests {
     fn draw_text_produces_pixels() {
         let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
         let mut canvas = TestCanvas::new(200, 50);
-        let d = renderer.draw_text(&mut canvas, 10, 10, "Hello", 16, Color32::WHITE, Color32::BLACK);
+        let d = renderer.draw_text(
+            &mut canvas,
+            10,
+            10,
+            "Hello",
+            16,
+            Color32::WHITE,
+            Color32::BLACK,
+        );
         assert!(d.is_some());
         assert!(canvas.has_any_nonzero());
     }
@@ -400,7 +427,17 @@ mod tests {
     fn draw_text_damage_rect_sane() {
         let mut renderer = FontRenderer::new(INTER_TTF).unwrap();
         let mut canvas = TestCanvas::new(200, 50);
-        let d = renderer.draw_text(&mut canvas, 10, 10, "AB", 16, Color32::WHITE, Color32::BLACK).unwrap();
+        let d = renderer
+            .draw_text(
+                &mut canvas,
+                10,
+                10,
+                "AB",
+                16,
+                Color32::WHITE,
+                Color32::BLACK,
+            )
+            .unwrap();
         assert!(d.x0 >= 0 && d.y0 >= 0 && d.x1 < 200 && d.y1 < 50);
         assert!(d.x1 - d.x0 > 5, "width {} too small", d.x1 - d.x0);
     }

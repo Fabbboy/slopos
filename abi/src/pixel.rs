@@ -168,7 +168,12 @@ mod tests {
         for &color in &colors {
             let encoded = PixelFormat::Argb8888.encode(color);
             let decoded = PixelFormat::Argb8888.decode(encoded.to_u32());
-            assert_eq!(decoded, color, "roundtrip failed for 0x{:08X}", color.to_u32());
+            assert_eq!(
+                decoded,
+                color,
+                "roundtrip failed for 0x{:08X}",
+                color.to_u32()
+            );
         }
     }
 

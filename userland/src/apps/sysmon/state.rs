@@ -9,9 +9,9 @@ use crate::syscall::{
 };
 
 use super::{
-    col_cpu_pct_x, col_cpu_x, col_name_x, col_pid_x, col_pri_x, col_runtime_x, col_state_x,
-    MAX_CPUS, process_header_h, process_header_y, process_row_h, process_rows_y,
-    process_status_h, REFRESH_INTERVAL_MS, task_name_bytes,
+    MAX_CPUS, REFRESH_INTERVAL_MS, col_cpu_pct_x, col_cpu_x, col_name_x, col_pid_x, col_pri_x,
+    col_runtime_x, col_state_x, process_header_h, process_header_y, process_row_h, process_rows_y,
+    process_status_h, task_name_bytes,
 };
 
 #[derive(Clone, Copy, PartialEq)]

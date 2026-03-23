@@ -9,12 +9,11 @@ use crate::gfx::{DrawBuffer, draw_rect, fill_rect, fill_rect_clipped};
 use crate::syscall::process as sys_proc;
 
 use super::{
-    col_cpu_pct_x, col_cpu_x, col_name_x, col_pid_x, col_pri_x, col_runtime_x, col_state_x,
     COLOR_BG, COLOR_BRIGHT, COLOR_DIM, COLOR_HEADER, COLOR_KILL_RED, COLOR_ROW_EVEN, COLOR_ROW_ODD,
-    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, SysmonApp, Tab,
-    format_pct, format_runtime, priority_label, process_header_h, process_header_y,
-    process_row_h, process_rows_y, process_status_h,
-    task_name_string, task_state, truncate_name,
+    COLOR_ROW_SELECTED, COLOR_TAB_INACTIVE, ContextMenu, SysmonApp, Tab, col_cpu_pct_x, col_cpu_x,
+    col_name_x, col_pid_x, col_pri_x, col_runtime_x, col_state_x, format_pct, format_runtime,
+    priority_label, process_header_h, process_header_y, process_row_h, process_rows_y,
+    process_status_h, task_name_string, task_state, truncate_name,
 };
 
 const CONTEXT_MENU_W: i32 = 140;
@@ -467,8 +466,10 @@ impl SysmonApp {
             COLOR_DIM,
         );
 
-        let kill_text_x = layout.kill_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Kill")) / 2;
-        let cancel_text_x = layout.cancel_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Cancel")) / 2;
+        let kill_text_x =
+            layout.kill_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Kill")) / 2;
+        let cancel_text_x =
+            layout.cancel_x + (KILL_BUTTON_W - crate::gfx::font::string_width("Cancel")) / 2;
         Self::text(
             fb,
             kill_text_x,

@@ -80,14 +80,11 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
     let title_y = ring_center_y + ring_radius + 12;
     let subtitle_y = title_y + 26;
     let message_y = subtitle_y + 22;
-    let progress_w =
-        (min_dim * 5 / 10).clamp(SPLASH_PROGRESS_MIN_WIDTH, SPLASH_PROGRESS_MAX_WIDTH);
-    let progress_h =
-        (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
+    let progress_w = (min_dim * 5 / 10).clamp(SPLASH_PROGRESS_MIN_WIDTH, SPLASH_PROGRESS_MAX_WIDTH);
+    let progress_h = (min_dim / 120).clamp(SPLASH_PROGRESS_MIN_HEIGHT, SPLASH_PROGRESS_MAX_HEIGHT);
     let progress_x = center_x - (progress_w / 2);
     let progress_y = message_y + 22;
-    let message_w =
-        (min_dim * 55 / 100).clamp(SPLASH_MESSAGE_MIN_WIDTH, SPLASH_MESSAGE_MAX_WIDTH);
+    let message_w = (min_dim * 55 / 100).clamp(SPLASH_MESSAGE_MIN_WIDTH, SPLASH_MESSAGE_MAX_WIDTH);
     let message_x = center_x - (message_w / 2);
 
     SplashLayout {
@@ -240,7 +237,10 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
 
     if !message.is_empty() {
         // Convert &[u8] to &str (strip null terminator).
-        let end = message.iter().position(|&b| b == 0).unwrap_or(message.len());
+        let end = message
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(message.len());
         if let Ok(s) = core::str::from_utf8(&message[..end]) {
             draw_text(
                 &mut ctx,

@@ -65,8 +65,7 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Vec<u8> {
 
         // Process each edge that crosses this sub-scanline.
         for edge in edges {
-            let (mut ey0, mut ey1, mut ex0, mut ex1) =
-                (edge.y0, edge.y1, edge.x0, edge.x1);
+            let (mut ey0, mut ey1, mut ex0, mut ex1) = (edge.y0, edge.y1, edge.x0, edge.x1);
 
             let dir: f32;
             if ey0 < ey1 {

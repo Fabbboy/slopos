@@ -14,8 +14,7 @@ pub fn measure_text(font: &TtfFont<'_>, text: &str, size_px: u16) -> (i32, i32) 
     let scale = size_px as f32 / upem;
 
     let hhea = font.hhea();
-    let height =
-        libm::ceilf((hhea.ascender as f32 - hhea.descender as f32) * scale) as i32;
+    let height = libm::ceilf((hhea.ascender as f32 - hhea.descender as f32) * scale) as i32;
 
     // Accumulate width in float to avoid per-character truncation error.
     let mut width_f = 0.0f32;
