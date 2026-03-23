@@ -97,6 +97,44 @@ impl PixelFormat {
         })
     }
 
+    /// Decode a raw encoded pixel value back to `Color32` (0xAARRGGBB).
+    ///
+    /// This is the inverse of `encode()`. For 3-byte formats without alpha,
+    /// the returned alpha is 0xFF (fully opaque).
+    #[inline]
+    pub fn decode(self, raw: u32) -> Color32 {
+        match self {
+            Self::Argb8888 => Color32(raw),
+            Self::Xrgb8888 => Color32(0xFF000000 | (raw & 0x00FFFFFF)),
+            Self::Rgba8888 => {
+                let r = (raw >> 24) & 0xFF;
+                let g = (raw >> 16) & 0xFF;
+                let b = (raw >> 8) & 0xFF;
+                let a = raw & 0xFF;
+                Color32((a << 24) | (r << 16) | (g << 8) | b)
+            }
+            Self::Bgra8888 => {
+                let b = (raw >> 24) & 0xFF;
+                let g = (raw >> 16) & 0xFF;
+                let r = (raw >> 8) & 0xFF;
+                let a = raw & 0xFF;
+                Color32((a << 24) | (r << 16) | (g << 8) | b)
+            }
+            Self::Rgb888 => {
+                let r = (raw >> 16) & 0xFF;
+                let g = (raw >> 8) & 0xFF;
+                let b = raw & 0xFF;
+                Color32(0xFF000000 | (r << 16) | (g << 8) | b)
+            }
+            Self::Bgr888 => {
+                let b = (raw >> 16) & 0xFF;
+                let g = (raw >> 8) & 0xFF;
+                let r = raw & 0xFF;
+                Color32(0xFF000000 | (r << 16) | (g << 8) | b)
+            }
+        }
+    }
+
     /// Get a bitmap of all supported formats
     ///
     /// Returns a u32 where bit N is set if format with value N is supported.

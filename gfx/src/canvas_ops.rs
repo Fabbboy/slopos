@@ -1,6 +1,8 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
+use crate::blend::put_pixel_coverage;
+
 #[inline]
 fn emit<T: Canvas>(target: &mut T, damage: Option<DamageRect>) -> Option<DamageRect> {
     if let Some(d) = damage {
@@ -315,6 +317,411 @@ pub fn triangle_filled<T: Canvas>(
             y0: min_y,
             x1: max_x,
             y1: max_y,
+        })
+    } else {
+        None
+    };
+    emit(target, damage)
+}
+
+// ---------------------------------------------------------------------------
+// Anti-aliased drawing primitives
+// ---------------------------------------------------------------------------
+
+/// Xiaolin Wu's anti-aliased line algorithm.
+///
+/// Draws a smooth line from `(x0, y0)` to `(x1, y1)` by blending pixels
+/// at fractional boundaries. Uses integer fixed-point arithmetic.
+pub fn line_aa<T: Canvas>(
+    target: &mut T,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: Color32,
+) -> Option<DamageRect> {
+    let w = target.width() as i32;
+    let h = target.height() as i32;
+
+    if (x0 < 0 && x1 < 0) || (y0 < 0 && y1 < 0) || (x0 >= w && x1 >= w) || (y0 >= h && y1 >= h)
+    {
+        return None;
+    }
+
+    let dx = (x1 - x0).abs();
+    let dy = (y1 - y0).abs();
+
+    if dx == 0 && dy == 0 {
+        put_pixel_coverage(target, x0, y0, color, 255);
+        let damage = DamageRect {
+            x0,
+            y0,
+            x1: x0,
+            y1: y0,
+        };
+        return emit(target, Some(damage));
+    }
+
+    let steep = dy > dx;
+
+    let (mut px0, mut py0, mut px1, mut py1) = if steep {
+        (y0, x0, y1, x1)
+    } else {
+        (x0, y0, x1, y1)
+    };
+
+    if px0 > px1 {
+        core::mem::swap(&mut px0, &mut px1);
+        core::mem::swap(&mut py0, &mut py1);
+    }
+
+    let dx_f = px1 - px0;
+    let dy_f = py1 - py0;
+
+    // Gradient in 8.8 fixed point
+    let gradient = if dx_f == 0 {
+        256i32
+    } else {
+        (dy_f * 256) / dx_f
+    };
+
+    let plot = |t: &mut T, px: i32, py: i32, cov: u8| {
+        if steep {
+            put_pixel_coverage(t, py, px, color, cov);
+        } else {
+            put_pixel_coverage(t, px, py, color, cov);
+        }
+    };
+
+    // First endpoint
+    plot(target, px0, py0, 255);
+
+    let mut intery = py0 * 256 + gradient;
+
+    // Second endpoint
+    plot(target, px1, py1, 255);
+
+    // Main loop
+    for x in (px0 + 1)..px1 {
+        let y_int = intery / 256;
+        let frac = (intery & 0xFF) as u8;
+
+        plot(target, x, y_int, 255 - frac);
+        plot(target, x, y_int + 1, frac);
+
+        intery += gradient;
+    }
+
+    let min_x_aa = x0.min(x1).max(0);
+    let min_y_aa = y0.min(y1).max(0);
+    let max_x_aa = x0.max(x1).min(w - 1);
+    let max_y_aa = (y0.max(y1) + 1).min(h - 1);
+
+    let damage = if min_x_aa <= max_x_aa && min_y_aa <= max_y_aa {
+        Some(DamageRect {
+            x0: min_x_aa,
+            y0: min_y_aa,
+            x1: max_x_aa,
+            y1: max_y_aa,
+        })
+    } else {
+        None
+    };
+    emit(target, damage)
+}
+
+/// Anti-aliased circle outline using midpoint algorithm with coverage.
+pub fn circle_aa<T: Canvas>(
+    target: &mut T,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    color: Color32,
+) -> Option<DamageRect> {
+    if radius <= 0 {
+        return None;
+    }
+
+    let r_f64 = radius as f64;
+
+    let mut x = 0i32;
+    let mut y = radius;
+
+    while x <= y {
+        let dist = libm::sqrt((x as f64) * (x as f64) + (y as f64) * (y as f64));
+        let err = dist - r_f64;
+        let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+
+        let pairs: [(i32, i32); 8] = [
+            (cx + x, cy + y),
+            (cx - x, cy + y),
+            (cx + x, cy - y),
+            (cx - x, cy - y),
+            (cx + y, cy + x),
+            (cx - y, cy + x),
+            (cx + y, cy - x),
+            (cx - y, cy - x),
+        ];
+        for &(px, py) in &pairs {
+            put_pixel_coverage(target, px, py, color, cov);
+        }
+
+        if y > 0 {
+            let dist_inner = libm::sqrt(
+                (x as f64) * (x as f64) + ((y - 1) as f64) * ((y - 1) as f64),
+            );
+            let err_inner = r_f64 - dist_inner;
+            let cov_inner = ((1.0 - err_inner).clamp(0.0, 1.0) * 255.0) as u8;
+            if cov_inner > 0 {
+                let inner_pairs: [(i32, i32); 8] = [
+                    (cx + x, cy + y - 1),
+                    (cx - x, cy + y - 1),
+                    (cx + x, cy - y + 1),
+                    (cx - x, cy - y + 1),
+                    (cx + y - 1, cy + x),
+                    (cx - y + 1, cy + x),
+                    (cx + y - 1, cy - x),
+                    (cx - y + 1, cy - x),
+                ];
+                for &(px, py) in &inner_pairs {
+                    put_pixel_coverage(target, px, py, color, cov_inner);
+                }
+            }
+        }
+
+        x += 1;
+        let next_dist =
+            libm::sqrt((x as f64) * (x as f64) + (y as f64) * (y as f64));
+        if next_dist - r_f64 > 0.5 {
+            y -= 1;
+        }
+    }
+
+    let buf_w = target.width() as i32;
+    let buf_h = target.height() as i32;
+    let dx0 = (cx - radius - 1).max(0);
+    let dy0 = (cy - radius - 1).max(0);
+    let dx1 = (cx + radius + 1).min(buf_w - 1);
+    let dy1 = (cy + radius + 1).min(buf_h - 1);
+
+    let damage = if dx0 <= dx1 && dy0 <= dy1 {
+        Some(DamageRect {
+            x0: dx0,
+            y0: dy0,
+            x1: dx1,
+            y1: dy1,
+        })
+    } else {
+        None
+    };
+    emit(target, damage)
+}
+
+/// Draw a rounded rectangle outline.
+///
+/// Draws four straight edges connected by anti-aliased quarter-circle arcs
+/// of the given corner `radius`.
+pub fn rounded_rect<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    color: Color32,
+) -> Option<DamageRect> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+
+    let r = radius.min(w / 2).min(h / 2).max(0);
+
+    if r == 0 {
+        return rect(target, x, y, w, h, color);
+    }
+
+    let px = target.pixel_format().encode(color);
+
+    // Straight edges (between corner arcs)
+    target.hline(x + r, x + w - 1 - r, y, px);
+    target.hline(x + r, x + w - 1 - r, y + h - 1, px);
+    target.vline(x, y + r, y + h - 1 - r, px);
+    target.vline(x + w - 1, y + r, y + h - 1 - r, px);
+
+    // Corner arcs
+    let corners = [
+        (x + r, y + r, -1i32, -1i32),
+        (x + w - 1 - r, y + r, 1, -1),
+        (x + r, y + h - 1 - r, -1, 1),
+        (x + w - 1 - r, y + h - 1 - r, 1, 1),
+    ];
+
+    let r_f64 = r as f64;
+
+    for &(ccx, ccy, sx, sy) in &corners {
+        let mut ci = 0i32;
+        let mut cj = r;
+
+        while ci <= cj {
+            let dist =
+                libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
+            let err = dist - r_f64;
+            let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+
+            put_pixel_coverage(target, ccx + ci * sx, ccy + cj * sy, color, cov);
+            if ci != cj {
+                put_pixel_coverage(target, ccx + cj * sx, ccy + ci * sy, color, cov);
+            }
+
+            if cj > 0 {
+                let dist_inner = libm::sqrt(
+                    (ci as f64) * (ci as f64) + ((cj - 1) as f64) * ((cj - 1) as f64),
+                );
+                let err_inner = r_f64 - dist_inner;
+                let cov_inner = ((1.0 - err_inner).clamp(0.0, 1.0) * 255.0) as u8;
+                if cov_inner > 0 {
+                    put_pixel_coverage(
+                        target,
+                        ccx + ci * sx,
+                        ccy + (cj - 1) * sy,
+                        color,
+                        cov_inner,
+                    );
+                    if ci != cj - 1 {
+                        put_pixel_coverage(
+                            target,
+                            ccx + (cj - 1) * sx,
+                            ccy + ci * sy,
+                            color,
+                            cov_inner,
+                        );
+                    }
+                }
+            }
+
+            ci += 1;
+            let next_dist =
+                libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
+            if next_dist - r_f64 > 0.5 {
+                cj -= 1;
+            }
+        }
+    }
+
+    let buf_w = target.width() as i32;
+    let buf_h = target.height() as i32;
+    let dx0 = x.max(0);
+    let dy0 = y.max(0);
+    let dx1 = (x + w - 1).min(buf_w - 1);
+    let dy1 = (y + h - 1).min(buf_h - 1);
+
+    let damage = if dx0 <= dx1 && dy0 <= dy1 {
+        Some(DamageRect {
+            x0: dx0,
+            y0: dy0,
+            x1: dx1,
+            y1: dy1,
+        })
+    } else {
+        None
+    };
+    emit(target, damage)
+}
+
+/// Draw a filled rounded rectangle with anti-aliased corners.
+pub fn rounded_rect_filled<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    color: Color32,
+) -> Option<DamageRect> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+
+    let r = radius.min(w / 2).min(h / 2).max(0);
+    let px = target.pixel_format().encode(color);
+
+    if r == 0 {
+        return fill_rect(target, x, y, w, h, color);
+    }
+
+    // Fill three rectangular regions (non-corner areas)
+    target.fill_rect_encoded(x, y + r, w, h - 2 * r, px);
+    target.fill_rect_encoded(x + r, y, w - 2 * r, r, px);
+    target.fill_rect_encoded(x + r, y + h - r, w - 2 * r, r, px);
+
+    // Fill corner regions with AA at the boundary
+    let tl_cx = x + r;
+    let tr_cx = x + w - 1 - r;
+    let tl_cy = y + r;
+    let bl_cy = y + h - 1 - r;
+    let r_f64 = r as f64;
+
+    let mut ci = 0i32;
+    let mut cj = r;
+
+    while ci <= cj {
+        let dist = libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
+        let err = dist - r_f64;
+        let cov = ((1.0 - err).clamp(0.0, 1.0) * 255.0) as u8;
+
+        let row_top = tl_cy - cj;
+        let row_bot = bl_cy + cj;
+
+        // Fill interior of this row in both corners, then AA boundary pixel
+        if ci > 0 {
+            target.hline(tl_cx - ci + 1, tl_cx - 1, row_top, px);
+            target.hline(tr_cx + 1, tr_cx + ci - 1, row_top, px);
+            target.hline(tl_cx - ci + 1, tl_cx - 1, row_bot, px);
+            target.hline(tr_cx + 1, tr_cx + ci - 1, row_bot, px);
+        }
+        put_pixel_coverage(target, tl_cx - ci, row_top, color, cov);
+        put_pixel_coverage(target, tr_cx + ci, row_top, color, cov);
+        put_pixel_coverage(target, tl_cx - ci, row_bot, color, cov);
+        put_pixel_coverage(target, tr_cx + ci, row_bot, color, cov);
+
+        // Swapped axis row
+        if ci != cj {
+            let row_top2 = tl_cy - ci;
+            let row_bot2 = bl_cy + ci;
+
+            if cj > 0 {
+                target.hline(tl_cx - cj + 1, tl_cx - 1, row_top2, px);
+                target.hline(tr_cx + 1, tr_cx + cj - 1, row_top2, px);
+                target.hline(tl_cx - cj + 1, tl_cx - 1, row_bot2, px);
+                target.hline(tr_cx + 1, tr_cx + cj - 1, row_bot2, px);
+            }
+            put_pixel_coverage(target, tl_cx - cj, row_top2, color, cov);
+            put_pixel_coverage(target, tr_cx + cj, row_top2, color, cov);
+            put_pixel_coverage(target, tl_cx - cj, row_bot2, color, cov);
+            put_pixel_coverage(target, tr_cx + cj, row_bot2, color, cov);
+        }
+
+        ci += 1;
+        let next_dist =
+            libm::sqrt((ci as f64) * (ci as f64) + (cj as f64) * (cj as f64));
+        if next_dist - r_f64 > 0.5 {
+            cj -= 1;
+        }
+    }
+
+    let buf_w = target.width() as i32;
+    let buf_h = target.height() as i32;
+    let dx0 = x.max(0);
+    let dy0 = y.max(0);
+    let dx1 = (x + w - 1).min(buf_w - 1);
+    let dy1 = (y + h - 1).min(buf_h - 1);
+
+    let damage = if dx0 <= dx1 && dy0 <= dy1 {
+        Some(DamageRect {
+            x0: dx0,
+            y0: dy0,
+            x1: dx1,
+            y1: dy1,
         })
     } else {
         None

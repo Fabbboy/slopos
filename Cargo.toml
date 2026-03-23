@@ -6,6 +6,7 @@ members = [
   "boot",
   "core",
   "drivers",
+  "font",
   "fs",
   "gfx",
   "kernel",
@@ -40,6 +41,7 @@ non_camel_case_types = "deny"
 
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }
+libm = { version = "0.2", default-features = false }
 limine = { version = "0.5.0", default-features = false }
 slopos-arch = { path = "karch" }
 slopos-abi = { path = "abi" }
@@ -47,6 +49,7 @@ slopos-acpi = { path = "acpi" }
 slopos-boot = { path = "boot" }
 slopos-core = { path = "core" }
 slopos-drivers = { path = "drivers" }
+slopos-font = { path = "font" }
 slopos-fs = { path = "fs" }
 slopos-gfx = { path = "gfx" }
   slopos-utils = { path = "utils" }

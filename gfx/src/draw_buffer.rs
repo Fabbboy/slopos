@@ -240,6 +240,37 @@ impl Canvas for DrawBuffer<'_> {
     }
 
     #[inline]
+    fn read_encoded_at(&self, byte_offset: usize) -> u32 {
+        match self.bytes_pp {
+            4 => {
+                if byte_offset + 4 <= self.data.len() {
+                    u32::from_le_bytes([
+                        self.data[byte_offset],
+                        self.data[byte_offset + 1],
+                        self.data[byte_offset + 2],
+                        self.data[byte_offset + 3],
+                    ])
+                } else {
+                    0
+                }
+            }
+            3 => {
+                if byte_offset + 3 <= self.data.len() {
+                    u32::from_le_bytes([
+                        self.data[byte_offset],
+                        self.data[byte_offset + 1],
+                        self.data[byte_offset + 2],
+                        0xFF,
+                    ])
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    #[inline]
     fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel) {
         let color = pixel.to_u32();
         let bytes = color.to_le_bytes();

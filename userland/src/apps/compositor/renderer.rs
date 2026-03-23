@@ -1,4 +1,5 @@
 use slopos_abi::draw::Color32;
+use slopos_font::FontRenderer;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
@@ -14,11 +15,16 @@ use super::taskbar::{self, START_MENU_ITEMS};
 
 const COLOR_WINDOW_PLACEHOLDER: Color32 = Color32::rgb(0x20, 0x20, 0x30);
 
+/// Default TTF font size for title bar text (in pixels).
+const TITLE_FONT_SIZE: u16 = 14;
+
 pub struct Renderer {
     pub output_width: u32,
     pub output_height: u32,
     pub output_bytes_pp: u8,
     pub output_pitch: usize,
+    ttf_font: Option<FontRenderer<'static>>,
+    ttf_init_attempted: bool,
 }
 
 impl Renderer {
@@ -28,6 +34,21 @@ impl Renderer {
             output_height: 0,
             output_bytes_pp: 4,
             output_pitch: 0,
+            ttf_font: None,
+            ttf_init_attempted: false,
+        }
+    }
+
+    /// Try to load the TTF font from the filesystem (once).
+    fn ensure_font(&mut self) {
+        if self.ttf_init_attempted {
+            return;
+        }
+        self.ttf_init_attempted = true;
+
+        if let Ok(data) = std::fs::read("/usr/share/fonts/Inter-Regular.ttf") {
+            let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
+            self.ttf_font = FontRenderer::new(leaked);
         }
     }
 
@@ -39,7 +60,7 @@ impl Renderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         windows: &[UserWindowInfo],
         window_count: usize,
@@ -108,7 +129,7 @@ impl Renderer {
     }
 
     fn draw_partial_region(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         damage: &DamageRect,
         windows: &[UserWindowInfo],
@@ -201,7 +222,7 @@ impl Renderer {
     }
 
     fn draw_title_bar(
-        &self,
+        &mut self,
         buf: &mut DrawBuffer,
         window: &UserWindowInfo,
         focused_task: u32,
@@ -227,15 +248,34 @@ impl Renderer {
         );
 
         let title = title_to_str(&window.title);
-        gfx::draw_str_clipped(
-            buf,
-            window.x + 8,
-            title_y + 4,
-            title,
-            COLOR_TEXT,
-            color,
-            clip,
-        );
+
+        // Try TTF font first, fall back to bitmap
+        self.ensure_font();
+        let used_ttf = if let Some(ref mut font) = self.ttf_font {
+            font.draw_text(
+                buf,
+                window.x + 8,
+                title_y + 3,
+                title,
+                TITLE_FONT_SIZE,
+                COLOR_TEXT,
+            );
+            true
+        } else {
+            false
+        };
+
+        if !used_ttf {
+            gfx::draw_str_clipped(
+                buf,
+                window.x + 8,
+                title_y + 4,
+                title,
+                COLOR_TEXT,
+                color,
+                clip,
+            );
+        }
 
         draw_button_clipped(
             buf,

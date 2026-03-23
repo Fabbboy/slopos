@@ -58,3 +58,21 @@ for bin in "${BINS[@]}"; do
     debugfs -w -R "write $src $dst" "$IMAGE_PATH" >/dev/null
     debugfs -w -R "set_inode_field $dst mode 0100755" "$IMAGE_PATH" >/dev/null
 done
+
+# Install font files into /usr/share/fonts/ if assets/fonts/ exists
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FONTS_DIR="${REPO_ROOT}/assets/fonts"
+
+if [ -d "$FONTS_DIR" ]; then
+    debugfs -w -R "mkdir /usr" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    debugfs -w -R "mkdir /usr/share" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    debugfs -w -R "mkdir /usr/share/fonts" "$IMAGE_PATH" >/dev/null 2>&1 || true
+
+    for font in "$FONTS_DIR"/*.ttf; do
+        [ -f "$font" ] || continue
+        fname="$(basename "$font")"
+        debugfs -w -R "write $font /usr/share/fonts/$fname" "$IMAGE_PATH" >/dev/null
+        echo "Installed font: /usr/share/fonts/$fname"
+    done
+fi

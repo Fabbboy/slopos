@@ -74,5 +74,6 @@ testbins = []
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-font = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-slibc = { workspace = true }

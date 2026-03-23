@@ -197,6 +197,20 @@ pub trait Canvas {
         }
     }
 
+    /// Read a raw pixel value at the given byte offset.
+    ///
+    /// Returns the pixel as a u32 in the buffer's native encoding (typically
+    /// little-endian ARGB8888). Used by alpha-blending and anti-aliased
+    /// drawing operations that need to read-modify-write pixels.
+    ///
+    /// The default returns 0 (transparent black), which is correct for
+    /// write-only surfaces like MMIO framebuffers. Buffer-backed surfaces
+    /// should override this to read actual pixel data.
+    #[inline]
+    fn read_encoded_at(&self, _byte_offset: usize) -> u32 {
+        0
+    }
+
     /// Report that a rectangular region was modified.
     ///
     /// Drawing functions in the `gfx` crate call this automatically after
