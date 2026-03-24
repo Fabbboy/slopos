@@ -14,14 +14,21 @@ impl FileOps for SocketFileOps {
     }
 
     fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
-        // Socket API uses raw pointers; use a kernel-side staging buffer.
         let mut tmp = [0u8; IO_STAGING_SIZE];
         let read_len = buf.len().min(tmp.len());
         let n = socket::socket_recv(handle as u32, tmp.as_mut_ptr(), read_len);
         if n <= 0 {
             return n as isize;
         }
-        match buf.copy_in(0, &tmp[..n as usize]) {
+        // Clamp to requested length defensively — the socket driver must
+        // not return more than `read_len`, but a kernel panic from a
+        // slice overrun is never acceptable.
+        let n = (n as usize).min(read_len);
+        // Linux TCP model: data is consumed from the receive queue before
+        // the copy to userspace.  If copy_to_user faults, the bytes are
+        // lost — this is acceptable because the calling process supplied
+        // a bogus buffer.  See net/ipv4/tcp.c:tcp_recvmsg_locked().
+        match buf.copy_in(0, &tmp[..n]) {
             Ok(written) => written as isize,
             Err(e) => e.as_isize(),
         }

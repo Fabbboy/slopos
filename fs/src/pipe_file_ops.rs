@@ -99,7 +99,7 @@ impl FileOps for PipeReadOps {
 
         loop {
             let mut need_block = false;
-            let mut drained = 0usize;
+            let mut peeked = 0usize;
             let no_writers;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
@@ -113,11 +113,11 @@ impl FileOps for PipeReadOps {
 
                 if remaining > 0 && slot.len > 0 {
                     let chunk = remaining.min(local.len());
-                    drained = slot.read_into(&mut local[..chunk]);
+                    peeked = slot.peek_into(&mut local[..chunk]);
                 }
 
                 no_writers = slot.writers == 0;
-                if drained == 0
+                if peeked == 0
                     && total == 0
                     && !no_writers
                     && !is_nonblock
@@ -126,12 +126,9 @@ impl FileOps for PipeReadOps {
                     need_block = true;
                 }
             }
-            if drained > 0 {
-                match buf.copy_in(total, &local[..drained]) {
-                    Ok(n) => {
-                        total += n;
-                        remaining -= n;
-                    }
+            if peeked > 0 {
+                let copied = match buf.copy_in(total, &local[..peeked]) {
+                    Ok(n) => n,
                     Err(_) => {
                         return if total > 0 {
                             total as isize
@@ -139,7 +136,16 @@ impl FileOps for PipeReadOps {
                             Errno::EFAULT.as_isize()
                         };
                     }
+                };
+
+                {
+                    let mut pipe_state = pipe::PIPE_STATE.lock();
+                    if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
+                        slot.consume(copied);
+                    }
                 }
+                total += copied;
+                remaining -= copied;
                 pipe::writer_wq(pipe_id).wake_one();
                 continue;
             }

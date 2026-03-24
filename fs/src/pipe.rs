@@ -50,15 +50,22 @@ impl PipeSlot {
         }
     }
 
-    pub(crate) fn read_into(&mut self, out: &mut [u8]) -> usize {
+    pub(crate) fn peek_into(&self, out: &mut [u8]) -> usize {
         let mut copied = 0usize;
-        while copied < out.len() && self.len > 0 {
-            out[copied] = self.buffer[self.read_pos];
-            self.read_pos = (self.read_pos + 1) % PIPE_BUFFER_SIZE;
-            self.len -= 1;
+        let mut pos = self.read_pos;
+        let avail = self.len;
+        while copied < out.len() && copied < avail {
+            out[copied] = self.buffer[pos];
+            pos = (pos + 1) % PIPE_BUFFER_SIZE;
             copied += 1;
         }
         copied
+    }
+
+    pub(crate) fn consume(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.read_pos = (self.read_pos + n) % PIPE_BUFFER_SIZE;
+        self.len -= n;
     }
 
     pub(crate) fn write_from(&mut self, input: &[u8]) -> usize {

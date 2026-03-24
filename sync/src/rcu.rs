@@ -130,76 +130,99 @@ pub fn synchronize_rcu() {
 // ---------------------------------------------------------------------------
 // Deferred RCU callbacks (call_rcu)
 // ---------------------------------------------------------------------------
+//
+// Modelled after Linux's call_rcu() design:
+//
+// - `call_rcu()` is always O(1) and never blocks — it pushes a callback
+//   node onto a lock-free Treiber stack (LIFO linked list).
+//
+// - `rcu_process_callbacks()`, called from CPU 0's timer tick, atomically
+//   steals the entire list, waits for a grace period, then invokes all
+//   callbacks.  This mirrors Linux's RCU callback batching in softirq
+//   context (see kernel/rcu/tree.c:rcu_do_batch).
+//
+// - No fixed-size limit, no synchronous fallback.  The only allocation
+//   is the `Box<RcuCallbackNode>` in `call_rcu()`.
 
 type RcuCallback = unsafe fn(*mut u8);
 
-struct RcuPendingFree {
+struct RcuCallbackNode {
+    next: *mut RcuCallbackNode,
     ptr: *mut u8,
     callback: RcuCallback,
 }
 
-unsafe impl Send for RcuPendingFree {}
+// SAFETY: RcuCallbackNode is only accessed through atomic operations on
+// PENDING_HEAD (push side) or exclusively after the atomic steal (drain
+// side).  No concurrent mutable access is possible.
+unsafe impl Send for RcuCallbackNode {}
 
-const MAX_PENDING: usize = 8;
-static PENDING_COUNT: AtomicU64 = AtomicU64::new(0);
-static PENDING_SLOTS: [AtomicPtr<RcuPendingFree>; MAX_PENDING] =
-    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_PENDING];
+static PENDING_HEAD: AtomicPtr<RcuCallbackNode> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Schedule a deferred free after the next RCU grace period.
 ///
-/// The callback will be invoked with `ptr` after `synchronize_rcu()`
-/// completes.  This is the non-blocking alternative to calling
-/// `synchronize_rcu()` + `drop()` inline.
+/// The callback will be invoked with `ptr` after [`rcu_process_callbacks`]
+/// completes a grace period.  This is the non-blocking alternative to
+/// calling `synchronize_rcu()` + `drop()` inline.
 ///
-/// If the pending queue is full, falls back to synchronous
-/// `synchronize_rcu()` + immediate callback.
+/// This function is O(1), never blocks, and is safe to call from any
+/// context including interrupt handlers and non-preemptible sections.
+/// The only fallible operation is the `Box::new` allocation for the
+/// callback node.
 ///
 /// # Safety
 ///
 /// `callback` must be safe to call with `ptr` after a grace period.
 pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
-    let entry = Box::into_raw(Box::new(RcuPendingFree { ptr, callback }));
-    for slot in &PENDING_SLOTS {
-        if slot
-            .compare_exchange(
-                core::ptr::null_mut(),
-                entry,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
+    let node = Box::into_raw(Box::new(RcuCallbackNode {
+        next: core::ptr::null_mut(),
+        ptr,
+        callback,
+    }));
+
+    // Lock-free Treiber stack push.  We own `node` exclusively until
+    // the CAS succeeds, so the unsynchronised write to `next` is safe.
+    loop {
+        let head = PENDING_HEAD.load(Ordering::Relaxed);
+        // SAFETY: we have exclusive access to `node` until CAS publishes it.
+        unsafe {
+            (*node).next = head;
+        }
+        if PENDING_HEAD
+            .compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
-            PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
             return;
         }
-    }
-    // Queue full — fall back to synchronous path.
-    unsafe {
-        drop(Box::from_raw(entry));
-    }
-    synchronize_rcu();
-    unsafe {
-        callback(ptr);
     }
 }
 
 /// Process all pending RCU callbacks.
 ///
 /// Called from the timer tick on CPU 0 (or any periodic kernel context).
-/// Performs a single `synchronize_rcu()` then drains all pending entries.
+/// Atomically steals the entire callback list, waits for one grace period,
+/// then invokes every callback.  Multiple callbacks batched between ticks
+/// share a single `synchronize_rcu()` — the same optimisation Linux uses
+/// in `rcu_do_batch()`.
 pub fn rcu_process_callbacks() {
-    if PENDING_COUNT.load(Ordering::Relaxed) == 0 {
+    // Atomic steal — grabs the entire list in one operation.
+    let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
+    if head.is_null() {
         return;
     }
+
     synchronize_rcu();
-    for slot in &PENDING_SLOTS {
-        let entry = slot.swap(core::ptr::null_mut(), Ordering::AcqRel);
-        if !entry.is_null() {
-            PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-            let pending = unsafe { Box::from_raw(entry) };
-            unsafe {
-                (pending.callback)(pending.ptr);
-            }
+
+    let mut current = head;
+    while !current.is_null() {
+        // SAFETY: each node was allocated with Box::new in call_rcu and
+        // is exclusively ours after the atomic swap above.
+        let node = unsafe { Box::from_raw(current) };
+        current = node.next;
+        // SAFETY: the grace period has elapsed — the callback contract
+        // guarantees this is safe to invoke.
+        unsafe {
+            (node.callback)(node.ptr);
         }
     }
 }
