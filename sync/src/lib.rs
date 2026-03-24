@@ -13,7 +13,8 @@ pub use init_flag::{InitFlag, StateFlag};
 pub use once_lock::OnceLock;
 pub use preempt::{is_preemption_disabled, preempt_count, IrqPreemptGuard, PreemptGuard};
 pub use rcu::{
-    call_rcu, rcu_note_qs, rcu_process_callbacks, rcu_read_lock, synchronize_rcu, RcuReadGuard,
+    call_rcu, rcu_note_qs, rcu_process_callbacks, rcu_raise_softirq, rcu_read_lock,
+    synchronize_rcu, RcuReadGuard,
 };
 pub use spinlock::{
     IrqMutex, IrqMutexGuard, IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, PreemptMutex,

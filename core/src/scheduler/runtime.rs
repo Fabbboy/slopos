@@ -130,6 +130,9 @@ fn unified_idle_loop(_: *mut c_void) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
+        if cpu_id == 0 {
+            slopos_sync::rcu_process_callbacks();
+        }
         slopos_sync::rcu_note_qs();
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));

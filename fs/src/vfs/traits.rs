@@ -157,6 +157,32 @@ pub enum VfsError {
     Busy,
 }
 
+impl VfsError {
+    pub fn to_errno(self) -> slopos_abi::Errno {
+        use slopos_abi::Errno;
+        match self {
+            Self::NotFound => Errno::ENOENT,
+            Self::NotDirectory => Errno::ENOTDIR,
+            Self::NotFile => Errno::EINVAL,
+            Self::IsDirectory => Errno::EISDIR,
+            Self::PermissionDenied => Errno::EACCES,
+            Self::ReadOnly => Errno::EACCES,
+            Self::NoSpace => Errno::ENOSPC,
+            Self::IoError => Errno::EIO,
+            Self::InvalidPath => Errno::EINVAL,
+            Self::AlreadyExists => Errno::EEXIST,
+            Self::NotEmpty => Errno::ENOTEMPTY,
+            Self::CrossDevice => Errno::EINVAL,
+            Self::NotSupported => Errno::EOPNOTSUPP,
+            Self::TooManyLinks => Errno::EINVAL,
+            Self::NameTooLong => Errno::ENAMETOOLONG,
+            Self::InvalidArgument => Errno::EINVAL,
+            Self::BadFileDescriptor => Errno::EBADF,
+            Self::Busy => Errno::EBUSY,
+        }
+    }
+}
+
 /// A filesystem implementation.
 ///
 /// All filesystem types (ext2, ramfs, devfs, etc.) implement this trait.

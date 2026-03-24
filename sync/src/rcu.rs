@@ -38,17 +38,17 @@
 //!   callback — slower but correct, matching Linux's OOM behaviour in
 //!   `kfree_rcu()` (see `kernel/rcu/tree.c:kfree_rcu_monitor`).
 //!
-//! - `rcu_process_callbacks()`, called from CPU 0's timer tick, atomically
-//!   steals the entire list, waits for a grace period, then invokes all
-//!   callbacks.  Multiple callbacks batched between ticks share a single
-//!   `synchronize_rcu()` — the same optimisation Linux uses in
-//!   `rcu_do_batch()`.
+//! - `rcu_process_callbacks()` is called from non-IRQ context (the
+//!   scheduler idle loop on CPU 0, or context-switch paths).  The timer
+//!   tick only raises a flag via [`rcu_raise_softirq`]; the actual grace
+//!   period wait and callback invocation happen outside interrupt context,
+//!   matching Linux's separation of `rcu_sched_clock_irq()` (hardirq)
+//!   from `rcu_core()` (softirq/kthread).
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::alloc::Layout;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::preempt::PreemptGuard;
 use slopos_arch::pcr::{
@@ -116,7 +116,7 @@ pub fn synchronize_rcu() {
     }
 
     for cpu in 0..n {
-        if cpu == this_cpu || !is_cpu_online(cpu) || snaps[cpu] == 0 {
+        if cpu == this_cpu || !is_cpu_online(cpu) {
             continue;
         }
 
@@ -172,11 +172,21 @@ unsafe impl Send for RcuCallbackNode {}
 
 static PENDING_HEAD: AtomicPtr<RcuCallbackNode> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Flag set by the timer tick when pending callbacks exist.
+///
+/// Modelled after Linux's `raise_softirq(RCU_SOFTIRQ)`: the hardirq
+/// path only sets this flag; the actual grace-period wait and callback
+/// invocation happen in [`rcu_process_callbacks`] which runs from
+/// non-IRQ context (idle loop, context switch).
+static RCU_CB_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Attempt to allocate an `RcuCallbackNode` via the global allocator.
 ///
 /// Returns a raw pointer (null on OOM).  Uses the raw allocator API
 /// instead of `Box::new` to avoid panicking under memory pressure —
 /// the caller is responsible for the OOM fallback path.
+///
+/// Freed symmetrically via [`dealloc_callback_node`] with the same layout.
 fn try_alloc_callback_node(ptr: *mut u8, callback: RcuCallback) -> *mut RcuCallbackNode {
     let layout = Layout::new::<RcuCallbackNode>();
     // SAFETY: layout is non-zero-sized (RcuCallbackNode contains pointers).
@@ -195,6 +205,20 @@ fn try_alloc_callback_node(ptr: *mut u8, callback: RcuCallback) -> *mut RcuCallb
         });
     }
     node
+}
+
+/// Free an `RcuCallbackNode` allocated by [`try_alloc_callback_node`].
+///
+/// Uses the same [`Layout`] as the allocation to ensure symmetry.
+/// # Safety
+/// `node` must have been allocated by [`try_alloc_callback_node`] and
+/// must not be accessed after this call.
+unsafe fn dealloc_callback_node(node: *mut RcuCallbackNode) {
+    let layout = Layout::new::<RcuCallbackNode>();
+    // SAFETY: caller guarantees `node` was allocated with this layout.
+    unsafe {
+        alloc::alloc::dealloc(node as *mut u8, layout);
+    }
 }
 
 /// Schedule a deferred free after the next RCU grace period.
@@ -243,14 +267,41 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
     }
 }
 
-/// Process all pending RCU callbacks.
+/// Check from the timer tick whether deferred callbacks need processing.
 ///
-/// Called from the timer tick on CPU 0 (or any periodic kernel context).
-/// Atomically steals the entire callback list, waits for one grace period,
-/// then invokes every callback.  Multiple callbacks batched between ticks
-/// share a single `synchronize_rcu()` — the same optimisation Linux uses
-/// in `rcu_do_batch()`.
+/// This is the hardirq-safe half of the callback pipeline, analogous to
+/// Linux's `rcu_sched_clock_irq()` raising `RCU_SOFTIRQ`.  It only
+/// sets an atomic flag — the actual grace-period wait and callback
+/// invocation happen in [`rcu_process_callbacks`] which must be called
+/// from non-IRQ context.
+#[inline]
+pub fn rcu_raise_softirq() {
+    if !PENDING_HEAD.load(Ordering::Relaxed).is_null() {
+        RCU_CB_PENDING.store(true, Ordering::Release);
+    }
+}
+
+/// Process all pending RCU callbacks from non-IRQ context.
+///
+/// Called from the scheduler idle loop or context-switch path on CPU 0.
+/// If the softirq flag is set, atomically steals the entire callback
+/// list, waits for one grace period, then invokes every callback.
+///
+/// Multiple callbacks batched between ticks share a single
+/// `synchronize_rcu()` — the same optimisation Linux uses in
+/// `rcu_do_batch()`.
+///
+/// # Context
+///
+/// Must be called from process context (idle task, kernel thread) —
+/// **never** from a timer tick or other IRQ handler, because
+/// `synchronize_rcu()` spins waiting for all CPUs to report quiescent
+/// states.
 pub fn rcu_process_callbacks() {
+    if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
+        return;
+    }
+
     let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
     if head.is_null() {
         return;
@@ -262,12 +313,18 @@ pub fn rcu_process_callbacks() {
     while !current.is_null() {
         // SAFETY: each node was allocated via try_alloc_callback_node in
         // call_rcu and is exclusively ours after the atomic swap above.
-        let node = unsafe { Box::from_raw(current) };
-        current = node.next;
+        let next = unsafe { (*current).next };
+        let ptr = unsafe { (*current).ptr };
+        let callback = unsafe { (*current).callback };
+        // SAFETY: symmetric dealloc with the same Layout used in allocation.
+        unsafe {
+            dealloc_callback_node(current);
+        }
         // SAFETY: the grace period has elapsed — the callback contract
         // guarantees this is safe to invoke.
         unsafe {
-            (node.callback)(node.ptr);
+            callback(ptr);
         }
+        current = next;
     }
 }

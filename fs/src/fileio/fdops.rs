@@ -176,22 +176,21 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
     let create = (flags & FILE_OPEN_CREAT) != 0;
     let exclusive = (posix_flags & slopos_abi::fs::O_EXCL) != 0;
     let truncate = (posix_flags & slopos_abi::fs::O_TRUNC) != 0;
+    let writable = (flags & FILE_OPEN_WRITE) != 0;
     let open_flags = crate::vfs::ops::VfsOpenFlags {
         create,
         exclusive,
         truncate,
+        writable,
     };
-    let Some(vfs_handle) = vfs_open_handle_flags(path_bytes, open_flags) else {
-        return Errno::ENOENT.raw() as _;
+    let vfs_handle = match vfs_open_handle_flags(path_bytes, open_flags) {
+        Ok(h) => h,
+        Err(e) => return e.raw() as _,
     };
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
 
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
-    if buf.len() == 0 {
-        return 0;
-    }
-
     let (open_file_idx, ops, handle, flags, offset, seekable) =
         with_tables(|kernel, processes, open_files, _| {
             let table = table_for_pid(kernel, processes, process_id)?;
@@ -224,6 +223,9 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
     if open_file_idx == u16::MAX {
         return Errno::EBADF.raw() as _;
     }
+    if buf.len() == 0 {
+        return 0;
+    }
 
     let used_offset = if seekable { offset } else { 0 };
     let rc = ops.read(handle, buf, used_offset, flags);
@@ -240,10 +242,6 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
-    if buf.len() == 0 {
-        return 0;
-    }
-
     let (open_file_idx, ops, handle, flags, offset, seekable) =
         with_tables(|kernel, processes, open_files, _| {
             let table = table_for_pid(kernel, processes, process_id)?;
@@ -275,6 +273,9 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
 
     if open_file_idx == u16::MAX {
         return Errno::EBADF.raw() as _;
+    }
+    if buf.len() == 0 {
+        return 0;
     }
 
     let used_offset = if seekable { offset } else { 0 };
@@ -437,10 +438,15 @@ pub fn file_mkdir_path(path: *const c_char) -> c_int {
         Some(p) => p,
         None => return Errno::EINVAL.raw() as _,
     };
-    if vfs_mkdir(path_bytes).is_ok() {
-        0
-    } else {
-        Errno::EEXIST.raw() as _
+    match vfs_mkdir(path_bytes) {
+        Ok(()) => 0,
+        Err(crate::vfs::VfsError::AlreadyExists) => Errno::EEXIST.raw() as _,
+        Err(crate::vfs::VfsError::NotFound) => Errno::ENOENT.raw() as _,
+        Err(crate::vfs::VfsError::NotDirectory) => Errno::ENOTDIR.raw() as _,
+        Err(crate::vfs::VfsError::PermissionDenied) => Errno::EACCES.raw() as _,
+        Err(crate::vfs::VfsError::NoSpace) => Errno::ENOSPC.raw() as _,
+        Err(crate::vfs::VfsError::ReadOnly) => Errno::EACCES.raw() as _,
+        Err(_) => Errno::EIO.raw() as _,
     }
 }
 

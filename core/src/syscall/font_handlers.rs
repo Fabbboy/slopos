@@ -1,5 +1,6 @@
 //! Font management syscall handlers (inspired by Linux KDFONTOP).
 
+use slopos_abi::Errno;
 use slopos_mm::user_io_buf::memdup_user;
 use slopos_utils::klog_info;
 
@@ -30,7 +31,7 @@ fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
 
 define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
     if pid > 1 {
-        return ctx.err_with(slopos_abi::syscall::ERRNO_EPERM);
+        return ctx.err_with(Errno::EPERM.as_u64());
     }
 
     let data_ptr = args.arg0;
@@ -44,20 +45,23 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
     }
     if format == FONT_FORMAT_COVERAGE {
         if width == 0 || height == 0 || height > 32 {
-            return ctx.err();
+            return ctx.err_with(Errno::EINVAL.as_u64());
+        }
+        if glyph_count != slopos_font::ASCII_COUNT {
+            return ctx.err_with(Errno::EINVAL.as_u64());
         }
 
         let stride = match (width as usize).checked_mul(height as usize) {
             Some(size) => size,
-            None => return ctx.err(),
+            None => return ctx.err_with(Errno::EINVAL.as_u64()),
         };
         let coverage_size = match slopos_font::ASCII_COUNT.checked_mul(stride) {
             Some(size) => size,
-            None => return ctx.err(),
+            None => return ctx.err_with(Errno::EINVAL.as_u64()),
         };
         let data_size = match (slopos_font::ASCII_COUNT + 1).checked_mul(stride) {
             Some(size) if size <= 65536 => size,
-            _ => return ctx.err(),
+            _ => return ctx.err_with(Errno::EINVAL.as_u64()),
         };
 
         let mut font_data = match memdup_user(data_ptr, data_size, 65536) {
@@ -73,28 +77,29 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             Some(atlas) => {
                 replace_and_schedule_free(atlas);
                 klog_info!(
-                    "FONT_SET: applied {}x{} coverage font (95 glyphs + replacement)",
+                    "FONT_SET: applied {}x{} coverage font ({} glyphs + replacement)",
                     width,
                     height,
+                    glyph_count,
                 );
                 ctx.ok(0)
             }
-            None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+            None => ctx.err_with(Errno::ENOMEM.as_u64()),
         }
     } else if format == FONT_FORMAT_BITMAP {
         if width != 8 {
-            return ctx.err();
+            return ctx.err_with(Errno::EINVAL.as_u64());
         }
         if height == 0 || height > 32 {
-            return ctx.err();
+            return ctx.err_with(Errno::EINVAL.as_u64());
         }
         if glyph_count == 0 || glyph_count > 512 {
-            return ctx.err();
+            return ctx.err_with(Errno::EINVAL.as_u64());
         }
 
         let data_size = match glyph_count.checked_mul(height as usize) {
             Some(size) if size <= 16384 => size,
-            _ => return ctx.err(),
+            _ => return ctx.err_with(Errno::EINVAL.as_u64()),
         };
 
         let font_data = match memdup_user(data_ptr, data_size, 16384) {
@@ -121,12 +126,12 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
                         );
                         ctx.ok(0)
                     }
-                    None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+                    None => ctx.err_with(Errno::ENOMEM.as_u64()),
                 }
             }
-            None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
+            None => ctx.err_with(Errno::EINVAL.as_u64()),
         }
     } else {
-        ctx.err()
+        ctx.err_with(Errno::EINVAL.as_u64())
     }
 });

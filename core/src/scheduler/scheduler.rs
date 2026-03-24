@@ -1122,7 +1122,7 @@ pub fn scheduler_timer_tick() {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     if cpu_id == 0 {
-        slopos_sync::rcu_process_callbacks();
+        slopos_sync::rcu_raise_softirq();
     }
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 

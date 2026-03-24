@@ -99,7 +99,7 @@ impl FileOps for PipeReadOps {
 
         loop {
             let mut need_block = false;
-            let mut peeked = 0usize;
+            let mut consumed = 0usize;
             let no_writers;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
@@ -113,11 +113,11 @@ impl FileOps for PipeReadOps {
 
                 if remaining > 0 && slot.len > 0 {
                     let chunk = remaining.min(local.len());
-                    peeked = slot.peek_into(&mut local[..chunk]);
+                    consumed = slot.read_into(&mut local[..chunk]);
                 }
 
                 no_writers = slot.writers == 0;
-                if peeked == 0
+                if consumed == 0
                     && total == 0
                     && !no_writers
                     && !is_nonblock
@@ -126,9 +126,13 @@ impl FileOps for PipeReadOps {
                     need_block = true;
                 }
             }
-            if peeked > 0 {
-                let copied = match buf.copy_in(total, &local[..peeked]) {
-                    Ok(n) => n,
+
+            if consumed > 0 {
+                match buf.copy_in(total, &local[..consumed]) {
+                    Ok(n) => {
+                        total += n;
+                        remaining -= n;
+                    }
                     Err(_) => {
                         return if total > 0 {
                             total as isize
@@ -136,16 +140,7 @@ impl FileOps for PipeReadOps {
                             Errno::EFAULT.as_isize()
                         };
                     }
-                };
-
-                {
-                    let mut pipe_state = pipe::PIPE_STATE.lock();
-                    if let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) {
-                        slot.consume(copied);
-                    }
                 }
-                total += copied;
-                remaining -= copied;
                 pipe::writer_wq(pipe_id).wake_one();
                 continue;
             }
@@ -208,7 +203,7 @@ impl FileOps for PipeWriteOps {
     }
 
     fn read(&self, _handle: usize, _buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
-        Errno::EPERM.as_isize()
+        Errno::EBADF.as_isize()
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
@@ -268,7 +263,7 @@ impl FileOps for PipeWriteOps {
                 if total >= buf_len {
                     return total as isize;
                 }
-                if total > 0 {
+                if is_nonblock && total > 0 {
                     return total as isize;
                 }
                 if is_nonblock {

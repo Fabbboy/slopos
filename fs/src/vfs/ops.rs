@@ -33,6 +33,7 @@ pub struct VfsOpenFlags {
     pub create: bool,
     pub exclusive: bool,
     pub truncate: bool,
+    pub writable: bool,
 }
 
 impl VfsOpenFlags {
@@ -41,6 +42,7 @@ impl VfsOpenFlags {
             create: false,
             exclusive: false,
             truncate: false,
+            writable: false,
         }
     }
 
@@ -49,6 +51,7 @@ impl VfsOpenFlags {
             create: true,
             exclusive: false,
             truncate: false,
+            writable: true,
         }
     }
 }
@@ -60,6 +63,7 @@ pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
             create,
             exclusive: false,
             truncate: false,
+            writable: create,
         },
     )
 }
@@ -67,7 +71,6 @@ pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
 pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> {
     match resolve_path(path) {
         Ok(resolved) => {
-            // O_EXCL + O_CREAT: file must not exist.
             if flags.create && flags.exclusive {
                 return Err(VfsError::AlreadyExists);
             }
@@ -75,7 +78,7 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
             if stat.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
             }
-            if flags.truncate && stat.file_type == FileType::Regular {
+            if flags.truncate && flags.writable && stat.file_type == FileType::Regular {
                 resolved.fs.truncate(resolved.inode, 0)?;
             }
             Ok(VfsHandle {

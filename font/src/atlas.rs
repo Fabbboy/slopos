@@ -549,7 +549,15 @@ mod global_atlas {
 
     pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
         if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
-            replace_global(atlas);
+            let old = replace_global(atlas);
+            if !old.is_null() {
+                // SAFETY: old was allocated via Box::into_raw in a previous
+                // replace_global call.  During early boot no concurrent
+                // readers exist, so immediate free is safe.
+                unsafe {
+                    drop(Box::from_raw(old));
+                }
+            }
             true
         } else {
             false
@@ -573,7 +581,13 @@ mod global_atlas {
                     FontSource::BitmapFallback,
                 ) {
                     Some(atlas) => {
-                        replace_global(atlas);
+                        let old = replace_global(atlas);
+                        if !old.is_null() {
+                            // SAFETY: see init_global — early boot, no readers.
+                            unsafe {
+                                drop(Box::from_raw(old));
+                            }
+                        }
                         true
                     }
                     None => false,

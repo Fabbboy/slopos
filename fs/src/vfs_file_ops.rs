@@ -46,19 +46,11 @@ pub struct VfsFileOps;
 
 pub static VFS_FILE_OPS: VfsFileOps = VfsFileOps;
 
-pub fn vfs_open_handle(path: &[u8], create: bool) -> Option<usize> {
-    vfs_open_handle_flags(
-        path,
-        crate::vfs::ops::VfsOpenFlags {
-            create,
-            exclusive: false,
-            truncate: false,
-        },
-    )
-}
-
-pub fn vfs_open_handle_flags(path: &[u8], flags: crate::vfs::ops::VfsOpenFlags) -> Option<usize> {
-    let opened = crate::vfs::ops::vfs_open_flags(path, flags).ok()?;
+pub fn vfs_open_handle_flags(
+    path: &[u8],
+    flags: crate::vfs::ops::VfsOpenFlags,
+) -> Result<usize, slopos_abi::Errno> {
+    let opened = crate::vfs::ops::vfs_open_flags(path, flags).map_err(|e| e.to_errno())?;
     let mut table = OPEN_VNODES.lock();
     for (idx, slot) in table.slots.iter_mut().enumerate() {
         if !slot.valid {
@@ -68,10 +60,10 @@ pub fn vfs_open_handle_flags(path: &[u8], flags: crate::vfs::ops::VfsOpenFlags) 
                 refcount: 1,
                 valid: true,
             };
-            return Some(idx);
+            return Ok(idx);
         }
     }
-    None
+    Err(slopos_abi::Errno::ENFILE)
 }
 
 impl FileOps for VfsFileOps {

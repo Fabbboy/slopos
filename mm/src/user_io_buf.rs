@@ -5,16 +5,16 @@ use slopos_abi::Errno;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
-use crate::user_ptr::UserBytes;
+use crate::user_ptr::{UserBytes, UserVirtAddr};
 
 /// Allocate a kernel buffer and copy user data into it in one step.
 ///
 /// Inspired by Linux `memdup_user()`. Returns `ENOMEM` if the
 /// allocation fails (never panics), `EFAULT` if the copy fails.
-/// Rejects requests larger than `max_size` bytes.
+/// Rejects requests larger than `max_size` bytes with `EINVAL`.
 pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<Vec<u8>, Errno> {
     if len > max_size {
-        return Err(Errno::ENOMEM);
+        return Err(Errno::EINVAL);
     }
     let user_bytes = UserBytes::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
     let mut buf = Vec::new();
@@ -24,6 +24,20 @@ pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<Vec<u8>, Er
     Ok(buf)
 }
 
+/// Validates that `[addr, addr+len)` lies entirely within user-space.
+///
+/// This is the upfront `access_ok()` equivalent — rejects null,
+/// non-canonical, kernel-space, and overflowing ranges before any
+/// I/O buffer is constructed.  Individual copy operations re-validate
+/// via `UserBytes::try_new` for defense-in-depth.
+fn validate_user_range(addr: u64, len: usize) -> Result<(), Errno> {
+    if len == 0 {
+        return Ok(());
+    }
+    UserVirtAddr::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
+    Ok(())
+}
+
 pub struct UserReadBuf {
     addr: u64,
     len: usize,
@@ -31,10 +45,7 @@ pub struct UserReadBuf {
 
 impl UserReadBuf {
     pub fn new(addr: u64, len: usize) -> Option<Self> {
-        if addr == 0 {
-            return None;
-        }
-        addr.checked_add(len as u64)?;
+        validate_user_range(addr, len).ok()?;
         Some(Self { addr, len })
     }
 }
@@ -66,10 +77,7 @@ pub struct UserWriteBuf {
 
 impl UserWriteBuf {
     pub fn new(addr: u64, len: usize) -> Option<Self> {
-        if addr == 0 {
-            return None;
-        }
-        addr.checked_add(len as u64)?;
+        validate_user_range(addr, len).ok()?;
         Some(Self { addr, len })
     }
 }

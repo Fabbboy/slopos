@@ -50,22 +50,27 @@ impl PipeSlot {
         }
     }
 
-    pub(crate) fn peek_into(&self, out: &mut [u8]) -> usize {
+    /// Atomically read and consume bytes from the pipe buffer.
+    ///
+    /// Modelled after Linux's `pipe_read()` in `fs/pipe.c`: data is
+    /// consumed from the ring buffer in a single operation while the
+    /// caller holds `PIPE_STATE`.  The consumed bytes are copied into
+    /// the kernel staging buffer `out`; the caller is responsible for
+    /// transferring them to userspace *after* releasing the lock.
+    ///
+    /// This is critical for correctness: if consumption and copying
+    /// were split (peek → unlock → copy → re-lock → consume), a
+    /// concurrent reader could peek the same bytes before they are
+    /// consumed, causing double delivery.
+    pub(crate) fn read_into(&mut self, out: &mut [u8]) -> usize {
         let mut copied = 0usize;
-        let mut pos = self.read_pos;
-        let avail = self.len;
-        while copied < out.len() && copied < avail {
-            out[copied] = self.buffer[pos];
-            pos = (pos + 1) % PIPE_BUFFER_SIZE;
+        while copied < out.len() && self.len > 0 {
+            out[copied] = self.buffer[self.read_pos];
+            self.read_pos = (self.read_pos + 1) % PIPE_BUFFER_SIZE;
+            self.len -= 1;
             copied += 1;
         }
         copied
-    }
-
-    pub(crate) fn consume(&mut self, n: usize) {
-        let n = n.min(self.len);
-        self.read_pos = (self.read_pos + n) % PIPE_BUFFER_SIZE;
-        self.len -= n;
     }
 
     pub(crate) fn write_from(&mut self, input: &[u8]) -> usize {

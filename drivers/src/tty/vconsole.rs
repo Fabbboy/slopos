@@ -1708,9 +1708,47 @@ pub fn notify_font_changed() {
             None
         }
     };
-    let new_scrollback = alloc::boxed::Box::new(ScrollbackBuf::new(new_cols));
-    let new_grid = vec![Cell::blank(); new_rows * new_cols].into_boxed_slice();
-    let new_alt_grid = vec![Cell::blank(); new_rows * new_cols].into_boxed_slice();
+    let new_scrollback: Option<alloc::boxed::Box<ScrollbackBuf>> = {
+        let sb = ScrollbackBuf::new(new_cols);
+        let layout = alloc::alloc::Layout::new::<ScrollbackBuf>();
+        let raw = unsafe { alloc::alloc::alloc(layout) };
+        if raw.is_null() {
+            None
+        } else {
+            let ptr = raw as *mut ScrollbackBuf;
+            unsafe {
+                ptr.write(sb);
+            }
+            Some(unsafe { alloc::boxed::Box::from_raw(ptr) })
+        }
+    };
+    let new_grid = {
+        let grid_len = new_rows * new_cols;
+        let mut v = alloc::vec::Vec::new();
+        if v.try_reserve_exact(grid_len).is_ok() {
+            v.resize(grid_len, Cell::blank());
+            Some(v.into_boxed_slice())
+        } else {
+            None
+        }
+    };
+    let new_alt_grid = {
+        let grid_len = new_rows * new_cols;
+        let mut v = alloc::vec::Vec::new();
+        if v.try_reserve_exact(grid_len).is_ok() {
+            v.resize(grid_len, Cell::blank());
+            Some(v.into_boxed_slice())
+        } else {
+            None
+        }
+    };
+
+    if new_scrollback.is_none() || new_grid.is_none() || new_alt_grid.is_none() {
+        return;
+    }
+    let new_scrollback = new_scrollback.unwrap();
+    let new_grid = new_grid.unwrap();
+    let new_alt_grid = new_alt_grid.unwrap();
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
