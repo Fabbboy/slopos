@@ -1,4 +1,5 @@
 use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
 use crate::socket;
@@ -12,39 +13,27 @@ impl FileOps for SocketFileOps {
         FileKind::Socket
     }
 
-    fn read(
-        &self,
-        handle: usize,
-        buf: &mut dyn slopos_abi::io::IoBuf,
-        _offset: u64,
-        _flags: u32,
-    ) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
         // Socket API uses raw pointers; use a kernel-side staging buffer.
-        let mut tmp = [0u8; 4096];
+        let mut tmp = [0u8; IO_STAGING_SIZE];
         let read_len = buf.len().min(tmp.len());
         let n = socket::socket_recv(handle as u32, tmp.as_mut_ptr(), read_len);
         if n <= 0 {
             return n as isize;
         }
-        match buf.write_at(0, &tmp[..n as usize]) {
+        match buf.copy_in(0, &tmp[..n as usize]) {
             Ok(written) => written as isize,
-            Err(e) => e as isize,
+            Err(e) => e.as_isize(),
         }
     }
 
-    fn write(
-        &self,
-        handle: usize,
-        buf: &mut dyn slopos_abi::io::IoBuf,
-        _offset: u64,
-        _flags: u32,
-    ) -> isize {
+    fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         // Socket API uses raw pointers; use a kernel-side staging buffer.
-        let mut tmp = [0u8; 4096];
+        let mut tmp = [0u8; IO_STAGING_SIZE];
         let write_len = buf.len().min(tmp.len());
-        match buf.read_at(0, &mut tmp[..write_len]) {
+        match buf.copy_out(0, &mut tmp[..write_len]) {
             Ok(n) => socket::socket_send(handle as u32, tmp.as_ptr(), n) as isize,
-            Err(e) => e as isize,
+            Err(e) => e.as_isize(),
         }
     }
 

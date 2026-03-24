@@ -187,7 +187,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Implementations receive a plain `&mut [u8]` slice that is always
     /// backed by kernel memory.  User-space I/O buffering is handled by
-    /// the [`FileOps`] layer above (via `IoBuf` + a staging buffer),
+    /// the [`FileOps`] layer above (via directional I/O buffers + staging),
     /// so filesystem code never needs to touch user addresses — this is
     /// enforced at compile time by the slice type.
     ///
@@ -204,7 +204,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Implementations receive a plain `&[u8]` slice that is always
     /// backed by kernel memory.  The [`FileOps`] layer stages data from
-    /// user-space `IoBuf`s into kernel buffers before calling this
+    /// user-space read buffers into kernel buffers before calling this
     /// method, so filesystem code never handles user addresses.
     ///
     /// # Arguments

@@ -7,6 +7,7 @@ use slopos_abi::fs::{
     FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY,
     UserFsStat,
 };
+use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
 use slopos_sync::{InitFlag, IrqMutex};
 
@@ -354,47 +355,35 @@ impl FileOps for LocalTtyOps {
         FileKind::Tty
     }
 
-    fn read(
-        &self,
-        handle: usize,
-        buf: &mut dyn slopos_abi::io::IoBuf,
-        _offset: u64,
-        flags: u32,
-    ) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
         let buf_len = buf.len();
-        let mut tmp = [0u8; 4096];
+        let mut tmp = [0u8; IO_STAGING_SIZE];
         let read_len = buf_len.min(tmp.len());
         match tty::read_cooked(tty_idx, tmp.as_mut_ptr(), read_len, nonblock) {
-            Ok(n) => match buf.write_at(0, &tmp[..n]) {
+            Ok(n) => match buf.copy_in(0, &tmp[..n]) {
                 Ok(written) => written as isize,
-                Err(e) => e as isize,
+                Err(e) => e.as_isize(),
             },
             Err(e) => e.to_errno() as isize,
         }
     }
 
-    fn write(
-        &self,
-        handle: usize,
-        buf: &mut dyn slopos_abi::io::IoBuf,
-        _offset: u64,
-        flags: u32,
-    ) -> isize {
+    fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
         let buf_len = buf.len();
-        let mut tmp = [0u8; 4096];
+        let mut tmp = [0u8; IO_STAGING_SIZE];
         let write_len = buf_len.min(tmp.len());
-        match buf.read_at(0, &mut tmp[..write_len]) {
+        match buf.copy_out(0, &mut tmp[..write_len]) {
             Ok(n) => match tty::write_bytes(tty_idx, tmp.as_ptr(), n, nonblock) {
                 Ok(written) => written as isize,
                 Err(e) => e.to_errno() as isize,
             },
-            Err(e) => e as isize,
+            Err(e) => e.as_isize(),
         }
     }
 

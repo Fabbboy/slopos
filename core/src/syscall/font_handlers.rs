@@ -4,7 +4,11 @@ use slopos_mm::user_copy::copy_bytes_from_user;
 use slopos_mm::user_ptr::UserBytes;
 use slopos_utils::klog_info;
 
-define_syscall!(syscall_font_set(ctx, args) {
+define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
+    if pid > 1 {
+        return ctx.err_with(slopos_abi::syscall::ERRNO_EPERM);
+    }
+
     let data_ptr = args.arg0;
     let width = args.arg1 as u16;
     let height = args.arg2 as u16;
@@ -15,7 +19,7 @@ define_syscall!(syscall_font_set(ctx, args) {
         return ctx.bad_address();
     }
     if width != 8 {
-        return ctx.err(); // Only 8-pixel-wide fonts supported
+        return ctx.err_with(slopos_abi::syscall::ENOSYS_RETURN);
     }
     if height == 0 || height > 32 {
         return ctx.err();
@@ -24,10 +28,10 @@ define_syscall!(syscall_font_set(ctx, args) {
         return ctx.err();
     }
 
-    let data_size = glyph_count * height as usize;
-    if data_size > 16384 {
-        return ctx.err(); // Sanity limit: 16KB max
-    }
+    let data_size = match glyph_count.checked_mul(height as usize) {
+        Some(size) if size <= 16384 => size,
+        _ => return ctx.err(),
+    };
 
     // Copy bitmap data from user space.
     let user_bytes = match UserBytes::try_new(data_ptr, data_size) {
@@ -35,25 +39,32 @@ define_syscall!(syscall_font_set(ctx, args) {
         Err(_) => return ctx.bad_address(),
     };
 
-    // Allocate kernel buffer and copy.
-    extern crate alloc;
     let mut font_data = alloc::vec![0u8; data_size];
     if copy_bytes_from_user(user_bytes, &mut font_data).is_err() {
         return ctx.bad_address();
     }
 
-    klog_info!(
-        "FONT_SET: received {}x{} font ({} glyphs, {} bytes)",
-        width,
-        height,
-        glyph_count,
-        data_size,
-    );
-
-    // TODO: Rebuild the console glyph atlas from the uploaded bitmap data.
-    // This requires converting the 1-bpp bitmap to the coverage format
-    // used by GlyphAtlas and replacing the global atlas.
-    // For now, accept the data but don't apply it.
-
-    ctx.ok(0)
+    match slopos_font::bitmap::bitmap_to_coverage(&font_data, width, height, glyph_count) {
+        Some((coverage, replacement)) => {
+            match slopos_font::atlas::GlyphAtlas::from_raw_coverage(
+                width,
+                height,
+                coverage,
+                replacement,
+            ) {
+                Some(atlas) => {
+                    slopos_font::atlas::replace_global(atlas);
+                    klog_info!(
+                        "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
+                        width,
+                        height,
+                        glyph_count,
+                    );
+                    ctx.ok(0)
+                }
+                None => ctx.err(),
+            }
+        }
+        None => ctx.err(),
+    }
 });

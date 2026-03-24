@@ -75,9 +75,8 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
             if stat.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
             }
-            // O_TRUNC: truncate existing file to zero length.
-            if flags.truncate {
-                let _ = resolved.fs.truncate(resolved.inode, 0);
+            if flags.truncate && stat.file_type == FileType::Regular {
+                resolved.fs.truncate(resolved.inode, 0)?;
             }
             Ok(VfsHandle {
                 inode: resolved.inode,

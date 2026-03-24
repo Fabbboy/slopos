@@ -135,6 +135,31 @@ impl GlyphAtlas {
         Some(atlas)
     }
 
+    pub fn from_raw_coverage(
+        cell_w: u16,
+        cell_h: u16,
+        coverage: Vec<u8>,
+        replacement: Vec<u8>,
+    ) -> Option<Self> {
+        if cell_w == 0 || cell_h == 0 {
+            return None;
+        }
+
+        let stride = (cell_w as usize).checked_mul(cell_h as usize)?;
+        let expected_coverage = ASCII_COUNT.checked_mul(stride)?;
+        if coverage.len() != expected_coverage || replacement.len() != stride {
+            return None;
+        }
+
+        Some(Self {
+            cell_w,
+            cell_h,
+            data: coverage,
+            replacement,
+            source: FontSource::Bitmap,
+        })
+    }
+
     /// Returns the source from which this atlas's font was loaded.
     pub fn source(&self) -> FontSource {
         self.source
@@ -466,11 +491,22 @@ static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut(
 /// allocator is ready.
 pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
     if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
-        let ptr = Box::into_raw(Box::new(atlas));
-        GLOBAL_ATLAS.store(ptr, Ordering::Release);
+        replace_global(atlas);
         true
     } else {
         false
+    }
+}
+
+pub fn replace_global(new_atlas: GlyphAtlas) {
+    let new_ptr = Box::into_raw(Box::new(new_atlas));
+    let old_ptr = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
+    if !old_ptr.is_null() {
+        // SAFETY: old_ptr was created with Box::into_raw and is no longer
+        // reachable after the atomic swap.
+        unsafe {
+            drop(Box::from_raw(old_ptr));
+        }
     }
 }
 
@@ -483,5 +519,40 @@ pub fn global() -> Option<&'static GlyphAtlas> {
         // SAFETY: ptr was created via Box::into_raw during init_global
         // and is never freed or mutated after store.
         unsafe { Some(&*ptr) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlyphAtlas;
+    use crate::FontSource;
+
+    #[test]
+    fn from_raw_coverage_accepts_valid_buffers() {
+        let cell_w = 8u16;
+        let cell_h = 16u16;
+        let stride = cell_w as usize * cell_h as usize;
+        let coverage = alloc::vec![7u8; 95 * stride];
+        let replacement = alloc::vec![9u8; stride];
+
+        let atlas = GlyphAtlas::from_raw_coverage(cell_w, cell_h, coverage, replacement)
+            .expect("atlas must build");
+
+        assert_eq!(atlas.source(), FontSource::Bitmap);
+        assert_eq!(atlas.cell_width(), 8);
+        assert_eq!(atlas.cell_height(), 16);
+        assert_eq!(atlas.get_coverage(32)[0], 7);
+        assert_eq!(atlas.get_coverage(31)[0], 9);
+    }
+
+    #[test]
+    fn from_raw_coverage_rejects_wrong_coverage_size() {
+        let cell_w = 8u16;
+        let cell_h = 16u16;
+        let stride = cell_w as usize * cell_h as usize;
+        let coverage = alloc::vec![0u8; 95 * stride - 1];
+        let replacement = alloc::vec![0u8; stride];
+
+        assert!(GlyphAtlas::from_raw_coverage(cell_w, cell_h, coverage, replacement).is_none());
     }
 }

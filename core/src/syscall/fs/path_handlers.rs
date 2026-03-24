@@ -12,7 +12,7 @@ use slopos_fs::fileio::{
 
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
-use slopos_mm::user_io_buf::UserIoBuf;
+use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 define_syscall!(syscall_fs_open(ctx, args) requires(let pid: process_id) {
@@ -30,7 +30,7 @@ define_syscall!(syscall_fs_read(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
     let count = args.arg2_usize();
-    let Some(mut io_buf) = UserIoBuf::new(args.arg1, count) else {
+    let Some(mut io_buf) = UserWriteBuf::new(args.arg1, count) else {
         return ctx.bad_address();
     };
 
@@ -51,11 +51,11 @@ define_syscall!(syscall_fs_write(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
     let count = args.arg2_usize();
-    let Some(mut io_buf) = UserIoBuf::new(args.arg1, count) else {
+    let Some(io_buf) = UserReadBuf::new(args.arg1, count) else {
         return ctx.bad_address();
     };
 
-    let bytes = file_write_fd(pid, args.arg0 as c_int, &mut io_buf);
+    let bytes = file_write_fd(pid, args.arg0 as c_int, &io_buf);
     ctx.from_rc_value(bytes as i64)
 });
 

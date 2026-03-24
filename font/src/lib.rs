@@ -40,6 +40,7 @@ pub enum FontSource {
     Embedded,
     /// Loaded from the filesystem at runtime.
     Filesystem,
+    Bitmap,
     /// Minimal bitmap fallback (VGA 8×16).
     BitmapFallback,
 }

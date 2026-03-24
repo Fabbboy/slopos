@@ -7,10 +7,16 @@
 //! Format: 256 glyphs × 16 rows × 1 byte/row = 4096 bytes.
 //! Each byte represents 8 pixels (MSB = leftmost).
 
+use alloc::vec::Vec;
+
 pub const BITMAP_FONT_WIDTH: u16 = 8;
 pub const BITMAP_FONT_HEIGHT: u16 = 16;
 pub const BITMAP_FONT_GLYPH_COUNT: usize = 256;
 pub const BITMAP_FONT_BYTES_PER_GLYPH: usize = 16;
+
+const ASCII_FIRST: usize = 32;
+const ASCII_LAST: usize = 126;
+const ASCII_COUNT: usize = ASCII_LAST - ASCII_FIRST + 1;
 
 /// Get the bitmap data for a single glyph.
 /// Returns 16 bytes representing the glyph rows (MSB = leftmost pixel).
@@ -36,6 +42,104 @@ pub fn render_bitmap_glyph(codepoint: u8, out: &mut [u8]) -> (u16, u16) {
         }
     }
     (BITMAP_FONT_WIDTH, BITMAP_FONT_HEIGHT)
+}
+
+pub fn bitmap_to_coverage(
+    data: &[u8],
+    width: u16,
+    height: u16,
+    glyph_count: usize,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if width != 8 || height == 0 || glyph_count == 0 {
+        return None;
+    }
+
+    let cell_w = width as usize;
+    let cell_h = height as usize;
+    let required_len = glyph_count.checked_mul(cell_h)?;
+    if data.len() < required_len {
+        return None;
+    }
+
+    let stride = cell_w.checked_mul(cell_h)?;
+    let coverage_len = ASCII_COUNT.checked_mul(stride)?;
+    let mut coverage = alloc::vec![0u8; coverage_len];
+
+    let expand_glyph = |glyph_index: usize, out: &mut [u8]| {
+        let glyph_offset = glyph_index * cell_h;
+        for row in 0..cell_h {
+            let bits = data[glyph_offset + row];
+            let row_offset = row * cell_w;
+            for col in 0..cell_w {
+                out[row_offset + col] = if bits & (1 << (7 - col)) != 0 { 255 } else { 0 };
+            }
+        }
+    };
+
+    for cp in ASCII_FIRST..=ASCII_LAST {
+        let glyph_slot = cp - ASCII_FIRST;
+        let cell = &mut coverage[glyph_slot * stride..(glyph_slot + 1) * stride];
+        if cp < glyph_count {
+            expand_glyph(cp, cell);
+        }
+    }
+
+    let mut replacement = alloc::vec![0u8; stride];
+    expand_glyph(0, &mut replacement);
+
+    Some((coverage, replacement))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bitmap_to_coverage;
+
+    #[test]
+    fn bitmap_to_coverage_valid_8x16_data() {
+        let width = 8u16;
+        let height = 16u16;
+        let glyph_count = 128usize;
+        let mut data = alloc::vec![0u8; glyph_count * height as usize];
+
+        let glyph0 = 0usize;
+        data[glyph0 * 16] = 0b1111_0000;
+
+        let glyph_space = 32usize;
+        data[glyph_space * 16] = 0b1000_0001;
+        data[glyph_space * 16 + 1] = 0b0100_0010;
+
+        let glyph_bang = 33usize;
+        data[glyph_bang * 16] = 0xFF;
+
+        let (coverage, replacement) =
+            bitmap_to_coverage(&data, width, height, glyph_count).expect("must convert");
+
+        let stride = width as usize * height as usize;
+        assert_eq!(coverage.len(), 95 * stride);
+        assert_eq!(replacement.len(), stride);
+
+        assert_eq!(&coverage[0..8], &[255, 0, 0, 0, 0, 0, 0, 255]);
+        assert_eq!(&coverage[8..16], &[0, 255, 0, 0, 0, 0, 255, 0]);
+        assert_eq!(&coverage[stride..stride + 8], &[255; 8]);
+        assert_eq!(&replacement[0..8], &[255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn bitmap_to_coverage_rejects_non_8_width() {
+        let data = alloc::vec![0u8; 16];
+        assert!(bitmap_to_coverage(&data, 9, 16, 1).is_none());
+    }
+
+    #[test]
+    fn bitmap_to_coverage_rejects_zero_height() {
+        let data = alloc::vec![0u8; 16];
+        assert!(bitmap_to_coverage(&data, 8, 0, 1).is_none());
+    }
+
+    #[test]
+    fn bitmap_to_coverage_rejects_empty_data() {
+        assert!(bitmap_to_coverage(&[], 8, 16, 1).is_none());
+    }
 }
 
 /// Classic VGA 8x16 ROM font — public domain IBM PC font data.
