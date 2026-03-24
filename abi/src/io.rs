@@ -2,7 +2,7 @@
 
 use crate::errno::Errno;
 
-pub const IO_STAGING_SIZE: usize = 2048;
+pub const IO_STAGING_SIZE: usize = 4096;
 
 pub trait IoBufRead {
     fn copy_out(&self, offset: usize, dst: &mut [u8]) -> Result<usize, Errno>;
@@ -33,23 +33,6 @@ impl<'a> KernelIoBuf<'a> {
     #[inline]
     pub fn new(buf: &'a mut [u8]) -> Self {
         Self { buf }
-    }
-}
-
-impl IoBufRead for KernelIoBuf<'_> {
-    #[inline]
-    fn copy_out(&self, offset: usize, dst: &mut [u8]) -> Result<usize, Errno> {
-        let Some(src) = self.buf.get(offset..) else {
-            return Err(Errno::EFAULT);
-        };
-        let n = dst.len().min(src.len());
-        dst[..n].copy_from_slice(&src[..n]);
-        Ok(n)
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.buf.len()
     }
 }
 
