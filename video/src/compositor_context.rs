@@ -579,11 +579,14 @@ pub fn surface_raise_window(task_id: u32) -> Result<(), CompositorError> {
     Ok(())
 }
 
-/// Enumerate all visible windows. IMMEDIATE - called by COMPOSITOR only.
+/// Enumerate all visible windows sorted by z-order (ascending).
+///
+/// The output is ordered back-to-front: `out_buffer[0]` is the bottom-most
+/// window and `out_buffer[count-1]` is the top-most. The compositor relies on
+/// this ordering for correct back-to-front rendering and hit-testing.
 ///
 /// Note: Damage is NOT cleared here. It persists until the next commit replaces it.
 /// This ensures damage isn't lost if the compositor fails to render.
-/// Static windows may report stale damage, but that's preferable to losing damage.
 ///
 /// For subsurfaces, the absolute position is calculated as parent position + relative offset.
 pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) -> u32 {
@@ -592,17 +595,41 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
     }
 
     let ctx = CONTEXT.lock();
-    let mut count = 0u32;
 
-    for surface in ctx.surfaces.iter().filter_map(|slot| slot.as_ref()) {
-        if count >= max_count {
-            break;
+    // Collect visible surface slot indices with their z_order for sorting.
+    let mut indices = [(0usize, 0u32); MAX_SURFACES]; // (slot index, z_order)
+    let mut len = 0usize;
+    for (i, slot) in ctx.surfaces.iter().enumerate() {
+        if let Some(surface) = slot.as_ref() {
+            if surface.visible {
+                indices[len] = (i, surface.z_order);
+                len += 1;
+            }
         }
+    }
 
-        // Skip invisible windows
-        if !surface.visible {
-            continue;
+    // Selection-sort by z_order ascending (same pattern as normalize_z_order).
+    let mut i = 0usize;
+    while i < len {
+        let mut min = i;
+        let mut j = i + 1;
+        while j < len {
+            if indices[j].1 < indices[min].1 {
+                min = j;
+            }
+            j += 1;
         }
+        if min != i {
+            indices.swap(i, min);
+        }
+        i += 1;
+    }
+
+    // Emit sorted surfaces into the output buffer.
+    let emit_count = len.min(max_count as usize);
+    for out_idx in 0..emit_count {
+        let slot_idx = indices[out_idx].0;
+        let surface = ctx.surfaces[slot_idx].as_ref().unwrap();
 
         // Calculate absolute position
         // For subsurfaces: parent position + relative offset
@@ -615,11 +642,9 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
                         parent.window_y + surface.relative_y,
                     )
                 } else {
-                    // Parent not found, fall back to relative as absolute
                     (surface.relative_x, surface.relative_y)
                 }
             } else {
-                // No parent set, use relative as absolute
                 (surface.relative_x, surface.relative_y)
             }
         } else {
@@ -628,8 +653,10 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
 
         let (regions, dmg_count) = surface.export_damage();
 
+        // SAFETY: out_buffer points to caller-owned array with at least max_count
+        // entries, and out_idx < emit_count <= max_count.
         unsafe {
-            let info = &mut *out_buffer.add(count as usize);
+            let info = &mut *out_buffer.add(out_idx);
             info.task_id = surface.task_id;
             info.x = abs_x;
             info.y = abs_y;
@@ -643,13 +670,8 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.damage_regions = regions;
             info.title = surface.title;
         }
-
-        // Damage is acknowledged and cleared in `surface_mark_frames_done()` after
-        // successful present. Do not clear here to avoid losing damage if present fails.
-
-        count += 1;
     }
-    count
+    emit_count as u32
 }
 
 // =============================================================================
