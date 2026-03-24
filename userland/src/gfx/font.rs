@@ -2,7 +2,6 @@ use std::sync::OnceLock;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
-use slopos_font::FontSource;
 use slopos_font::atlas::GlyphAtlas;
 
 use super::font_loader;
@@ -13,20 +12,12 @@ static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
 
 fn atlas() -> &'static GlyphAtlas {
     ATLAS.get_or_init(|| {
-        let (font_data, from_fs) =
-            font_loader::load_font_or_embedded("mono", JETBRAINS_MONO_EMBEDDED);
-        let source = if from_fs {
-            FontSource::Filesystem
-        } else {
-            FontSource::Embedded
-        };
-        GlyphAtlas::new_with_source(font_data, FONT_SIZE_PX, source)
+        let font_data =
+            font_loader::load_font("mono").expect("font: failed to load mono font from filesystem");
+        GlyphAtlas::new_with_source(font_data, FONT_SIZE_PX, slopos_font::FontSource::Filesystem)
             .expect("font: failed to create glyph atlas")
     })
 }
-
-const JETBRAINS_MONO_EMBEDDED: &[u8] =
-    include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 pub fn cell_width() -> i32 {
     atlas().cell_width()

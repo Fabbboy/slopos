@@ -491,6 +491,11 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 // ---------------------------------------------------------------------------
 
 static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
+static FONT_CHANGE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+pub fn register_font_change_callback(cb: fn()) {
+    FONT_CHANGE_CALLBACK.store(cb as *mut (), Ordering::Release);
+}
 
 pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
     if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
@@ -533,6 +538,12 @@ pub fn replace_global(new_atlas: GlyphAtlas) {
     // references that would dangle if we freed here. Bounded cost
     // (~30KB per upgrade, happens once at boot).
     let _leaked = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
+
+    let cb = FONT_CHANGE_CALLBACK.load(Ordering::Acquire);
+    if !cb.is_null() {
+        let f: fn() = unsafe { core::mem::transmute(cb) };
+        f();
+    }
 }
 
 pub fn global() -> Option<&'static GlyphAtlas> {

@@ -37,16 +37,6 @@ const SCROLLBACK_LINES: usize = 200;
 /// Continuation marker for the right half of a double-width character.
 const CONTINUATION_CODEPOINT: u32 = 0xFFFF_FFFF;
 
-/// Cell width from the global atlas, with a fallback for early boot.
-fn cell_width() -> i32 {
-    atlas::global().map_or(8, |a| a.cell_width())
-}
-
-/// Cell height from the global atlas, with a fallback for early boot.
-fn cell_height() -> i32 {
-    atlas::global().map_or(16, |a| a.cell_height())
-}
-
 // ---------------------------------------------------------------------------
 // ANSI color tables (standard 8 + bright 8)
 // ---------------------------------------------------------------------------
@@ -384,6 +374,8 @@ pub(crate) struct VConsoleState {
     pub(crate) cursor_col: u16,
     pub(crate) rows: u16,
     pub(crate) cols: u16,
+    pub(crate) cell_w: i32,
+    pub(crate) cell_h: i32,
     pub(crate) fb: Option<VConsoleFbInfo>,
     pub(crate) cells: CellGrid,
     pub(crate) parser: VtParser,
@@ -415,6 +407,8 @@ impl VConsoleState {
             cursor_col: 0,
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
+            cell_w: 8,
+            cell_h: 16,
             fb: None,
             cells: CellGrid::empty(),
             parser: VtParser::new(),
@@ -744,7 +738,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = cell_height() as usize;
+            let row_px = self.cell_h as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = sr_top.saturating_mul(row_bytes);
@@ -862,7 +856,7 @@ impl VConsoleState {
         self.cursor_col = 0;
         self.in_alt_screen = true;
         if let Some(ref mut shadow) = self.shadow {
-            let row_bytes = (cell_height() as usize).saturating_mul(self.shadow_pitch);
+            let row_bytes = (self.cell_h as usize).saturating_mul(self.shadow_pitch);
             let byte_count = rows.saturating_mul(row_bytes);
             let end = byte_count.min(shadow.len());
             shadow[..end].fill(0);
@@ -931,7 +925,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = cell_height() as usize;
+            let row_px = self.cell_h as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = cur.saturating_mul(row_bytes);
@@ -1049,7 +1043,7 @@ impl VConsoleState {
         }
 
         if let Some(ref mut shadow) = self.shadow {
-            let row_px = cell_height() as usize;
+            let row_px = self.cell_h as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
             let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = cur.saturating_mul(row_bytes);
@@ -1242,7 +1236,7 @@ impl VConsoleState {
 
         if self.shadow.is_some() {
             if let Some(ref mut shadow) = self.shadow {
-                let row_px = cell_height() as usize;
+                let row_px = self.cell_h as usize;
                 let row_bytes = row_px.saturating_mul(self.shadow_pitch);
                 let region_start = sr_top.saturating_mul(row_bytes);
                 let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
@@ -1334,8 +1328,8 @@ impl VConsoleState {
         } else {
             cell.codepoint
         };
-        let cw = atlas.cell_width() as usize;
-        let ch = atlas.cell_height() as usize;
+        let cw = self.cell_w as usize;
+        let ch = self.cell_h as usize;
         let coverage = atlas.get_coverage(cp);
         let x0 = c * cw;
         let y0 = r * ch;
@@ -1363,8 +1357,8 @@ impl VConsoleState {
         } else {
             cell.codepoint
         };
-        let cw = atlas.cell_width() as usize;
-        let ch = atlas.cell_height() as usize;
+        let cw = self.cell_w as usize;
+        let ch = self.cell_h as usize;
         let coverage = atlas.get_coverage(cp);
         let x0 = c.saturating_mul(cw);
         let y0 = r.saturating_mul(ch);
@@ -1417,8 +1411,8 @@ impl VConsoleState {
         } else {
             cell.codepoint
         };
-        let cw = atlas.cell_width() as usize;
-        let ch = atlas.cell_height() as usize;
+        let cw = self.cell_w as usize;
+        let ch = self.cell_h as usize;
         let coverage = atlas.get_coverage(cp);
         let x0 = col_usize.saturating_mul(cw);
         let y0 = row_usize.saturating_mul(ch);
@@ -1460,7 +1454,7 @@ impl VConsoleState {
             return;
         };
 
-        let row_height = cell_height() as usize;
+        let row_height = self.cell_h as usize;
         let pitch = fb.pitch as usize;
         let max_rows = self.rows as usize;
         let mut bits = dirty;
@@ -1499,12 +1493,13 @@ impl VConsoleState {
     }
 
     pub(crate) fn recalculate_dimensions(&mut self) {
+        if let Some(atlas) = atlas::global() {
+            self.cell_w = atlas.cell_width();
+            self.cell_h = atlas.cell_height();
+        }
         if let Some(fb) = self.fb {
-            let char_w = cell_width() as u32;
-            let char_h = cell_height() as u32;
-
-            let calc_cols = (fb.width / char_w).max(1) as usize;
-            let calc_rows = (fb.height / char_h).max(1) as usize;
+            let calc_cols = (fb.width / self.cell_w as u32).max(1) as usize;
+            let calc_rows = (fb.height / self.cell_h as u32).max(1) as usize;
 
             self.cols = core::cmp::min(calc_cols, VCONSOLE_MAX_COLS) as u16;
             self.rows = core::cmp::min(calc_rows, VCONSOLE_MAX_ROWS) as u16;
@@ -1584,6 +1579,8 @@ pub fn register_framebuffer(
         return;
     }
 
+    atlas::register_font_change_callback(notify_font_changed);
+
     let shadow_size = (pitch as usize).saturating_mul(height as usize);
     let cols = {
         let mut state = VCONSOLE_STATE.lock();
@@ -1661,6 +1658,95 @@ pub fn has_framebuffer() -> bool {
     VCONSOLE_STATE.lock().fb.is_some()
 }
 
+pub fn notify_font_changed() {
+    let (need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
+        let state = VCONSOLE_STATE.lock();
+        let Some(fb) = state.fb else {
+            return;
+        };
+        let Some(atlas) = atlas::global() else {
+            return;
+        };
+        let cw = atlas.cell_width();
+        let ch = atlas.cell_height();
+        if cw == state.cell_w && ch == state.cell_h {
+            return;
+        }
+        let calc_cols = (fb.width / cw as u32).max(1) as usize;
+        let calc_rows = (fb.height / ch as u32).max(1) as usize;
+        let nc = calc_cols.min(VCONSOLE_MAX_COLS);
+        let nr = calc_rows.min(VCONSOLE_MAX_ROWS);
+        (
+            true,
+            cw,
+            ch,
+            nr,
+            nc,
+            fb,
+            state.rows as usize,
+            state.cols as usize,
+        )
+    };
+
+    if !need_resize {
+        return;
+    }
+
+    let shadow_size = (fb_info.pitch as usize).saturating_mul(fb_info.height as usize);
+    let new_shadow = {
+        let mut bytes = alloc::vec::Vec::new();
+        if shadow_size > 0 && bytes.try_reserve_exact(shadow_size).is_ok() {
+            bytes.resize(shadow_size, 0);
+            Some(bytes.into_boxed_slice())
+        } else {
+            None
+        }
+    };
+    let new_scrollback = alloc::boxed::Box::new(ScrollbackBuf::new(new_cols));
+    let new_grid = vec![Cell::blank(); new_rows * new_cols].into_boxed_slice();
+    let new_alt_grid = vec![Cell::blank(); new_rows * new_cols].into_boxed_slice();
+
+    let mut state = VCONSOLE_STATE.lock();
+    if state.fb.is_none() {
+        return;
+    }
+
+    let old_cells = core::mem::replace(&mut state.cells, CellGrid::empty());
+    state.cell_w = new_cw;
+    state.cell_h = new_ch;
+    state.rows = new_rows as u16;
+    state.cols = new_cols as u16;
+    state.cells = CellGrid {
+        cells: Some(new_grid),
+        cols: new_cols,
+    };
+    state.alt_cells = CellGrid {
+        cells: Some(new_alt_grid),
+        cols: new_cols,
+    };
+    let copy_rows = old_rows.min(new_rows);
+    let copy_cols = old_cols.min(new_cols);
+    state.cells.copy_from(&old_cells, copy_rows, copy_cols);
+    state.scroll_top = 0;
+    state.scroll_bottom = state.rows.saturating_sub(1);
+    if state.cursor_col >= state.cols {
+        state.cursor_col = state.cols.saturating_sub(1);
+    }
+    if state.cursor_row >= state.rows {
+        state.cursor_row = state.rows.saturating_sub(1);
+    }
+    state.shadow = new_shadow;
+    state.shadow_pitch = if state.shadow.is_some() {
+        fb_info.pitch as usize
+    } else {
+        0
+    };
+    state.redraw_all();
+    drop(state);
+
+    *SCROLLBACK.lock() = Some(new_scrollback);
+}
+
 pub fn scroll_view_up(lines: usize) {
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.scroll_up(lines);
@@ -1696,6 +1782,8 @@ pub(crate) fn reset_for_tests() {
     state.cursor_col = 0;
     state.rows = DEFAULT_ROWS;
     state.cols = DEFAULT_COLS;
+    state.cell_w = 8;
+    state.cell_h = 16;
     state.fb = None;
     state
         .cells
