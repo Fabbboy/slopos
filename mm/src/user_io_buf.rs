@@ -21,7 +21,7 @@ impl UserReadBuf {
 
 impl IoBufRead for UserReadBuf {
     fn copy_out(&self, offset: usize, dst: &mut [u8]) -> Result<usize, Errno> {
-        if offset >= self.len {
+        if offset > self.len {
             return Err(Errno::EFAULT);
         }
         let remaining = self.len - offset;
@@ -56,7 +56,7 @@ impl UserWriteBuf {
 
 impl IoBufWrite for UserWriteBuf {
     fn copy_in(&mut self, offset: usize, src: &[u8]) -> Result<usize, Errno> {
-        if offset >= self.len {
+        if offset > self.len {
             return Err(Errno::EFAULT);
         }
         let remaining = self.len - offset;
