@@ -14,9 +14,7 @@ pub const BITMAP_FONT_HEIGHT: u16 = 16;
 pub const BITMAP_FONT_GLYPH_COUNT: usize = 256;
 pub const BITMAP_FONT_BYTES_PER_GLYPH: usize = 16;
 
-const ASCII_FIRST: usize = 32;
-const ASCII_LAST: usize = 126;
-const ASCII_COUNT: usize = ASCII_LAST - ASCII_FIRST + 1;
+use crate::{ASCII_COUNT, ASCII_FIRST, ASCII_LAST};
 
 /// Get the bitmap data for a single glyph.
 /// Returns 16 bytes representing the glyph rows (MSB = leftmost pixel).
@@ -25,8 +23,7 @@ pub fn glyph_bitmap(codepoint: u8) -> &'static [u8] {
     &VGA_FONT_8X16[offset..offset + BITMAP_FONT_BYTES_PER_GLYPH]
 }
 
-/// Render a single glyph into a coverage buffer.
-/// Returns cell dimensions (width, height) and fills `out` with 0 or 255 values.
+#[cfg(test)]
 pub fn render_bitmap_glyph(codepoint: u8, out: &mut [u8]) -> (u16, u16) {
     let bitmap = glyph_bitmap(codepoint);
     let w = BITMAP_FONT_WIDTH as usize;
@@ -77,10 +74,10 @@ pub fn bitmap_to_coverage(
     };
 
     for cp in ASCII_FIRST..=ASCII_LAST {
-        let glyph_slot = cp - ASCII_FIRST;
+        let glyph_slot = (cp - ASCII_FIRST) as usize;
         let cell = &mut coverage[glyph_slot * stride..(glyph_slot + 1) * stride];
-        if cp < glyph_count {
-            expand_glyph(cp, cell);
+        if (cp as usize) < glyph_count {
+            expand_glyph(cp as usize, cell);
         }
     }
 

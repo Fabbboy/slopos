@@ -142,22 +142,22 @@ pub fn display_panic_screen(
     y += char_height + 8;
 
     if let Some(rip_val) = rip {
-        draw_register_line(&mut ctx, atlas, 60, y, b"RIP: \0", rip_val);
+        draw_register_line(&mut ctx, &atlas, 60, y, b"RIP: \0", rip_val);
         y += char_height + 4;
     }
 
     if let Some(rsp_val) = rsp {
-        draw_register_line(&mut ctx, atlas, 60, y, b"RSP: \0", rsp_val);
+        draw_register_line(&mut ctx, &atlas, 60, y, b"RSP: \0", rsp_val);
         y += char_height + 4;
     }
 
-    draw_register_line(&mut ctx, atlas, 60, y, b"CR0: \0", cr0);
+    draw_register_line(&mut ctx, &atlas, 60, y, b"CR0: \0", cr0);
     y += char_height + 4;
 
-    draw_register_line(&mut ctx, atlas, 60, y, b"CR3: \0", cr3);
+    draw_register_line(&mut ctx, &atlas, 60, y, b"CR3: \0", cr3);
     y += char_height + 4;
 
-    draw_register_line(&mut ctx, atlas, 60, y, b"CR4: \0", cr4);
+    draw_register_line(&mut ctx, &atlas, 60, y, b"CR4: \0", cr4);
 
     // Prompt at bottom
     let prompt = b"Press ENTER to shutdown\0";

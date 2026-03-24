@@ -1659,8 +1659,9 @@ pub fn has_framebuffer() -> bool {
 }
 
 pub fn notify_font_changed() {
-    let (need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
+    let (gen_before, need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
         let state = VCONSOLE_STATE.lock();
+        let gen_before = atlas::current_generation();
         let Some(fb) = state.fb else {
             return;
         };
@@ -1677,6 +1678,7 @@ pub fn notify_font_changed() {
         let nc = calc_cols.min(VCONSOLE_MAX_COLS);
         let nr = calc_rows.min(VCONSOLE_MAX_ROWS);
         (
+            gen_before,
             true,
             cw,
             ch,
@@ -1708,6 +1710,9 @@ pub fn notify_font_changed() {
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
+        return;
+    }
+    if atlas::current_generation() != gen_before {
         return;
     }
 

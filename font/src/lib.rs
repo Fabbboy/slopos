@@ -28,6 +28,14 @@ pub mod ttf_parser;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
+// ── Shared ASCII constants ─────────────────────────────────────────────
+/// First printable ASCII codepoint (space).
+pub const ASCII_FIRST: u32 = 0x20;
+/// Last printable ASCII codepoint (tilde).
+pub const ASCII_LAST: u32 = 0x7E;
+/// Number of printable ASCII characters (0x20..=0x7E → 95).
+pub const ASCII_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
+
 use cache::GlyphCache;
 use outline::outline_to_edges;
 use rasterizer::{RasterizedGlyph, rasterize};
@@ -40,8 +48,9 @@ pub enum FontSource {
     Embedded,
     /// Loaded from the filesystem at runtime.
     Filesystem,
+    /// Loaded via `SYS_FONT_SET` from userland-provided bitmap or coverage data.
     Bitmap,
-    /// Minimal bitmap fallback (VGA 8×16).
+    /// Minimal bitmap fallback (VGA 8×16) used when no other font is available.
     BitmapFallback,
 }
 

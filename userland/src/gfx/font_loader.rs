@@ -21,13 +21,6 @@ pub fn load_font(name: &str) -> Option<&'static [u8]> {
     Some(std::boxed::Box::leak(data.into_boxed_slice()))
 }
 
-pub fn load_font_or_embedded(name: &str, embedded: &'static [u8]) -> (&'static [u8], bool) {
-    match load_font(name) {
-        Some(data) => (data, true),
-        None => (embedded, false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36,14 +29,5 @@ mod tests {
     fn font_map_contains_mono_and_sans() {
         assert!(FONT_MAP.iter().any(|(k, _)| *k == "mono"));
         assert!(FONT_MAP.iter().any(|(k, _)| *k == "sans"));
-    }
-
-    #[test]
-    fn load_font_or_embedded_falls_back() {
-        let embedded = b"fake font data";
-        let (result, from_fs) = load_font_or_embedded("mono", embedded);
-        if !from_fs {
-            assert_eq!(result, embedded.as_slice());
-        }
     }
 }
