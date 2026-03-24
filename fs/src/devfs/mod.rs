@@ -128,28 +128,48 @@ impl FileSystem for DevFs {
         Err(VfsError::NotFound)
     }
 
-    fn read(&self, inode: InodeId, _offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+    fn read(
+        &self,
+        inode: InodeId,
+        _offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
         match inode {
             NULL_INODE => Ok(0),
 
             ZERO_INODE => {
-                buf.fill(0);
-                Ok(buf.len())
+                let zeros = [0u8; 4096];
+                let buf_len = buf.len();
+                let mut pos = 0;
+                while pos < buf_len {
+                    let chunk = (buf_len - pos).min(zeros.len());
+                    let written = buf
+                        .write_at(pos, &zeros[..chunk])
+                        .map_err(|_| VfsError::IoError)?;
+                    pos += written;
+                    if written == 0 {
+                        break;
+                    }
+                }
+                Ok(pos)
             }
 
             RANDOM_INODE => {
                 let mut inner = self.inner.lock();
+                let buf_len = buf.len();
                 let mut pos = 0;
-                while pos + 8 <= buf.len() {
+                while pos < buf_len {
                     let val = inner.next_random();
-                    buf[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
-                    pos += 8;
-                }
-                if pos < buf.len() {
-                    let val = inner.next_random();
-                    let remaining = buf.len() - pos;
-                    buf[pos..].copy_from_slice(&val.to_le_bytes()[..remaining]);
-                    pos = buf.len();
+                    let bytes = val.to_le_bytes();
+                    let remaining = buf_len - pos;
+                    let chunk = remaining.min(8);
+                    let written = buf
+                        .write_at(pos, &bytes[..chunk])
+                        .map_err(|_| VfsError::IoError)?;
+                    pos += written;
+                    if written == 0 {
+                        break;
+                    }
                 }
                 Ok(pos)
             }
@@ -162,21 +182,36 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn write(&self, inode: InodeId, _offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    fn write(
+        &self,
+        inode: InodeId,
+        _offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
+        let buf_len = buf.len();
         match inode {
-            NULL_INODE | ZERO_INODE => Ok(buf.len()),
+            NULL_INODE | ZERO_INODE => Ok(buf_len),
 
             RANDOM_INODE => {
                 let mut inner = self.inner.lock();
-                for chunk in buf.chunks(8) {
+                let mut pos = 0;
+                while pos < buf_len {
                     let mut bytes = [0u8; 8];
-                    bytes[..chunk.len()].copy_from_slice(chunk);
+                    let remaining = buf_len - pos;
+                    let chunk = remaining.min(8);
+                    let read = buf
+                        .read_at(pos, &mut bytes[..chunk])
+                        .map_err(|_| VfsError::IoError)?;
                     inner.rng_state ^= u64::from_le_bytes(bytes);
+                    pos += read;
+                    if read == 0 {
+                        break;
+                    }
                 }
-                Ok(buf.len())
+                Ok(pos)
             }
 
-            CONSOLE_INODE => Ok(buf.len()),
+            CONSOLE_INODE => Ok(buf_len),
 
             ROOT_INODE => Err(VfsError::IsDirectory),
 

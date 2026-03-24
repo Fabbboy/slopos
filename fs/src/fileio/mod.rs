@@ -354,21 +354,35 @@ impl FileOps for LocalTtyOps {
         FileKind::Tty
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], _offset: u64, flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
-        match tty::read_cooked(tty_idx, buf.as_mut_ptr(), buf.len(), nonblock) {
-            Ok(n) => n as isize,
+        // TTY service API uses raw pointers; use a kernel-side staging buffer.
+        let buf_len = buf.len();
+        let mut tmp = [0u8; 4096];
+        let read_len = buf_len.min(tmp.len());
+        match tty::read_cooked(tty_idx, tmp.as_mut_ptr(), read_len, nonblock) {
+            Ok(n) => match buf.write_at(0, &tmp[..n]) {
+                Ok(written) => written as isize,
+                Err(e) => e as isize,
+            },
             Err(e) => e.to_errno() as isize,
         }
     }
 
-    fn write(&self, handle: usize, buf: &[u8], _offset: u64, flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
-        match tty::write_bytes(tty_idx, buf.as_ptr(), buf.len(), nonblock) {
-            Ok(n) => n as isize,
-            Err(e) => e.to_errno() as isize,
+        // TTY service API uses raw pointers; use a kernel-side staging buffer.
+        let buf_len = buf.len();
+        let mut tmp = [0u8; 4096];
+        let write_len = buf_len.min(tmp.len());
+        match buf.read_at(0, &mut tmp[..write_len]) {
+            Ok(n) => match tty::write_bytes(tty_idx, tmp.as_ptr(), n, nonblock) {
+                Ok(written) => written as isize,
+                Err(e) => e.to_errno() as isize,
+            },
+            Err(e) => e as isize,
         }
     }
 

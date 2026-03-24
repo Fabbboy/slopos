@@ -85,7 +85,7 @@ impl FileOps for PipeReadOps {
         FileKind::PipeRead
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], _offset: u64, flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         if buf.is_empty() {
             return 0;
         }
@@ -109,9 +109,13 @@ impl FileOps for PipeReadOps {
                     if copied == 0 {
                         break;
                     }
-                    buf[total..total + copied].copy_from_slice(&local[..copied]);
-                    total += copied;
-                    remaining -= copied;
+                    match buf.write_at(total, &local[..copied]) {
+                        Ok(n) => {
+                            total += n;
+                            remaining -= n;
+                        }
+                        Err(_) => return if total > 0 { total as isize } else { -14 },
+                    }
                     pipe::writer_wq(pipe_id).wake_one();
                 }
 
@@ -141,7 +145,7 @@ impl FileOps for PipeReadOps {
         }
     }
 
-    fn write(&self, _handle: usize, _buf: &[u8], _offset: u64, _flags: u32) -> isize {
+    fn write(&self, _handle: usize, _buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
         -1
     }
 
@@ -176,17 +180,19 @@ impl FileOps for PipeWriteOps {
         FileKind::PipeWrite
     }
 
-    fn read(&self, _handle: usize, _buf: &mut [u8], _offset: u64, _flags: u32) -> isize {
+    fn read(&self, _handle: usize, _buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
         -1
     }
 
-    fn write(&self, handle: usize, buf: &[u8], _offset: u64, flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         if buf.is_empty() {
             return 0;
         }
         let pipe_id = handle as u32;
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
+        let buf_len = buf.len();
         let mut total = 0usize;
+        let mut local = [0u8; 512];
 
         loop {
             let mut need_block = false;
@@ -200,15 +206,22 @@ impl FileOps for PipeWriteOps {
                     return if total > 0 { total as isize } else { -1 };
                 }
 
-                if total < buf.len() && slot.len < pipe::PIPE_BUFFER_SIZE {
-                    let written = slot.write_from(&buf[total..]);
-                    if written > 0 {
+                if total < buf_len && slot.len < pipe::PIPE_BUFFER_SIZE {
+                    let chunk = (buf_len - total).min(local.len());
+                    let read = match buf.read_at(total, &mut local[..chunk]) {
+                        Ok(n) => n,
+                        Err(_) => return if total > 0 { total as isize } else { -14 },
+                    };
+                    if read > 0 {
+                        let written = slot.write_from(&local[..read]);
                         total += written;
-                        pipe::reader_wq(pipe_id).wake_one();
+                        if written > 0 {
+                            pipe::reader_wq(pipe_id).wake_one();
+                        }
                     }
                 }
 
-                if total >= buf.len() {
+                if total >= buf_len {
                     return total as isize;
                 }
                 if total > 0 {

@@ -9,11 +9,11 @@ pub struct VfsHandle {
 }
 
 impl VfsHandle {
-    pub fn read(&self, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+    pub fn read(&self, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf) -> VfsResult<usize> {
         self.fs.read(self.inode, offset, buf)
     }
 
-    pub fn write(&self, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    pub fn write(&self, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf) -> VfsResult<usize> {
         self.fs.write(self.inode, offset, buf)
     }
 

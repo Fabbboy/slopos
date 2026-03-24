@@ -175,8 +175,8 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
 
-pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usize) -> ssize_t {
-    if buffer.is_null() || count == 0 {
+pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn slopos_abi::io::IoBuf) -> ssize_t {
+    if buf.len() == 0 {
         return 0;
     }
 
@@ -213,9 +213,8 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
         return -1;
     }
 
-    let out = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, count) };
     let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.read(handle, out, used_offset, flags);
+    let rc = ops.read(handle, buf, used_offset, flags);
     if rc > 0 && seekable {
         with_tables(|_, _, open_files, _| {
             if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)
@@ -228,8 +227,8 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buffer: *mut c_char, count: usiz
     rc
 }
 
-pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: usize) -> ssize_t {
-    if buffer.is_null() || count == 0 {
+pub fn file_write_fd(process_id: u32, fd: c_int, buf: &mut dyn slopos_abi::io::IoBuf) -> ssize_t {
+    if buf.len() == 0 {
         return 0;
     }
 
@@ -266,9 +265,8 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buffer: *const c_char, count: u
         return -1;
     }
 
-    let input = unsafe { slice::from_raw_parts(buffer as *const u8, count) };
     let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.write(handle, input, used_offset, flags);
+    let rc = ops.write(handle, buf, used_offset, flags);
     if rc > 0 && seekable {
         with_tables(|_, _, open_files, _| {
             if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)

@@ -47,6 +47,7 @@ use crate::scheduler::task::{
 };
 use crate::scheduler::{per_cpu, task};
 use crate::syscall::handlers::syscall_lookup;
+use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_fs::fileio::{
     file_close_fd, file_fcntl_fd, file_open_for_process, file_pipe_create, file_poll_fd,
     file_read_fd, file_write_fd, fileio_clone_table_for_process, fileio_destroy_table_for_process,
@@ -297,8 +298,7 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
     let written = file_write_fd(
         pid,
         write_fd,
-        payload.as_ptr() as *const c_char,
-        payload.len(),
+        &mut KernelIoBufRef::new(payload),
     );
     assert_eq_test!(written as usize, payload.len(), "pipe write failed");
 
@@ -306,12 +306,12 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
     assert_test!((revents & POLLIN) != 0, "pipe read fd should be readable");
 
     let mut out = [0u8; 8];
-    let read = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, payload.len());
+    let read = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out[..payload.len()]));
     assert_eq_test!(read as usize, payload.len(), "pipe read length mismatch");
     assert_test!(&out[..payload.len()] == payload, "pipe payload mismatch");
 
     assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write fd failed");
-    let eof_read = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    let eof_read = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out));
     assert_eq_test!(eof_read, 0, "pipe EOF read should return 0");
     assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read fd failed");
 
@@ -1815,8 +1815,7 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     let written = file_write_fd(
         pid,
         write_fd,
-        payload.as_ptr() as *const c_char,
-        payload.len(),
+        &mut KernelIoBufRef::new(payload),
     );
     assert_eq_test!(
         written as usize,
@@ -1825,7 +1824,7 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     );
 
     let mut out = [0u8; 16];
-    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, payload.len());
+    let nread = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out[..payload.len()]));
     assert_eq_test!(nread as usize, payload.len(), "read returned wrong count");
     assert_test!(&out[..payload.len()] == payload, "read payload mismatch");
 
@@ -1857,8 +1856,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
     let written = file_write_fd(
         pid,
         write_fd,
-        payload.as_ptr() as *const c_char,
-        payload.len(),
+        &mut KernelIoBufRef::new(payload),
     );
     assert_eq_test!(written as usize, payload.len(), "write failed");
 
@@ -1867,7 +1865,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
 
     // First read: should return the data.
     let mut out = [0u8; 16];
-    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    let nread = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out));
     assert_eq_test!(nread as usize, payload.len(), "first read wrong count");
     assert_test!(
         &out[..payload.len()] == payload,
@@ -1875,7 +1873,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
     );
 
     // Second read: pipe empty + no writers = EOF (0), NOT error (-1).
-    let eof = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    let eof = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out));
     assert_eq_test!(eof, 0, "EOF read should return 0, not -1");
 
     assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
@@ -1908,8 +1906,7 @@ pub fn test_pipe_broken_pipe() -> TestResult {
     let result = file_write_fd(
         pid,
         write_fd,
-        payload.as_ptr() as *const c_char,
-        payload.len(),
+        &mut KernelIoBufRef::new(payload),
     );
     assert_eq_test!(result, -1, "write to broken pipe should return -1");
 
@@ -1938,14 +1935,14 @@ pub fn test_pipe_multi_write_read() -> TestResult {
 
     let a = b"aaa";
     let b = b"bbb";
-    let w1 = file_write_fd(pid, write_fd, a.as_ptr() as *const c_char, a.len());
+    let w1 = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(a));
     assert_eq_test!(w1 as usize, a.len(), "first write failed");
 
-    let w2 = file_write_fd(pid, write_fd, b.as_ptr() as *const c_char, b.len());
+    let w2 = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(b));
     assert_eq_test!(w2 as usize, b.len(), "second write failed");
 
     let mut out = [0u8; 16];
-    let nread = file_read_fd(pid, read_fd, out.as_mut_ptr() as *mut c_char, out.len());
+    let nread = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out));
     assert_eq_test!(nread as usize, 6, "read should return all 6 bytes");
     assert_test!(&out[..6] == b"aaabbb", "accumulated data mismatch");
 
@@ -1981,14 +1978,13 @@ pub fn test_pipe_partial_read() -> TestResult {
     let written = file_write_fd(
         pid,
         write_fd,
-        payload.as_ptr() as *const c_char,
-        payload.len(),
+        &mut KernelIoBufRef::new(&payload),
     );
     assert_eq_test!(written as usize, 100, "write 100 bytes failed");
 
     // Read first 50
     let mut buf1 = [0u8; 50];
-    let r1 = file_read_fd(pid, read_fd, buf1.as_mut_ptr() as *mut c_char, 50);
+    let r1 = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut buf1));
     assert_eq_test!(r1 as usize, 50, "first partial read wrong count");
     assert_test!(
         &buf1[..] == &payload[..50],
@@ -1997,7 +1993,7 @@ pub fn test_pipe_partial_read() -> TestResult {
 
     // Read remaining 50
     let mut buf2 = [0u8; 50];
-    let r2 = file_read_fd(pid, read_fd, buf2.as_mut_ptr() as *mut c_char, 50);
+    let r2 = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut buf2));
     assert_eq_test!(r2 as usize, 50, "second partial read wrong count");
     assert_test!(
         &buf2[..] == &payload[50..100],
@@ -2034,7 +2030,7 @@ pub fn test_pipe_buffer_full() -> TestResult {
     let chunk = [0xABu8; 512];
     let mut total_written: usize = 0;
     for _ in 0..8 {
-        let w = file_write_fd(pid, write_fd, chunk.as_ptr() as *const c_char, chunk.len());
+        let w = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(&chunk));
         assert_test!(w > 0, "write chunk failed while filling buffer");
         total_written += w as usize;
     }
@@ -2042,18 +2038,18 @@ pub fn test_pipe_buffer_full() -> TestResult {
 
     // Now the pipe should be full. A non-blocking write of 1 byte should return EAGAIN.
     let extra = [0xCDu8; 1];
-    let over = file_write_fd(pid, write_fd, extra.as_ptr() as *const c_char, extra.len());
+    let over = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(&extra));
     assert_eq_test!(over, -11, "write to full pipe should return EAGAIN (-11)");
 
     // Also verify reading from an empty non-blocking pipe returns EAGAIN.
     // First drain the buffer.
     let mut drain = [0u8; 4096];
-    let drained = file_read_fd(pid, read_fd, drain.as_mut_ptr() as *mut c_char, drain.len());
+    let drained = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut drain));
     assert_eq_test!(drained as usize, 4096, "drain read wrong count");
 
     // Pipe is now empty with writers still open: non-blocking read should return EAGAIN.
     let mut one = [0u8; 1];
-    let empty_read = file_read_fd(pid, read_fd, one.as_mut_ptr() as *mut c_char, 1);
+    let empty_read = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut one));
     assert_eq_test!(
         empty_read,
         -11,
@@ -2115,7 +2111,7 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     // If writer refs were released correctly, empty nonblocking read returns EOF (0),
     // not EAGAIN (-11).
     let mut one = [0u8; 1];
-    let r = file_read_fd(pid2, read_fd, one.as_mut_ptr() as *mut c_char, 1);
+    let r = file_read_fd(pid2, read_fd, &mut KernelIoBuf::new(&mut one));
     assert_eq_test!(r, 0, "reader should observe EOF after current task exit");
 
     assert_eq_test!(file_close_fd(pid2, read_fd), 0, "pid2 close read failed");

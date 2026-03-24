@@ -43,12 +43,12 @@ pub fn test_vfs_file_roundtrip() -> TestResult {
     };
 
     let content = b"hello vfs";
-    if handle.write(0, content).is_err() {
+    if handle.write(0, &mut slopos_abi::io::KernelIoBufRef::new(content)).is_err() {
         return TestResult::Fail;
     }
 
     let mut buf = [0u8; 32];
-    let read_len = match handle.read(0, &mut buf) {
+    let read_len = match handle.read(0, &mut slopos_abi::io::KernelIoBuf::new(&mut buf)) {
         Ok(len) => len,
         Err(_) => return TestResult::Fail,
     };
@@ -133,12 +133,12 @@ pub fn test_vfs_storage_contention_stress_baseline() -> TestResult {
             Err(_) => return TestResult::Fail,
         };
 
-        if handle.write(0, &payload).is_err() {
+        if handle.write(0, &mut slopos_abi::io::KernelIoBufRef::new(&payload)).is_err() {
             return TestResult::Fail;
         }
 
         let mut out = [0u8; 256];
-        let read_len = match handle.read(0, &mut out) {
+        let read_len = match handle.read(0, &mut slopos_abi::io::KernelIoBuf::new(&mut out)) {
             Ok(n) => n,
             Err(_) => return TestResult::Fail,
         };
@@ -440,7 +440,7 @@ pub fn test_ext2_read_file_not_regular() -> TestResult {
     };
 
     let mut buf = [0u8; 32];
-    let result = fs.read_file(2, 0, &mut buf);
+    let result = fs.read_file(2, 0, &mut slopos_abi::io::KernelIoBuf::new(&mut buf));
     match result {
         Err(Ext2Error::NotFile) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -494,7 +494,8 @@ pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    let result = fs.read_file(inode, 0, &mut [0u8; 1]);
+    let mut tiny = [0u8; 1];
+    let result = fs.read_file(inode, 0, &mut slopos_abi::io::KernelIoBuf::new(&mut tiny));
     match result {
         Err(Ext2Error::InvalidBlock) | Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,
@@ -523,7 +524,7 @@ pub fn test_ext2_read_file_data_roundtrip() -> TestResult {
     };
 
     let mut buf = [0u8; 16];
-    let read_len = match fs.read_file(inode, 0, &mut buf) {
+    let read_len = match fs.read_file(inode, 0, &mut slopos_abi::io::KernelIoBuf::new(&mut buf)) {
         Ok(len) => len,
         Err(_) => return TestResult::Fail,
     };

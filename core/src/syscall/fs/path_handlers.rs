@@ -1,11 +1,10 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::mem;
 
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
 use crate::syscall::common::{
-    USER_IO_MAX_BYTES, USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-    syscall_copy_user_str, syscall_copy_user_str_to_cstr,
+    USER_PATH_MAX, syscall_copy_user_str, syscall_copy_user_str_to_cstr,
 };
 
 use slopos_fs::fileio::{
@@ -15,6 +14,7 @@ use slopos_fs::fileio::{
 
 use slopos_mm::kernel_heap::{kfree, kmalloc};
 use slopos_mm::user_copy::{copy_bytes_to_user, copy_from_user, copy_to_user};
+use slopos_mm::user_io_buf::UserIoBuf;
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 define_syscall!(syscall_fs_open(ctx, args) requires(let pid: process_id) {
@@ -31,10 +31,12 @@ define_syscall!(syscall_fs_close(ctx, args) requires(let pid: process_id) {
 define_syscall!(syscall_fs_read(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let capped_len = args.arg2_usize().min(USER_IO_MAX_BYTES);
+    let count = args.arg2_usize();
+    let Some(mut io_buf) = UserIoBuf::new(args.arg1, count) else {
+        return ctx.bad_address();
+    };
 
-    let bytes = file_read_fd(pid, args.arg0 as c_int, tmp.as_mut_ptr() as *mut c_char, capped_len);
+    let bytes = file_read_fd(pid, args.arg0 as c_int, &mut io_buf);
     if bytes < 0 {
         // Propagate ERESTARTSYS (-512) directly so the
         // syscall dispatch restart logic can intercept it.
@@ -44,17 +46,18 @@ define_syscall!(syscall_fs_read(ctx, args) requires(let pid: process_id) {
         return ctx.err();
     }
 
-    try_or_err!(ctx, syscall_copy_to_user_bounded(args.arg1, &tmp[..bytes as usize]));
     ctx.ok(bytes as u64)
 });
 
 define_syscall!(syscall_fs_write(ctx, args) requires(let pid: process_id) {
     require_nonzero!(ctx, args.arg1);
 
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let write_len = try_or_err!(ctx, syscall_bounded_from_user(&mut tmp, args.arg1, args.arg2, USER_IO_MAX_BYTES));
+    let count = args.arg2_usize();
+    let Some(mut io_buf) = UserIoBuf::new(args.arg1, count) else {
+        return ctx.bad_address();
+    };
 
-    let bytes = file_write_fd(pid, args.arg0 as c_int, tmp.as_ptr() as *const c_char, write_len);
+    let bytes = file_write_fd(pid, args.arg0 as c_int, &mut io_buf);
     ctx.from_rc_value(bytes as i64)
 });
 

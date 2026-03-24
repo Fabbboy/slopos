@@ -256,7 +256,12 @@ impl FileSystem for RamFs {
         })
     }
 
-    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+    fn read(
+        &self,
+        inode: InodeId,
+        offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
         self.with_inner(|inner| {
             let ram_inode = inner.get_inode(inode)?;
 
@@ -271,13 +276,17 @@ impl FileSystem for RamFs {
 
             let available = ram_inode.data_len - offset;
             let to_read = buf.len().min(available);
-            buf[..to_read].copy_from_slice(&ram_inode.data[offset..offset + to_read]);
-
-            Ok(to_read)
+            buf.write_at(0, &ram_inode.data[offset..offset + to_read])
+                .map_err(|_| VfsError::IoError)
         })
     }
 
-    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    fn write(
+        &self,
+        inode: InodeId,
+        offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;
 
@@ -285,19 +294,22 @@ impl FileSystem for RamFs {
                 return Err(VfsError::IsDirectory);
             }
 
+            let buf_len = buf.len();
             let offset = offset as usize;
-            let end = offset + buf.len();
+            let end = offset + buf_len;
 
             if end > RAMFS_MAX_FILE_SIZE {
                 return Err(VfsError::NoSpace);
             }
 
-            ram_inode.data[offset..end].copy_from_slice(buf);
-            if end > ram_inode.data_len {
-                ram_inode.data_len = end;
+            let n = buf
+                .read_at(0, &mut ram_inode.data[offset..end])
+                .map_err(|_| VfsError::IoError)?;
+            if offset + n > ram_inode.data_len {
+                ram_inode.data_len = offset + n;
             }
 
-            Ok(buf.len())
+            Ok(n)
         })
     }
 

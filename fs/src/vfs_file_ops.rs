@@ -66,7 +66,7 @@ impl FileOps for VfsFileOps {
         FileKind::Regular
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], offset: u64, _flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, offset: u64, _flags: u32) -> isize {
         let (fs, inode) = {
             let table = OPEN_VNODES.lock();
             let Some(slot) = table.slots.get(handle) else {
@@ -86,7 +86,7 @@ impl FileOps for VfsFileOps {
         }
     }
 
-    fn write(&self, handle: usize, buf: &[u8], offset: u64, _flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, offset: u64, _flags: u32) -> isize {
         let (fs, inode) = {
             let table = OPEN_VNODES.lock();
             let Some(slot) = table.slots.get(handle) else {

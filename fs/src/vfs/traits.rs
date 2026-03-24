@@ -183,27 +183,38 @@ pub trait FileSystem: Send + Sync {
     /// Get metadata (stat) for an inode.
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat>;
 
-    /// Read data from a file.
+    /// Read data from a file into an I/O buffer.
+    ///
+    /// The `buf` may be backed by kernel memory ([`KernelIoBuf`]) or
+    /// user-space memory (`UserIoBuf`).  Implementations should use
+    /// `buf.write_at(offset, src)` to transfer block data, which
+    /// handles kernel↔user copying transparently.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start reading from
-    /// * `buf` - Buffer to read into
+    /// * `buf` - I/O buffer to read into
     ///
     /// # Returns
-    /// Number of bytes actually read (may be less than buffer size at EOF).
-    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize>;
+    /// Number of bytes actually read (may be less than buffer capacity at EOF).
+    fn read(&self, inode: InodeId, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf)
+        -> VfsResult<usize>;
 
-    /// Write data to a file.
+    /// Write data from an I/O buffer into a file.
+    ///
+    /// The `buf` may be backed by kernel memory or user-space memory.
+    /// Implementations should use `buf.read_at(offset, dst)` to extract
+    /// data for writing to disk.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start writing at
-    /// * `buf` - Data to write
+    /// * `buf` - I/O buffer containing data to write
     ///
     /// # Returns
     /// Number of bytes actually written.
-    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;
+    fn write(&self, inode: InodeId, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf)
+        -> VfsResult<usize>;
 
     /// Create a new file or directory in a parent directory.
     ///

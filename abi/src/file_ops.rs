@@ -1,6 +1,7 @@
 //! File-operations vtable for polymorphic file descriptors.
 
 use crate::fs::UserFsStat;
+use crate::io::IoBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -16,14 +17,24 @@ pub enum FileKind {
 ///
 /// Subsystems provide **static** (zero-sized) implementations. Per-open
 /// state is identified by the opaque `handle` passed to every method.
+///
+/// Read and write methods accept `&mut dyn IoBuf` which abstracts
+/// over kernel buffers and user-space buffers, enabling zero-copy
+/// transfers without intermediate bounce buffers.
 pub trait FileOps: Send + Sync {
     fn kind(&self) -> FileKind;
 
+    /// Read data from this file into `buf`.
+    ///
     /// Returns bytes read on success, or a negative errno.
-    fn read(&self, handle: usize, buf: &mut [u8], offset: u64, flags: u32) -> isize;
+    /// The `buf` may be backed by kernel memory ([`KernelIoBuf`]) or
+    /// user-space memory (`UserIoBuf`), transparently.
+    fn read(&self, handle: usize, buf: &mut dyn IoBuf, offset: u64, flags: u32) -> isize;
 
+    /// Write data from `buf` into this file.
+    ///
     /// Returns bytes written on success, or a negative errno.
-    fn write(&self, handle: usize, buf: &[u8], offset: u64, flags: u32) -> isize;
+    fn write(&self, handle: usize, buf: &mut dyn IoBuf, offset: u64, flags: u32) -> isize;
 
     /// Called exactly once when refcount reaches zero.
     fn release(&self, handle: usize);

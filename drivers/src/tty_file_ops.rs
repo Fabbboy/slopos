@@ -14,21 +14,33 @@ impl FileOps for TtyFileOps {
         FileKind::Tty
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], _offset: u64, flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        match tty::read(tty_idx, buf, nonblock) {
-            Ok(n) => n as isize,
+        // TTY driver API uses &mut [u8]; use a kernel-side staging buffer.
+        let mut tmp = [0u8; 4096];
+        let read_len = buf.len().min(tmp.len());
+        match tty::read(tty_idx, &mut tmp[..read_len], nonblock) {
+            Ok(n) => match buf.write_at(0, &tmp[..n]) {
+                Ok(written) => written as isize,
+                Err(e) => e as isize,
+            },
             Err(e) => e.to_errno() as isize,
         }
     }
 
-    fn write(&self, handle: usize, buf: &[u8], _offset: u64, flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        match tty::write(tty_idx, buf, nonblock) {
-            Ok(n) => n as isize,
-            Err(e) => e.to_errno() as isize,
+        // TTY driver API uses &[u8]; use a kernel-side staging buffer.
+        let mut tmp = [0u8; 4096];
+        let write_len = buf.len().min(tmp.len());
+        match buf.read_at(0, &mut tmp[..write_len]) {
+            Ok(n) => match tty::write(tty_idx, &tmp[..n], nonblock) {
+                Ok(written) => written as isize,
+                Err(e) => e.to_errno() as isize,
+            },
+            Err(e) => e as isize,
         }
     }
 

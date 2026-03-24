@@ -99,11 +99,21 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
         })
     }
 
-    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
+    fn read(
+        &self,
+        inode: InodeId,
+        offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
         self.with_ext2(|fs| fs.read_file(inode as u32, offset as u32, buf))
     }
 
-    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
+    fn write(
+        &self,
+        inode: InodeId,
+        offset: u64,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+    ) -> VfsResult<usize> {
         self.with_ext2(|fs| fs.write_file(inode as u32, offset as u32, buf))
     }
 
