@@ -5,10 +5,8 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
@@ -484,140 +482,144 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 // Global atlas (kernel use)
 // ---------------------------------------------------------------------------
 //
-// Protected by RCU: readers must hold preemption disabled (e.g. via
-// IrqMutex guard or explicit PreemptGuard) while using the returned
-// AtlasRef.  Writers call replace_global() which atomically swaps the
-// pointer; the caller is responsible for calling synchronize_rcu() and
-// freeing the old atlas.
+// Protected by RCU: readers acquire an AtlasGuard which embeds an
+// RcuReadGuard, preventing preemption (and thus quiescent states) for
+// the duration of the borrow.  Writers call replace_global() which
+// atomically swaps the pointer; the caller is responsible for deferring
+// the free via call_rcu().
 
-/// Lifetime-bounded borrow of the global atlas.
-///
-/// The `'a` lifetime is tied to whatever preemption guard the caller
-/// holds (e.g. `RcuReadGuard`, `IrqMutexGuard`, `PreemptGuard`).  The
-/// borrow cannot outlive the guard, preventing use-after-free when a
-/// writer replaces the atlas and frees the old one via RCU.
-///
-/// Deliberately `!Send` and `!Sync` — must be used on the CPU that
-/// created it, within the preemption-disabled window.
-pub struct AtlasGuard<'a> {
-    ptr: *const GlyphAtlas,
-    _lifetime: core::marker::PhantomData<&'a ()>,
-    _not_send_sync: core::marker::PhantomData<*const ()>,
-}
+#[cfg(feature = "kernel")]
+mod global_atlas {
+    use super::*;
+    use alloc::boxed::Box;
+    use core::sync::atomic::{AtomicPtr, Ordering};
+    use slopos_sync::RcuReadGuard;
 
-impl<'a> core::ops::Deref for AtlasGuard<'a> {
-    type Target = GlyphAtlas;
-
-    #[inline]
-    fn deref(&self) -> &GlyphAtlas {
-        // SAFETY: ptr is non-null (checked by global()), and the caller
-        // holds a preemption guard so the atlas cannot be freed.
-        unsafe { &*self.ptr }
+    /// Self-owning RCU-protected borrow of the global glyph atlas.
+    ///
+    /// Embeds an [`RcuReadGuard`] so the RCU read-side critical section
+    /// is held for exactly as long as the caller keeps this value alive.
+    /// Derefs to [`GlyphAtlas`] for ergonomic rendering calls.
+    ///
+    /// Deliberately `!Send` and `!Sync` — must be used on the CPU that
+    /// created it, within the preemption-disabled window.
+    pub struct AtlasGuard {
+        _rcu: RcuReadGuard,
+        ptr: *const GlyphAtlas,
     }
-}
 
-static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
-static FONT_CHANGE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+    impl core::ops::Deref for AtlasGuard {
+        type Target = GlyphAtlas;
 
-pub fn register_font_change_callback(cb: fn()) {
-    FONT_CHANGE_CALLBACK.store(cb as *mut (), Ordering::Release);
-}
-
-pub fn invoke_font_change_callback() {
-    let cb = FONT_CHANGE_CALLBACK.load(Ordering::Acquire);
-    if !cb.is_null() {
-        // SAFETY: stored via register_font_change_callback which only accepts fn().
-        let f: fn() = unsafe { core::mem::transmute(cb) };
-        f();
-    }
-}
-
-/// Load the raw global atlas pointer.
-///
-/// Returns null if no atlas has been initialised.  Callers that use the
-/// returned pointer **must** hold an RCU read-side critical section for
-/// the duration of any dereference.  Prefer [`global`] for the safe,
-/// lifetime-bounded API.
-#[inline]
-pub fn global_ptr() -> *const GlyphAtlas {
-    GLOBAL_ATLAS.load(Ordering::Acquire)
-}
-
-pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
-    if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
-        replace_global(atlas);
-        true
-    } else {
-        false
-    }
-}
-
-pub fn init_global_bitmap() -> bool {
-    use crate::bitmap;
-    match bitmap::bitmap_to_coverage(
-        &bitmap::VGA_FONT_8X16,
-        bitmap::BITMAP_FONT_WIDTH,
-        bitmap::BITMAP_FONT_HEIGHT,
-        bitmap::BITMAP_FONT_GLYPH_COUNT,
-    ) {
-        Some((coverage, replacement)) => {
-            match GlyphAtlas::from_raw_coverage(
-                bitmap::BITMAP_FONT_WIDTH,
-                bitmap::BITMAP_FONT_HEIGHT,
-                coverage,
-                replacement,
-                FontSource::BitmapFallback,
-            ) {
-                Some(atlas) => {
-                    replace_global(atlas);
-                    true
-                }
-                None => false,
-            }
+        #[inline]
+        fn deref(&self) -> &GlyphAtlas {
+            // SAFETY: ptr is non-null (checked by global()), and _rcu
+            // keeps the RCU read-side critical section active so no
+            // writer can free the atlas while this guard exists.
+            unsafe { &*self.ptr }
         }
-        None => false,
+    }
+
+    static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
+
+    static FONT_CHANGE_CALLBACK: slopos_sync::IrqMutex<Option<fn()>> =
+        slopos_sync::IrqMutex::new(None);
+
+    pub fn register_font_change_callback(cb: fn()) {
+        *FONT_CHANGE_CALLBACK.lock() = Some(cb);
+    }
+
+    pub fn invoke_font_change_callback() {
+        let cb = *FONT_CHANGE_CALLBACK.lock();
+        if let Some(f) = cb {
+            f();
+        }
+    }
+
+    /// Load the raw global atlas pointer.
+    ///
+    /// Returns null if no atlas has been initialised.  Callers that use
+    /// the returned pointer **must** hold an RCU read-side critical
+    /// section for the duration of any dereference.  Prefer [`global`]
+    /// for the safe, self-owning API.
+    #[inline]
+    pub fn global_ptr() -> *const GlyphAtlas {
+        GLOBAL_ATLAS.load(Ordering::Acquire)
+    }
+
+    pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
+        if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
+            replace_global(atlas);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn init_global_bitmap() -> bool {
+        use crate::bitmap;
+        match bitmap::bitmap_to_coverage(
+            &bitmap::VGA_FONT_8X16,
+            bitmap::BITMAP_FONT_WIDTH,
+            bitmap::BITMAP_FONT_HEIGHT,
+            bitmap::BITMAP_FONT_GLYPH_COUNT,
+        ) {
+            Some((coverage, replacement)) => {
+                match GlyphAtlas::from_raw_coverage(
+                    bitmap::BITMAP_FONT_WIDTH,
+                    bitmap::BITMAP_FONT_HEIGHT,
+                    coverage,
+                    replacement,
+                    FontSource::BitmapFallback,
+                ) {
+                    Some(atlas) => {
+                        replace_global(atlas);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        }
+    }
+
+    /// Atomically replace the global atlas.
+    ///
+    /// Returns a pointer to the previous atlas (may be null on first
+    /// call).  **The caller must arrange deferred freeing** — in kernel
+    /// context this means passing the old pointer to `call_rcu()`.
+    /// During early boot (before the scheduler is running) the old
+    /// pointer may be freed immediately since no concurrent readers are
+    /// possible.
+    pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
+        let new_ptr = Box::into_raw(Box::new(new_atlas));
+        GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel)
+    }
+
+    /// Acquire the global glyph atlas under an RCU read lock.
+    ///
+    /// The returned [`AtlasGuard`] owns an [`RcuReadGuard`], so the RCU
+    /// read-side critical section is held for exactly as long as the
+    /// guard is alive.  Drop promptly after rendering to minimise the
+    /// critical section length.
+    pub fn global() -> Option<AtlasGuard> {
+        let rcu = slopos_sync::rcu_read_lock();
+        let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(AtlasGuard { _rcu: rcu, ptr })
+        }
     }
 }
 
-/// Atomically replace the global atlas.
-///
-/// Returns a pointer to the previous atlas (may be null on first call).
-/// **The caller must arrange deferred freeing** — in kernel context this
-/// means calling `synchronize_rcu()` then `Box::from_raw(old)`.
-/// During early boot (before the scheduler is running) the old pointer
-/// may be freed immediately since no concurrent readers are possible.
-pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
-    let new_ptr = Box::into_raw(Box::new(new_atlas));
-    let old = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
-    // Callback deferred — caller invokes it after RCU grace period.
-    old
-}
-
-/// Load the current global atlas, borrowing the caller's preemption guard.
-///
-/// The returned [`AtlasGuard`] borrows from `_guard`, so it cannot
-/// outlive the preemption-disabled window.  Pass any reference whose
-/// lifetime covers the desired usage scope — typically an
-/// `&RcuReadGuard`, `&IrqMutexGuard`, or `&PreemptGuard`.
-pub fn global<'a, G: ?Sized>(_guard: &'a G) -> Option<AtlasGuard<'a>> {
-    let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
-    if ptr.is_null() {
-        None
-    } else {
-        Some(AtlasGuard {
-            ptr,
-            _lifetime: core::marker::PhantomData,
-            _not_send_sync: core::marker::PhantomData,
-        })
-    }
-}
+#[cfg(feature = "kernel")]
+pub use global_atlas::*;
 
 #[cfg(test)]
 mod tests {
-    use super::{GlyphAtlas, global, init_global_bitmap};
+    use super::GlyphAtlas;
     use crate::FontSource;
-
-    struct DummyGuard;
 
     #[test]
     fn from_raw_coverage_accepts_valid_buffers() {
@@ -663,11 +665,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kernel")]
     #[test]
     fn init_global_bitmap_succeeds() {
+        use super::global_atlas::{global, init_global_bitmap};
         assert!(init_global_bitmap());
-        let guard = DummyGuard;
-        let atlas = global(&guard).expect("atlas must be set");
+        let atlas = global().expect("atlas must be set");
         assert_eq!(atlas.cell_width(), 8);
         assert_eq!(atlas.cell_height(), 16);
     }

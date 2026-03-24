@@ -27,10 +27,27 @@
 //! declared complete for that CPU with a serial warning.  The old data
 //! is leaked rather than risking a use-after-free, matching Linux's
 //! philosophy of "warn loudly but don't crash."
+//!
+//! ## Deferred callbacks (`call_rcu`)
+//!
+//! Modelled after Linux's `call_rcu()` / `rcu_do_batch()`:
+//!
+//! - `call_rcu()` pushes a callback node onto a lock-free Treiber stack.
+//!   The node is allocated via the global allocator; on OOM, the call
+//!   falls back to a synchronous `synchronize_rcu()` + immediate
+//!   callback — slower but correct, matching Linux's OOM behaviour in
+//!   `kfree_rcu()` (see `kernel/rcu/tree.c:kfree_rcu_monitor`).
+//!
+//! - `rcu_process_callbacks()`, called from CPU 0's timer tick, atomically
+//!   steals the entire list, waits for a grace period, then invokes all
+//!   callbacks.  Multiple callbacks batched between ticks share a single
+//!   `synchronize_rcu()` — the same optimisation Linux uses in
+//!   `rcu_do_batch()`.
 
 extern crate alloc;
 
 use alloc::boxed::Box;
+use core::alloc::Layout;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::preempt::PreemptGuard;
@@ -38,6 +55,8 @@ use slopos_arch::pcr::{
     apic_id_from_cpu_index, get_cpu_count, get_current_cpu, is_cpu_online, send_ipi_to_cpu,
     MAX_CPUS,
 };
+
+use slopos_utils::klog_warn;
 
 #[repr(C, align(64))]
 struct QsSlot(AtomicU64);
@@ -73,8 +92,8 @@ const RCU_IPI_THRESHOLD: u32 = 1_000;
 
 /// Maximum spin iterations per CPU before declaring an RCU stall.
 ///
-/// At ~GHz spin rates this is roughly 100-500ms — long enough for any
-/// healthy CPU to report a QS via timer tick (10ms) or idle loop, but
+/// At ~GHz spin rates this is roughly 100-500 ms — long enough for any
+/// healthy CPU to report a QS via timer tick (10 ms) or idle loop, but
 /// short enough to avoid hanging the kernel indefinitely.
 const RCU_STALL_LIMIT_SPINS: u32 = 500_000_000;
 
@@ -119,6 +138,13 @@ pub fn synchronize_rcu() {
             }
 
             if spins >= RCU_STALL_LIMIT_SPINS {
+                klog_warn!(
+                    "RCU stall: CPU {} failed to report QS after {} spins (snap={}, cur={})",
+                    cpu,
+                    spins,
+                    snaps[cpu],
+                    RCU_QS_CTR[cpu].0.load(Ordering::Relaxed),
+                );
                 break;
             }
 
@@ -130,19 +156,6 @@ pub fn synchronize_rcu() {
 // ---------------------------------------------------------------------------
 // Deferred RCU callbacks (call_rcu)
 // ---------------------------------------------------------------------------
-//
-// Modelled after Linux's call_rcu() design:
-//
-// - `call_rcu()` is always O(1) and never blocks — it pushes a callback
-//   node onto a lock-free Treiber stack (LIFO linked list).
-//
-// - `rcu_process_callbacks()`, called from CPU 0's timer tick, atomically
-//   steals the entire list, waits for a grace period, then invokes all
-//   callbacks.  This mirrors Linux's RCU callback batching in softirq
-//   context (see kernel/rcu/tree.c:rcu_do_batch).
-//
-// - No fixed-size limit, no synchronous fallback.  The only allocation
-//   is the `Box<RcuCallbackNode>` in `call_rcu()`.
 
 type RcuCallback = unsafe fn(*mut u8);
 
@@ -159,26 +172,59 @@ unsafe impl Send for RcuCallbackNode {}
 
 static PENDING_HEAD: AtomicPtr<RcuCallbackNode> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Attempt to allocate an `RcuCallbackNode` via the global allocator.
+///
+/// Returns a raw pointer (null on OOM).  Uses the raw allocator API
+/// instead of `Box::new` to avoid panicking under memory pressure —
+/// the caller is responsible for the OOM fallback path.
+fn try_alloc_callback_node(ptr: *mut u8, callback: RcuCallback) -> *mut RcuCallbackNode {
+    let layout = Layout::new::<RcuCallbackNode>();
+    // SAFETY: layout is non-zero-sized (RcuCallbackNode contains pointers).
+    let raw = unsafe { alloc::alloc::alloc(layout) };
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+    let node = raw as *mut RcuCallbackNode;
+    // SAFETY: `raw` is a valid, properly aligned, freshly allocated pointer
+    // for `RcuCallbackNode`.  No other references exist.
+    unsafe {
+        node.write(RcuCallbackNode {
+            next: core::ptr::null_mut(),
+            ptr,
+            callback,
+        });
+    }
+    node
+}
+
 /// Schedule a deferred free after the next RCU grace period.
 ///
 /// The callback will be invoked with `ptr` after [`rcu_process_callbacks`]
 /// completes a grace period.  This is the non-blocking alternative to
 /// calling `synchronize_rcu()` + `drop()` inline.
 ///
-/// This function is O(1), never blocks, and is safe to call from any
-/// context including interrupt handlers and non-preemptible sections.
-/// The only fallible operation is the `Box::new` allocation for the
-/// callback node.
+/// On successful allocation the function is O(1) and never blocks.
+/// If the callback-node allocation fails (OOM), the function falls back
+/// to a synchronous grace period and invokes the callback immediately —
+/// this matches Linux's `kfree_rcu()` OOM fallback which calls
+/// `synchronize_rcu()` then `kfree()` inline (see
+/// `kernel/rcu/tree.c:kfree_rcu_monitor`).
 ///
 /// # Safety
 ///
 /// `callback` must be safe to call with `ptr` after a grace period.
 pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
-    let node = Box::into_raw(Box::new(RcuCallbackNode {
-        next: core::ptr::null_mut(),
-        ptr,
-        callback,
-    }));
+    let node = try_alloc_callback_node(ptr, callback);
+
+    if node.is_null() {
+        klog_warn!("RCU: call_rcu allocation failed, falling back to synchronous grace period");
+        synchronize_rcu();
+        // SAFETY: grace period has elapsed — callback contract satisfied.
+        unsafe {
+            callback(ptr);
+        }
+        return;
+    }
 
     // Lock-free Treiber stack push.  We own `node` exclusively until
     // the CAS succeeds, so the unsynchronised write to `next` is safe.
@@ -205,7 +251,6 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
 /// share a single `synchronize_rcu()` — the same optimisation Linux uses
 /// in `rcu_do_batch()`.
 pub fn rcu_process_callbacks() {
-    // Atomic steal — grabs the entire list in one operation.
     let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
     if head.is_null() {
         return;
@@ -215,8 +260,8 @@ pub fn rcu_process_callbacks() {
 
     let mut current = head;
     while !current.is_null() {
-        // SAFETY: each node was allocated with Box::new in call_rcu and
-        // is exclusively ours after the atomic swap above.
+        // SAFETY: each node was allocated via try_alloc_callback_node in
+        // call_rcu and is exclusively ours after the atomic swap above.
         let node = unsafe { Box::from_raw(current) };
         current = node.next;
         // SAFETY: the grace period has elapsed — the callback contract

@@ -1316,8 +1316,7 @@ impl VConsoleState {
 
     fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
         let Some(fb) = self.fb else { return };
-        let rcu = slopos_sync::rcu_read_lock();
-        let Some(atlas) = atlas::global(&rcu) else {
+        let Some(atlas) = atlas::global() else {
             return;
         };
         let (r, c) = (row as usize, col as usize);
@@ -1352,8 +1351,7 @@ impl VConsoleState {
             self.render_cell_direct_to_fb(row, col, cell);
             return;
         };
-        let rcu = slopos_sync::rcu_read_lock();
-        let Some(atlas) = atlas::global(&rcu) else {
+        let Some(atlas) = atlas::global() else {
             return;
         };
         let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
@@ -1401,8 +1399,7 @@ impl VConsoleState {
         let Some(fb) = self.fb else {
             return;
         };
-        let rcu = slopos_sync::rcu_read_lock();
-        let Some(atlas) = atlas::global(&rcu) else {
+        let Some(atlas) = atlas::global() else {
             return;
         };
 
@@ -1500,12 +1497,9 @@ impl VConsoleState {
     }
 
     pub(crate) fn recalculate_dimensions(&mut self) {
-        {
-            let rcu = slopos_sync::rcu_read_lock();
-            if let Some(atlas) = atlas::global(&rcu) {
-                self.cell_w = atlas.cell_width();
-                self.cell_h = atlas.cell_height();
-            }
+        if let Some(atlas) = atlas::global() {
+            self.cell_w = atlas.cell_width();
+            self.cell_h = atlas.cell_height();
         }
         if let Some(fb) = self.fb {
             let calc_cols = (fb.width / self.cell_w as u32).max(1) as usize;
@@ -1674,8 +1668,7 @@ pub fn notify_font_changed() {
         let Some(fb) = state.fb else {
             return;
         };
-        let rcu = slopos_sync::rcu_read_lock();
-        let Some(atlas) = atlas::global(&rcu) else {
+        let Some(atlas) = atlas::global() else {
             return;
         };
         let ptr = atlas::global_ptr() as usize;

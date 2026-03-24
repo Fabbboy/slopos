@@ -16,14 +16,16 @@ unsafe fn free_atlas_box(ptr: *mut u8) {
 }
 
 fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
-    let _writer = FONT_WRITER_LOCK.lock();
-    let old = slopos_font::atlas::replace_global(new_atlas);
-    slopos_font::atlas::invoke_font_change_callback();
-    if !old.is_null() {
-        unsafe {
-            slopos_sync::call_rcu(old as *mut u8, free_atlas_box);
+    {
+        let _writer = FONT_WRITER_LOCK.lock();
+        let old = slopos_font::atlas::replace_global(new_atlas);
+        if !old.is_null() {
+            unsafe {
+                slopos_sync::call_rcu(old as *mut u8, free_atlas_box);
+            }
         }
     }
+    slopos_font::atlas::invoke_font_change_callback();
 }
 
 define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
