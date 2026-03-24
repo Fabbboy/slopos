@@ -503,6 +503,7 @@ mod global_atlas {
     ///
     /// Deliberately `!Send` and `!Sync` — must be used on the CPU that
     /// created it, within the preemption-disabled window.
+    #[must_use = "dropping the guard immediately ends the RCU read-side critical section"]
     pub struct AtlasGuard {
         _rcu: RcuReadGuard,
         ptr: *const GlyphAtlas,

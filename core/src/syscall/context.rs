@@ -1,7 +1,9 @@
 use crate::scheduler::task_struct::Task;
 use crate::syscall::common::{SyscallDisposition, syscall_return_err, syscall_return_ok};
 use slopos_abi::syscall::{ERRNO_EFAULT, ERRNO_EINVAL};
-use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE};
+use slopos_abi::task::{
+    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_SYSTEM,
+};
 use slopos_arch::InterruptFrame;
 use slopos_utils::wl_currency::{self, WL_DELTA};
 
@@ -85,6 +87,25 @@ impl SyscallContext {
     #[inline]
     pub fn is_display_exclusive(&self) -> bool {
         self.has_flag(TASK_FLAG_DISPLAY_EXCLUSIVE)
+    }
+
+    /// Check if the calling task has console administration privilege.
+    ///
+    /// Modelled on Linux's `capable(CAP_SYS_TTY_CONFIG)` check in
+    /// `drivers/tty/vt/vt_ioctl.c`.  Uses `TASK_FLAG_SYSTEM` as the
+    /// SlopOS equivalent until a proper capability bitfield is added.
+    #[inline]
+    pub fn is_console_admin(&self) -> bool {
+        self.has_flag(TASK_FLAG_SYSTEM)
+    }
+
+    #[inline]
+    pub fn require_console_admin(&self) -> Result<(), SyscallDisposition> {
+        if !self.is_console_admin() {
+            Err(self.err_with(slopos_abi::Errno::EPERM.as_u64()))
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]

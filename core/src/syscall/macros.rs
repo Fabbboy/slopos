@@ -90,6 +90,14 @@ macro_rules! define_syscall {
         $($crate::define_syscall!(@expand_reqs $ctx, $($rest)*);)?
     };
 
+    // `console_admin` — capability check (CAP_SYS_TTY_CONFIG equivalent)
+    (@expand_reqs $ctx:ident, console_admin $(, $($rest:tt)*)?) => {
+        if let Err(disp) = $ctx.require_console_admin() {
+            return disp;
+        }
+        $($crate::define_syscall!(@expand_reqs $ctx, $($rest)*);)?
+    };
+
     // `display_exclusive` — permission check, no binding
     (@expand_reqs $ctx:ident, display_exclusive $(, $($rest:tt)*)?) => {
         if let Err(disp) = $ctx.require_display_exclusive() {

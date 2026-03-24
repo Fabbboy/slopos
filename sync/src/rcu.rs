@@ -44,6 +44,15 @@
 //!   period wait and callback invocation happen outside interrupt context,
 //!   matching Linux's separation of `rcu_sched_clock_irq()` (hardirq)
 //!   from `rcu_core()` (softirq/kthread).
+//!
+//! - After draining and invoking a batch, `rcu_process_callbacks` re-checks
+//!   `PENDING_HEAD` and loops if new callbacks arrived during the grace
+//!   period wait.  This mirrors Linux's `rcu_core()` which calls
+//!   `invoke_rcu_core()` to re-raise the softirq when
+//!   `rcu_segcblist_ready_cbs()` indicates more work.  Without this
+//!   re-check, callbacks pushed between the atomic steal and the end of
+//!   `synchronize_rcu()` could sit unprocessed until the next timer tick
+//!   raises the softirq flag — an unbounded latency hole.
 
 extern crate alloc;
 
@@ -64,6 +73,7 @@ struct QsSlot(AtomicU64);
 static RCU_QS_CTR: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
 
 /// Read-side critical section guard.
+#[must_use = "dropping the guard immediately ends the RCU read-side critical section"]
 pub struct RcuReadGuard {
     _preempt: PreemptGuard,
 }
@@ -100,13 +110,26 @@ const RCU_STALL_LIMIT_SPINS: u32 = 500_000_000;
 /// Block until every online CPU has passed through at least one
 /// quiescent state since this call.
 ///
-/// Two-phase approach per holdout CPU:
-/// 1. Spin briefly waiting for natural QS reports (timer tick, idle loop)
-/// 2. Send a dedicated RCU QS IPI (vector 0xFB) to force the CPU to
-///    bump its counter
-/// 3. If the CPU still hasn't reported after [`RCU_STALL_LIMIT_SPINS`],
-///    log a warning and move on (leak the old data rather than hang)
+/// Sequence (modelled on Linux `synchronize_rcu` / GP init in
+/// `kernel/rcu/tree.c`):
+///
+/// 1. Note a QS on the calling CPU — the act of entering this function
+///    proves no RCU read-side critical section is active here (we are in
+///    process context with preemption enabled).  Linux does the same in
+///    `rcu_gp_init()` after snapshotting all CPUs: it calls `rcu_qs()` +
+///    `rcu_report_qs_rdp()` to immediately clear the local CPU from the
+///    qsmask.
+///
+/// 2. Snapshot every CPU's QS counter.
+///
+/// 3. For each remote online CPU, spin until its counter advances past
+///    the snapshot (natural QS from timer tick, idle loop, or context
+///    switch).  If the CPU is slow, send a dedicated RCU QS IPI (vector
+///    0xFB) to force it.  If it still hasn't reported after
+///    [`RCU_STALL_LIMIT_SPINS`], log a stall warning and move on.
 pub fn synchronize_rcu() {
+    rcu_note_qs();
+
     let this_cpu = get_current_cpu();
     let n = get_cpu_count().min(MAX_CPUS);
 
@@ -252,6 +275,12 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
 
     // Lock-free Treiber stack push.  We own `node` exclusively until
     // the CAS succeeds, so the unsynchronised write to `next` is safe.
+    //
+    // Note: Linux's `call_rcu()` uses per-CPU segmented callback lists
+    // with no atomic contention.  Our Treiber stack is simpler but has
+    // CAS contention under high call_rcu() concurrency.  The spin_loop
+    // hint reduces power waste on retry; contention is expected to be
+    // very low (font changes are rare events).
     loop {
         let head = PENDING_HEAD.load(Ordering::Relaxed);
         // SAFETY: we have exclusive access to `node` until CAS publishes it.
@@ -264,6 +293,7 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
         {
             return;
         }
+        core::hint::spin_loop();
     }
 }
 
@@ -281,30 +311,13 @@ pub fn rcu_raise_softirq() {
     }
 }
 
-/// Process all pending RCU callbacks from non-IRQ context.
+/// Drain the Treiber stack and invoke all callbacks after a grace period.
 ///
-/// Called from the scheduler idle loop or context-switch path on CPU 0.
-/// If the softirq flag is set, atomically steals the entire callback
-/// list, waits for one grace period, then invokes every callback.
-///
-/// Multiple callbacks batched between ticks share a single
-/// `synchronize_rcu()` — the same optimisation Linux uses in
-/// `rcu_do_batch()`.
-///
-/// # Context
-///
-/// Must be called from process context (idle task, kernel thread) —
-/// **never** from a timer tick or other IRQ handler, because
-/// `synchronize_rcu()` spins waiting for all CPUs to report quiescent
-/// states.
-pub fn rcu_process_callbacks() {
-    if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
-        return;
-    }
-
+/// Returns `true` if any callbacks were processed.
+fn drain_and_invoke() -> bool {
     let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
     if head.is_null() {
-        return;
+        return false;
     }
 
     synchronize_rcu();
@@ -326,5 +339,47 @@ pub fn rcu_process_callbacks() {
             callback(ptr);
         }
         current = next;
+    }
+    true
+}
+
+/// Process all pending RCU callbacks from non-IRQ context.
+///
+/// Called from the scheduler idle loop or context-switch path on CPU 0.
+/// If the softirq flag is set, atomically steals the entire callback
+/// list, waits for one grace period, then invokes every callback.
+///
+/// Multiple callbacks batched between ticks share a single
+/// `synchronize_rcu()` — the same optimisation Linux uses in
+/// `rcu_do_batch()`.
+///
+/// After draining a batch, re-checks `PENDING_HEAD` for callbacks that
+/// arrived during the grace period wait.  This mirrors Linux's
+/// `rcu_core()` which re-invokes itself via `invoke_rcu_core()` when
+/// `rcu_segcblist_ready_cbs()` shows more work.  Without this loop,
+/// callbacks pushed between the atomic steal and the `synchronize_rcu()`
+/// return would sit unprocessed until the next timer tick — an
+/// unbounded latency hole.
+///
+/// # Context
+///
+/// Must be called from process context (idle task, kernel thread) —
+/// **never** from a timer tick or other IRQ handler, because
+/// `synchronize_rcu()` spins waiting for all CPUs to report quiescent
+/// states.
+pub fn rcu_process_callbacks() {
+    if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
+        return;
+    }
+
+    loop {
+        if !drain_and_invoke() {
+            break;
+        }
+        // New callbacks may have arrived during synchronize_rcu().
+        // Re-check before returning to avoid latency holes.
+        if PENDING_HEAD.load(Ordering::Acquire).is_null() {
+            break;
+        }
     }
 }

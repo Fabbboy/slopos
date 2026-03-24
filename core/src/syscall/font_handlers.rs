@@ -29,11 +29,7 @@ fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
     slopos_font::atlas::invoke_font_change_callback();
 }
 
-define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
-    if pid > 1 {
-        return ctx.err_with(Errno::EPERM.as_u64());
-    }
-
+define_syscall!(syscall_font_set(ctx, args) requires(console_admin) {
     let data_ptr = args.arg0;
     let width = args.arg1 as u16;
     let height = args.arg2 as u16;

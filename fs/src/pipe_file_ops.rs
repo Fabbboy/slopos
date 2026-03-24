@@ -217,23 +217,8 @@ impl FileOps for PipeWriteOps {
         let mut local = [0u8; IO_STAGING_SIZE];
 
         loop {
-            let staged = if total < buf_len {
-                let chunk = (buf_len - total).min(local.len());
-                match buf.copy_out(total, &mut local[..chunk]) {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return if total > 0 {
-                            total as isize
-                        } else {
-                            Errno::EFAULT.as_isize()
-                        };
-                    }
-                }
-            } else {
-                0
-            };
-
             let mut need_block = false;
+            let can_write;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
                 let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
@@ -252,14 +237,10 @@ impl FileOps for PipeWriteOps {
                     };
                 }
 
-                if staged > 0 && slot.len < pipe::PIPE_BUFFER_SIZE {
-                    let written = slot.write_from(&local[..staged]);
-                    total += written;
-                    if written > 0 {
-                        pipe::reader_wq(pipe_id).wake_one();
-                    }
-                }
+                can_write = slot.len < pipe::PIPE_BUFFER_SIZE;
+            }
 
+            if !can_write {
                 if total >= buf_len {
                     return total as isize;
                 }
@@ -270,8 +251,70 @@ impl FileOps for PipeWriteOps {
                     return Errno::EAGAIN.as_isize();
                 }
                 if scheduler_is_enabled() != 0 {
-                    need_block = true;
+                    pipe::writer_wq(pipe_id).enqueue_current();
+                    prepare_to_wait();
+                    block_current_task();
+                    finish_wait();
+                    pipe::writer_wq(pipe_id).remove_current();
+                    continue;
                 }
+                return Errno::EAGAIN.as_isize();
+            }
+
+            if total >= buf_len {
+                return total as isize;
+            }
+            let chunk = (buf_len - total).min(local.len());
+            let staged = match buf.copy_out(total, &mut local[..chunk]) {
+                Ok(n) => n,
+                Err(_) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EFAULT.as_isize()
+                    };
+                }
+            };
+            if staged == 0 {
+                return total as isize;
+            }
+
+            {
+                let mut pipe_state = pipe::PIPE_STATE.lock();
+                let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EBADF.as_isize()
+                    };
+                };
+
+                if slot.readers == 0 {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EPIPE.as_isize()
+                    };
+                }
+
+                let written = slot.write_from(&local[..staged]);
+                total += written;
+                if written > 0 {
+                    pipe::reader_wq(pipe_id).wake_one();
+                }
+            }
+
+            if total >= buf_len {
+                return total as isize;
+            }
+            if is_nonblock && total > 0 {
+                return total as isize;
+            }
+            if is_nonblock {
+                return Errno::EAGAIN.as_isize();
+            }
+            if scheduler_is_enabled() != 0 {
+                need_block = true;
             }
 
             if need_block {

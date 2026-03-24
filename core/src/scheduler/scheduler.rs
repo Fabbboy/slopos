@@ -1117,13 +1117,19 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
+    // Unconditional QS: the timer ISR firing proves this CPU is not
+    // inside an RCU read-side critical section (those disable preemption
+    // but not interrupts).  Matches Linux rcu_sched_clock_irq().
     slopos_sync::rcu_note_qs();
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
+    // Raise the deferred-callback softirq flag on CPU 0 only.
+    // rcu_process_callbacks() runs later from the idle loop, not here.
     if cpu_id == 0 {
         slopos_sync::rcu_raise_softirq();
     }
+
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
     let preempt_active = PreemptGuard::is_active();
