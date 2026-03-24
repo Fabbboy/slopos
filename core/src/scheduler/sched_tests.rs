@@ -23,8 +23,10 @@ use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
     TASK_FLAG_USER_MODE, TASK_PRIORITY_HIGH, TASK_PRIORITY_IDLE, TASK_PRIORITY_LOW,
     TASK_PRIORITY_NORMAL, Task, TaskStatus, init_task_manager, task_create, task_find_by_id,
-    task_get_info, task_set_state, task_shutdown_all, task_terminate,
+    task_get_info, task_is_blocked, task_set_state, task_set_state_with_reason, task_shutdown_all,
+    task_terminate,
 };
+use slopos_abi::task::BlockReason;
 use slopos_arch::arch::gdt::SegmentSelector;
 use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -1602,6 +1604,54 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_sleep_wake_race_regression() -> TestResult {
+    let _fixture = SchedFixture::new();
+    super::sleep::reset_sleep_queue();
+
+    let task_id = task_create(
+        b"SleepRace\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task_ptr = task_find_by_id(task_id);
+    if task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    for round in 0..64 {
+        let _ = task_set_state(task_id, TaskStatus::Running);
+
+        if !super::sleep::test_insert_sleep_entry(task_id, 100) {
+            klog_info!("SCHED_TEST: sleep queue insert failed at round {}", round);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+        if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+            klog_info!("SCHED_TEST: set Blocked failed at round {}", round);
+            super::sleep::cancel_sleep(task_id);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+
+        super::sleep::wake_due_sleepers(200);
+
+        if task_is_blocked(task_ptr) {
+            klog_info!("SCHED_TEST: task stuck in Blocked after wake — race bug");
+            let _ = task_set_state(task_id, TaskStatus::Ready);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    }
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::define_test_suite!(
     sched_core,
     [
@@ -1643,5 +1693,6 @@ slopos_testing::define_test_suite!(
         test_cross_cpu_schedule_lockfree,
         test_privilege_separation_invariants,
         test_scheduler_wakeup_race_stress_baseline,
+        test_sleep_wake_race_regression,
     ]
 );

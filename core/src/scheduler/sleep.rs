@@ -152,6 +152,11 @@ pub fn reset_sleep_queue() {
     SLEEP_QUEUE.lock().clear();
 }
 
+#[cfg(feature = "itests")]
+pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_tick: u64) -> bool {
+    SLEEP_QUEUE.lock().upsert(task_id, wake_tick)
+}
+
 pub fn cancel_sleep(task_id: u32) {
     if task_id == INVALID_TASK_ID {
         return;
@@ -185,16 +190,18 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
 
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
-    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
-        return -1;
-    }
 
-    if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
-        cancel_sleep(task_id);
-        return -1;
+    {
+        let mut queue = SLEEP_QUEUE.lock();
+        if !queue.upsert(task_id, wake_tick) {
+            return -1;
+        }
+        if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+            queue.remove(task_id);
+            return -1;
+        }
+        unschedule_task(current);
     }
-
-    unschedule_task(current);
     schedule();
     0
 }
