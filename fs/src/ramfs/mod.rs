@@ -272,7 +272,6 @@ impl FileSystem for RamFs {
             let available = ram_inode.data_len - offset;
             let to_read = buf.len().min(available);
             buf[..to_read].copy_from_slice(&ram_inode.data[offset..offset + to_read]);
-
             Ok(to_read)
         })
     }

@@ -9,7 +9,9 @@ use core::ptr;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
-use slopos_abi::task::{INVALID_PROCESS_ID, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN};
+use slopos_abi::task::{
+    INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN,
+};
 use slopos_fs::fileio::{fileio_clone_table_for_process, fileio_destroy_table_for_process};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
@@ -66,7 +68,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
         INIT_PATH,
         None,
         EXEC_SPAWN_DEFAULT_PRIORITY,
-        TASK_FLAG_USER_MODE,
+        TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,
     )

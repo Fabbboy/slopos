@@ -26,6 +26,7 @@ pub mod symbols;
 pub mod tests;
 pub mod tlb;
 pub mod user_copy;
+pub mod user_io_buf;
 pub mod user_ptr;
 pub mod vma_flags;
 pub mod vma_tree;

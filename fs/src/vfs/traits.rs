@@ -157,6 +157,32 @@ pub enum VfsError {
     Busy,
 }
 
+impl VfsError {
+    pub fn to_errno(self) -> slopos_abi::Errno {
+        use slopos_abi::Errno;
+        match self {
+            Self::NotFound => Errno::ENOENT,
+            Self::NotDirectory => Errno::ENOTDIR,
+            Self::NotFile => Errno::EINVAL,
+            Self::IsDirectory => Errno::EISDIR,
+            Self::PermissionDenied => Errno::EACCES,
+            Self::ReadOnly => Errno::EACCES,
+            Self::NoSpace => Errno::ENOSPC,
+            Self::IoError => Errno::EIO,
+            Self::InvalidPath => Errno::EINVAL,
+            Self::AlreadyExists => Errno::EEXIST,
+            Self::NotEmpty => Errno::ENOTEMPTY,
+            Self::CrossDevice => Errno::EINVAL,
+            Self::NotSupported => Errno::EOPNOTSUPP,
+            Self::TooManyLinks => Errno::EINVAL,
+            Self::NameTooLong => Errno::ENAMETOOLONG,
+            Self::InvalidArgument => Errno::EINVAL,
+            Self::BadFileDescriptor => Errno::EBADF,
+            Self::Busy => Errno::EBUSY,
+        }
+    }
+}
+
 /// A filesystem implementation.
 ///
 /// All filesystem types (ext2, ramfs, devfs, etc.) implement this trait.
@@ -183,23 +209,34 @@ pub trait FileSystem: Send + Sync {
     /// Get metadata (stat) for an inode.
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat>;
 
-    /// Read data from a file.
+    /// Read data from a file into a **kernel** buffer.
+    ///
+    /// Implementations receive a plain `&mut [u8]` slice that is always
+    /// backed by kernel memory.  User-space I/O buffering is handled by
+    /// the [`FileOps`] layer above (via directional I/O buffers + staging),
+    /// so filesystem code never needs to touch user addresses — this is
+    /// enforced at compile time by the slice type.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start reading from
-    /// * `buf` - Buffer to read into
+    /// * `buf` - Kernel buffer to read into
     ///
     /// # Returns
-    /// Number of bytes actually read (may be less than buffer size at EOF).
+    /// Number of bytes actually read (may be less than `buf.len()` at EOF).
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize>;
 
-    /// Write data to a file.
+    /// Write data from a **kernel** buffer into a file.
+    ///
+    /// Implementations receive a plain `&[u8]` slice that is always
+    /// backed by kernel memory.  The [`FileOps`] layer stages data from
+    /// user-space read buffers into kernel buffers before calling this
+    /// method, so filesystem code never handles user addresses.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start writing at
-    /// * `buf` - Data to write
+    /// * `buf` - Kernel buffer containing data to write
     ///
     /// # Returns
     /// Number of bytes actually written.

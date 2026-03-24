@@ -248,6 +248,11 @@ isr_lapic_timer:
 isr_tlb_shootdown:
     INTERRUPT_HANDLER 253, 0
 
+# RCU QS IPI handler (vector 0xFB = 251)
+.global isr_rcu_qs_ipi
+isr_rcu_qs_ipi:
+    INTERRUPT_HANDLER 251, 0
+
 # Shutdown IPI handler (vector 0xFE = 254)
 .global isr_shutdown_ipi
 isr_shutdown_ipi:

@@ -4,14 +4,18 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
 
+use super::font_loader;
+
 const FONT_SIZE_PX: u16 = 16;
-const JETBRAINS_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
 
 fn atlas() -> &'static GlyphAtlas {
     ATLAS.get_or_init(|| {
-        GlyphAtlas::new(JETBRAINS_MONO, FONT_SIZE_PX).expect("font: failed to create glyph atlas")
+        let font_data =
+            font_loader::load_font("mono").expect("font: failed to load mono font from filesystem");
+        GlyphAtlas::new_with_source(font_data, FONT_SIZE_PX, slopos_font::FontSource::Filesystem)
+            .expect("font: failed to create glyph atlas")
     })
 }
 

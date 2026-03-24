@@ -494,7 +494,8 @@ pub fn test_ext2_read_block_out_of_bounds() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    let result = fs.read_file(inode, 0, &mut [0u8; 1]);
+    let mut tiny = [0u8; 1];
+    let result = fs.read_file(inode, 0, &mut tiny);
     match result {
         Err(Ext2Error::InvalidBlock) | Err(Ext2Error::DeviceError) => TestResult::Pass,
         _ => TestResult::Fail,

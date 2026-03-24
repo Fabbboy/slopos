@@ -28,4 +28,5 @@ slopos-utils = { workspace = true }
 slopos-mm = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-net = { workspace = true }
+slopos-font = { workspace = true, features = ["kernel"] }
 paste.workspace = true

@@ -25,11 +25,6 @@ const SPLASH_MESSAGE_MIN_WIDTH: i32 = 240;
 const SPLASH_MESSAGE_MAX_WIDTH: i32 = 420;
 const SPLASH_MESSAGE_HEIGHT: i32 = 18;
 
-/// Font size for splash screen text (proportional renderer).
-const SPLASH_TITLE_SIZE: u16 = 22;
-const SPLASH_SUBTITLE_SIZE: u16 = 14;
-const SPLASH_MESSAGE_SIZE: u16 = 12;
-
 const TEXT_TITLE: &str = "SLOPOS";
 const TEXT_SUBTITLE: &str = "Safe boot";
 const TEXT_INIT: &str = "Starting services...";
@@ -67,9 +62,11 @@ struct SplashLayout {
     progress_h: i32,
 }
 
-fn measure_center_x(center_x: i32, text: &str, size_px: u16) -> i32 {
-    let w = kernel_font::with_renderer(|r| r.measure_text(text, size_px).0).unwrap_or(0);
-    center_x - w / 2
+fn measure_center_x(center_x: i32, text: &str) -> i32 {
+    match kernel_font::atlas() {
+        Some(atlas) => center_x - atlas.str_width(text) / 2,
+        None => center_x,
+    }
 }
 
 fn splash_layout(width: i32, height: i32) -> SplashLayout {
@@ -91,9 +88,9 @@ fn splash_layout(width: i32, height: i32) -> SplashLayout {
         center_x,
         ring_center_y,
         ring_radius,
-        title_x: measure_center_x(center_x, TEXT_TITLE, SPLASH_TITLE_SIZE),
+        title_x: measure_center_x(center_x, TEXT_TITLE),
         title_y,
-        subtitle_x: measure_center_x(center_x, TEXT_SUBTITLE, SPLASH_SUBTITLE_SIZE),
+        subtitle_x: measure_center_x(center_x, TEXT_SUBTITLE),
         subtitle_y,
         message_x,
         message_y,
@@ -154,10 +151,10 @@ fn splash_draw_progress_bar(
     }
 }
 
-fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, size: u16, color: Color32) {
-    kernel_font::with_renderer(|r| {
-        r.draw_text(ctx, x, y, text, size, color, SPLASH_BG_COLOR);
-    });
+fn draw_text(ctx: &mut GraphicsContext, x: i32, y: i32, text: &str, color: Color32) {
+    if let Some(atlas) = kernel_font::atlas() {
+        atlas.draw_bytes(ctx, x, y, text.as_bytes(), color, SPLASH_BG_COLOR);
+    }
 }
 
 pub fn splash_show_boot_screen() -> GraphicsResult<()> {
@@ -184,7 +181,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.title_x,
         layout.title_y,
         TEXT_TITLE,
-        SPLASH_TITLE_SIZE,
         SPLASH_TEXT_COLOR,
     );
     draw_text(
@@ -192,7 +188,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.subtitle_x,
         layout.subtitle_y,
         TEXT_SUBTITLE,
-        SPLASH_SUBTITLE_SIZE,
         SPLASH_SUBTEXT_COLOR,
     );
     draw_text(
@@ -200,7 +195,6 @@ pub fn splash_show_boot_screen() -> GraphicsResult<()> {
         layout.message_x,
         layout.message_y,
         TEXT_INIT,
-        SPLASH_MESSAGE_SIZE,
         SPLASH_SUBTEXT_COLOR,
     );
 
@@ -247,7 +241,6 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
                 layout.message_x,
                 layout.message_y,
                 s,
-                SPLASH_MESSAGE_SIZE,
                 SPLASH_SUBTEXT_COLOR,
             );
         }

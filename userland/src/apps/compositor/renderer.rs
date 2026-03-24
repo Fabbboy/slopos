@@ -46,9 +46,9 @@ impl Renderer {
         }
         self.ttf_init_attempted = true;
 
-        if let Ok(data) = std::fs::read("/usr/share/fonts/Inter-Regular.ttf") {
-            let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
-            self.ttf_font = FontRenderer::new(leaked);
+        if let Some(data) = crate::gfx::font_loader::load_font("sans") {
+            self.ttf_font =
+                FontRenderer::new_with_source(data, slopos_font::FontSource::Filesystem);
         }
     }
 

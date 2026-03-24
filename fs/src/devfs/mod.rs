@@ -140,16 +140,12 @@ impl FileSystem for DevFs {
             RANDOM_INODE => {
                 let mut inner = self.inner.lock();
                 let mut pos = 0;
-                while pos + 8 <= buf.len() {
+                while pos < buf.len() {
                     let val = inner.next_random();
-                    buf[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
-                    pos += 8;
-                }
-                if pos < buf.len() {
-                    let val = inner.next_random();
-                    let remaining = buf.len() - pos;
-                    buf[pos..].copy_from_slice(&val.to_le_bytes()[..remaining]);
-                    pos = buf.len();
+                    let bytes = val.to_le_bytes();
+                    let chunk = (buf.len() - pos).min(8);
+                    buf[pos..pos + chunk].copy_from_slice(&bytes[..chunk]);
+                    pos += chunk;
                 }
                 Ok(pos)
             }
@@ -168,12 +164,15 @@ impl FileSystem for DevFs {
 
             RANDOM_INODE => {
                 let mut inner = self.inner.lock();
-                for chunk in buf.chunks(8) {
+                let mut pos = 0;
+                while pos < buf.len() {
                     let mut bytes = [0u8; 8];
-                    bytes[..chunk.len()].copy_from_slice(chunk);
+                    let chunk = (buf.len() - pos).min(8);
+                    bytes[..chunk].copy_from_slice(&buf[pos..pos + chunk]);
                     inner.rng_state ^= u64::from_le_bytes(bytes);
+                    pos += chunk;
                 }
-                Ok(buf.len())
+                Ok(pos)
             }
 
             CONSOLE_INODE => Ok(buf.len()),

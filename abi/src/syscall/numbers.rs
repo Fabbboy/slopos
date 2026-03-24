@@ -617,6 +617,38 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
+// =============================================================================
+// Font management (inspired by Linux KDFONTOP ioctl)
+// =============================================================================
+
+/// Upload a console font to the kernel.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to font data (user-space)
+/// * rsi (arg1): font width in pixels (must be 8 for bitmap format)
+/// * rdx (arg2): font height in pixels (e.g. 16)
+/// * r10 (arg3): glyph count (e.g. 256 for bitmap, 95 for coverage)
+/// * r8  (arg4): format — [`FONT_FORMAT_BITMAP`] (0) or
+///               [`FONT_FORMAT_COVERAGE`] (1)
+///
+/// **Bitmap format** (`arg4 = 0`): 1-bit-per-pixel, MSB-first, one byte
+/// per row per glyph.  Total payload = `glyph_count × height` bytes.
+///
+/// **Coverage format** (`arg4 = 1`): 8-bit coverage per pixel, 95 ASCII
+/// glyphs (0x20–0x7E) followed by one replacement glyph.  Total payload
+/// = `(95 + 1) × width × height` bytes.
+///
+/// # Returns
+/// * `0` on success
+/// * negative errno on failure
+pub const SYSCALL_FONT_SET: u64 = 144;
+
+/// Font bitmap format: 1-bit-per-pixel MSB-first, like VGA ROM fonts.
+pub const FONT_FORMAT_BITMAP: u64 = 0;
+/// Pre-rasterized coverage format: 8-bit-per-pixel alpha, 95 glyphs + replacement.
+pub const FONT_FORMAT_COVERAGE: u64 = 1;
+
+// Syscall numbers 145-147 are reserved for future font/console operations.
 pub const SYSCALL_TABLE_SIZE: usize = 148;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).

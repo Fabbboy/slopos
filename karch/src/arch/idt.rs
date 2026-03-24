@@ -107,6 +107,11 @@ pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 /// Used to wake a CPU from idle to run newly-queued tasks.
 pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 
+/// RCU quiescent-state IPI vector (0xFB).
+/// Lightweight IPI that bumps the per-CPU RCU QS counter and returns.
+/// Used by synchronize_rcu() to force holdout CPUs to report a QS.
+pub const RCU_QS_IPI_VECTOR: u8 = 0xFB;
+
 /// LAPIC timer vector (0xEC).
 /// Each CPU's local APIC timer fires on this vector for scheduler preemption.
 /// Handled directly in the IDT path (not through the IOAPIC IRQ dispatch table).

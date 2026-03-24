@@ -1,4 +1,6 @@
+use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP};
 use slopos_kernel_services::driver_runtime::{
     block_current_task, finish_wait, prepare_to_wait, scheduler_is_enabled,
@@ -85,48 +87,72 @@ impl FileOps for PipeReadOps {
         FileKind::PipeRead
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], _offset: u64, flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, _offset: u64, flags: u32) -> isize {
         if buf.is_empty() {
             return 0;
         }
         let pipe_id = handle as u32;
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut local = [0u8; 512];
+        let mut local = [0u8; IO_STAGING_SIZE];
         let mut total = 0usize;
         let mut remaining = buf.len();
 
         loop {
             let mut need_block = false;
+            let mut consumed = 0usize;
+            let no_writers;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
                 let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
-                    return if total > 0 { total as isize } else { -1 };
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EBADF.as_isize()
+                    };
                 };
 
-                while remaining > 0 && slot.len > 0 {
+                if remaining > 0 && slot.len > 0 {
                     let chunk = remaining.min(local.len());
-                    let copied = slot.read_into(&mut local[..chunk]);
-                    if copied == 0 {
-                        break;
-                    }
-                    buf[total..total + copied].copy_from_slice(&local[..copied]);
-                    total += copied;
-                    remaining -= copied;
-                    pipe::writer_wq(pipe_id).wake_one();
+                    consumed = slot.read_into(&mut local[..chunk]);
                 }
 
-                if total > 0 {
-                    return total as isize;
-                }
-                if slot.writers == 0 {
-                    return 0;
-                }
-                if is_nonblock {
-                    return -11;
-                }
-                if scheduler_is_enabled() != 0 {
+                no_writers = slot.writers == 0;
+                if consumed == 0
+                    && total == 0
+                    && !no_writers
+                    && !is_nonblock
+                    && scheduler_is_enabled() != 0
+                {
                     need_block = true;
                 }
+            }
+
+            if consumed > 0 {
+                match buf.copy_in(total, &local[..consumed]) {
+                    Ok(n) => {
+                        total += n;
+                        remaining -= n;
+                    }
+                    Err(_) => {
+                        return if total > 0 {
+                            total as isize
+                        } else {
+                            Errno::EFAULT.as_isize()
+                        };
+                    }
+                }
+                pipe::writer_wq(pipe_id).wake_one();
+                continue;
+            }
+
+            if total > 0 {
+                return total as isize;
+            }
+            if no_writers {
+                return 0;
+            }
+            if is_nonblock {
+                return Errno::EAGAIN.as_isize();
             }
 
             if need_block {
@@ -137,12 +163,12 @@ impl FileOps for PipeReadOps {
                 pipe::reader_wq(pipe_id).remove_current();
                 continue;
             }
-            return -1;
+            return Errno::EAGAIN.as_isize();
         }
     }
 
-    fn write(&self, _handle: usize, _buf: &[u8], _offset: u64, _flags: u32) -> isize {
-        -1
+    fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
+        Errno::EBADF.as_isize()
     }
 
     fn release(&self, handle: usize) {
@@ -176,50 +202,119 @@ impl FileOps for PipeWriteOps {
         FileKind::PipeWrite
     }
 
-    fn read(&self, _handle: usize, _buf: &mut [u8], _offset: u64, _flags: u32) -> isize {
-        -1
+    fn read(&self, _handle: usize, _buf: &mut dyn IoBufWrite, _offset: u64, _flags: u32) -> isize {
+        Errno::EBADF.as_isize()
     }
 
-    fn write(&self, handle: usize, buf: &[u8], _offset: u64, flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
         if buf.is_empty() {
             return 0;
         }
         let pipe_id = handle as u32;
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
+        let buf_len = buf.len();
         let mut total = 0usize;
+        let mut local = [0u8; IO_STAGING_SIZE];
 
         loop {
             let mut need_block = false;
+            let can_write;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
                 let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
-                    return if total > 0 { total as isize } else { -1 };
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EBADF.as_isize()
+                    };
                 };
 
                 if slot.readers == 0 {
-                    return if total > 0 { total as isize } else { -1 };
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EPIPE.as_isize()
+                    };
                 }
 
-                if total < buf.len() && slot.len < pipe::PIPE_BUFFER_SIZE {
-                    let written = slot.write_from(&buf[total..]);
-                    if written > 0 {
-                        total += written;
-                        pipe::reader_wq(pipe_id).wake_one();
-                    }
-                }
+                can_write = slot.len < pipe::PIPE_BUFFER_SIZE;
+            }
 
-                if total >= buf.len() {
+            if !can_write {
+                if total >= buf_len {
                     return total as isize;
                 }
-                if total > 0 {
+                if is_nonblock && total > 0 {
                     return total as isize;
                 }
                 if is_nonblock {
-                    return -11;
+                    return Errno::EAGAIN.as_isize();
                 }
                 if scheduler_is_enabled() != 0 {
-                    need_block = true;
+                    pipe::writer_wq(pipe_id).enqueue_current();
+                    prepare_to_wait();
+                    block_current_task();
+                    finish_wait();
+                    pipe::writer_wq(pipe_id).remove_current();
+                    continue;
                 }
+                return Errno::EAGAIN.as_isize();
+            }
+
+            if total >= buf_len {
+                return total as isize;
+            }
+            let chunk = (buf_len - total).min(local.len());
+            let staged = match buf.copy_out(total, &mut local[..chunk]) {
+                Ok(n) => n,
+                Err(_) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EFAULT.as_isize()
+                    };
+                }
+            };
+            if staged == 0 {
+                return total as isize;
+            }
+
+            {
+                let mut pipe_state = pipe::PIPE_STATE.lock();
+                let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EBADF.as_isize()
+                    };
+                };
+
+                if slot.readers == 0 {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EPIPE.as_isize()
+                    };
+                }
+
+                let written = slot.write_from(&local[..staged]);
+                total += written;
+                if written > 0 {
+                    pipe::reader_wq(pipe_id).wake_one();
+                }
+            }
+
+            if total >= buf_len {
+                return total as isize;
+            }
+            if is_nonblock && total > 0 {
+                return total as isize;
+            }
+            if is_nonblock {
+                return Errno::EAGAIN.as_isize();
+            }
+            if scheduler_is_enabled() != 0 {
+                need_block = true;
             }
 
             if need_block {
@@ -230,7 +325,7 @@ impl FileOps for PipeWriteOps {
                 pipe::writer_wq(pipe_id).remove_current();
                 continue;
             }
-            return -1;
+            return Errno::EAGAIN.as_isize();
         }
     }
 

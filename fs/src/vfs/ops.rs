@@ -28,19 +28,65 @@ impl VfsHandle {
     }
 }
 
+/// Open flags for [`vfs_open`].
+pub struct VfsOpenFlags {
+    pub create: bool,
+    pub exclusive: bool,
+    pub truncate: bool,
+    pub writable: bool,
+}
+
+impl VfsOpenFlags {
+    pub const fn read_only() -> Self {
+        Self {
+            create: false,
+            exclusive: false,
+            truncate: false,
+            writable: false,
+        }
+    }
+
+    pub const fn create_only() -> Self {
+        Self {
+            create: true,
+            exclusive: false,
+            truncate: false,
+            writable: true,
+        }
+    }
+}
+
 pub fn vfs_open(path: &[u8], create: bool) -> VfsResult<VfsHandle> {
+    vfs_open_flags(
+        path,
+        VfsOpenFlags {
+            create,
+            exclusive: false,
+            truncate: false,
+            writable: create,
+        },
+    )
+}
+
+pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> {
     match resolve_path(path) {
         Ok(resolved) => {
+            if flags.create && flags.exclusive {
+                return Err(VfsError::AlreadyExists);
+            }
             let stat = resolved.fs.stat(resolved.inode)?;
             if stat.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
+            }
+            if flags.truncate && flags.writable && stat.file_type == FileType::Regular {
+                resolved.fs.truncate(resolved.inode, 0)?;
             }
             Ok(VfsHandle {
                 inode: resolved.inode,
                 fs: resolved.fs,
             })
         }
-        Err(VfsError::NotFound) if create => {
+        Err(VfsError::NotFound) if flags.create => {
             let (parent, name) = resolve_parent(path)?;
             let new_inode = parent.fs.create(parent.inode, name, FileType::Regular)?;
             Ok(VfsHandle {

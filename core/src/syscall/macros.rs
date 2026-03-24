@@ -39,7 +39,7 @@ macro_rules! define_syscall {
             let Some($ctx) = $crate::syscall::context::SyscallContext::new(task, frame) else {
                 return $crate::syscall::common::syscall_return_err(
                     frame,
-                    slopos_abi::syscall::ERRNO_EINVAL,
+                    slopos_abi::Errno::EINVAL.as_u64(),
                 );
             };
             $crate::define_syscall!(@expand_reqs $ctx, $($req)*);
@@ -85,6 +85,14 @@ macro_rules! define_syscall {
     // `compositor` — permission check, no binding
     (@expand_reqs $ctx:ident, compositor $(, $($rest:tt)*)?) => {
         if let Err(disp) = $ctx.require_compositor() {
+            return disp;
+        }
+        $($crate::define_syscall!(@expand_reqs $ctx, $($rest)*);)?
+    };
+
+    // `console_admin` — capability check (CAP_SYS_TTY_CONFIG equivalent)
+    (@expand_reqs $ctx:ident, console_admin $(, $($rest:tt)*)?) => {
+        if let Err(disp) = $ctx.require_console_admin() {
             return disp;
         }
         $($crate::define_syscall!(@expand_reqs $ctx, $($rest)*);)?

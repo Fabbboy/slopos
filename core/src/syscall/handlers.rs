@@ -9,6 +9,7 @@ pub use crate::syscall::core_handlers::{
     syscall_net_info, syscall_net_scan, syscall_percpu_stats, syscall_process_list, syscall_reboot,
     syscall_sleep_ms, syscall_sys_info, syscall_user_read, syscall_user_write, syscall_yield,
 };
+use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
     syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink,
@@ -225,6 +226,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETPGID] => syscall_getpgid, "getpgid";
     [SYSCALL_SETSID] => syscall_setsid, "setsid";
     [SYSCALL_VHANGUP] => syscall_vhangup, "vhangup";
+
+    // Font management
+    [SYSCALL_FONT_SET] => syscall_font_set, "font_set";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

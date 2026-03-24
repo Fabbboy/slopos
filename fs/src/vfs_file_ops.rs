@@ -1,9 +1,11 @@
+use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
+use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLIN, POLLOUT};
 use slopos_sync::IrqMutex;
 
-use crate::vfs::{FileSystem, InodeId, vfs_open};
+use crate::vfs::{FileSystem, InodeId};
 
 const MAX_OPEN_VNODES: usize = 256;
 
@@ -44,8 +46,11 @@ pub struct VfsFileOps;
 
 pub static VFS_FILE_OPS: VfsFileOps = VfsFileOps;
 
-pub fn vfs_open_handle(path: &[u8], create: bool) -> Option<usize> {
-    let opened = vfs_open(path, create).ok()?;
+pub fn vfs_open_handle_flags(
+    path: &[u8],
+    flags: crate::vfs::ops::VfsOpenFlags,
+) -> Result<usize, slopos_abi::Errno> {
+    let opened = crate::vfs::ops::vfs_open_flags(path, flags).map_err(|e| e.to_errno())?;
     let mut table = OPEN_VNODES.lock();
     for (idx, slot) in table.slots.iter_mut().enumerate() {
         if !slot.valid {
@@ -55,10 +60,10 @@ pub fn vfs_open_handle(path: &[u8], create: bool) -> Option<usize> {
                 refcount: 1,
                 valid: true,
             };
-            return Some(idx);
+            return Ok(idx);
         }
     }
-    None
+    Err(slopos_abi::Errno::ENFILE)
 }
 
 impl FileOps for VfsFileOps {
@@ -66,44 +71,105 @@ impl FileOps for VfsFileOps {
         FileKind::Regular
     }
 
-    fn read(&self, handle: usize, buf: &mut [u8], offset: u64, _flags: u32) -> isize {
+    fn read(&self, handle: usize, buf: &mut dyn IoBufWrite, offset: u64, _flags: u32) -> isize {
         let (fs, inode) = {
             let table = OPEN_VNODES.lock();
             let Some(slot) = table.slots.get(handle) else {
-                return -1;
+                return Errno::EBADF.as_isize();
             };
             if !slot.valid {
-                return -1;
+                return Errno::EBADF.as_isize();
             }
             let Some(fs) = slot.fs else {
-                return -1;
+                return Errno::EBADF.as_isize();
             };
             (fs, slot.inode)
         };
-        match fs.read(inode, offset, buf) {
-            Ok(n) => n as isize,
-            Err(_) => -1,
+
+        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut total = 0usize;
+        let want = buf.len();
+
+        while total < want {
+            let chunk = (want - total).min(IO_STAGING_SIZE);
+            match fs.read(inode, offset + total as u64, &mut staging[..chunk]) {
+                Ok(0) => break,
+                Ok(n) => match buf.copy_in(total, &staging[..n]) {
+                    Ok(w) => {
+                        total += w;
+                        if w < n {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return if total > 0 {
+                            total as isize
+                        } else {
+                            e.as_isize()
+                        };
+                    }
+                },
+                Err(_) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EIO.as_isize()
+                    };
+                }
+            }
         }
+        total as isize
     }
 
-    fn write(&self, handle: usize, buf: &[u8], offset: u64, _flags: u32) -> isize {
+    fn write(&self, handle: usize, buf: &dyn IoBufRead, offset: u64, _flags: u32) -> isize {
         let (fs, inode) = {
             let table = OPEN_VNODES.lock();
             let Some(slot) = table.slots.get(handle) else {
-                return -1;
+                return Errno::EBADF.as_isize();
             };
             if !slot.valid {
-                return -1;
+                return Errno::EBADF.as_isize();
             }
             let Some(fs) = slot.fs else {
-                return -1;
+                return Errno::EBADF.as_isize();
             };
             (fs, slot.inode)
         };
-        match fs.write(inode, offset, buf) {
-            Ok(n) => n as isize,
-            Err(_) => -1,
+
+        let mut staging = [0u8; IO_STAGING_SIZE];
+        let mut total = 0usize;
+        let want = buf.len();
+
+        while total < want {
+            let chunk = (want - total).min(IO_STAGING_SIZE);
+            let n = match buf.copy_out(total, &mut staging[..chunk]) {
+                Ok(n) if n > 0 => n,
+                Ok(_) => break,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        e.as_isize()
+                    };
+                }
+            };
+            match fs.write(inode, offset + total as u64, &staging[..n]) {
+                Ok(w) => {
+                    total += w;
+                    if w < n {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EIO.as_isize()
+                    };
+                }
+            }
         }
+        total as isize
     }
 
     fn release(&self, handle: usize) {
@@ -146,13 +212,13 @@ impl FileOps for VfsFileOps {
         let (fs, inode) = {
             let table = OPEN_VNODES.lock();
             let Some(slot) = table.slots.get(handle) else {
-                return -1;
+                return Errno::EBADF.raw();
             };
             if !slot.valid {
-                return -1;
+                return Errno::EBADF.raw();
             }
             let Some(fs) = slot.fs else {
-                return -1;
+                return Errno::EBADF.raw();
             };
             (fs, slot.inode)
         };
@@ -162,7 +228,7 @@ impl FileOps for VfsFileOps {
                 out.size = stat.size as u32;
                 0
             }
-            Err(_) => -1,
+            Err(_) => Errno::EPERM.raw(),
         }
     }
 
