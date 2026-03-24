@@ -85,7 +85,13 @@ impl FileOps for PipeReadOps {
         FileKind::PipeRead
     }
 
-    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn read(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         if buf.is_empty() {
             return 0;
         }
@@ -97,40 +103,50 @@ impl FileOps for PipeReadOps {
 
         loop {
             let mut need_block = false;
+            let mut drained = 0usize;
+            let no_writers;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
                 let Some(slot) = pipe::slot_mut(&mut pipe_state, pipe_id) else {
                     return if total > 0 { total as isize } else { -1 };
                 };
 
-                while remaining > 0 && slot.len > 0 {
+                if remaining > 0 && slot.len > 0 {
                     let chunk = remaining.min(local.len());
-                    let copied = slot.read_into(&mut local[..chunk]);
-                    if copied == 0 {
-                        break;
-                    }
-                    match buf.write_at(total, &local[..copied]) {
-                        Ok(n) => {
-                            total += n;
-                            remaining -= n;
-                        }
-                        Err(_) => return if total > 0 { total as isize } else { -14 },
-                    }
-                    pipe::writer_wq(pipe_id).wake_one();
+                    drained = slot.read_into(&mut local[..chunk]);
                 }
 
-                if total > 0 {
-                    return total as isize;
-                }
-                if slot.writers == 0 {
-                    return 0;
-                }
-                if is_nonblock {
-                    return -11;
-                }
-                if scheduler_is_enabled() != 0 {
+                no_writers = slot.writers == 0;
+                if drained == 0
+                    && total == 0
+                    && !no_writers
+                    && !is_nonblock
+                    && scheduler_is_enabled() != 0
+                {
                     need_block = true;
                 }
+            }
+            // IoBuf access is now outside the IrqMutex — safe for UserIoBuf.
+            if drained > 0 {
+                match buf.write_at(total, &local[..drained]) {
+                    Ok(n) => {
+                        total += n;
+                        remaining -= n;
+                    }
+                    Err(_) => return if total > 0 { total as isize } else { -14 },
+                }
+                pipe::writer_wq(pipe_id).wake_one();
+                continue;
+            }
+
+            if total > 0 {
+                return total as isize;
+            }
+            if no_writers {
+                return 0;
+            }
+            if is_nonblock {
+                return -11;
             }
 
             if need_block {
@@ -145,7 +161,13 @@ impl FileOps for PipeReadOps {
         }
     }
 
-    fn write(&self, _handle: usize, _buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
+    fn write(
+        &self,
+        _handle: usize,
+        _buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        _flags: u32,
+    ) -> isize {
         -1
     }
 
@@ -180,11 +202,23 @@ impl FileOps for PipeWriteOps {
         FileKind::PipeWrite
     }
 
-    fn read(&self, _handle: usize, _buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
+    fn read(
+        &self,
+        _handle: usize,
+        _buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        _flags: u32,
+    ) -> isize {
         -1
     }
 
-    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn write(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         if buf.is_empty() {
             return 0;
         }
@@ -195,6 +229,17 @@ impl FileOps for PipeWriteOps {
         let mut local = [0u8; 512];
 
         loop {
+            // IoBuf access outside IrqMutex — safe for UserIoBuf.
+            let staged = if total < buf_len {
+                let chunk = (buf_len - total).min(local.len());
+                match buf.read_at(total, &mut local[..chunk]) {
+                    Ok(n) => n,
+                    Err(_) => return if total > 0 { total as isize } else { -14 },
+                }
+            } else {
+                0
+            };
+
             let mut need_block = false;
             {
                 let mut pipe_state = pipe::PIPE_STATE.lock();
@@ -206,18 +251,11 @@ impl FileOps for PipeWriteOps {
                     return if total > 0 { total as isize } else { -1 };
                 }
 
-                if total < buf_len && slot.len < pipe::PIPE_BUFFER_SIZE {
-                    let chunk = (buf_len - total).min(local.len());
-                    let read = match buf.read_at(total, &mut local[..chunk]) {
-                        Ok(n) => n,
-                        Err(_) => return if total > 0 { total as isize } else { -14 },
-                    };
-                    if read > 0 {
-                        let written = slot.write_from(&local[..read]);
-                        total += written;
-                        if written > 0 {
-                            pipe::reader_wq(pipe_id).wake_one();
-                        }
+                if staged > 0 && slot.len < pipe::PIPE_BUFFER_SIZE {
+                    let written = slot.write_from(&local[..staged]);
+                    total += written;
+                    if written > 0 {
+                        pipe::reader_wq(pipe_id).wake_one();
                     }
                 }
 

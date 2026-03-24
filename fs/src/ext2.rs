@@ -111,7 +111,7 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         inode: u32,
         offset: u32,
-        buffer: &mut dyn slopos_abi::io::IoBuf,
+        buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
         self.read_file_internal(inode, offset, buffer)
     }
@@ -120,7 +120,7 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         inode: u32,
         offset: u32,
-        buffer: &mut dyn slopos_abi::io::IoBuf,
+        buffer: &[u8],
     ) -> Result<usize, Ext2Error> {
         self.write_file_internal(inode, offset, buffer)
     }
@@ -211,18 +211,17 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         inode: u32,
         offset: u32,
-        buffer: &mut dyn slopos_abi::io::IoBuf,
+        buffer: &mut [u8],
     ) -> Result<usize, Ext2Error> {
         let inode = self.read_inode_internal(inode)?;
         if !inode.is_regular_file() {
             return Err(Ext2Error::NotFile);
         }
         let file_size = inode.size;
-        let buf_len = buffer.len();
-        if offset >= file_size || buf_len == 0 {
+        if offset >= file_size || buffer.is_empty() {
             return Ok(0);
         }
-        let max_len = cmp::min(buf_len as u32, file_size - offset) as usize;
+        let max_len = cmp::min(buffer.len() as u32, file_size - offset) as usize;
         let mut read_total = 0usize;
         let mut remaining = max_len;
         let mut file_offset = offset as usize;
@@ -239,16 +238,11 @@ impl<'a> Ext2Fs<'a> {
                 Err(err) => return Err(err),
             }
             let to_copy = cmp::min(remaining, self.block_size as usize - block_offset);
-            // Write directly into the I/O buffer (kernel slice or user-space).
-            let copied = buffer
-                .write_at(read_total, &block_slice[block_offset..block_offset + to_copy])
-                .map_err(|_| Ext2Error::DeviceError)?;
-            read_total += copied;
-            remaining -= copied;
-            file_offset += copied;
-            if copied < to_copy {
-                break; // Short write into buffer (e.g. user fault)
-            }
+            buffer[read_total..read_total + to_copy]
+                .copy_from_slice(&block_slice[block_offset..block_offset + to_copy]);
+            read_total += to_copy;
+            remaining -= to_copy;
+            file_offset += to_copy;
         }
         Ok(read_total)
     }
@@ -388,10 +382,9 @@ impl<'a> Ext2Fs<'a> {
         &mut self,
         inode_num: u32,
         offset: u32,
-        buffer: &mut dyn slopos_abi::io::IoBuf,
+        buffer: &[u8],
     ) -> Result<usize, Ext2Error> {
-        let buf_len = buffer.len();
-        if buf_len == 0 {
+        if buffer.is_empty() {
             return Ok(0);
         }
         let mut inode = self.read_inode_internal(inode_num)?;
@@ -399,7 +392,7 @@ impl<'a> Ext2Fs<'a> {
             return Err(Ext2Error::NotFile);
         }
         let mut written = 0usize;
-        let mut remaining = buf_len;
+        let mut remaining = buffer.len();
         let mut file_offset = offset as usize;
         let mut allocated_blocks = 0u32;
         let mut block_buf = [0u8; EXT2_MAX_BLOCK_SIZE_USIZE];
@@ -414,17 +407,12 @@ impl<'a> Ext2Fs<'a> {
             let block_slice = &mut block_buf[..self.block_size as usize];
             self.read_block(block_num, block_slice)?;
             let to_copy = cmp::min(remaining, self.block_size as usize - block_offset);
-            // Read directly from the I/O buffer (kernel slice or user-space).
-            let copied = buffer
-                .read_at(written, &mut block_slice[block_offset..block_offset + to_copy])
-                .map_err(|_| Ext2Error::DeviceError)?;
+            block_slice[block_offset..block_offset + to_copy]
+                .copy_from_slice(&buffer[written..written + to_copy]);
             self.write_block(block_num, block_slice)?;
-            written += copied;
-            remaining -= copied;
-            file_offset += copied;
-            if copied < to_copy {
-                break; // Short read from buffer
-            }
+            written += to_copy;
+            remaining -= to_copy;
+            file_offset += to_copy;
         }
 
         let end_pos = offset as u64 + written as u64;

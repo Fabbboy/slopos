@@ -40,7 +40,7 @@ pub fn load_font(name: &str) -> Option<&'static [u8]> {
 /// Load a font, falling back to embedded data if the filesystem fails.
 pub fn load_font_or_embedded(name: &str, embedded: &'static [u8]) -> (&'static [u8], bool) {
     match load_font(name) {
-        Some(data) => (data, true),  // (data, from_filesystem)
+        Some(data) => (data, true), // (data, from_filesystem)
         None => (embedded, false),
     }
 }

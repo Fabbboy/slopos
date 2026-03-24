@@ -295,18 +295,18 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
     );
 
     let payload = b"wheel";
-    let written = file_write_fd(
-        pid,
-        write_fd,
-        &mut KernelIoBufRef::new(payload),
-    );
+    let written = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "pipe write failed");
 
     let revents = file_poll_fd(pid, read_fd, POLLIN);
     assert_test!((revents & POLLIN) != 0, "pipe read fd should be readable");
 
     let mut out = [0u8; 8];
-    let read = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out[..payload.len()]));
+    let read = file_read_fd(
+        pid,
+        read_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
     assert_eq_test!(read as usize, payload.len(), "pipe read length mismatch");
     assert_test!(&out[..payload.len()] == payload, "pipe payload mismatch");
 
@@ -1812,11 +1812,7 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     );
 
     let payload = b"hello";
-    let written = file_write_fd(
-        pid,
-        write_fd,
-        &mut KernelIoBufRef::new(payload),
-    );
+    let written = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(
         written as usize,
         payload.len(),
@@ -1824,7 +1820,11 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     );
 
     let mut out = [0u8; 16];
-    let nread = file_read_fd(pid, read_fd, &mut KernelIoBuf::new(&mut out[..payload.len()]));
+    let nread = file_read_fd(
+        pid,
+        read_fd,
+        &mut KernelIoBuf::new(&mut out[..payload.len()]),
+    );
     assert_eq_test!(nread as usize, payload.len(), "read returned wrong count");
     assert_test!(&out[..payload.len()] == payload, "read payload mismatch");
 
@@ -1853,11 +1853,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
     );
 
     let payload = b"data";
-    let written = file_write_fd(
-        pid,
-        write_fd,
-        &mut KernelIoBufRef::new(payload),
-    );
+    let written = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(written as usize, payload.len(), "write failed");
 
     // Close the write end before reading -- this sets up the EOF condition.
@@ -1903,11 +1899,7 @@ pub fn test_pipe_broken_pipe() -> TestResult {
     assert_eq_test!(file_close_fd(pid, read_fd), 0, "close read failed");
 
     let payload = b"orphan";
-    let result = file_write_fd(
-        pid,
-        write_fd,
-        &mut KernelIoBufRef::new(payload),
-    );
+    let result = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(payload));
     assert_eq_test!(result, -1, "write to broken pipe should return -1");
 
     assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
@@ -1975,11 +1967,7 @@ pub fn test_pipe_partial_read() -> TestResult {
     for i in 0..100 {
         payload[i] = i as u8;
     }
-    let written = file_write_fd(
-        pid,
-        write_fd,
-        &mut KernelIoBufRef::new(&payload),
-    );
+    let written = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(&payload));
     assert_eq_test!(written as usize, 100, "write 100 bytes failed");
 
     // Read first 50

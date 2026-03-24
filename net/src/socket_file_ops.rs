@@ -12,7 +12,13 @@ impl FileOps for SocketFileOps {
         FileKind::Socket
     }
 
-    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
+    fn read(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        _flags: u32,
+    ) -> isize {
         // Socket API uses raw pointers; use a kernel-side staging buffer.
         let mut tmp = [0u8; 4096];
         let read_len = buf.len().min(tmp.len());
@@ -26,7 +32,13 @@ impl FileOps for SocketFileOps {
         }
     }
 
-    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, _flags: u32) -> isize {
+    fn write(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        _flags: u32,
+    ) -> isize {
         // Socket API uses raw pointers; use a kernel-side staging buffer.
         let mut tmp = [0u8; 4096];
         let write_len = buf.len().min(tmp.len());

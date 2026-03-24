@@ -183,38 +183,38 @@ pub trait FileSystem: Send + Sync {
     /// Get metadata (stat) for an inode.
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat>;
 
-    /// Read data from a file into an I/O buffer.
+    /// Read data from a file into a **kernel** buffer.
     ///
-    /// The `buf` may be backed by kernel memory ([`KernelIoBuf`]) or
-    /// user-space memory (`UserIoBuf`).  Implementations should use
-    /// `buf.write_at(offset, src)` to transfer block data, which
-    /// handles kernel↔user copying transparently.
+    /// Implementations receive a plain `&mut [u8]` slice that is always
+    /// backed by kernel memory.  User-space I/O buffering is handled by
+    /// the [`FileOps`] layer above (via `IoBuf` + a staging buffer),
+    /// so filesystem code never needs to touch user addresses — this is
+    /// enforced at compile time by the slice type.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start reading from
-    /// * `buf` - I/O buffer to read into
+    /// * `buf` - Kernel buffer to read into
     ///
     /// # Returns
-    /// Number of bytes actually read (may be less than buffer capacity at EOF).
-    fn read(&self, inode: InodeId, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf)
-        -> VfsResult<usize>;
+    /// Number of bytes actually read (may be less than `buf.len()` at EOF).
+    fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize>;
 
-    /// Write data from an I/O buffer into a file.
+    /// Write data from a **kernel** buffer into a file.
     ///
-    /// The `buf` may be backed by kernel memory or user-space memory.
-    /// Implementations should use `buf.read_at(offset, dst)` to extract
-    /// data for writing to disk.
+    /// Implementations receive a plain `&[u8]` slice that is always
+    /// backed by kernel memory.  The [`FileOps`] layer stages data from
+    /// user-space `IoBuf`s into kernel buffers before calling this
+    /// method, so filesystem code never handles user addresses.
     ///
     /// # Arguments
     /// * `inode` - The file's inode
     /// * `offset` - Byte offset to start writing at
-    /// * `buf` - I/O buffer containing data to write
+    /// * `buf` - Kernel buffer containing data to write
     ///
     /// # Returns
     /// Number of bytes actually written.
-    fn write(&self, inode: InodeId, offset: u64, buf: &mut dyn slopos_abi::io::IoBuf)
-        -> VfsResult<usize>;
+    fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize>;
 
     /// Create a new file or directory in a parent directory.
     ///

@@ -242,9 +242,7 @@ pub fn do_exec(
         let read = handle
             .read(
                 offset,
-                &mut slopos_abi::io::KernelIoBuf::new(
-                    &mut elf_data[offset as usize..offset as usize + chunk_size],
-                ),
+                &mut elf_data[offset as usize..offset as usize + chunk_size],
             )
             .map_err(|_| ExecError::IoError)?;
         if read == 0 {

@@ -14,7 +14,13 @@ impl FileOps for TtyFileOps {
         FileKind::Tty
     }
 
-    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn read(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         // TTY driver API uses &mut [u8]; use a kernel-side staging buffer.
@@ -29,7 +35,13 @@ impl FileOps for TtyFileOps {
         }
     }
 
-    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn write(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
         // TTY driver API uses &[u8]; use a kernel-side staging buffer.

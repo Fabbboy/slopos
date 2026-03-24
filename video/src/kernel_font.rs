@@ -53,7 +53,10 @@ pub fn init() {
 
     // 2. Proportional renderer using Inter (splash screen, roulette).
     if let Some(r) = FontRenderer::new(INTER_TTF) {
-        klog_info!("Proportional font renderer ready (Inter, source={:?})", r.source());
+        klog_info!(
+            "Proportional font renderer ready (Inter, source={:?})",
+            r.source()
+        );
         *FONT_RENDERER.lock() = Some(r);
     }
 }

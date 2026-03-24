@@ -3,9 +3,7 @@ use core::mem;
 
 use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList, UserFsStat};
 
-use crate::syscall::common::{
-    USER_PATH_MAX, syscall_copy_user_str, syscall_copy_user_str_to_cstr,
-};
+use crate::syscall::common::{USER_PATH_MAX, syscall_copy_user_str, syscall_copy_user_str_to_cstr};
 
 use slopos_fs::fileio::{
     file_close_fd, file_list_path, file_mkdir_path, file_open_for_process, file_read_fd,

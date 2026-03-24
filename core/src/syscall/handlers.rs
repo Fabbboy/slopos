@@ -9,6 +9,7 @@ pub use crate::syscall::core_handlers::{
     syscall_net_info, syscall_net_scan, syscall_percpu_stats, syscall_process_list, syscall_reboot,
     syscall_sleep_ms, syscall_sys_info, syscall_user_read, syscall_user_write, syscall_yield,
 };
+use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
     syscall_dup, syscall_dup2, syscall_dup3, syscall_fcntl, syscall_fs_close, syscall_fs_list,
     syscall_fs_mkdir, syscall_fs_open, syscall_fs_read, syscall_fs_stat, syscall_fs_unlink,
@@ -48,7 +49,6 @@ pub use crate::syscall::ui_handlers::{
     syscall_surface_set_parent, syscall_surface_set_rel_pos, syscall_surface_set_role,
     syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
 };
-use crate::syscall::font_handlers::syscall_font_set;
 
 /// Build the static syscall dispatch table from a compact registration list.
 ///

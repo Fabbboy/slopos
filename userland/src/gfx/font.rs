@@ -18,7 +18,8 @@ static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
 fn atlas() -> &'static GlyphAtlas {
     ATLAS.get_or_init(|| {
         // Try filesystem first, fall back to embedded.
-        let (font_data, from_fs) = font_loader::load_font_or_embedded("mono", JETBRAINS_MONO_EMBEDDED);
+        let (font_data, from_fs) =
+            font_loader::load_font_or_embedded("mono", JETBRAINS_MONO_EMBEDDED);
         let source = if from_fs {
             FontSource::Filesystem
         } else {

@@ -551,6 +551,9 @@ mod tests {
     #[test]
     fn bitmap_space_is_blank() {
         let glyph = bitmap::glyph_bitmap(b' ');
-        assert!(glyph.iter().all(|&b| b == 0), "space glyph should be all zeros");
+        assert!(
+            glyph.iter().all(|&b| b == 0),
+            "space glyph should be all zeros"
+        );
     }
 }

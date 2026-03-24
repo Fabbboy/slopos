@@ -354,7 +354,13 @@ impl FileOps for LocalTtyOps {
         FileKind::Tty
     }
 
-    fn read(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn read(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
@@ -370,7 +376,13 @@ impl FileOps for LocalTtyOps {
         }
     }
 
-    fn write(&self, handle: usize, buf: &mut dyn slopos_abi::io::IoBuf, _offset: u64, flags: u32) -> isize {
+    fn write(
+        &self,
+        handle: usize,
+        buf: &mut dyn slopos_abi::io::IoBuf,
+        _offset: u64,
+        flags: u32,
+    ) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         // TTY service API uses raw pointers; use a kernel-side staging buffer.
