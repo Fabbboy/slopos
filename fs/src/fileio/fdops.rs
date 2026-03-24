@@ -12,7 +12,7 @@ use slopos_abi::syscall::{
 use crate::pipe;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS};
 use crate::vfs::{vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
-use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle};
+use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags};
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -169,7 +169,14 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
     }
 
     let create = (flags & FILE_OPEN_CREAT) != 0;
-    let Some(vfs_handle) = vfs_open_handle(path_bytes, create) else {
+    let exclusive = (posix_flags & slopos_abi::fs::O_EXCL) != 0;
+    let truncate = (posix_flags & slopos_abi::fs::O_TRUNC) != 0;
+    let open_flags = crate::vfs::ops::VfsOpenFlags {
+        create,
+        exclusive,
+        truncate,
+    };
+    let Some(vfs_handle) = vfs_open_handle_flags(path_bytes, open_flags) else {
         return -1;
     };
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
