@@ -490,29 +490,28 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 // pointer; the caller is responsible for calling synchronize_rcu() and
 // freeing the old atlas.
 
-/// Lightweight borrow of the global atlas.
+/// Lifetime-bounded borrow of the global atlas.
 ///
-/// # Safety contract
+/// The `'a` lifetime is tied to whatever preemption guard the caller
+/// holds (e.g. `RcuReadGuard`, `IrqMutexGuard`, `PreemptGuard`).  The
+/// borrow cannot outlive the guard, preventing use-after-free when a
+/// writer replaces the atlas and frees the old one via RCU.
 ///
-/// The caller must ensure preemption is disabled (RCU read-side critical
-/// section) for the entire lifetime of this reference.  All existing
-/// callers satisfy this — vconsole holds `IrqMutex`, panic screen runs
-/// on a single CPU with interrupts disabled, and kernel_font is called
-/// from similar contexts.
-pub struct AtlasRef {
+/// Deliberately `!Send` and `!Sync` — must be used on the CPU that
+/// created it, within the preemption-disabled window.
+pub struct AtlasGuard<'a> {
     ptr: *const GlyphAtlas,
+    _lifetime: core::marker::PhantomData<&'a ()>,
+    _not_send_sync: core::marker::PhantomData<*const ()>,
 }
 
-unsafe impl Send for AtlasRef {}
-unsafe impl Sync for AtlasRef {}
-
-impl core::ops::Deref for AtlasRef {
+impl<'a> core::ops::Deref for AtlasGuard<'a> {
     type Target = GlyphAtlas;
 
     #[inline]
     fn deref(&self) -> &GlyphAtlas {
         // SAFETY: ptr is non-null (checked by global()), and the caller
-        // holds preemption disabled so the atlas cannot be freed.
+        // holds a preemption guard so the atlas cannot be freed.
         unsafe { &*self.ptr }
     }
 }
@@ -531,6 +530,17 @@ pub fn invoke_font_change_callback() {
         let f: fn() = unsafe { core::mem::transmute(cb) };
         f();
     }
+}
+
+/// Load the raw global atlas pointer.
+///
+/// Returns null if no atlas has been initialised.  Callers that use the
+/// returned pointer **must** hold an RCU read-side critical section for
+/// the duration of any dereference.  Prefer [`global`] for the safe,
+/// lifetime-bounded API.
+#[inline]
+pub fn global_ptr() -> *const GlyphAtlas {
+    GLOBAL_ATLAS.load(Ordering::Acquire)
 }
 
 pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
@@ -583,18 +593,22 @@ pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
     old
 }
 
-/// Load the current global atlas.
+/// Load the current global atlas, borrowing the caller's preemption guard.
 ///
-/// # Safety contract
-///
-/// The caller must be in an RCU read-side critical section (preemption
-/// disabled) for the duration of the returned `AtlasRef`'s lifetime.
-pub fn global() -> Option<AtlasRef> {
+/// The returned [`AtlasGuard`] borrows from `_guard`, so it cannot
+/// outlive the preemption-disabled window.  Pass any reference whose
+/// lifetime covers the desired usage scope — typically an
+/// `&RcuReadGuard`, `&IrqMutexGuard`, or `&PreemptGuard`.
+pub fn global<'a, G: ?Sized>(_guard: &'a G) -> Option<AtlasGuard<'a>> {
     let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
     if ptr.is_null() {
         None
     } else {
-        Some(AtlasRef { ptr })
+        Some(AtlasGuard {
+            ptr,
+            _lifetime: core::marker::PhantomData,
+            _not_send_sync: core::marker::PhantomData,
+        })
     }
 }
 
@@ -602,6 +616,8 @@ pub fn global() -> Option<AtlasRef> {
 mod tests {
     use super::{GlyphAtlas, global, init_global_bitmap};
     use crate::FontSource;
+
+    struct DummyGuard;
 
     #[test]
     fn from_raw_coverage_accepts_valid_buffers() {
@@ -650,7 +666,8 @@ mod tests {
     #[test]
     fn init_global_bitmap_succeeds() {
         assert!(init_global_bitmap());
-        let atlas = global().expect("atlas must be set");
+        let guard = DummyGuard;
+        let atlas = global(&guard).expect("atlas must be set");
         assert_eq!(atlas.cell_width(), 8);
         assert_eq!(atlas.cell_height(), 16);
     }

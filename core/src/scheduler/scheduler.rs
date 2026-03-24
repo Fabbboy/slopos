@@ -1120,6 +1120,10 @@ pub fn scheduler_timer_tick() {
     slopos_sync::rcu_note_qs();
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    if cpu_id == 0 {
+        slopos_sync::rcu_process_callbacks();
+    }
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
     let preempt_active = PreemptGuard::is_active();

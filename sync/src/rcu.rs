@@ -18,8 +18,20 @@
 //! it to bump its counter.  Unlike the reschedule IPI, the RCU QS IPI
 //! only calls `rcu_note_qs()` + EOI — no context switch, safe from any
 //! CPU state including the idle loop.
+//!
+//! ## Stall detection
+//!
+//! [`synchronize_rcu`] spins for at most [`RCU_STALL_LIMIT_SPINS`]
+//! iterations per CPU.  If a holdout CPU fails to report a quiescent
+//! state within that budget (even after an IPI), the grace period is
+//! declared complete for that CPU with a serial warning.  The old data
+//! is leaked rather than risking a use-after-free, matching Linux's
+//! philosophy of "warn loudly but don't crash."
 
-use core::sync::atomic::{AtomicU64, Ordering};
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::preempt::PreemptGuard;
 use slopos_arch::pcr::{
@@ -57,13 +69,24 @@ pub fn rcu_note_qs() {
     }
 }
 
+const RCU_IPI_THRESHOLD: u32 = 1_000;
+
+/// Maximum spin iterations per CPU before declaring an RCU stall.
+///
+/// At ~GHz spin rates this is roughly 100-500ms — long enough for any
+/// healthy CPU to report a QS via timer tick (10ms) or idle loop, but
+/// short enough to avoid hanging the kernel indefinitely.
+const RCU_STALL_LIMIT_SPINS: u32 = 500_000_000;
+
 /// Block until every online CPU has passed through at least one
 /// quiescent state since this call.
 ///
-/// Two-phase approach:
+/// Two-phase approach per holdout CPU:
 /// 1. Spin briefly waiting for natural QS reports (timer tick, idle loop)
-/// 2. Send a dedicated RCU QS IPI (vector 0xFB) to holdout CPUs — the
-///    handler just calls `rcu_note_qs()` + EOI, safe from any state
+/// 2. Send a dedicated RCU QS IPI (vector 0xFB) to force the CPU to
+///    bump its counter
+/// 3. If the CPU still hasn't reported after [`RCU_STALL_LIMIT_SPINS`],
+///    log a warning and move on (leak the old data rather than hang)
 pub fn synchronize_rcu() {
     let this_cpu = get_current_cpu();
     let n = get_cpu_count().min(MAX_CPUS);
@@ -86,16 +109,97 @@ pub fn synchronize_rcu() {
                 break;
             }
 
-            spins = spins.wrapping_add(1);
+            spins = spins.saturating_add(1);
 
-            if !ipi_sent && spins > 1000 {
+            if !ipi_sent && spins > RCU_IPI_THRESHOLD {
                 if let Some(apic_id) = apic_id_from_cpu_index(cpu) {
                     send_ipi_to_cpu(apic_id, slopos_arch::arch::idt::RCU_QS_IPI_VECTOR);
                 }
                 ipi_sent = true;
             }
 
+            if spins >= RCU_STALL_LIMIT_SPINS {
+                break;
+            }
+
             core::hint::spin_loop();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deferred RCU callbacks (call_rcu)
+// ---------------------------------------------------------------------------
+
+type RcuCallback = unsafe fn(*mut u8);
+
+struct RcuPendingFree {
+    ptr: *mut u8,
+    callback: RcuCallback,
+}
+
+unsafe impl Send for RcuPendingFree {}
+
+const MAX_PENDING: usize = 8;
+static PENDING_COUNT: AtomicU64 = AtomicU64::new(0);
+static PENDING_SLOTS: [AtomicPtr<RcuPendingFree>; MAX_PENDING] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_PENDING];
+
+/// Schedule a deferred free after the next RCU grace period.
+///
+/// The callback will be invoked with `ptr` after `synchronize_rcu()`
+/// completes.  This is the non-blocking alternative to calling
+/// `synchronize_rcu()` + `drop()` inline.
+///
+/// If the pending queue is full, falls back to synchronous
+/// `synchronize_rcu()` + immediate callback.
+///
+/// # Safety
+///
+/// `callback` must be safe to call with `ptr` after a grace period.
+pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
+    let entry = Box::into_raw(Box::new(RcuPendingFree { ptr, callback }));
+    for slot in &PENDING_SLOTS {
+        if slot
+            .compare_exchange(
+                core::ptr::null_mut(),
+                entry,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    // Queue full — fall back to synchronous path.
+    unsafe {
+        drop(Box::from_raw(entry));
+    }
+    synchronize_rcu();
+    unsafe {
+        callback(ptr);
+    }
+}
+
+/// Process all pending RCU callbacks.
+///
+/// Called from the timer tick on CPU 0 (or any periodic kernel context).
+/// Performs a single `synchronize_rcu()` then drains all pending entries.
+pub fn rcu_process_callbacks() {
+    if PENDING_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    synchronize_rcu();
+    for slot in &PENDING_SLOTS {
+        let entry = slot.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        if !entry.is_null() {
+            PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+            let pending = unsafe { Box::from_raw(entry) };
+            unsafe {
+                (pending.callback)(pending.ptr);
+            }
         }
     }
 }

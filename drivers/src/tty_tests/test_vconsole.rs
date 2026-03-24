@@ -639,7 +639,8 @@ pub fn test_vtparser_fuzz_no_panic() -> TestResult {
 }
 
 pub fn test_replacement_glyph_exists() -> TestResult {
-    let Some(atlas) = slopos_font::atlas::global() else {
+    let rcu = slopos_sync::rcu_read_lock();
+    let Some(atlas) = slopos_font::atlas::global(&rcu) else {
         klog_info!("TTY_TEST: glyph atlas not initialised");
         return TestResult::Fail;
     };
@@ -654,7 +655,8 @@ pub fn test_replacement_glyph_exists() -> TestResult {
 }
 
 pub fn test_get_glyph_for_codepoint_ascii() -> TestResult {
-    let Some(atlas) = slopos_font::atlas::global() else {
+    let rcu = slopos_sync::rcu_read_lock();
+    let Some(atlas) = slopos_font::atlas::global(&rcu) else {
         klog_info!("TTY_TEST: glyph atlas not initialised");
         return TestResult::Fail;
     };

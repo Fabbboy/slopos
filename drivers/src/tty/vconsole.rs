@@ -1316,7 +1316,10 @@ impl VConsoleState {
 
     fn render_cell_direct_to_fb(&self, row: u16, col: u16, cell: &Cell) {
         let Some(fb) = self.fb else { return };
-        let Some(atlas) = atlas::global() else { return };
+        let rcu = slopos_sync::rcu_read_lock();
+        let Some(atlas) = atlas::global(&rcu) else {
+            return;
+        };
         let (r, c) = (row as usize, col as usize);
         if r >= self.rows as usize || c >= self.cols as usize {
             return;
@@ -1349,7 +1352,10 @@ impl VConsoleState {
             self.render_cell_direct_to_fb(row, col, cell);
             return;
         };
-        let Some(atlas) = atlas::global() else { return };
+        let rcu = slopos_sync::rcu_read_lock();
+        let Some(atlas) = atlas::global(&rcu) else {
+            return;
+        };
         let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
             b' ' as u32
         } else {
@@ -1395,7 +1401,10 @@ impl VConsoleState {
         let Some(fb) = self.fb else {
             return;
         };
-        let Some(atlas) = atlas::global() else { return };
+        let rcu = slopos_sync::rcu_read_lock();
+        let Some(atlas) = atlas::global(&rcu) else {
+            return;
+        };
 
         let row_usize = row as usize;
         let col_usize = col as usize;
@@ -1491,9 +1500,12 @@ impl VConsoleState {
     }
 
     pub(crate) fn recalculate_dimensions(&mut self) {
-        if let Some(atlas) = atlas::global() {
-            self.cell_w = atlas.cell_width();
-            self.cell_h = atlas.cell_height();
+        {
+            let rcu = slopos_sync::rcu_read_lock();
+            if let Some(atlas) = atlas::global(&rcu) {
+                self.cell_w = atlas.cell_width();
+                self.cell_h = atlas.cell_height();
+            }
         }
         if let Some(fb) = self.fb {
             let calc_cols = (fb.width / self.cell_w as u32).max(1) as usize;
@@ -1662,10 +1674,11 @@ pub fn notify_font_changed() {
         let Some(fb) = state.fb else {
             return;
         };
-        let Some(atlas) = atlas::global() else {
+        let rcu = slopos_sync::rcu_read_lock();
+        let Some(atlas) = atlas::global(&rcu) else {
             return;
         };
-        let ptr = &*atlas as *const _ as usize;
+        let ptr = atlas::global_ptr() as usize;
         let cw = atlas.cell_width();
         let ch = atlas.cell_height();
         if cw == state.cell_w && ch == state.cell_h {
@@ -1710,7 +1723,7 @@ pub fn notify_font_changed() {
     if state.fb.is_none() {
         return;
     }
-    if atlas::global().map(|a| &*a as *const _ as usize) != Some(atlas_ptr) {
+    if (atlas::global_ptr() as usize) != atlas_ptr {
         return;
     }
 

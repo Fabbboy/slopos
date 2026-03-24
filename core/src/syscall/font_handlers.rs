@@ -5,14 +5,25 @@ use slopos_utils::klog_info;
 
 use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 
-fn rcu_free_old_atlas(old: *mut slopos_font::atlas::GlyphAtlas) {
+static FONT_WRITER_LOCK: slopos_sync::IrqMutex<()> = slopos_sync::IrqMutex::new(());
+
+unsafe fn free_atlas_box(ptr: *mut u8) {
+    unsafe {
+        drop(alloc::boxed::Box::from_raw(
+            ptr as *mut slopos_font::atlas::GlyphAtlas,
+        ));
+    }
+}
+
+fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
+    let _writer = FONT_WRITER_LOCK.lock();
+    let old = slopos_font::atlas::replace_global(new_atlas);
+    slopos_font::atlas::invoke_font_change_callback();
     if !old.is_null() {
-        slopos_sync::synchronize_rcu();
         unsafe {
-            drop(alloc::boxed::Box::from_raw(old));
+            slopos_sync::call_rcu(old as *mut u8, free_atlas_box);
         }
     }
-    slopos_font::atlas::invoke_font_change_callback();
 }
 
 define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
@@ -58,8 +69,7 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             width, height, coverage, replacement, slopos_font::FontSource::Syscall,
         ) {
             Some(atlas) => {
-                let old = slopos_font::atlas::replace_global(atlas);
-                rcu_free_old_atlas(old);
+                replace_and_schedule_free(atlas);
                 klog_info!(
                     "FONT_SET: applied {}x{} coverage font (95 glyphs + replacement)",
                     width,
@@ -100,8 +110,7 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
                     slopos_font::FontSource::Syscall,
                 ) {
                     Some(atlas) => {
-                        let old = slopos_font::atlas::replace_global(atlas);
-                        rcu_free_old_atlas(old);
+                        replace_and_schedule_free(atlas);
                         klog_info!(
                             "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
                             width,
