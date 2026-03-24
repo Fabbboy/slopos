@@ -48,6 +48,7 @@ pub use crate::syscall::ui_handlers::{
     syscall_surface_set_parent, syscall_surface_set_rel_pos, syscall_surface_set_role,
     syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
 };
+use crate::syscall::font_handlers::syscall_font_set;
 
 /// Build the static syscall dispatch table from a compact registration list.
 ///
@@ -225,6 +226,9 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETPGID] => syscall_getpgid, "getpgid";
     [SYSCALL_SETSID] => syscall_setsid, "setsid";
     [SYSCALL_VHANGUP] => syscall_vhangup, "vhangup";
+
+    // Font management
+    [SYSCALL_FONT_SET] => syscall_font_set, "font_set";
 };
 
 pub fn syscall_lookup(sysno: u64) -> *const SyscallEntry {

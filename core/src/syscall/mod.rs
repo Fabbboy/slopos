@@ -4,6 +4,7 @@ pub mod common;
 pub mod context;
 pub mod core_handlers;
 pub mod dispatch;
+pub mod font_handlers;
 pub mod fs;
 pub mod handlers;
 pub mod memory_handlers;

@@ -617,6 +617,26 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 // =============================================================================
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
+// =============================================================================
+// Font management (inspired by Linux KDFONTOP ioctl)
+// =============================================================================
+
+/// Upload a console font bitmap to the kernel.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): pointer to font bitmap data (user-space)
+/// * rsi (arg1): font width (pixels, must be 8)
+/// * rdx (arg2): font height (pixels, e.g. 16)
+/// * r10 (arg3): glyph count (e.g. 256)
+///
+/// The bitmap format is 1 bit per pixel, MSB = leftmost, one byte per
+/// row per glyph. Total size = glyph_count * height bytes.
+///
+/// # Returns
+/// * 0 on success
+/// * negative errno on failure
+pub const SYSCALL_FONT_SET: u64 = 144;
+
 pub const SYSCALL_TABLE_SIZE: usize = 148;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
