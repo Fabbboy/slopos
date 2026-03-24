@@ -175,6 +175,11 @@ impl GlyphAtlas {
         self.cell_h as i32
     }
 
+    #[inline]
+    pub fn coverage_and_replacement(&self) -> (&[u8], &[u8]) {
+        (&self.data, &self.replacement)
+    }
+
     /// Get coverage data for a codepoint (cell_w × cell_h bytes).
     #[inline]
     pub fn get_coverage(&self, codepoint: u32) -> &[u8] {
@@ -487,8 +492,6 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 
 static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Initialize the global glyph atlas. Call once during boot after the
-/// allocator is ready.
 pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
     if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
         replace_global(atlas);
@@ -498,33 +501,53 @@ pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
     }
 }
 
-pub fn replace_global(new_atlas: GlyphAtlas) {
-    let new_ptr = Box::into_raw(Box::new(new_atlas));
-    let old_ptr = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
-    if !old_ptr.is_null() {
-        // SAFETY: old_ptr was created with Box::into_raw and is no longer
-        // reachable after the atomic swap.
-        unsafe {
-            drop(Box::from_raw(old_ptr));
+pub fn init_global_bitmap() -> bool {
+    use crate::bitmap;
+    match bitmap::bitmap_to_coverage(
+        &bitmap::VGA_FONT_8X16,
+        bitmap::BITMAP_FONT_WIDTH,
+        bitmap::BITMAP_FONT_HEIGHT,
+        bitmap::BITMAP_FONT_GLYPH_COUNT,
+    ) {
+        Some((coverage, replacement)) => {
+            match GlyphAtlas::from_raw_coverage(
+                bitmap::BITMAP_FONT_WIDTH,
+                bitmap::BITMAP_FONT_HEIGHT,
+                coverage,
+                replacement,
+            ) {
+                Some(atlas) => {
+                    replace_global(atlas);
+                    true
+                }
+                None => false,
+            }
         }
+        None => false,
     }
 }
 
-/// Get a reference to the global atlas (`None` before `init_global`).
+pub fn replace_global(new_atlas: GlyphAtlas) {
+    let new_ptr = Box::into_raw(Box::new(new_atlas));
+    // Old atlas intentionally leaked: global() hands out &'static
+    // references that would dangle if we freed here. Bounded cost
+    // (~30KB per upgrade, happens once at boot).
+    let _leaked = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
+}
+
 pub fn global() -> Option<&'static GlyphAtlas> {
     let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
     if ptr.is_null() {
         None
     } else {
-        // SAFETY: ptr was created via Box::into_raw during init_global
-        // and is never freed or mutated after store.
+        // SAFETY: ptr was created via Box::into_raw and is never freed.
         unsafe { Some(&*ptr) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GlyphAtlas;
+    use super::{GlyphAtlas, global, init_global_bitmap};
     use crate::FontSource;
 
     #[test]
@@ -554,5 +577,13 @@ mod tests {
         let replacement = alloc::vec![0u8; stride];
 
         assert!(GlyphAtlas::from_raw_coverage(cell_w, cell_h, coverage, replacement).is_none());
+    }
+
+    #[test]
+    fn init_global_bitmap_succeeds() {
+        assert!(init_global_bitmap());
+        let atlas = global().expect("atlas must be set");
+        assert_eq!(atlas.cell_width(), 8);
+        assert_eq!(atlas.cell_height(), 16);
     }
 }

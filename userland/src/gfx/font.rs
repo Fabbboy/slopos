@@ -9,15 +9,10 @@ use super::font_loader;
 
 const FONT_SIZE_PX: u16 = 16;
 
-/// Minimal embedded fallback — only used if filesystem font loading fails.
-const JETBRAINS_MONO_EMBEDDED: &[u8] =
-    include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
-
 static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
 
 fn atlas() -> &'static GlyphAtlas {
     ATLAS.get_or_init(|| {
-        // Try filesystem first, fall back to embedded.
         let (font_data, from_fs) =
             font_loader::load_font_or_embedded("mono", JETBRAINS_MONO_EMBEDDED);
         let source = if from_fs {
@@ -29,6 +24,9 @@ fn atlas() -> &'static GlyphAtlas {
             .expect("font: failed to create glyph atlas")
     })
 }
+
+const JETBRAINS_MONO_EMBEDDED: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 pub fn cell_width() -> i32 {
     atlas().cell_width()

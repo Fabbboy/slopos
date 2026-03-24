@@ -85,7 +85,12 @@ pub fn bitmap_to_coverage(
     }
 
     let mut replacement = alloc::vec![0u8; stride];
-    expand_glyph(0, &mut replacement);
+    let replacement_glyph = if (b'?' as usize) < glyph_count {
+        b'?' as usize
+    } else {
+        0
+    };
+    expand_glyph(replacement_glyph, &mut replacement);
 
     Some((coverage, replacement))
 }
@@ -110,6 +115,9 @@ mod tests {
 
         let glyph_bang = 33usize;
         data[glyph_bang * 16] = 0xFF;
+
+        let glyph_q = 63usize;
+        data[glyph_q * 16] = 0b1111_0000;
 
         let (coverage, replacement) =
             bitmap_to_coverage(&data, width, height, glyph_count).expect("must convert");
