@@ -26,6 +26,15 @@ pub const COLOR_CURSOR: Color32 = Color32::rgb(0xFF, 0xFF, 0xFF);
 pub const COLOR_BACKGROUND: Color32 = Color32::rgb(0x00, 0x11, 0x22);
 pub const COLOR_START_MENU_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
 
+// Shadow
+pub const SHADOW_SPREAD: i32 = 12;
+pub const SHADOW_OFFSET_Y: i32 = 4;
+pub const SHADOW_MAX_ALPHA: u8 = 50;
+
+// Semi-transparent title bar overlays (alpha-blended over underlying content)
+pub const COLOR_TITLE_BAR_TINT: Color32 = Color32::new(0x1E, 0x1E, 0x1E, 0xD0);
+pub const COLOR_TITLE_BAR_FOCUSED_TINT: Color32 = Color32::new(0x2D, 0x2D, 0x30, 0xD0);
+
 // File Manager Specific
 pub const FM_WIDTH: i32 = 400;
 pub const FM_HEIGHT: i32 = 300;

@@ -59,7 +59,7 @@ impl CompositorOutput {
 // ── Window bounds ───────────────────────────────────────────────────────────
 
 use crate::syscall::UserWindowInfo;
-use crate::theme::TITLE_BAR_HEIGHT;
+use crate::theme::{SHADOW_OFFSET_Y, SHADOW_SPREAD, TITLE_BAR_HEIGHT};
 
 pub const WINDOW_STATE_MINIMIZED: u8 = 1;
 
@@ -90,10 +90,10 @@ impl WindowBounds {
             return DamageRect::invalid();
         }
         DamageRect {
-            x0: self.x,
-            y0: self.y - TITLE_BAR_HEIGHT,
-            x1: self.x + self.width as i32 - 1,
-            y1: self.y + self.height as i32 - 1,
+            x0: self.x - SHADOW_SPREAD,
+            y0: self.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y - SHADOW_SPREAD,
+            x1: self.x + self.width as i32 - 1 + SHADOW_SPREAD,
+            y1: self.y + self.height as i32 - 1 + SHADOW_OFFSET_Y + SHADOW_SPREAD,
         }
     }
 }

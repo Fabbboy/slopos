@@ -193,6 +193,33 @@ pub fn fill_rect_blended<T: Canvas>(
     Some(damage)
 }
 
+/// Alpha-blend a filled rectangle onto a canvas, clipped to a damage region.
+///
+/// Combines [`fill_rect_blended`] with clip-rect intersection — only pixels
+/// within `clip` are touched. Fully-transparent colours and empty/off-screen
+/// rectangles are short-circuited.
+pub fn fill_rect_blended_clipped<T: Canvas>(
+    target: &mut T,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: Color32,
+    clip: &DamageRect,
+) {
+    if w <= 0 || h <= 0 || color.alpha() == 0 {
+        return;
+    }
+    let x0 = x.max(clip.x0);
+    let y0 = y.max(clip.y0);
+    let x1 = (x + w - 1).min(clip.x1);
+    let y1 = (y + h - 1).min(clip.y1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    fill_rect_blended(target, x0, y0, x1 - x0 + 1, y1 - y0 + 1, color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

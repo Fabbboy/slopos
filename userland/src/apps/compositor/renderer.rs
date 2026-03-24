@@ -90,6 +90,7 @@ impl Renderer {
                 if window.state == WINDOW_STATE_MINIMIZED {
                     continue;
                 }
+                self.draw_window_shadow(buf, &window, &full_clip);
                 self.draw_window_content(buf, &window, &full_clip, surface_cache);
                 self.draw_title_bar(buf, &window, focused_task, hover, &full_clip);
             }
@@ -161,6 +162,10 @@ impl Renderer {
                 continue;
             }
 
+            if intersect_rect(damage, &shadow_bounds(&window)).is_some() {
+                self.draw_window_shadow(buf, &window, damage);
+            }
+
             let content_rect = DamageRect {
                 x0: window.x,
                 y0: window.y,
@@ -230,28 +235,30 @@ impl Renderer {
         clip: &DamageRect,
     ) {
         let focused = window.task_id == focused_task;
-        let color = if focused {
+        let tint = if focused {
+            COLOR_TITLE_BAR_FOCUSED_TINT
+        } else {
+            COLOR_TITLE_BAR_TINT
+        };
+        let opaque_bg = if focused {
             COLOR_TITLE_BAR_FOCUSED
         } else {
             COLOR_TITLE_BAR
         };
         let title_y = window.y - TITLE_BAR_HEIGHT;
 
-        gfx::fill_rect_clipped(
+        gfx::fill_rect_blended_clipped(
             buf,
             window.x,
             title_y,
             window.width as i32,
             TITLE_BAR_HEIGHT,
-            color,
+            tint,
             clip,
         );
 
         let title = title_to_str(&window.title);
 
-        // Render title bar text with TTF font, blending against the
-        // title-bar colour so AA is crisp on both readable and write-only
-        // surfaces.
         let text_y = title_y + (TITLE_BAR_HEIGHT - TITLE_FONT_SIZE as i32) / 2;
         self.ensure_font();
         if let Some(ref mut font) = self.ttf_font {
@@ -262,10 +269,18 @@ impl Renderer {
                 title,
                 TITLE_FONT_SIZE,
                 COLOR_TEXT,
-                color, // title-bar bg for AA blending
+                opaque_bg,
             );
         } else {
-            gfx::draw_str_clipped(buf, window.x + 8, text_y, title, COLOR_TEXT, color, clip);
+            gfx::draw_str_clipped(
+                buf,
+                window.x + 8,
+                text_y,
+                title,
+                COLOR_TEXT,
+                opaque_bg,
+                clip,
+            );
         }
 
         draw_button_clipped(
@@ -539,6 +554,44 @@ impl Renderer {
         );
     }
 
+    fn draw_window_shadow(&self, buf: &mut DrawBuffer, window: &UserWindowInfo, clip: &DamageRect) {
+        let ww = window.width as i32;
+        let wh = window.height as i32 + TITLE_BAR_HEIGHT;
+        let sx = window.x;
+        let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
+        let spread_sq = (SHADOW_SPREAD * SHADOW_SPREAD) as u32;
+
+        for d in 1..=SHADOW_SPREAD {
+            let t = (SHADOW_SPREAD - d) as u32;
+            let alpha = (SHADOW_MAX_ALPHA as u32 * t * t) / spread_sq;
+            if alpha == 0 {
+                continue;
+            }
+            let color = Color32::new(0, 0, 0, alpha as u8);
+
+            gfx::fill_rect_blended_clipped(
+                buf,
+                sx - d,
+                sy + wh + d - 1,
+                ww + 2 * d,
+                1,
+                color,
+                clip,
+            );
+            gfx::fill_rect_blended_clipped(buf, sx - d, sy - d, ww + 2 * d, 1, color, clip);
+            gfx::fill_rect_blended_clipped(buf, sx - d, sy - d + 1, 1, wh + 2 * d - 2, color, clip);
+            gfx::fill_rect_blended_clipped(
+                buf,
+                sx + ww + d - 1,
+                sy - d + 1,
+                1,
+                wh + 2 * d - 2,
+                color,
+                clip,
+            );
+        }
+    }
+
     fn draw_window_content(
         &self,
         buf: &mut DrawBuffer,
@@ -675,6 +728,19 @@ fn title_to_str(title: &[u8; 32]) -> &str {
         return "";
     }
     core::str::from_utf8(&title[..len]).unwrap_or("<invalid>")
+}
+
+fn shadow_bounds(window: &UserWindowInfo) -> DamageRect {
+    let sx = window.x;
+    let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
+    let ww = window.width as i32;
+    let wh = window.height as i32 + TITLE_BAR_HEIGHT;
+    DamageRect {
+        x0: sx - SHADOW_SPREAD,
+        y0: sy - SHADOW_SPREAD,
+        x1: sx + ww - 1 + SHADOW_SPREAD,
+        y1: sy + wh - 1 + SHADOW_SPREAD,
+    }
 }
 
 fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
