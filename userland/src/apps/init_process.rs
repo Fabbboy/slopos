@@ -5,11 +5,11 @@ use crate::program_registry;
 use crate::syscall::{UserSysInfo, core as sys_core, process, tty};
 
 fn upgrade_console_font() {
-    let ttf_data = match std::fs::read("/usr/share/fonts/JetBrainsMono-Regular.ttf") {
-        Ok(data) => data,
-        Err(_) => return,
+    let font_data = match crate::gfx::font_loader::load_font("mono") {
+        Some(data) => data,
+        None => return,
     };
-    let atlas = match GlyphAtlas::new(&ttf_data, 16) {
+    let atlas = match GlyphAtlas::new(font_data, 16) {
         Some(a) => a,
         None => return,
     };

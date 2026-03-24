@@ -1663,7 +1663,7 @@ pub fn has_framebuffer() -> bool {
 }
 
 pub fn notify_font_changed() {
-    let (atlas_ptr, need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
+    let (atlas_gen, need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
         let state = VCONSOLE_STATE.lock();
         let Some(fb) = state.fb else {
             return;
@@ -1671,7 +1671,7 @@ pub fn notify_font_changed() {
         let Some(atlas) = atlas::global() else {
             return;
         };
-        let ptr = atlas::global_ptr() as usize;
+        let atlas_gen = atlas::atlas_generation();
         let cw = atlas.cell_width();
         let ch = atlas.cell_height();
         if cw == state.cell_w && ch == state.cell_h {
@@ -1682,7 +1682,7 @@ pub fn notify_font_changed() {
         let nc = calc_cols.min(VCONSOLE_MAX_COLS);
         let nr = calc_rows.min(VCONSOLE_MAX_ROWS);
         (
-            ptr,
+            atlas_gen,
             true,
             cw,
             ch,
@@ -1710,17 +1710,7 @@ pub fn notify_font_changed() {
     };
     let new_scrollback: Option<alloc::boxed::Box<ScrollbackBuf>> = {
         let sb = ScrollbackBuf::new(new_cols);
-        let layout = alloc::alloc::Layout::new::<ScrollbackBuf>();
-        let raw = unsafe { alloc::alloc::alloc(layout) };
-        if raw.is_null() {
-            None
-        } else {
-            let ptr = raw as *mut ScrollbackBuf;
-            unsafe {
-                ptr.write(sb);
-            }
-            Some(unsafe { alloc::boxed::Box::from_raw(ptr) })
-        }
+        Some(alloc::boxed::Box::new(sb))
     };
     let new_grid = {
         let grid_len = new_rows * new_cols;
@@ -1754,7 +1744,7 @@ pub fn notify_font_changed() {
     if state.fb.is_none() {
         return;
     }
-    if (atlas::global_ptr() as usize) != atlas_ptr {
+    if (atlas::atlas_generation()) != atlas_gen {
         return;
     }
 

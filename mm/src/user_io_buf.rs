@@ -19,7 +19,14 @@ pub fn memdup_user(addr: u64, len: usize, max_size: usize) -> Result<Vec<u8>, Er
     let user_bytes = UserBytes::try_new(addr, len).map_err(|_| Errno::EFAULT)?;
     let mut buf = Vec::new();
     buf.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
-    buf.resize(len, 0);
+    // SAFETY: `try_reserve_exact` succeeded so capacity >= len.  The
+    // bytes are immediately overwritten by `copy_bytes_from_user` below
+    // and never read uninitialised — this avoids a redundant zero-fill
+    // (matching Linux's `memdup_user` which copies directly into
+    // uninitialized kmalloc'd memory).
+    unsafe {
+        buf.set_len(len);
+    }
     copy_bytes_from_user(user_bytes, &mut buf).map_err(|_| Errno::EFAULT)?;
     Ok(buf)
 }

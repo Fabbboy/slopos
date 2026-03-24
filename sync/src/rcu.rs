@@ -100,12 +100,45 @@ pub fn rcu_note_qs() {
 
 const RCU_IPI_THRESHOLD: u32 = 1_000;
 
-/// Maximum spin iterations per CPU before declaring an RCU stall.
+/// RCU stall timeout in nanoseconds.
 ///
-/// At ~GHz spin rates this is roughly 100-500 ms — long enough for any
-/// healthy CPU to report a QS via timer tick (10 ms) or idle loop, but
-/// short enough to avoid hanging the kernel indefinitely.
-const RCU_STALL_LIMIT_SPINS: u32 = 500_000_000;
+/// Modelled after Linux's `CONFIG_RCU_CPU_STALL_TIMEOUT` (default 21 s).
+/// We use a shorter 500 ms budget because SlopOS is a unikernel running
+/// under QEMU with a 100 Hz timer tick — any healthy CPU should report
+/// a QS via timer tick (10 ms), idle loop, or context switch well
+/// within this window.  If a CPU hasn't reported after an IPI + 500 ms,
+/// something is seriously wrong.
+///
+/// Unlike the old iteration-count limit, this is clock-based (TSC) so
+/// the timeout is deterministic regardless of CPU frequency, matching
+/// Linux's approach of using `jiffies` / `local_clock()` for stall
+/// detection in `rcu_check_gp_stall_node()`.
+const RCU_STALL_TIMEOUT_NS: u64 = 500_000_000;
+
+/// Wrapping-safe comparison: has the counter advanced past the snapshot?
+///
+/// Modelled after Linux's `ULONG_CMP_GE` — uses signed wrapping
+/// subtraction so the comparison is correct even if the counter has
+/// wrapped around (which is astronomically unlikely for `u64` but
+/// formally required for soundness).
+#[inline]
+fn qs_counter_advanced(current: u64, snapshot: u64) -> bool {
+    (current.wrapping_sub(snapshot)) as i64 > 0
+}
+
+/// Read the current monotonic time in nanoseconds.
+///
+/// Uses the kernel-services platform clock (HPET-backed) when
+/// available; falls back to raw TSC with a conservative 1 GHz
+/// assumption if the platform clock isn't wired yet (early boot).
+#[inline]
+fn monotonic_ns() -> u64 {
+    let ns = slopos_kernel_services::platform::clock_monotonic_ns();
+    if ns > 0 {
+        return ns;
+    }
+    slopos_arch::tsc::rdtsc()
+}
 
 /// Block until every online CPU has passed through at least one
 /// quiescent state since this call.
@@ -123,10 +156,10 @@ const RCU_STALL_LIMIT_SPINS: u32 = 500_000_000;
 /// 2. Snapshot every CPU's QS counter.
 ///
 /// 3. For each remote online CPU, spin until its counter advances past
-///    the snapshot (natural QS from timer tick, idle loop, or context
-///    switch).  If the CPU is slow, send a dedicated RCU QS IPI (vector
-///    0xFB) to force it.  If it still hasn't reported after
-///    [`RCU_STALL_LIMIT_SPINS`], log a stall warning and move on.
+///    the snapshot (wrapping-safe comparison, like Linux's
+///    `ULONG_CMP_GE`).  If the CPU is slow, send a dedicated RCU QS
+///    IPI (vector 0xFB) to force it.  If it still hasn't reported
+///    after [`RCU_STALL_TIMEOUT_NS`], log a stall warning and move on.
 pub fn synchronize_rcu() {
     rcu_note_qs();
 
@@ -145,9 +178,10 @@ pub fn synchronize_rcu() {
 
         let mut ipi_sent = false;
         let mut spins: u32 = 0;
+        let deadline = monotonic_ns().wrapping_add(RCU_STALL_TIMEOUT_NS);
         loop {
             let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
-            if current != snaps[cpu] {
+            if qs_counter_advanced(current, snaps[cpu]) {
                 break;
             }
 
@@ -160,15 +194,18 @@ pub fn synchronize_rcu() {
                 ipi_sent = true;
             }
 
-            if spins >= RCU_STALL_LIMIT_SPINS {
-                klog_warn!(
-                    "RCU stall: CPU {} failed to report QS after {} spins (snap={}, cur={})",
-                    cpu,
-                    spins,
-                    snaps[cpu],
-                    RCU_QS_CTR[cpu].0.load(Ordering::Relaxed),
-                );
-                break;
+            if (spins & 0xFFFF) == 0 {
+                let now = monotonic_ns();
+                if now.wrapping_sub(deadline) < u64::MAX / 2 {
+                    klog_warn!(
+                        "RCU stall: CPU {} failed to report QS after {}ms (snap={}, cur={})",
+                        cpu,
+                        RCU_STALL_TIMEOUT_NS / 1_000_000,
+                        snaps[cpu],
+                        RCU_QS_CTR[cpu].0.load(Ordering::Relaxed),
+                    );
+                    break;
+                }
             }
 
             core::hint::spin_loop();

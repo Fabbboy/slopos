@@ -492,7 +492,7 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 mod global_atlas {
     use super::*;
     use alloc::boxed::Box;
-    use core::sync::atomic::{AtomicPtr, Ordering};
+    use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
     use slopos_sync::RcuReadGuard;
 
     /// Self-owning RCU-protected borrow of the global glyph atlas.
@@ -507,6 +507,7 @@ mod global_atlas {
     pub struct AtlasGuard {
         _rcu: RcuReadGuard,
         ptr: *const GlyphAtlas,
+        _not_send_sync: core::marker::PhantomData<*mut ()>,
     }
 
     impl core::ops::Deref for AtlasGuard {
@@ -523,6 +524,13 @@ mod global_atlas {
 
     static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
 
+    /// Monotonic generation counter incremented on every `replace_global`.
+    ///
+    /// Used by `notify_font_changed` for ABA-safe comparison instead of
+    /// raw pointer identity.  A recycled heap address can never produce
+    /// the same generation.
+    static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
     static FONT_CHANGE_CALLBACK: slopos_sync::IrqMutex<Option<fn()>> =
         slopos_sync::IrqMutex::new(None);
 
@@ -537,15 +545,14 @@ mod global_atlas {
         }
     }
 
-    /// Load the raw global atlas pointer.
+    /// Return the current atlas generation (monotonic, ABA-safe).
     ///
-    /// Returns null if no atlas has been initialised.  Callers that use
-    /// the returned pointer **must** hold an RCU read-side critical
-    /// section for the duration of any dereference.  Prefer [`global`]
-    /// for the safe, self-owning API.
+    /// Callers can snapshot this value, release a lock, perform
+    /// allocations, then re-check to detect whether the atlas was
+    /// replaced in the interim.
     #[inline]
-    pub fn global_ptr() -> *const GlyphAtlas {
-        GLOBAL_ATLAS.load(Ordering::Acquire)
+    pub fn atlas_generation() -> u64 {
+        ATLAS_GENERATION.load(Ordering::Acquire)
     }
 
     pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
@@ -608,7 +615,9 @@ mod global_atlas {
     /// possible.
     pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
         let new_ptr = Box::into_raw(Box::new(new_atlas));
-        GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel)
+        let old = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
+        ATLAS_GENERATION.fetch_add(1, Ordering::Release);
+        old
     }
 
     /// Acquire the global glyph atlas under an RCU read lock.
@@ -623,7 +632,11 @@ mod global_atlas {
         if ptr.is_null() {
             None
         } else {
-            Some(AtlasGuard { _rcu: rcu, ptr })
+            Some(AtlasGuard {
+                _rcu: rcu,
+                ptr,
+                _not_send_sync: core::marker::PhantomData,
+            })
         }
     }
 }

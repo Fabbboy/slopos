@@ -621,19 +621,25 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 // Font management (inspired by Linux KDFONTOP ioctl)
 // =============================================================================
 
-/// Upload a console font bitmap to the kernel.
+/// Upload a console font to the kernel.
 ///
 /// # Arguments (via registers)
-/// * rdi (arg0): pointer to font bitmap data (user-space)
-/// * rsi (arg1): font width (pixels, must be 8)
-/// * rdx (arg2): font height (pixels, e.g. 16)
-/// * r10 (arg3): glyph count (e.g. 256)
+/// * rdi (arg0): pointer to font data (user-space)
+/// * rsi (arg1): font width in pixels (must be 8 for bitmap format)
+/// * rdx (arg2): font height in pixels (e.g. 16)
+/// * r10 (arg3): glyph count (e.g. 256 for bitmap, 95 for coverage)
+/// * r8  (arg4): format — [`FONT_FORMAT_BITMAP`] (0) or
+///               [`FONT_FORMAT_COVERAGE`] (1)
 ///
-/// The bitmap format is 1 bit per pixel, MSB = leftmost, one byte per
-/// row per glyph. Total size = glyph_count * height bytes.
+/// **Bitmap format** (`arg4 = 0`): 1-bit-per-pixel, MSB-first, one byte
+/// per row per glyph.  Total payload = `glyph_count × height` bytes.
+///
+/// **Coverage format** (`arg4 = 1`): 8-bit coverage per pixel, 95 ASCII
+/// glyphs (0x20–0x7E) followed by one replacement glyph.  Total payload
+/// = `(95 + 1) × width × height` bytes.
 ///
 /// # Returns
-/// * 0 on success
+/// * `0` on success
 /// * negative errno on failure
 pub const SYSCALL_FONT_SET: u64 = 144;
 

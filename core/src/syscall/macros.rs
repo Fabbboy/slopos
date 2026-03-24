@@ -39,7 +39,7 @@ macro_rules! define_syscall {
             let Some($ctx) = $crate::syscall::context::SyscallContext::new(task, frame) else {
                 return $crate::syscall::common::syscall_return_err(
                     frame,
-                    slopos_abi::syscall::ERRNO_EINVAL,
+                    slopos_abi::Errno::EINVAL.as_u64(),
                 );
             };
             $crate::define_syscall!(@expand_reqs $ctx, $($req)*);
