@@ -19,9 +19,6 @@ use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags};
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
 
-const ERR_PERM_I32: i32 = Errno::EPERM.raw();
-const ERR_PERM_I64: i64 = Errno::EPERM.raw() as i64;
-
 fn pick_table_ptr(
     kernel: &mut FileTableSlot,
     processes: &mut [FileTableSlot; MAX_PROCESSES],
@@ -53,7 +50,7 @@ fn install_fd_entry(
 ) -> c_int {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table_ptr) = pick_table_ptr(kernel, processes, process_id) else {
-            return ERR_PERM_I32;
+            return Errno::ESRCH.raw();
         };
         let table = unsafe { &mut *table_ptr };
         let guard = unsafe { (&(*table_ptr).lock).lock() };
@@ -61,7 +58,7 @@ fn install_fd_entry(
         let Some(slot_idx) = find_free_slot(table) else {
             drop(guard);
             ops.release(handle);
-            return ERR_PERM_I32;
+            return Errno::EMFILE.raw();
         };
 
         let mut position = 0u64;
@@ -79,7 +76,7 @@ fn install_fd_entry(
         else {
             drop(guard);
             ops.release(handle);
-            return ERR_PERM_I32 as _;
+            return Errno::ENFILE.raw() as _;
         };
 
         if ops.kind() == FileKind::Socket {
@@ -117,16 +114,19 @@ fn current_socket_ops() -> Option<&'static dyn FileOps> {
 
 pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: u32) -> c_int {
     let flags = posix_to_internal_flags(posix_flags);
-    if path.is_null() || (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
-        return ERR_PERM_I32 as _;
+    if path.is_null() {
+        return Errno::EFAULT.raw() as _;
+    }
+    if (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
+        return Errno::EINVAL.raw() as _;
     }
     if (flags & FILE_OPEN_APPEND) != 0 && (flags & FILE_OPEN_WRITE) == 0 {
-        return ERR_PERM_I32 as _;
+        return Errno::EINVAL.raw() as _;
     }
 
     let path_bytes = match unsafe { path_bytes(path) } {
         Some(p) => p,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::EINVAL.raw() as _,
     };
 
     if path_bytes == b"/dev/tty" {
@@ -135,7 +135,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
             None => return Errno::ENXIO.raw(),
         };
         if tty::open_ref(tty_idx).is_err() {
-            return ERR_PERM_I32 as _;
+            return Errno::EBUSY.raw() as _;
         }
         let tty_ops = current_tty_ops();
         return install_fd_entry(process_id, tty_ops, tty_idx.0 as usize, flags, None);
@@ -144,10 +144,10 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
     if path_bytes == b"/dev/ptmx" {
         let master_idx = match tty::alloc_pty() {
             Ok(idx) => idx,
-            Err(_) => return ERR_PERM_I32 as _,
+            Err(_) => return Errno::ENOMEM.raw() as _,
         };
         if tty::open_ref(master_idx).is_err() {
-            return ERR_PERM_I32 as _;
+            return Errno::EBUSY.raw() as _;
         }
         let tty_ops = current_tty_ops();
         return install_fd_entry(
@@ -161,7 +161,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
 
     if let Some(slave_idx) = parse_pts_path(path_bytes) {
         if tty::open_pty_slave(slave_idx).is_err() {
-            return ERR_PERM_I32 as _;
+            return Errno::EBUSY.raw() as _;
         }
         let tty_ops = current_tty_ops();
         return install_fd_entry(
@@ -182,7 +182,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         truncate,
     };
     let Some(vfs_handle) = vfs_open_handle_flags(path_bytes, open_flags) else {
-        return ERR_PERM_I32 as _;
+        return Errno::ENOENT.raw() as _;
     };
     install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
 }
@@ -222,7 +222,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
         .unwrap_or((u16::MAX, &VFS_FILE_OPS as &dyn FileOps, 0, 0, 0, false));
 
     if open_file_idx == u16::MAX {
-        return ERR_PERM_I32 as _;
+        return Errno::EBADF.raw() as _;
     }
 
     let used_offset = if seekable { offset } else { 0 };
@@ -274,7 +274,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
         .unwrap_or((u16::MAX, &VFS_FILE_OPS as &dyn FileOps, 0, 0, 0, false));
 
     if open_file_idx == u16::MAX {
-        return ERR_PERM_I32 as _;
+        return Errno::EBADF.raw() as _;
     }
 
     let used_offset = if seekable { offset } else { 0 };
@@ -306,16 +306,16 @@ impl OpenFileEntryGuard for OpenFileEntry {
 pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         };
         release_open_file(open_files, fd_entry.open_file_idx);
         reset_fd_entry(fd_entry);
@@ -327,35 +327,35 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
 pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as i64;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as i64;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
         let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as i64;
         };
         let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as i64;
         };
         let Some(ops) = open_file.ops else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as i64;
         };
         if !ops.seekable() {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::ESPIPE.raw() as i64;
         }
 
         let size = match ops.size(open_file.handle) {
             Some(v) => v as i64,
             None => {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             }
         };
 
@@ -365,12 +365,12 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
             SEEK_END => size.saturating_add(offset),
             _ => {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EINVAL.raw() as i64;
             }
         };
         if new_pos < 0 {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EINVAL.raw() as i64;
         }
 
         open_file.position = new_pos as u64;
@@ -416,48 +416,48 @@ pub fn file_exists_path(path: *const c_char) -> c_int {
 
 pub fn file_unlink_path(path: *const c_char) -> c_int {
     if path.is_null() {
-        return ERR_PERM_I32 as _;
+        return Errno::EFAULT.raw() as _;
     }
     let path_bytes = match unsafe { path_bytes(path) } {
         Some(p) => p,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::EINVAL.raw() as _,
     };
     if vfs_unlink(path_bytes).is_ok() {
         0
     } else {
-        ERR_PERM_I32 as _
+        Errno::ENOENT.raw() as _
     }
 }
 
 pub fn file_mkdir_path(path: *const c_char) -> c_int {
     if path.is_null() {
-        return ERR_PERM_I32 as _;
+        return Errno::EFAULT.raw() as _;
     }
     let path_bytes = match unsafe { path_bytes(path) } {
         Some(p) => p,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::EINVAL.raw() as _,
     };
     if vfs_mkdir(path_bytes).is_ok() {
         0
     } else {
-        ERR_PERM_I32 as _
+        Errno::EEXIST.raw() as _
     }
 }
 
 pub fn file_stat_path(path: *const c_char, out_type: &mut u8, out_size: &mut u32) -> c_int {
     if path.is_null() {
-        return ERR_PERM_I32 as _;
+        return Errno::EFAULT.raw() as _;
     }
     let path_bytes = match unsafe { path_bytes(path) } {
         Some(p) => p,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::EINVAL.raw() as _,
     };
     if let Ok((kind, size)) = vfs_stat(path_bytes) {
         *out_type = kind;
         *out_size = size;
         return 0;
     }
-    ERR_PERM_I32 as _
+    Errno::ENOENT.raw() as _
 }
 
 pub fn file_list_path(
@@ -467,11 +467,11 @@ pub fn file_list_path(
     out_count: &mut u32,
 ) -> c_int {
     if path.is_null() || entries.is_null() || max == 0 {
-        return ERR_PERM_I32 as _;
+        return Errno::EINVAL.raw() as _;
     }
     let path_bytes = match unsafe { path_bytes(path) } {
         Some(p) => p,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::EINVAL.raw() as _,
     };
     let cap = max as usize;
     let out_slice = unsafe { slice::from_raw_parts_mut(entries, cap) };
@@ -480,7 +480,7 @@ pub fn file_list_path(
             *out_count = count as u32;
             0
         }
-        Err(_) => ERR_PERM_I32 as _,
+        Err(_) => Errno::ENOENT.raw() as _,
     }
 }
 
@@ -543,17 +543,17 @@ pub fn file_pipe_create(
     out_write_fd: &mut c_int,
 ) -> c_int {
     if flags & !(O_NONBLOCK as u32 | O_CLOEXEC as u32) != 0 {
-        return ERR_PERM_I32 as _;
+        return Errno::EINVAL.raw() as _;
     }
 
     let pipe_id = match pipe::alloc_slot() {
         Some(id) => id,
-        None => return ERR_PERM_I32 as _,
+        None => return Errno::ENOMEM.raw() as _,
     };
 
     let rc = with_tables(|kernel, processes, open_files, _| {
         let Some(table_ptr) = pick_table_ptr(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
 
         let table = unsafe { &mut *table_ptr };
@@ -561,14 +561,14 @@ pub fn file_pipe_create(
 
         let Some(read_idx) = find_free_slot(table) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EMFILE.raw() as _;
         };
         table.descriptors[read_idx].valid = true;
 
         let Some(write_idx) = find_free_slot(table) else {
             reset_fd_entry(&mut table.descriptors[read_idx]);
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EMFILE.raw() as _;
         };
 
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
@@ -581,7 +581,7 @@ pub fn file_pipe_create(
         else {
             reset_fd_entry(&mut table.descriptors[read_idx]);
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::ENFILE.raw() as _;
         };
         let Some(write_open_idx) = alloc_open_file_entry(
             open_files,
@@ -593,7 +593,7 @@ pub fn file_pipe_create(
             release_open_file(open_files, read_open_idx);
             reset_fd_entry(&mut table.descriptors[read_idx]);
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::ENFILE.raw() as _;
         };
 
         {
@@ -603,7 +603,7 @@ pub fn file_pipe_create(
                 release_open_file(open_files, write_open_idx);
                 reset_fd_entry(&mut table.descriptors[read_idx]);
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::ENOMEM.raw() as _;
             };
             slot.readers = 1;
             slot.writers = 1;
@@ -643,28 +643,28 @@ pub fn file_dup_fd(process_id: u32, old_fd: c_int) -> c_int {
 fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
 
         let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         };
         if !incref_open_file(open_files, src.open_file_idx) {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
 
         let table = unsafe { &mut *table_ptr };
         let Some(new_idx) = find_free_slot_from(table, min_fd) else {
             release_open_file(open_files, src.open_file_idx);
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EMFILE.raw() as _;
         };
 
         table.descriptors[new_idx] = FdEntry {
@@ -679,41 +679,45 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
 
 pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
-        return ERR_PERM_I32 as _;
+        return Errno::EBADF.raw() as _;
     }
     if old_fd == new_fd {
         return with_tables(|kernel, processes, _, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return ERR_PERM_I32 as _;
+                return Errno::ESRCH.raw() as _;
             };
             if !table.in_use {
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as _;
             }
             let table_ptr: *mut FileTableSlot = table;
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let valid = unsafe { get_fd_entry(&mut *table_ptr, old_fd) }.is_some();
             drop(guard);
-            if valid { new_fd } else { ERR_PERM_I32 as _ }
+            if valid {
+                new_fd
+            } else {
+                Errno::EBADF.raw() as _
+            }
         });
     }
 
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
 
         let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         };
         if !incref_open_file(open_files, src.open_file_idx) {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
 
         let table = unsafe { &mut *table_ptr };
@@ -732,29 +736,29 @@ pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
 
 pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
     if old_fd == new_fd {
-        return ERR_PERM_I32 as _;
+        return Errno::EINVAL.raw() as _;
     }
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
-        return ERR_PERM_I32 as _;
+        return Errno::EBADF.raw() as _;
     }
 
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
 
         let Some(src) = (unsafe { get_fd_entry(&mut *table_ptr, old_fd) }) else {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         };
         if !incref_open_file(open_files, src.open_file_idx) {
             drop(guard);
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
 
         let table = unsafe { &mut *table_ptr };
@@ -776,16 +780,16 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
         F_DUPFD => file_dup_fd_min(process_id, fd, arg as usize) as i64,
         F_GETFD => with_tables(|kernel, processes, _, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return ERR_PERM_I64;
+                return Errno::ESRCH.raw() as i64;
             };
             if !table.in_use {
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             }
             let table_ptr: *mut FileTableSlot = table;
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let Some(desc) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             };
             let val = if desc.cloexec { FD_CLOEXEC as i64 } else { 0 };
             drop(guard);
@@ -793,16 +797,16 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
         }),
         F_SETFD => with_tables(|kernel, processes, _, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return ERR_PERM_I64;
+                return Errno::ESRCH.raw() as i64;
             };
             if !table.in_use {
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             }
             let table_ptr: *mut FileTableSlot = table;
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let Some(desc) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             };
             desc.cloexec = (arg & FD_CLOEXEC) != 0;
             drop(guard);
@@ -810,36 +814,36 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
         }),
         F_GETFL => with_tables(|kernel, processes, open_files, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return ERR_PERM_I64;
+                return Errno::ESRCH.raw() as i64;
             };
             if !table.in_use {
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             }
             let table_ptr: *mut FileTableSlot = table;
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let val = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
                 .and_then(|f| get_open_file_mut(open_files, f.open_file_idx))
                 .map(|o| o.status_flags as i64)
-                .unwrap_or(ERR_PERM_I32 as _);
+                .unwrap_or(Errno::EBADF.raw() as i64);
             drop(guard);
             val
         }),
         F_SETFL => with_tables(|kernel, processes, open_files, _| {
             let Some(table) = table_for_pid(kernel, processes, process_id) else {
-                return ERR_PERM_I64;
+                return Errno::ESRCH.raw() as i64;
             };
             if !table.in_use {
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             }
             let table_ptr: *mut FileTableSlot = table;
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let Some(fd_entry) = (unsafe { get_fd_entry(&mut *table_ptr, fd) }) else {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             };
             let Some(open_file) = get_open_file_mut(open_files, fd_entry.open_file_idx) else {
                 drop(guard);
-                return ERR_PERM_I32 as _;
+                return Errno::EBADF.raw() as i64;
             };
             let mode_bits = open_file.status_flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
             let sticky_flags = open_file.status_flags & (O_NOCTTY as u32);
@@ -854,7 +858,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             drop(guard);
             0
         }),
-        _ => ERR_PERM_I32 as _,
+        _ => Errno::EINVAL.raw() as i64,
     }
 }
 
@@ -865,10 +869,10 @@ pub fn file_fstat_fd(
 ) -> c_int {
     with_tables(|kernel, processes, open_files, _| {
         let Some(table) = table_for_pid(kernel, processes, process_id) else {
-            return ERR_PERM_I32 as _;
+            return Errno::ESRCH.raw() as _;
         };
         if !table.in_use {
-            return ERR_PERM_I32 as _;
+            return Errno::EBADF.raw() as _;
         }
         let table_ptr: *mut FileTableSlot = table;
         let guard = unsafe { (&(*table_ptr).lock).lock() };
@@ -878,7 +882,7 @@ pub fn file_fstat_fd(
                 let ops = open_file.ops?;
                 Some(ops.stat(open_file.handle, out_stat))
             })
-            .unwrap_or(ERR_PERM_I32 as _);
+            .unwrap_or(Errno::EBADF.raw() as _);
         drop(guard);
         rc
     })
@@ -886,7 +890,7 @@ pub fn file_fstat_fd(
 
 pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
     let Some(socket_ops) = current_socket_ops() else {
-        return ERR_PERM_I32 as _;
+        return Errno::ENOTSOCK.raw() as _;
     };
     install_fd_entry(
         process_id,
