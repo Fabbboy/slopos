@@ -18,6 +18,7 @@
 extern crate alloc;
 
 pub mod atlas;
+pub mod bitmap;
 pub mod cache;
 pub mod metrics;
 pub mod outline;
@@ -32,22 +33,46 @@ use outline::outline_to_edges;
 use rasterizer::{RasterizedGlyph, rasterize};
 use ttf_parser::TtfFont;
 
+/// Describes the origin of font data for diagnostics and fallback logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontSource {
+    /// Compiled into the binary via `include_bytes!`.
+    Embedded,
+    /// Loaded from the filesystem at runtime.
+    Filesystem,
+    /// Minimal bitmap fallback (VGA 8×16).
+    BitmapFallback,
+}
+
 /// High-level font renderer that combines parsing, rasterization, and caching.
 pub struct FontRenderer<'a> {
     pub(crate) font: TtfFont<'a>,
     cache: GlyphCache,
+    source: FontSource,
 }
 
 impl<'a> FontRenderer<'a> {
     /// Create a new font renderer from raw TrueType font data.
     ///
     /// Returns `None` if the font data cannot be parsed.
+    /// Source defaults to [`FontSource::Embedded`].
     pub fn new(ttf_data: &'a [u8]) -> Option<Self> {
+        Self::new_with_source(ttf_data, FontSource::Embedded)
+    }
+
+    /// Create a new font renderer with an explicit source tag.
+    pub fn new_with_source(ttf_data: &'a [u8], source: FontSource) -> Option<Self> {
         let font = TtfFont::parse(ttf_data)?;
         Some(Self {
             font,
             cache: GlyphCache::new(),
+            source,
         })
+    }
+
+    /// Returns the source from which this font was loaded.
+    pub fn source(&self) -> FontSource {
+        self.source
     }
 
     /// Draw a text string onto a canvas at the given position.
@@ -286,6 +311,7 @@ impl<'a> FontRenderer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atlas::GlyphAtlas;
     use slopos_abi::draw::{Canvas, EncodedPixel};
     use slopos_abi::pixel::PixelFormat;
 
@@ -471,5 +497,60 @@ mod tests {
         let (w_a, _) = renderer.measure_text("A", 16);
         let (w_aa, _) = renderer.measure_text("A A", 16);
         assert!(w_aa > w_a * 2 - 5, "A={w_a}, A_A={w_aa}");
+    }
+
+    #[test]
+    fn font_source_default_is_embedded() {
+        let r = FontRenderer::new(INTER_TTF).unwrap();
+        assert_eq!(r.source(), FontSource::Embedded);
+    }
+
+    #[test]
+    fn font_source_filesystem_tracking() {
+        let r = FontRenderer::new_with_source(INTER_TTF, FontSource::Filesystem).unwrap();
+        assert_eq!(r.source(), FontSource::Filesystem);
+    }
+
+    #[test]
+    fn atlas_source_default_is_embedded() {
+        let atlas = GlyphAtlas::new(INTER_TTF, 16).unwrap();
+        assert_eq!(atlas.source(), FontSource::Embedded);
+    }
+
+    #[test]
+    fn atlas_source_with_override() {
+        let atlas = GlyphAtlas::new_with_source(INTER_TTF, 16, FontSource::Filesystem).unwrap();
+        assert_eq!(atlas.source(), FontSource::Filesystem);
+    }
+
+    #[test]
+    fn bitmap_font_data_has_correct_size() {
+        assert_eq!(
+            bitmap::VGA_FONT_8X16.len(),
+            bitmap::BITMAP_FONT_GLYPH_COUNT * bitmap::BITMAP_FONT_BYTES_PER_GLYPH
+        );
+    }
+
+    #[test]
+    fn bitmap_glyph_a_is_nonzero() {
+        let glyph = bitmap::glyph_bitmap(b'A');
+        let nonzero = glyph.iter().any(|&b| b != 0);
+        assert!(nonzero, "glyph 'A' should have non-zero pixels");
+    }
+
+    #[test]
+    fn bitmap_render_produces_coverage() {
+        let mut buf = [0u8; 128]; // 8 * 16
+        let (w, h) = bitmap::render_bitmap_glyph(b'A', &mut buf);
+        assert_eq!(w, 8);
+        assert_eq!(h, 16);
+        let has_pixels = buf.iter().any(|&b| b == 255);
+        assert!(has_pixels, "rendered 'A' should have foreground pixels");
+    }
+
+    #[test]
+    fn bitmap_space_is_blank() {
+        let glyph = bitmap::glyph_bitmap(b' ');
+        assert!(glyph.iter().all(|&b| b == 0), "space glyph should be all zeros");
     }
 }

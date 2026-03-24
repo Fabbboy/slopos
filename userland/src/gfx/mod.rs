@@ -1,4 +1,5 @@
 pub mod font;
+pub mod font_loader;
 
 pub use slopos_abi::Canvas;
 pub use slopos_abi::damage::{self, DamageRect, MAX_DAMAGE_REGIONS};

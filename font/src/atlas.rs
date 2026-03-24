@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-use crate::FontRenderer;
+use crate::{FontRenderer, FontSource};
 
 const ASCII_FIRST: u32 = 32;
 const ASCII_LAST: u32 = 126;
@@ -31,6 +31,8 @@ pub struct GlyphAtlas {
     data: Vec<u8>,
     /// Replacement glyph for non-ASCII codepoints.
     replacement: Vec<u8>,
+    /// Where the font data came from.
+    source: FontSource,
 }
 
 impl GlyphAtlas {
@@ -122,7 +124,20 @@ impl GlyphAtlas {
             cell_h,
             data,
             replacement,
+            source: FontSource::Embedded,
         })
+    }
+
+    /// Create a new atlas with an explicit source tag.
+    pub fn new_with_source(font_data: &[u8], size_px: u16, source: FontSource) -> Option<Self> {
+        let mut atlas = Self::new(font_data, size_px)?;
+        atlas.source = source;
+        Some(atlas)
+    }
+
+    /// Returns the source from which this atlas's font was loaded.
+    pub fn source(&self) -> FontSource {
+        self.source
     }
 
     #[inline]
