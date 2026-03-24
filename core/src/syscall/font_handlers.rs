@@ -28,11 +28,11 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             Some(size) => size,
             None => return ctx.err(),
         };
-        let coverage_size = match 95usize.checked_mul(stride) {
+        let coverage_size = match slopos_font::ASCII_COUNT.checked_mul(stride) {
             Some(size) => size,
             None => return ctx.err(),
         };
-        let data_size = match 96usize.checked_mul(stride) {
+        let data_size = match (slopos_font::ASCII_COUNT + 1).checked_mul(stride) {
             Some(size) if size <= 65536 => size,
             _ => return ctx.err(),
         };
@@ -59,11 +59,11 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
                 );
                 ctx.ok(0)
             }
-            None => ctx.err(),
+            None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
         }
     } else if format == 0 {
         if width != 8 {
-            return ctx.err_with(slopos_abi::syscall::ENOSYS_RETURN);
+            return ctx.err();
         }
         if height == 0 || height > 32 {
             return ctx.err();
@@ -106,10 +106,10 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
                         );
                         ctx.ok(0)
                     }
-                    None => ctx.err(),
+                    None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
                 }
             }
-            None => ctx.err(),
+            None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
         }
     } else {
         ctx.err()
