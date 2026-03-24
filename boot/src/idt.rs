@@ -20,8 +20,8 @@ pub use slopos_arch::arch::idt::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR,
-    IdtEntry, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RESCHEDULE_IPI_VECTOR,
-    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    IdtEntry, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT, RCU_QS_IPI_VECTOR,
+    RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
 };
 
 #[repr(C, packed)]
@@ -105,6 +105,7 @@ unsafe extern "C" {
     fn isr19();
     fn isr128();
     fn isr_reschedule_ipi();
+    fn isr_rcu_qs_ipi();
     fn isr_tlb_shootdown();
     fn isr_shutdown_ipi();
     fn isr_spurious();
@@ -184,6 +185,12 @@ pub fn idt_init() {
     idt_set_gate(
         RESCHEDULE_IPI_VECTOR,
         handler_ptr(isr_reschedule_ipi),
+        0x08,
+        IDT_GATE_INTERRUPT,
+    );
+    idt_set_gate(
+        RCU_QS_IPI_VECTOR,
+        handler_ptr(isr_rcu_qs_ipi),
         0x08,
         IDT_GATE_INTERRUPT,
     );
@@ -390,6 +397,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     if vector == TLB_SHOOTDOWN_VECTOR {
         handle_tlb_shootdown_ipi();
+        return;
+    }
+
+    if vector == RCU_QS_IPI_VECTOR {
+        slopos_sync::rcu_note_qs();
+        send_eoi();
         return;
     }
 

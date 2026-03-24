@@ -1117,6 +1117,8 @@ pub fn scheduler_is_preemption_enabled() -> c_int {
 }
 
 pub fn scheduler_timer_tick() {
+    slopos_sync::rcu_note_qs();
+
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
 
