@@ -637,6 +637,12 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 /// * negative errno on failure
 pub const SYSCALL_FONT_SET: u64 = 144;
 
+/// Font bitmap format: 1-bit-per-pixel MSB-first, like VGA ROM fonts.
+pub const FONT_FORMAT_BITMAP: u64 = 0;
+/// Pre-rasterized coverage format: 8-bit-per-pixel alpha, 95 glyphs + replacement.
+pub const FONT_FORMAT_COVERAGE: u64 = 1;
+
+// Syscall numbers 145-147 are reserved for future font/console operations.
 pub const SYSCALL_TABLE_SIZE: usize = 148;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).

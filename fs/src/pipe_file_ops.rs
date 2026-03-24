@@ -162,12 +162,12 @@ impl FileOps for PipeReadOps {
                 pipe::reader_wq(pipe_id).remove_current();
                 continue;
             }
-            return Errno::EPERM.as_isize();
+            return Errno::EAGAIN.as_isize();
         }
     }
 
     fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
-        Errno::EPERM.as_isize()
+        Errno::EBADF.as_isize()
     }
 
     fn release(&self, handle: usize) {
@@ -247,7 +247,7 @@ impl FileOps for PipeWriteOps {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EPERM.as_isize()
+                        Errno::EPIPE.as_isize()
                     };
                 }
 
@@ -281,7 +281,7 @@ impl FileOps for PipeWriteOps {
                 pipe::writer_wq(pipe_id).remove_current();
                 continue;
             }
-            return Errno::EPERM.as_isize();
+            return Errno::EAGAIN.as_isize();
         }
     }
 

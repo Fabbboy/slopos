@@ -49,8 +49,8 @@ pub enum FontSource {
     /// Loaded from the filesystem at runtime.
     Filesystem,
     /// Loaded via `SYS_FONT_SET` from userland-provided bitmap or coverage data.
-    Bitmap,
-    /// Minimal bitmap fallback (VGA 8×16) used when no other font is available.
+    Syscall,
+    /// Minimal bitmap fallback (VGA 8\u{d7}16) used when no other font is available.
     BitmapFallback,
 }
 
@@ -307,7 +307,7 @@ impl<'a> FontRenderer<'a> {
                     if cov == 255 {
                         target.put_pixel(col, row, fmt.encode(color));
                     } else {
-                        let blended = atlas::blend_color32_pub(cov, color, blend_bg);
+                        let blended = atlas::blend_color32(cov, color, blend_bg);
                         target.put_pixel(col, row, fmt.encode(blended));
                     }
                 }

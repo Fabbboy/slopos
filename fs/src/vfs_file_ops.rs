@@ -121,7 +121,7 @@ impl FileOps for VfsFileOps {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EPERM.as_isize()
+                        Errno::EIO.as_isize()
                     };
                 }
             }
@@ -172,7 +172,7 @@ impl FileOps for VfsFileOps {
                     return if total > 0 {
                         total as isize
                     } else {
-                        Errno::EPERM.as_isize()
+                        Errno::EIO.as_isize()
                     };
                 }
             }

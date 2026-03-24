@@ -1,9 +1,8 @@
 //! Type-safe POSIX errno for kernel-internal use.
 //!
-//! Modeled after the Linux Rust bindings (`kernel::error::Error`).
-//! [`Errno`] wraps a [`NonZeroI32`] that is always a valid negative
-//! POSIX error code, verified at compile time for constants and at
-//! runtime for dynamic values.
+//! All errno constants, their [`Debug`] representation, and
+//! human-readable names are generated from a single invocation of
+//! [`define_errnos!`] — adding a new code requires exactly one line.
 //!
 //! ## Usage
 //!
@@ -74,110 +73,90 @@ impl Errno {
     pub const fn as_u64(self) -> u64 {
         self.0.get() as i64 as u64
     }
-
-    // ── POSIX errno constants ──────────────────────────────────────────
-
-    pub const EPERM: Self = Self::new(-1);
-    pub const ENOENT: Self = Self::new(-2);
-    pub const ESRCH: Self = Self::new(-3);
-    pub const EINTR: Self = Self::new(-4);
-    pub const EIO: Self = Self::new(-5);
-    pub const ENXIO: Self = Self::new(-6);
-    pub const ENOEXEC: Self = Self::new(-8);
-    pub const EBADF: Self = Self::new(-9);
-    pub const ECHILD: Self = Self::new(-10);
-    pub const EAGAIN: Self = Self::new(-11);
-    pub const ENOMEM: Self = Self::new(-12);
-    pub const EACCES: Self = Self::new(-13);
-    pub const EFAULT: Self = Self::new(-14);
-    pub const EBUSY: Self = Self::new(-16);
-    pub const EEXIST: Self = Self::new(-17);
-    pub const ENOTDIR: Self = Self::new(-20);
-    pub const EISDIR: Self = Self::new(-21);
-    pub const EINVAL: Self = Self::new(-22);
-    pub const ENFILE: Self = Self::new(-23);
-    pub const EMFILE: Self = Self::new(-24);
-    pub const ENOSPC: Self = Self::new(-28);
-    pub const ESPIPE: Self = Self::new(-29);
-    pub const EPIPE: Self = Self::new(-32);
-    pub const ERANGE: Self = Self::new(-34);
-    pub const ENAMETOOLONG: Self = Self::new(-36);
-    pub const ENOSYS: Self = Self::new(-38);
-    pub const ENOTEMPTY: Self = Self::new(-39);
-    pub const ENOTSOCK: Self = Self::new(-88);
-    pub const EDESTADDRREQ: Self = Self::new(-89);
-    pub const EPROTONOSUPPORT: Self = Self::new(-93);
-    pub const EOPNOTSUPP: Self = Self::new(-95);
-    pub const EAFNOSUPPORT: Self = Self::new(-97);
-    pub const EADDRINUSE: Self = Self::new(-98);
-    pub const EADDRNOTAVAIL: Self = Self::new(-99);
-    pub const ENETUNREACH: Self = Self::new(-101);
-    pub const ECONNABORTED: Self = Self::new(-103);
-    pub const ECONNRESET: Self = Self::new(-104);
-    pub const ENOBUFS: Self = Self::new(-105);
-    pub const EISCONN: Self = Self::new(-106);
-    pub const ENOTCONN: Self = Self::new(-107);
-    pub const ETIMEDOUT: Self = Self::new(-110);
-    pub const ECONNREFUSED: Self = Self::new(-111);
-    pub const EHOSTUNREACH: Self = Self::new(-113);
-    pub const EINPROGRESS: Self = Self::new(-115);
-
-    /// Kernel-internal: restartable syscall.  **Must never reach userland.**
-    pub const ERESTARTSYS: Self = Self::new(-512);
 }
 
-impl fmt::Debug for Errno {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self.raw() {
-            -1 => "EPERM",
-            -2 => "ENOENT",
-            -3 => "ESRCH",
-            -4 => "EINTR",
-            -5 => "EIO",
-            -6 => "ENXIO",
-            -8 => "ENOEXEC",
-            -9 => "EBADF",
-            -10 => "ECHILD",
-            -11 => "EAGAIN",
-            -12 => "ENOMEM",
-            -13 => "EACCES",
-            -14 => "EFAULT",
-            -16 => "EBUSY",
-            -17 => "EEXIST",
-            -20 => "ENOTDIR",
-            -21 => "EISDIR",
-            -22 => "EINVAL",
-            -23 => "ENFILE",
-            -24 => "EMFILE",
-            -28 => "ENOSPC",
-            -29 => "ESPIPE",
-            -32 => "EPIPE",
-            -34 => "ERANGE",
-            -36 => "ENAMETOOLONG",
-            -38 => "ENOSYS",
-            -39 => "ENOTEMPTY",
-            -88 => "ENOTSOCK",
-            -89 => "EDESTADDRREQ",
-            -93 => "EPROTONOSUPPORT",
-            -95 => "EOPNOTSUPP",
-            -97 => "EAFNOSUPPORT",
-            -98 => "EADDRINUSE",
-            -99 => "EADDRNOTAVAIL",
-            -101 => "ENETUNREACH",
-            -103 => "ECONNABORTED",
-            -104 => "ECONNRESET",
-            -105 => "ENOBUFS",
-            -106 => "EISCONN",
-            -107 => "ENOTCONN",
-            -110 => "ETIMEDOUT",
-            -111 => "ECONNREFUSED",
-            -113 => "EHOSTUNREACH",
-            -115 => "EINPROGRESS",
-            -512 => "ERESTARTSYS",
-            _ => return write!(f, "Errno({})", self.raw()),
-        };
-        write!(f, "Errno::{name}")
-    }
+macro_rules! define_errnos {
+    ( $( $(#[$meta:meta])* $name:ident = $val:literal; )* ) => {
+        impl Errno {
+            $( $(#[$meta])* pub const $name: Self = Self::new(-$val); )*
+        }
+
+        impl Errno {
+            /// Return the symbolic name of this errno (e.g. `"EPERM"`).
+            pub const fn name(self) -> &'static str {
+                match self.raw() {
+                    $( -$val => stringify!($name), )*
+                    _ => "UNKNOWN",
+                }
+            }
+        }
+
+        impl fmt::Debug for Errno {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let n = self.name();
+                if n == "UNKNOWN" {
+                    write!(f, "Errno({})", self.raw())
+                } else {
+                    write!(f, "Errno::{n}")
+                }
+            }
+        }
+    };
+}
+
+// ── Single source of truth for all errno constants ─────────────────────
+//
+// Values follow the Linux/x86-64 numbering from
+// include/uapi/asm-generic/errno-base.h and errno.h.
+define_errnos! {
+    EPERM           =   1;
+    ENOENT          =   2;
+    ESRCH           =   3;
+    EINTR           =   4;
+    EIO             =   5;
+    ENXIO           =   6;
+    E2BIG           =   7;
+    ENOEXEC         =   8;
+    EBADF           =   9;
+    ECHILD          =  10;
+    EAGAIN          =  11;
+    ENOMEM          =  12;
+    EACCES          =  13;
+    EFAULT          =  14;
+    EBUSY           =  16;
+    EEXIST          =  17;
+    ENODEV          =  19;
+    ENOTDIR         =  20;
+    EISDIR          =  21;
+    EINVAL          =  22;
+    ENFILE          =  23;
+    EMFILE          =  24;
+    ENOSPC          =  28;
+    ESPIPE          =  29;
+    EPIPE           =  32;
+    ERANGE          =  34;
+    ENAMETOOLONG    =  36;
+    ENOSYS          =  38;
+    ENOTEMPTY       =  39;
+    ENOTSOCK        =  88;
+    EDESTADDRREQ    =  89;
+    EPROTONOSUPPORT =  93;
+    EOPNOTSUPP      =  95;
+    EAFNOSUPPORT    =  97;
+    EADDRINUSE      =  98;
+    EADDRNOTAVAIL   =  99;
+    ENETUNREACH     = 101;
+    ECONNABORTED    = 103;
+    ECONNRESET      = 104;
+    ENOBUFS         = 105;
+    EISCONN         = 106;
+    ENOTCONN        = 107;
+    ETIMEDOUT       = 110;
+    ECONNREFUSED    = 111;
+    EHOSTUNREACH    = 113;
+    EINPROGRESS     = 115;
+    /// Kernel-internal: restartable syscall.  **Must never reach userland.**
+    ERESTARTSYS     = 512;
 }
 
 impl fmt::Display for Errno {

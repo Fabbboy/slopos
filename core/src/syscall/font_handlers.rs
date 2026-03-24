@@ -1,8 +1,19 @@
 //! Font management syscall handlers (inspired by Linux KDFONTOP).
 
-use slopos_mm::user_copy::copy_bytes_from_user;
-use slopos_mm::user_ptr::UserBytes;
+use slopos_mm::user_io_buf::memdup_user;
 use slopos_utils::klog_info;
+
+use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
+
+fn rcu_free_old_atlas(old: *mut slopos_font::atlas::GlyphAtlas) {
+    if !old.is_null() {
+        slopos_sync::synchronize_rcu();
+        unsafe {
+            drop(alloc::boxed::Box::from_raw(old));
+        }
+    }
+    slopos_font::atlas::invoke_font_change_callback();
+}
 
 define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
     if pid > 1 {
@@ -15,11 +26,10 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
     let glyph_count = args.arg3 as usize;
     let format = args.arg4;
 
-    // Validate parameters.
     if data_ptr == 0 {
         return ctx.bad_address();
     }
-    if format == 1 {
+    if format == FONT_FORMAT_COVERAGE {
         if width == 0 || height == 0 || height > 32 {
             return ctx.err();
         }
@@ -37,21 +47,19 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             _ => return ctx.err(),
         };
 
-        let user_bytes = match UserBytes::try_new(data_ptr, data_size) {
-            Ok(b) => b,
-            Err(_) => return ctx.bad_address(),
+        let mut font_data = match memdup_user(data_ptr, data_size, 65536) {
+            Ok(v) => v,
+            Err(e) => return ctx.err_with(e.as_u64()),
         };
-
-        let mut font_data = alloc::vec![0u8; data_size];
-        if copy_bytes_from_user(user_bytes, &mut font_data).is_err() {
-            return ctx.bad_address();
-        }
 
         let replacement = font_data.split_off(coverage_size);
         let coverage = font_data;
-        match slopos_font::atlas::GlyphAtlas::from_raw_coverage(width, height, coverage, replacement) {
+        match slopos_font::atlas::GlyphAtlas::from_raw_coverage(
+            width, height, coverage, replacement, slopos_font::FontSource::Syscall,
+        ) {
             Some(atlas) => {
-                slopos_font::atlas::replace_global(atlas);
+                let old = slopos_font::atlas::replace_global(atlas);
+                rcu_free_old_atlas(old);
                 klog_info!(
                     "FONT_SET: applied {}x{} coverage font (95 glyphs + replacement)",
                     width,
@@ -61,7 +69,7 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             }
             None => ctx.err_with(slopos_abi::syscall::ERRNO_ENOMEM),
         }
-    } else if format == 0 {
+    } else if format == FONT_FORMAT_BITMAP {
         if width != 8 {
             return ctx.err();
         }
@@ -77,16 +85,10 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
             _ => return ctx.err(),
         };
 
-        // Copy bitmap data from user space.
-        let user_bytes = match UserBytes::try_new(data_ptr, data_size) {
-            Ok(b) => b,
-            Err(_) => return ctx.bad_address(),
+        let font_data = match memdup_user(data_ptr, data_size, 16384) {
+            Ok(v) => v,
+            Err(e) => return ctx.err_with(e.as_u64()),
         };
-
-        let mut font_data = alloc::vec![0u8; data_size];
-        if copy_bytes_from_user(user_bytes, &mut font_data).is_err() {
-            return ctx.bad_address();
-        }
 
         match slopos_font::bitmap::bitmap_to_coverage(&font_data, width, height, glyph_count) {
             Some((coverage, replacement)) => {
@@ -95,9 +97,11 @@ define_syscall!(syscall_font_set(ctx, args) requires(let pid: process_id) {
                     height,
                     coverage,
                     replacement,
+                    slopos_font::FontSource::Syscall,
                 ) {
                     Some(atlas) => {
-                        slopos_font::atlas::replace_global(atlas);
+                        let old = slopos_font::atlas::replace_global(atlas);
+                        rcu_free_old_atlas(old);
                         klog_info!(
                             "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
                             width,

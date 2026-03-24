@@ -130,6 +130,7 @@ fn unified_idle_loop(_: *mut c_void) {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
+        slopos_sync::rcu_note_qs();
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
         }
@@ -274,6 +275,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         });
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
+            slopos_sync::rcu_note_qs();
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
             }
@@ -293,6 +295,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.increment_idle_time();
         });
+        slopos_sync::rcu_note_qs();
 
         unsafe {
             core::arch::asm!("sti; hlt; cli", options(nomem, nostack));

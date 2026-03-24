@@ -16,6 +16,6 @@ pub fn init() {
 }
 
 #[inline]
-pub fn atlas() -> Option<slopos_font::atlas::AtlasGuard> {
+pub fn atlas() -> Option<slopos_font::atlas::AtlasRef> {
     slopos_font::atlas::global()
 }

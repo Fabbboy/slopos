@@ -1900,7 +1900,7 @@ pub fn test_pipe_broken_pipe() -> TestResult {
 
     let payload = b"orphan";
     let result = file_write_fd(pid, write_fd, &mut KernelIoBufRef::new(payload));
-    assert_eq_test!(result, -1, "write to broken pipe should return -1");
+    assert_eq_test!(result, -32, "write to broken pipe should return EPIPE(-32)");
 
     assert_eq_test!(file_close_fd(pid, write_fd), 0, "close write failed");
     task_terminate(task_id);

@@ -234,6 +234,7 @@ fn switch_from_current_to_idle(
 
     set_scheduler_current_task(cpu_id, idle_task);
     switch_to_kernel_address_space(idle_task);
+    slopos_sync::rcu_note_qs();
 
     unsafe {
         let old_pid = if !current.is_null() {
@@ -415,6 +416,7 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         sched.increment_switches();
     });
     task_set_current(to_task);
+    slopos_sync::rcu_note_qs();
 
     unsafe {
         let is_user_mode = (*to_task).flags & TASK_FLAG_USER_MODE != 0;
@@ -559,6 +561,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     task_record_context_switch(next_task, idle_task, timestamp);
 
     set_scheduler_current_task(cpu_id, idle_task);
+    slopos_sync::rcu_note_qs();
 
     switch_to_kernel_address_space(idle_task);
 

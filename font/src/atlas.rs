@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
@@ -138,6 +138,7 @@ impl GlyphAtlas {
         cell_h: u16,
         coverage: Vec<u8>,
         replacement: Vec<u8>,
+        source: FontSource,
     ) -> Option<Self> {
         if cell_w == 0 || cell_h == 0 {
             return None;
@@ -154,7 +155,7 @@ impl GlyphAtlas {
             cell_h,
             data: coverage,
             replacement,
-            source: FontSource::Bitmap,
+            source,
         })
     }
 
@@ -451,12 +452,7 @@ impl GlyphAtlas {
 
 /// Blend fg and bg Color32 values by coverage (0-255).
 #[inline]
-pub fn blend_color32_pub(cov: u8, fg: Color32, bg: Color32) -> Color32 {
-    blend_color32(cov, fg, bg)
-}
-
-#[inline]
-fn blend_color32(cov: u8, fg: Color32, bg: Color32) -> Color32 {
+pub fn blend_color32(cov: u8, fg: Color32, bg: Color32) -> Color32 {
     let a = cov as u32;
     let inv = 255 - a;
     let r = (fg.red() as u32 * a + bg.red() as u32 * inv + 128) / 255;
@@ -487,75 +483,51 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
 // ---------------------------------------------------------------------------
 // Global atlas (kernel use)
 // ---------------------------------------------------------------------------
+//
+// Protected by RCU: readers must hold preemption disabled (e.g. via
+// IrqMutex guard or explicit PreemptGuard) while using the returned
+// AtlasRef.  Writers call replace_global() which atomically swaps the
+// pointer; the caller is responsible for calling synchronize_rcu() and
+// freeing the old atlas.
 
-struct RcGlyphAtlas {
-    refcount: AtomicU32,
-    generation: u64,
-    atlas: GlyphAtlas,
+/// Lightweight borrow of the global atlas.
+///
+/// # Safety contract
+///
+/// The caller must ensure preemption is disabled (RCU read-side critical
+/// section) for the entire lifetime of this reference.  All existing
+/// callers satisfy this — vconsole holds `IrqMutex`, panic screen runs
+/// on a single CPU with interrupts disabled, and kernel_font is called
+/// from similar contexts.
+pub struct AtlasRef {
+    ptr: *const GlyphAtlas,
 }
 
-pub struct AtlasGuard {
-    ptr: *const RcGlyphAtlas,
-}
+unsafe impl Send for AtlasRef {}
+unsafe impl Sync for AtlasRef {}
 
-unsafe impl Send for AtlasGuard {}
-unsafe impl Sync for AtlasGuard {}
-
-impl core::ops::Deref for AtlasGuard {
+impl core::ops::Deref for AtlasRef {
     type Target = GlyphAtlas;
 
+    #[inline]
     fn deref(&self) -> &GlyphAtlas {
-        // SAFETY: AtlasGuard always points to a valid RcGlyphAtlas while its
-        // refcount is held, and deref only borrows the embedded GlyphAtlas.
-        unsafe { &(*self.ptr).atlas }
+        // SAFETY: ptr is non-null (checked by global()), and the caller
+        // holds preemption disabled so the atlas cannot be freed.
+        unsafe { &*self.ptr }
     }
 }
 
-impl Clone for AtlasGuard {
-    fn clone(&self) -> Self {
-        // SAFETY: self.ptr remains valid while any AtlasGuard exists.
-        unsafe {
-            (*self.ptr).refcount.fetch_add(1, Ordering::Acquire);
-        }
-        Self { ptr: self.ptr }
-    }
-}
-
-impl Drop for AtlasGuard {
-    fn drop(&mut self) {
-        // SAFETY: self.ptr remains valid until we observe the final reference.
-        let prev = unsafe { (*self.ptr).refcount.fetch_sub(1, Ordering::Release) };
-        if prev == 1 {
-            core::sync::atomic::fence(Ordering::Acquire);
-            // SAFETY: We just observed the last reference and can reclaim box.
-            unsafe {
-                drop(Box::from_raw(self.ptr as *mut RcGlyphAtlas));
-            }
-        }
-    }
-}
-
-static GLOBAL_ATLAS: AtomicPtr<RcGlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
-static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_ATLAS: AtomicPtr<GlyphAtlas> = AtomicPtr::new(core::ptr::null_mut());
 static FONT_CHANGE_CALLBACK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 pub fn register_font_change_callback(cb: fn()) {
     FONT_CHANGE_CALLBACK.store(cb as *mut (), Ordering::Release);
 }
 
-/// Invoke the registered font change callback, if one exists.
-///
-/// # Safety
-///
-/// The pointer stored in `FONT_CHANGE_CALLBACK` was registered via
-/// `register_font_change_callback`, which only accepts `fn()`. The function
-/// is never unregistered, so the pointer is valid for the lifetime of the kernel.
-fn invoke_font_change_callback() {
+pub fn invoke_font_change_callback() {
     let cb = FONT_CHANGE_CALLBACK.load(Ordering::Acquire);
     if !cb.is_null() {
-        // SAFETY: The pointer was stored via `register_font_change_callback` which
-        // only accepts `fn()`. The function is never unregistered, so the pointer
-        // is valid for the lifetime of the kernel.
+        // SAFETY: stored via register_font_change_callback which only accepts fn().
         let f: fn() = unsafe { core::mem::transmute(cb) };
         f();
     }
@@ -584,6 +556,7 @@ pub fn init_global_bitmap() -> bool {
                 bitmap::BITMAP_FONT_HEIGHT,
                 coverage,
                 replacement,
+                FontSource::BitmapFallback,
             ) {
                 Some(atlas) => {
                     replace_global(atlas);
@@ -596,60 +569,33 @@ pub fn init_global_bitmap() -> bool {
     }
 }
 
-pub fn replace_global(new_atlas: GlyphAtlas) {
-    let generation = ATLAS_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    let new_ptr = Box::into_raw(Box::new(RcGlyphAtlas {
-        refcount: AtomicU32::new(1),
-        generation,
-        atlas: new_atlas,
-    }));
+/// Atomically replace the global atlas.
+///
+/// Returns a pointer to the previous atlas (may be null on first call).
+/// **The caller must arrange deferred freeing** — in kernel context this
+/// means calling `synchronize_rcu()` then `Box::from_raw(old)`.
+/// During early boot (before the scheduler is running) the old pointer
+/// may be freed immediately since no concurrent readers are possible.
+pub fn replace_global(new_atlas: GlyphAtlas) -> *mut GlyphAtlas {
+    let new_ptr = Box::into_raw(Box::new(new_atlas));
     let old = GLOBAL_ATLAS.swap(new_ptr, Ordering::AcqRel);
-    if !old.is_null() {
-        // SAFETY: `old` came from Box::into_raw and points to RcGlyphAtlas.
-        let prev = unsafe { (*old).refcount.fetch_sub(1, Ordering::Release) };
-        if prev == 1 {
-            core::sync::atomic::fence(Ordering::Acquire);
-            // SAFETY: swap dropped the global ref and this was last holder.
-            unsafe {
-                drop(Box::from_raw(old));
-            }
-        }
-    }
-
-    invoke_font_change_callback();
+    // Callback deferred — caller invokes it after RCU grace period.
+    old
 }
 
-pub fn global() -> Option<AtlasGuard> {
-    loop {
-        let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
-        if ptr.is_null() {
-            return None;
-        }
-
-        // SAFETY: ptr was loaded from GLOBAL_ATLAS and may only be reclaimed
-        // after refcount reaches zero.
-        unsafe {
-            (*ptr).refcount.fetch_add(1, Ordering::Acquire);
-        }
-
-        if GLOBAL_ATLAS.load(Ordering::Acquire) == ptr {
-            let _ = unsafe { (*ptr).generation };
-            return Some(AtlasGuard { ptr });
-        }
-
-        // SAFETY: We just acquired a reference above and are releasing it here.
-        unsafe {
-            let prev = (*ptr).refcount.fetch_sub(1, Ordering::Release);
-            if prev == 1 {
-                core::sync::atomic::fence(Ordering::Acquire);
-                drop(Box::from_raw(ptr));
-            }
-        }
+/// Load the current global atlas.
+///
+/// # Safety contract
+///
+/// The caller must be in an RCU read-side critical section (preemption
+/// disabled) for the duration of the returned `AtlasRef`'s lifetime.
+pub fn global() -> Option<AtlasRef> {
+    let ptr = GLOBAL_ATLAS.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        Some(AtlasRef { ptr })
     }
-}
-
-pub fn current_generation() -> u64 {
-    ATLAS_GENERATION.load(Ordering::Acquire)
 }
 
 #[cfg(test)]
@@ -665,10 +611,16 @@ mod tests {
         let coverage = alloc::vec![7u8; 95 * stride];
         let replacement = alloc::vec![9u8; stride];
 
-        let atlas = GlyphAtlas::from_raw_coverage(cell_w, cell_h, coverage, replacement)
-            .expect("atlas must build");
+        let atlas = GlyphAtlas::from_raw_coverage(
+            cell_w,
+            cell_h,
+            coverage,
+            replacement,
+            FontSource::Syscall,
+        )
+        .expect("atlas must build");
 
-        assert_eq!(atlas.source(), FontSource::Bitmap);
+        assert_eq!(atlas.source(), FontSource::Syscall);
         assert_eq!(atlas.cell_width(), 8);
         assert_eq!(atlas.cell_height(), 16);
         assert_eq!(atlas.get_coverage(32)[0], 7);
@@ -683,7 +635,16 @@ mod tests {
         let coverage = alloc::vec![0u8; 95 * stride - 1];
         let replacement = alloc::vec![0u8; stride];
 
-        assert!(GlyphAtlas::from_raw_coverage(cell_w, cell_h, coverage, replacement).is_none());
+        assert!(
+            GlyphAtlas::from_raw_coverage(
+                cell_w,
+                cell_h,
+                coverage,
+                replacement,
+                FontSource::Syscall
+            )
+            .is_none()
+        );
     }
 
     #[test]

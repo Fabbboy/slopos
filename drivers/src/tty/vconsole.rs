@@ -1234,20 +1234,18 @@ impl VConsoleState {
             self.cells.set(sr_bottom, c, Cell::blank());
         }
 
-        if self.shadow.is_some() {
-            if let Some(ref mut shadow) = self.shadow {
-                let row_px = self.cell_h as usize;
-                let row_bytes = row_px.saturating_mul(self.shadow_pitch);
-                let region_start = sr_top.saturating_mul(row_bytes);
-                let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
-                if row_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
-                    shadow.copy_within(region_start + row_bytes..region_end, region_start);
-                }
-                let clear_start = region_end.saturating_sub(row_bytes).min(shadow.len());
-                let clear_end = region_end.min(shadow.len());
-                if clear_start < clear_end {
-                    shadow[clear_start..clear_end].fill(0);
-                }
+        if let Some(ref mut shadow) = self.shadow {
+            let row_px = self.cell_h as usize;
+            let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+            let region_start = sr_top.saturating_mul(row_bytes);
+            let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
+            if row_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                shadow.copy_within(region_start + row_bytes..region_end, region_start);
+            }
+            let clear_start = region_end.saturating_sub(row_bytes).min(shadow.len());
+            let clear_end = region_end.min(shadow.len());
+            if clear_start < clear_end {
+                shadow[clear_start..clear_end].fill(0);
             }
             self.mark_all_dirty();
         } else if self.fb.is_some() {
@@ -1659,15 +1657,15 @@ pub fn has_framebuffer() -> bool {
 }
 
 pub fn notify_font_changed() {
-    let (gen_before, need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
+    let (atlas_ptr, need_resize, new_cw, new_ch, new_rows, new_cols, fb_info, old_rows, old_cols) = {
         let state = VCONSOLE_STATE.lock();
-        let gen_before = atlas::current_generation();
         let Some(fb) = state.fb else {
             return;
         };
         let Some(atlas) = atlas::global() else {
             return;
         };
+        let ptr = &*atlas as *const _ as usize;
         let cw = atlas.cell_width();
         let ch = atlas.cell_height();
         if cw == state.cell_w && ch == state.cell_h {
@@ -1678,7 +1676,7 @@ pub fn notify_font_changed() {
         let nc = calc_cols.min(VCONSOLE_MAX_COLS);
         let nr = calc_rows.min(VCONSOLE_MAX_ROWS);
         (
-            gen_before,
+            ptr,
             true,
             cw,
             ch,
@@ -1712,7 +1710,7 @@ pub fn notify_font_changed() {
     if state.fb.is_none() {
         return;
     }
-    if atlas::current_generation() != gen_before {
+    if atlas::global().map(|a| &*a as *const _ as usize) != Some(atlas_ptr) {
         return;
     }
 
