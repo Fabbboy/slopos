@@ -371,13 +371,7 @@ pub fn unregister_surface_for_task(task_id: u32) {
     let mut ctx = CONTEXT.lock();
     ctx.remove_surface(task_id);
 
-    let mut filtered = VecDeque::new();
-    while let Some(op) = ctx.queue.pop_front() {
-        if op.task_id() != task_id {
-            filtered.push_back(op);
-        }
-    }
-    ctx.queue = filtered;
+    ctx.queue.retain(|op| op.task_id() != task_id);
 }
 
 // =============================================================================
