@@ -28,13 +28,37 @@ impl FileOps for SocketFileOps {
     }
 
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
-        // Socket API uses raw pointers; use a kernel-side staging buffer.
-        let mut tmp = [0u8; IO_STAGING_SIZE];
-        let write_len = buf.len().min(tmp.len());
-        match buf.copy_out(0, &mut tmp[..write_len]) {
-            Ok(n) => socket::socket_send(handle as u32, tmp.as_ptr(), n) as isize,
-            Err(e) => e.as_isize(),
+        let mut staging = [0u8; IO_STAGING_SIZE];
+        let buf_len = buf.len();
+        let mut total = 0usize;
+
+        while total < buf_len {
+            let chunk = (buf_len - total).min(staging.len());
+            let n = match buf.copy_out(total, &mut staging[..chunk]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        e.as_isize()
+                    };
+                }
+            };
+            let sent = socket::socket_send(handle as u32, staging.as_ptr(), n);
+            if sent <= 0 {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    sent as isize
+                };
+            }
+            total += sent as usize;
+            if (sent as usize) < n {
+                break;
+            }
         }
+        total as isize
     }
 
     fn release(&self, handle: usize) {

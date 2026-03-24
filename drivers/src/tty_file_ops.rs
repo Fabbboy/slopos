@@ -33,16 +33,40 @@ impl FileOps for TtyFileOps {
     fn write(&self, handle: usize, buf: &dyn IoBufRead, _offset: u64, flags: u32) -> isize {
         let tty_idx = TtyIndex(handle as u8);
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        // TTY driver API uses &[u8]; use a kernel-side staging buffer.
-        let mut tmp = [0u8; IO_STAGING_SIZE];
-        let write_len = buf.len().min(tmp.len());
-        match buf.copy_out(0, &mut tmp[..write_len]) {
-            Ok(n) => match tty::write(tty_idx, &tmp[..n], nonblock) {
-                Ok(written) => written as isize,
-                Err(e) => e.to_errno() as isize,
-            },
-            Err(e) => e.as_isize(),
+        let mut staging = [0u8; IO_STAGING_SIZE];
+        let buf_len = buf.len();
+        let mut total = 0usize;
+
+        while total < buf_len {
+            let chunk = (buf_len - total).min(staging.len());
+            let n = match buf.copy_out(total, &mut staging[..chunk]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        e.as_isize()
+                    };
+                }
+            };
+            match tty::write(tty_idx, &staging[..n], nonblock) {
+                Ok(written) => {
+                    total += written;
+                    if written < n {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        e.to_errno() as isize
+                    };
+                }
+            }
         }
+        total as isize
     }
 
     fn release(&self, handle: usize) {
