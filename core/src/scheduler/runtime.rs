@@ -5,7 +5,9 @@ use slopos_sync::{IrqMutex, OnceLock};
 use slopos_utils::klog_info;
 
 use super::per_cpu;
-use super::scheduler::{run_ready_task_from_idle, schedule_task, set_scheduler_enabled, r#yield};
+use super::scheduler::{
+    run_ready_task_from_idle, schedule_new_task, set_scheduler_enabled, r#yield,
+};
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_IDLE, Task, TaskEntry, reap_zombies,
     task_create, task_get_info, task_set_current,
@@ -103,7 +105,7 @@ pub fn spawn_kernel_task_from_driver(
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
         return INVALID_TASK_ID;
     }
-    if schedule_task(task_ptr) != 0 {
+    if schedule_new_task(task_ptr) != 0 {
         return INVALID_TASK_ID;
     }
     task_id
@@ -127,9 +129,9 @@ fn unified_idle_loop(_: *mut c_void) {
             continue;
         }
         let cpu_id = slopos_arch::pcr::get_current_cpu();
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.increment_idle_time();
-        });
+        // idle_time is now incremented per-tick in scheduler_timer_tick(),
+        // not per-idle-loop-iteration, so the counter stays in lockstep
+        // with total_ticks.
         if cpu_id == 0 {
             slopos_sync::rcu_process_callbacks();
         }
@@ -271,8 +273,56 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     unsafe { enter_scheduler_on_idle_stack(cpu_id, idle_task, idle_stack_top) }
 }
 
+/// Callback registered by the boot layer to start the per-CPU LAPIC timer.
+/// Returns `true` when the timer was successfully started (or already running).
+/// Called from the scheduler loop on each AP until it returns `true`.
+static AP_TIMER_START_CB: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Register a callback that APs invoke from their scheduler loop to start
+/// their LAPIC timer.  The boot layer calls this after calibration so that
+/// APs (which may already be running) can pick up the calibrated frequency.
+///
+/// The callback signature is `fn() -> bool` (returns true once started).
+pub fn register_ap_timer_start(cb: fn() -> bool) {
+    AP_TIMER_START_CB.store(cb as *mut (), core::sync::atomic::Ordering::Release);
+}
+
+/// Try to start the per-CPU LAPIC timer via the registered callback.
+/// Called once per scheduler-loop iteration until the timer is running.
+fn deferred_start_ap_timer(cpu_id: usize) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static AP_TIMER_DONE: [AtomicBool; 256] = {
+        const FALSE: AtomicBool = AtomicBool::new(false);
+        [FALSE; 256]
+    };
+
+    if cpu_id >= AP_TIMER_DONE.len() {
+        return;
+    }
+    if AP_TIMER_DONE[cpu_id].load(Ordering::Relaxed) {
+        return;
+    }
+
+    let ptr = AP_TIMER_START_CB.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return;
+    }
+
+    let cb: fn() -> bool = unsafe { core::mem::transmute(ptr) };
+    if cb() {
+        klog_info!("SCHED: CPU {} LAPIC timer started (deferred)", cpu_id);
+        AP_TIMER_DONE[cpu_id].store(true, Ordering::Relaxed);
+    }
+}
+
 fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
     loop {
+        // Start the LAPIC timer on this AP once the boot layer registers
+        // the callback (after calibration).  No-op after the first success.
+        deferred_start_ap_timer(cpu_id);
+
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.drain_remote_inbox();
         });
@@ -295,9 +345,8 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
 
         reap_zombies();
 
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.increment_idle_time();
-        });
+        // idle_time is now incremented per-tick in scheduler_timer_tick(),
+        // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
         slopos_sync::rcu_note_qs();
 
         unsafe {

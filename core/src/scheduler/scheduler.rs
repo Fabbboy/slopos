@@ -71,7 +71,7 @@ pub(crate) fn is_scheduling_active() -> bool {
 }
 
 use slopos_mm::paging::paging_get_kernel_directory;
-use slopos_mm::process_vm::{process_vm_get_page_dir, process_vm_sync_kernel_mappings};
+use slopos_mm::process_vm::{process_vm_get_cr3_phys, process_vm_sync_kernel_mappings};
 use slopos_mm::tlb;
 use slopos_mm::user_copy;
 
@@ -157,6 +157,7 @@ fn set_scheduler_current_task(cpu_id: usize, task: *mut Task) {
     task_set_current(task);
 }
 
+#[allow(dead_code)]
 fn requeue_running_task(cpu_id: usize, current: *mut Task) {
     if current.is_null() {
         return;
@@ -278,6 +279,9 @@ fn switch_from_current_to_idle(
 
         let idle_ctx = &raw const (*idle_task).context;
         context_switch(current_ctx, idle_ctx);
+        // NOTE: code here runs when the TASK resumes (not on idle path).
+        // All post-switch cleanup happens in run_ready_task_from_idle
+        // after execute_task returns — that IS the idle resumption point.
     }
 }
 
@@ -308,6 +312,19 @@ pub fn clear_scheduler_current_task() {
     set_scheduler_current_task(cpu_id, ptr::null_mut());
 }
 
+/// Spin until the previous CPU finishes its outgoing context switch for
+/// this task.  Matches Linux's `smp_cond_load_acquire(&p->on_cpu, !VAL)`
+/// in `try_to_wake_up()`.  Without this, a woken task can be dispatched
+/// on CPU B while CPU A is still saving its registers → corruption.
+#[inline]
+fn wait_task_off_cpu(task: *mut Task) {
+    unsafe {
+        while (*task).on_cpu.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 pub fn schedule_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
@@ -316,11 +333,67 @@ pub fn schedule_task(task: *mut Task) -> c_int {
         return -1;
     }
 
+    wait_task_off_cpu(task);
+
     if unsafe { (*task).time_slice_remaining } == 0 {
         reset_task_quantum(task);
     }
 
     let Some(target_cpu) = per_cpu::select_target_cpu(task) else {
+        return -1;
+    };
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
+
+    if target_cpu == current_cpu {
+        let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enqueue_local(task));
+
+        if result != Some(0) {
+            return -1;
+        }
+        0
+    } else {
+        let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| {
+            sched.push_remote_wake(task);
+            0
+        });
+        if push_result != Some(0) {
+            return -1;
+        }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        if slopos_arch::pcr::is_cpu_online(target_cpu) {
+            send_reschedule_ipi(target_cpu);
+        }
+        0
+    }
+}
+
+/// Schedule a **newly created** task (fork, spawn, exec).
+///
+/// Uses the `SD_BALANCE_FORK`-style slow path: bypasses `last_cpu` and
+/// finds the globally idlest CPU with round-robin tie-breaking.  This
+/// spreads new processes across CPUs at creation time, matching Linux's
+/// `wake_up_new_task()` → `select_task_rq(WF_FORK)` path.
+///
+/// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
+/// which preserves cache affinity by preferring the last CPU.
+pub fn schedule_new_task(task: *mut Task) -> c_int {
+    if task.is_null() {
+        return -1;
+    }
+    if !task_is_ready(task) {
+        return -1;
+    }
+
+    // New tasks have on_cpu=false from init, but be defensive.
+    wait_task_off_cpu(task);
+
+    if unsafe { (*task).time_slice_remaining } == 0 {
+        reset_task_quantum(task);
+    }
+
+    let Some(target_cpu) = per_cpu::select_target_cpu_for_new(task) else {
         return -1;
     };
     let current_cpu = slopos_arch::pcr::get_current_cpu();
@@ -412,6 +485,13 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     let timestamp = kdiag_timestamp();
     task_record_context_switch(from_task, to_task, timestamp);
 
+    // Mark task as physically on this CPU.  schedule_task() spin-waits on
+    // this flag before allowing the task to be dispatched elsewhere, preventing
+    // the "wake-before-switch-complete" race (Linux p->on_cpu pattern).
+    unsafe {
+        (*to_task).on_cpu.store(true, Ordering::Release);
+    }
+
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_current_task(to_task);
         sched.increment_switches();
@@ -460,18 +540,15 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             if is_user_mode {
                 process_vm_sync_kernel_mappings((*to_task).process_id);
             }
-            let page_dir = process_vm_get_page_dir((*to_task).process_id);
-            if !page_dir.is_null() && (page_dir as u64) < USER_SPACE_TOP {
-                klog_info!(
-                    "SCHED: task {} has invalid page_dir pointer 0x{:x}",
-                    (*to_task).task_id,
-                    page_dir as u64
-                );
-                let _ = crate::task::task_terminate((*to_task).task_id);
-                return;
-            }
-            if !page_dir.is_null() && !(*page_dir).pml4_phys.is_null() {
-                (*to_task).context.cr3 = (*page_dir).pml4_phys.as_u64();
+            // Read the CR3 physical address under the VM_MANAGER lock so
+            // the process VM cannot be freed between the lookup and the
+            // dereference.  The old path used process_vm_get_page_dir()
+            // which returned a raw pointer that escaped the lock scope —
+            // a use-after-free race on SMP when another CPU destroys the
+            // process VM concurrently.
+            let cr3_phys = process_vm_get_cr3_phys((*to_task).process_id);
+            if cr3_phys != 0 {
+                (*to_task).context.cr3 = cr3_phys;
             }
         } else {
             let kernel_dir = paging_get_kernel_directory();
@@ -546,6 +623,17 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         return false;
     }
 
+    // Guard: if the task is still physically on another CPU (context switch
+    // in progress), put it back and skip.  Matches the schedule_task() spin,
+    // but here we re-enqueue instead of spinning (idle loop must not block).
+    if unsafe { (*next_task).on_cpu.load(Ordering::Acquire) } {
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+            let _ = sched.enqueue_local(next_task);
+            sched.set_executing_task(false);
+        });
+        return false;
+    }
+
     // Single-winner dispatch claim: only one CPU may run a READY task.
     // If another CPU already claimed it (or state changed), drop this dequeue.
     let next_task_id = unsafe { (*next_task).task_id };
@@ -558,6 +646,12 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     execute_task(cpu_id, idle_task, next_task);
 
+    // Context switch OUT is complete — the task's registers are fully saved.
+    // Clear on_cpu so schedule_task() on other CPUs can dispatch this task.
+    unsafe {
+        (*next_task).on_cpu.store(false, Ordering::Release);
+    }
+
     let timestamp = kdiag_timestamp();
     task_record_context_switch(next_task, idle_task, timestamp);
 
@@ -566,9 +660,13 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     switch_to_kernel_address_space(idle_task);
 
+    // Re-enqueue the task if it was preempted (Running) or in a pre-block
+    // critical section (WillBlock).  Blocked/Terminated tasks are NOT
+    // re-enqueued — they'll be woken by their respective event paths.
+    // This runs AFTER on_cpu=false and context save, so no SMP race.
     unsafe {
         if !task_is_terminated(next_task)
-            && task_is_running(next_task)
+            && (task_is_running(next_task) || task_is_will_block(next_task))
             && task_set_state((*next_task).task_id, TaskStatus::Ready) == 0
         {
             per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -777,7 +875,10 @@ fn schedule_internal(allow_user_frame_resume: bool) {
         return;
     }
 
-    requeue_running_task(cpu_id, current);
+    // Do NOT re-enqueue before the context switch — that is the
+    // "wake-before-switch-complete" SMP race.  The re-enqueue happens in
+    // run_ready_task_from_idle (the idle resumption point) AFTER
+    // execute_task returns and on_cpu is cleared.
     switch_from_current_to_idle(cpu_id, current, idle_task, allow_user_frame_resume);
     cpu::restore_flags(irq_flags);
 }
@@ -1132,9 +1233,20 @@ pub fn scheduler_timer_tick() {
     }
 
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
+    let running_idle = !current.is_null() && current == idle_task;
+
+    // Unconditional tick accounting — like Linux's account_process_tick().
+    // Every timer interrupt is counted regardless of preemption state.
+    // Idle time is categorised per-tick (not per-idle-loop-iteration) so
+    // that idle_ticks and total_ticks stay in lockstep.
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.increment_ticks();
+        if running_idle {
+            sched.increment_idle_time();
+        }
+    });
 
     let preempt_active = PreemptGuard::is_active();
-    let running_idle = !current.is_null() && current == idle_task;
 
     if preempt_active && !running_idle {
         scheduler_request_reschedule(RescheduleReason::TimerTick);
@@ -1143,7 +1255,6 @@ pub fn scheduler_timer_tick() {
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.drain_remote_inbox();
-        sched.increment_ticks();
     });
 
     wake_due_sleepers(platform::timer_ticks());

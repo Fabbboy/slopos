@@ -24,7 +24,7 @@ use slopos_mm::process_vm::{
 };
 use slopos_utils::klog_info;
 
-use crate::sched::schedule_task;
+use crate::sched::schedule_new_task;
 use crate::scheduler::task_struct::Task;
 use crate::task::{TaskEntry, task_create, task_find_by_id, task_get_info, task_terminate};
 use slopos_abi::task::INVALID_TASK_ID;
@@ -187,7 +187,7 @@ pub fn spawn_program_with_attrs(
             }
         }
 
-        if schedule_task(task_info) != 0 {
+        if schedule_new_task(task_info) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }

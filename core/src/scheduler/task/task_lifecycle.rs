@@ -739,7 +739,10 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
         parent.process_id
     );
 
-    scheduler::schedule_task(child_task_ptr);
+    // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU
+    // instead of sticking to the parent's CPU.  Wakeups from sleep will
+    // later use schedule_task() which preserves cache affinity.
+    scheduler::schedule_new_task(child_task_ptr);
 
     child_task_id
 }
@@ -918,7 +921,8 @@ pub fn task_clone(
         parent.process_id
     );
 
-    scheduler::schedule_task(child_task_ptr);
+    // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU.
+    scheduler::schedule_new_task(child_task_ptr);
 
     Ok(child_task_id)
 }

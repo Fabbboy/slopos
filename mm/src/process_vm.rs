@@ -201,6 +201,23 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*process_ptr).page_dir }
 }
 
+/// Read the PML4 physical address for a process, entirely under the
+/// VM_MANAGER lock.  Returns 0 if the process or page directory is not found.
+/// SMP-safe: the returned u64 cannot become dangling.
+pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
+    let manager = VM_MANAGER.lock();
+    for process in manager.processes.iter() {
+        if process.process_id == process_id {
+            let page_dir = process.page_dir;
+            if page_dir.is_null() {
+                return 0;
+            }
+            return unsafe { (*page_dir).pml4_phys.as_u64() };
+        }
+    }
+    0
+}
+
 pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     let cr3_phys = cr3 & !0xFFF;
     if cr3_phys == 0 {
@@ -222,11 +239,16 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
 }
 
 pub fn process_vm_sync_kernel_mappings(process_id: u32) {
-    let page_dir = process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
-        return;
+    let manager = VM_MANAGER.lock();
+    for process in manager.processes.iter() {
+        if process.process_id == process_id {
+            let page_dir = process.page_dir;
+            if !page_dir.is_null() {
+                paging_sync_kernel_mappings(page_dir);
+            }
+            return;
+        }
     }
-    paging_sync_kernel_mappings(page_dir);
 }
 
 fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: VmaFlags) -> c_int {

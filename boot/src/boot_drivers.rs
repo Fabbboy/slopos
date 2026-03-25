@@ -224,6 +224,7 @@ const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 fn boot_step_lapic_timer_start_fn() {
     use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
 
+    // Start BSP timer.
     if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS) {
         panic!(
             "SlopOS requires LAPIC timer — set_periodic_ms failed (vector 0x{:x}, {}ms)",
@@ -237,6 +238,16 @@ fn boot_step_lapic_timer_start_fn() {
         LAPIC_TIMER_PERIOD_MS,
         1000 / LAPIC_TIMER_PERIOD_MS,
     );
+
+    // Register a callback so APs can start their LAPIC timers from their
+    // scheduler loops.  APs boot before calibration (SMP priority 45 <
+    // HPET priority 55 < calibration priority 57), so they defer timer
+    // start until the callback is registered here.
+    fn ap_start_timer() -> bool {
+        use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
+        apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS)
+    }
+    slopos_core::scheduler::runtime::register_ap_timer_start(ap_start_timer);
 }
 
 fn boot_step_pci_init_fn() {
