@@ -91,6 +91,10 @@ impl WindowedApp for SysmonApp {
         win.request_redraw();
     }
 
+    fn refresh_interval_ms(&self) -> Option<u64> {
+        Some(REFRESH_INTERVAL_MS)
+    }
+
     fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
         match event {
             Event::CloseRequest => return ControlFlow::Exit,

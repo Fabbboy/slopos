@@ -44,6 +44,17 @@ pub trait WindowedApp {
     /// The `DrawBuffer` already has the correct pixel format set.
     /// Width and height are available via `fb.width()` / `fb.height()`.
     fn draw(&mut self, fb: &mut DrawBuffer<'_>);
+
+    /// Optional periodic refresh interval in milliseconds.
+    ///
+    /// If this returns `Some(ms)`, the framework automatically requests a
+    /// redraw every `ms` milliseconds even without user input. Useful for
+    /// apps like system monitors that need to update live data.
+    ///
+    /// Default is `None` (redraw only on input events).
+    fn refresh_interval_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Run a windowed application to completion.
@@ -70,6 +81,8 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
 
     app.init(&mut win);
 
+    let refresh_interval = app.refresh_interval_ms();
+    let mut last_refresh = sys_core::get_time_ms();
     let mut raw_buf = [InputEvent::default(); window::EVENT_BUF_LEN];
 
     loop {
@@ -80,6 +93,15 @@ pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
             win.track_pointer(&event);
             if app.on_event(&mut win, event) == ControlFlow::Exit {
                 std::process::exit(0);
+            }
+        }
+
+        // Auto-request redraws for apps with a periodic refresh interval.
+        if let Some(interval) = refresh_interval {
+            let now = sys_core::get_time_ms();
+            if now.saturating_sub(last_refresh) >= interval {
+                last_refresh = now;
+                win.request_redraw();
             }
         }
 
