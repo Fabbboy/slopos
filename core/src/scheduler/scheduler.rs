@@ -13,7 +13,8 @@ use slopos_kernel_services::platform;
 pub use super::lifecycle::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
     get_percpu_scheduler_stats, get_scheduler_stats, get_total_ready_tasks_all_cpus,
-    init_scheduler_for_ap, scheduler_shutdown, send_reschedule_ipi, stop_scheduler,
+    init_scheduler_for_ap, scheduler_enable, scheduler_shutdown, send_reschedule_ipi,
+    stop_scheduler,
 };
 use super::per_cpu;
 pub use super::runtime::{

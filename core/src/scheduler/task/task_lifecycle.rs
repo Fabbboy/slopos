@@ -13,8 +13,8 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};
 use super::task_table::{
-    ReserveTaskSlotError, defer_task_cleanup, free_task_memory_and_invalidate, reserve_task_slot,
-    task_find_by_id, with_task_manager,
+    ReserveTaskSlotError, defer_task_cleanup, free_task_stacks, reserve_task_slot, task_find_by_id,
+    with_task_manager,
 };
 use super::{
     FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
@@ -556,7 +556,11 @@ fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
         if (*task_ptr).ref_count() > 0 {
             defer_task_cleanup(task_ptr);
         } else {
-            free_task_memory_and_invalidate(task_ptr);
+            // Free stacks but keep the task struct in Terminated state so
+            // task_find_by_id still resolves the ID.  This makes repeated
+            // task_terminate() calls idempotent.  reserve_task_slot() will
+            // reclaim the slot when a new task needs it.
+            free_task_stacks(task_ptr);
         }
     }
 }

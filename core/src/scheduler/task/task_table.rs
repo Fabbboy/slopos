@@ -56,11 +56,13 @@ pub(super) fn defer_task_cleanup(task: *mut Task) {
     ZOMBIE_LIST.lock().push(task);
 }
 
-pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
+/// Free a task's kernel and user stacks without invalidating the task struct.
+/// The slot remains in its current status (typically Terminated) so that
+/// task_find_by_id can still locate it for idempotent terminate calls.
+pub(super) fn free_task_stacks(task: *mut Task) {
     if task.is_null() {
         return;
     }
-
     unsafe {
         let kstack = (*task).kernel_stack_base;
         let ustack = (*task).stack_base;
@@ -74,7 +76,15 @@ pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
             kfree(ustack as *mut c_void);
             (*task).stack_base = 0;
         }
+    }
+}
 
+pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    free_task_stacks(task);
+    unsafe {
         *task = Task::invalid();
     }
 }
@@ -296,6 +306,18 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             if task.status() == TaskStatus::Invalid {
                 slot = task as *mut Task;
                 break;
+            }
+        }
+
+        // Reclaim a Terminated slot whose resources are already freed.
+        if slot.is_null() {
+            for task in mgr.tasks.iter_mut() {
+                if task.status() == TaskStatus::Terminated && task.ref_count() == 0 {
+                    let p = task as *mut Task;
+                    unsafe { *p = Task::invalid() };
+                    slot = p;
+                    break;
+                }
             }
         }
 

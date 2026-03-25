@@ -3,7 +3,9 @@
 //! Tests verify the kernel shutdown machinery: StateFlag atomicity,
 //! scheduler/task teardown, and reinit-after-shutdown correctness.
 
-use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_is_enabled, scheduler_shutdown};
+use slopos_core::scheduler::scheduler::{
+    init_scheduler, scheduler_enable, scheduler_is_enabled, scheduler_shutdown,
+};
 use slopos_core::scheduler::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskStatus, init_task_manager,
     task_create, task_find_by_id, task_shutdown_all, task_terminate,
@@ -507,6 +509,10 @@ pub fn test_task_terminate_idempotent() -> TestResult {
 /// is still operational after task_shutdown_all returns.
 pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     let _fixture = ShutdownFixture::new();
+
+    // The fixture leaves the scheduler disabled (init_scheduler resets to 0).
+    // Enable it so we can verify task_shutdown_all preserves the enabled state.
+    scheduler_enable();
 
     let created = create_n_tasks(5);
     assert_test!(created > 0, "failed to create tasks");

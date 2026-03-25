@@ -11,6 +11,10 @@ pub fn stop_scheduler() {
     set_scheduler_enabled(false);
 }
 
+pub fn scheduler_enable() {
+    set_scheduler_enabled(true);
+}
+
 pub fn scheduler_shutdown() {
     set_scheduler_enabled(false);
     reset_sleep_queue();
