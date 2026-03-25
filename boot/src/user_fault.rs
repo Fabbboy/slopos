@@ -7,9 +7,38 @@ use slopos_core::sched::{schedule, scheduler_get_current_task};
 use slopos_core::scheduler::task::{task_find_by_cr3, task_pointer_is_valid};
 use slopos_core::scheduler::task_struct::Task;
 use slopos_core::task::task_terminate;
+use slopos_mm::paging::{paging_get_kernel_directory, switch_page_directory};
 use slopos_utils::{kdiag_dump_interrupt_frame, klog_info};
 
 use crate::panic::set_panic_cpu_state;
+
+/// Retire this CPU after a fatal user-mode exception.
+///
+/// Terminates the faulting task, attempts to schedule the next runnable
+/// task, and — if no context switch occurred (e.g. the scheduler is
+/// already disabled during shutdown) — switches to the kernel address
+/// space, re-enables interrupts so the CPU can still service IPIs (TLB
+/// shootdown, halt broadcast), and parks in a halt loop.
+///
+/// # Safety invariant
+/// The caller must be handling a user-mode exception (CS RPL == 3).
+/// This function never returns.
+fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
+    unsafe {
+        (*task).exit_reason = TaskExitReason::UserFault;
+        (*task).fault_reason = reason;
+        (*task).exit_code = 1;
+        task_terminate((*task).task_id);
+        schedule();
+    }
+    // schedule() returned without switching — park safely.
+    let kernel_dir = paging_get_kernel_directory();
+    if !kernel_dir.is_null() {
+        let _ = switch_page_directory(kernel_dir);
+    }
+    cpu::enable_interrupts();
+    cpu::halt_loop();
+}
 
 pub(crate) fn in_user(frame: &InterruptFrame) -> bool {
     (frame.cs & 0x3) == 0x3
@@ -100,13 +129,7 @@ pub(crate) fn terminate_user_task(
     );
     kdiag_dump_interrupt_frame(frame as *const _);
     if !task.is_null() {
-        unsafe {
-            (*task).exit_reason = TaskExitReason::UserFault;
-            (*task).fault_reason = reason;
-            (*task).exit_code = 1;
-            task_terminate(tid);
-            schedule();
-        }
+        retire_faulted_cpu(task, reason);
     }
     let _ = frame;
 }

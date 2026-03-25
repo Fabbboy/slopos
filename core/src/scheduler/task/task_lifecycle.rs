@@ -448,6 +448,10 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
+    if unsafe { (*task_ptr).status() } == TaskStatus::Terminated {
+        return 0;
+    }
+
     klog_info!(
         "Terminating task '{}' (ID {})",
         bytes_as_str(&unsafe { &*task_ptr }.name),

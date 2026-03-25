@@ -5,8 +5,8 @@
 
 use slopos_core::scheduler::scheduler::{init_scheduler, scheduler_is_enabled, scheduler_shutdown};
 use slopos_core::scheduler::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, init_task_manager, task_create,
-    task_find_by_id, task_shutdown_all,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_PRIORITY_NORMAL, TaskStatus, init_task_manager,
+    task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
 use slopos_sync::StateFlag;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
@@ -24,6 +24,8 @@ struct ShutdownFixture;
 
 impl ShutdownFixture {
     fn new() -> Self {
+        // Tear down tasks while the scheduler is still enabled (correct
+        // ordering — see kernel_shutdown), then disable the scheduler.
         task_shutdown_all();
         scheduler_shutdown();
         let _ = init_task_manager();
@@ -229,6 +231,9 @@ pub fn test_task_shutdown_all_idempotent() -> TestResult {
 // Shutdown Sequence Tests
 // =============================================================================
 
+/// The canonical shutdown order is task_shutdown_all() → scheduler_shutdown().
+/// Tasks must be torn down while the scheduler is still enabled so that any
+/// CPU whose current task is destroyed can schedule() to idle.
 pub fn test_shutdown_sequence_ordering() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
@@ -241,8 +246,9 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID);
 
-    scheduler_shutdown();
+    // Correct order: tasks first, scheduler second.
     let _result = task_shutdown_all();
+    scheduler_shutdown();
     TestResult::Pass
 }
 
@@ -427,8 +433,8 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
             page_addrs[i] = phys.as_u64();
         }
 
-        scheduler_shutdown();
         let _result = task_shutdown_all();
+        scheduler_shutdown();
 
         for ptr in heap_ptrs.iter() {
             if !ptr.is_null() {
@@ -441,6 +447,80 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
             }
         }
     }
+
+    TestResult::Pass
+}
+
+// =============================================================================
+// Regression Tests
+// =============================================================================
+
+/// Regression: task_terminate must be idempotent.  Calling it on an
+/// already-terminated task should return 0 without re-running teardown
+/// side-effects.  Before the fix, repeated terminate calls would spam
+/// log output and redo cleanup hooks on dead tasks.
+pub fn test_task_terminate_idempotent() -> TestResult {
+    let _fixture = ShutdownFixture::new();
+
+    let task_id = task_create(
+        b"TermIdem\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+
+    // First terminate succeeds.
+    assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
+
+    // Verify the task is actually terminated.
+    let task_ptr = task_find_by_id(task_id);
+    if !task_ptr.is_null() {
+        let status = unsafe { (*task_ptr).status() };
+        assert_eq_test!(
+            status,
+            TaskStatus::Terminated,
+            "task should be Terminated after first call"
+        );
+    }
+
+    // Second terminate must also return 0 (idempotent), not -1 or panic.
+    assert_eq_test!(
+        task_terminate(task_id),
+        0,
+        "second terminate should be idempotent"
+    );
+
+    // Third time for good measure.
+    assert_eq_test!(
+        task_terminate(task_id),
+        0,
+        "third terminate should be idempotent"
+    );
+
+    TestResult::Pass
+}
+
+/// Regression: scheduler must stay enabled during task_shutdown_all() so
+/// that faulting CPUs can schedule() to idle.  Verify that the scheduler
+/// is still operational after task_shutdown_all returns.
+pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
+    let _fixture = ShutdownFixture::new();
+
+    let created = create_n_tasks(5);
+    assert_test!(created > 0, "failed to create tasks");
+
+    // After task teardown, scheduler should still be enabled.
+    let _result = task_shutdown_all();
+    assert_test!(
+        scheduler_is_enabled() != 0,
+        "scheduler must remain enabled after task_shutdown_all"
+    );
+
+    // Now disable it (as kernel_shutdown would).
+    scheduler_shutdown();
+    assert_eq_test!(scheduler_is_enabled(), 0, "scheduler should be disabled");
 
     TestResult::Pass
 }
@@ -470,5 +550,7 @@ slopos_testing::define_test_suite!(
         test_kernel_page_directory_available,
         test_serial_flush_terminates,
         test_shutdown_e2e_stress_with_allocation,
+        test_task_terminate_idempotent,
+        test_shutdown_scheduler_alive_during_task_teardown,
     ]
 );

@@ -89,11 +89,13 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
 
     pcp_drain_all();
 
-    scheduler_shutdown();
-
+    // Terminate all tasks while the scheduler is still enabled so that APs
+    // whose current task is destroyed can schedule() to idle normally.
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
+
+    scheduler_shutdown();
 
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();

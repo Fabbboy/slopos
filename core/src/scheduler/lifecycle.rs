@@ -14,7 +14,6 @@ pub fn stop_scheduler() {
 pub fn scheduler_shutdown() {
     set_scheduler_enabled(false);
     reset_sleep_queue();
-    per_cpu::clear_all_cpu_queues();
 }
 
 pub fn get_scheduler_stats(
