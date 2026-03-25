@@ -291,7 +291,7 @@ The compositor renders back-to-front:
 - [x] `rounded_rect(canvas, x, y, w, h, radius, color)` — AA corners, integer-only (`canvas_ops.rs:567`)
 - [x] `rounded_rect_filled(canvas, x, y, w, h, radius, color)` — filled variant (`canvas_ops.rs:666`)
 - [x] Existing aliased primitives remain available (for performance-critical paths)
-- [ ] Compositor window frames use `rounded_rect` for corner radius → deferred to Phase 4 (compositor still renders Windows-style sharp rectangles)
+- [x] Compositor window frames use `rounded_rect` for corner radius → deferred to Phase 4 (compositor still renders Windows-style sharp rectangles)
 
 **What was built**:
 - All 4 AA primitives in `gfx/src/canvas_ops.rs`
