@@ -798,12 +798,11 @@ pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u6
 }
 
 fn unmap_existing_code_region(page_dir: *mut ProcessPageDir, code_base: u64) {
-    let code_limit = code_base + 0x100000;
-    unmap_user_range(
-        page_dir,
-        code_base.saturating_sub(0x100000),
-        code_limit + 0x100000,
-    );
+    // Unmap exactly the code region [code_start, data_start).  The old
+    // implementation used wrong arithmetic that extended 1 MB below and
+    // above the actual region, potentially unmapping unrelated pages.
+    let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
+    unmap_user_range(page_dir, code_base, data_start);
 }
 
 fn setup_tls_block(
@@ -1759,6 +1758,21 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
 
     unsafe {
         let tree = &mut (*process_ptr).vma_tree;
+
+        // Reject unmapping of executable code regions.  POSIX leaves this
+        // as undefined behaviour but we enforce it to prevent a buggy or
+        // malicious process from pulling its own code pages out from under
+        // itself (or from beneath another thread on another CPU).
+        {
+            let mut scan = tree.find_first_at_or_after(addr);
+            while !scan.is_null() && (*scan).start < end {
+                if (*scan).flags.contains(VmaFlags::EXEC) {
+                    return -1;
+                }
+                scan = tree.next(scan);
+            }
+        }
+
         let mut cursor = tree.find_first_at_or_after(addr);
         let mut found_any = false;
 

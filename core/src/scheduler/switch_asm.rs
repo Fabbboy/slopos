@@ -57,14 +57,15 @@ pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const S
         "mov r15, [rsi + {off_r15}]",
         "mov rbp, [rsi + {off_rbp}]",
 
-        // Load RFLAGS
-        "push QWORD PTR [rsi + {off_rflags}]",
-        "popfq",
-
-        // Switch stack (this is the actual context switch point)
+        // Switch stack and push return address BEFORE restoring RFLAGS.
+        // RFLAGS may set IF (enabling interrupts); a timer interrupt in
+        // the window between popfq and ret would push a frame onto the
+        // new stack, potentially overwriting the return address.
         "mov rsp, [rsi + {off_rsp}]",
 
-        // Return (pops return address from new stack)
+        // Now restore RFLAGS (may enable interrupts) and return.
+        "push QWORD PTR [rsi + {off_rflags}]",
+        "popfq",
         "ret",
 
         off_rbx = const offset_of!(SwitchContext, rbx),

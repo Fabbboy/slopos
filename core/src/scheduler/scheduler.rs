@@ -75,9 +75,7 @@ use slopos_mm::process_vm::{process_vm_get_cr3_phys, process_vm_sync_kernel_mapp
 use slopos_mm::tlb;
 use slopos_mm::user_copy;
 
-use super::ffi_boundary::{
-    context_switch, context_switch_user, kernel_stack_top, task_entry_wrapper,
-};
+use super::ffi_boundary::{context_switch, context_switch_user, kernel_stack_top};
 
 fn current_task_process_id() -> u32 {
     let task = scheduler_get_current_task();
@@ -537,9 +535,10 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
         platform::gdt_set_kernel_rsp0(kernel_rsp);
 
         if (*to_task).process_id != INVALID_PROCESS_ID {
-            if is_user_mode {
-                process_vm_sync_kernel_mappings((*to_task).process_id);
-            }
+            // Sync kernel mappings regardless of dispatch mode: a user task
+            // preempted during a syscall (CS=0x08) will still return to user
+            // mode via SYSRET and needs both kernel + user pages mapped.
+            process_vm_sync_kernel_mappings((*to_task).process_id);
             // Read the CR3 physical address under the VM_MANAGER lock so
             // the process VM cannot be freed between the lookup and the
             // dereference.  The old path used process_vm_get_page_dir()
@@ -564,9 +563,34 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             ptr::null_mut()
         };
 
-        if (*to_task).context.cs & 3 == 3 {
+        let dispatch_cs = core::ptr::read_unaligned(core::ptr::addr_of!((*to_task).context.cs));
+        let dispatch_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*to_task).context.rip));
+
+        if dispatch_cs & 3 == 3 {
             context_switch_user(old_ctx_ptr, &(*to_task).context);
         } else {
+            // Final RIP sanity check right before the assembly switch.
+            // If this fires, the context was corrupted between
+            // validate_kernel_context() and this point.
+            let (text_start, text_end) = kernel_text_range();
+            if dispatch_rip < text_start || dispatch_rip >= text_end {
+                klog_info!(
+                    "SCHED: ABORT context_switch: task {} RIP 0x{:x} outside .text (0x{:x}..0x{:x}) cs=0x{:x}",
+                    (*to_task).task_id,
+                    dispatch_rip,
+                    text_start,
+                    text_end,
+                    dispatch_cs,
+                );
+                let _ = crate::task::task_terminate((*to_task).task_id);
+                return;
+            }
+            // Keep the process CR3 for user tasks preempted during a
+            // syscall (CS=0x08).  Process page tables include kernel
+            // mappings (via paging_copy_kernel_mappings), so kernel code
+            // runs fine.  Forcing the kernel CR3 here would break SYSRET:
+            // SYSRET does not reload CR3, so user code would execute with
+            // the kernel page table that lacks user mappings → #PF.
             context_switch(old_ctx_ptr, &(*to_task).context);
         }
     }
@@ -644,6 +668,14 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         return false;
     }
 
+    // Hold a reference while the task is dispatched on this CPU.
+    // Without this, refcnt is 0 after dequeue and a concurrent
+    // task_terminate() on another CPU can kfree() the kernel stack
+    // while we are still executing on it — a use-after-free.
+    unsafe {
+        (*next_task).inc_ref();
+    }
+
     execute_task(cpu_id, idle_task, next_task);
 
     // Context switch OUT is complete — the task's registers are fully saved.
@@ -673,6 +705,14 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
                 let _ = sched.enqueue_local(next_task);
             });
         }
+    }
+
+    // Release the dispatch reference.  If the task was re-enqueued above,
+    // the queue holds its own reference so the refcnt stays > 0.  If the
+    // task was terminated/blocked, this may drop refcnt to 0, allowing the
+    // zombie reaper to safely reclaim its resources on the next pass.
+    unsafe {
+        (*next_task).dec_ref();
     }
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -738,43 +778,6 @@ fn validate_user_context(ctx: &TaskContext, task: *const Task) {
     );
 }
 
-fn repair_idle_context(idle_task: *mut Task) -> bool {
-    if idle_task.is_null() {
-        return false;
-    }
-
-    unsafe {
-        let ctx = &mut (*idle_task).context;
-        *ctx = TaskContext::zero();
-        ctx.rflags = 0x202;
-        ctx.rip = task_entry_wrapper as *const () as u64;
-        ctx.rdi = (*idle_task).entry_point;
-        ctx.rsi = (*idle_task).entry_arg as u64;
-        ctx.rsp = if (*idle_task).stack_pointer != 0 {
-            (*idle_task).stack_pointer
-        } else {
-            (*idle_task)
-                .stack_base
-                .saturating_add((*idle_task).stack_size)
-                .saturating_sub(8)
-        };
-        ctx.cs = 0x08;
-        ctx.ds = 0x10;
-        ctx.es = 0x10;
-        ctx.fs = 0;
-        ctx.gs = 0;
-        ctx.ss = 0x10;
-        (*idle_task).context_from_user = 0;
-
-        let kernel_dir = paging_get_kernel_directory();
-        if !(*kernel_dir).pml4_phys.is_null() {
-            ctx.cr3 = (*kernel_dir).pml4_phys.as_u64();
-        }
-    }
-
-    true
-}
-
 fn ensure_idle_context_valid(idle_task: *mut Task) -> bool {
     if idle_task.is_null() {
         return false;
@@ -785,13 +788,22 @@ fn ensure_idle_context_valid(idle_task: *mut Task) -> bool {
             return true;
         }
 
+        // The idle context is corrupt.  Previous code tried to "repair" it by
+        // writing a fresh task_entry_wrapper context with RFLAGS=0x202 (IF=1).
+        // This was fundamentally broken on SMP: context_switch would load the
+        // repaired RFLAGS, enabling interrupts while execute_task expected them
+        // disabled.  Timer IPIs during execute_task then corrupted registers.
+        //
+        // Instead we refuse to switch and log the corruption so the caller can
+        // bail out safely.
         let ctx_cs = core::ptr::read_unaligned(core::ptr::addr_of!((*idle_task).context.cs));
         let ctx_rip = core::ptr::read_unaligned(core::ptr::addr_of!((*idle_task).context.rip));
         let ctx_rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*idle_task).context.rsp));
         let ctx_cr3 = core::ptr::read_unaligned(core::ptr::addr_of!((*idle_task).context.cr3));
 
         klog_info!(
-            "SCHED: repairing idle task {} corrupt context: cs=0x{:x} rip=0x{:x} rsp=0x{:x} cr3=0x{:x}",
+            "SCHED: CPU {} idle task {} has corrupt context: cs=0x{:x} rip=0x{:x} rsp=0x{:x} cr3=0x{:x} — refusing switch",
+            slopos_arch::pcr::get_current_cpu(),
             (*idle_task).task_id,
             ctx_cs,
             ctx_rip,
@@ -799,11 +811,7 @@ fn ensure_idle_context_valid(idle_task: *mut Task) -> bool {
             ctx_cr3
         );
 
-        if !repair_idle_context(idle_task) {
-            return false;
-        }
-
-        validate_kernel_context(&(*idle_task).context, idle_task)
+        false
     }
 }
 

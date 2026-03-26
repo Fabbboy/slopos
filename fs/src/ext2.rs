@@ -301,7 +301,7 @@ impl<'a> Ext2Fs<'a> {
                     remaining = 0;
                 }
             }
-            offset += self.block_size as usize - block_offset;
+            offset = offset.saturating_add(self.block_size as usize - block_offset);
         }
         Ok(())
     }

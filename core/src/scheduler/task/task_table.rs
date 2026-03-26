@@ -325,15 +325,33 @@ pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotErr
             return Err(ReserveTaskSlotError::NoFreeSlot);
         }
 
+        // Mark the slot as Blocked while we hold the lock so that no
+        // concurrent caller can reserve the same slot (TOCTOU fix).
+        // task_create() will transition to Ready once fully initialized,
+        // or reset to Invalid on failure.
+        unsafe { (*slot).set_status(TaskStatus::Blocked) };
+
         if let Some(idx) = task_slot_index_inner(mgr, slot) {
             mgr.exit_records[idx] = TaskExitRecord::empty();
         }
 
         let task_id = mgr.next_task_id;
         mgr.next_task_id = task_id.wrapping_add(1);
+        mgr.num_tasks += 1;
 
         Ok((slot, task_id))
     })
+}
+
+/// Release a previously reserved task slot back to Invalid.
+/// Called when task_create fails after reserve_task_slot succeeded.
+pub(super) fn release_task_slot(slot: *mut Task) {
+    with_task_manager(|mgr| {
+        if !slot.is_null() {
+            unsafe { *slot = Task::invalid() };
+            mgr.num_tasks = mgr.num_tasks.saturating_sub(1);
+        }
+    });
 }
 
 pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
