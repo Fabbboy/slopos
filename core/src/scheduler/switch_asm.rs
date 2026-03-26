@@ -58,13 +58,16 @@ pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const S
         "mov rbp, [rsi + {off_rbp}]",
 
         // Switch stack and push return address BEFORE restoring RFLAGS.
-        // RFLAGS may set IF (enabling interrupts); a timer interrupt in
-        // the window between popfq and ret would push a frame onto the
-        // new stack, potentially overwriting the return address.
         "mov rsp, [rsi + {off_rsp}]",
 
-        // Now restore RFLAGS (may enable interrupts) and return.
-        "push QWORD PTR [rsi + {off_rflags}]",
+        // Restore RFLAGS with IF cleared — callers re-enable interrupts
+        // explicitly after the switch returns.  See context_switch.s for
+        // the full rationale: a pending IPI between popfq and ret would
+        // see current_task pointing at the dispatched task while RSP is
+        // still the idle stack, corrupting the dispatched task's context.
+        "mov rax, [rsi + {off_rflags}]",
+        "and rax, ~0x200",  // clear IF (bit 9)
+        "push rax",
         "popfq",
         "ret",
 

@@ -407,23 +407,9 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == RESCHEDULE_IPI_VECTOR {
-        let pre_cs = frame_ref.cs;
-        let pre_ss = frame_ref.ss;
         send_eoi();
         scheduler_request_reschedule(RescheduleReason::RescheduleIpi);
         scheduler_handoff_on_trap_exit(TrapExitSource::RescheduleIpi);
-        let post_cs = unsafe { core::ptr::read_volatile(&(*frame).cs) };
-        let post_ss = unsafe { core::ptr::read_volatile(&(*frame).ss) };
-        if post_cs != pre_cs || post_ss != pre_ss {
-            klog_info!(
-                "RESCHED IRET CORRUPTION: cs 0x{:x}->0x{:x} ss 0x{:x}->0x{:x} frame={:p}",
-                pre_cs,
-                post_cs,
-                pre_ss,
-                post_ss,
-                frame
-            );
-        }
         return;
     }
 
