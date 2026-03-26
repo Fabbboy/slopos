@@ -29,10 +29,9 @@ const MAX_CNAME_HOPS: usize = 8;
 /// Maximum compression pointer follows (loop detection).
 const MAX_POINTER_FOLLOWS: usize = 16;
 /// DNS resolve timeout per attempt (ms).
-const DNS_TIMEOUT_MS: u32 = 4000;
-/// Number of resolve attempts.  SMP/TCG environments need extra attempts
-/// because virtual network latency is unpredictable under heavy emulation.
-const DNS_MAX_RETRIES: usize = 4;
+const DNS_TIMEOUT_MS: u32 = 3000;
+/// Number of resolve attempts.
+const DNS_MAX_RETRIES: usize = 3;
 /// DNS cache size.
 const DNS_CACHE_SIZE: usize = 16;
 

@@ -271,12 +271,11 @@ pub fn test_create_max_tasks() -> TestResult {
         MAX_TASKS
     );
 
-    // On SMP, per-CPU idle tasks and system tasks consume slots that
-    // persist across test fixture resets (per-CPU schedulers are
-    // init-once).  Require at least a quarter of MAX_TASKS to be
-    // creatable, which is generous even with 4+ CPUs and accumulated
-    // system state.
-    let min_expected = MAX_TASKS / 4;
+    // On SMP, per-CPU idle tasks consume slots.  Account for them plus
+    // the current task when computing the minimum expected capacity.
+    let cpu_count = slopos_arch::pcr::get_cpu_count() as usize;
+    let reserved_slots = cpu_count.max(1) + 1;
+    let min_expected = MAX_TASKS.saturating_sub(reserved_slots);
     if success_count < min_expected {
         klog_info!(
             "SCHED_TEST: Only created {} tasks, expected at least {}",
@@ -326,17 +325,13 @@ pub fn test_create_over_max_tasks() -> TestResult {
 }
 
 /// Test: Rapid create/destroy cycle - stress test slot reuse
-/// On SMP, per-CPU idle tasks and system state can reduce available
-/// slots.  We require at least 20 successful create/destroy cycles
-/// which validates slot reclamation without assuming a fixed capacity.
 pub fn test_rapid_create_destroy_cycle() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    const MIN_CYCLES: usize = 20;
+    const CYCLES: usize = 100;
     let mut last_id = INVALID_TASK_ID;
-    let mut completed = 0usize;
 
-    for i in 0..100 {
+    for i in 0..CYCLES {
         let task_id = task_create(
             b"CycleTask\0".as_ptr() as *const c_char,
             dummy_task_fn,
@@ -346,10 +341,6 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
         );
 
         if task_id == INVALID_TASK_ID {
-            // Slot or resource exhaustion — acceptable after MIN_CYCLES.
-            if completed >= MIN_CYCLES {
-                break;
-            }
             klog_info!("SCHED_TEST: Cycle {} failed to create task", i);
             return TestResult::Fail;
         }
@@ -361,12 +352,11 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
         }
 
         last_id = task_id;
-        completed += 1;
     }
 
     klog_info!(
         "SCHED_TEST: Completed {} create/destroy cycles, last ID={}",
-        completed,
+        CYCLES,
         last_id
     );
 
@@ -1093,12 +1083,8 @@ pub fn test_many_same_priority_tasks() -> TestResult {
 }
 
 /// Test: Interleaved create/schedule/terminate
-/// On SMP, per-CPU state reduces available task slots.  Require at
-/// least 10 successful iterations (20 tasks) rather than a fixed 50.
 pub fn test_interleaved_operations() -> TestResult {
     let _fixture = SchedFixture::new();
-
-    const MIN_ITERATIONS: usize = 10;
 
     for i in 0..50 {
         // Create
@@ -1119,10 +1105,6 @@ pub fn test_interleaved_operations() -> TestResult {
         );
 
         if id1 == INVALID_TASK_ID || id2 == INVALID_TASK_ID {
-            if i >= MIN_ITERATIONS {
-                // Enough iterations completed — slot/resource exhaustion is OK.
-                break;
-            }
             klog_info!("SCHED_TEST: Interleaved creation failed at iteration {}", i);
             return TestResult::Fail;
         }

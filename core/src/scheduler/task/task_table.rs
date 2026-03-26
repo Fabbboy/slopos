@@ -436,6 +436,24 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
     }
 }
 
+/// Return the current num_tasks counter and a breakdown of slot states.
+/// Used by tests to diagnose capacity issues.
+pub fn task_slot_census() -> (u32, u32, u32, u32) {
+    with_task_manager(|mgr| {
+        let mut invalid = 0u32;
+        let mut terminated = 0u32;
+        let mut active = 0u32;
+        for task in mgr.tasks.iter() {
+            match task.status() {
+                TaskStatus::Invalid => invalid += 1,
+                TaskStatus::Terminated => terminated += 1,
+                _ => active += 1,
+            }
+        }
+        (mgr.num_tasks, invalid, terminated, active)
+    })
+}
+
 pub unsafe fn task_manager_force_unlock() {
     unsafe { TASK_MANAGER.force_unlock() };
 }
