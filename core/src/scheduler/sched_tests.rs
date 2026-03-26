@@ -271,9 +271,11 @@ pub fn test_create_max_tasks() -> TestResult {
         MAX_TASKS
     );
 
+    // On SMP, per-CPU idle tasks consume slots.  Account for them plus
+    // the current task when computing the minimum expected capacity.
     let cpu_count = slopos_arch::pcr::get_cpu_count() as usize;
-    let reserved_idle_slots = cpu_count.max(1);
-    let min_expected = MAX_TASKS.saturating_sub(reserved_idle_slots + 1);
+    let reserved_slots = cpu_count.max(1) + 1;
+    let min_expected = MAX_TASKS.saturating_sub(reserved_slots);
     if success_count < min_expected {
         klog_info!(
             "SCHED_TEST: Only created {} tasks, expected at least {}",

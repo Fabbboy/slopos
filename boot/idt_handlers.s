@@ -234,14 +234,160 @@ irq15:
     INTERRUPT_HANDLER 47, 0   # ATA Secondary
 
 # Reschedule IPI handler (vector 0xFC = 252)
+# Custom handler with pre-IRETQ CS validation (same pattern as timer).
 .global isr_reschedule_ipi
 isr_reschedule_ipi:
-    INTERRUPT_HANDLER 252, 0
+    pushq $0
+    pushq $252
+
+    testb $3, 24(%rsp)
+    jz .Lresched_noswap_entry
+    swapgs
+.Lresched_noswap_entry:
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    movw $SEL_KERNEL_DATA, %ax
+    movw %ax, %ds
+    movw %ax, %es
+
+    movq %rsp, %rdi
+    call common_exception_handler
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp
+
+    pushq %rax
+    movq  16(%rsp), %rax
+    cmpq  $0x08, %rax
+    je    .Lresched_cs_ok
+    cmpq  $0x23, %rax
+    je    .Lresched_cs_ok
+    popq  %rax
+    movq  %rsp, %rdi
+    jmp   isr_iret_frame_corrupt
+.Lresched_cs_ok:
+    popq %rax
+
+    testb $3, 8(%rsp)
+    jz .Lresched_noswap_exit
+    swapgs
+.Lresched_noswap_exit:
+    iretq
 
 # LAPIC Timer handler (vector 0xEC = 236)
+#
+# Custom handler (not the generic macro) with pre-IRETQ validation.
+# The IRET frame's CS must be 0x08 (kernel) or 0x23 (user); any other
+# value indicates stack corruption and we divert to a diagnostic panic
+# rather than taking a #GP from a bad IRETQ.
 .global isr_lapic_timer
 isr_lapic_timer:
-    INTERRUPT_HANDLER 236, 0
+    pushq $0
+    pushq $236
+
+    testb $3, 24(%rsp)
+    jz .Ltimer_noswap_entry
+    swapgs
+.Ltimer_noswap_entry:
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    movw $SEL_KERNEL_DATA, %ax
+    movw %ax, %ds
+    movw %ax, %es
+
+    movq %rsp, %rdi
+    call common_exception_handler
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp
+
+    # ---- IRET frame validation ----
+    # [RSP+0]=RIP  [RSP+8]=CS  [RSP+16]=RFLAGS  [RSP+24]=RSP  [RSP+32]=SS
+    # CS must be 0x08 (kernel) or 0x23 (user).  Anything else means the
+    # frame was silently corrupted — diagnose instead of taking a #GP.
+    pushq %rax
+    movq  16(%rsp), %rax          # CS (offset 8 from orig RSP, +8 for our push)
+    cmpq  $0x08, %rax
+    je    .Ltimer_cs_ok
+    cmpq  $0x23, %rax
+    je    .Ltimer_cs_ok
+
+    # ---------- corrupt IRET frame ----------
+    # Put the bad CS value into RDI for the panic handler.
+    # Restore RAX first so the register dump is accurate, then call
+    # the Rust panic with a pointer to the 5-word IRET frame.
+    popq  %rax
+    movq  %rsp, %rdi              # pointer to [RIP, CS, RFLAGS, RSP, SS]
+    jmp   isr_iret_frame_corrupt
+
+.Ltimer_cs_ok:
+    popq %rax
+
+    testb $3, 8(%rsp)
+    jz .Ltimer_noswap_exit
+    swapgs
+.Ltimer_noswap_exit:
+    iretq
 
 # TLB Shootdown IPI handler (vector 0xFD = 253)
 .global isr_tlb_shootdown

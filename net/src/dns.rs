@@ -31,7 +31,7 @@ const MAX_POINTER_FOLLOWS: usize = 16;
 /// DNS resolve timeout per attempt (ms).
 const DNS_TIMEOUT_MS: u32 = 3000;
 /// Number of resolve attempts.
-const DNS_MAX_RETRIES: usize = 2;
+const DNS_MAX_RETRIES: usize = 3;
 /// DNS cache size.
 const DNS_CACHE_SIZE: usize = 16;
 

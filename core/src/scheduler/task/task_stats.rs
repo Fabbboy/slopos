@@ -52,7 +52,8 @@ pub fn task_get_total_yields() -> u64 {
 
 pub(super) fn record_task_created() {
     with_task_manager(|mgr| {
-        mgr.num_tasks = mgr.num_tasks.saturating_add(1);
+        // num_tasks is already incremented by reserve_task_slot(); only
+        // bump the lifetime counter here.
         mgr.tasks_created = mgr.tasks_created.saturating_add(1);
     });
 }

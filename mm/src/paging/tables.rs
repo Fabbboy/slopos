@@ -144,18 +144,26 @@ fn is_user_address(vaddr: VirtAddr) -> bool {
 }
 
 #[inline]
-fn flush_page_for_directory(_page_dir: *mut ProcessPageDir, vaddr: VirtAddr) {
-    // Page table modifications happen inside IrqMutex-locked sections.
-    // Targeted IPIs cannot be used here because the ack wait would deadlock
-    // against other CPUs spinning for the same lock with interrupts disabled.
-    // Broadcast flush is safe: the LAPIC delivers the IPI to all CPUs that
-    // have interrupts enabled, and wait_for_acks re-enables interrupts on
-    // the initiator so it can still service incoming IPIs from others.
-    //
-    // The gold-standard targeted path (cpumask + tlb_gen + lazy) is used by
-    // process lifecycle operations (destroy_process_vm, flush_all_for_process)
-    // which run OUTSIDE locked sections.
-    tlb::flush_page(vaddr);
+fn flush_page_for_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) {
+    if !page_dir.is_null() && is_user_address(vaddr) {
+        // User-address modifications in a process page directory only
+        // need a local INVLPG.  Other CPUs running this process will
+        // pick up the change when they context-switch in (CR3 reload
+        // flushes the entire TLB) or via exit_lazy_tlb's generation
+        // check.  This avoids the broadcast IPI which (a) is wasteful
+        // since all processes share the same user virtual ranges and
+        // (b) cannot safely wait for acks while the caller holds a
+        // page-table lock.
+        //
+        // Bump the process TLB generation so remote CPUs know their
+        // cached entries are stale.
+        let pid = unsafe { (*page_dir).process_id };
+        tlb::flush_page_local_for_process(pid, vaddr);
+    } else {
+        // Kernel-space modifications are shared across all page tables,
+        // so a broadcast is necessary.
+        tlb::flush_page(vaddr);
+    }
 }
 
 #[inline(always)]

@@ -13,8 +13,8 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};
 use super::task_table::{
-    ReserveTaskSlotError, defer_task_cleanup, free_task_stacks, reserve_task_slot, task_find_by_id,
-    with_task_manager,
+    ReserveTaskSlotError, defer_task_cleanup, free_task_stacks, release_task_slot,
+    reserve_task_slot, task_find_by_id, with_task_manager,
 };
 use super::{
     FpuState, INVALID_PROCESS_ID, INVALID_TASK_ID, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
@@ -377,13 +377,16 @@ pub fn task_create(
 
     let resources = match allocate_task_create_resources(flags) {
         Some(resources) => resources,
-        None => return INVALID_TASK_ID,
+        None => {
+            release_task_slot(task);
+            return INVALID_TASK_ID;
+        }
     };
 
     let task_ref = unsafe { &mut *task };
     task_ref.task_id = task_id;
     unsafe { copy_name(&mut task_ref.name, name) };
-    task_ref.set_status(TaskStatus::Ready);
+    // Status stays Blocked (set by reserve_task_slot) until fully initialised.
     task_ref.priority = priority;
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
@@ -399,7 +402,7 @@ pub fn task_create(
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         cleanup_task_create_resources(resources.process_id, resources.kernel_stack_base);
-        *task_ref = Task::invalid();
+        release_task_slot(task);
         return INVALID_TASK_ID;
     }
 
@@ -423,6 +426,11 @@ pub fn task_create(
             task_ref.context.cr3 = unsafe { (*page_dir).pml4_phys.as_u64() };
         }
     }
+
+    // Transition to Ready only after context + CR3 are fully initialised.
+    // reserve_task_slot() marked the slot Blocked to prevent TOCTOU races;
+    // we atomically publish it as dispatchable only now.
+    task_ref.set_status(TaskStatus::Ready);
 
     record_task_created();
 

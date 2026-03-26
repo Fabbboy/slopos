@@ -417,6 +417,20 @@ fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());
 }
 
+/// Flush a single user page locally and bump the process TLB generation
+/// so remote CPUs know their cached translations are stale.  Used for
+/// process page-table modifications that happen under a lock where a
+/// broadcast IPI would risk deadlock.
+#[inline]
+pub fn flush_page_local_for_process(process_id: u32, vaddr: VirtAddr) {
+    flush_page_local(vaddr);
+    if process_id != INVALID_PROCESS_ID {
+        if let Some(info) = process_tlb_info(process_id) {
+            info.tlb_gen.fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
 /// Flush a range of pages on the local CPU.
 fn flush_range_local(start: VirtAddr, end: VirtAddr) {
     let start_addr = start.as_u64();

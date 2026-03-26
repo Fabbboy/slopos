@@ -67,10 +67,11 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     idt_load();
     syscall_msr_init();
 
-    // AP LAPIC timer is started later by deferred_start_ap_timer() in the
-    // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
-    // (SMP init runs at priority 45, calibration at priority 57.)
-    cpu::enable_interrupts();
+    // Initialize the per-CPU scheduler and create the idle task BEFORE
+    // enabling interrupts.  The previous order (enable_interrupts → init)
+    // opened a race window where timer IPIs, TLB shootdowns, or reschedule
+    // IPIs could arrive and touch uninitialised per-CPU scheduler state.
+    init_scheduler_for_ap(cpu_idx);
 
     cpu_info.extra.store(AP_STARTED_MAGIC, Ordering::Release);
     klog_info!(
@@ -80,7 +81,11 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
         cpu_info.id
     );
 
-    init_scheduler_for_ap(cpu_idx);
+    // AP LAPIC timer is started later by deferred_start_ap_timer() in the
+    // scheduler loop, after the BSP completes HPET init + LAPIC calibration.
+    // Interrupts are enabled here only after all per-CPU state is ready.
+    cpu::enable_interrupts();
+
     enter_scheduler(cpu_idx);
 }
 
