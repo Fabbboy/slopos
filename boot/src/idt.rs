@@ -605,27 +605,22 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
     }
     klog_info!("=== END DUMP ===");
 
-    // Attempt recovery: if the current task is a user task with a valid
-    // saved context, we can abandon this corrupt ISR frame and resume the
-    // task via context_switch_user from the scheduler.
+    // With the new switch_registers architecture, context_from_user is no
+    // longer used.  The scheduler always saves/restores via switch_registers,
+    // so there is no "user frame resume" shortcut to attempt.
     let task = slopos_core::sched::scheduler_get_current_task();
     if !task.is_null() {
         let is_user = unsafe { (*task).flags } & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
-        let cfu = unsafe { (*task).context_from_user };
         klog_info!(
-            "  Current task: id={} user={} context_from_user={}",
+            "  Current task: id={} user={}",
             unsafe { (*task).task_id },
             is_user,
-            cfu
         );
-        if is_user && cfu != 0 {
-            // The task has a valid user context snapshot.  Force a yield
-            // so the scheduler re-dispatches via context_switch_user with
-            // a cleanly constructed IRET frame.
-            klog_info!("  RECOVERY: yielding to scheduler for clean user dispatch");
+        if is_user {
+            // Force a yield so the scheduler can re-dispatch this task
+            // through the normal switch_registers + ret_from_fork path.
+            klog_info!("  RECOVERY: yielding to scheduler for clean dispatch");
             slopos_core::sched::r#yield();
-            // If yield returns, we got re-dispatched via kernel context.
-            // Fall through to panic.
         }
     }
 

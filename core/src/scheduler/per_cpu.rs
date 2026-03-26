@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsiz
 /// `for_each_cpu_wrap()` pattern in `sched_balance_find_dst_group_cpu()`.
 static FORK_RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-use super::task_struct::{Task, TaskContext};
+use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_sync::{InitFlag, IrqMutex};
@@ -209,7 +209,7 @@ pub struct PerCpuScheduler {
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
-    pub return_context: UnsafeCell<TaskContext>,
+    pub return_context: UnsafeCell<SwitchContext>,
     executing_task: AtomicBool,
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
@@ -235,7 +235,7 @@ impl PerCpuScheduler {
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
-            return_context: UnsafeCell::new(TaskContext::zero()),
+            return_context: UnsafeCell::new(SwitchContext::zero()),
             executing_task: AtomicBool::new(false),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
@@ -949,7 +949,7 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
 
 /// Get the return context for an AP to use when no tasks are available.
 /// This is stored in the per-CPU scheduler and initialized during AP startup.
-pub fn get_ap_return_context(cpu_id: usize) -> *mut TaskContext {
+pub fn get_ap_return_context(cpu_id: usize) -> *mut SwitchContext {
     if cpu_id >= MAX_CPUS {
         return ptr::null_mut();
     }

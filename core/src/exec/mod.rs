@@ -155,6 +155,15 @@ pub fn spawn_program_with_attrs(
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rip), entry);
             ptr::write_unaligned(ptr::addr_of_mut!((*task_info).context.rsp), stack_ptr);
             (*task_info).fs_base = tls_tp;
+
+            // Update the synthetic InterruptFrame on the kernel stack.
+            // init_task_context pushed it at (kernel_stack_top - sizeof(InterruptFrame) - 8)
+            // (the -8 is the ret_from_fork return address slot).
+            let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
+            let frame_addr = (*task_info).kernel_stack_top - frame_size;
+            let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
+            ptr::write_unaligned(ptr::addr_of_mut!((*frame_ptr).rip), entry);
+            ptr::write_unaligned(ptr::addr_of_mut!((*frame_ptr).rsp), stack_ptr);
         }
 
         // Clone the parent's fd table BEFORE scheduling so the child has

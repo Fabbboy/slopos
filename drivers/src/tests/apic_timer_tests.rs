@@ -335,8 +335,12 @@ pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
 
     // The global tick counter is incremented by ALL CPUs' LAPIC timers.
     // With N CPUs at ~100Hz each, the observed rate is ~N*100 Hz.
+    // However, AP timers may be stopped by earlier tests in this suite,
+    // so only the BSP timer (restarted above) may be ticking.  Use a
+    // conservative floor of 50 Hz (single CPU, slow QEMU) and ceiling
+    // based on all CPUs at 200 Hz.
     let cpu_count = slopos_arch::pcr::get_cpu_count() as u64;
-    let min_hz: u64 = 50 * cpu_count.max(1);
+    let min_hz: u64 = 50;
     let max_hz: u64 = 200 * cpu_count.max(1);
 
     if observed_rate_hz < min_hz || observed_rate_hz > max_hz {

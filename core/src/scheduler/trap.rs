@@ -82,8 +82,7 @@ pub fn scheduler_request_reschedule_from_interrupt() {
     scheduler_request_reschedule(RescheduleReason::InterruptWake);
 }
 
-pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
-    save_preempt_context(frame);
+pub fn scheduler_handle_timer_interrupt(_frame: *mut InterruptFrame) {
     scheduler_timer_tick();
 }
 

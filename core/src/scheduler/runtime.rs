@@ -258,11 +258,9 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         }
     };
 
-    unsafe {
-        let return_ctx = per_cpu::get_ap_return_context(cpu_id);
-        if !return_ctx.is_null() {
-            crate::ffi_boundary::init_kernel_context(return_ctx);
-        }
+    let return_ctx = per_cpu::get_ap_return_context(cpu_id);
+    if !return_ctx.is_null() {
+        super::switch_asm::init_current_context(return_ctx);
     }
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {

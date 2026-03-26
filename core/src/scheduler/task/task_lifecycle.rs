@@ -7,8 +7,9 @@ use slopos_utils::kdiag_timestamp;
 use slopos_utils::string::bytes_as_str;
 use slopos_utils::{klog_debug, klog_info};
 
-use super::super::ffi_boundary::task_entry_wrapper;
 use super::super::scheduler;
+use super::super::switch_asm::task_entry_trampoline;
+use super::super::task_struct::SwitchContext;
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::{record_task_created, record_task_exit};
@@ -289,25 +290,83 @@ fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
     task.fpu_state = FpuState::new();
-    task.context.rsi = task.entry_arg as u64;
-    task.context.rdi = task.entry_point;
-    task.context.rsp = task.stack_pointer;
-    task.context.rflags = 0x202;
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
-        task.context.rip = task_entry_wrapper as *const () as usize as u64;
-    } else {
-        task.context.rip = task.entry_point;
-    }
-
-    if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
+        let trampoline = task_entry_trampoline as *const () as u64;
+        unsafe {
+            let ret_addr_ptr = (task.kernel_stack_top - 8) as *mut u64;
+            core::ptr::write(ret_addr_ptr, trampoline);
+        }
+        task.switch_ctx = SwitchContext::new_for_task(
+            task.entry_point,
+            task.entry_arg as u64,
+            task.kernel_stack_top,
+            trampoline,
+        );
+        task.context.rip = trampoline;
+        task.context.rsi = task.entry_arg as u64;
+        task.context.rdi = task.entry_point;
+        task.context.rsp = task.stack_pointer;
+        task.context.rflags = 0x202;
         task.context.cs = 0x08;
         task.context.ds = 0x10;
         task.context.es = 0x10;
-        task.context.fs = 0;
-        task.context.gs = 0;
         task.context.ss = 0x10;
     } else {
+        unsafe {
+            let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
+            let frame_addr = task.kernel_stack_top - frame_size;
+            let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
+            core::ptr::write(
+                frame_ptr,
+                slopos_arch::InterruptFrame {
+                    r15: 0,
+                    r14: 0,
+                    r13: 0,
+                    r12: 0,
+                    r11: 0,
+                    r10: 0,
+                    r9: 0,
+                    r8: 0,
+                    rbp: 0,
+                    rdi: task.entry_arg as u64,
+                    rsi: 0,
+                    rdx: 0,
+                    rcx: 0,
+                    rbx: 0,
+                    rax: 0,
+                    vector: 0,
+                    error_code: 0,
+                    rip: task.entry_point,
+                    cs: 0x23,
+                    rflags: 0x202,
+                    rsp: task.stack_pointer,
+                    ss: 0x1B,
+                },
+            );
+            unsafe extern "C" {
+                fn ret_from_fork();
+            }
+            // switch_registers ends with `ret`, which pops [RSP] as the
+            // return address.  Push ret_from_fork below the InterruptFrame
+            // so `ret` jumps there, then ret_from_fork pops the frame.
+            let ret_addr_slot = frame_addr - 8;
+            core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
+            task.switch_ctx = SwitchContext {
+                rbx: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rbp: 0,
+                rsp: ret_addr_slot, // points at the ret_from_fork address
+                rflags: 0x02,
+                rip: ret_from_fork as *const () as u64,
+            };
+        }
+        task.context.rip = task.entry_point;
+        task.context.rsp = task.stack_pointer;
+        task.context.rflags = 0x202;
         task.context.cs = 0x23;
         task.context.ds = 0x1B;
         task.context.es = 0x1B;
@@ -315,7 +374,6 @@ fn init_task_context(task: &mut Task) {
         task.context.gs = 0x1B;
         task.context.ss = 0x1B;
         task.context.rdi = task.entry_arg as u64;
-        task.context.rsi = 0;
     }
 
     task.context.cr3 = 0;
@@ -699,6 +757,35 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
+    unsafe {
+        let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
+        let child_frame_addr = child.kernel_stack_top - frame_size;
+        let child_frame_ptr = child_frame_addr as *mut slopos_arch::InterruptFrame;
+        if !syscall_frame.is_null() {
+            core::ptr::copy_nonoverlapping(syscall_frame, child_frame_ptr, 1);
+        } else {
+            core::ptr::write_bytes(child_frame_ptr, 0, 1);
+        }
+        (*child_frame_ptr).rax = 0;
+        unsafe extern "C" {
+            fn ret_from_fork();
+        }
+        let ret_addr_slot = child_frame_addr - 8;
+        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
+        child.switch_ctx = SwitchContext {
+            rbx: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rbp: 0,
+            rsp: ret_addr_slot,
+            rflags: 0x02,
+            rip: ret_from_fork as *const () as u64,
+        };
+    }
+    child.context_from_user = 0;
+    child.context.rax = 0;
     if !syscall_frame.is_null() {
         let sf = unsafe { &*syscall_frame };
         child.context.rip = sf.rip;
@@ -706,27 +793,7 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
         child.context.rflags = sf.rflags;
         child.context.cs = if (sf.cs & 0x3) == 0x3 { sf.cs } else { 0x23 };
         child.context.ss = if (sf.ss & 0x3) == 0x3 { sf.ss } else { 0x1B };
-        child.context.ds = 0x1B;
-        child.context.es = 0x1B;
-        child.context.fs = 0;
-        child.context.gs = 0;
-        child.context.rbx = sf.rbx;
-        child.context.rcx = sf.rcx;
-        child.context.rdx = sf.rdx;
-        child.context.rsi = sf.rsi;
-        child.context.rdi = sf.rdi;
-        child.context.rbp = sf.rbp;
-        child.context.r8 = sf.r8;
-        child.context.r9 = sf.r9;
-        child.context.r10 = sf.r10;
-        child.context.r11 = sf.r11;
-        child.context.r12 = sf.r12;
-        child.context.r13 = sf.r13;
-        child.context.r14 = sf.r14;
-        child.context.r15 = sf.r15;
     }
-    child.context_from_user = 1;
-    child.context.rax = 0;
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
     if !child_page_dir.is_null() {
@@ -859,8 +926,63 @@ pub fn task_clone(
     child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
+    // Build InterruptFrame on child's kernel stack from inherited context.
+    unsafe {
+        let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
+        let child_frame_addr = child.kernel_stack_top - frame_size;
+        let child_frame_ptr = child_frame_addr as *mut slopos_arch::InterruptFrame;
+        let ctx = &child.context;
+        let user_rsp = if child_stack != 0 {
+            child_stack
+        } else {
+            ctx.rsp
+        };
+        core::ptr::write(
+            child_frame_ptr,
+            slopos_arch::InterruptFrame {
+                r15: ctx.r15,
+                r14: ctx.r14,
+                r13: ctx.r13,
+                r12: ctx.r12,
+                r11: ctx.r11,
+                r10: ctx.r10,
+                r9: ctx.r9,
+                r8: ctx.r8,
+                rbp: ctx.rbp,
+                rdi: ctx.rdi,
+                rsi: ctx.rsi,
+                rdx: ctx.rdx,
+                rcx: ctx.rcx,
+                rbx: ctx.rbx,
+                rax: 0,
+                vector: 0,
+                error_code: 0,
+                rip: ctx.rip,
+                cs: if (ctx.cs & 0x3) == 0x3 { ctx.cs } else { 0x23 },
+                rflags: ctx.rflags,
+                rsp: user_rsp,
+                ss: if (ctx.ss & 0x3) == 0x3 { ctx.ss } else { 0x1B },
+            },
+        );
+        unsafe extern "C" {
+            fn ret_from_fork();
+        }
+        let ret_addr_slot = child_frame_addr - 8;
+        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
+        child.switch_ctx = SwitchContext {
+            rbx: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rbp: 0,
+            rsp: ret_addr_slot,
+            rflags: 0x02,
+            rip: ret_from_fork as *const () as u64,
+        };
+    }
+    child.context_from_user = 0;
     child.context.rax = 0;
-
     if child_stack != 0 {
         child.context.rsp = child_stack;
     }

@@ -169,7 +169,7 @@ impl SurfaceState {
             window_x: 0,
             window_y: 0,
             z_order: 0,
-            visible: true,
+            visible: false, // invisible until first commit()
             window_state: WINDOW_STATE_NORMAL,
             frame_callback_pending: false,
             last_present_time_ms: 0,
@@ -199,6 +199,7 @@ impl SurfaceState {
         core::mem::swap(&mut self.committed_damage, &mut self.pending_damage);
         self.pending_damage.clear();
         self.dirty = true;
+        self.visible = true;
     }
 
     fn add_damage(&mut self, x: i32, y: i32, width: i32, height: i32) {

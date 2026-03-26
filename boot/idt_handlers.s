@@ -84,6 +84,39 @@
     iretq
 .endm
 
+# Entry point for new/forked tasks dispatched via switch_registers.
+# The kernel stack has a synthetic InterruptFrame pushed by task_create/task_fork.
+# This stub pops it and iretq's to user mode (or kernel mode for kthreads).
+.global ret_from_fork
+ret_from_fork:
+    movw $SEL_KERNEL_DATA, %ax
+    movw %ax, %ds
+    movw %ax, %es
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp
+
+    testb $3, 8(%rsp)
+    jz .Lret_from_fork_noswap
+    swapgs
+.Lret_from_fork_noswap:
+    iretq
+
 # Exception handlers (vectors 0-19)
 .global isr0
 isr0:
