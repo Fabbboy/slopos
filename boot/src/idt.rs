@@ -569,14 +569,16 @@ fn initialize_handler_tables() {
 /// fall through to the diagnostic / terminate / panic path in
 /// `exception_page_fault`.
 /// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
-/// frame.  `iret_frame` points at 5 u64 values: [RIP, CS, RFLAGS, RSP, SS].
+/// frame.  Logs the corruption for debugging, then panics.
 ///
-/// We log the corruption for debugging, then attempt recovery by resuming
-/// the current user task from its saved context (if possible).  If recovery
-/// fails, we panic.
-pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) {
+/// # Safety
+/// `iret_frame` must point to a readable region of at least 5 consecutive
+/// `u64` values laid out as `[RIP, CS, RFLAGS, RSP, SS]`.  The pointer
+/// need not be aligned (values are read with `read_unaligned`).
+pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     use slopos_utils::klog_info;
 
+    // SAFETY: caller guarantees iret_frame points to 5 readable u64s.
     let (rip, cs, rflags, rsp, ss) = unsafe {
         (
             core::ptr::read_unaligned(iret_frame),

@@ -508,6 +508,11 @@ fn get_current_cpu() -> usize {
 /// duration of the call.  All list + descriptor mutations happen under
 /// the global `PAGE_ALLOCATOR` lock, eliminating ABA and TOCTOU races.
 fn pcp_try_alloc(cpu: usize) -> u32 {
+    debug_assert!(
+        PreemptGuard::is_active(),
+        "pcp_try_alloc requires PreemptGuard"
+    );
+
     if cpu >= MAX_CPUS || !PCP_INIT.is_set() {
         return INVALID_PAGE_FRAME;
     }
@@ -525,19 +530,22 @@ fn pcp_try_alloc(cpu: usize) -> u32 {
     if head == INVALID_PAGE_FRAME {
         return INVALID_PAGE_FRAME;
     }
-    let next = unsafe { alloc.frame_desc_mut(head) }
-        .map(|f| f.next_free)
-        .unwrap_or(INVALID_PAGE_FRAME);
 
+    // Only proceed if the descriptor is valid — otherwise the cache
+    // list is corrupt and we must not advance head or adjust counts.
+    let desc = match unsafe { alloc.frame_desc_mut(head) } {
+        Some(d) => d,
+        None => return INVALID_PAGE_FRAME,
+    };
+
+    let next = desc.next_free;
     cache.head.store(next, Ordering::Release);
     cache.count.fetch_sub(1, Ordering::Relaxed);
     cache.alloc_count.fetch_add(1, Ordering::Relaxed);
 
-    if let Some(desc) = unsafe { alloc.frame_desc_mut(head) } {
-        desc.state = PAGE_FRAME_ALLOCATED;
-        desc.ref_count = 1;
-        desc.next_free = INVALID_PAGE_FRAME;
-    }
+    desc.state = PAGE_FRAME_ALLOCATED;
+    desc.ref_count = 1;
+    desc.next_free = INVALID_PAGE_FRAME;
 
     head
 }
@@ -547,6 +555,11 @@ fn pcp_try_alloc(cpu: usize) -> u32 {
 /// # Safety contract
 /// Caller must hold a `PreemptGuard` so `cpu` remains stable.
 fn pcp_refill(cpu: usize, flags: u32) {
+    debug_assert!(
+        PreemptGuard::is_active(),
+        "pcp_refill requires PreemptGuard"
+    );
+
     if cpu >= MAX_CPUS {
         return;
     }
@@ -554,6 +567,13 @@ fn pcp_refill(cpu: usize, flags: u32) {
     let cache = &PER_CPU_CACHES[cpu];
     let current_count = cache.count.load(Ordering::Relaxed);
 
+    // Two-watermark design:
+    // - PCP_LOW_WATERMARK (optimistic, lock-free): skip the refill entirely
+    //   if the cache is reasonably full, avoiding redundant lock acquisitions.
+    // - PCP_HIGH_WATERMARK (authoritative, under lock): prevents overflow by
+    //   recomputing `needed` after acquiring PAGE_ALLOCATOR.  The gap between
+    //   LOW and HIGH (e.g. 8 vs 64) absorbs concurrent drains between the
+    //   two checks.
     if current_count >= PCP_LOW_WATERMARK {
         return;
     }
@@ -585,6 +605,16 @@ fn pcp_refill(cpu: usize, flags: u32) {
     }
 }
 
+/// Drain all per-CPU PCP caches back into the buddy allocator.
+///
+/// Iterates every CPU's [`PER_CPU_CACHES`] entry and returns cached frames
+/// to the buddy via [`free_batch_from_pcp`], batching up to
+/// [`PCP_BATCH_SIZE`] frames per lock acquisition.
+///
+/// # Safety
+/// Must only be called during system shutdown when no concurrent PCP
+/// operations or per-CPU allocations are in progress.  This function
+/// does not acquire per-CPU locks and is unsafe under concurrent use.
 pub fn pcp_drain_all() {
     for cpu in 0..MAX_CPUS {
         let cache = &PER_CPU_CACHES[cpu];
@@ -843,9 +873,12 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
                     if h == INVALID_PAGE_FRAME {
                         break;
                     }
-                    let next = unsafe { alloc.frame_desc_mut(h) }
-                        .map(|f| f.next_free)
-                        .unwrap_or(INVALID_PAGE_FRAME);
+                    // Only drain frames with valid descriptors — a None
+                    // descriptor means the list is corrupt; stop draining.
+                    let next = match unsafe { alloc.frame_desc_mut(h) } {
+                        Some(f) => f.next_free,
+                        None => break,
+                    };
                     cache.head.store(next, Ordering::Release);
                     cache.count.fetch_sub(1, Ordering::Relaxed);
                     *slot = h;

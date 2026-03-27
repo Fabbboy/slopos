@@ -1794,7 +1794,16 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Ensure at least one other CPU is online and schedulable.
+    // Ensure both the local CPU and at least one other CPU are online
+    // and schedulable so select_target_cpu sees both as candidates.
+    slopos_arch::pcr::mark_cpu_online(cpu_id);
+    if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Could not enable scheduler on local CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
     let other_cpu = if cpu_id == 0 { 1 } else { 0 };
     slopos_arch::pcr::mark_cpu_online(other_cpu);
     if super::per_cpu::with_cpu_scheduler(other_cpu, |sched| sched.enable()).is_none() {
