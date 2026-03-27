@@ -2070,23 +2070,26 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: ready_queues_empty must report empty queues correctly.
-pub fn test_ready_queues_empty_accuracy() -> TestResult {
+/// Regression: effective_load must reflect queued tasks correctly.
+pub fn test_effective_load_accuracy() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // After fixture reset, queues should be empty.
-    let idle_before =
-        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.ready_queues_empty())
-            .unwrap_or(false);
-    if !idle_before {
-        klog_info!("SCHED_TEST: ready_queues_empty reports busy on empty queues");
+    // After fixture reset, effective_load should be 0 or 1 (just the
+    // running task on this CPU, if any).
+    let load_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load())
+        .unwrap_or(u32::MAX);
+    if load_before > 1 {
+        klog_info!(
+            "SCHED_TEST: effective_load {} > 1 on empty queues",
+            load_before
+        );
         return TestResult::Fail;
     }
 
-    // Enqueue a task — now it should not be idle.
+    // Enqueue a task — effective_load should increase.
     let task_id = task_create(
-        b"IdleCheck\0".as_ptr() as *const c_char,
+        b"LoadCheck\0".as_ptr() as *const c_char,
         dummy_task_fn,
         ptr::null_mut(),
         TASK_PRIORITY_NORMAL,
@@ -2103,10 +2106,14 @@ pub fn test_ready_queues_empty_accuracy() -> TestResult {
         sched.enqueue_local(task_ptr);
     });
 
-    let idle_after = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.ready_queues_empty())
-        .unwrap_or(true);
-    if idle_after {
-        klog_info!("SCHED_TEST: ready_queues_empty reports idle with queued task");
+    let load_after =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0);
+    if load_after <= load_before {
+        klog_info!(
+            "SCHED_TEST: effective_load did not increase after enqueue ({} -> {})",
+            load_before,
+            load_after
+        );
         return TestResult::Fail;
     }
 
@@ -2160,6 +2167,6 @@ slopos_testing::define_test_suite!(
         test_select_target_cpu_prefers_idle_cpu,
         test_select_target_cpu_running_task_not_idle,
         test_schedule_new_task_spreads_across_cpus,
-        test_ready_queues_empty_accuracy,
+        test_effective_load_accuracy,
     ]
 );

@@ -370,20 +370,6 @@ impl PerCpuScheduler {
         queues.iter().map(|q| q.len()).sum()
     }
 
-    /// Lock-free check that all per-CPU ready queues are empty.
-    ///
-    /// Only inspects the local `ready_queues` atomic counts — does NOT
-    /// check `inbox_count`, `remote_inbox_head`, or whether a non-idle
-    /// task is currently running.  Use `effective_load() == 0` for a
-    /// more comprehensive idle check.  May briefly race with concurrent
-    /// enqueue/dequeue but false positives are benign.
-    #[allow(dead_code)] // used by sched_tests
-    pub(crate) fn ready_queues_empty(&self) -> bool {
-        // SAFETY: ReadyQueue counts are AtomicU32 — safe to read without the lock.
-        let queues = unsafe { &*self.ready_queues.get() };
-        queues.iter().all(|q| q.is_empty())
-    }
-
     /// Returns the effective load on this CPU: queued tasks plus one if a
     /// non-idle task is currently running.  Lock-free and approximate.
     /// Mirrors Linux's `rq->nr_running` which includes the running task.
