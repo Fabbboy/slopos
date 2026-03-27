@@ -583,10 +583,34 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
         iret_frame
     );
 
-    // Dump the surrounding stack words for forensics
+    // Dump the surrounding stack words for forensics.
+    // Limit the probe range to avoid nested faults on invalid addresses:
+    // use the current task's kernel stack bounds when available, otherwise
+    // conservatively bound to ±128 bytes around iret_frame.
     klog_info!("=== IRET FRAME VICINITY DUMP ===");
+    let (dump_lo, dump_hi) = {
+        let t = slopos_core::sched::scheduler_get_current_task();
+        if !t.is_null() {
+            let base = unsafe { (*t).kernel_stack_base } as usize;
+            let top = unsafe { (*t).kernel_stack_top } as usize;
+            if base != 0 && top > base {
+                (base, top)
+            } else {
+                let mid = iret_frame as usize;
+                (mid.saturating_sub(128), mid.saturating_add(128))
+            }
+        } else {
+            let mid = iret_frame as usize;
+            (mid.saturating_sub(128), mid.saturating_add(128))
+        }
+    };
     for offset in -4isize..10 {
         let addr = unsafe { iret_frame.offset(offset) };
+        let addr_val = addr as usize;
+        if addr_val < dump_lo || addr_val + 8 > dump_hi {
+            klog_info!("  [{:+}] {:p} = <out of bounds>", offset, addr);
+            continue;
+        }
         let val = unsafe { core::ptr::read_unaligned(addr) };
         let marker = if offset == 0 {
             " <-- RIP"
@@ -616,13 +640,10 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
             unsafe { (*task).task_id },
             is_user,
         );
-        if is_user {
-            // User-mode IRET corruption is fatal in the current handler.
-            // A corrupted frame cannot be fixed by yielding — the panic
-            // below will fire regardless.
-        }
     }
 
+    // User-mode IRET corruption is fatal — a corrupted frame cannot be
+    // recovered and the panic below fires regardless.
     panic!("Unrecoverable IRET frame corruption");
 }
 

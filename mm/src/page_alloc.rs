@@ -570,9 +570,11 @@ fn pcp_refill(cpu: usize, flags: u32) {
         let head = cache.head.load(Ordering::Acquire);
         if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
             desc.next_free = head;
+            cache.head.store(frame_num, Ordering::Release);
+            cache.count.fetch_add(1, Ordering::Relaxed);
         }
-        cache.head.store(frame_num, Ordering::Release);
-        cache.count.fetch_add(1, Ordering::Relaxed);
+        // If frame_desc_mut returns None, skip this frame — linking a
+        // frame without a valid descriptor would corrupt the PCP list.
     }
 }
 
@@ -872,22 +874,23 @@ pub fn page_allocator_max_supported_frames() -> u32 {
 pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
     let alloc = PAGE_ALLOCATOR.lock();
 
+    // PCP-cached frames are allocated from the buddy but not in use —
+    // include them in the free count for accurate statistics.
     let mut pcp_count = 0u32;
     for cpu in 0..MAX_CPUS {
         let val = PER_CPU_CACHES[cpu].count.load(Ordering::Relaxed);
         pcp_count = pcp_count.saturating_add(val);
     }
-    let _ = pcp_count;
 
     unsafe {
         if !total.is_null() {
             *total = alloc.total_frames;
         }
         if !free.is_null() {
-            *free = alloc.free_frames;
+            *free = alloc.free_frames.saturating_add(pcp_count);
         }
         if !allocated.is_null() {
-            *allocated = alloc.allocated_frames;
+            *allocated = alloc.allocated_frames.saturating_sub(pcp_count);
         }
     }
 }

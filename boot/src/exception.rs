@@ -131,22 +131,20 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         klog_info!("=== STACK DUMP at RSP 0x{:x} ===", frame_ref.rsp);
         let rsp = frame_ref.rsp as *const u64;
 
-        // Determine a safe probe range for the stack dump.  If the current
-        // task has a valid kernel stack region, use that; otherwise fall back
-        // to a conservative ±128-byte window around RSP.
-        let (stack_lo, stack_hi) = {
-            let task = slopos_core::sched::scheduler_get_current_task();
-            if !task.is_null() {
-                let base = unsafe { (*task).kernel_stack_base };
-                let top = unsafe { (*task).kernel_stack_top };
-                if base != 0 && top > base {
-                    (base as usize, top as usize)
-                } else {
-                    (frame_ref.rsp as usize, frame_ref.rsp as usize + 128)
-                }
+        // Determine a safe probe range for the stack dump.  Call
+        // scheduler_get_current_task() once and reuse the pointer for
+        // both bounds computation and the task-context dump below.
+        let task_ptr = slopos_core::sched::scheduler_get_current_task();
+        let (stack_lo, stack_hi) = if !task_ptr.is_null() {
+            let base = unsafe { (*task_ptr).kernel_stack_base };
+            let top = unsafe { (*task_ptr).kernel_stack_top };
+            if base != 0 && top > base {
+                (base as usize, top as usize)
             } else {
                 (frame_ref.rsp as usize, frame_ref.rsp as usize + 128)
             }
+        } else {
+            (frame_ref.rsp as usize, frame_ref.rsp as usize + 128)
         };
 
         for i in 0..16isize {
@@ -168,22 +166,24 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         let current_cr3 = cpu::read_cr3();
         klog_info!("Active CR3: 0x{:x}", current_cr3);
 
-        let task = slopos_core::sched::scheduler_get_current_task();
-        if !task.is_null() {
+        if !task_ptr.is_null() {
             unsafe {
-                let ctx_cr3 = core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.cr3));
+                let ctx_cr3 =
+                    core::ptr::read_unaligned(core::ptr::addr_of!((*task_ptr).context.cr3));
                 klog_info!(
                     "Current task: id={} name='{}' kstack=0x{:x}..0x{:x} flags=0x{:x} ctx_cr3=0x{:x}",
-                    (*task).task_id,
-                    slopos_utils::string::bytes_as_str(&(*task).name),
-                    (*task).kernel_stack_base,
-                    (*task).kernel_stack_top,
-                    (*task).flags,
+                    (*task_ptr).task_id,
+                    slopos_utils::string::bytes_as_str(&(*task_ptr).name),
+                    (*task_ptr).kernel_stack_base,
+                    (*task_ptr).kernel_stack_top,
+                    (*task_ptr).flags,
                     ctx_cr3
                 );
                 // Check if RSP is outside the task's kernel stack bounds
                 let rsp_val = frame_ref.rsp;
-                if rsp_val < (*task).kernel_stack_base || rsp_val >= (*task).kernel_stack_top {
+                if rsp_val < (*task_ptr).kernel_stack_base
+                    || rsp_val >= (*task_ptr).kernel_stack_top
+                {
                     klog_info!("WARNING: RSP 0x{:x} OUTSIDE kernel stack bounds!", rsp_val);
                 }
             }

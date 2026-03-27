@@ -391,8 +391,12 @@ impl PerCpuScheduler {
         let current = self.current_task_atomic.load(Ordering::Relaxed);
         let idle = self.idle_task_atomic.load(Ordering::Relaxed);
         let running_real = !current.is_null() && current != idle;
-        let load = queued + inbox;
-        if running_real { load + 1 } else { load }
+        let load = queued.saturating_add(inbox);
+        if running_real {
+            load.saturating_add(1)
+        } else {
+            load
+        }
     }
 
     pub fn steal_task(&self) -> Option<*mut Task> {
