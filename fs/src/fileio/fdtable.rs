@@ -9,8 +9,8 @@ fn bootstrap_console_fds(
     let tty_ops = effective_tty_ops(external_ops);
 
     let console_tty = tty::default_console_tty();
-    let stdin_flags = FILE_OPEN_READ;
-    let stdout_flags = FILE_OPEN_WRITE;
+    let stdin_flags = OpenMode::READ;
+    let stdout_flags = OpenMode::WRITE;
 
     let mut opened_refs = 0u8;
     for _ in 0..3 {

@@ -58,3 +58,46 @@ pub use wrappers::shm::{CachedShmMapping, ShmBuffer, ShmBufferRef};
 
 pub type UserWindowInfo = WindowInfo;
 pub type RawFd = i32;
+
+/// Owned file descriptor — closes automatically on drop.
+///
+/// This is the fd analog of `Box<T>`: it owns the resource and releases it
+/// when it goes out of scope.  NOT `Copy`, NOT `Clone` — you can't
+/// accidentally duplicate an fd or use one after close.
+///
+/// Use `.raw()` to borrow the fd number for syscalls that need `i32`.
+/// Use `.into_raw()` to take ownership without closing (e.g. after `dup2`
+/// to a well-known slot like stdin).
+pub struct OwnedFd(RawFd);
+
+impl OwnedFd {
+    /// Wrap a raw fd number into an owned handle.
+    ///
+    /// # Safety contract
+    /// The caller must ensure `fd` is a valid, open file descriptor that
+    /// is not owned by any other `OwnedFd`.
+    pub fn from_raw(fd: RawFd) -> Self {
+        Self(fd)
+    }
+
+    /// Borrow the raw fd number for passing to syscalls.
+    pub fn raw(&self) -> RawFd {
+        self.0
+    }
+
+    /// Consume the `OwnedFd` WITHOUT closing.  The caller takes
+    /// responsibility for the fd's lifetime.
+    pub fn into_raw(self) -> RawFd {
+        let fd = self.0;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            let _ = super::syscall::fs::close_fd_raw(self.0);
+        }
+    }
+}

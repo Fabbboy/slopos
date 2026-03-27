@@ -24,26 +24,85 @@ use crate::MAX_PATH_LEN;
 pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
 pub(super) const FILEIO_MAX_OPEN_FILE_ENTRIES: usize = 256;
 
-pub(super) const FILE_OPEN_READ: u32 = 1 << 0;
-pub(super) const FILE_OPEN_WRITE: u32 = 1 << 1;
-pub(super) const FILE_OPEN_CREAT: u32 = 1 << 2;
-pub(super) const FILE_OPEN_APPEND: u32 = 1 << 3;
+/// Internal open-mode flags for `OpenFileEntry`.
+///
+/// These are a DISTINCT type from POSIX `O_*` flags (`u32`).  Passing raw
+/// POSIX flags where `OpenMode` is expected is a compile error — preventing
+/// the class of bugs where `O_RDONLY` (0) is silently misinterpreted as
+/// "no permissions" because `FILE_OPEN_READ` was 1.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct OpenMode(u32);
 
-pub(super) fn posix_to_internal_flags(posix: u32) -> u32 {
-    let mut f = 0u32;
+impl OpenMode {
+    pub const EMPTY: Self = Self(0);
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+    pub const CREAT: Self = Self(1 << 2);
+    pub const APPEND: Self = Self(1 << 3);
+
+    pub const fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) == flag.0 && flag.0 != 0
+    }
+
+    pub const fn intersects(self, flag: Self) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Merge pass-through POSIX bits (O_NONBLOCK, O_NOCTTY, etc.) that
+    /// live in the upper bits and don't collide with the internal flags.
+    pub const fn with_raw(self, raw: u32) -> Self {
+        Self(self.0 | raw)
+    }
+}
+
+impl Default for OpenMode {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl core::ops::BitOr for OpenMode {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for OpenMode {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl core::ops::BitAnd for OpenMode {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+
+/// Convert POSIX `O_*` flags to internal `OpenMode`.
+pub fn posix_to_open_mode(posix: u32) -> OpenMode {
+    let mut m = OpenMode::EMPTY;
     match posix & O_ACCMODE {
-        O_RDONLY => f |= FILE_OPEN_READ,
-        O_WRONLY => f |= FILE_OPEN_WRITE,
-        O_RDWR => f |= FILE_OPEN_READ | FILE_OPEN_WRITE,
+        O_RDONLY => m |= OpenMode::READ,
+        O_WRONLY => m |= OpenMode::WRITE,
+        O_RDWR => m |= OpenMode::READ | OpenMode::WRITE,
         _ => {}
     }
     if posix & O_CREAT != 0 {
-        f |= FILE_OPEN_CREAT;
+        m |= OpenMode::CREAT;
     }
     if posix & O_APPEND != 0 {
-        f |= FILE_OPEN_APPEND;
+        m |= OpenMode::APPEND;
     }
-    f | (posix & !(O_ACCMODE | O_CREAT | O_APPEND))
+    // Pass through remaining POSIX bits (O_NONBLOCK, O_NOCTTY, etc.)
+    m.with_raw(posix & !(O_ACCMODE | O_CREAT | O_APPEND))
 }
 
 #[derive(Clone, Copy)]
@@ -64,7 +123,7 @@ pub(super) struct OpenFileEntry {
     pub(super) ops: Option<&'static dyn FileOps>,
     pub(super) handle: usize,
     pub(super) position: u64,
-    pub(super) status_flags: u32,
+    pub(super) status_flags: OpenMode,
     pub(super) refcount: u16,
     pub(super) generation: u16,
     pub(super) valid: bool,
@@ -76,7 +135,7 @@ impl OpenFileEntry {
             ops: None,
             handle: 0,
             position: 0,
-            status_flags: 0,
+            status_flags: OpenMode::EMPTY,
             refcount: 0,
             generation: 0,
             valid: false,

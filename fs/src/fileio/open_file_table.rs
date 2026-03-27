@@ -4,7 +4,7 @@ pub(super) fn alloc_open_file_entry(
     open_files: &mut [OpenFileEntry; FILEIO_MAX_OPEN_FILE_ENTRIES],
     ops: &'static dyn FileOps,
     handle: usize,
-    status_flags: u32,
+    status_flags: OpenMode,
     position: u64,
 ) -> Option<u16> {
     for (idx, slot) in open_files.iter_mut().enumerate() {
@@ -72,7 +72,7 @@ pub(super) fn release_open_file(
     slot.ops = None;
     slot.handle = 0;
     slot.position = 0;
-    slot.status_flags = 0;
+    slot.status_flags = OpenMode::EMPTY;
     slot.refcount = 0;
     slot.valid = false;
 }

@@ -1543,7 +1543,23 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "signal number not passed in RDI"
     );
 
-    let sigframe: SignalFrame = match user_copy_in(pid, user_frame.rsp) {
+    // The restorer address is pushed as a separate u64 at [rsp].
+    // The SignalFrame starts at [rsp + 8].
+    let restorer_on_stack: u64 = match user_copy_in(pid, user_frame.rsp) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(
+        restorer_on_stack,
+        new_action.sa_restorer,
+        "signal restorer mismatch"
+    );
+
+    let sigframe_addr = user_frame.rsp.wrapping_add(8);
+    let sigframe: SignalFrame = match user_copy_in(pid, sigframe_addr) {
         Some(v) => v,
         None => {
             task_terminate(task_id);
@@ -1560,12 +1576,10 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         original_rsp,
         "saved RSP mismatch in signal frame"
     );
-    assert_eq_test!(
-        sigframe.restorer,
-        new_action.sa_restorer,
-        "signal restorer mismatch"
-    );
 
+    // Simulate handler's `ret`: it pops the restorer, advancing RSP by 8
+    // so it now points at the SignalFrame — matching the real flow.
+    user_frame.rsp = user_frame.rsp.wrapping_add(8);
     let _ = with_user_process_context(pid, || syscall_rt_sigreturn(task_ptr, &mut user_frame));
     assert_eq_test!(
         user_frame.rip,

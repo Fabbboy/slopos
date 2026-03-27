@@ -45,7 +45,7 @@ fn install_fd_entry(
     process_id: u32,
     ops: &'static dyn FileOps,
     handle: usize,
-    mut flags: u32,
+    mut flags: OpenMode,
     call_tty_policy: Option<TtyIndex>,
 ) -> c_int {
     with_tables(|kernel, processes, open_files, _| {
@@ -62,7 +62,7 @@ fn install_fd_entry(
         };
 
         let mut position = 0u64;
-        if (flags & FILE_OPEN_APPEND) != 0 {
+        if flags.contains(OpenMode::APPEND) {
             if let Some(size) = ops.size(handle) {
                 position = size;
             } else {
@@ -80,24 +80,24 @@ fn install_fd_entry(
         };
 
         if ops.kind() == FileKind::Socket {
-            let mode_bits = flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
+            let mode_bits = flags & (OpenMode::READ | OpenMode::WRITE);
             flags = mode_bits;
             if let Some(open_file) = get_open_file_mut(open_files, open_file_idx) {
                 open_file.status_flags = flags;
-                let _ = ops.set_status_flags(handle, flags);
+                let _ = ops.set_status_flags(handle, flags.bits());
             }
         }
 
         table.descriptors[slot_idx] = FdEntry {
             open_file_idx,
-            cloexec: (flags & O_CLOEXEC as u32) != 0,
+            cloexec: (flags.bits() & O_CLOEXEC as u32) != 0,
             valid: true,
         };
 
         drop(guard);
 
         if let Some(tty_idx) = call_tty_policy {
-            maybe_acquire_controlling_tty_on_open(tty_idx, flags);
+            maybe_acquire_controlling_tty_on_open(tty_idx, flags.bits());
         }
 
         slot_idx as c_int
@@ -113,14 +113,14 @@ fn current_socket_ops() -> Option<&'static dyn FileOps> {
 }
 
 pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: u32) -> c_int {
-    let flags = posix_to_internal_flags(posix_flags);
+    let flags = posix_to_open_mode(posix_flags);
     if path.is_null() {
         return Errno::EFAULT.raw() as _;
     }
-    if (flags & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0 {
+    if !flags.intersects(OpenMode::READ | OpenMode::WRITE) {
         return Errno::EINVAL.raw() as _;
     }
-    if (flags & FILE_OPEN_APPEND) != 0 && (flags & FILE_OPEN_WRITE) == 0 {
+    if flags.contains(OpenMode::APPEND) && !flags.contains(OpenMode::WRITE) {
         return Errno::EINVAL.raw() as _;
     }
 
@@ -154,7 +154,7 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
             process_id,
             tty_ops,
             master_idx.0 as usize,
-            flags | O_NOCTTY as u32,
+            flags.with_raw(O_NOCTTY as u32),
             None,
         );
     }
@@ -173,10 +173,10 @@ pub fn file_open_for_process(process_id: u32, path: *const c_char, posix_flags: 
         );
     }
 
-    let create = (flags & FILE_OPEN_CREAT) != 0;
+    let create = flags.contains(OpenMode::CREAT);
     let exclusive = (posix_flags & slopos_abi::fs::O_EXCL) != 0;
     let truncate = (posix_flags & slopos_abi::fs::O_TRUNC) != 0;
-    let writable = (flags & FILE_OPEN_WRITE) != 0;
+    let writable = flags.contains(OpenMode::WRITE);
     let open_flags = crate::vfs::ops::VfsOpenFlags {
         create,
         exclusive,
@@ -202,7 +202,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
             let fd_entry = unsafe { get_fd_entry(&mut *table_ptr, fd) }?;
             let open_file_idx = fd_entry.open_file_idx;
             let open_file = get_open_file_mut(open_files, open_file_idx)?;
-            if (open_file.status_flags & FILE_OPEN_READ) == 0 {
+            if !open_file.status_flags.contains(OpenMode::READ) {
                 drop(guard);
                 return None;
             }
@@ -218,7 +218,14 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
             drop(guard);
             Some(snapshot)
         })
-        .unwrap_or((u16::MAX, &VFS_FILE_OPS as &dyn FileOps, 0, 0, 0, false));
+        .unwrap_or((
+            u16::MAX,
+            &VFS_FILE_OPS as &dyn FileOps,
+            0,
+            OpenMode::EMPTY,
+            0,
+            false,
+        ));
 
     if open_file_idx == u16::MAX {
         return Errno::EBADF.raw() as _;
@@ -228,7 +235,7 @@ pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssi
     }
 
     let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.read(handle, buf, used_offset, flags);
+    let rc = ops.read(handle, buf, used_offset, flags.bits());
     if rc > 0 && seekable {
         with_tables(|_, _, open_files, _| {
             if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)
@@ -253,7 +260,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
             let fd_entry = unsafe { get_fd_entry(&mut *table_ptr, fd) }?;
             let open_file_idx = fd_entry.open_file_idx;
             let open_file = get_open_file_mut(open_files, open_file_idx)?;
-            if (open_file.status_flags & FILE_OPEN_WRITE) == 0 {
+            if !open_file.status_flags.contains(OpenMode::WRITE) {
                 drop(guard);
                 return None;
             }
@@ -269,7 +276,14 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
             drop(guard);
             Some(snapshot)
         })
-        .unwrap_or((u16::MAX, &VFS_FILE_OPS as &dyn FileOps, 0, 0, 0, false));
+        .unwrap_or((
+            u16::MAX,
+            &VFS_FILE_OPS as &dyn FileOps,
+            0,
+            OpenMode::EMPTY,
+            0,
+            false,
+        ));
 
     if open_file_idx == u16::MAX {
         return Errno::EBADF.raw() as _;
@@ -279,7 +293,7 @@ pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t
     }
 
     let used_offset = if seekable { offset } else { 0 };
-    let rc = ops.write(handle, buf, used_offset, flags);
+    let rc = ops.write(handle, buf, used_offset, flags.bits());
     if rc > 0 && seekable {
         with_tables(|_, _, open_files, _| {
             if let Some(open_file) = get_open_file_mut(open_files, open_file_idx)
@@ -531,13 +545,18 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
     })
 }
 
-pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, flags: u32) -> c_int {
+/// Open a file descriptor for a TTY device.
+///
+/// TTY devices are inherently bidirectional, so READ and WRITE are always
+/// granted.  There is no `flags` parameter — callers cannot accidentally
+/// pass unconverted POSIX flags (the bug that `OpenMode` prevents).
+pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex) -> c_int {
     let tty_ops = current_tty_ops();
     install_fd_entry(
         process_id,
         tty_ops,
         tty_idx.0 as usize,
-        flags,
+        OpenMode::READ | OpenMode::WRITE,
         Some(tty_idx),
     )
 }
@@ -579,8 +598,16 @@ pub fn file_pipe_create(
 
         let nonblock = (flags & O_NONBLOCK as u32) != 0;
         let cloexec = (flags & O_CLOEXEC as u32) != 0;
-        let read_flags = FILE_OPEN_READ | if nonblock { O_NONBLOCK as u32 } else { 0 };
-        let write_flags = FILE_OPEN_WRITE | if nonblock { O_NONBLOCK as u32 } else { 0 };
+        let read_flags = if nonblock {
+            OpenMode::READ.with_raw(O_NONBLOCK as u32)
+        } else {
+            OpenMode::READ
+        };
+        let write_flags = if nonblock {
+            OpenMode::WRITE.with_raw(O_NONBLOCK as u32)
+        } else {
+            OpenMode::WRITE
+        };
 
         let Some(read_open_idx) =
             alloc_open_file_entry(open_files, &PIPE_READ_OPS, pipe_id as usize, read_flags, 0)
@@ -829,7 +856,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let val = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
                 .and_then(|f| get_open_file_mut(open_files, f.open_file_idx))
-                .map(|o| o.status_flags as i64)
+                .map(|o| o.status_flags.bits() as i64)
                 .unwrap_or(Errno::EBADF.raw() as i64);
             drop(guard);
             val
@@ -851,15 +878,19 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
                 drop(guard);
                 return Errno::EBADF.raw() as i64;
             };
-            let mode_bits = open_file.status_flags & (FILE_OPEN_READ | FILE_OPEN_WRITE);
-            let sticky_flags = open_file.status_flags & (O_NOCTTY as u32);
-            let mut next_flags = mode_bits | sticky_flags | (arg as u32 & FILE_OPEN_APPEND);
-            if (arg & O_NONBLOCK) != 0 {
-                next_flags |= O_NONBLOCK as u32;
+            let mode_bits = open_file.status_flags & (OpenMode::READ | OpenMode::WRITE);
+            let mut next_flags = mode_bits;
+            if (arg as u32 & OpenMode::APPEND.bits()) != 0 {
+                next_flags |= OpenMode::APPEND;
             }
+            let mut raw = open_file.status_flags.bits() & (O_NOCTTY as u32);
+            if (arg & O_NONBLOCK) != 0 {
+                raw |= O_NONBLOCK as u32;
+            }
+            let next_flags = next_flags.with_raw(raw);
             open_file.status_flags = next_flags;
             if let Some(ops) = open_file.ops {
-                let _ = ops.set_status_flags(open_file.handle, next_flags);
+                let _ = ops.set_status_flags(open_file.handle, next_flags.bits());
             }
             drop(guard);
             0
@@ -902,7 +933,7 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
         process_id,
         socket_ops,
         socket_idx as usize,
-        FILE_OPEN_READ | FILE_OPEN_WRITE,
+        OpenMode::READ | OpenMode::WRITE,
         None,
     )
 }

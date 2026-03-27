@@ -61,6 +61,8 @@ pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_OPENPTY: u64 = 145;
 pub const SYSCALL_TTY_READ: u64 = 146;
 pub const SYSCALL_TTY_WRITE: u64 = 147;
+/// Open a file descriptor for a TTY by its index.  Returns the new fd number.
+pub const SYSCALL_OPEN_TTY_FD: u64 = 148;
 pub const SYSCALL_GET_TIME_MS: u64 = 39;
 pub const SYSCALL_REBOOT: u64 = 85;
 
@@ -649,7 +651,7 @@ pub const FONT_FORMAT_BITMAP: u64 = 0;
 pub const FONT_FORMAT_COVERAGE: u64 = 1;
 
 // Syscall numbers 145-147 are reserved for future font/console operations.
-pub const SYSCALL_TABLE_SIZE: usize = 148;
+pub const SYSCALL_TABLE_SIZE: usize = 149;
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

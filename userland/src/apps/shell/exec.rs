@@ -389,27 +389,42 @@ fn print_background_job_started(job_id: u16, pid: u32) {
     shell_write(b"\n");
 }
 
-fn drain_compositor_signals() {
+/// Forward compositor keyboard events to the PTY master so the slave's
+/// line discipline handles ISIG signal generation, echo, and canonical
+/// editing.  Also drains PTY master output (echo bytes) to the display.
+///
+/// This replaces the old `drain_compositor_signals()` which bypassed the
+/// TTY and called `kill()` directly — breaking ISIG semantics, preventing
+/// child stdin reads, and only handling Ctrl+C (not Ctrl+Z/Ctrl+\).
+fn forward_compositor_keyboard() {
     use crate::syscall::{InputEvent, InputEventType, input};
-    use slopos_abi::signal::SIGINT;
 
     if !super::display::DISPLAY.enabled.get() {
         return;
     }
+    let master = super::shell_pty_master();
+    if master < 0 {
+        return;
+    }
+    let master_idx = master as u32;
+
+    // Forward keyboard bytes to PTY master → slave ldisc processes them.
     let mut events = [InputEvent::default(); 8];
     let count = input::poll_batch(&mut events) as usize;
     for i in 0..count.min(8) {
         if events[i].event_type == InputEventType::KeyPress {
             let ascii = events[i].key_ascii();
-            if ascii == 0x03 {
-                let fg = foreground_pgid();
-                if fg != 0 {
-                    if let Ok(group) = i32::try_from(fg) {
-                        let _ = process::kill_pid(-group, SIGINT);
-                    }
-                }
+            if ascii != 0 {
+                let _ = process::tty_write(master_idx, &[ascii]);
             }
         }
+    }
+
+    // Drain echo/output from the PTY master and display it.
+    let mut echo_buf = [0u8; 256];
+    let n = process::tty_read(master_idx, &mut echo_buf);
+    if n > 0 {
+        super::display::shell_write(&echo_buf[..n as usize]);
     }
 }
 
@@ -423,28 +438,33 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
     let mut backup_fd = -1i32;
 
     if capture {
-        if fs::pipe(&mut pipe_fds).is_err() {
-            shell_write(b"pipe failed\n");
-            return Some(1);
-        }
-        backup_fd = match fs::dup(1) {
-            Ok(fd) => fd,
+        let (r, w) = match fs::pipe() {
+            Ok(pair) => pair,
             Err(_) => {
-                let _ = fs::close_fd(pipe_fds[0]);
-                let _ = fs::close_fd(pipe_fds[1]);
+                shell_write(b"pipe failed\n");
+                return Some(1);
+            }
+        };
+        pipe_fds[0] = r.into_raw();
+        pipe_fds[1] = w.into_raw();
+        backup_fd = match fs::dup(1) {
+            Ok(fd) => fd.into_raw(),
+            Err(_) => {
+                let _ = fs::close_fd_raw(pipe_fds[0]);
+                let _ = fs::close_fd_raw(pipe_fds[1]);
                 shell_write(b"dup failed\n");
                 return Some(1);
             }
         };
         if fs::dup2(pipe_fds[1], 1).is_err() {
-            let _ = fs::close_fd(pipe_fds[0]);
-            let _ = fs::close_fd(pipe_fds[1]);
-            let _ = fs::close_fd(backup_fd);
+            let _ = fs::close_fd_raw(pipe_fds[0]);
+            let _ = fs::close_fd_raw(pipe_fds[1]);
+            let _ = fs::close_fd_raw(backup_fd);
             shell_write(b"dup2 failed\n");
             return Some(1);
         }
         // Close extra write-end; child will inherit fd 1 = pipe write.
-        let _ = fs::close_fd(pipe_fds[1]);
+        let _ = fs::close_fd_raw(pipe_fds[1]);
     }
 
     let spawn_flags = if background {
@@ -460,14 +480,13 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
         spawn_flags,
     );
 
-    // Restore fd 1 immediately after spawn so shell output is normal again.
     if capture {
         let _ = fs::dup2(backup_fd, 1);
-        let _ = fs::close_fd(backup_fd);
+        let _ = fs::close_fd_raw(backup_fd);
     }
     if tid <= 0 {
         if capture {
-            let _ = fs::close_fd(pipe_fds[0]);
+            let _ = fs::close_fd_raw(pipe_fds[0]);
         }
         shell_write(b"spawn failed\n");
     }
@@ -508,7 +527,7 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
             }];
             let _ = fs::poll(&mut pfds, 10);
 
-            drain_compositor_signals();
+            forward_compositor_keyboard();
 
             loop {
                 match fs::read_slice(pipe_fds[0], &mut buf) {
@@ -521,8 +540,6 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
             }
 
             if let Some(st) = process::waitpid_nohang(pid) {
-                // Final drain — child is dead, pipe write-end closed,
-                // remaining data can be read without blocking.
                 loop {
                     match fs::read_slice(pipe_fds[0], &mut buf) {
                         Ok(0) => break,
@@ -536,14 +553,14 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
                 break;
             }
         }
-        let _ = fs::close_fd(pipe_fds[0]);
+        let _ = fs::close_fd_raw(pipe_fds[0]);
         exit_status
     } else if super::display::DISPLAY.enabled.get() {
         loop {
             if let Some(st) = process::waitpid_nohang(pid) {
                 break st;
             }
-            drain_compositor_signals();
+            forward_compositor_keyboard();
             sys_core::sleep_ms(5);
         }
     } else {
@@ -561,13 +578,13 @@ fn open_redirect_target(redir: Redirect, path_buf: &mut [u8; 256]) -> Result<(i3
     match redir.kind {
         RedirectKind::Input => {
             let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_RDONLY).map_err(|_| ())?;
-            Ok((0, fd))
+            Ok((0, fd.into_raw()))
         }
         RedirectKind::OutputTruncate => {
             let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
             let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_WRONLY | O_CREAT)
                 .map_err(|_| ())?;
-            Ok((1, fd))
+            Ok((1, fd.into_raw()))
         }
         RedirectKind::OutputAppend => {
             let fd = fs::open_path(
@@ -575,7 +592,7 @@ fn open_redirect_target(redir: Redirect, path_buf: &mut [u8; 256]) -> Result<(i3
                 O_WRONLY | O_CREAT | O_APPEND,
             )
             .map_err(|_| ())?;
-            Ok((1, fd))
+            Ok((1, fd.into_raw()))
         }
     }
 }
@@ -596,28 +613,28 @@ fn apply_redirects_for_builtin(
 
         if target_fd == 1 {
             if *output_fd >= 0 {
-                let _ = fs::close_fd(*output_fd);
+                let _ = fs::close_fd_raw(*output_fd);
             }
             *output_fd = opened_fd;
             continue;
         }
 
         let backup = match fs::dup(target_fd) {
-            Ok(fd) => fd,
+            Ok(fd) => fd.into_raw(),
             Err(_) => {
-                let _ = fs::close_fd(opened_fd);
+                let _ = fs::close_fd_raw(opened_fd);
                 shell_write(b"redirection failed\n");
                 return false;
             }
         };
 
         if fs::dup2(opened_fd, target_fd).is_err() {
-            let _ = fs::close_fd(opened_fd);
-            let _ = fs::close_fd(backup);
+            let _ = fs::close_fd_raw(opened_fd);
+            let _ = fs::close_fd_raw(backup);
             shell_write(b"redirection failed\n");
             return false;
         }
-        let _ = fs::close_fd(opened_fd);
+        let _ = fs::close_fd_raw(opened_fd);
 
         if save_count < saved.len() {
             saved[save_count] = SavedFd {
@@ -637,7 +654,7 @@ fn restore_redirects(saved: &mut [SavedFd; MAX_REDIRECTS]) {
             continue;
         }
         let _ = fs::dup2(slot.backup, slot.fd);
-        let _ = fs::close_fd(slot.backup);
+        let _ = fs::close_fd_raw(slot.backup);
         *slot = SavedFd::empty();
     }
 }
@@ -709,8 +726,8 @@ fn run_in_child(
     }
 
     for pipe in pipes.iter().take(pipe_count) {
-        let _ = fs::close_fd(pipe[0]);
-        let _ = fs::close_fd(pipe[1]);
+        let _ = fs::close_fd_raw(pipe[0]);
+        let _ = fs::close_fd_raw(pipe[1]);
     }
 
     if let Some(entry) = builtins::find_builtin(cmd.argv[0]) {
@@ -723,17 +740,17 @@ fn run_in_child(
             };
             if target_fd == 1 {
                 if builtin_output_fd != 1 {
-                    let _ = fs::close_fd(builtin_output_fd);
+                    let _ = fs::close_fd_raw(builtin_output_fd);
                 }
                 builtin_output_fd = opened_fd;
                 continue;
             }
             if fs::dup2(opened_fd, target_fd).is_err() {
                 let _ = crate::syscall::tty::write(b"redirection failed\n");
-                let _ = fs::close_fd(opened_fd);
+                let _ = fs::close_fd_raw(opened_fd);
                 sys_core::exit_with_code(1);
             }
-            let _ = fs::close_fd(opened_fd);
+            let _ = fs::close_fd_raw(opened_fd);
         }
 
         shell_set_output_fd(builtin_output_fd);
@@ -744,7 +761,7 @@ fn run_in_child(
         let code = (entry.func)(cmd.argc as i32, &args);
         shell_clear_output_fd();
         if builtin_output_fd != 1 {
-            let _ = fs::close_fd(builtin_output_fd);
+            let _ = fs::close_fd_raw(builtin_output_fd);
         }
         sys_core::exit_with_code(code);
     }
@@ -757,10 +774,10 @@ fn run_in_child(
         };
         if fs::dup2(opened_fd, target_fd).is_err() {
             let _ = crate::syscall::tty::write(b"redirection failed\n");
-            let _ = fs::close_fd(opened_fd);
+            let _ = fs::close_fd_raw(opened_fd);
             sys_core::exit_with_code(1);
         }
-        let _ = fs::close_fd(opened_fd);
+        let _ = fs::close_fd_raw(opened_fd);
     }
 
     let Some(path_ptr) = resolve_exec_path(cmd.argv[0], &mut path_buf) else {
@@ -786,7 +803,7 @@ fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
     if !apply_redirects_for_builtin(cmd, &mut saved, &mut output_fd) {
         restore_redirects(&mut saved);
         if output_fd >= 0 {
-            let _ = fs::close_fd(output_fd);
+            let _ = fs::close_fd_raw(output_fd);
         }
         return 1;
     }
@@ -810,7 +827,7 @@ fn execute_single_builtin(cmd: &ParsedCommand) -> i32 {
 
     restore_redirects(&mut saved);
     if output_fd >= 0 {
-        let _ = fs::close_fd(output_fd);
+        let _ = fs::close_fd_raw(output_fd);
     }
     code
 }
@@ -822,17 +839,23 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
     let total_pipes = inter_pipes + if capture_output { 1 } else { 0 };
     let mut pipes = [[-1; 2]; MAX_PIPE_CMDS];
     for pair in pipes.iter_mut().take(total_pipes) {
-        if fs::pipe(pair).is_err() {
-            shell_write(b"pipe failed\n");
-            for p in pipes.iter().take(total_pipes) {
-                if p[0] >= 0 {
-                    let _ = fs::close_fd(p[0]);
-                }
-                if p[1] >= 0 {
-                    let _ = fs::close_fd(p[1]);
-                }
+        match fs::pipe() {
+            Ok((r, w)) => {
+                pair[0] = r.into_raw();
+                pair[1] = w.into_raw();
             }
-            return 1;
+            Err(_) => {
+                shell_write(b"pipe failed\n");
+                for p in pipes.iter().take(total_pipes) {
+                    if p[0] >= 0 {
+                        let _ = fs::close_fd_raw(p[0]);
+                    }
+                    if p[1] >= 0 {
+                        let _ = fs::close_fd_raw(p[1]);
+                    }
+                }
+                return 1;
+            }
         }
     }
 
@@ -853,8 +876,8 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         if pid < 0 {
             shell_write(b"fork failed\n");
             for pair in pipes.iter().take(total_pipes) {
-                let _ = fs::close_fd(pair[0]);
-                let _ = fs::close_fd(pair[1]);
+                let _ = fs::close_fd_raw(pair[0]);
+                let _ = fs::close_fd_raw(pair[1]);
             }
             return 1;
         }
@@ -881,12 +904,12 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
 
     for pair in pipes.iter().take(total_pipes) {
         if pair[1] >= 0 {
-            let _ = fs::close_fd(pair[1]);
+            let _ = fs::close_fd_raw(pair[1]);
         }
     }
     for pair in pipes.iter().take(inter_pipes) {
         if pair[0] >= 0 {
-            let _ = fs::close_fd(pair[0]);
+            let _ = fs::close_fd_raw(pair[0]);
         }
     }
 
@@ -916,7 +939,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
             }
             shell_write(&buf[..n]);
         }
-        let _ = fs::close_fd(capture_fd);
+        let _ = fs::close_fd_raw(capture_fd);
     }
 
     let mut status = 0;
@@ -927,7 +950,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
                     status = st;
                     break;
                 }
-                drain_compositor_signals();
+                forward_compositor_keyboard();
                 sys_core::sleep_ms(5);
             }
         } else {

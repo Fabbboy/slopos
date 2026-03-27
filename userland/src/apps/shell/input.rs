@@ -470,9 +470,6 @@ fn input_loop(
                     rd!();
                     continue;
                 }
-                if super::builtins::process::maybe_handle_ctrl_c() {
-                    continue;
-                }
                 shell_write(b"^C\n");
                 history::reset_cursor();
                 return 0;
