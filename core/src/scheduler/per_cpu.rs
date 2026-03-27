@@ -16,9 +16,15 @@
 
 use core::cell::{SyncUnsafeCell, UnsafeCell};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use super::task_struct::{Task, TaskContext};
+/// Round-robin counter for fork/spawn CPU placement.  Rotates the starting
+/// position in `find_idlest_cpu()` so sequential forks spread across CPUs
+/// even when all are idle (all have the same load).  Mirrors Linux's
+/// `for_each_cpu_wrap()` pattern in `sched_balance_find_dst_group_cpu()`.
+static FORK_RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_sync::{InitFlag, IrqMutex};
@@ -203,7 +209,7 @@ pub struct PerCpuScheduler {
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
-    pub return_context: UnsafeCell<TaskContext>,
+    pub return_context: UnsafeCell<SwitchContext>,
     executing_task: AtomicBool,
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
@@ -229,7 +235,7 @@ impl PerCpuScheduler {
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
-            return_context: UnsafeCell::new(TaskContext::zero()),
+            return_context: UnsafeCell::new(SwitchContext::zero()),
             executing_task: AtomicBool::new(false),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
@@ -362,6 +368,32 @@ impl PerCpuScheduler {
         // SAFETY: queue_lock held, read-only access to ready_queues
         let queues = unsafe { &*self.ready_queues.get() };
         queues.iter().map(|q| q.len()).sum()
+    }
+
+    /// Returns the effective load on this CPU: queued tasks plus one if a
+    /// non-idle task is currently running.  Lock-free and approximate.
+    /// Mirrors Linux's `rq->nr_running` which includes the running task.
+    pub fn effective_load(&self) -> u32 {
+        let queues = unsafe { &*self.ready_queues.get() };
+        let queued: u32 = queues.iter().map(|q| q.len()).sum();
+        let inbox = self.inbox_count.load(Ordering::Relaxed);
+        // push_remote_wake() links into remote_inbox_head BEFORE
+        // incrementing inbox_count, so treat a non-null head as at
+        // least one pending task to avoid undercounting.
+        let inbox = if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
+            1
+        } else {
+            inbox
+        };
+        let current = self.current_task_atomic.load(Ordering::Relaxed);
+        let idle = self.idle_task_atomic.load(Ordering::Relaxed);
+        let running_real = !current.is_null() && current != idle;
+        let load = queued.saturating_add(inbox);
+        if running_real {
+            load.saturating_add(1)
+        } else {
+            load
+        }
     }
 
     pub fn steal_task(&self) -> Option<*mut Task> {
@@ -702,6 +734,20 @@ pub fn get_total_schedule_calls() -> u32 {
     total
 }
 
+/// Check whether a CPU is genuinely idle: no queued tasks AND no real
+/// (non-idle) task currently running.  Mirrors Linux's `idle_cpu()` which
+/// checks `rq->nr_running == 0` (their nr_running includes the running task).
+fn cpu_is_idle(cpu_id: usize) -> bool {
+    with_cpu_scheduler(cpu_id, |sched| sched.effective_load() == 0).unwrap_or(false)
+}
+
+/// Select the best CPU for a waking task.
+///
+/// Inspired by Linux `select_task_rq_fair()` / `wake_affine_idle()`:
+///   1. Prefer `last_cpu` if it has no queued work (cache locality + idle).
+///   2. Prefer the waker's CPU if idle and affinity-compatible.
+///   3. Fall through to the globally least-loaded CPU.
+///   4. Last resort: `last_cpu` even if busy (keeps the task runnable).
 pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     if task.is_null() {
@@ -717,12 +763,32 @@ pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
     let affinity = unsafe { (*task).cpu_affinity };
     let last_cpu = unsafe { (*task).last_cpu as usize };
 
-    if is_schedulable_cpu(last_cpu, affinity) {
+    // 1. Prefer last_cpu when idle — cache-warm data is still there and
+    //    no contention.  Mirrors Linux wake_affine_idle(): "If prev_cpu is
+    //    idle and cache affine then avoid a migration."
+    if is_schedulable_cpu(last_cpu, affinity) && cpu_is_idle(last_cpu) {
         return Some(last_cpu);
     }
 
+    // 2. If the waker's CPU is idle and compatible, use it.  The waker is
+    //    about to return to userspace or sleep, freeing the CPU shortly.
+    //    Mirrors Linux WF_SYNC / wake_affine_idle() this_cpu path.
+    if current_cpu != last_cpu
+        && is_schedulable_cpu(current_cpu, affinity)
+        && cpu_is_idle(current_cpu)
+    {
+        return Some(current_cpu);
+    }
+
+    // 3. Neither last_cpu nor waker CPU is idle — find globally least loaded.
+    //    This spreads work across genuinely idle CPUs.
     if let Some(best_cpu) = find_least_loaded_cpu(affinity) {
         return Some(best_cpu);
+    }
+
+    // 4. Fallback: last_cpu even if busy — keeps the task runnable.
+    if is_schedulable_cpu(last_cpu, affinity) {
+        return Some(last_cpu);
     }
 
     // Boot-time fallback: allow queueing onto the current CPU before it is
@@ -732,6 +798,89 @@ pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
     }
 
     None
+}
+
+/// Select the best CPU for a **newly created** task (fork, spawn, exec).
+///
+/// Mirrors Linux's `WF_FORK` / `SD_BALANCE_FORK` slow path: bypasses
+/// `last_cpu` entirely (cache is cold for a new address space) and finds
+/// the globally idlest CPU.  A round-robin counter rotates the scan start
+/// so sequential forks spread evenly when all CPUs have equal load.
+pub fn select_target_cpu_for_new(task: *mut Task) -> Option<usize> {
+    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    if task.is_null() {
+        return if is_schedulable_cpu(current_cpu, 0)
+            || is_local_enqueue_fallback_cpu(current_cpu, 0)
+        {
+            Some(current_cpu)
+        } else {
+            find_idlest_cpu(0)
+        };
+    }
+
+    let affinity = unsafe { (*task).cpu_affinity };
+
+    // Go straight to the global idlest-CPU search — no last_cpu preference.
+    if let Some(best_cpu) = find_idlest_cpu(affinity) {
+        return Some(best_cpu);
+    }
+
+    // Fallback: current CPU if schedulable.
+    if is_schedulable_cpu(current_cpu, affinity) {
+        return Some(current_cpu);
+    }
+
+    if is_local_enqueue_fallback_cpu(current_cpu, affinity) {
+        return Some(current_cpu);
+    }
+
+    None
+}
+
+/// Find the CPU with the lowest effective load, using a round-robin starting
+/// position to break ties.  This mirrors Linux's `for_each_cpu_wrap()` in
+/// `sched_balance_find_dst_group_cpu()`.
+///
+/// The RR counter advances over the eligible set (not raw cpu_count) so
+/// that tie-breaking is fair when some CPUs are ineligible.
+fn find_idlest_cpu(affinity: u32) -> Option<usize> {
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    if cpu_count == 0 {
+        return None;
+    }
+
+    // Collect eligible CPUs into a stack array so the RR counter
+    // rotates over the candidate set, not the full CPU range.
+    let mut eligible = [0usize; slopos_arch::MAX_CPUS];
+    let mut n_eligible = 0usize;
+    for cpu_id in 0..cpu_count {
+        if is_schedulable_cpu(cpu_id, affinity) {
+            eligible[n_eligible] = cpu_id;
+            n_eligible += 1;
+        }
+    }
+    if n_eligible == 0 {
+        return None;
+    }
+
+    // Rotate start position so sequential calls spread across eligible CPUs.
+    let start = FORK_RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n_eligible;
+
+    let mut best_cpu: Option<usize> = None;
+    let mut min_load = u32::MAX;
+
+    for i in 0..n_eligible {
+        let cpu_id = eligible[(start + i) % n_eligible];
+
+        if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.effective_load()) {
+            if load < min_load {
+                min_load = load;
+                best_cpu = Some(cpu_id);
+            }
+        }
+    }
+
+    best_cpu
 }
 
 #[inline]
@@ -802,7 +951,9 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
             continue;
         }
 
-        if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
+        // Use effective_load (queued + running) so that a CPU running a
+        // real task is not considered equally idle to a truly idle CPU.
+        if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.effective_load()) {
             if load < min_load {
                 min_load = load;
                 best_cpu = Some(cpu_id);
@@ -815,7 +966,7 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
 
 /// Get the return context for an AP to use when no tasks are available.
 /// This is stored in the per-CPU scheduler and initialized during AP startup.
-pub fn get_ap_return_context(cpu_id: usize) -> *mut TaskContext {
+pub fn get_ap_return_context(cpu_id: usize) -> *mut SwitchContext {
     if cpu_id >= MAX_CPUS {
         return ptr::null_mut();
     }

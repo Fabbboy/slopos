@@ -251,11 +251,16 @@ pub fn test_lapic_timer_mask_suppresses_ticks() -> TestResult {
     let ticks_after_unmask = irq_get_timer_ticks();
     let delta_unmasked = ticks_after_unmask.saturating_sub(ticks_after_mask);
 
-    // Check: masked period should have minimal ticks (allow 1 for race).
-    if delta_masked > 1 {
+    // On SMP, other CPUs' LAPIC timers still fire into the global tick
+    // counter while *this* CPU's timer is masked.  Allow up to N*5 ticks
+    // (N = number of CPUs) during the 50ms masked window.
+    let cpu_count = slopos_arch::pcr::get_cpu_count() as u64;
+    let max_masked_ticks = if cpu_count > 1 { cpu_count * 5 } else { 1 };
+    if delta_masked > max_masked_ticks {
         klog_info!(
-            "LAPIC_TIMER_TEST: BUG - mask did not suppress ticks (delta_masked={})",
+            "LAPIC_TIMER_TEST: BUG - mask did not suppress ticks (delta_masked={}, max_allowed={})",
             delta_masked,
+            max_masked_ticks,
         );
         return TestResult::Fail;
     }
@@ -328,16 +333,22 @@ pub fn test_lapic_timer_tick_rate_reasonable() -> TestResult {
     // Compute observed rate: ticks per second.
     let observed_rate_hz = (delta_ticks as u64 * 1000) / (elapsed_ms as u64);
 
-    // Allow generous bounds: 50-200 Hz (100Hz target with QEMU jitter).
-    const MIN_HZ: u64 = 50;
-    const MAX_HZ: u64 = 200;
+    // The global tick counter is incremented by ALL CPUs' LAPIC timers.
+    // With N CPUs at ~100Hz each, the observed rate is ~N*100 Hz.
+    // However, AP timers may be stopped by earlier tests in this suite,
+    // so only the BSP timer (restarted above) may be ticking.  Use a
+    // conservative floor of 50 Hz (single CPU, slow QEMU) and ceiling
+    // based on all CPUs at 200 Hz.
+    let cpu_count = slopos_arch::pcr::get_cpu_count() as u64;
+    let min_hz: u64 = 50;
+    let max_hz: u64 = 200 * cpu_count.max(1);
 
-    if observed_rate_hz < MIN_HZ || observed_rate_hz > MAX_HZ {
+    if observed_rate_hz < min_hz || observed_rate_hz > max_hz {
         klog_info!(
             "LAPIC_TIMER_TEST: BUG - tick rate {} Hz outside [{}, {}] Hz (delta_ticks={}, elapsed_ms={})",
             observed_rate_hz,
-            MIN_HZ,
-            MAX_HZ,
+            min_hz,
+            max_hz,
             delta_ticks,
             elapsed_ms,
         );

@@ -201,6 +201,23 @@ pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
     unsafe { (*process_ptr).page_dir }
 }
 
+/// Read the PML4 physical address for a process, entirely under the
+/// VM_MANAGER lock.  Returns 0 if the process or page directory is not found.
+/// SMP-safe: the returned u64 cannot become dangling.
+pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
+    let manager = VM_MANAGER.lock();
+    for process in manager.processes.iter() {
+        if process.process_id == process_id {
+            let page_dir = process.page_dir;
+            if page_dir.is_null() {
+                return 0;
+            }
+            return unsafe { (*page_dir).pml4_phys.as_u64() };
+        }
+    }
+    0
+}
+
 pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     let cr3_phys = cr3 & !0xFFF;
     if cr3_phys == 0 {
@@ -222,11 +239,16 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
 }
 
 pub fn process_vm_sync_kernel_mappings(process_id: u32) {
-    let page_dir = process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
-        return;
+    let manager = VM_MANAGER.lock();
+    for process in manager.processes.iter() {
+        if process.process_id == process_id {
+            let page_dir = process.page_dir;
+            if !page_dir.is_null() {
+                paging_sync_kernel_mappings(page_dir);
+            }
+            return;
+        }
     }
-    paging_sync_kernel_mappings(page_dir);
 }
 
 fn add_vma_to_process(process: *mut ProcessVm, start: u64, end: u64, flags: VmaFlags) -> c_int {
@@ -776,12 +798,11 @@ pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u6
 }
 
 fn unmap_existing_code_region(page_dir: *mut ProcessPageDir, code_base: u64) {
-    let code_limit = code_base + 0x100000;
-    unmap_user_range(
-        page_dir,
-        code_base.saturating_sub(0x100000),
-        code_limit + 0x100000,
-    );
+    // Unmap exactly the code region [code_start, data_start).  The old
+    // implementation used wrong arithmetic that extended 1 MB below and
+    // above the actual region, potentially unmapping unrelated pages.
+    let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
+    unmap_user_range(page_dir, code_base, data_start);
 }
 
 fn setup_tls_block(
@@ -1737,6 +1758,21 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
 
     unsafe {
         let tree = &mut (*process_ptr).vma_tree;
+
+        // Reject unmapping of executable code regions.  POSIX leaves this
+        // as undefined behaviour but we enforce it to prevent a buggy or
+        // malicious process from pulling its own code pages out from under
+        // itself (or from beneath another thread on another CPU).
+        {
+            let mut scan = tree.find_first_at_or_after(addr);
+            while !scan.is_null() && (*scan).start < end {
+                if (*scan).flags.contains(VmaFlags::EXEC) {
+                    return -1;
+                }
+                scan = tree.next(scan);
+            }
+        }
+
         let mut cursor = tree.find_first_at_or_after(addr);
         let mut found_any = false;
 

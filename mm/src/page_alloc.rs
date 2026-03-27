@@ -42,7 +42,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::pcr::MAX_CPUS;
-use slopos_sync::{InitFlag, IrqMutex};
+use slopos_sync::{InitFlag, IrqMutex, PreemptGuard};
 use slopos_utils::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
@@ -501,88 +501,65 @@ fn get_current_cpu() -> usize {
     slopos_arch::pcr::get_current_cpu()
 }
 
+/// Pop a single page from the per-CPU cache.
+///
+/// # Safety contract
+/// Caller must hold a `PreemptGuard` so `cpu` remains stable for the
+/// duration of the call.  All list + descriptor mutations happen under
+/// the global `PAGE_ALLOCATOR` lock, eliminating ABA and TOCTOU races.
 fn pcp_try_alloc(cpu: usize) -> u32 {
+    debug_assert!(
+        PreemptGuard::is_active(),
+        "pcp_try_alloc requires PreemptGuard"
+    );
+
     if cpu >= MAX_CPUS || !PCP_INIT.is_set() {
         return INVALID_PAGE_FRAME;
     }
 
     let cache = &PER_CPU_CACHES[cpu];
-
-    // Try to pop from the cache's free list
-    // Use a simple CAS loop for lock-free operation
-    loop {
-        let head = cache.head.load(Ordering::Acquire);
-        if head == INVALID_PAGE_FRAME {
-            return INVALID_PAGE_FRAME;
-        }
-
-        // Read the next pointer from the frame descriptor
-        let next = {
-            let alloc = PAGE_ALLOCATOR.lock();
-            unsafe { alloc.frame_desc_mut(head) }
-                .map(|f| f.next_free)
-                .unwrap_or(INVALID_PAGE_FRAME)
-        };
-
-        if cache
-            .head
-            .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            cache.count.fetch_sub(1, Ordering::Relaxed);
-            cache.alloc_count.fetch_add(1, Ordering::Relaxed);
-
-            {
-                let alloc = PAGE_ALLOCATOR.lock();
-                if let Some(desc) = unsafe { alloc.frame_desc_mut(head) } {
-                    desc.state = PAGE_FRAME_ALLOCATED;
-                    desc.ref_count = 1;
-                    desc.next_free = INVALID_PAGE_FRAME;
-                }
-            }
-
-            return head;
-        }
+    let head = cache.head.load(Ordering::Acquire);
+    if head == INVALID_PAGE_FRAME {
+        return INVALID_PAGE_FRAME;
     }
+
+    // Single lock acquisition: read next, update head, mark allocated.
+    let alloc = PAGE_ALLOCATOR.lock();
+    // Re-read head under lock in case another path (drain) changed it.
+    let head = cache.head.load(Ordering::Acquire);
+    if head == INVALID_PAGE_FRAME {
+        return INVALID_PAGE_FRAME;
+    }
+
+    // Only proceed if the descriptor is valid — otherwise the cache
+    // list is corrupt and we must not advance head or adjust counts.
+    let desc = match unsafe { alloc.frame_desc_mut(head) } {
+        Some(d) => d,
+        None => return INVALID_PAGE_FRAME,
+    };
+
+    let next = desc.next_free;
+    cache.head.store(next, Ordering::Release);
+    cache.count.fetch_sub(1, Ordering::Relaxed);
+    cache.alloc_count.fetch_add(1, Ordering::Relaxed);
+
+    desc.state = PAGE_FRAME_ALLOCATED;
+    desc.ref_count = 1;
+    desc.next_free = INVALID_PAGE_FRAME;
+
+    head
 }
 
-fn pcp_try_free(cpu: usize, frame_num: u32) -> bool {
-    if cpu >= MAX_CPUS || !PCP_INIT.is_set() {
-        return false;
-    }
-
-    let cache = &PER_CPU_CACHES[cpu];
-
-    let current_count = cache.count.load(Ordering::Relaxed);
-    if current_count >= PCP_HIGH_WATERMARK {
-        return false;
-    }
-
-    loop {
-        let head = cache.head.load(Ordering::Acquire);
-
-        {
-            let alloc = PAGE_ALLOCATOR.lock();
-            if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
-                desc.next_free = head;
-                desc.state = PAGE_FRAME_PCP;
-                desc.ref_count = 0;
-            }
-        }
-
-        if cache
-            .head
-            .compare_exchange_weak(head, frame_num, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            cache.count.fetch_add(1, Ordering::Relaxed);
-            cache.free_count.fetch_add(1, Ordering::Relaxed);
-            return true;
-        }
-    }
-}
-
+/// Refill the per-CPU cache from the buddy allocator.
+///
+/// # Safety contract
+/// Caller must hold a `PreemptGuard` so `cpu` remains stable.
 fn pcp_refill(cpu: usize, flags: u32) {
+    debug_assert!(
+        PreemptGuard::is_active(),
+        "pcp_refill requires PreemptGuard"
+    );
+
     if cpu >= MAX_CPUS {
         return;
     }
@@ -590,139 +567,86 @@ fn pcp_refill(cpu: usize, flags: u32) {
     let cache = &PER_CPU_CACHES[cpu];
     let current_count = cache.count.load(Ordering::Relaxed);
 
+    // Two-watermark design:
+    // - PCP_LOW_WATERMARK (optimistic, lock-free): skip the refill entirely
+    //   if the cache is reasonably full, avoiding redundant lock acquisitions.
+    // - PCP_HIGH_WATERMARK (authoritative, under lock): prevents overflow by
+    //   recomputing `needed` after acquiring PAGE_ALLOCATOR.  The gap between
+    //   LOW and HIGH (e.g. 8 vs 64) absorbs concurrent drains between the
+    //   two checks.
     if current_count >= PCP_LOW_WATERMARK {
         return;
     }
 
-    let needed = PCP_BATCH_SIZE.min(PCP_HIGH_WATERMARK - current_count);
     let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
 
-    let allocated = {
-        let mut alloc = PAGE_ALLOCATOR.lock();
-        alloc.allocate_batch_for_pcp(&mut batch[..needed as usize], flags)
-    };
+    // Single lock: allocate batch and link into PCP list atomically.
+    let mut alloc = PAGE_ALLOCATOR.lock();
+
+    // Re-read count under lock — another path (drain, concurrent alloc)
+    // may have changed it between the check above and the lock acquisition.
+    let current_count = cache.count.load(Ordering::Relaxed);
+    if current_count >= PCP_HIGH_WATERMARK {
+        return;
+    }
+    let needed = PCP_BATCH_SIZE.min(PCP_HIGH_WATERMARK - current_count);
+    let allocated = alloc.allocate_batch_for_pcp(&mut batch[..needed as usize], flags);
 
     for i in 0..allocated {
         let frame_num = batch[i];
-        loop {
-            let head = cache.head.load(Ordering::Acquire);
-            {
-                let alloc = PAGE_ALLOCATOR.lock();
-                if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
-                    desc.next_free = head;
-                }
-            }
-            if cache
-                .head
-                .compare_exchange_weak(head, frame_num, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                cache.count.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
+        let head = cache.head.load(Ordering::Acquire);
+        if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+            desc.next_free = head;
+            cache.head.store(frame_num, Ordering::Release);
+            cache.count.fetch_add(1, Ordering::Relaxed);
         }
+        // If frame_desc_mut returns None, skip this frame — linking a
+        // frame without a valid descriptor would corrupt the PCP list.
     }
 }
 
-fn pcp_drain(cpu: usize) {
-    if cpu >= MAX_CPUS {
-        return;
-    }
-
-    let cache = &PER_CPU_CACHES[cpu];
-    let current_count = cache.count.load(Ordering::Relaxed);
-
-    if current_count <= PCP_HIGH_WATERMARK {
-        return;
-    }
-
-    let to_drain = (current_count - PCP_HIGH_WATERMARK / 2).min(PCP_BATCH_SIZE);
-    let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
-    let mut drained = 0;
-
-    for i in 0..to_drain as usize {
-        loop {
-            let head = cache.head.load(Ordering::Acquire);
-            if head == INVALID_PAGE_FRAME {
-                break;
-            }
-
-            let next = {
-                let alloc = PAGE_ALLOCATOR.lock();
-                unsafe { alloc.frame_desc_mut(head) }
-                    .map(|f| f.next_free)
-                    .unwrap_or(INVALID_PAGE_FRAME)
-            };
-
-            if cache
-                .head
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                batch[i] = head;
-                cache.count.fetch_sub(1, Ordering::Relaxed);
-                drained += 1;
-                break;
-            }
-        }
-        if batch[i] == INVALID_PAGE_FRAME {
-            break;
-        }
-    }
-
-    if drained > 0 {
-        let mut alloc = PAGE_ALLOCATOR.lock();
-        alloc.free_batch_from_pcp(&batch[..drained]);
-    }
-}
-
+/// Drain all per-CPU PCP caches back into the buddy allocator.
+///
+/// Iterates every CPU's [`PER_CPU_CACHES`] entry and returns cached frames
+/// to the buddy via [`free_batch_from_pcp`], batching up to
+/// [`PCP_BATCH_SIZE`] frames per lock acquisition.
+///
+/// # Safety
+/// Must only be called during system shutdown when no concurrent PCP
+/// operations or per-CPU allocations are in progress.  This function
+/// does not acquire per-CPU locks and is unsafe under concurrent use.
 pub fn pcp_drain_all() {
     for cpu in 0..MAX_CPUS {
         let cache = &PER_CPU_CACHES[cpu];
         let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
 
         loop {
-            let count = cache.count.load(Ordering::Relaxed);
-            if count == 0 {
+            if cache.count.load(Ordering::Relaxed) == 0 {
                 break;
             }
 
             let mut drained = 0;
-            for slot in batch.iter_mut() {
-                *slot = INVALID_PAGE_FRAME;
-                loop {
+            {
+                let mut alloc = PAGE_ALLOCATOR.lock();
+                for slot in batch.iter_mut() {
                     let head = cache.head.load(Ordering::Acquire);
                     if head == INVALID_PAGE_FRAME {
                         break;
                     }
-
-                    let next = {
-                        let alloc = PAGE_ALLOCATOR.lock();
-                        unsafe { alloc.frame_desc_mut(head) }
-                            .map(|f| f.next_free)
-                            .unwrap_or(INVALID_PAGE_FRAME)
-                    };
-
-                    if cache
-                        .head
-                        .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        *slot = head;
-                        cache.count.fetch_sub(1, Ordering::Relaxed);
-                        drained += 1;
-                        break;
-                    }
+                    let next = unsafe { alloc.frame_desc_mut(head) }
+                        .map(|f| f.next_free)
+                        .unwrap_or(INVALID_PAGE_FRAME);
+                    cache.head.store(next, Ordering::Release);
+                    cache.count.fetch_sub(1, Ordering::Relaxed);
+                    *slot = head;
+                    drained += 1;
                 }
-                if *slot == INVALID_PAGE_FRAME {
-                    break;
+                if drained > 0 {
+                    alloc.free_batch_from_pcp(&batch[..drained]);
                 }
             }
 
-            if drained > 0 {
-                let mut alloc = PAGE_ALLOCATOR.lock();
-                alloc.free_batch_from_pcp(&batch[..drained]);
-            } else {
+            if drained == 0 {
                 break;
             }
         }
@@ -805,12 +729,18 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
 
     let use_pcp = order == 0
         && (flags & ALLOC_FLAG_DMA) == 0
+        && (flags & ALLOC_FLAG_KERNEL) == 0
+        && (flags & ALLOC_FLAG_ORDER_MASK) == 0
         && (flags & ALLOC_FLAG_NO_PCP) == 0
         && PCP_INIT.is_set();
 
     let mut attempts = 0u32;
     loop {
         let frame_num = if use_pcp {
+            // PreemptGuard pins us to this CPU for the duration of PCP
+            // operations, preventing migration races that could allow two
+            // CPUs to access the same per-CPU cache concurrently.
+            let _no_migrate = PreemptGuard::new();
             let cpu = get_current_cpu();
 
             let mut frame = pcp_try_alloc(cpu);
@@ -884,54 +814,85 @@ pub fn alloc_page_frame(flags: u32) -> PhysAddr {
 }
 
 pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
-    let frame_num = {
-        let alloc = PAGE_ALLOCATOR.lock();
-        alloc.phys_to_frame(phys_addr)
+    // Pin to CPU for safe PCP access and do ALL state checks + transitions
+    // under a single lock acquisition to eliminate TOCTOU races where two
+    // concurrent free_page_frame calls on the same frame could both see
+    // ref_count==1 and double-free.
+    let _no_migrate = PreemptGuard::new();
+    let cpu = get_current_cpu();
+
+    let mut alloc = PAGE_ALLOCATOR.lock();
+    let frame_num = alloc.phys_to_frame(phys_addr);
+    if !alloc.is_valid_frame(frame_num) {
+        return -1;
+    }
+
+    let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
+        return -1;
     };
-
-    let (is_valid, is_allocated, order, is_pcp_candidate) = {
-        let alloc = PAGE_ALLOCATOR.lock();
-        if !alloc.is_valid_frame(frame_num) {
-            klog_info!("free_page_frame: Invalid physical address");
-            return -1;
-        }
-
-        let Some(frame) = (unsafe { alloc.frame_desc_mut(frame_num) }) else {
-            return -1;
-        };
-        let is_alloc = PageAllocator::frame_state_is_allocated(frame.state);
-        let ord = frame.order as u32;
-
-        let pcp_ok = ord == 0 && frame.state == PAGE_FRAME_ALLOCATED && PCP_INIT.is_set();
-
-        if !is_alloc {
-            return 0;
-        }
-
-        if frame.ref_count > 1 {
-            frame.ref_count -= 1;
-            return 0;
-        }
-
-        (true, is_alloc, ord, pcp_ok)
-    };
-
-    if !is_valid || !is_allocated {
+    if !PageAllocator::frame_state_is_allocated(frame.state) {
+        return 0;
+    }
+    // A frame already parked on a PCP list (state == PAGE_FRAME_PCP) must
+    // not fall through to the buddy free path — that would make it
+    // double-referenced (once in PCP, once in buddy).  Treat as a no-op.
+    if frame.state == PAGE_FRAME_PCP {
+        return 0;
+    }
+    if frame.ref_count > 1 {
+        frame.ref_count -= 1;
         return 0;
     }
 
+    let order = frame.order as u32;
+    let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && PCP_INIT.is_set();
+
     if is_pcp_candidate {
-        let cpu = get_current_cpu();
-        if pcp_try_free(cpu, frame_num) {
-            let cache = &PER_CPU_CACHES[cpu];
-            if cache.count.load(Ordering::Relaxed) > PCP_HIGH_WATERMARK {
-                pcp_drain(cpu);
+        let cache = &PER_CPU_CACHES[cpu];
+        if cache.count.load(Ordering::Relaxed) < PCP_HIGH_WATERMARK {
+            // Push directly onto PCP list while still holding the lock.
+            let head = cache.head.load(Ordering::Acquire);
+            // Re-fetch descriptor (borrow was dropped by the if-let above).
+            if let Some(desc) = unsafe { alloc.frame_desc_mut(frame_num) } {
+                desc.next_free = head;
+                desc.state = PAGE_FRAME_PCP;
+                desc.ref_count = 0;
+            }
+            cache.head.store(frame_num, Ordering::Release);
+            cache.count.fetch_add(1, Ordering::Relaxed);
+            cache.free_count.fetch_add(1, Ordering::Relaxed);
+
+            // Drain if over watermark.
+            let count = cache.count.load(Ordering::Relaxed);
+            if count > PCP_HIGH_WATERMARK {
+                let to_drain = (count - PCP_HIGH_WATERMARK / 2).min(PCP_BATCH_SIZE);
+                let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
+                let mut drained = 0;
+                for slot in batch.iter_mut().take(to_drain as usize) {
+                    let h = cache.head.load(Ordering::Acquire);
+                    if h == INVALID_PAGE_FRAME {
+                        break;
+                    }
+                    // Only drain frames with valid descriptors — a None
+                    // descriptor means the list is corrupt; stop draining.
+                    let next = match unsafe { alloc.frame_desc_mut(h) } {
+                        Some(f) => f.next_free,
+                        None => break,
+                    };
+                    cache.head.store(next, Ordering::Release);
+                    cache.count.fetch_sub(1, Ordering::Relaxed);
+                    *slot = h;
+                    drained += 1;
+                }
+                if drained > 0 {
+                    alloc.free_batch_from_pcp(&batch[..drained]);
+                }
             }
             return 0;
         }
     }
 
-    let mut alloc = PAGE_ALLOCATOR.lock();
+    // Fallback: return directly to buddy allocator.
     if let Some(frame) = unsafe { alloc.frame_desc_mut(frame_num) } {
         let pages = PageAllocator::order_block_pages(order);
         frame.ref_count = 0;
@@ -955,22 +916,23 @@ pub fn page_allocator_max_supported_frames() -> u32 {
 pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
     let alloc = PAGE_ALLOCATOR.lock();
 
+    // PCP-cached frames are allocated from the buddy but not in use —
+    // include them in the free count for accurate statistics.
     let mut pcp_count = 0u32;
     for cpu in 0..MAX_CPUS {
         let val = PER_CPU_CACHES[cpu].count.load(Ordering::Relaxed);
         pcp_count = pcp_count.saturating_add(val);
     }
-    let _ = pcp_count;
 
     unsafe {
         if !total.is_null() {
             *total = alloc.total_frames;
         }
         if !free.is_null() {
-            *free = alloc.free_frames;
+            *free = alloc.free_frames.saturating_add(pcp_count);
         }
         if !allocated.is_null() {
-            *allocated = alloc.allocated_frames;
+            *allocated = alloc.allocated_frames.saturating_sub(pcp_count);
         }
     }
 }

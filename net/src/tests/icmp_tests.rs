@@ -234,9 +234,8 @@ fn test_dns_resolve_google() -> TestResult {
     let hostname = b"google.com";
     klog_info!("icmp_test: resolving google.com via kernel DNS...");
 
-    let result = dns::dns_resolve(hostname);
-    match result {
-        Some(addr) => {
+    match dns::dns_resolve(hostname) {
+        Ok(addr) => {
             klog_info!(
                 "icmp_test: google.com resolved to {}.{}.{}.{}",
                 addr[0],
@@ -247,9 +246,10 @@ fn test_dns_resolve_google() -> TestResult {
             assert_test!(addr != [0, 0, 0, 0], "DNS returned 0.0.0.0");
             assert_test!(addr != [127, 0, 0, 1], "DNS returned loopback");
         }
-        None => {
+        Err(e) => {
             klog_info!(
-                "icmp_test: dns_resolve returned None (SLIRP DNS may be unavailable in test mode)"
+                "icmp_test: dns_resolve returned {:?} (SLIRP DNS may be unavailable in test mode)",
+                e
             );
         }
     }
@@ -269,7 +269,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
 
     let hostname = b"google.com";
     let target_ip = match dns::dns_resolve(hostname) {
-        Some(ip) => {
+        Ok(ip) => {
             klog_info!(
                 "icmp_test: will ping {}.{}.{}.{} (google.com)",
                 ip[0],
@@ -279,7 +279,7 @@ fn test_ping_resolved_host_e2e() -> TestResult {
             );
             ip
         }
-        None => {
+        Err(_) => {
             klog_info!("icmp_test: DNS failed, pinging gateway instead");
             GATEWAY_IP
         }

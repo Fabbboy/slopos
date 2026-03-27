@@ -7,7 +7,7 @@
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
@@ -408,6 +408,12 @@ pub struct Task {
     /// Per-signal action table.
     pub signal_actions: [SignalAction; NSIG],
     pub switch_ctx: SwitchContext,
+    /// Set while a CPU is physically executing this task (context switch
+    /// in progress or task running).  Cleared after the outgoing context
+    /// switch completes.  `schedule_task` spin-waits on this flag so a
+    /// woken task is never dispatched on a second CPU before the first
+    /// CPU finishes saving its context — the Linux `p->on_cpu` pattern.
+    pub on_cpu: AtomicBool,
     pub next_ready: *mut Task,
     pub next_inbox: AtomicPtr<Task>,
     pub refcnt: AtomicU32,
@@ -469,6 +475,7 @@ impl Task {
             signal_blocked: SIG_EMPTY,
             signal_actions: [SignalAction::default(); NSIG],
             switch_ctx: SwitchContext::zero(),
+            on_cpu: AtomicBool::new(false),
             next_ready: ptr::null_mut(),
             next_inbox: AtomicPtr::new(ptr::null_mut()),
             refcnt: AtomicU32::new(0),

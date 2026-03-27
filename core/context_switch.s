@@ -184,8 +184,17 @@ context_switch:
     movq    0x38(%r15), %rsp
     pushq   0x80(%r15)
 
-    # Now restore RFLAGS (may set IF) and the last GPR, then return.
+    # Restore RFLAGS with IF *always* cleared.  Callers re-enable
+    # interrupts explicitly (restore_flags / sti) after context_switch
+    # returns.  Without this mask, a pending IPI can fire between popfq
+    # and retq.  At that point per-CPU current_task already points to the
+    # dispatched task (set by execute_task before the switch), but RSP is
+    # the idle stack — the IPI handler's switch_from_current_to_idle then
+    # saves idle-stack RSP into the dispatched task's context, corrupting
+    # it.  The next dispatch of that task runs on the idle stack, and two
+    # concurrent users of the same stack corrupt each other's IRET frames.
     movq    0x88(%r15), %rax
+    andq    $~0x200, %rax       # clear IF (bit 9) — no interrupts before retq
     movq    0x78(%r15), %r15
     pushq   %rax
     popfq

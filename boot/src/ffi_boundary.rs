@@ -22,6 +22,17 @@ pub extern "C" fn common_exception_handler(frame: *mut slopos_arch::InterruptFra
     crate::idt::common_exception_handler_impl(frame);
 }
 
+/// Called from ISR assembly when the IRET frame's CS field is not 0x08 or
+/// 0x23.  `iret_frame` points at the 5-word IRET frame on the kernel stack:
+/// [RIP, CS, RFLAGS, RSP, SS].  We log the corruption and panic instead of
+/// taking a triple-fault from a bad IRETQ.
+#[unsafe(no_mangle)]
+pub extern "C" fn isr_iret_frame_corrupt(iret_frame: *const u64) -> ! {
+    // SAFETY: called from ISR assembly which pushes the 5-word IRET
+    // frame [RIP, CS, RFLAGS, RSP, SS] at this pointer.
+    unsafe { crate::idt::handle_corrupt_iret_frame(iret_frame) }
+}
+
 // ============================================================================
 // Linker symbols (for boot init sections)
 // ============================================================================

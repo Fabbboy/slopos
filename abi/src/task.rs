@@ -7,7 +7,7 @@
 
 // --- Task Configuration ---
 
-pub const MAX_TASKS: usize = 32;
+pub const MAX_TASKS: usize = 64;
 pub const TASK_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000; // 32 KiB
 pub const TASK_NAME_MAX_LEN: usize = 32;

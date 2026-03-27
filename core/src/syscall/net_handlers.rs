@@ -424,10 +424,9 @@ define_syscall!(syscall_resolve(ctx, args) requires(let process_id) {
         return ctx.err_with(ERRNO_EFAULT);
     }
 
-    let resolved = dns::dns_resolve(&hostname_buf[..hostname_len]);
-    let result_addr = match resolved {
-        Some(addr) => addr,
-        None => return ctx.err_with(ERRNO_EHOSTUNREACH),
+    let result_addr = match dns::dns_resolve(&hostname_buf[..hostname_len]) {
+        Ok(addr) => addr,
+        Err(_) => return ctx.err_with(ERRNO_EHOSTUNREACH),
     };
 
     // Copy result to user memory

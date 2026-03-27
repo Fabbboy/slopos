@@ -422,10 +422,55 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     // LAPIC timer: per-CPU preemption tick — handled directly, not through
     // the IOAPIC IRQ dispatch table.  Each CPU has its own LAPIC timer.
     if vector == LAPIC_TIMER_VECTOR {
+        // Snapshot ALL IRET payload fields BEFORE the handler runs.
+        // After the handler + scheduler, compare to detect silent corruption
+        // of any field (not just CS/SS).
+        let pre_rip = frame_ref.rip;
+        let pre_cs = frame_ref.cs;
+        let pre_rflags = frame_ref.rflags;
+        let pre_rsp = frame_ref.rsp;
+        let pre_ss = frame_ref.ss;
+
         slopos_core::irq::increment_timer_ticks();
         slopos_core::sched::scheduler_handle_timer_interrupt(frame);
         send_eoi();
         scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+
+        // Re-read the frame from the stack pointer — if context_switch saved
+        // and restored our context, `frame` still points at the same stack
+        // address and the CPU-pushed fields (rip/cs/rflags/rsp/ss) must be
+        // untouched.  Corruption here means something overwrote the ISR's
+        // interrupt frame while we were switched out.
+        let post_rip = unsafe { core::ptr::read_volatile(&(*frame).rip) };
+        let post_cs = unsafe { core::ptr::read_volatile(&(*frame).cs) };
+        let post_rflags = unsafe { core::ptr::read_volatile(&(*frame).rflags) };
+        let post_rsp = unsafe { core::ptr::read_volatile(&(*frame).rsp) };
+        let post_ss = unsafe { core::ptr::read_volatile(&(*frame).ss) };
+
+        if post_rip != pre_rip
+            || post_cs != pre_cs
+            || post_rflags != pre_rflags
+            || post_rsp != pre_rsp
+            || post_ss != pre_ss
+        {
+            klog_info!(
+                "TIMER IRET CORRUPTION: rip 0x{:x}->0x{:x} cs 0x{:x}->0x{:x} rflags 0x{:x}->0x{:x} rsp 0x{:x}->0x{:x} ss 0x{:x}->0x{:x} frame={:p}",
+                pre_rip,
+                post_rip,
+                pre_cs,
+                post_cs,
+                pre_rflags,
+                post_rflags,
+                pre_rsp,
+                post_rsp,
+                pre_ss,
+                post_ss,
+                frame
+            );
+            // Do not resume with a corrupted IRET frame — that would
+            // fault or silently execute in the wrong context.
+            panic!("TIMER IRET frame corruption detected");
+        }
         return;
     }
 
@@ -523,6 +568,105 @@ fn initialize_handler_tables() {
 /// hits, missing task/page-dir, or failed resolution) — the caller must then
 /// fall through to the diagnostic / terminate / panic path in
 /// `exception_page_fault`.
+/// Called when the ISR's pre-IRETQ CS validation detects a corrupt IRET
+/// frame.  Logs the corruption for debugging, then panics.
+///
+/// # Safety
+/// `iret_frame` must point to a readable region of at least 5 consecutive
+/// `u64` values laid out as `[RIP, CS, RFLAGS, RSP, SS]`.  The pointer
+/// need not be aligned (values are read with `read_unaligned`).
+pub(crate) unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
+    use slopos_utils::klog_info;
+
+    // SAFETY: caller guarantees iret_frame points to 5 readable u64s.
+    let (rip, cs, rflags, rsp, ss) = unsafe {
+        (
+            core::ptr::read_unaligned(iret_frame),
+            core::ptr::read_unaligned(iret_frame.add(1)),
+            core::ptr::read_unaligned(iret_frame.add(2)),
+            core::ptr::read_unaligned(iret_frame.add(3)),
+            core::ptr::read_unaligned(iret_frame.add(4)),
+        )
+    };
+
+    klog_info!(
+        "ISR IRET FRAME CORRUPT: CS=0x{:x} (expected 0x08 or 0x23)",
+        cs
+    );
+    klog_info!(
+        "  RIP=0x{:x} RFLAGS=0x{:x} RSP=0x{:x} SS=0x{:x} frame_ptr={:p}",
+        rip,
+        rflags,
+        rsp,
+        ss,
+        iret_frame
+    );
+
+    // Dump the surrounding stack words for forensics.
+    // Limit the probe range to avoid nested faults on invalid addresses:
+    // use the current task's kernel stack bounds when available, otherwise
+    // conservatively bound to ±128 bytes around iret_frame.
+    // Call scheduler_get_current_task() once and reuse for both the
+    // bounds computation and the task-info dump below.
+    let task_ptr = slopos_core::sched::scheduler_get_current_task();
+
+    klog_info!("=== IRET FRAME VICINITY DUMP ===");
+    let (dump_lo, dump_hi) = {
+        if !task_ptr.is_null() {
+            let base = unsafe { (*task_ptr).kernel_stack_base } as usize;
+            let top = unsafe { (*task_ptr).kernel_stack_top } as usize;
+            if base != 0 && top > base {
+                (base, top)
+            } else {
+                let mid = iret_frame as usize;
+                (mid.saturating_sub(128), mid.saturating_add(128))
+            }
+        } else {
+            let mid = iret_frame as usize;
+            (mid.saturating_sub(128), mid.saturating_add(128))
+        }
+    };
+    for offset in -4isize..10 {
+        // Use wrapping_offset to avoid UB when the resulting pointer
+        // falls outside the allocated object (negative offsets).
+        let addr = iret_frame.wrapping_offset(offset);
+        let addr_val = addr as usize;
+        if addr_val < dump_lo || addr_val + 8 > dump_hi {
+            klog_info!("  [{:+}] {:p} = <out of bounds>", offset, addr);
+            continue;
+        }
+        let val = unsafe { core::ptr::read_unaligned(addr) };
+        let marker = if offset == 0 {
+            " <-- RIP"
+        } else if offset == 1 {
+            " <-- CS (BAD)"
+        } else if offset == 2 {
+            " <-- RFLAGS"
+        } else if offset == 3 {
+            " <-- RSP"
+        } else if offset == 4 {
+            " <-- SS"
+        } else {
+            ""
+        };
+        klog_info!("  [{:+}] {:p} = 0x{:016x}{}", offset, addr, val, marker);
+    }
+    klog_info!("=== END DUMP ===");
+
+    if !task_ptr.is_null() {
+        let is_user = unsafe { (*task_ptr).flags } & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
+        klog_info!(
+            "  Current task: id={} user={}",
+            unsafe { (*task_ptr).task_id },
+            is_user,
+        );
+    }
+
+    // User-mode IRET corruption is fatal — a corrupted frame cannot be
+    // recovered and the panic below fires regardless.
+    panic!("Unrecoverable IRET frame corruption");
+}
+
 fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let fault_addr = cpu::read_cr2();
     let frame_ref = unsafe { &*frame };

@@ -57,14 +57,18 @@ pub extern "sysv64" fn switch_registers(prev: *mut SwitchContext, next: *const S
         "mov r15, [rsi + {off_r15}]",
         "mov rbp, [rsi + {off_rbp}]",
 
-        // Load RFLAGS
-        "push QWORD PTR [rsi + {off_rflags}]",
-        "popfq",
-
-        // Switch stack (this is the actual context switch point)
+        // Switch stack and push return address BEFORE restoring RFLAGS.
         "mov rsp, [rsi + {off_rsp}]",
 
-        // Return (pops return address from new stack)
+        // Restore RFLAGS with IF cleared — callers re-enable interrupts
+        // explicitly after the switch returns.  See context_switch.s for
+        // the full rationale: a pending IPI between popfq and ret would
+        // see current_task pointing at the dispatched task while RSP is
+        // still the idle stack, corrupting the dispatched task's context.
+        "mov rax, [rsi + {off_rflags}]",
+        "and rax, ~0x200",  // clear IF (bit 9)
+        "push rax",
+        "popfq",
         "ret",
 
         off_rbx = const offset_of!(SwitchContext, rbx),
@@ -143,4 +147,53 @@ pub extern "sysv64" fn init_current_context(ctx: *mut SwitchContext) {
         off_rflags = const offset_of!(SwitchContext, rflags),
         off_rip = const offset_of!(SwitchContext, rip),
     );
+}
+
+/// Save the current CPU's FPU/SIMD state to the given task's FpuState buffer.
+///
+/// Uses XSAVE64 with the active XCR0 mask.  The buffer must be 64-byte
+/// aligned (guaranteed by `#[repr(C, align(64))]` on `FpuState`).
+///
+/// # Safety
+/// - `fpu_state` must point to a valid, 64-byte-aligned `FpuState`.
+/// - Must be called with interrupts disabled (the caller holds the
+///   scheduler lock or is in a cli section).
+#[inline]
+pub unsafe fn fpu_save(fpu_state: *mut super::task_struct::FpuState) {
+    let xcr0 = slopos_arch::cpu::xsave::active_xcr0();
+    let lo = xcr0 as u32;
+    let hi = (xcr0 >> 32) as u32;
+    unsafe {
+        core::arch::asm!(
+            "xsave64 [{}]",
+            in(reg) fpu_state,
+            in("eax") lo,
+            in("edx") hi,
+            // xsave clobbers memory at the destination
+            options(nostack),
+        );
+    }
+}
+
+/// Restore FPU/SIMD state from the given task's FpuState buffer into the CPU.
+///
+/// Uses XRSTOR64 with the active XCR0 mask.
+///
+/// # Safety
+/// Same requirements as `fpu_save`.
+#[inline]
+pub unsafe fn fpu_restore(fpu_state: *const super::task_struct::FpuState) {
+    let xcr0 = slopos_arch::cpu::xsave::active_xcr0();
+    let lo = xcr0 as u32;
+    let hi = (xcr0 >> 32) as u32;
+    unsafe {
+        core::arch::asm!(
+            "xrstor64 [{}]",
+            in(reg) fpu_state,
+            in("eax") lo,
+            in("edx") hi,
+            clobber_abi("sysv64"),
+            options(nostack, readonly),
+        );
+    }
 }

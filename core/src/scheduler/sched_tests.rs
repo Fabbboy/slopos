@@ -16,8 +16,8 @@ use slopos_utils::klog_info;
 use super::per_cpu::{pause_all_aps, resume_all_aps_if_not_nested};
 use super::runtime::{self, IdleStackResolveError};
 use super::scheduler::{
-    self, get_scheduler_stats, init_scheduler, schedule, schedule_task, scheduler_is_enabled,
-    scheduler_shutdown, scheduler_timer_tick, unschedule_task,
+    self, get_scheduler_stats, init_scheduler, schedule, schedule_new_task, schedule_task,
+    scheduler_is_enabled, scheduler_shutdown, scheduler_timer_tick, unschedule_task,
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, MAX_TASKS, TASK_FLAG_KERNEL_MODE,
@@ -27,6 +27,7 @@ use super::task::{
     task_terminate,
 };
 use slopos_abi::task::BlockReason;
+use slopos_arch::MAX_CPUS;
 use slopos_arch::arch::gdt::SegmentSelector;
 use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -271,9 +272,11 @@ pub fn test_create_max_tasks() -> TestResult {
         MAX_TASKS
     );
 
+    // On SMP, per-CPU idle tasks consume slots.  Account for them plus
+    // the current task when computing the minimum expected capacity.
     let cpu_count = slopos_arch::pcr::get_cpu_count() as usize;
-    let reserved_idle_slots = cpu_count.max(1);
-    let min_expected = MAX_TASKS.saturating_sub(reserved_idle_slots + 1);
+    let reserved_slots = cpu_count.max(1) + 1;
+    let min_expected = MAX_TASKS.saturating_sub(reserved_slots);
     if success_count < min_expected {
         klog_info!(
             "SCHED_TEST: Only created {} tasks, expected at least {}",
@@ -1652,6 +1655,481 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// REGRESSION: Tick accounting & load-aware CPU selection
+// =============================================================================
+
+/// Regression: scheduler_timer_tick() must always increment total_ticks.
+/// Previously the early-return path skipped increment_ticks(), under-counting
+/// ticks on busy CPUs.  This test exercises the unguarded (no PreemptGuard)
+/// path only; the guarded path is covered by the live scheduler under SMP.
+pub fn test_timer_tick_always_increments_ticks() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    let ticks_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched
+            .total_ticks
+            .load(core::sync::atomic::Ordering::Relaxed)
+    })
+    .unwrap_or(0);
+
+    // Fire several timer ticks
+    for _ in 0..5 {
+        scheduler_timer_tick();
+    }
+
+    let ticks_after = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched
+            .total_ticks
+            .load(core::sync::atomic::Ordering::Relaxed)
+    })
+    .unwrap_or(0);
+
+    let delta = ticks_after.saturating_sub(ticks_before);
+    if delta < 5 {
+        klog_info!(
+            "SCHED_TEST: timer_tick incremented ticks only {} times (expected >=5)",
+            delta
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: idle_time must track ticks, not loop iterations.
+/// When the idle task is current, each timer tick should increment both
+/// total_ticks and idle_time by the same amount.
+pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // Set current task to the idle task so timer_tick recognises us as idle.
+    let idle_task = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.idle_task())
+        .unwrap_or(ptr::null_mut());
+    if idle_task.is_null() {
+        return TestResult::Fail;
+    }
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(idle_task);
+    });
+
+    let (ticks_before, idle_before) = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        (
+            sched
+                .total_ticks
+                .load(core::sync::atomic::Ordering::Relaxed),
+            sched.idle_time.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    })
+    .unwrap_or((0, 0));
+
+    for _ in 0..10 {
+        scheduler_timer_tick();
+    }
+
+    let (ticks_after, idle_after) = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        (
+            sched
+                .total_ticks
+                .load(core::sync::atomic::Ordering::Relaxed),
+            sched.idle_time.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    })
+    .unwrap_or((0, 0));
+
+    let delta_ticks = ticks_after.saturating_sub(ticks_before);
+    let delta_idle = idle_after.saturating_sub(idle_before);
+
+    // Both should have incremented by 10 (one per tick).
+    if delta_ticks < 10 {
+        klog_info!("SCHED_TEST: total_ticks delta {} < 10", delta_ticks);
+        return TestResult::Fail;
+    }
+
+    let drift = if delta_idle > delta_ticks {
+        delta_idle - delta_ticks
+    } else {
+        delta_ticks - delta_idle
+    };
+    // Allow a small tolerance (up to 2 ticks) for SMP timing jitter.
+    if drift > 2 {
+        klog_info!(
+            "SCHED_TEST: idle_time ({}) vs total_ticks ({}) — drift {} exceeds tolerance",
+            delta_idle,
+            delta_ticks,
+            drift
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: select_target_cpu should prefer idle CPUs over busy ones.
+/// Previously it always returned last_cpu regardless of load.
+pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+
+    if cpu_count < 2 {
+        // Single-CPU systems cannot test cross-CPU placement.
+        return TestResult::Pass;
+    }
+
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // Ensure both the local CPU and at least one other CPU are online
+    // and schedulable so select_target_cpu sees both as candidates.
+    slopos_arch::pcr::mark_cpu_online(cpu_id);
+    if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Could not enable scheduler on local CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
+    let other_cpu = if cpu_id == 0 { 1 } else { 0 };
+    slopos_arch::pcr::mark_cpu_online(other_cpu);
+    if super::per_cpu::with_cpu_scheduler(other_cpu, |sched| sched.enable()).is_none() {
+        klog_info!(
+            "SCHED_TEST: Could not enable scheduler on CPU {}",
+            other_cpu
+        );
+        return TestResult::Fail;
+    }
+
+    // Load up last_cpu (cpu_id) with several queued tasks.
+    let mut filler_ids = [INVALID_TASK_ID; 3];
+    for i in 0..3 {
+        let tid = task_create(
+            b"Filler\0".as_ptr() as *const c_char,
+            dummy_task_fn,
+            ptr::null_mut(),
+            TASK_PRIORITY_NORMAL,
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if tid == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        filler_ids[i] = tid;
+        let mut tp: *mut Task = ptr::null_mut();
+        if task_get_info(tid, &mut tp) != 0 || tp.is_null() {
+            return TestResult::Fail;
+        }
+        // Pin fillers to cpu_id so they stay in its queue.
+        unsafe {
+            (*tp).cpu_affinity = super::per_cpu::affinity_mask_for_cpu(cpu_id);
+            (*tp).last_cpu = cpu_id as u8;
+        }
+        if schedule_task(tp) != 0 {
+            return TestResult::Fail;
+        }
+    }
+
+    // Create a test task whose last_cpu is cpu_id (busy), with affinity=0 (any CPU).
+    let task_id = task_create(
+        b"Migratee\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+
+    unsafe {
+        (*task_ptr).cpu_affinity = 0; // any CPU
+        (*task_ptr).last_cpu = cpu_id as u8; // last ran on the busy CPU
+    }
+
+    // select_target_cpu should see that cpu_id is loaded and pick other_cpu.
+    let target = super::per_cpu::select_target_cpu(task_ptr);
+    match target {
+        Some(t) if t == other_cpu => { /* expected — migrated to idle CPU */ }
+        Some(t) if t == cpu_id => {
+            // This is the old buggy behaviour — always returning last_cpu.
+            klog_info!(
+                "SCHED_TEST: select_target_cpu returned busy last_cpu {} instead of idle CPU {}",
+                cpu_id,
+                other_cpu
+            );
+            return TestResult::Fail;
+        }
+        Some(t) => {
+            // Some other idle CPU is also acceptable.
+            klog_info!(
+                "SCHED_TEST: select_target_cpu chose CPU {} (not the expected {} but still OK)",
+                t,
+                other_cpu
+            );
+        }
+        None => {
+            klog_info!("SCHED_TEST: select_target_cpu returned None");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: CPU running a real task with empty queue must NOT be
+/// considered idle.  This is the key scenario that caused all tasks to
+/// stick to CPU0 — bursty workloads left the queue empty between bursts,
+/// so the old code always returned last_cpu.
+pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+
+    if cpu_count < 2 {
+        return TestResult::Pass;
+    }
+
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    let other_cpu = if cpu_id == 0 { 1 } else { 0 };
+    slopos_arch::pcr::mark_cpu_online(other_cpu);
+    if super::per_cpu::with_cpu_scheduler(other_cpu, |sched| sched.enable()).is_none() {
+        return TestResult::Fail;
+    }
+
+    // Simulate a real task running on cpu_id: create a task and set it as
+    // the current task.  The queue stays empty, but effective_load should
+    // be 1 because a non-idle task is running.
+    let runner_id = task_create(
+        b"Runner\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if runner_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let mut runner_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(runner_id, &mut runner_ptr) != 0 || runner_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(runner_ptr);
+    });
+
+    let load =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0);
+    if load == 0 {
+        klog_info!(
+            "SCHED_TEST: effective_load is 0 despite running task on CPU {}",
+            cpu_id
+        );
+        return TestResult::Fail;
+    }
+
+    // Create a task with last_cpu = cpu_id.  Even though cpu_id's QUEUE
+    // is empty, the scheduler should NOT consider it idle.
+    let task_id = task_create(
+        b"WakeTest\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    unsafe {
+        (*task_ptr).cpu_affinity = 0;
+        (*task_ptr).last_cpu = cpu_id as u8;
+    }
+
+    let target = super::per_cpu::select_target_cpu(task_ptr);
+    match target {
+        Some(t) if t != cpu_id => { /* expected — migrated away from busy CPU */ }
+        Some(t) => {
+            klog_info!(
+                "SCHED_TEST: select_target_cpu stuck to CPU {} despite running task (empty queue)",
+                t
+            );
+            return TestResult::Fail;
+        }
+        None => {
+            klog_info!("SCHED_TEST: select_target_cpu returned None");
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: schedule_new_task() must spread sequential forks across
+/// CPUs via round-robin, not pile them all onto CPU0.  Mirrors Linux's
+/// WF_FORK / SD_BALANCE_FORK slow path.
+pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+
+    if cpu_count < 2 {
+        return TestResult::Pass;
+    }
+
+    if scheduler::create_idle_task() != 0 {
+        return TestResult::Fail;
+    }
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // Enable all CPUs for scheduling.
+    for c in 0..cpu_count {
+        slopos_arch::pcr::mark_cpu_online(c);
+        super::per_cpu::with_cpu_scheduler(c, |sched| sched.enable());
+    }
+
+    // Simulate the parent (shell) running on cpu_id by setting current_task.
+    let parent_id = task_create(
+        b"Parent\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if parent_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let mut parent_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(parent_id, &mut parent_ptr) != 0 {
+        return TestResult::Fail;
+    }
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.set_current_task(parent_ptr);
+    });
+
+    // Spawn N children using schedule_new_task (the fork path).
+    let n = cpu_count.min(4);
+    let mut placed_on = [0usize; 4];
+    for i in 0..n {
+        let tid = task_create(
+            b"Child\0".as_ptr() as *const c_char,
+            dummy_task_fn,
+            ptr::null_mut(),
+            TASK_PRIORITY_NORMAL,
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if tid == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        let mut tp: *mut Task = ptr::null_mut();
+        if task_get_info(tid, &mut tp) != 0 || tp.is_null() {
+            return TestResult::Fail;
+        }
+        unsafe {
+            (*tp).cpu_affinity = 0; // any CPU
+        }
+        if schedule_new_task(tp) != 0 {
+            return TestResult::Fail;
+        }
+        placed_on[i] = unsafe { (*tp).last_cpu } as usize;
+    }
+
+    // Verify that at least 2 distinct CPUs were used (not all on CPU0).
+    let mut distinct = [false; MAX_CPUS];
+    let mut count = 0usize;
+    for i in 0..n {
+        if !distinct[placed_on[i]] {
+            distinct[placed_on[i]] = true;
+            count += 1;
+        }
+    }
+
+    if count < 2 {
+        klog_info!(
+            "SCHED_TEST: schedule_new_task placed all {} children on same CPU ({})",
+            n,
+            placed_on[0]
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Regression: effective_load must reflect queued tasks correctly.
+pub fn test_effective_load_accuracy() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+
+    // After fixture reset, effective_load should be 0 or 1 (just the
+    // running task on this CPU, if any).
+    let load_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load())
+        .unwrap_or(u32::MAX);
+    if load_before > 1 {
+        klog_info!(
+            "SCHED_TEST: effective_load {} > 1 on empty queues",
+            load_before
+        );
+        return TestResult::Fail;
+    }
+
+    // Enqueue a task — effective_load should increase.
+    let task_id = task_create(
+        b"LoadCheck\0".as_ptr() as *const c_char,
+        dummy_task_fn,
+        ptr::null_mut(),
+        TASK_PRIORITY_NORMAL,
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let mut task_ptr: *mut Task = ptr::null_mut();
+    if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
+        sched.enqueue_local(task_ptr);
+    });
+
+    let load_after =
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0);
+    if load_after <= load_before {
+        klog_info!(
+            "SCHED_TEST: effective_load did not increase after enqueue ({} -> {})",
+            load_before,
+            load_after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
 slopos_testing::define_test_suite!(
     sched_core,
     [
@@ -1694,5 +2172,11 @@ slopos_testing::define_test_suite!(
         test_privilege_separation_invariants,
         test_scheduler_wakeup_race_stress_baseline,
         test_sleep_wake_race_regression,
+        test_timer_tick_always_increments_ticks,
+        test_idle_time_tracks_ticks_not_iterations,
+        test_select_target_cpu_prefers_idle_cpu,
+        test_select_target_cpu_running_task_not_idle,
+        test_schedule_new_task_spreads_across_cpus,
+        test_effective_load_accuracy,
     ]
 );
