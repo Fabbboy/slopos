@@ -558,11 +558,18 @@ fn pcp_refill(cpu: usize, flags: u32) {
         return;
     }
 
-    let needed = PCP_BATCH_SIZE.min(PCP_HIGH_WATERMARK - current_count);
     let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
 
     // Single lock: allocate batch and link into PCP list atomically.
     let mut alloc = PAGE_ALLOCATOR.lock();
+
+    // Re-read count under lock — another path (drain, concurrent alloc)
+    // may have changed it between the check above and the lock acquisition.
+    let current_count = cache.count.load(Ordering::Relaxed);
+    if current_count >= PCP_HIGH_WATERMARK {
+        return;
+    }
+    let needed = PCP_BATCH_SIZE.min(PCP_HIGH_WATERMARK - current_count);
     let allocated = alloc.allocate_batch_for_pcp(&mut batch[..needed as usize], flags);
 
     for i in 0..allocated {
@@ -692,6 +699,8 @@ pub fn alloc_page_frames(count: u32, flags: u32) -> PhysAddr {
 
     let use_pcp = order == 0
         && (flags & ALLOC_FLAG_DMA) == 0
+        && (flags & ALLOC_FLAG_KERNEL) == 0
+        && (flags & ALLOC_FLAG_ORDER_MASK) == 0
         && (flags & ALLOC_FLAG_NO_PCP) == 0
         && PCP_INIT.is_set();
 

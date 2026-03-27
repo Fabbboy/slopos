@@ -1659,9 +1659,10 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 // REGRESSION: Tick accounting & load-aware CPU selection
 // =============================================================================
 
-/// Regression: scheduler_timer_tick() must always increment total_ticks,
-/// even when PreemptGuard is active.  Previously the early-return path
-/// skipped increment_ticks(), under-counting ticks on busy CPUs.
+/// Regression: scheduler_timer_tick() must always increment total_ticks.
+/// Previously the early-return path skipped increment_ticks(), under-counting
+/// ticks on busy CPUs.  This test exercises the unguarded (no PreemptGuard)
+/// path only; the guarded path is covered by the live scheduler under SMP.
 pub fn test_timer_tick_always_increments_ticks() -> TestResult {
     let _fixture = SchedFixture::new();
 
