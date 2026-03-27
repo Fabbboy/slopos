@@ -792,6 +792,12 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
     if !PageAllocator::frame_state_is_allocated(frame.state) {
         return 0;
     }
+    // A frame already parked on a PCP list (state == PAGE_FRAME_PCP) must
+    // not fall through to the buddy free path — that would make it
+    // double-referenced (once in PCP, once in buddy).  Treat as a no-op.
+    if frame.state == PAGE_FRAME_PCP {
+        return 0;
+    }
     if frame.ref_count > 1 {
         frame.ref_count -= 1;
         return 0;

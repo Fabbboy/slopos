@@ -63,12 +63,20 @@ pub fn syscall_handle(frame: *mut InterruptFrame) {
             // ---------------------------------------------------------------
             handle_erestartsys(task, frame, sysno);
 
-            crate::syscall::signal::deliver_pending_signal(task, frame);
-
             // Safety net: ERESTARTSYS must NEVER leak to userland.
             debug_assert_erestartsys_not_leaked(frame);
+        } else {
+            // Reserved table slot with no handler — return ENOSYS.
+            unsafe {
+                (*frame).rax = slopos_abi::syscall::ENOSYS_RETURN;
+            }
         }
     }
+
+    // Deliver pending signals on every syscall exit path, not just when
+    // a handler ran.  Linux checks TIF_SIGPENDING unconditionally on
+    // return to userspace.
+    crate::syscall::signal::deliver_pending_signal(task, frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,40 +142,55 @@ fn handle_erestartsys(task: *mut Task, frame: *mut InterruptFrame, sysno: u64) {
         return;
     }
 
-    unsafe {
+    // --- Minimal unsafe region: read raw signal state into safe locals ---
+    let (pending, blocked, handler, flags) = unsafe {
         let pending = (*task).signal_pending.load(Ordering::Acquire);
-        let deliverable = pending & !(*task).signal_blocked;
+        let blocked = (*task).signal_blocked;
+        let deliverable = pending & !blocked;
 
         if deliverable == 0 {
-            // No deliverable signals — restart the syscall immediately.
-            (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
-            (*frame).rax = sysno;
-            return;
+            (pending, blocked, 0u64, 0u64)
+        } else {
+            // Inspect the signal that deliver_pending_signal will pick (the
+            // lowest-numbered deliverable signal, matching its trailing_zeros
+            // selection).
+            let signum = (deliverable.trailing_zeros() + 1) as u8;
+            let idx = (signum as usize).wrapping_sub(1);
+            let action = (*task).signal_actions[idx];
+            (pending, blocked, action.handler, action.flags)
         }
+    };
 
-        // Inspect the signal that deliver_pending_signal will pick (the
-        // lowest-numbered deliverable signal, matching its trailing_zeros
-        // selection).
-        let signum = (deliverable.trailing_zeros() + 1) as u8;
-        let idx = (signum as usize).wrapping_sub(1);
-        let action = (*task).signal_actions[idx];
+    // --- Safe policy decision using copied locals ---
+    let deliverable = pending & !blocked;
 
-        let is_user_handler = action.handler != SIG_DFL && action.handler != SIG_IGN;
-
+    let should_restart = if deliverable == 0 {
+        // No deliverable signals — restart the syscall immediately.
+        true
+    } else {
+        let is_user_handler = handler != SIG_DFL && handler != SIG_IGN;
         if !is_user_handler {
             // SIG_DFL or SIG_IGN: no user handler will run.
             // Restart the syscall — if the default action is Terminate,
             // deliver_pending_signal will kill the process and the
             // restart is moot.
-            (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
-            (*frame).rax = sysno;
-        } else if (action.flags & SA_RESTART) != 0 {
+            true
+        } else if (flags & SA_RESTART) != 0 {
             // User handler with SA_RESTART: set up for transparent
             // restart after the signal handler returns via sigreturn.
+            true
+        } else {
+            // User handler without SA_RESTART: convert to EINTR.
+            false
+        }
+    };
+
+    // --- Write decision back to frame (minimal unsafe) ---
+    unsafe {
+        if should_restart {
             (*frame).rip = (*frame).rip.wrapping_sub(SYSCALL_INSN_SIZE);
             (*frame).rax = sysno;
         } else {
-            // User handler without SA_RESTART: convert to EINTR.
             (*frame).rax = (-4i64) as u64;
         }
     }

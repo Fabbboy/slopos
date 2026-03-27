@@ -125,6 +125,10 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
     }
 
     // Cache-hot: don't migrate a task that ran very recently on victim.
+    // NOTE: This comparison assumes an invariant TSC across CPUs so that
+    // timestamps from different cores are directly comparable.  On systems
+    // without invariant TSC this check may be inaccurate and should be
+    // disabled or replaced with a CPU-synchronized timestamp method.
     if MIGRATION_COST_CYCLES > 0 {
         let last_run = unsafe { (*task).last_run_timestamp };
         if last_run != 0 {

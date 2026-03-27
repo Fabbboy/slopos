@@ -358,10 +358,10 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     let timestamp = kdiag_timestamp();
     task_record_context_switch(current, idle_task, timestamp);
 
-    set_scheduler_current_task(cpu_id, idle_task);
-    slopos_sync::rcu_note_qs();
-
     unsafe {
+        // Validate the idle context BEFORE publishing it as current_task.
+        // Otherwise, other CPUs could observe current_task pointing at an
+        // unusable idle context if validation fails.
         if !ensure_idle_switch_ctx_valid(idle_task) {
             klog_info!(
                 "SCHED: CPU {} cannot recover idle switch_ctx for task {}",
@@ -370,7 +370,12 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
             );
             return;
         }
+    }
 
+    set_scheduler_current_task(cpu_id, idle_task);
+    slopos_sync::rcu_note_qs();
+
+    unsafe {
         // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
         prepare_switch_to(cpu_id, current, idle_task);
 
@@ -595,6 +600,22 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
             );
             let _ = crate::task::task_terminate((*to_task).task_id);
             return;
+        }
+
+        // Validate CR3 for tasks with a process VM.  cr3_phys == 0 means
+        // the process VM was destroyed or never created — switching into
+        // that address space would fault immediately.
+        if pid != INVALID_PROCESS_ID {
+            let cr3_phys = process_vm_get_cr3_phys(pid);
+            if cr3_phys == 0 {
+                klog_info!(
+                    "SCHED: refusing to dispatch task {} (pid {}) with cr3_phys=0",
+                    (*to_task).task_id,
+                    pid,
+                );
+                let _ = crate::task::task_terminate((*to_task).task_id);
+                return;
+            }
         }
     }
 

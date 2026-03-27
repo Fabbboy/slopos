@@ -130,8 +130,35 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     if (frame_ref.error_code & 0x10) != 0 {
         klog_info!("=== STACK DUMP at RSP 0x{:x} ===", frame_ref.rsp);
         let rsp = frame_ref.rsp as *const u64;
+
+        // Determine a safe probe range for the stack dump.  If the current
+        // task has a valid kernel stack region, use that; otherwise fall back
+        // to a conservative ±128-byte window around RSP.
+        let (stack_lo, stack_hi) = {
+            let task = slopos_core::sched::scheduler_get_current_task();
+            if !task.is_null() {
+                let base = unsafe { (*task).kernel_stack_base };
+                let top = unsafe { (*task).kernel_stack_top };
+                if base != 0 && top > base {
+                    (base as usize, top as usize)
+                } else {
+                    (frame_ref.rsp as usize, frame_ref.rsp as usize + 128)
+                }
+            } else {
+                (frame_ref.rsp as usize, frame_ref.rsp as usize + 128)
+            }
+        };
+
         for i in 0..16isize {
             let addr = unsafe { rsp.offset(i) };
+            let addr_val = addr as usize;
+            if addr_val < stack_lo || addr_val + 8 > stack_hi {
+                klog_info!(
+                    "  [RSP+0x{:02x}] = <out of bounds, remaining omitted>",
+                    (i as usize) * 8
+                );
+                break;
+            }
             let val = unsafe { core::ptr::read_unaligned(addr) };
             klog_info!("  [RSP+0x{:02x}] = 0x{:016x}", (i as usize) * 8, val);
         }

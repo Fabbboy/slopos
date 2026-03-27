@@ -387,10 +387,12 @@ impl PerCpuScheduler {
     pub fn effective_load(&self) -> u32 {
         let queues = unsafe { &*self.ready_queues.get() };
         let queued: u32 = queues.iter().map(|q| q.len()).sum();
+        let inbox = self.inbox_count.load(Ordering::Relaxed);
         let current = self.current_task_atomic.load(Ordering::Relaxed);
         let idle = self.idle_task_atomic.load(Ordering::Relaxed);
         let running_real = !current.is_null() && current != idle;
-        if running_real { queued + 1 } else { queued }
+        let load = queued + inbox;
+        if running_real { load + 1 } else { load }
     }
 
     pub fn steal_task(&self) -> Option<*mut Task> {

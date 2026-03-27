@@ -235,6 +235,7 @@ fn reset_task_runtime_fields(task: &mut Task) {
     task.fate_token = 0;
     task.fate_value = 0;
     task.fate_pending = 0;
+    task.on_cpu.store(false, Ordering::Release);
     task.next_ready = ptr::null_mut();
     task.next_inbox.store(ptr::null_mut(), Ordering::Release);
     task.refcnt.store(0, Ordering::Release);
@@ -287,6 +288,78 @@ fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool
     })
 }
 
+/// Build a user-mode InterruptFrame from a saved TaskContext.
+///
+/// Sets rax=0 (fork/clone child return value) and ensures cs/ss have
+/// ring-3 selectors.
+fn interrupt_frame_from_context(ctx: &TaskContext, user_rsp: u64) -> slopos_arch::InterruptFrame {
+    slopos_arch::InterruptFrame {
+        r15: ctx.r15,
+        r14: ctx.r14,
+        r13: ctx.r13,
+        r12: ctx.r12,
+        r11: ctx.r11,
+        r10: ctx.r10,
+        r9: ctx.r9,
+        r8: ctx.r8,
+        rbp: ctx.rbp,
+        rdi: ctx.rdi,
+        rsi: ctx.rsi,
+        rdx: ctx.rdx,
+        rcx: ctx.rcx,
+        rbx: ctx.rbx,
+        rax: 0,
+        vector: 0,
+        error_code: 0,
+        rip: ctx.rip,
+        cs: if (ctx.cs & 0x3) == 0x3 { ctx.cs } else { 0x23 },
+        rflags: ctx.rflags,
+        rsp: user_rsp,
+        ss: if (ctx.ss & 0x3) == 0x3 { ctx.ss } else { 0x1B },
+    }
+}
+
+/// Build the ret_from_fork stack frame on a task's kernel stack.
+///
+/// Writes the given `InterruptFrame` at `kernel_stack_top - sizeof(InterruptFrame)`,
+/// pushes the `ret_from_fork` return address 8 bytes below it, and returns a
+/// `SwitchContext` whose RSP points at the return address slot.  When
+/// `switch_registers` executes `ret`, it pops `ret_from_fork`, which then
+/// restores the `InterruptFrame` via `iretq`.
+///
+/// # Safety
+/// Caller must ensure that the region `[kernel_stack_top - sizeof(InterruptFrame) - 8,
+/// kernel_stack_top)` is writable, properly aligned, and not concurrently accessed.
+pub(crate) unsafe fn build_ret_from_fork_frame(
+    kernel_stack_top: u64,
+    iframe: slopos_arch::InterruptFrame,
+) -> SwitchContext {
+    unsafe extern "C" {
+        fn ret_from_fork();
+    }
+    let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
+    let frame_addr = kernel_stack_top - frame_size;
+    let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
+    unsafe {
+        core::ptr::write(frame_ptr, iframe);
+    }
+    let ret_addr_slot = frame_addr - 8;
+    unsafe {
+        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
+    }
+    SwitchContext {
+        rbx: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+        rbp: 0,
+        rsp: ret_addr_slot,
+        rflags: 0x02,
+        rip: ret_from_fork as *const () as u64,
+    }
+}
+
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
     task.fpu_state = FpuState::new();
@@ -313,12 +386,10 @@ fn init_task_context(task: &mut Task) {
         task.context.es = 0x10;
         task.context.ss = 0x10;
     } else {
-        unsafe {
-            let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
-            let frame_addr = task.kernel_stack_top - frame_size;
-            let frame_ptr = frame_addr as *mut slopos_arch::InterruptFrame;
-            core::ptr::write(
-                frame_ptr,
+        // SAFETY: kernel_stack region was just allocated and is writable.
+        task.switch_ctx = unsafe {
+            build_ret_from_fork_frame(
+                task.kernel_stack_top,
                 slopos_arch::InterruptFrame {
                     r15: 0,
                     r14: 0,
@@ -343,27 +414,8 @@ fn init_task_context(task: &mut Task) {
                     rsp: task.stack_pointer,
                     ss: 0x1B,
                 },
-            );
-            unsafe extern "C" {
-                fn ret_from_fork();
-            }
-            // switch_registers ends with `ret`, which pops [RSP] as the
-            // return address.  Push ret_from_fork below the InterruptFrame
-            // so `ret` jumps there, then ret_from_fork pops the frame.
-            let ret_addr_slot = frame_addr - 8;
-            core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
-            task.switch_ctx = SwitchContext {
-                rbx: 0,
-                r12: 0,
-                r13: 0,
-                r14: 0,
-                r15: 0,
-                rbp: 0,
-                rsp: ret_addr_slot, // points at the ret_from_fork address
-                rflags: 0x02,
-                rip: ret_from_fork as *const () as u64,
-            };
-        }
+            )
+        };
         task.context.rip = task.entry_point;
         task.context.rsp = task.stack_pointer;
         task.context.rflags = 0x202;
@@ -751,39 +803,26 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
     child.pgid = parent.pgid;
     child.sid = parent.sid;
     child.clear_child_tid = 0;
-    child.set_status(TaskStatus::Ready);
 
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    unsafe {
-        let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
-        let child_frame_addr = child.kernel_stack_top - frame_size;
-        let child_frame_ptr = child_frame_addr as *mut slopos_arch::InterruptFrame;
-        if !syscall_frame.is_null() {
-            core::ptr::copy_nonoverlapping(syscall_frame, child_frame_ptr, 1);
-        } else {
-            core::ptr::write_bytes(child_frame_ptr, 0, 1);
-        }
-        (*child_frame_ptr).rax = 0;
-        unsafe extern "C" {
-            fn ret_from_fork();
-        }
-        let ret_addr_slot = child_frame_addr - 8;
-        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
-        child.switch_ctx = SwitchContext {
-            rbx: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rbp: 0,
-            rsp: ret_addr_slot,
-            rflags: 0x02,
-            rip: ret_from_fork as *const () as u64,
-        };
-    }
+    // Build the child's InterruptFrame: copy from syscall_frame if
+    // available, otherwise synthesize from the cloned task context.
+    let iframe = if !syscall_frame.is_null() {
+        let mut frame = unsafe { core::ptr::read(syscall_frame) };
+        frame.rax = 0; // child returns 0 from fork
+        frame
+    } else {
+        // No syscall frame available — synthesize a valid InterruptFrame
+        // from the cloned task's saved context so ret_from_fork returns
+        // to a valid user-mode state (not a zeroed rip/cs/rsp/ss).
+        let ctx = &child.context;
+        interrupt_frame_from_context(ctx, ctx.rsp)
+    };
+    // SAFETY: child kernel stack was just allocated and is writable.
+    child.switch_ctx = unsafe { build_ret_from_fork_frame(child.kernel_stack_top, iframe) };
     child.context_from_user = 0;
     child.context.rax = 0;
     if !syscall_frame.is_null() {
@@ -813,6 +852,10 @@ pub fn task_fork(parent_task: *mut Task, syscall_frame: *const slopos_arch::Inte
         parent.task_id,
         parent.process_id
     );
+
+    // Mark Ready only after all child-specific fields are fully initialized,
+    // so the task is never visible as Ready with incomplete state.
+    child.set_status(TaskStatus::Ready);
 
     // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU
     // instead of sticking to the parent's CPU.  Wakeups from sleep will
@@ -920,66 +963,21 @@ pub fn task_clone(
     child.pgid = parent.pgid;
     child.sid = parent.sid;
 
-    child.set_status(TaskStatus::Ready);
-
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack_base + TASK_KERNEL_STACK_SIZE;
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Build InterruptFrame on child's kernel stack from inherited context.
-    unsafe {
-        let frame_size = core::mem::size_of::<slopos_arch::InterruptFrame>() as u64;
-        let child_frame_addr = child.kernel_stack_top - frame_size;
-        let child_frame_ptr = child_frame_addr as *mut slopos_arch::InterruptFrame;
+    {
         let ctx = &child.context;
         let user_rsp = if child_stack != 0 {
             child_stack
         } else {
             ctx.rsp
         };
-        core::ptr::write(
-            child_frame_ptr,
-            slopos_arch::InterruptFrame {
-                r15: ctx.r15,
-                r14: ctx.r14,
-                r13: ctx.r13,
-                r12: ctx.r12,
-                r11: ctx.r11,
-                r10: ctx.r10,
-                r9: ctx.r9,
-                r8: ctx.r8,
-                rbp: ctx.rbp,
-                rdi: ctx.rdi,
-                rsi: ctx.rsi,
-                rdx: ctx.rdx,
-                rcx: ctx.rcx,
-                rbx: ctx.rbx,
-                rax: 0,
-                vector: 0,
-                error_code: 0,
-                rip: ctx.rip,
-                cs: if (ctx.cs & 0x3) == 0x3 { ctx.cs } else { 0x23 },
-                rflags: ctx.rflags,
-                rsp: user_rsp,
-                ss: if (ctx.ss & 0x3) == 0x3 { ctx.ss } else { 0x1B },
-            },
-        );
-        unsafe extern "C" {
-            fn ret_from_fork();
-        }
-        let ret_addr_slot = child_frame_addr - 8;
-        core::ptr::write(ret_addr_slot as *mut u64, ret_from_fork as *const () as u64);
-        child.switch_ctx = SwitchContext {
-            rbx: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rbp: 0,
-            rsp: ret_addr_slot,
-            rflags: 0x02,
-            rip: ret_from_fork as *const () as u64,
-        };
+        let iframe = interrupt_frame_from_context(ctx, user_rsp);
+        // SAFETY: child kernel stack was just allocated and is writable.
+        child.switch_ctx = unsafe { build_ret_from_fork_frame(child.kernel_stack_top, iframe) };
     }
     child.context_from_user = 0;
     child.context.rax = 0;
@@ -1050,6 +1048,9 @@ pub fn task_clone(
         parent.task_id,
         parent.process_id
     );
+
+    // Mark Ready only after all child-specific fields are fully initialized.
+    child.set_status(TaskStatus::Ready);
 
     // Use the fork balancer (SD_BALANCE_FORK-style): spread to idlest CPU.
     scheduler::schedule_new_task(child_task_ptr);

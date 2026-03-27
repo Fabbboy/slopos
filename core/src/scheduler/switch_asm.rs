@@ -192,6 +192,7 @@ pub unsafe fn fpu_restore(fpu_state: *const super::task_struct::FpuState) {
             in(reg) fpu_state,
             in("eax") lo,
             in("edx") hi,
+            clobber_abi("sysv64"),
             options(nostack, readonly),
         );
     }

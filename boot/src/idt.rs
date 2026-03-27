@@ -617,10 +617,9 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
             is_user,
         );
         if is_user {
-            // Force a yield so the scheduler can re-dispatch this task
-            // through the normal switch_registers + ret_from_fork path.
-            klog_info!("  RECOVERY: yielding to scheduler for clean dispatch");
-            slopos_core::sched::r#yield();
+            // User-mode IRET corruption is fatal in the current handler.
+            // A corrupted frame cannot be fixed by yielding — the panic
+            // below will fire regardless.
         }
     }
 

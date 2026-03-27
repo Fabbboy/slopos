@@ -291,9 +291,9 @@ pub fn register_ap_timer_start(cb: fn() -> bool) {
 fn deferred_start_ap_timer(cpu_id: usize) {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    static AP_TIMER_DONE: [AtomicBool; 256] = {
+    static AP_TIMER_DONE: [AtomicBool; slopos_arch::MAX_CPUS] = {
         const FALSE: AtomicBool = AtomicBool::new(false);
-        [FALSE; 256]
+        [FALSE; slopos_arch::MAX_CPUS]
     };
 
     if cpu_id >= AP_TIMER_DONE.len() {

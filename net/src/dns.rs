@@ -42,6 +42,22 @@ static QUERY_ID: AtomicU16 = AtomicU16::new(0x4242);
 // Types
 // =============================================================================
 
+/// Errors returned by [`dns_resolve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsResolveError {
+    /// No DNS server configured (DHCP not completed or no driver).
+    NoDnsServer,
+    /// The hostname could not be encoded into a valid DNS query.
+    InvalidHostname,
+    /// All resolution attempts timed out waiting for a response.
+    Timeout,
+    /// All resolution attempts failed to transmit the query packet.
+    TransmitFailed,
+    /// A DNS response was received but could not be parsed or contained
+    /// no answer records.
+    ParseFailed,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum DnsType {
@@ -594,11 +610,15 @@ pub fn dns_cache_flush() {
 /// 2. Sends a DNS query to the DHCP-provided DNS server
 /// 3. Waits for a response with timeout
 /// 4. Parses and caches the result
-/// 5. Retries once on timeout
-pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
+/// 5. Retries up to [`DNS_MAX_RETRIES`] times
+///
+/// Returns a structured [`DnsResolveError`] on failure so callers can
+/// distinguish transient issues (timeout, transmit failure) from
+/// permanent ones (invalid hostname, no server).
+pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
     // Shortcut: if it looks like an IP literal, parse it
     if let Some(addr) = parse_ip_literal(hostname) {
-        return Some(addr);
+        return Ok(addr);
     }
 
     // Check cache first
@@ -611,14 +631,16 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             addr[2],
             addr[3]
         );
-        return Some(addr);
+        return Ok(addr);
     }
 
     // Get DNS server IP from DHCP lease
-    let dns_server = crate::net_driver_service::net_driver().and_then(|d| (d.virtio_net_dns)())?;
+    let dns_server = crate::net_driver_service::net_driver()
+        .and_then(|d| (d.virtio_net_dns)())
+        .ok_or(DnsResolveError::NoDnsServer)?;
     if dns_server == [0; 4] {
         klog_debug!("dns: no DNS server configured");
-        return None;
+        return Err(DnsResolveError::NoDnsServer);
     }
 
     // Get our IP for source address
@@ -627,12 +649,15 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
 
+    let mut last_error = DnsResolveError::Timeout;
+
     for attempt in 0..DNS_MAX_RETRIES {
         let id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
 
-        // Build query
+        // Build query — hostname encoding failure is permanent, no retry.
         let mut query_buf = [0u8; 512];
-        let query_len = dns_build_query(id, hostname, DnsType::A, &mut query_buf)?;
+        let query_len = dns_build_query(id, hostname, DnsType::A, &mut query_buf)
+            .ok_or(DnsResolveError::InvalidHostname)?;
 
         // Use an ephemeral source port
         let src_port = 49152 + (id % 16384);
@@ -656,6 +681,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             .unwrap_or(false);
         if !transmitted {
             klog_debug!("dns: transmit failed (attempt {})", attempt);
+            last_error = DnsResolveError::TransmitFailed;
             continue;
         }
 
@@ -665,6 +691,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             .unwrap_or(false);
         if !got_response {
             klog_debug!("dns: timeout (attempt {})", attempt);
+            last_error = DnsResolveError::Timeout;
             continue;
         }
 
@@ -675,6 +702,7 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
             .unwrap_or(0);
         if resp_len == 0 {
             klog_debug!("dns: empty response (attempt {})", attempt);
+            last_error = DnsResolveError::Timeout;
             continue;
         }
 
@@ -696,13 +724,14 @@ pub fn dns_resolve(hostname: &[u8]) -> Option<[u8; 4]> {
                 response.ttl
             );
             dns_cache_insert(hostname, response.addr, response.ttl);
-            return Some(response.addr);
+            return Ok(response.addr);
         }
 
         klog_debug!("dns: parse failed (attempt {})", attempt);
+        last_error = DnsResolveError::ParseFailed;
     }
 
-    None
+    Err(last_error)
 }
 
 /// Try to parse a dotted-decimal IPv4 literal (e.g., `"10.0.2.3"`).

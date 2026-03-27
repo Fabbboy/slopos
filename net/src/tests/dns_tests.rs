@@ -3,7 +3,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::dns;
+use crate::dns::{self, DnsResolveError};
 
 // =============================================================================
 // 5F.T1 — DNS name encoding
@@ -301,19 +301,25 @@ pub fn test_dns_t6_resolver_integration() -> TestResult {
 
     // QEMU user-net provides DNS at 10.0.2.3 and can resolve real hostnames.
     // Under SMP/TCG, the SLIRP DNS proxy may be too slow to respond within
-    // the resolver timeout.  If resolution fails, report Skipped rather than
-    // Fail — this is an environment issue, not a code bug.
-    let result = dns::dns_resolve(b"dns.google");
-    if result.is_none() {
-        return TestResult::Skipped;
-    }
-    let addr = result.unwrap();
+    // the resolver timeout.  Transient/timeout failures are environment
+    // issues, not code bugs — skip the test in that case.
+    let addr = match dns::dns_resolve(b"dns.google") {
+        Ok(addr) => addr,
+        Err(
+            DnsResolveError::Timeout
+            | DnsResolveError::TransmitFailed
+            | DnsResolveError::NoDnsServer,
+        ) => {
+            return TestResult::Skipped;
+        }
+        Err(_) => return TestResult::Fail,
+    };
     // dns.google resolves to 8.8.8.8 or 8.8.4.4
     assert_test!(addr[0] == 8 && addr[1] == 8, "dns.google starts with 8.8");
 
     // IP literal passthrough
     let literal = dns::dns_resolve(b"10.0.2.3");
-    assert_test!(literal.is_some(), "IP literal passthrough");
+    assert_test!(literal.is_ok(), "IP literal passthrough");
     assert_eq_test!(literal.unwrap(), [10, 0, 2, 3], "literal address");
 
     pass!()
@@ -338,7 +344,7 @@ pub fn test_dns_t7_resolver_timeout() -> TestResult {
     // Try to resolve a hostname that should not exist
     // Using .invalid TLD (RFC 6761) — guaranteed to not resolve
     let result = dns::dns_resolve(b"this-does-not-exist.invalid");
-    assert_test!(result.is_none(), "non-existent hostname returns None");
+    assert_test!(result.is_err(), "non-existent hostname returns error");
 
     pass!()
 }
