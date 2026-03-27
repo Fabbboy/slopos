@@ -824,9 +824,9 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
             cache.free_count.fetch_add(1, Ordering::Relaxed);
 
             // Drain if over watermark.
-            if cache.count.load(Ordering::Relaxed) > PCP_HIGH_WATERMARK {
-                let to_drain = (cache.count.load(Ordering::Relaxed) - PCP_HIGH_WATERMARK / 2)
-                    .min(PCP_BATCH_SIZE);
+            let count = cache.count.load(Ordering::Relaxed);
+            if count > PCP_HIGH_WATERMARK {
+                let to_drain = (count - PCP_HIGH_WATERMARK / 2).min(PCP_BATCH_SIZE);
                 let mut batch = [INVALID_PAGE_FRAME; PCP_BATCH_SIZE as usize];
                 let mut drained = 0;
                 for slot in batch.iter_mut().take(to_drain as usize) {

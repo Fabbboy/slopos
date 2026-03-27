@@ -370,12 +370,15 @@ impl PerCpuScheduler {
         queues.iter().map(|q| q.len()).sum()
     }
 
-    /// Lock-free approximate idle check.  Reads each priority queue's atomic
-    /// count without acquiring the queue lock.  May briefly race with a
-    /// concurrent enqueue/dequeue, but false positives are benign — the task
-    /// will be dispatched on the next scheduling pass.  This is the fast path
-    /// used by `select_target_cpu()` to avoid locking every candidate CPU.
-    pub fn is_idle_approx(&self) -> bool {
+    /// Lock-free check that all per-CPU ready queues are empty.
+    ///
+    /// Only inspects the local `ready_queues` atomic counts — does NOT
+    /// check `inbox_count`, `remote_inbox_head`, or whether a non-idle
+    /// task is currently running.  Use `effective_load() == 0` for a
+    /// more comprehensive idle check.  May briefly race with concurrent
+    /// enqueue/dequeue but false positives are benign.
+    #[allow(dead_code)] // used by sched_tests
+    pub(crate) fn ready_queues_empty(&self) -> bool {
         // SAFETY: ReadyQueue counts are AtomicU32 — safe to read without the lock.
         let queues = unsafe { &*self.ready_queues.get() };
         queues.iter().all(|q| q.is_empty())
@@ -388,6 +391,14 @@ impl PerCpuScheduler {
         let queues = unsafe { &*self.ready_queues.get() };
         let queued: u32 = queues.iter().map(|q| q.len()).sum();
         let inbox = self.inbox_count.load(Ordering::Relaxed);
+        // push_remote_wake() links into remote_inbox_head BEFORE
+        // incrementing inbox_count, so treat a non-null head as at
+        // least one pending task to avoid undercounting.
+        let inbox = if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
+            1
+        } else {
+            inbox
+        };
         let current = self.current_task_atomic.load(Ordering::Relaxed);
         let idle = self.idle_task_atomic.load(Ordering::Relaxed);
         let running_real = !current.is_null() && current != idle;
@@ -843,23 +854,37 @@ pub fn select_target_cpu_for_new(task: *mut Task) -> Option<usize> {
 /// Find the CPU with the lowest effective load, using a round-robin starting
 /// position to break ties.  This mirrors Linux's `for_each_cpu_wrap()` in
 /// `sched_balance_find_dst_group_cpu()`.
+///
+/// The RR counter advances over the eligible set (not raw cpu_count) so
+/// that tie-breaking is fair when some CPUs are ineligible.
 fn find_idlest_cpu(affinity: u32) -> Option<usize> {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_count == 0 {
         return None;
     }
 
-    // Rotate start position so sequential calls spread across CPUs.
-    let start = FORK_RR_COUNTER.fetch_add(1, Ordering::Relaxed) % cpu_count;
+    // Collect eligible CPUs into a stack array so the RR counter
+    // rotates over the candidate set, not the full CPU range.
+    let mut eligible = [0usize; slopos_arch::MAX_CPUS];
+    let mut n_eligible = 0usize;
+    for cpu_id in 0..cpu_count {
+        if is_schedulable_cpu(cpu_id, affinity) {
+            eligible[n_eligible] = cpu_id;
+            n_eligible += 1;
+        }
+    }
+    if n_eligible == 0 {
+        return None;
+    }
+
+    // Rotate start position so sequential calls spread across eligible CPUs.
+    let start = FORK_RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n_eligible;
 
     let mut best_cpu: Option<usize> = None;
     let mut min_load = u32::MAX;
 
-    for i in 0..cpu_count {
-        let cpu_id = (start + i) % cpu_count;
-        if !is_schedulable_cpu(cpu_id, affinity) {
-            continue;
-        }
+    for i in 0..n_eligible {
+        let cpu_id = eligible[(start + i) % n_eligible];
 
         if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.effective_load()) {
             if load < min_load {

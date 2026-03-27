@@ -453,6 +453,9 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
                 post_rip,
                 frame
             );
+            // Do not resume with a corrupted IRET frame — that would
+            // fault or silently execute in the wrong context.
+            panic!("TIMER IRET frame corruption detected");
         }
         return;
     }
@@ -557,7 +560,7 @@ fn initialize_handler_tables() {
 /// We log the corruption for debugging, then attempt recovery by resuming
 /// the current user task from its saved context (if possible).  If recovery
 /// fails, we panic.
-pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
+pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) {
     use slopos_utils::klog_info;
 
     let (rip, cs, rflags, rsp, ss) = unsafe {
@@ -587,12 +590,15 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
     // Limit the probe range to avoid nested faults on invalid addresses:
     // use the current task's kernel stack bounds when available, otherwise
     // conservatively bound to ±128 bytes around iret_frame.
+    // Call scheduler_get_current_task() once and reuse for both the
+    // bounds computation and the task-info dump below.
+    let task_ptr = slopos_core::sched::scheduler_get_current_task();
+
     klog_info!("=== IRET FRAME VICINITY DUMP ===");
     let (dump_lo, dump_hi) = {
-        let t = slopos_core::sched::scheduler_get_current_task();
-        if !t.is_null() {
-            let base = unsafe { (*t).kernel_stack_base } as usize;
-            let top = unsafe { (*t).kernel_stack_top } as usize;
+        if !task_ptr.is_null() {
+            let base = unsafe { (*task_ptr).kernel_stack_base } as usize;
+            let top = unsafe { (*task_ptr).kernel_stack_top } as usize;
             if base != 0 && top > base {
                 (base, top)
             } else {
@@ -629,15 +635,11 @@ pub fn handle_corrupt_iret_frame(iret_frame: *const u64) {
     }
     klog_info!("=== END DUMP ===");
 
-    // With the new switch_registers architecture, context_from_user is no
-    // longer used.  The scheduler always saves/restores via switch_registers,
-    // so there is no "user frame resume" shortcut to attempt.
-    let task = slopos_core::sched::scheduler_get_current_task();
-    if !task.is_null() {
-        let is_user = unsafe { (*task).flags } & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
+    if !task_ptr.is_null() {
+        let is_user = unsafe { (*task_ptr).flags } & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
         klog_info!(
             "  Current task: id={} user={}",
-            unsafe { (*task).task_id },
+            unsafe { (*task_ptr).task_id },
             is_user,
         );
     }

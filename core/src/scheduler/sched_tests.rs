@@ -2070,16 +2070,17 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: is_idle_approx must report empty queues correctly.
-pub fn test_is_idle_approx_accuracy() -> TestResult {
+/// Regression: ready_queues_empty must report empty queues correctly.
+pub fn test_ready_queues_empty_accuracy() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // After fixture reset, queues should be empty.
     let idle_before =
-        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.is_idle_approx()).unwrap_or(false);
+        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.ready_queues_empty())
+            .unwrap_or(false);
     if !idle_before {
-        klog_info!("SCHED_TEST: is_idle_approx reports busy on empty queues");
+        klog_info!("SCHED_TEST: ready_queues_empty reports busy on empty queues");
         return TestResult::Fail;
     }
 
@@ -2102,10 +2103,10 @@ pub fn test_is_idle_approx_accuracy() -> TestResult {
         sched.enqueue_local(task_ptr);
     });
 
-    let idle_after =
-        super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.is_idle_approx()).unwrap_or(true);
+    let idle_after = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.ready_queues_empty())
+        .unwrap_or(true);
     if idle_after {
-        klog_info!("SCHED_TEST: is_idle_approx reports idle with queued task");
+        klog_info!("SCHED_TEST: ready_queues_empty reports idle with queued task");
         return TestResult::Fail;
     }
 
@@ -2159,6 +2160,6 @@ slopos_testing::define_test_suite!(
         test_select_target_cpu_prefers_idle_cpu,
         test_select_target_cpu_running_task_not_idle,
         test_schedule_new_task_spreads_across_cpus,
-        test_is_idle_approx_accuracy,
+        test_ready_queues_empty_accuracy,
     ]
 );
