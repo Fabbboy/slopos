@@ -183,7 +183,7 @@ pub fn init_task_manager() -> c_int {
             let task_ptr = task as *mut Task;
             if crate::per_cpu::is_idle_task(task_ptr) {
                 preserved_count += 1;
-                if task.task_id > max_task_id {
+                if task.task_id != INVALID_TASK_ID && task.task_id > max_task_id {
                     max_task_id = task.task_id;
                 }
                 klog_debug!(
@@ -199,7 +199,7 @@ pub fn init_task_manager() -> c_int {
             *rec = TaskExitRecord::empty();
         }
         mgr.num_tasks = preserved_count;
-        mgr.next_task_id = max_task_id + 1;
+        mgr.next_task_id = max_task_id.saturating_add(1);
         mgr.initialized = true;
     });
     // Invariants restored -- clear any poisoned state from panic recovery.
