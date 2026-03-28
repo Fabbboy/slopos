@@ -134,6 +134,19 @@ define_syscall!(syscall_surface_set_title(ctx, args) requires(let task_id) {
     ctx.from_result(video::surface_set_title(task_id, title_slice))
 });
 
+define_syscall!(syscall_surface_set_app_id(ctx, args) requires(let task_id) {
+    let app_id_ptr = args.arg0_const_ptr::<u8>();
+    let app_id_len = args.arg1_usize();
+
+    if app_id_ptr.is_null() || app_id_len == 0 {
+        return ctx.err();
+    }
+
+    let copy_len = app_id_len.min(31);
+    let app_id_slice = unsafe { core::slice::from_raw_parts(app_id_ptr, copy_len) };
+    ctx.from_result(video::surface_set_app_id(task_id, app_id_slice))
+});
+
 define_syscall!(syscall_input_poll(ctx, args) requires(let task_id) {
     let event_ptr = args.arg0_ptr::<InputEvent>();
     if event_ptr.is_null() {

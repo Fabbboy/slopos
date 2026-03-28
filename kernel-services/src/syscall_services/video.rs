@@ -31,6 +31,7 @@ slopos_service_core::define_service! {
         @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize, damage: *const DamageRect, damage_count: u32) -> c_int;
         @no_wrapper roulette_draw(fate: u32) -> VideoResult;
         @no_wrapper surface_set_title(task_id: u32, ptr: *const u8, len: usize) -> CompositorResult;
+        @no_wrapper surface_set_app_id(task_id: u32, ptr: *const u8, len: usize) -> CompositorResult;
     }
 }
 
@@ -52,4 +53,9 @@ pub fn roulette_draw(fate: u32) -> VideoResult {
 #[inline(always)]
 pub fn surface_set_title(task_id: u32, title: &[u8]) -> CompositorResult {
     (video_services().surface_set_title)(task_id, title.as_ptr(), title.len())
+}
+
+#[inline(always)]
+pub fn surface_set_app_id(task_id: u32, app_id: &[u8]) -> CompositorResult {
+    (video_services().surface_set_app_id)(task_id, app_id.as_ptr(), app_id.len())
 }

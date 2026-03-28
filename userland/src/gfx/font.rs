@@ -8,23 +8,32 @@ use super::font_loader;
 
 const FONT_SIZE_PX: u16 = 16;
 
-static ATLAS: OnceLock<GlyphAtlas> = OnceLock::new();
+static ATLAS: OnceLock<Option<GlyphAtlas>> = OnceLock::new();
 
-fn atlas() -> &'static GlyphAtlas {
-    ATLAS.get_or_init(|| {
-        let font_data =
-            font_loader::load_font("mono").expect("font: failed to load mono font from filesystem");
-        GlyphAtlas::new_with_source(font_data, FONT_SIZE_PX, slopos_font::FontSource::Filesystem)
-            .expect("font: failed to create glyph atlas")
-    })
+fn atlas() -> Option<&'static GlyphAtlas> {
+    ATLAS
+        .get_or_init(|| {
+            let font_data = font_loader::load_font("mono")?;
+            GlyphAtlas::new_with_source(
+                font_data,
+                FONT_SIZE_PX,
+                slopos_font::FontSource::Filesystem,
+            )
+        })
+        .as_ref()
 }
 
+/// Fallback cell width when the font atlas is unavailable.
+const FALLBACK_CELL_W: i32 = 8;
+/// Fallback cell height when the font atlas is unavailable.
+const FALLBACK_CELL_H: i32 = 16;
+
 pub fn cell_width() -> i32 {
-    atlas().cell_width()
+    atlas().map_or(FALLBACK_CELL_W, |a| a.cell_width())
 }
 
 pub fn cell_height() -> i32 {
-    atlas().cell_height()
+    atlas().map_or(FALLBACK_CELL_H, |a| a.cell_height())
 }
 
 pub fn draw_char<T: Canvas>(
@@ -35,7 +44,7 @@ pub fn draw_char<T: Canvas>(
     fg: Color32,
     bg: Color32,
 ) -> Option<DamageRect> {
-    atlas().draw_char(target, x, y, ch as u32, fg, bg)
+    atlas()?.draw_char(target, x, y, ch as u32, fg, bg)
 }
 
 pub fn draw_string<T: Canvas>(
@@ -46,7 +55,7 @@ pub fn draw_string<T: Canvas>(
     fg: Color32,
     bg: Color32,
 ) -> Option<DamageRect> {
-    atlas().draw_str(target, x, y, text, fg, bg)
+    atlas()?.draw_str(target, x, y, text, fg, bg)
 }
 
 pub fn draw_str_clipped<T: Canvas>(
@@ -58,7 +67,9 @@ pub fn draw_str_clipped<T: Canvas>(
     bg: Color32,
     clip: &DamageRect,
 ) {
-    atlas().draw_str_clipped(target, x, y, text, fg, bg, clip);
+    if let Some(a) = atlas() {
+        a.draw_str_clipped(target, x, y, text, fg, bg, clip);
+    }
 }
 
 pub fn draw_char_clipped<T: Canvas>(
@@ -70,13 +81,17 @@ pub fn draw_char_clipped<T: Canvas>(
     bg: Color32,
     clip: &DamageRect,
 ) {
-    atlas().draw_char_clipped(target, x, y, ch as u32, fg, bg, clip);
+    if let Some(a) = atlas() {
+        a.draw_char_clipped(target, x, y, ch as u32, fg, bg, clip);
+    }
 }
 
 pub fn string_width(text: &str) -> i32 {
-    atlas().str_width(text)
+    atlas().map_or(text.len() as i32 * FALLBACK_CELL_W, |a| a.str_width(text))
 }
 
 pub fn string_height(text: &str) -> i32 {
-    atlas().bytes_lines(text.as_bytes()) * cell_height()
+    atlas().map_or(FALLBACK_CELL_H, |a| {
+        a.bytes_lines(text.as_bytes()) * a.cell_height()
+    })
 }

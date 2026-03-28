@@ -38,6 +38,12 @@ impl Window {
         let _ = window::surface_set_title(title);
     }
 
+    /// Set the application identifier (e.g. "org.slopos.files").
+    /// The compositor uses this for window-to-dock matching instead of the title.
+    pub fn set_app_id(&self, app_id: &str) {
+        let _ = window::surface_set_app_id(app_id);
+    }
+
     /// Request a redraw on the next frame.
     #[inline]
     pub fn request_redraw(&mut self) {

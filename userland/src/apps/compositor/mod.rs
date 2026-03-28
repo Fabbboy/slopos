@@ -1,9 +1,11 @@
+pub mod decorations;
+pub mod dock;
 mod hover;
 mod input;
+pub mod menu_bar;
 mod output;
 mod renderer;
 mod surface_cache;
-mod taskbar;
 
 use crate::gfx::{DamageRect, DamageTracker};
 use crate::syscall::{
@@ -13,10 +15,7 @@ use crate::theme::*;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hover::{
-    HOVER_APP_BTN_BASE, HOVER_CLOSE_BASE, HOVER_MENU_ITEM_BASE, HOVER_MINIMIZE_BASE,
-    HOVER_START_BTN, HoverRegistry,
-};
+use hover::HoverRegistry;
 use input::InputHandler;
 use output::{
     CompositorOutput, FrameMetrics, RenderMode, WINDOW_STATE_MINIMIZED, WindowBounds,
@@ -24,7 +23,6 @@ use output::{
 };
 use renderer::Renderer;
 use surface_cache::ClientSurfaceCache;
-use taskbar::{START_MENU_ITEMS, TaskbarState};
 
 const MAX_WINDOWS: usize = 32;
 
@@ -39,15 +37,19 @@ struct WindowManager {
     hover_registry: HoverRegistry,
     surface_cache: ClientSurfaceCache,
 
+    system_bar: menu_bar::SystemBar,
+    shelf: dock::LauncherShelf,
+
     first_frame: bool,
-    prev_taskbar_state: TaskbarState,
-    taskbar_needs_redraw: bool,
     output_damage: DamageTracker,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
+    prev_uptime_secs: u64,
 }
 
 impl WindowManager {
     fn new() -> Self {
+        let mut shelf = dock::LauncherShelf::new();
+        shelf.init_defaults();
         Self {
             windows: [UserWindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
@@ -57,11 +59,12 @@ impl WindowManager {
             renderer: Renderer::new(),
             hover_registry: HoverRegistry::new(),
             surface_cache: ClientSurfaceCache::new(),
+            system_bar: menu_bar::SystemBar::new(),
+            shelf,
             first_frame: true,
-            prev_taskbar_state: TaskbarState::empty(),
-            taskbar_needs_redraw: true,
             output_damage: DamageTracker::new(),
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
+            prev_uptime_secs: u64::MAX, // force first-frame clock damage
         }
     }
 
@@ -80,16 +83,9 @@ impl WindowManager {
         self.surface_cache
             .cleanup_stale(&self.windows, self.window_count);
 
-        let new_state = TaskbarState::from_windows(
-            &self.windows,
-            self.window_count,
-            self.input.focused_task,
-            self.input.start_menu_open,
-        );
-        if new_state != self.prev_taskbar_state {
-            self.taskbar_needs_redraw = true;
-            self.prev_taskbar_state = new_state;
-        }
+        // Sync running apps into the launcher shelf.
+        self.shelf
+            .sync_running_apps(&self.windows, self.window_count);
 
         self.output_damage.clear();
 
@@ -131,8 +127,15 @@ impl WindowManager {
             }
         }
 
-        if self.taskbar_needs_redraw {
-            self.add_taskbar_damage();
+        // Add shelf bounds to damage when cursor moves near the shelf.
+        let shelf_bounds = self.shelf.bounds();
+        if shelf_bounds.is_valid() {
+            self.output_damage.add_rect(
+                shelf_bounds.x0,
+                shelf_bounds.y0,
+                shelf_bounds.x1,
+                shelf_bounds.y1,
+            );
         }
 
         if self.input.cursor_trail_count > 0 {
@@ -152,105 +155,35 @@ impl WindowManager {
         if self.renderer.output_height == 0 {
             return;
         }
-        let fb_h = self.renderer.output_height as i32;
 
-        let btn_x = taskbar::start_button_x();
-        let btn_y = taskbar::start_button_y(fb_h);
-        let btn_h = taskbar::start_button_height();
-        self.hover_registry.register(
-            HOVER_START_BTN,
-            DamageRect {
-                x0: btn_x,
-                y0: btn_y,
-                x1: btn_x + START_BUTTON_WIDTH - 1,
-                y1: btn_y + btn_h - 1,
-            },
-            self.input.hit_test_start_button(fb_h),
-        );
-
-        if self.input.start_menu_open {
-            let menu_y = taskbar::start_menu_y(fb_h) + START_MENU_PADDING;
-            let menu_x = taskbar::start_menu_x();
-            let hovered_item = self.input.hit_test_start_menu_item(fb_h);
-            for idx in 0..START_MENU_ITEMS.len() {
-                let item_y = menu_y + (idx as i32 * START_MENU_ITEM_HEIGHT);
-                let hovered = hovered_item == Some(idx);
-                self.hover_registry.register(
-                    HOVER_MENU_ITEM_BASE | idx as u32,
-                    DamageRect {
-                        x0: menu_x + START_MENU_PADDING,
-                        y0: item_y,
-                        x1: menu_x + START_MENU_WIDTH - START_MENU_PADDING - 1,
-                        y1: item_y + START_MENU_ITEM_HEIGHT - 1,
-                    },
-                    hovered,
-                );
-            }
-        }
-
-        let mut app_x = taskbar::app_buttons_start_x();
-        let taskbar_y = fb_h - TASKBAR_HEIGHT;
-        let app_btn_y = taskbar_y + TASKBAR_BUTTON_PADDING;
-        let app_btn_h = TASKBAR_HEIGHT - (TASKBAR_BUTTON_PADDING * 2);
-        for i in 0..self.window_count as usize {
-            let w = self.windows[i];
-            let btn_w = taskbar::app_button_width(&w.title);
-            let hovered = self.input.mouse_x >= app_x
-                && self.input.mouse_x < app_x + btn_w
-                && self.input.mouse_y >= app_btn_y
-                && self.input.mouse_y < app_btn_y + app_btn_h;
-            self.hover_registry.register(
-                HOVER_APP_BTN_BASE | w.task_id,
-                DamageRect {
-                    x0: app_x,
-                    y0: app_btn_y,
-                    x1: app_x + btn_w - 1,
-                    y1: app_btn_y + app_btn_h - 1,
-                },
-                hovered,
-            );
-            app_x += btn_w + TASKBAR_BUTTON_PADDING;
-        }
-
-        let mut deco_hit_consumed = false;
+        // Register signal button group hover for each visible window.
+        // We track the group bounding box for the focused window so the
+        // renderer can show/hide button glyphs on hover.
         for i in (0..self.window_count as usize).rev() {
             let w = self.windows[i];
             if w.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
 
-            let close_x = w.x + w.width as i32 - BUTTON_SIZE - BUTTON_PADDING;
-            let close_y = w.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
-            let min_x = w.x + w.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
-            let min_y = w.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
-
-            let on_title_bar = !deco_hit_consumed && self.input.hit_test_title_bar(&w);
-            let close_hover = on_title_bar && self.input.hit_test_close_button(&w);
-            let min_hover = on_title_bar && self.input.hit_test_minimize_button(&w);
-
-            if on_title_bar {
-                deco_hit_consumed = true;
-            }
-
-            self.hover_registry.register(
-                HOVER_CLOSE_BASE | w.task_id,
-                DamageRect {
-                    x0: close_x,
-                    y0: close_y,
-                    x1: close_x + BUTTON_SIZE - 1,
-                    y1: close_y + BUTTON_SIZE - 1,
-                },
-                close_hover,
+            let frame_y = w.y - TITLE_BAR_HEIGHT;
+            let group_hovered = decorations::hit_test_signal_group(
+                w.x,
+                frame_y,
+                self.input.mouse_x,
+                self.input.mouse_y,
             );
+
+            let gx = w.x + SIGNAL_GROUP_X;
+            let gy = frame_y + SIGNAL_GROUP_Y;
             self.hover_registry.register(
-                HOVER_MINIMIZE_BASE | w.task_id,
+                hover::HOVER_SIGNAL_GROUP_BASE | w.task_id,
                 DamageRect {
-                    x0: min_x,
-                    y0: min_y,
-                    x1: min_x + BUTTON_SIZE - 1,
-                    y1: min_y + BUTTON_SIZE - 1,
+                    x0: gx,
+                    y0: gy,
+                    x1: gx + SIGNAL_GROUP_W - 1,
+                    y1: gy + SIGNAL_GROUP_H - 1,
                 },
-                min_hover,
+                group_hovered,
             );
         }
 
@@ -311,45 +244,12 @@ impl WindowManager {
         }
     }
 
-    fn add_taskbar_damage(&mut self) {
-        if self.renderer.output_width == 0 || self.renderer.output_height == 0 {
-            return;
-        }
-        let fb_height = self.renderer.output_height as i32;
-        self.output_damage.add_rect(
-            0,
-            fb_height - TASKBAR_HEIGHT,
-            self.renderer.output_width as i32 - 1,
-            fb_height - 1,
-        );
-        if self.input.start_menu_open {
-            self.add_start_menu_damage();
-        }
-    }
-
-    fn add_start_menu_damage(&mut self) {
-        if self.renderer.output_width == 0 || self.renderer.output_height == 0 {
-            return;
-        }
-        let fb_height = self.renderer.output_height as i32;
-        let menu_h = taskbar::start_menu_height();
-        self.output_damage.add_rect(
-            taskbar::start_menu_x(),
-            taskbar::start_menu_y(fb_height),
-            taskbar::start_menu_x() + START_MENU_WIDTH - 1,
-            taskbar::start_menu_y(fb_height) + menu_h - 1,
-        );
-    }
-
     fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
         self.output_damage.add_rect(x - 3, y - 9, x + 12, y + 17);
     }
 
     fn needs_redraw(&self) -> bool {
-        self.first_frame
-            || self.input.needs_full_redraw
-            || self.taskbar_needs_redraw
-            || self.output_damage.is_dirty()
+        self.first_frame || self.input.needs_full_redraw || self.output_damage.is_dirty()
     }
 }
 
@@ -404,8 +304,28 @@ pub fn compositor_user_main() {
         wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
-        wm.input
-            .handle_mouse_events(fb_info.height as i32, &wm.windows, wm.window_count);
+        wm.input.handle_mouse_events(
+            fb_info.height as i32,
+            &wm.windows,
+            wm.window_count,
+            &wm.shelf,
+        );
+
+        // Compute uptime for the system bar clock.
+        let uptime_secs = time_origin.elapsed().as_secs();
+
+        // Add system bar clock damage each second.
+        if uptime_secs != wm.prev_uptime_secs {
+            wm.prev_uptime_secs = uptime_secs;
+            if let Some(clock_rect) = wm.system_bar.clock_damage(output.width) {
+                wm.output_damage.add_rect(
+                    clock_rect.x0,
+                    clock_rect.y0,
+                    clock_rect.x1,
+                    clock_rect.y1,
+                );
+            }
+        }
 
         if wm.needs_redraw() {
             let force_full =
@@ -442,17 +362,34 @@ pub fn compositor_user_main() {
                     shape
                 };
 
+                // Determine the active app name for the system bar.
+                let active_app_name =
+                    active_window_title(&wm.windows, wm.window_count, wm.input.focused_task);
+
+                // Compute per-window signal group hover state.
+                let signal_hovered_task = signal_hovered_task_id(
+                    &wm.windows,
+                    wm.window_count,
+                    wm.input.focused_task,
+                    wm.input.mouse_x,
+                    wm.input.mouse_y,
+                );
+
                 mode = wm.renderer.render(
                     &mut buf,
                     &wm.windows,
                     wm.window_count as usize,
                     wm.input.focused_task,
-                    wm.input.start_menu_open,
+                    signal_hovered_task,
                     wm.input.mouse_x,
                     wm.input.mouse_y,
                     cursor_shape,
                     &wm.hover_registry,
                     &mut wm.surface_cache,
+                    &mut wm.system_bar,
+                    &mut wm.shelf,
+                    active_app_name,
+                    uptime_secs,
                     force_full,
                     &damage_snapshot[..damage_count],
                 );
@@ -491,7 +428,6 @@ pub fn compositor_user_main() {
 
             wm.input.needs_full_redraw = false;
             wm.first_frame = false;
-            wm.taskbar_needs_redraw = false;
         }
 
         let frame_elapsed = frame_start.elapsed();
@@ -500,4 +436,48 @@ pub fn compositor_user_main() {
             thread::sleep(target_frame - frame_elapsed);
         }
     }
+}
+
+/// Return the title of the focused window as a `&str`, or `""` if none.
+fn active_window_title(
+    windows: &[UserWindowInfo; MAX_WINDOWS],
+    count: u32,
+    focused_task: u32,
+) -> &str {
+    if focused_task == 0 {
+        return "";
+    }
+    for i in 0..count as usize {
+        if windows[i].task_id == focused_task {
+            let title = &windows[i].title;
+            let len = title.iter().position(|&b| b == 0).unwrap_or(32);
+            return core::str::from_utf8(&title[..len]).unwrap_or("");
+        }
+    }
+    ""
+}
+
+/// Return the task_id of the focused window whose signal group is hovered,
+/// or 0 if no signal group is hovered.
+fn signal_hovered_task_id(
+    windows: &[UserWindowInfo; MAX_WINDOWS],
+    count: u32,
+    focused_task: u32,
+    mx: i32,
+    my: i32,
+) -> u32 {
+    if focused_task == 0 {
+        return 0;
+    }
+    for i in (0..count as usize).rev() {
+        let w = &windows[i];
+        if w.task_id == focused_task && w.state != WINDOW_STATE_MINIMIZED {
+            let frame_y = w.y - TITLE_BAR_HEIGHT;
+            if decorations::hit_test_signal_group(w.x, frame_y, mx, my) {
+                return w.task_id;
+            }
+            break;
+        }
+    }
+    0
 }

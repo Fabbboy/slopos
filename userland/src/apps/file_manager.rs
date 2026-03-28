@@ -125,6 +125,7 @@ impl FileManager {
 impl WindowedApp for FileManager {
     fn init(&mut self, win: &mut Window) {
         win.set_title("Files");
+        win.set_app_id("org.slopos.files");
         win.request_redraw();
     }
 

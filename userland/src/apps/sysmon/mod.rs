@@ -88,6 +88,7 @@ pub(crate) fn col_runtime_x() -> i32 {
 impl WindowedApp for SysmonApp {
     fn init(&mut self, win: &mut Window) {
         win.set_title("System Monitor");
+        win.set_app_id("org.slopos.sysmon");
         win.request_redraw();
     }
 

@@ -46,8 +46,9 @@ pub use crate::syscall::ui_handlers::{
     syscall_shm_acquire, syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
     syscall_shm_get_formats, syscall_shm_map, syscall_shm_poll_released, syscall_shm_release,
     syscall_shm_unmap, syscall_surface_attach, syscall_surface_commit, syscall_surface_damage,
-    syscall_surface_frame, syscall_surface_set_parent, syscall_surface_set_rel_pos,
-    syscall_surface_set_role, syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
+    syscall_surface_frame, syscall_surface_set_app_id, syscall_surface_set_parent,
+    syscall_surface_set_rel_pos, syscall_surface_set_role, syscall_surface_set_title,
+    syscall_tty_read, syscall_tty_write,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -147,7 +148,8 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SURFACE_SET_ROLE]    => syscall_surface_set_role,    "surface_set_role";
     [SYSCALL_SURFACE_SET_PARENT]  => syscall_surface_set_parent,  "surface_set_parent";
     [SYSCALL_SURFACE_SET_REL_POS] => syscall_surface_set_rel_pos, "surface_set_rel_pos";
-    [SYSCALL_SURFACE_SET_TITLE]   => syscall_surface_set_title,   "surface_set_title";
+    [SYSCALL_SURFACE_SET_TITLE]    => syscall_surface_set_title,    "surface_set_title";
+    [SYSCALL_SURFACE_SET_APP_ID]  => syscall_surface_set_app_id,  "surface_set_app_id";
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
     [SYSCALL_DRAIN_QUEUE]         => syscall_drain_queue,         "drain_queue";
 

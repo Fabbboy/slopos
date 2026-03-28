@@ -11,11 +11,7 @@ const MAX_HOVER_REGIONS: usize = 64;
 
 // ── Hover ID namespace constants ────────────────────────────────────────────
 
-pub const HOVER_START_BTN: u32 = 0x0001_0000;
-pub const HOVER_MENU_ITEM_BASE: u32 = 0x0002_0000; // + item index
-pub const HOVER_CLOSE_BASE: u32 = 0x0003_0000; // + task_id
-pub const HOVER_MINIMIZE_BASE: u32 = 0x0004_0000; // + task_id
-pub const HOVER_APP_BTN_BASE: u32 = 0x0005_0000; // + task_id
+pub const HOVER_SIGNAL_GROUP_BASE: u32 = 0x0006_0000; // + task_id
 
 // ── Region ──────────────────────────────────────────────────────────────────
 
@@ -72,6 +68,7 @@ impl HoverRegistry {
     }
 
     /// Check whether a region is hovered in the current frame.
+    #[allow(dead_code)]
     pub fn is_hovered(&self, id: u32) -> bool {
         for i in 0..self.current_count {
             if self.current[i].id == id {

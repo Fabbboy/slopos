@@ -64,6 +64,27 @@ fn video_surface_set_title(
     compositor_context::surface_set_title(task_id, title)
 }
 
+fn video_surface_set_app_id(
+    task_id: u32,
+    app_id_ptr: *const u8,
+    app_id_len: usize,
+) -> Result<(), CompositorError> {
+    if app_id_ptr.is_null() {
+        return Err(CompositorError::InvalidArgument);
+    }
+
+    let ptr_addr = app_id_ptr as u64;
+    let len = app_id_len.min(31);
+    let end_addr = ptr_addr.saturating_add(len as u64);
+    use slopos_mm::memory_layout_defs::USER_SPACE_END_VA;
+    if ptr_addr >= USER_SPACE_END_VA || end_addr > USER_SPACE_END_VA {
+        return Err(CompositorError::InvalidArgument);
+    }
+
+    let app_id_slice = unsafe { core::slice::from_raw_parts(app_id_ptr, len) };
+    compositor_context::surface_set_app_id(task_id, app_id_slice)
+}
+
 static VIDEO_SERVICES: VideoServices = VideoServices {
     get_display_info: framebuffer::get_display_info,
     roulette_draw: video_roulette_draw,
@@ -85,6 +106,7 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     surface_set_parent: compositor_context::surface_set_parent,
     surface_set_relative_position: compositor_context::surface_set_relative_position,
     surface_set_title: video_surface_set_title,
+    surface_set_app_id: video_surface_set_app_id,
 };
 
 fn task_cleanup_callback(task_id: u32) {

@@ -17,7 +17,7 @@
 use alloc::collections::VecDeque;
 
 use slopos_abi::{
-    CompositorError, DamageRect, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole,
+    AppId, CompositorError, DamageRect, MAX_CHILDREN, MAX_WINDOW_DAMAGE_REGIONS, SurfaceRole,
     WINDOW_STATE_NORMAL, WindowInfo,
 };
 use slopos_gfx::damage::InternalDamageTracker;
@@ -81,6 +81,11 @@ enum ClientOp {
         task_id: u32,
         title: [u8; 32],
     },
+    /// Set application identifier (reverse-DNS, e.g. "org.slopos.shell")
+    SetAppId {
+        task_id: u32,
+        app_id: AppId,
+    },
     /// Set cursor shape for a surface (e.g. text I-beam, crosshair)
     SetCursorShape {
         task_id: u32,
@@ -99,6 +104,7 @@ impl ClientOp {
             | ClientOp::SetParent { task_id, .. }
             | ClientOp::SetRelativePosition { task_id, .. }
             | ClientOp::SetTitle { task_id, .. }
+            | ClientOp::SetAppId { task_id, .. }
             | ClientOp::SetCursorShape { task_id, .. } => *task_id,
         }
     }
@@ -152,6 +158,8 @@ struct SurfaceState {
     relative_y: i32,
     /// Window title (UTF-8, null-terminated)
     title: [u8; 32],
+    /// Application identifier (reverse-DNS, e.g. "org.slopos.shell")
+    app_id: AppId,
     cursor_shape: u8,
 }
 
@@ -180,6 +188,7 @@ impl SurfaceState {
             relative_x: 0,
             relative_y: 0,
             title: [0; 32],
+            app_id: AppId::EMPTY,
             cursor_shape: 0,
         }
     }
@@ -511,6 +520,12 @@ pub fn drain_queue() {
                     surface.dirty = true;
                 }
             }
+            ClientOp::SetAppId { task_id, app_id } => {
+                if let Some(surface) = ctx.get_surface_mut(task_id) {
+                    surface.app_id = app_id;
+                    surface.dirty = true;
+                }
+            }
             ClientOp::SetCursorShape { task_id, shape } => {
                 if let Some(surface) = ctx.get_surface_mut(task_id) {
                     surface.cursor_shape = shape;
@@ -664,6 +679,7 @@ pub fn surface_enumerate_windows(out_buffer: *mut WindowInfo, max_count: u32) ->
             info.shm_token = surface.shm_token;
             info.damage_regions = regions;
             info.title = surface.title;
+            info.app_id = surface.app_id;
         }
     }
     emit_count as u32
@@ -814,5 +830,14 @@ pub fn surface_set_title(task_id: u32, title: &[u8]) -> Result<(), CompositorErr
         task_id,
         title: title_buf,
     });
+    Ok(())
+}
+
+/// Set the application identifier. Called by CLIENT tasks.
+/// App ID is UTF-8, max 31 characters (null-terminated in 32-byte buffer).
+pub fn surface_set_app_id(task_id: u32, app_id_bytes: &[u8]) -> Result<(), CompositorError> {
+    let app_id = AppId::from_str(core::str::from_utf8(app_id_bytes).unwrap_or(""));
+    let mut ctx = CONTEXT.lock();
+    ctx.queue.push_back(ClientOp::SetAppId { task_id, app_id });
     Ok(())
 }

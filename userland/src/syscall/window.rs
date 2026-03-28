@@ -115,6 +115,18 @@ pub fn surface_set_title(title: &str) -> i64 {
 }
 
 #[inline(always)]
+pub fn surface_set_app_id(app_id: &str) -> i64 {
+    let bytes = app_id.as_bytes();
+    unsafe {
+        syscall2(
+            SYSCALL_SURFACE_SET_APP_ID,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
 pub fn enumerate_windows(windows: &mut [WindowInfo]) -> i64 {
     unsafe {
         syscall2(

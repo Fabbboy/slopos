@@ -10,6 +10,39 @@ pub const CURSOR_SHAPE_DEFAULT: u8 = 0;
 pub const CURSOR_SHAPE_TEXT: u8 = 1;
 pub const CURSOR_SHAPE_POINTER: u8 = 2;
 
+/// Fixed-size application identifier following the Wayland `set_app_id()` convention.
+/// Apps declare their identity (e.g. "org.slopos.shell") and the compositor uses
+/// this for window-to-dock matching instead of the window title.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AppId(pub [u8; 32]);
+
+impl AppId {
+    pub const EMPTY: Self = Self([0u8; 32]);
+
+    pub fn from_str(s: &str) -> Self {
+        let mut buf = [0u8; 32];
+        let len = s.len().min(31);
+        buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+        Self(buf)
+    }
+
+    pub fn as_str(&self) -> &str {
+        let len = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
+        core::str::from_utf8(&self.0[..len]).unwrap_or("")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0[0] == 0
+    }
+}
+
+impl Default for AppId {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct WindowInfo {
@@ -25,6 +58,7 @@ pub struct WindowInfo {
     pub shm_token: u32,
     pub damage_regions: [DamageRect; MAX_WINDOW_DAMAGE_REGIONS],
     pub title: [u8; 32],
+    pub app_id: AppId,
 }
 
 impl WindowInfo {
@@ -59,6 +93,11 @@ impl WindowInfo {
     }
 
     #[inline]
+    pub fn app_id_str(&self) -> &str {
+        self.app_id.as_str()
+    }
+
+    #[inline]
     pub fn damage_regions(&self) -> &[DamageRect] {
         if self.is_full_damage() {
             &[]
@@ -84,6 +123,7 @@ impl Default for WindowInfo {
             shm_token: 0,
             damage_regions: [DamageRect::default(); MAX_WINDOW_DAMAGE_REGIONS],
             title: [0; 32],
+            app_id: AppId::EMPTY,
         }
     }
 }

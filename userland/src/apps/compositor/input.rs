@@ -4,8 +4,10 @@ use crate::theme::*;
 use std::time::Instant;
 
 use super::MAX_WINDOWS;
+use super::decorations;
+use super::dock::LauncherShelf;
+use super::menu_bar::SystemBar;
 use super::output::WINDOW_STATE_MINIMIZED;
-use super::taskbar::{self, START_MENU_ITEMS};
 
 const WINDOW_STATE_NORMAL: u8 = 0;
 const CLOSE_REQUEST_GRACE_MS: u64 = 1500;
@@ -22,7 +24,6 @@ pub struct InputHandler {
     drag_offset_x: i32,
     drag_offset_y: i32,
 
-    pub start_menu_open: bool,
     pub focused_task: u32,
     /// The task that the kernel currently routes keyboard events to.
     /// Kept in sync with `focused_task`; the syscall is only issued when
@@ -50,7 +51,6 @@ impl InputHandler {
             drag_task: 0,
             drag_offset_x: 0,
             drag_offset_y: 0,
-            start_menu_open: false,
             focused_task: 0,
             kernel_keyboard_focus: 0,
             needs_full_redraw: false,
@@ -99,7 +99,7 @@ impl InputHandler {
     /// Update pointer focus to the topmost visible window under the cursor.
     ///
     /// Following the Wayland compositor pattern (wlroots `tinywl.c`), pointer
-    /// focus is tracked **continuously on every frame** — not only on click.
+    /// focus is tracked **continuously on every frame** -- not only on click.
     /// This ensures the correct window already has focus by the time a PS/2
     /// button IRQ fires, so button events are routed to the right client.
     pub fn update_pointer_focus(
@@ -167,11 +167,19 @@ impl InputHandler {
         }
     }
 
+    /// Hit-test priority chain (spec section 8):
+    /// 1. system_bar::hit_test() -> consume click (no action)
+    /// 2. shelf.hit_test()       -> handle shelf click
+    /// 3. decorations::hit_test_signal_button() -> close/min/expand
+    /// 4. decorations::hit_test_title_bar()     -> drag
+    /// 5. hit_test_content_area() -> raise + focus + forward
+    /// 6. desktop -> deselect
     pub fn handle_mouse_events(
         &mut self,
-        fb_height: i32,
+        _fb_height: i32,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
+        shelf: &LauncherShelf,
     ) {
         let clicked = self.mouse_clicked();
 
@@ -188,49 +196,63 @@ impl InputHandler {
             return;
         }
 
-        if self.start_menu_open && self.hit_test_start_menu(fb_height) {
-            if let Some(item_idx) = self.hit_test_start_menu_item(fb_height) {
-                self.activate_start_menu_item(item_idx, windows, window_count);
-            }
+        // 1. System bar -- consume click, no action
+        if SystemBar::hit_test(self.mouse_x, self.mouse_y) {
             return;
         }
 
-        if self.start_menu_open
-            && !self.hit_test_start_button(fb_height)
-            && !self.hit_test_start_menu(fb_height)
-        {
-            self.start_menu_open = false;
-            self.needs_full_redraw = true;
-        }
-
-        if self.mouse_y >= fb_height - TASKBAR_HEIGHT {
-            self.handle_taskbar_click(fb_height, windows, window_count);
+        // 2. Shelf click
+        if let Some(idx) = shelf.hit_test(self.mouse_x, self.mouse_y) {
+            self.handle_shelf_click(idx, shelf, windows, window_count);
             return;
         }
 
+        // 3-4. Window decorations and content (top-to-bottom z-order)
         for i in (0..window_count as usize).rev() {
             let window = windows[i];
             if window.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
 
-            if self.hit_test_title_bar(&window) {
-                if self.hit_test_close_button(&window) {
-                    self.request_window_close(window.task_id, windows, window_count);
-                    return;
-                }
+            // Frame top (title bar) is above the kernel's window.y.
+            let frame_y = window.y - TITLE_BAR_HEIGHT;
 
-                if self.hit_test_minimize_button(&window) {
-                    window::set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
-                    return;
+            // 3. Signal buttons (close/minimize/expand)
+            if let Some(button_id) =
+                decorations::hit_test_signal_button(window.x, frame_y, self.mouse_x, self.mouse_y)
+            {
+                match button_id {
+                    0 => {
+                        // Close
+                        self.request_window_close(window.task_id, windows, window_count);
+                    }
+                    1 => {
+                        // Minimize
+                        window::set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
+                    }
+                    2 => {
+                        // Expand -- no-op in Phase 4
+                    }
+                    _ => {}
                 }
+                return;
+            }
 
+            // 4. Title bar (drag)
+            if decorations::hit_test_title_bar(
+                window.x,
+                frame_y,
+                window.width,
+                self.mouse_x,
+                self.mouse_y,
+            ) {
                 self.start_drag(&window);
                 window::raise_window(window.task_id);
                 self.set_focused(window.task_id);
                 return;
             }
 
+            // 5. Content area
             if self.hit_test_content_area(&window) {
                 window::raise_window(window.task_id);
                 input::set_pointer_focus_with_offset(window.task_id, window.x, window.y);
@@ -239,8 +261,7 @@ impl InputHandler {
             }
         }
 
-        // Clicked on desktop background (no window hit) — clear GUI keyboard
-        // focus so keystrokes go to the VConsole/TTY instead.
+        // 6. Desktop background -- clear focus
         self.set_focused(0);
     }
 
@@ -274,75 +295,13 @@ impl InputHandler {
         }
     }
 
+    /// Hit-test the client content area of a window. The kernel stores
+    /// `window.y` as the content top; the title bar is above it.
     pub fn hit_test_content_area(&self, window: &UserWindowInfo) -> bool {
         self.mouse_x >= window.x
             && self.mouse_x < window.x + window.width as i32
             && self.mouse_y >= window.y
             && self.mouse_y < window.y + window.height as i32
-    }
-
-    pub fn hit_test_title_bar(&self, window: &UserWindowInfo) -> bool {
-        let title_y = window.y - TITLE_BAR_HEIGHT;
-        self.mouse_x >= window.x
-            && self.mouse_x < window.x + window.width as i32
-            && self.mouse_y >= title_y
-            && self.mouse_y < window.y
-    }
-
-    pub fn hit_test_close_button(&self, window: &UserWindowInfo) -> bool {
-        let button_x = window.x + window.width as i32 - BUTTON_SIZE - BUTTON_PADDING;
-        let button_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
-        self.mouse_x >= button_x
-            && self.mouse_x < button_x + BUTTON_SIZE
-            && self.mouse_y >= button_y
-            && self.mouse_y < button_y + BUTTON_SIZE
-    }
-
-    pub fn hit_test_minimize_button(&self, window: &UserWindowInfo) -> bool {
-        let button_x = window.x + window.width as i32 - (BUTTON_SIZE * 2) - (BUTTON_PADDING * 2);
-        let button_y = window.y - TITLE_BAR_HEIGHT + BUTTON_PADDING;
-        self.mouse_x >= button_x
-            && self.mouse_x < button_x + BUTTON_SIZE
-            && self.mouse_y >= button_y
-            && self.mouse_y < button_y + BUTTON_SIZE
-    }
-
-    pub fn hit_test_start_button(&self, fb_height: i32) -> bool {
-        let btn_x = taskbar::start_button_x();
-        let btn_y = taskbar::start_button_y(fb_height);
-        let btn_h = taskbar::start_button_height();
-        self.mouse_x >= btn_x
-            && self.mouse_x < btn_x + START_BUTTON_WIDTH
-            && self.mouse_y >= btn_y
-            && self.mouse_y < btn_y + btn_h
-    }
-
-    pub fn hit_test_start_menu(&self, fb_height: i32) -> bool {
-        let menu_x = taskbar::start_menu_x();
-        let menu_y = taskbar::start_menu_y(fb_height);
-        let menu_h = taskbar::start_menu_height();
-        self.mouse_x >= menu_x
-            && self.mouse_x < menu_x + START_MENU_WIDTH
-            && self.mouse_y >= menu_y
-            && self.mouse_y < menu_y + menu_h
-    }
-
-    pub fn hit_test_start_menu_item(&self, fb_height: i32) -> Option<usize> {
-        if !self.start_menu_open || !self.hit_test_start_menu(fb_height) {
-            return None;
-        }
-
-        let menu_y = taskbar::start_menu_y(fb_height) + START_MENU_PADDING;
-        let rel_y = self.mouse_y - menu_y;
-        if rel_y < 0 {
-            return None;
-        }
-        let idx = (rel_y / START_MENU_ITEM_HEIGHT) as usize;
-        if idx < START_MENU_ITEMS.len() {
-            Some(idx)
-        } else {
-            None
-        }
     }
 
     fn set_focused(&mut self, task_id: u32) {
@@ -418,115 +377,62 @@ impl InputHandler {
         self.pending_close_count -= 1;
     }
 
-    fn launch_or_raise_program(
+    fn handle_shelf_click(
         &mut self,
-        window_title: Option<&[u8]>,
-        program_name: &str,
+        idx: usize,
+        shelf: &LauncherShelf,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
     ) {
-        if let Some(title) = window_title {
-            if let Some(task_id) = find_window_by_title(windows, window_count, title) {
-                window::raise_window(task_id);
-                self.set_focused(task_id);
-                return;
+        let entry = match shelf.entry(idx) {
+            Some(e) => e,
+            None => return,
+        };
+
+        if entry.running && entry.task_id != 0 {
+            // Check if the window is minimized; if so, unminimize it.
+            for i in 0..window_count as usize {
+                if windows[i].task_id == entry.task_id {
+                    if windows[i].state == WINDOW_STATE_MINIMIZED {
+                        window::set_window_state(entry.task_id, WINDOW_STATE_NORMAL);
+                    }
+                    window::raise_window(entry.task_id);
+                    self.set_focused(entry.task_id);
+                    self.needs_full_redraw = true;
+                    return;
+                }
             }
         }
 
-        if let Some(spec) = program_registry::resolve_program(program_name) {
+        // Not running -- spawn the program.
+        let path_len = entry.path_len.min(entry.program_path.len());
+        let path_bytes = &entry.program_path[..path_len];
+        if let Ok(path_str) = core::str::from_utf8(path_bytes) {
+            self.spawn_program(path_str);
+        }
+    }
+
+    fn spawn_program(&mut self, path: &str) {
+        if let Some(spec) = program_registry::resolve_program_path(path) {
             let tid =
                 process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags);
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {
-                // Window doesn't exist yet; sync_keyboard_focus will pick it
-                // up once it appears in the next refresh_windows cycle.
                 self.focused_task = tid as u32;
             }
         } else {
-            tty::write(b"COMPOSITOR: unknown program in start menu\n");
-        }
-    }
-
-    fn activate_start_menu_item(
-        &mut self,
-        item_idx: usize,
-        windows: &[UserWindowInfo; MAX_WINDOWS],
-        window_count: u32,
-    ) {
-        if let Some(item) = START_MENU_ITEMS.get(item_idx) {
-            self.launch_or_raise_program(
-                item.window_title,
-                item.program_name,
-                windows,
-                window_count,
-            );
-            self.start_menu_open = false;
-            self.needs_full_redraw = true;
-        }
-    }
-
-    fn handle_taskbar_click(
-        &mut self,
-        fb_height: i32,
-        windows: &[UserWindowInfo; MAX_WINDOWS],
-        window_count: u32,
-    ) {
-        if self.hit_test_start_button(fb_height) {
-            self.start_menu_open = !self.start_menu_open;
-            self.needs_full_redraw = true;
-            return;
-        }
-
-        if let Some(item_idx) = self.hit_test_start_menu_item(fb_height) {
-            self.activate_start_menu_item(item_idx, windows, window_count);
-            return;
-        }
-
-        let mut x = taskbar::app_buttons_start_x();
-        for i in 0..window_count as usize {
-            let w = &windows[i];
-            let btn_w = taskbar::app_button_width(&w.title);
-            if self.mouse_x >= x && self.mouse_x < x + btn_w {
-                let new_state = if w.state == WINDOW_STATE_MINIMIZED {
-                    WINDOW_STATE_NORMAL
-                } else {
-                    WINDOW_STATE_MINIMIZED
-                };
-                window::set_window_state(w.task_id, new_state);
-                if new_state == WINDOW_STATE_NORMAL {
-                    window::raise_window(w.task_id);
-                    self.set_focused(w.task_id);
-                }
-                self.needs_full_redraw = true;
-                return;
+            // Fall back to direct path spawn with default attrs.
+            let tid = process::spawn_path_with_attrs(path.as_bytes(), 4, 0);
+            if tid <= 0 {
+                tty::write(b"COMPOSITOR: spawn failed for program\n");
+            } else {
+                self.focused_task = tid as u32;
             }
-
-            x += btn_w + TASKBAR_BUTTON_PADDING;
-        }
-
-        if self.start_menu_open {
-            self.start_menu_open = false;
-            self.needs_full_redraw = true;
         }
     }
 }
 
 fn window_exists(windows: &[UserWindowInfo; MAX_WINDOWS], count: u32, task_id: u32) -> bool {
     (0..count as usize).any(|i| windows[i].task_id == task_id)
-}
-
-fn find_window_by_title(
-    windows: &[UserWindowInfo; MAX_WINDOWS],
-    count: u32,
-    title: &[u8],
-) -> Option<u32> {
-    let title_len = title.iter().position(|&b| b == 0).unwrap_or(title.len());
-    for i in 0..count as usize {
-        let win_title_len = windows[i].title.iter().position(|&b| b == 0).unwrap_or(32);
-        if title_len == win_title_len && windows[i].title[..win_title_len] == title[..title_len] {
-            return Some(windows[i].task_id);
-        }
-    }
-    None
 }

@@ -305,6 +305,7 @@ fn shell_interactive_main() {
     display::shell_console_clear();
 
     window::surface_set_title("SlopOS Shell");
+    window::surface_set_app_id("org.slopos.shell");
     window::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
 
     cwd_set(b"/");
