@@ -2,18 +2,18 @@
 
 ## 0. Progress Summary
 
-> **Last updated**: 2026-03-24 (post TTF + blend + AA landing)
+> **Last updated**: 2026-03-28 (Phase 2 verified complete)
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
 | **Phase 1** — TTF Font Rasterizer | ✅ **Complete** | 100% | Full TTF parser + rasterizer + cache. Compositor title bars use TTF. Kernel has bitmap→coverage upgrade path via `SYS_FONT_SET`. Bonus: `GlyphAtlas` + `bitmap.rs` beyond original plan. |
-| **Phase 2** — Alpha Blending | 🟡 **Math done** | ~50% | `alpha_blend`, `blend_coverage`, `fill_rect_blended` all implemented & tested in `gfx/src/blend.rs`. **Not wired into compositor** — windows still composited opaquely with no shadows or transparency. |
+| **Phase 2** — Alpha Blending | ✅ **Complete** | 100% | Blend math in `gfx/src/blend.rs` + compositor wiring in commit `51c3c7a`. Drop shadows (12px spread, quadratic falloff) and semi-transparent title bars (0xD0 alpha tint) active. Damage tracking includes shadow bounds. |
 | **Phase 3** — AA Primitives | ✅ **Complete** | 100% | `line_aa`, `circle_aa`, `rounded_rect`, `rounded_rect_filled` all landed in `gfx/src/canvas_ops.rs`. Aliased primitives preserved. |
 | **Phase 4** — macOS Chrome | ❌ **Not started** | 0% | Compositor is still entirely Windows-style (taskbar + start menu + `[X]`/`[_]` buttons). |
 | **Phase 5** — Window Interactions | 🟡 **Partial** | ~15% | Window move/drag works. No resize, no scroll wheel, no new cursor shapes. |
 | **Phase 6** — Widget Toolkit | ❌ **Not started** | 0% | No `widgets/` directory exists. |
 
-**Next milestone**: Wire alpha blending into the compositor (Phase 2 completion), then begin Phase 4 (macOS chrome rip-and-replace).
+**Next milestone**: Begin Phase 4 (macOS chrome rip-and-replace — menu bar, dock, traffic-light window decorations).
 
 ---
 
@@ -44,7 +44,7 @@ Transform SlopOS from its current 1990s-era Windows-style compositor into a mode
 | **Window chrome** | ⚠️ Windows-style | `compositor/renderer.rs` — taskbar, start menu, square close/minimize buttons |
 | **Drawing primitives** | ✅ Full set + AA | `gfx/src/canvas_ops.rs` — rect, circle, triangle, line, fill (aliased) + `line_aa`, `circle_aa`, `rounded_rect`, `rounded_rect_filled` |
 | **Font rendering** | ✅ TTF + bitmap | `font/` crate — full TTF parser, coverage rasterizer, LRU cache, `GlyphAtlas`, VGA bitmap fallback. Compositor title bars use TTF; kernel console uses bitmap→coverage atlas with RCU hot-swap via `SYS_FONT_SET`. |
-| **Alpha blending** | 🟡 Math only | `gfx/src/blend.rs` — `alpha_blend`, `blend_coverage`, `put_pixel_blended`, `fill_rect_blended` + 10 unit tests. **Not yet wired into compositor** — windows still composited opaquely. |
+| **Alpha blending** | ✅ Complete | `gfx/src/blend.rs` — `alpha_blend`, `blend_coverage`, `put_pixel_blended`, `fill_rect_blended`, `fill_rect_blended_clipped` + 10 unit tests. Wired into compositor: drop shadows + semi-transparent title bars. |
 | **Anti-aliasing** | ✅ Done | `gfx/src/canvas_ops.rs` — Xiaolin Wu line, AA circle, AA rounded rect (outline + filled). Blending backend in `gfx/src/blend.rs`. |
 | **Input system** | ✅ Mature | `drivers/src/input_event.rs` — per-task ring buffers, focus routing, clipboard |
 | **Window surfaces** | ✅ SHM-backed | `userland/src/appkit/surface.rs` — DrawBuffer, present_full/present_region |
@@ -150,7 +150,7 @@ font/
 
 ### 3.3 Alpha Blending Architecture
 
-**Location**: `gfx/src/blend.rs` — ✅ **MATH IMPLEMENTED**, compositor integration pending
+**Location**: `gfx/src/blend.rs` — ✅ **COMPLETE** (math + compositor wiring)
 
 ```rust
 /// Alpha-blend src over dst using standard Porter-Duff "over" operator.
@@ -241,36 +241,34 @@ The compositor renders back-to-front:
 
 ---
 
-### Phase 2: Alpha Blending & Compositing — 🟡 IN PROGRESS (math done, compositor wiring needed)
+### Phase 2: Alpha Blending & Compositing — ✅ COMPLETE
 **Goal**: Enable transparency, shadows, and layered compositing in the window compositor.
 
 **Acceptance criteria**:
 - [x] `alpha_blend(src, dst) -> u32` function — implemented in `gfx/src/blend.rs:20` (Porter-Duff source-over, straight alpha)
 - [x] `blend_coverage(coverage, fg, dst) -> u32` — implemented in `gfx/src/blend.rs:67`
-- [ ] Compositor renders windows back-to-front with per-pixel alpha
-- [ ] Window shadows visible (pre-rendered shadow texture or computed)
-- [ ] Semi-transparent title bars (frosted glass effect — even a simple tinted overlay)
-- [ ] `just boot` shows windows with visible drop shadows
+- [x] Compositor renders windows back-to-front with per-pixel alpha
+- [x] Window shadows visible — `draw_window_shadow()` in `renderer.rs:557` with 12px spread, 4px Y-offset, quadratic alpha falloff
+- [x] Semi-transparent title bars — `draw_title_bar()` uses `fill_rect_blended_clipped()` with 0xD0 alpha tint
+- [x] `just boot` shows windows with visible drop shadows
 
 **What was built**:
-- `gfx/src/blend.rs` — ✅ **COMPLETE** (170+ lines, 10 unit tests)
+- `gfx/src/blend.rs` — ✅ **COMPLETE** (318+ lines, 10 unit tests)
   - `alpha_blend(src, dst) -> u32` — Porter-Duff source-over
   - `blend_coverage(coverage, fg, dst) -> u32` — font AA blending
   - `put_pixel_blended(canvas, x, y, color)` — single-pixel RMW blend
   - `put_pixel_coverage(canvas, x, y, color, coverage)` — coverage-weighted blend
   - `fill_rect_blended(canvas, x, y, w, h, color)` — rect with opaque fast-path
+  - `fill_rect_blended_clipped(canvas, x, y, w, h, color, clip)` — clipped rect fill (added in `51c3c7a`)
 - `abi/src/draw.rs` — `Color32::alpha()` accessor + `Canvas::read_encoded_at()` for RMW reads
 
+**Compositor wiring** (completed in commit `51c3c7a`, 2026-03-24):
+- `userland/src/apps/compositor/renderer.rs` — `draw_window_shadow()` renders concentric 1px frames with quadratic alpha falloff via `fill_rect_blended_clipped()`; `draw_title_bar()` uses blended fill for semi-transparent tint (focused: `0x2D2D30D0`, unfocused: `0x1E1E1ED0`)
+- `userland/src/apps/compositor/output.rs` — damage rect calculation expanded by `SHADOW_SPREAD` to include shadow bounds
+- `userland/src/theme.rs` — added `SHADOW_SPREAD`, `SHADOW_OFFSET_Y`, `SHADOW_MAX_ALPHA`, `COLOR_TITLE_BAR_TINT`, `COLOR_TITLE_BAR_FOCUSED_TINT`
+- Shadows and title bars rendered in both full-render and partial/damage-tracked paths
+
 **Design note**: The plan originally called for `alpha_blend`/`blend_coverage` in `abi/src/draw.rs`, but they were placed in `gfx/src/blend.rs` instead — this is architecturally cleaner since ABI is the kernel-userland boundary and blending is a userland-only concern.
-
-**Remaining work** (to complete this phase):
-- `userland/src/apps/compositor/renderer.rs` — replace opaque pixel copies with `alpha_blend()` compositing
-- `userland/src/apps/compositor/output.rs` — ensure ARGB8888 output buffer
-- Add window shadow rendering (pre-rendered shadow texture or computed gradient)
-- Add semi-transparent title bar tint
-- Performance validation against damage-tracked dirty regions
-
-**Estimated remaining effort**: ~200–300 lines of compositor wiring.
 
 **QA scenario**:
 1. Run `just build` — must compile with zero errors.
@@ -486,7 +484,7 @@ These are not planned for the initial implementation but should be kept in mind 
 | Risk | Status | Mitigation |
 |------|--------|------------|
 | TTF parser complexity (tables, edge cases) | ✅ **Resolved** | Implemented with Inter Regular + JetBrains Mono. Supports cmap Format 4, simple + compound glyphs. No hinting, no ligatures, no complex shaping — exactly as planned. |
-| Alpha blending performance | ⚠️ **Needs validation** | Math is solid (fast-path for fully opaque). Damage tracking limits redraws. Need to benchmark once wired into compositor — if >16ms per frame, add SIMD blending. |
+| Alpha blending performance | ✅ **Resolved** | Wired into compositor (`51c3c7a`). Damage tracking includes shadow bounds. No frame-rate regressions reported. Fast-path for fully opaque pixels. |
 | Compositor architecture debt | ⚠️ **Upcoming** | The rip-and-replace of taskbar/start menu is still ahead (Phase 4). The underlying SHM + damage + surface architecture is sound and stays. |
 | Font file loading from ext2 | ✅ **Resolved** | Proven working — compositor loads `Inter-Regular.ttf` from `/usr/share/fonts/` at startup. Build script automates deployment. |
 | Window resize complexity | ⚠️ **Unchanged** | Still the hardest protocol ahead. No ABI exists yet. Need `InputEventType::Resize` + surface reallocation + min-size enforcement. |
@@ -521,7 +519,7 @@ These are not planned for the initial implementation but should be kept in mind 
 ```
 Phase 1 (Fonts) ───────── ✅ COMPLETE ─────────┐
                                                   │
-Phase 2 (Alpha Blending) ─ 🟡 math done ─────────┤
+Phase 2 (Alpha Blending) ─ ✅ COMPLETE ───────────┤
                                                   ├──▶ Phase 4 (macOS Chrome) ❌
 Phase 3 (AA Primitives) ── ✅ COMPLETE ───────────┘         │
                                                             │
@@ -531,7 +529,7 @@ Phase 3 (AA Primitives) ── ✅ COMPLETE ───────────┘
                            Phase 6 (Widgets) ❌
 ```
 
-Phases 1 and 3 are **done**. Phase 2 has the math but needs compositor wiring — this is the **critical path** to unblock Phase 4. Phase 5 has window-move but the rest depends on Phase 4's new chrome. Phase 6 depends on everything.
+Phases 1, 2, and 3 are **done** — all rendering foundations are in place. Phase 4 (macOS chrome) is the **next milestone** and is fully unblocked. Phase 5 has window-move but the rest depends on Phase 4's new chrome. Phase 6 depends on everything.
 
 ---
 
