@@ -134,9 +134,51 @@ impl Pal for Sys {
     }
 
     fn list(path: *const u8, buf: *mut u8, buf_len: usize) -> Result<usize, Errno> {
-        let ret = unsafe { syscall3(SYSCALL_FS_LIST, path as u64, buf as u64, buf_len as u64) };
-        let val = to_result(ret)?;
-        Ok(val as usize)
+        use slopos_abi::{USER_FS_MAX_ENTRIES, UserFsEntry, UserFsList};
+
+        let mut entries = [UserFsEntry::new(); USER_FS_MAX_ENTRIES as usize];
+        let mut hdr = UserFsList {
+            entries: entries.as_mut_ptr(),
+            max_entries: USER_FS_MAX_ENTRIES,
+            count: 0,
+        };
+
+        let ret = unsafe {
+            syscall2(
+                SYSCALL_FS_LIST,
+                path as u64,
+                &mut hdr as *mut UserFsList as u64,
+            )
+        };
+        to_result(ret)?;
+
+        let count = hdr.count as usize;
+        let mut pos = 0usize;
+        for i in 0..count {
+            let entry = &entries[i];
+            let name_len = entry
+                .name
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(entry.name.len());
+            if name_len == 0 {
+                continue;
+            }
+            let needed = if pos == 0 { name_len } else { name_len + 1 };
+            if pos + needed > buf_len {
+                return Err(Errno::from(crate::error::SyscallError::from_errno(34)));
+            }
+            if pos > 0 {
+                unsafe { *buf.add(pos) = b'\n' };
+                pos += 1;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(entry.name.as_ptr(), buf.add(pos), name_len);
+            }
+            pos += name_len;
+        }
+
+        Ok(pos)
     }
 
     fn brk(addr: *mut u8) -> Result<*mut u8, Errno> {

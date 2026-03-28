@@ -234,12 +234,51 @@ pub const COLOR_TASKBAR: Color32 = PANEL_BG;
 pub const COLOR_START_MENU_BG: Color32 = PANEL_BG;
 
 // File Manager Specific
-pub const FM_WIDTH: i32 = 400;
-pub const FM_HEIGHT: i32 = 300;
+pub const FM_WIDTH: i32 = 640;
+pub const FM_HEIGHT: i32 = 420;
 pub const FM_TITLE_HEIGHT: i32 = TITLE_BAR_HEIGHT;
-pub const FM_ITEM_HEIGHT: i32 = 20;
-pub const FM_COLOR_BG: Color32 = Color32::rgb(0x25, 0x25, 0x26);
+pub const FM_ITEM_HEIGHT: i32 = 22;
+pub const FM_COLOR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
 pub const FM_COLOR_FG: Color32 = Color32::rgb(0xE0, 0xE0, 0xE0);
 pub const FM_COLOR_HL: Color32 = Color32::rgb(0x3E, 0x3E, 0x42);
 pub const FM_BUTTON_WIDTH: i32 = 40;
+
+// File Manager -- Sidebar
+pub const FM_SIDEBAR_WIDTH: i32 = 140;
+pub const FM_SIDEBAR_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
+pub const FM_SIDEBAR_ITEM_HEIGHT: i32 = 22;
+pub const FM_SIDEBAR_HOVER: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
+pub const FM_SIDEBAR_ACTIVE: Color32 = Color32::rgb(0x30, 0x50, 0x80);
+pub const FM_SIDEBAR_TEXT: Color32 = Color32::rgb(0xB0, 0xB0, 0xB0);
+pub const FM_SIDEBAR_HEADING: Color32 = Color32::rgb(0x70, 0x70, 0x74);
+
+// File Manager -- Navigation bar
+pub const FM_NAV_HEIGHT: i32 = 28;
+pub const FM_NAV_BG: Color32 = Color32::rgb(0x25, 0x25, 0x28);
+pub const FM_NAV_BUTTON: Color32 = Color32::rgb(0x38, 0x38, 0x3C);
+pub const FM_NAV_BUTTON_HOVER: Color32 = Color32::rgb(0x48, 0x48, 0x4E);
+pub const FM_NAV_BUTTON_DISABLED: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
+
+// File Manager -- List view
+pub const FM_LIST_HEADER_HEIGHT: i32 = 20;
+pub const FM_LIST_HEADER_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
+pub const FM_LIST_HEADER_BORDER: Color32 = Color32::rgb(0x35, 0x35, 0x38);
+pub const FM_LIST_HOVER: Color32 = Color32::rgb(0x2A, 0x2A, 0x2E);
+pub const FM_LIST_SELECTED: Color32 = Color32::rgb(0x28, 0x48, 0x78);
+pub const FM_LIST_ALT_BG: Color32 = Color32::rgb(0x20, 0x20, 0x22);
+pub const FM_DIR_COLOR: Color32 = Color32::rgb(0x60, 0x9C, 0xF0);
+pub const FM_FILE_COLOR: Color32 = Color32::rgb(0xD0, 0xD0, 0xD0);
+pub const FM_SIZE_COLOR: Color32 = Color32::rgb(0x80, 0x80, 0x84);
+pub const FM_ERROR_COLOR: Color32 = Color32::rgb(0xE0, 0x50, 0x50);
+
+// File Manager -- Status bar
+pub const FM_STATUS_HEIGHT: i32 = 20;
+pub const FM_STATUS_BG: Color32 = Color32::rgb(0x22, 0x22, 0x24);
+pub const FM_STATUS_TEXT: Color32 = Color32::rgb(0x90, 0x90, 0x94);
+
+// File Manager -- Scrollbar
+pub const FM_SCROLLBAR_WIDTH: i32 = 6;
+pub const FM_SCROLLBAR_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x20);
+pub const FM_SCROLLBAR_THUMB: Color32 = Color32::rgb(0x50, 0x50, 0x54);
+
 pub const SYSINFO_BUTTON_WIDTH: i32 = 48;
