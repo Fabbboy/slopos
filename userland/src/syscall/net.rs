@@ -29,7 +29,8 @@ pub fn net_info(out: &mut UserNetInfo) -> i64 {
 
 pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<super::OwnedFd> {
     Sys::socket(domain as i32, sock_type as i32, protocol as i32)
-        .map(|v| super::OwnedFd::from_raw(v as i32))
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
         .map_err(Into::into)
 }
 
@@ -57,7 +58,8 @@ pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<super::
         &mut addrlen as *mut u32
     };
     Sys::accept(fd, peer_ptr, addrlen_ptr)
-        .map(|v| super::OwnedFd::from_raw(v as i32))
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
         .map_err(Into::into)
 }
 

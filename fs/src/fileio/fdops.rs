@@ -7,8 +7,8 @@ use slopos_abi::Errno;
 use slopos_abi::fs::UserFsEntry;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{
-    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, SEEK_CUR, SEEK_END,
-    SEEK_SET,
+    F_DUPFD, F_GETFD, F_GETFL, F_SETFD, F_SETFL, FD_CLOEXEC, O_CLOEXEC, O_NOCTTY, O_NONBLOCK,
+    SEEK_CUR, SEEK_END, SEEK_SET,
 };
 
 use crate::pipe;
@@ -548,16 +548,13 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
 /// Open a file descriptor for a TTY device.
 ///
 /// TTY devices are inherently bidirectional, so READ and WRITE are always
-/// granted.  `posix_flags` is honoured only for `O_CLOEXEC`; pass `0` when
-/// no special flags are needed.
+/// granted.  `posix_flags` is honoured for `O_CLOEXEC`, `O_NOCTTY`, and
+/// `O_NONBLOCK`; pass `0` when no special flags are needed.
 pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) -> c_int {
     let tty_ops = current_tty_ops();
     let base = OpenMode::READ | OpenMode::WRITE;
-    let flags = if posix_flags & O_CLOEXEC as u32 != 0 {
-        base.with_raw(O_CLOEXEC as u32)
-    } else {
-        base
-    };
+    let kept = posix_flags & (O_CLOEXEC as u32 | O_NOCTTY as u32 | O_NONBLOCK as u32);
+    let flags = if kept != 0 { base.with_raw(kept) } else { base };
     install_fd_entry(
         process_id,
         tty_ops,

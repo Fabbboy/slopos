@@ -76,7 +76,7 @@ impl OwnedFd {
     /// # Safety contract
     /// The caller must ensure `fd` is a valid, open file descriptor that
     /// is not owned by any other `OwnedFd`.
-    pub fn from_raw(fd: RawFd) -> Self {
+    pub unsafe fn from_raw(fd: RawFd) -> Self {
         Self(fd)
     }
 

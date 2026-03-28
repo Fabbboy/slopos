@@ -416,6 +416,23 @@ fn forward_compositor_keyboard() {
             let ascii = events[i].key_ascii();
             if ascii != 0 {
                 let _ = process::tty_write(master_idx, &[ascii]);
+            } else {
+                // Non-ASCII keys: convert scancode to VT100 escape sequence.
+                let seq: &[u8] = match events[i].key_scancode() {
+                    0x82 => b"\x1b[A",  // Up
+                    0x83 => b"\x1b[B",  // Down
+                    0x84 => b"\x1b[D",  // Left
+                    0x85 => b"\x1b[C",  // Right
+                    0x86 => b"\x1b[H",  // Home
+                    0x87 => b"\x1b[F",  // End
+                    0x88 => b"\x1b[3~", // Delete
+                    0x80 => b"\x1b[5~", // Page Up
+                    0x81 => b"\x1b[6~", // Page Down
+                    _ => &[],
+                };
+                if !seq.is_empty() {
+                    let _ = process::tty_write(master_idx, seq);
+                }
             }
         }
     }
@@ -936,6 +953,8 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
         let mut buf = [0u8; 512];
         let mut all_exited = false;
         let mut status = 0;
+        let cmd_count = pipeline.command_count;
+        let mut reaped = [false; 16];
         loop {
             let mut pfds = [UserPollFd {
                 fd: capture_fd,
@@ -958,9 +977,15 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
 
             if !all_exited {
                 let mut done = true;
-                for pid in pids.iter().take(pipeline.command_count) {
+                for (idx, pid) in pids.iter().take(cmd_count).enumerate() {
+                    if reaped[idx] {
+                        continue;
+                    }
                     if let Some(st) = process::waitpid_nohang(*pid) {
-                        status = st;
+                        reaped[idx] = true;
+                        if idx == cmd_count - 1 {
+                            status = st;
+                        }
                     } else {
                         done = false;
                     }

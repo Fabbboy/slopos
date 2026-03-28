@@ -102,7 +102,8 @@ pub fn open_tty_fd(tty_idx: u32) -> Result<super::OwnedFd, i64> {
     if ret < 0 {
         Err(ret)
     } else {
-        Ok(super::OwnedFd::from_raw(ret as i32))
+        // SAFETY: ret is a valid fd just returned by the kernel.
+        Ok(unsafe { super::OwnedFd::from_raw(ret as i32) })
     }
 }
 

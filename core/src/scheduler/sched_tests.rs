@@ -67,7 +67,8 @@ impl SchedFixture {
         for cpu in 0..slopos_arch::pcr::get_cpu_count() {
             super::per_cpu::with_cpu_scheduler(cpu, |sched| {
                 sched.force_clear_inbox_count();
-            });
+            })
+            .expect("SCHED_TEST: CPU scheduler missing after init");
         }
 
         Self { aps_paused }

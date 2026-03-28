@@ -36,7 +36,8 @@ use slopos_slibc::pal::{Pal, Sys};
 #[inline(always)]
 pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<super::OwnedFd> {
     Sys::open(path as *const u8, flags as i32, 0)
-        .map(|fd| super::OwnedFd::from_raw(fd as RawFd))
+        // SAFETY: fd is a valid descriptor just returned by the kernel.
+        .map(|fd| unsafe { super::OwnedFd::from_raw(fd as RawFd) })
         .map_err(Into::into)
 }
 
@@ -166,7 +167,8 @@ pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()>
 #[inline(always)]
 pub fn dup(fd: RawFd) -> SyscallResult<super::OwnedFd> {
     Sys::dup(fd)
-        .map(|v| super::OwnedFd::from_raw(v as RawFd))
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as RawFd) })
         .map_err(Into::into)
 }
 
@@ -190,10 +192,13 @@ pub fn lseek(fd: RawFd, offset: i64, whence: u32) -> SyscallResult<i64> {
 pub fn pipe() -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
     let mut raw = [0i32; 2];
     Sys::pipe(&mut raw as *mut [i32; 2]).map_err(super::SyscallError::from)?;
-    Ok((
-        super::OwnedFd::from_raw(raw[0]),
-        super::OwnedFd::from_raw(raw[1]),
-    ))
+    // SAFETY: raw fds are valid descriptors just returned by the kernel.
+    Ok(unsafe {
+        (
+            super::OwnedFd::from_raw(raw[0]),
+            super::OwnedFd::from_raw(raw[1]),
+        )
+    })
 }
 
 /// Create a pipe pair with flags.  Returns `(read_end, write_end)` as `OwnedFd`.
@@ -202,10 +207,13 @@ pub fn pipe2(flags: u32) -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
     let mut raw = [0i32; 2];
     let result = unsafe { syscall2(SYSCALL_PIPE2, raw.as_mut_ptr() as u64, flags as u64) };
     demux(result)?;
-    Ok((
-        super::OwnedFd::from_raw(raw[0]),
-        super::OwnedFd::from_raw(raw[1]),
-    ))
+    // SAFETY: raw fds are valid descriptors just returned by the kernel.
+    Ok(unsafe {
+        (
+            super::OwnedFd::from_raw(raw[0]),
+            super::OwnedFd::from_raw(raw[1]),
+        )
+    })
 }
 
 #[inline(always)]
@@ -281,7 +289,8 @@ pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
 #[inline(always)]
 pub fn ioctl_tiocgptpeer(master_fd: RawFd) -> SyscallResult<super::OwnedFd> {
     let result = unsafe { syscall3(SYSCALL_IOCTL, master_fd as u64, TIOCGPTPEER, 0) };
-    demux(result).map(|v| super::OwnedFd::from_raw(v as i32))
+    // SAFETY: v is a valid fd just returned by the kernel.
+    demux(result).map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
 }
 
 #[inline(always)]
