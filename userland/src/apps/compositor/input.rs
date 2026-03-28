@@ -30,6 +30,11 @@ pub struct InputHandler {
     /// these two diverge, avoiding redundant kernel calls every frame.
     kernel_keyboard_focus: u32,
     pub needs_full_redraw: bool,
+    /// Set when focus just changed; the main loop uses this + `focus_changed_from`
+    /// to add targeted title bar damage instead of full-screen redraw.
+    pub focus_changed: bool,
+    /// Holds the previously focused task_id when focus changes.
+    pub focus_changed_from: u32,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     pub cursor_trail_count: usize,
@@ -54,6 +59,8 @@ impl InputHandler {
             focused_task: 0,
             kernel_keyboard_focus: 0,
             needs_full_redraw: false,
+            focus_changed: false,
+            focus_changed_from: 0,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
             pending_close_tasks: [0; MAX_WINDOWS],
@@ -160,10 +167,16 @@ impl InputHandler {
         }
 
         // Only issue the kernel syscall when focus actually changed.
+        // Instead of needs_full_redraw, signal the previous task_id so the
+        // main loop can add targeted title-bar damage (Mutter pattern:
+        // only damage the actors whose paint volume changed).
+        self.focus_changed = false;
+        self.focus_changed_from = 0;
         if self.focused_task != self.kernel_keyboard_focus {
+            self.focus_changed = true;
+            self.focus_changed_from = self.kernel_keyboard_focus;
             input::set_keyboard_focus(self.focused_task);
             self.kernel_keyboard_focus = self.focused_task;
-            self.needs_full_redraw = true;
         }
     }
 
@@ -328,7 +341,9 @@ impl InputHandler {
         let new_x = self.mouse_x - self.drag_offset_x;
         let new_y = self.mouse_y - self.drag_offset_y;
         window::set_window_position(self.drag_task, new_x, new_y);
-        self.needs_full_redraw = true;
+        // Don't set needs_full_redraw — the per-window bounds change
+        // detection in refresh_windows() already damages old + new positions,
+        // following the wlroots scene_node_set_position() pattern.
     }
 
     fn request_window_close(

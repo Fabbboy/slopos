@@ -116,6 +116,8 @@ pub struct LauncherShelf {
     entry_count: usize,
     hovered_index: Option<usize>,
     last_bounds: DamageRect,
+    /// Set when shelf entries change (app opens/closes); cleared by `take_content_dirty()`.
+    content_dirty: bool,
 }
 
 impl LauncherShelf {
@@ -125,7 +127,15 @@ impl LauncherShelf {
             entry_count: 0,
             hovered_index: None,
             last_bounds: DamageRect::invalid(),
+            content_dirty: false,
         }
+    }
+
+    /// Returns `true` and clears the flag if shelf content changed since last call.
+    pub fn take_content_dirty(&mut self) -> bool {
+        let dirty = self.content_dirty;
+        self.content_dirty = false;
+        dirty
     }
 
     /// Populate default pinned applications (Shell, Files, Monitor).
@@ -166,6 +176,15 @@ impl LauncherShelf {
     pub fn sync_running_apps(&mut self, windows: &[UserWindowInfo], count: u32) {
         // Count pinned entries (they are always at the front).
         let pinned_count = self.pinned_count();
+
+        // Snapshot previous running state for change detection.
+        let prev_count = self.entry_count;
+        let mut prev_running = [false; MAX_ENTRIES];
+        let mut prev_task_ids = [0u32; MAX_ENTRIES];
+        for i in 0..prev_count {
+            prev_running[i] = self.entries[i].running;
+            prev_task_ids[i] = self.entries[i].task_id;
+        }
 
         // Reset running state on all pinned entries.
         for i in 0..pinned_count {
@@ -223,6 +242,20 @@ impl LauncherShelf {
                 };
                 self.entries[idx] = entry;
                 self.entry_count += 1;
+            }
+        }
+
+        // Detect if anything actually changed.
+        if self.entry_count != prev_count {
+            self.content_dirty = true;
+        } else {
+            for i in 0..self.entry_count {
+                if self.entries[i].running != prev_running[i]
+                    || self.entries[i].task_id != prev_task_ids[i]
+                {
+                    self.content_dirty = true;
+                    break;
+                }
             }
         }
     }

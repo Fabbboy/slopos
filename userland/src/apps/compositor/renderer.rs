@@ -1,4 +1,4 @@
-use slopos_abi::draw::Color32;
+use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
 use slopos_font::FontRenderer;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
@@ -384,36 +384,109 @@ impl Renderer {
         let wh = window.height as i32 + TITLE_BAR_HEIGHT;
         let sx = window.x;
         let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
-        let spread_sq = (SHADOW_SPREAD * SHADOW_SPREAD) as u32;
+        let spread = SHADOW_SPREAD;
 
-        for d in 1..=SHADOW_SPREAD {
-            let t = (SHADOW_SPREAD - d) as u32;
-            let alpha = (SHADOW_MAX_ALPHA as u32 * t * t) / spread_sq;
-            if alpha == 0 {
+        // Pre-compute alpha profile: alpha[d-1] = shadow alpha at distance d.
+        // Using quadratic falloff matching the original concentric-rect approach.
+        let spread_sq = (spread * spread) as u32;
+        let mut inv_alpha = [0u32; 12]; // 255 - alpha, for fast black-shadow blend
+        for d in 1..=spread {
+            let t = (spread - d) as u32;
+            let a = (SHADOW_MAX_ALPHA as u32 * t * t) / spread_sq;
+            inv_alpha[(d - 1) as usize] = 255 - a;
+        }
+
+        let buf_w = buf.width() as i32;
+        let buf_h = buf.height() as i32;
+        let bpp = buf.bytes_per_pixel() as usize;
+        let pitch = buf.pitch_bytes();
+
+        // Blend a single pixel at (px, py) with black at the given inv_alpha.
+        // For black shadow: out = dst * inv_alpha / 255, using the RB/AG trick.
+        #[inline(always)]
+        fn shadow_blend_pixel(buf: &mut DrawBuffer, off: usize, inv_a: u32) {
+            let dst = buf.read_encoded_at(off);
+            let rb = (dst & 0x00FF00FF) * inv_a + 0x00800080;
+            let ag = ((dst >> 8) & 0x00FF00FF) * inv_a + 0x00800080;
+            let result = (rb >> 8 & 0x00FF00FF) | (ag >> 8 & 0x00FF00FF) << 8;
+            buf.write_encoded_at(off, EncodedPixel(result));
+        }
+
+        // Process shadow in 4 regions: top strip, bottom strip, left strip, right strip.
+        // Each strip is `spread` pixels wide/tall. Corners are handled by overlap.
+
+        // Top strip: rows from (sy - spread) to (sy - 1)
+        for d in 1..=spread {
+            let row = sy - d;
+            if row < clip.y0 || row > clip.y1 {
                 continue;
             }
-            let color = Color32::new(0, 0, 0, alpha as u8);
+            let ia = inv_alpha[(d - 1) as usize];
+            if ia == 255 {
+                continue; // fully transparent shadow at this distance
+            }
+            let x_start = (sx - d).max(clip.x0).max(0);
+            let x_end = (sx + ww - 1 + d).min(clip.x1).min(buf_w - 1);
+            if x_start > x_end {
+                continue;
+            }
+            let base = (row as usize) * pitch;
+            for px in x_start..=x_end {
+                shadow_blend_pixel(buf, base + (px as usize) * bpp, ia);
+            }
+        }
 
-            gfx::fill_rect_blended_clipped(
-                buf,
-                sx - d,
-                sy + wh + d - 1,
-                ww + 2 * d,
-                1,
-                color,
-                clip,
-            );
-            gfx::fill_rect_blended_clipped(buf, sx - d, sy - d, ww + 2 * d, 1, color, clip);
-            gfx::fill_rect_blended_clipped(buf, sx - d, sy - d + 1, 1, wh + 2 * d - 2, color, clip);
-            gfx::fill_rect_blended_clipped(
-                buf,
-                sx + ww + d - 1,
-                sy - d + 1,
-                1,
-                wh + 2 * d - 2,
-                color,
-                clip,
-            );
+        // Bottom strip: rows from (sy + wh) to (sy + wh + spread - 1)
+        for d in 1..=spread {
+            let row = sy + wh + d - 1;
+            if row < clip.y0 || row > clip.y1 {
+                continue;
+            }
+            let ia = inv_alpha[(d - 1) as usize];
+            if ia == 255 {
+                continue;
+            }
+            let x_start = (sx - d).max(clip.x0).max(0);
+            let x_end = (sx + ww - 1 + d).min(clip.x1).min(buf_w - 1);
+            if x_start > x_end {
+                continue;
+            }
+            let base = (row as usize) * pitch;
+            for px in x_start..=x_end {
+                shadow_blend_pixel(buf, base + (px as usize) * bpp, ia);
+            }
+        }
+
+        // Left strip: rows from sy to (sy + wh - 1), columns (sx - spread) to (sx - 1)
+        for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
+            let base = (row as usize) * pitch;
+            for d in 1..=spread {
+                let col = sx - d;
+                if col < clip.x0 || col > clip.x1 || col < 0 || col >= buf_w {
+                    continue;
+                }
+                let ia = inv_alpha[(d - 1) as usize];
+                if ia == 255 {
+                    continue;
+                }
+                shadow_blend_pixel(buf, base + (col as usize) * bpp, ia);
+            }
+        }
+
+        // Right strip: rows from sy to (sy + wh - 1), columns (sx + ww) to (sx + ww + spread - 1)
+        for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
+            let base = (row as usize) * pitch;
+            for d in 1..=spread {
+                let col = sx + ww - 1 + d;
+                if col < clip.x0 || col > clip.x1 || col < 0 || col >= buf_w {
+                    continue;
+                }
+                let ia = inv_alpha[(d - 1) as usize];
+                if ia == 255 {
+                    continue;
+                }
+                shadow_blend_pixel(buf, base + (col as usize) * bpp, ia);
+            }
         }
     }
 

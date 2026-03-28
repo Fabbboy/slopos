@@ -10,6 +10,7 @@ set -euo pipefail
 #   RUST_CHANNEL      - toolchain channel (parsed from rust-toolchain.toml if unset)
 #   RUST_TARGET       - custom target JSON (default: targets/x86_64-slos.json)
 #   KERNEL_RUSTFLAGS  - extra RUSTFLAGS for the kernel build
+#   KERNEL_RELEASE    - set to 1 for optimized (release) kernel build
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -29,9 +30,16 @@ KERNEL_RUSTFLAGS="${KERNEL_RUSTFLAGS:--C force-frame-pointers=yes}"
 mkdir -p "$BUILD_DIR"
 rm -f "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
 
+KERNEL_RELEASE="${KERNEL_RELEASE:-0}"
+
 FEATURE_ARGS=()
 if [ -n "$FEATURES" ]; then
     FEATURE_ARGS=(--features "$FEATURES")
+fi
+
+PROFILE_ARGS=()
+if [ "$KERNEL_RELEASE" = "1" ]; then
+    PROFILE_ARGS=(--release)
 fi
 
 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
@@ -44,6 +52,7 @@ $CARGO +"$RUST_CHANNEL" build \
     --package kernel \
     --bin kernel \
     "${FEATURE_ARGS[@]}" \
+    "${PROFILE_ARGS[@]}" \
     --artifact-dir "$BUILD_DIR"
 
 if [ -f "$BUILD_DIR/kernel" ]; then

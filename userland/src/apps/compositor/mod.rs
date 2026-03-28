@@ -127,15 +127,22 @@ impl WindowManager {
             }
         }
 
-        // Add shelf bounds to damage when cursor moves near the shelf.
-        let shelf_bounds = self.shelf.bounds();
-        if shelf_bounds.is_valid() {
-            self.output_damage.add_rect(
-                shelf_bounds.x0,
-                shelf_bounds.y0,
-                shelf_bounds.x1,
-                shelf_bounds.y1,
-            );
+        // Add shelf bounds to damage only when its visual output changes:
+        // cursor moved (magnification/hover may change) or content changed
+        // (app opened/closed). Following the Mutter/wlroots pattern where
+        // panels produce zero damage when idle.
+        let cursor_moved = self.input.cursor_trail_count > 0;
+        let shelf_content_changed = self.shelf.take_content_dirty();
+        if cursor_moved || shelf_content_changed {
+            let shelf_bounds = self.shelf.bounds();
+            if shelf_bounds.is_valid() {
+                self.output_damage.add_rect(
+                    shelf_bounds.x0,
+                    shelf_bounds.y0,
+                    shelf_bounds.x1,
+                    shelf_bounds.y1,
+                );
+            }
         }
 
         if self.input.cursor_trail_count > 0 {
@@ -248,6 +255,28 @@ impl WindowManager {
         self.output_damage.add_rect(x - 3, y - 9, x + 12, y + 17);
     }
 
+    /// Add damage for a window's title bar + shadow area by task_id.
+    /// Used for targeted focus-change damage instead of full-screen redraw.
+    fn add_title_bar_damage_for_task(&mut self, task_id: u32) {
+        if task_id == 0 {
+            return;
+        }
+        for i in 0..self.window_count as usize {
+            if self.windows[i].task_id == task_id {
+                let w = &self.windows[i];
+                let frame_y = w.y - TITLE_BAR_HEIGHT;
+                // Damage the title bar area including shadow overlap.
+                self.output_damage.add_rect(
+                    w.x - SHADOW_SPREAD,
+                    frame_y - SHADOW_SPREAD,
+                    w.x + w.width as i32 - 1 + SHADOW_SPREAD,
+                    w.y - 1,
+                );
+                return;
+            }
+        }
+    }
+
     fn needs_redraw(&self) -> bool {
         self.first_frame || self.input.needs_full_redraw || self.output_damage.is_dirty()
     }
@@ -301,6 +330,13 @@ pub fn compositor_user_main() {
             &wm.prev_windows,
             wm.prev_window_count,
         );
+        // Add targeted title bar damage for focus change instead of full
+        // redraw. Following the Mutter pattern: only damage actors whose
+        // paint volume (title bar appearance) changed.
+        if wm.input.focus_changed {
+            wm.add_title_bar_damage_for_task(wm.input.focus_changed_from);
+            wm.add_title_bar_damage_for_task(wm.input.focused_task);
+        }
         wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);

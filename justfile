@@ -149,6 +149,11 @@ boot-fast:
     BOOT_CMDLINE="itests=off roulette=skip" just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
+[doc("Boot SlopOS with release-optimized kernel (production build)")]
+boot-prod:
+    BOOT_CMDLINE="itests=off roulette=skip" KERNEL_RELEASE=1 just _iso-notests
+    just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
+
 [doc("Boot SlopOS headless (serial only, ports= for forwarding)")]
 boot-headless:
     just _iso-notests

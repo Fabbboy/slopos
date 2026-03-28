@@ -256,6 +256,9 @@ impl PostLockWork {
     }
 
     pub(crate) fn execute(mut self) {
+        // `mut` is needed in debug builds for the assertion tracking below.
+        // In release the cfg block is stripped, making `mut` appear unused.
+        let _ = &mut self;
         #[cfg(debug_assertions)]
         {
             self.executed = true;

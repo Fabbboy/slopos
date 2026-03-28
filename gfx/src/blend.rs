@@ -5,7 +5,7 @@
 //! with different pixel layouts.
 
 use slopos_abi::damage::DamageRect;
-use slopos_abi::draw::{Canvas, Color32};
+use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
 
 /// Porter-Duff "source over" compositing operator (straight alpha).
 ///
@@ -181,9 +181,34 @@ pub fn fill_rect_blended<T: Canvas>(
         let px = target.pixel_format().encode(color);
         target.fill_rect_encoded(x0, y0, x1 - x0 + 1, y1 - y0 + 1, px);
     } else {
+        // Row-level blending using the RB/AG channel separation trick.
+        // Works in native pixel format — format-agnostic since the trick
+        // just separates alternating byte pairs.
+        //
+        // Hoists source contribution out of the loop:
+        //   out = src_color * src_alpha + dst_color * (255 - src_alpha)
+        // The src_color * src_alpha product is constant for solid-color fills.
+        let sa = alpha as u32;
+        let inv_sa = 255 - sa;
+        let src_native = target.pixel_format().encode(color).to_u32();
+        // Pre-compute src contribution (constant for entire rect)
+        let src_rb = (src_native & 0x00FF00FF) * sa;
+        let src_ag = ((src_native >> 8) & 0x00FF00FF) * sa;
+
+        let bpp = target.bytes_per_pixel() as usize;
+        let pitch = target.pitch_bytes();
+        let col_count = (x1 - x0 + 1) as usize;
+
         for row in y0..=y1 {
-            for col in x0..=x1 {
-                put_pixel_blended(target, col, row, color);
+            let base = (row as usize) * pitch + (x0 as usize) * bpp;
+            for i in 0..col_count {
+                let off = base + i * bpp;
+                let dst = target.read_encoded_at(off);
+                let dst_rb = dst & 0x00FF00FF;
+                let dst_ag = (dst >> 8) & 0x00FF00FF;
+                let rb = (src_rb + dst_rb * inv_sa + 0x00800080) >> 8 & 0x00FF00FF;
+                let ag = (src_ag + dst_ag * inv_sa + 0x00800080) >> 8 & 0x00FF00FF;
+                target.write_encoded_at(off, EncodedPixel(rb | (ag << 8)));
             }
         }
     }
