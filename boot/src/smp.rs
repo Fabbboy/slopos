@@ -1,6 +1,6 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use limine::mp::{Cpu as MpCpu, ResponseFlags as MpResponseFlags};
+use limine::mp::{MP_FLAG_X2APIC, MpInfo};
 
 use slopos_arch::{cpu, is_cpu_online, pcr};
 use slopos_core::sched::{enter_scheduler, init_scheduler_for_ap};
@@ -16,8 +16,19 @@ use crate::limine_protocol;
 static NEXT_CPU_ID: AtomicUsize = AtomicUsize::new(1);
 
 const AP_STARTED_MAGIC: u64 = 0x4150_5354_4152_5444;
+const MAX_CPUS: usize = 256;
 
-unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
+/// Per-CPU completion signals.  The BSP passes each AP its index into this
+/// array via `MpInfo::bootstrap(ap_entry, slot)`.  The AP stores
+/// `AP_STARTED_MAGIC` here once it is fully initialised so the BSP can
+/// spin-wait for it—replacing the now-private `MpInfo::extra_argument` field
+/// that limine 0.6 no longer exposes for writing.
+static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_CPUS]
+};
+
+unsafe extern "C" fn ap_entry(cpu_info: &MpInfo) -> ! {
     cpu::disable_interrupts();
 
     cpu::enable_sse();
@@ -73,12 +84,15 @@ unsafe extern "C" fn ap_entry(cpu_info: &MpCpu) -> ! {
     // IPIs could arrive and touch uninitialised per-CPU scheduler state.
     init_scheduler_for_ap(cpu_idx);
 
-    cpu_info.extra.store(AP_STARTED_MAGIC, Ordering::Release);
+    // Signal the BSP that this AP is fully initialised.
+    let signal_slot = cpu_info.extra_argument() as usize;
+    AP_SIGNALS[signal_slot].store(AP_STARTED_MAGIC, Ordering::Release);
+
     klog_info!(
         "MP: CPU online (idx {}, apic 0x{:x}, acpi {})",
         cpu_idx,
         apic_id,
-        cpu_info.id
+        cpu_info.processor_id
     );
 
     // AP LAPIC timer is started later by deferred_start_ap_timer() in the
@@ -96,12 +110,11 @@ pub fn smp_init() {
     };
 
     let cpus = resp.cpus();
-    let bsp_lapic = resp.bsp_lapic_id();
+    let bsp_lapic = resp.bsp_lapic_id;
 
     // BSP PCR already initialized in early_init; nothing more needed here.
 
-    let flags = resp.flags();
-    let x2apic = if flags.contains(MpResponseFlags::X2APIC) {
+    let x2apic = if resp.flags as u64 & MP_FLAG_X2APIC != 0 {
         "on"
     } else {
         "off"
@@ -121,17 +134,22 @@ pub fn smp_init() {
         } else {
             "ap"
         };
-        klog_info!("MP: CPU {} lapic 0x{:x} ({})", cpu.id, cpu.lapic_id, role);
+        klog_info!(
+            "MP: CPU {} lapic 0x{:x} ({})",
+            cpu.processor_id,
+            cpu.lapic_id,
+            role
+        );
     }
 
     let mut ap_count = 0usize;
-    for cpu in cpus {
+    for (i, cpu) in cpus.iter().enumerate() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
 
-        cpu.extra.store(0, Ordering::Release);
-        cpu.goto_address.write(ap_entry);
+        AP_SIGNALS[i].store(0, Ordering::Release);
+        cpu.bootstrap(ap_entry, i as u64);
         ap_count += 1;
     }
 
@@ -142,18 +160,18 @@ pub fn smp_init() {
 
     let mut started_count = 0usize;
 
-    for cpu in cpus {
+    for (i, cpu) in cpus.iter().enumerate() {
         if cpu.lapic_id == bsp_lapic {
             continue;
         }
 
         let mut spins = 2_000_000u32;
-        while cpu.extra.load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0 {
+        while AP_SIGNALS[i].load(Ordering::Acquire) != AP_STARTED_MAGIC && spins > 0 {
             cpu::pause();
             spins -= 1;
         }
 
-        if cpu.extra.load(Ordering::Acquire) == AP_STARTED_MAGIC {
+        if AP_SIGNALS[i].load(Ordering::Acquire) == AP_STARTED_MAGIC {
             klog_info!("MP: CPU 0x{:x} reported online", cpu.lapic_id);
             started_count += 1;
         } else {

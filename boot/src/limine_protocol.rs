@@ -5,12 +5,11 @@ use core::{
 };
 
 use limine::{
-    BaseRevision,
+    BaseRevision, memmap,
     request::{
         BootloaderInfoRequest, ExecutableAddressRequest, ExecutableFileRequest, FramebufferRequest,
-        HhdmRequest, MemoryMapRequest, MpRequest, RsdpRequest,
+        HhdmRequest, MemmapRequest, MpRequest, MpResponse, RsdpRequest,
     },
-    response::MpResponse,
 };
 
 use slopos_abi::DisplayInfo;
@@ -35,7 +34,7 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
@@ -59,64 +58,42 @@ static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressReque
 
 #[used]
 #[unsafe(link_section = ".limine_requests")]
-static MP_REQUEST: MpRequest = MpRequest::new();
+static MP_REQUEST: MpRequest = MpRequest::new(0);
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end_marker")]
 static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 
-fn convert_entry_type(entry_type: limine::memory_map::EntryType) -> MemoryRegionKind {
-    use limine::memory_map::EntryType;
-    if entry_type == EntryType::USABLE {
-        MemoryRegionKind::Usable
-    } else if entry_type == EntryType::RESERVED {
-        MemoryRegionKind::Reserved
-    } else if entry_type == EntryType::ACPI_RECLAIMABLE {
-        MemoryRegionKind::AcpiReclaimable
-    } else if entry_type == EntryType::ACPI_NVS {
-        MemoryRegionKind::AcpiNvs
-    } else if entry_type == EntryType::BAD_MEMORY {
-        MemoryRegionKind::BadMemory
-    } else if entry_type == EntryType::BOOTLOADER_RECLAIMABLE {
-        MemoryRegionKind::BootloaderReclaimable
-    } else if entry_type == EntryType::EXECUTABLE_AND_MODULES {
-        MemoryRegionKind::KernelAndModules
-    } else if entry_type == EntryType::FRAMEBUFFER {
-        MemoryRegionKind::Framebuffer
-    } else {
-        MemoryRegionKind::Reserved
+fn convert_entry_type(entry_type: u64) -> MemoryRegionKind {
+    match entry_type {
+        memmap::MEMMAP_USABLE => MemoryRegionKind::Usable,
+        memmap::MEMMAP_RESERVED => MemoryRegionKind::Reserved,
+        memmap::MEMMAP_ACPI_RECLAIMABLE => MemoryRegionKind::AcpiReclaimable,
+        memmap::MEMMAP_ACPI_NVS => MemoryRegionKind::AcpiNvs,
+        memmap::MEMMAP_BAD_MEMORY => MemoryRegionKind::BadMemory,
+        memmap::MEMMAP_BOOTLOADER_RECLAIMABLE => MemoryRegionKind::BootloaderReclaimable,
+        memmap::MEMMAP_EXECUTABLE_AND_MODULES => MemoryRegionKind::KernelAndModules,
+        memmap::MEMMAP_FRAMEBUFFER => MemoryRegionKind::Framebuffer,
+        _ => MemoryRegionKind::Reserved,
     }
 }
 
-fn entry_type_to_u64(entry_type: limine::memory_map::EntryType) -> u64 {
-    use limine::memory_map::EntryType;
-    if entry_type == EntryType::USABLE {
-        0
-    } else if entry_type == EntryType::RESERVED {
-        1
-    } else if entry_type == EntryType::ACPI_RECLAIMABLE {
-        2
-    } else if entry_type == EntryType::ACPI_NVS {
-        3
-    } else if entry_type == EntryType::BAD_MEMORY {
-        4
-    } else if entry_type == EntryType::BOOTLOADER_RECLAIMABLE {
-        5
-    } else if entry_type == EntryType::EXECUTABLE_AND_MODULES {
-        6
-    } else if entry_type == EntryType::FRAMEBUFFER {
-        7
-    } else {
-        1
+fn entry_type_to_u64(entry_type: u64) -> u64 {
+    match entry_type {
+        memmap::MEMMAP_USABLE => 0,
+        memmap::MEMMAP_RESERVED => 1,
+        memmap::MEMMAP_ACPI_RECLAIMABLE => 2,
+        memmap::MEMMAP_ACPI_NVS => 3,
+        memmap::MEMMAP_BAD_MEMORY => 4,
+        memmap::MEMMAP_BOOTLOADER_RECLAIMABLE => 5,
+        memmap::MEMMAP_EXECUTABLE_AND_MODULES => 6,
+        memmap::MEMMAP_FRAMEBUFFER => 7,
+        _ => 1,
     }
 }
 
-fn limine_entry_to_region(entry: &limine::memory_map::Entry) -> MemoryRegion {
-    MemoryRegion::new(
-        entry.base,
-        entry.length,
-        convert_entry_type(entry.entry_type),
-    )
+fn limine_entry_to_region(entry: &memmap::Entry) -> MemoryRegion {
+    MemoryRegion::new(entry.base, entry.length, convert_entry_type(entry.type_))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,7 +179,7 @@ pub fn ensure_base_revision() {
 }
 
 pub fn mp_response() -> Option<&'static MpResponse> {
-    MP_REQUEST.get_response()
+    MP_REQUEST.response()
 }
 
 pub fn init_limine_protocol() -> i32 {
@@ -213,30 +190,30 @@ pub fn init_limine_protocol() -> i32 {
 
     let info = sysinfo_mut();
 
-    if let Some(resp) = BOOTLOADER_INFO_REQUEST.get_response() {
+    if let Some(resp) = BOOTLOADER_INFO_REQUEST.response() {
         let name = resp.name();
         let version = resp.version();
         klog_debug!("Bootloader: {} version {}", name, version);
     }
 
-    if let Some(hhdm) = HHDM_REQUEST.get_response() {
-        info.hhdm_offset = hhdm.offset();
+    if let Some(hhdm) = HHDM_REQUEST.response() {
+        info.hhdm_offset = hhdm.offset;
         info.flags.hhdm_available = true;
-        klog_debug!("HHDM offset: 0x{:x}", hhdm.offset());
+        klog_debug!("HHDM offset: 0x{:x}", hhdm.offset);
     }
 
-    if let Some(ka) = KERNEL_ADDRESS_REQUEST.get_response() {
-        info.kernel_phys_base = ka.physical_base();
-        info.kernel_virt_base = ka.virtual_base();
+    if let Some(ka) = KERNEL_ADDRESS_REQUEST.response() {
+        info.kernel_phys_base = ka.physical_base;
+        info.kernel_virt_base = ka.virtual_base;
         klog_debug!(
             "Kernel phys base: 0x{:x} virt base: 0x{:x}",
-            ka.physical_base(),
-            ka.virtual_base()
+            ka.physical_base,
+            ka.virtual_base
         );
     }
 
-    if let Some(rsdp) = RSDP_REQUEST.get_response() {
-        let rsdp_ptr = rsdp.address() as u64;
+    if let Some(rsdp) = RSDP_REQUEST.response() {
+        let rsdp_ptr = rsdp.address as u64;
         info.rsdp_phys_addr = rsdp_ptr;
         info.rsdp_virt_addr = rsdp_ptr;
         info.flags.rsdp_available = rsdp_ptr != 0;
@@ -248,33 +225,28 @@ pub fn init_limine_protocol() -> i32 {
         }
     }
 
-    if let Some(kf_resp) = KERNEL_FILE_REQUEST.get_response() {
-        let kernel_file = kf_resp.file();
-        let cmdline_cstr = kernel_file.string();
-        let cmdline_bytes = cmdline_cstr.to_bytes();
-        if !cmdline_bytes.is_empty() {
-            info.cmdline_ptr = cmdline_cstr.as_ptr();
-            info.cmdline = cmdline_cstr.to_str().ok();
+    if let Some(kf_resp) = KERNEL_FILE_REQUEST.response() {
+        let kernel_file = kf_resp.executable_file();
+        let cmdline_str = kernel_file.cmdline();
+        if !cmdline_str.is_empty() {
+            info.cmdline_ptr = cmdline_str.as_ptr() as *const c_char;
+            info.cmdline = Some(cmdline_str);
             info.flags.kernel_cmdline_available = true;
 
-            if let Some(cmd) = info.cmdline {
-                if !cmd.is_empty() {
-                    klog_debug!("Kernel cmdline: {}", cmd);
-                } else {
-                    klog_debug!("Kernel cmdline: <empty>");
-                }
-            }
+            klog_debug!("Kernel cmdline: {}", cmdline_str);
+        } else {
+            klog_debug!("Kernel cmdline: <empty>");
         }
     }
 
-    if let Some(memmap) = MEMMAP_REQUEST.get_response() {
+    if let Some(memmap) = MEMMAP_REQUEST.response() {
         let entries = memmap.entries();
         let mut total = 0u64;
         let mut available = 0u64;
 
         for entry in entries {
             total = total.saturating_add(entry.length);
-            if entry.entry_type == limine::memory_map::EntryType::USABLE {
+            if entry.type_ == memmap::MEMMAP_USABLE {
                 available = available.saturating_add(entry.length);
             }
         }
@@ -294,23 +266,18 @@ pub fn init_limine_protocol() -> i32 {
         klog_info!("WARNING: No memory map available from Limine");
     }
 
-    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.get_response() {
-        let mut framebuffers = fb_resp.framebuffers();
-        if let Some(fb) = framebuffers.next() {
-            let display_info = DisplayInfo::from_raw(fb.width(), fb.height(), fb.pitch(), fb.bpp());
-            info.framebuffer = Some(BootFramebuffer::new(fb.addr(), display_info));
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response() {
+        let framebuffers = fb_resp.framebuffers();
+        if let Some(fb) = framebuffers.first() {
+            let display_info = DisplayInfo::from_raw(fb.width, fb.height, fb.pitch, fb.bpp);
+            info.framebuffer = Some(BootFramebuffer::new(fb.address() as *mut u8, display_info));
             info.flags.framebuffer_available = true;
 
-            klog_debug!(
-                "Framebuffer: {}x{} @ {} bpp",
-                fb.width(),
-                fb.height(),
-                fb.bpp()
-            );
+            klog_debug!("Framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
             klog_debug!(
                 "Framebuffer addr: 0x{:x} pitch: {}",
-                fb.addr() as u64,
-                fb.pitch()
+                fb.address() as u64,
+                fb.pitch
             );
         } else {
             klog_info!("WARNING: No framebuffer provided by Limine");
@@ -424,9 +391,9 @@ pub fn get_rsdp_address() -> *const c_void {
 
     let addr = info.rsdp_phys_addr;
 
-    // Limine protocol states pointers have HHDM offset added, but Limine v8 with
-    // revision 3 returns physical addresses for RSDP (ACPI regions not pre-mapped).
-    // Detect if address is already virtual (in HHDM range) or needs conversion.
+    // With base revision 6 (Limine v11), the RSDP address is returned as a
+    // virtual (HHDM) pointer again (unlike revision 3 which returned physical).
+    // Detect whether the address is already in the HHDM range or needs conversion.
     if addr >= info.hhdm_offset && info.flags.hhdm_available {
         // Already an HHDM virtual address
         addr as *const c_void
@@ -440,26 +407,26 @@ pub fn get_rsdp_address() -> *const c_void {
 }
 
 pub fn get_memmap_entry(index: usize) -> Option<MemmapEntry> {
-    let memmap = MEMMAP_REQUEST.get_response()?;
+    let memmap = MEMMAP_REQUEST.response()?;
     let entries = memmap.entries();
     let entry = entries.get(index)?;
     Some(MemmapEntry {
         base: entry.base,
         length: entry.length,
-        typ: entry_type_to_u64(entry.entry_type),
+        typ: entry_type_to_u64(entry.type_),
     })
 }
 
 pub fn memmap_entry_count() -> usize {
     MEMMAP_REQUEST
-        .get_response()
+        .response()
         .map(|r| r.entries().len())
         .unwrap_or(0)
 }
 
 pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
     MEMMAP_REQUEST
-        .get_response()
+        .response()
         .into_iter()
         .flat_map(|r| r.entries().iter())
         .map(|e| limine_entry_to_region(e))
@@ -497,7 +464,7 @@ fn init_legacy_memmap() {
         return;
     }
 
-    let Some(memmap) = MEMMAP_REQUEST.get_response() else {
+    let Some(memmap) = MEMMAP_REQUEST.response() else {
         return;
     };
 
@@ -513,7 +480,7 @@ fn init_legacy_memmap() {
             (*entries_ptr)[i] = LimineMemmapEntry {
                 base: entry.base,
                 length: entry.length,
-                typ: entry_type_to_u64(entry.entry_type),
+                typ: entry_type_to_u64(entry.type_),
             };
             (*ptrs_ptr).0[i] = &(*entries_ptr)[i];
         }

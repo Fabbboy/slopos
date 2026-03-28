@@ -65,15 +65,18 @@ ISO_DIR="$(dirname "$OUTPUT")"
 mkdir -p "$ISO_DIR"
 
 xorriso -as mkisofs \
+    -R -r -J \
     -V 'SLOPOS' \
     -b boot/limine-bios-cd.bin \
     -no-emul-boot \
     -boot-load-size 4 \
     -boot-info-table \
-    -eltorito-alt-boot \
-    -e boot/limine-uefi-cd.bin \
-    -no-emul-boot \
-    -isohybrid-gpt-basdat \
+    -hfsplus \
+    -apm-block-size 2048 \
+    --efi-boot boot/limine-uefi-cd.bin \
+    -efi-boot-part \
+    --efi-boot-image \
+    --protective-msdos-label \
     "$ISO_ROOT" \
     -o "$TMP_OUTPUT"
 

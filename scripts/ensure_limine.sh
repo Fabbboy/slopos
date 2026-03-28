@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
 LIMINE_REPO="${LIMINE_REPO:-https://github.com/limine-bootloader/limine.git}"
-LIMINE_BRANCH="${LIMINE_BRANCH:-v8.x-binary}"
+LIMINE_BRANCH="${LIMINE_BRANCH:-v11.x-binary}"
 
 if [ ! -f "$LIMINE_DIR/Makefile" ] && [ -f "$REPO_ROOT/.gitmodules" ]; then
     if command -v git >/dev/null 2>&1; then
