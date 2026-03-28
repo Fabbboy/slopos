@@ -97,7 +97,7 @@ impl OwnedFd {
 impl Drop for OwnedFd {
     fn drop(&mut self) {
         if self.0 >= 0 {
-            let _ = super::syscall::fs::close_fd_raw(self.0);
+            let _ = fs::close_fd_raw(self.0);
         }
     }
 }

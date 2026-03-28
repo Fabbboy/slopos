@@ -548,15 +548,21 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
 /// Open a file descriptor for a TTY device.
 ///
 /// TTY devices are inherently bidirectional, so READ and WRITE are always
-/// granted.  There is no `flags` parameter — callers cannot accidentally
-/// pass unconverted POSIX flags (the bug that `OpenMode` prevents).
-pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex) -> c_int {
+/// granted.  `posix_flags` is honoured only for `O_CLOEXEC`; pass `0` when
+/// no special flags are needed.
+pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) -> c_int {
     let tty_ops = current_tty_ops();
+    let base = OpenMode::READ | OpenMode::WRITE;
+    let flags = if posix_flags & O_CLOEXEC as u32 != 0 {
+        base.with_raw(O_CLOEXEC as u32)
+    } else {
+        base
+    };
     install_fd_entry(
         process_id,
         tty_ops,
         tty_idx.0 as usize,
-        OpenMode::READ | OpenMode::WRITE,
+        flags,
         Some(tty_idx),
     )
 }
@@ -856,7 +862,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             let guard = unsafe { (&(*table_ptr).lock).lock() };
             let val = (unsafe { get_fd_entry(&mut *table_ptr, fd) })
                 .and_then(|f| get_open_file_mut(open_files, f.open_file_idx))
-                .map(|o| o.status_flags.bits() as i64)
+                .map(|o| openmode_to_posix_bits(o.status_flags) as i64)
                 .unwrap_or(Errno::EBADF.raw() as i64);
             drop(guard);
             val
@@ -878,19 +884,20 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
                 drop(guard);
                 return Errno::EBADF.raw() as i64;
             };
+            let posix_arg = arg as u32;
             let mode_bits = open_file.status_flags & (OpenMode::READ | OpenMode::WRITE);
             let mut next_flags = mode_bits;
-            if (arg as u32 & OpenMode::APPEND.bits()) != 0 {
+            if posix_arg & O_APPEND != 0 {
                 next_flags |= OpenMode::APPEND;
             }
             let mut raw = open_file.status_flags.bits() & (O_NOCTTY as u32);
-            if (arg & O_NONBLOCK) != 0 {
+            if posix_arg & O_NONBLOCK as u32 != 0 {
                 raw |= O_NONBLOCK as u32;
             }
             let next_flags = next_flags.with_raw(raw);
             open_file.status_flags = next_flags;
             if let Some(ops) = open_file.ops {
-                let _ = ops.set_status_flags(open_file.handle, next_flags.bits());
+                let _ = ops.set_status_flags(open_file.handle, openmode_to_posix_bits(next_flags));
             }
             drop(guard);
             0

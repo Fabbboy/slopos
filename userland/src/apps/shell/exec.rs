@@ -489,6 +489,7 @@ fn execute_registry_spawn(cmd: &ParsedCommand, background: bool) -> Option<i32> 
             let _ = fs::close_fd_raw(pipe_fds[0]);
         }
         shell_write(b"spawn failed\n");
+        return Some(1);
     }
     let pid = tid as u32;
     if background {
@@ -927,6 +928,66 @@ fn execute_pipeline(pipeline: &ParsedPipeline) -> i32 {
     enter_foreground(pgid);
 
     let capture_fd = pipes[inter_pipes][0];
+    if capture_fd >= 0 && super::display::DISPLAY.enabled.get() {
+        // Display mode: non-blocking read + poll so we keep forwarding
+        // compositor keyboard events to the PTY (avoids deadlocking
+        // children that read from the TTY slave).
+        let _ = crate::syscall::net::set_nonblocking(capture_fd);
+        let mut buf = [0u8; 512];
+        let mut all_exited = false;
+        let mut status = 0;
+        loop {
+            let mut pfds = [UserPollFd {
+                fd: capture_fd,
+                events: POLLIN,
+                revents: 0,
+            }];
+            let _ = fs::poll(&mut pfds, 10);
+
+            forward_compositor_keyboard();
+
+            loop {
+                match fs::read_slice(capture_fd, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        shell_write(&buf[..n]);
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if !all_exited {
+                let mut done = true;
+                for pid in pids.iter().take(pipeline.command_count) {
+                    if let Some(st) = process::waitpid_nohang(*pid) {
+                        status = st;
+                    } else {
+                        done = false;
+                    }
+                }
+                if done {
+                    all_exited = true;
+                }
+            } else {
+                // Children exited — drain remaining data then stop.
+                break;
+            }
+        }
+        // Final drain after children have exited.
+        loop {
+            match fs::read_slice(capture_fd, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    shell_write(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = fs::close_fd_raw(capture_fd);
+        leave_foreground();
+        return status;
+    }
+
     if capture_fd >= 0 {
         let mut buf = [0u8; 512];
         loop {

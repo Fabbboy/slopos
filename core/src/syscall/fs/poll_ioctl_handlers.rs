@@ -460,7 +460,7 @@ define_syscall!(syscall_ioctl(ctx, args) requires(let task_id, let pid: process_
                 Ok(idx) => idx,
                 Err(_) => return ctx.err(),
             };
-            let new_fd = file_open_tty_fd(pid, peer_tty);
+            let new_fd = file_open_tty_fd(pid, peer_tty, arg as u32);
             if new_fd < 0 {
                 let _ = tty::close_ref(peer_tty);
                 ctx.err()

@@ -98,13 +98,21 @@ pub fn shell_pty_pair() -> Option<(u32, u32)> {
     }
 }
 
-/// Return the PTY master TTY index, or -1 if unavailable.
+/// Return the PTY master TTY index (not a file descriptor), or -1 if unavailable.
+///
+/// This is a kernel-internal TTY slot index used with `tty_write`/`tty_read`,
+/// not a POSIX file descriptor.  See [`SHELL_PTY_MASTER_FD`] for the fd.
 pub fn shell_pty_master() -> i32 {
     SHELL_PTY_MASTER.load(Ordering::Relaxed)
 }
 
+/// Raw file descriptor for the PTY master device.
+///
+/// Distinct from [`SHELL_PTY_MASTER`] which stores a kernel TTY slot index.
+/// This fd is obtained from `open_tty_fd` and can be used with `read`/`write`/`close`.
 static SHELL_PTY_MASTER_FD: AtomicI32 = AtomicI32::new(-1);
 
+/// Store the raw file descriptor for the PTY master device.
 fn set_shell_pty_master_fd(fd: i32) {
     SHELL_PTY_MASTER_FD.store(fd, Ordering::Relaxed);
 }

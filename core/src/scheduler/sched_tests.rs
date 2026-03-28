@@ -53,10 +53,12 @@ impl SchedFixture {
         if init_task_manager() != 0 {
             klog_info!("SCHED_TEST: Failed to init task manager");
             resume_all_aps_if_not_nested(aps_paused);
+            panic!("SCHED_TEST: init_task_manager failed");
         }
         if init_scheduler() != 0 {
             klog_info!("SCHED_TEST: Failed to init scheduler");
             resume_all_aps_if_not_nested(aps_paused);
+            panic!("SCHED_TEST: init_scheduler failed");
         }
 
         // Force-clear any stale inbox counts that accumulated between

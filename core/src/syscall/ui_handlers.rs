@@ -352,7 +352,7 @@ define_syscall!(syscall_open_tty_fd(ctx, args) requires(let pid: process_id) {
     if tty::open_ref(tty_idx).is_err() {
         return ctx.err();
     }
-    let fd = file_open_tty_fd(pid, tty_idx);
+    let fd = file_open_tty_fd(pid, tty_idx, 0);
     if fd < 0 {
         let _ = tty::close_ref(tty_idx);
         ctx.ok_i64(fd as i64)

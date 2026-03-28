@@ -32,7 +32,7 @@ pub(super) const FILEIO_MAX_OPEN_FILE_ENTRIES: usize = 256;
 /// "no permissions" because `FILE_OPEN_READ` was 1.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct OpenMode(u32);
+pub(crate) struct OpenMode(u32);
 
 impl OpenMode {
     pub const EMPTY: Self = Self(0);
@@ -87,7 +87,7 @@ impl core::ops::BitAnd for OpenMode {
 }
 
 /// Convert POSIX `O_*` flags to internal `OpenMode`.
-pub fn posix_to_open_mode(posix: u32) -> OpenMode {
+pub(crate) fn posix_to_open_mode(posix: u32) -> OpenMode {
     let mut m = OpenMode::EMPTY;
     match posix & O_ACCMODE {
         O_RDONLY => m |= OpenMode::READ,
@@ -103,6 +103,24 @@ pub fn posix_to_open_mode(posix: u32) -> OpenMode {
     }
     // Pass through remaining POSIX bits (O_NONBLOCK, O_NOCTTY, etc.)
     m.with_raw(posix & !(O_ACCMODE | O_CREAT | O_APPEND))
+}
+
+/// Convert internal `OpenMode` status flags back to POSIX `O_*` bits (for `F_GETFL`).
+pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
+    let mut posix = match (
+        mode.contains(OpenMode::READ),
+        mode.contains(OpenMode::WRITE),
+    ) {
+        (true, true) => O_RDWR,
+        (false, true) => O_WRONLY,
+        _ => O_RDONLY,
+    };
+    if mode.contains(OpenMode::APPEND) {
+        posix |= O_APPEND;
+    }
+    // O_NONBLOCK and O_NOCTTY are stored at their POSIX positions via with_raw().
+    posix |= mode.bits() & (O_NONBLOCK as u32 | O_NOCTTY as u32);
+    posix
 }
 
 #[derive(Clone, Copy)]
