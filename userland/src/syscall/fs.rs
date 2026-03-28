@@ -57,10 +57,14 @@ pub fn close_fd_raw(fd: RawFd) -> SyscallResult<()> {
     Sys::close(fd).map_err(Into::into)
 }
 
-/// Close an owned file descriptor.  Equivalent to `drop(fd)`.
+/// Close an owned file descriptor, returning any kernel error.
+///
+/// Extracts the raw fd (preventing the `Drop` double-close), then
+/// performs the close syscall.  On failure the fd is already consumed
+/// — the kernel closed it or it was invalid.
 #[inline(always)]
-pub fn close_fd(fd: super::OwnedFd) {
-    drop(fd);
+pub fn close_fd(fd: super::OwnedFd) -> SyscallResult<()> {
+    close_fd_raw(fd.into_raw())
 }
 
 /// Read from a file descriptor into a buffer.

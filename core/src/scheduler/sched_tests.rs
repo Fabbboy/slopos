@@ -65,10 +65,14 @@ impl SchedFixture {
         // the previous fixture's drop and this init (e.g. from AP timer
         // ticks that fired before pause took effect).
         for cpu in 0..slopos_arch::pcr::get_cpu_count() {
-            super::per_cpu::with_cpu_scheduler(cpu, |sched| {
+            if super::per_cpu::with_cpu_scheduler(cpu, |sched| {
                 sched.force_clear_inbox_count();
             })
-            .expect("SCHED_TEST: CPU scheduler missing after init");
+            .is_none()
+            {
+                resume_all_aps_if_not_nested(aps_paused);
+                panic!("SCHED_TEST: CPU scheduler missing after init");
+            }
         }
 
         Self { aps_paused }
