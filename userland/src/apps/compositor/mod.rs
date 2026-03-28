@@ -324,19 +324,19 @@ pub fn compositor_user_main() {
 
         wm.input.update_mouse();
         wm.refresh_windows();
+        // Snapshot focus *before* any input processing so we can detect
+        // changes from any source (sync, mouse click, shelf, spawn) in a
+        // single comparison afterwards.  This is order-independent and
+        // mirrors the Mutter/KWin pattern where focus transitions always
+        // trigger targeted title-bar redraws.
+        let focus_before = wm.input.focused_task();
+
         wm.input.sync_keyboard_focus(
             &wm.windows,
             wm.window_count,
             &wm.prev_windows,
             wm.prev_window_count,
         );
-        // Add targeted title bar damage for focus change instead of full
-        // redraw. Following the Mutter pattern: only damage actors whose
-        // paint volume (title bar appearance) changed.
-        if wm.input.focus_changed {
-            wm.add_title_bar_damage_for_task(wm.input.focus_changed_from);
-            wm.add_title_bar_damage_for_task(wm.input.focused_task);
-        }
         wm.input.update_pointer_focus(&wm.windows, wm.window_count);
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
@@ -346,6 +346,14 @@ pub fn compositor_user_main() {
             wm.window_count,
             &wm.shelf,
         );
+
+        // After all input: if focus moved, damage both the old and new
+        // title bars.  No flags to manage — just compare the snapshot.
+        let focus_after = wm.input.focused_task();
+        if focus_after != focus_before {
+            wm.add_title_bar_damage_for_task(focus_before);
+            wm.add_title_bar_damage_for_task(focus_after);
+        }
 
         // Compute uptime for the system bar clock.
         let uptime_secs = time_origin.elapsed().as_secs();
@@ -400,13 +408,13 @@ pub fn compositor_user_main() {
 
                 // Determine the active app name for the system bar.
                 let active_app_name =
-                    active_window_title(&wm.windows, wm.window_count, wm.input.focused_task);
+                    active_window_title(&wm.windows, wm.window_count, wm.input.focused_task());
 
                 // Compute per-window signal group hover state.
                 let signal_hovered_task = signal_hovered_task_id(
                     &wm.windows,
                     wm.window_count,
-                    wm.input.focused_task,
+                    wm.input.focused_task(),
                     wm.input.mouse_x,
                     wm.input.mouse_y,
                 );
@@ -415,7 +423,7 @@ pub fn compositor_user_main() {
                     &mut buf,
                     &wm.windows,
                     wm.window_count as usize,
-                    wm.input.focused_task,
+                    wm.input.focused_task(),
                     signal_hovered_task,
                     wm.input.mouse_x,
                     wm.input.mouse_y,

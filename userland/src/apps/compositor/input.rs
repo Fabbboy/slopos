@@ -24,17 +24,16 @@ pub struct InputHandler {
     drag_offset_x: i32,
     drag_offset_y: i32,
 
-    pub focused_task: u32,
-    /// The task that the kernel currently routes keyboard events to.
-    /// Kept in sync with `focused_task`; the syscall is only issued when
-    /// these two diverge, avoiding redundant kernel calls every frame.
+    /// The task that currently has keyboard focus.  Private — all changes
+    /// go through `set_focused()` so the kernel syscall is always issued.
+    /// Read via `focused_task()`.  This is the Mutter/KWin pattern: a
+    /// single entry-point for focus changes prevents desync by design.
+    focused_task: u32,
+    /// Mirror of the last value sent to the kernel via
+    /// `input::set_keyboard_focus()`.  Compared against `focused_task`
+    /// inside `set_focused()` to skip redundant syscalls.
     kernel_keyboard_focus: u32,
     pub needs_full_redraw: bool,
-    /// Set when focus just changed; the main loop uses this + `focus_changed_from`
-    /// to add targeted title bar damage instead of full-screen redraw.
-    pub focus_changed: bool,
-    /// Holds the previously focused task_id when focus changes.
-    pub focus_changed_from: u32,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     pub cursor_trail_count: usize,
@@ -59,8 +58,6 @@ impl InputHandler {
             focused_task: 0,
             kernel_keyboard_focus: 0,
             needs_full_redraw: false,
-            focus_changed: false,
-            focus_changed_from: 0,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
             pending_close_tasks: [0; MAX_WINDOWS],
@@ -68,6 +65,12 @@ impl InputHandler {
             pending_close_count: 0,
             clock_origin: Instant::now(),
         }
+    }
+
+    /// Read the currently focused task.  All mutations go through
+    /// `set_focused()` which keeps the kernel in sync.
+    pub fn focused_task(&self) -> u32 {
+        self.focused_task
     }
 
     #[inline]
@@ -143,7 +146,7 @@ impl InputHandler {
             let existed_before =
                 (0..prev_window_count as usize).any(|j| prev_windows[j].task_id == task_id);
             if !existed_before {
-                self.focused_task = task_id;
+                self.set_focused(task_id);
                 break;
             }
         }
@@ -156,27 +159,15 @@ impl InputHandler {
                     && windows[i].state != WINDOW_STATE_MINIMIZED
             });
             if !still_visible {
-                self.focused_task = 0;
+                let mut new_focus = 0u32;
                 for i in (0..window_count as usize).rev() {
                     if windows[i].state != WINDOW_STATE_MINIMIZED {
-                        self.focused_task = windows[i].task_id;
+                        new_focus = windows[i].task_id;
                         break;
                     }
                 }
+                self.set_focused(new_focus);
             }
-        }
-
-        // Only issue the kernel syscall when focus actually changed.
-        // Instead of needs_full_redraw, signal the previous task_id so the
-        // main loop can add targeted title-bar damage (Mutter pattern:
-        // only damage the actors whose paint volume changed).
-        self.focus_changed = false;
-        self.focus_changed_from = 0;
-        if self.focused_task != self.kernel_keyboard_focus {
-            self.focus_changed = true;
-            self.focus_changed_from = self.kernel_keyboard_focus;
-            input::set_keyboard_focus(self.focused_task);
-            self.kernel_keyboard_focus = self.focused_task;
         }
     }
 
@@ -317,6 +308,9 @@ impl InputHandler {
             && self.mouse_y < window.y + window.height as i32
     }
 
+    /// Single entry-point for all focus changes (KWin `activateClient`
+    /// pattern).  The field is private so every mutation is forced through
+    /// here at compile time, guaranteeing the kernel syscall is issued.
     fn set_focused(&mut self, task_id: u32) {
         self.focused_task = task_id;
         if task_id != self.kernel_keyboard_focus {
@@ -434,7 +428,7 @@ impl InputHandler {
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {
-                self.focused_task = tid as u32;
+                self.set_focused(tid as u32);
             }
         } else {
             // Fall back to direct path spawn with default attrs.
@@ -442,7 +436,7 @@ impl InputHandler {
             if tid <= 0 {
                 tty::write(b"COMPOSITOR: spawn failed for program\n");
             } else {
-                self.focused_task = tid as u32;
+                self.set_focused(tid as u32);
             }
         }
     }
