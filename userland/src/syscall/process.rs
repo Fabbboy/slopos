@@ -3,6 +3,17 @@
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
 use slopos_abi::signal::{SIG_IGN, SigSet, UserSigaction};
+
+/// Signal restorer trampoline — called when a signal handler returns.
+///
+/// The restorer address is pushed as a separate stack word before the
+/// `SignalFrame`.  After the handler's `ret` pops the restorer, RSP points
+/// directly at the `SignalFrame`, so `rt_sigreturn` (syscall 105) reads
+/// the frame from the correct address — no stack adjustment needed.
+#[unsafe(naked)]
+extern "C" fn signal_restorer() {
+    core::arch::naked_asm!("mov eax, 105", "syscall", "ud2");
+}
 use slopos_slibc::pal::{Pal, Sys};
 
 #[inline(always)]
@@ -81,6 +92,18 @@ pub fn openpty() -> Result<(u32, u32), i64> {
         Err(ret)
     } else {
         Ok((master, slave))
+    }
+}
+
+/// Open a file descriptor for a TTY by its kernel index.
+#[inline(always)]
+pub fn open_tty_fd(tty_idx: u32) -> Result<super::OwnedFd, i64> {
+    let ret = unsafe { syscall1(SYSCALL_OPEN_TTY_FD, tty_idx as u64) as i64 };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        // SAFETY: ret is a valid fd just returned by the kernel.
+        Ok(unsafe { super::OwnedFd::from_raw(ret as i32) })
     }
 }
 
@@ -174,6 +197,31 @@ pub fn ignore_signal(signum: u8) -> i32 {
         sa_handler: SIG_IGN,
         sa_flags: 0,
         sa_restorer: 0,
+        sa_mask: 0,
+    };
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGACTION,
+            signum as u64,
+            (&action as *const UserSigaction) as u64,
+            0,
+            core::mem::size_of::<SigSet>() as u64,
+        ) as i32
+    }
+}
+
+/// Install a custom signal handler with proper restorer trampoline.
+///
+/// The handler receives the signal number as its argument.  When it returns,
+/// the restorer automatically invokes `rt_sigreturn` to resume the
+/// interrupted context.  `SA_RESTART` is deliberately omitted so that
+/// blocking syscalls (e.g. `poll`) return early after the handler runs.
+#[inline(always)]
+pub fn set_signal_handler(signum: u8, handler: extern "C" fn(i32)) -> i32 {
+    let action = UserSigaction {
+        sa_handler: handler as *const () as u64,
+        sa_flags: 0,
+        sa_restorer: signal_restorer as *const () as u64,
         sa_mask: 0,
     };
     unsafe {

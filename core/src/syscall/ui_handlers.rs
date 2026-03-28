@@ -6,6 +6,7 @@ use slopos_abi::task::INVALID_TASK_ID;
 use slopos_abi::{DisplayInfo, InputEvent, WindowInfo};
 
 use crate::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
+use slopos_fs::fileio::file_open_tty_fd;
 use slopos_kernel_services::platform;
 use slopos_kernel_services::syscall_services::{input, tty, video};
 
@@ -341,6 +342,22 @@ define_syscall!(syscall_tty_write(ctx, args) {
                 ctx.ok_i64(errno)
             }
         }
+    }
+});
+
+// Open a file descriptor pointing to a TTY by its kernel index.
+// Increments the TTY's open_count first (matching the VFS open path).
+define_syscall!(syscall_open_tty_fd(ctx, args) requires(let pid: process_id) {
+    let tty_idx = TtyIndex(args.arg0 as u8);
+    if tty::open_ref(tty_idx).is_err() {
+        return ctx.err();
+    }
+    let fd = file_open_tty_fd(pid, tty_idx, 0);
+    if fd < 0 {
+        let _ = tty::close_ref(tty_idx);
+        ctx.ok_i64(fd as i64)
+    } else {
+        ctx.ok(fd as u64)
     }
 });
 

@@ -17,13 +17,13 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
     };
 
     if config.local_port != 0 {
-        if let Err(_) = net::bind_any(fd, config.local_port) {
+        if let Err(_) = net::bind_any(fd.raw(), config.local_port) {
             write_stdout(b"nc: bind failed (port in use?)\n");
             return 1;
         }
     }
 
-    if let Err(_) = net::set_nonblocking(fd) {
+    if let Err(_) = net::set_nonblocking(fd.raw()) {
         write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
@@ -59,7 +59,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
                 revents: 0,
             },
             UserPollFd {
-                fd,
+                fd: fd.raw(),
                 events: POLLIN,
                 revents: 0,
             },
@@ -81,7 +81,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
                             &mut line_pos,
                         ) {
                             StdinResult::SendLine(len) => {
-                                match net::sendto(fd, &line_buf[..len], 0, &dest) {
+                                match net::sendto(fd.raw(), &line_buf[..len], 0, &dest) {
                                     Ok(sent) => {
                                         verbose_bytes(config, "sent ", sent);
                                         last_activity_ms = clock_start.elapsed().as_millis() as u64;
@@ -93,7 +93,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
                                 line_pos = 0;
                             }
                             StdinResult::Quit => {
-                                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
                                 return 0;
                             }
                             StdinResult::Continue => {}
@@ -106,7 +106,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
 
         if (pfds[1].revents & POLLIN) != 0 {
             let mut src_addr = SockAddrIn::default();
-            match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
+            match net::recvfrom(fd.raw(), &mut recv_buf, 0, Some(&mut src_addr)) {
                 Ok(0) => {}
                 Ok(received) => {
                     write_stdout(&recv_buf[..received]);
@@ -124,7 +124,7 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
                 write_stdout(b"nc: timeout\n");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
                 return 1;
             }
         }
@@ -140,14 +140,14 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
         }
     };
 
-    let _ = net::set_reuse_addr(fd);
+    let _ = net::set_reuse_addr(fd.raw());
 
-    if let Err(_) = net::bind_any(fd, config.local_port) {
+    if let Err(_) = net::bind_any(fd.raw(), config.local_port) {
         write_stdout(b"nc: bind failed (port in use?)\n");
         return 1;
     }
 
-    if let Err(_) = net::set_nonblocking(fd) {
+    if let Err(_) = net::set_nonblocking(fd.raw()) {
         write_stdout(b"nc: failed to set non-blocking\n");
         return 1;
     }
@@ -177,7 +177,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
                 revents: 0,
             },
             UserPollFd {
-                fd,
+                fd: fd.raw(),
                 events: POLLIN,
                 revents: 0,
             },
@@ -200,7 +200,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
                         ) {
                             StdinResult::SendLine(len) => {
                                 if has_peer {
-                                    match net::sendto(fd, &line_buf[..len], 0, &last_peer) {
+                                    match net::sendto(fd.raw(), &line_buf[..len], 0, &last_peer) {
                                         Ok(sent) => {
                                             verbose_bytes(config, "sent ", sent);
                                             last_activity_ms =
@@ -214,7 +214,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
                                 line_pos = 0;
                             }
                             StdinResult::Quit => {
-                                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                                let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
                                 return 0;
                             }
                             StdinResult::Continue => {}
@@ -227,7 +227,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
 
         if (pfds[1].revents & POLLIN) != 0 {
             let mut src_addr = SockAddrIn::default();
-            match net::recvfrom(fd, &mut recv_buf, 0, Some(&mut src_addr)) {
+            match net::recvfrom(fd.raw(), &mut recv_buf, 0, Some(&mut src_addr)) {
                 Ok(0) => {}
                 Ok(received) => {
                     write_stdout(&recv_buf[..received]);
@@ -252,7 +252,7 @@ pub(super) fn udp_listen(config: &NcConfig) -> u8 {
             let now = clock_start.elapsed().as_millis() as u64;
             if now.wrapping_sub(last_activity_ms) >= config.timeout_ms as u64 {
                 write_stdout(b"nc: timeout\n");
-                let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+                let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
                 return 1;
             }
         }

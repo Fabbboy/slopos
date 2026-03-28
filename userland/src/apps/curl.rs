@@ -935,8 +935,8 @@ fn execute_request(
         _pad: [0; 8],
     };
 
-    if net::connect(fd, &addr).is_err() {
-        let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+    if net::connect(fd.raw(), &addr).is_err() {
+        let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
         return Err(CurlError::ConnectFailed);
     }
 
@@ -947,14 +947,14 @@ fn execute_request(
         }
     }
 
-    if send_all(fd, &req).is_err() {
-        let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+    if send_all(fd.raw(), &req).is_err() {
+        let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
         return Err(CurlError::SendFailed);
     }
 
-    let _ = net::set_nonblocking(fd);
-    let result = receive_http_response(fd, config.verbose);
-    let _ = net::shutdown(fd, slopos_abi::syscall::SHUT_RDWR);
+    let _ = net::set_nonblocking(fd.raw());
+    let result = receive_http_response(fd.raw(), config.verbose);
+    let _ = net::shutdown(fd.raw(), slopos_abi::syscall::SHUT_RDWR);
     result
 }
 

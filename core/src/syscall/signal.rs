@@ -352,8 +352,10 @@ pub fn syscall_rt_sigreturn(task: *mut Task, frame: *mut InterruptFrame) -> Sysc
         None => return ctx.err_with(ERRNO_EINVAL),
     };
 
+    // After the handler's `ret` pops the restorer address, RSP points
+    // directly at the SignalFrame.  Read it from there.
     let rsp = unsafe { (*frame).rsp };
-    let sigframe = match read_signal_frame(rsp).or_else(|| read_signal_frame(rsp.wrapping_sub(8))) {
+    let sigframe = match read_signal_frame(rsp) {
         Some(sf) => sf,
         None => return ctx.err_with(ERRNO_EFAULT),
     };
@@ -430,18 +432,35 @@ pub fn deliver_pending_signal(task: *mut Task, frame: *mut InterruptFrame) {
             return;
         }
 
-        let frame_addr = ((*frame)
-            .rsp
-            .wrapping_sub(core::mem::size_of::<SignalFrame>() as u64))
-            & !0xF;
-        let sigframe_ptr = match UserPtr::<SignalFrame>::try_new(frame_addr) {
+        // Linux convention: push the restorer address as a separate word
+        // on the stack BEFORE the SignalFrame.  When the handler does
+        // `ret`, it pops the restorer into RIP and RSP advances to point
+        // at the SignalFrame, which rt_sigreturn reads directly.
+        //
+        // Stack layout (low address → high address):
+        //   [frame_addr + 0]  = restorer address   (popped by `ret`)
+        //   [frame_addr + 8]  = SignalFrame { signum, rax, … }
+        let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64;
+        let frame_addr = (*frame).rsp.wrapping_sub(total_size) & !0xF;
+
+        // Write restorer as a separate u64 at frame_addr.
+        let restorer_ptr = match UserPtr::<u64>::try_new(frame_addr) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if copy_to_user(restorer_ptr, &action.restorer).is_err() {
+            return;
+        }
+
+        // Write SignalFrame at frame_addr + 8.
+        let sigframe_addr = frame_addr.wrapping_add(8);
+        let sigframe_ptr = match UserPtr::<SignalFrame>::try_new(sigframe_addr) {
             Ok(p) => p,
             Err(_) => return,
         };
 
         let saved_mask = (*task).signal_blocked;
         let sigframe = SignalFrame {
-            restorer: action.restorer,
             signum: signum as u64,
             rax: (*frame).rax,
             rbx: (*frame).rbx,

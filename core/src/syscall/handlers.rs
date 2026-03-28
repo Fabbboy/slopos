@@ -39,15 +39,15 @@ pub use crate::syscall::ui_handlers::{
     syscall_enumerate_windows, syscall_fb_flip, syscall_fb_info, syscall_input_get_button_state,
     syscall_input_get_pointer_pos, syscall_input_has_events, syscall_input_poll,
     syscall_input_poll_batch, syscall_input_request_close, syscall_input_set_focus,
-    syscall_input_set_focus_with_offset, syscall_mark_frames_done, syscall_openpty,
-    syscall_poll_frame_done, syscall_raise_window, syscall_random_next, syscall_roulette_draw,
-    syscall_roulette_result, syscall_roulette_spin, syscall_set_cursor_shape,
-    syscall_set_window_position, syscall_set_window_state, syscall_shm_acquire, syscall_shm_create,
-    syscall_shm_create_with_format, syscall_shm_destroy, syscall_shm_get_formats, syscall_shm_map,
-    syscall_shm_poll_released, syscall_shm_release, syscall_shm_unmap, syscall_surface_attach,
-    syscall_surface_commit, syscall_surface_damage, syscall_surface_frame,
-    syscall_surface_set_parent, syscall_surface_set_rel_pos, syscall_surface_set_role,
-    syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
+    syscall_input_set_focus_with_offset, syscall_mark_frames_done, syscall_open_tty_fd,
+    syscall_openpty, syscall_poll_frame_done, syscall_raise_window, syscall_random_next,
+    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
+    syscall_set_cursor_shape, syscall_set_window_position, syscall_set_window_state,
+    syscall_shm_acquire, syscall_shm_create, syscall_shm_create_with_format, syscall_shm_destroy,
+    syscall_shm_get_formats, syscall_shm_map, syscall_shm_poll_released, syscall_shm_release,
+    syscall_shm_unmap, syscall_surface_attach, syscall_surface_commit, syscall_surface_damage,
+    syscall_surface_frame, syscall_surface_set_parent, syscall_surface_set_rel_pos,
+    syscall_surface_set_role, syscall_surface_set_title, syscall_tty_read, syscall_tty_write,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -127,6 +127,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_OPENPTY]       => syscall_openpty,       "openpty";
     [SYSCALL_TTY_READ]      => syscall_tty_read,      "tty_read";
     [SYSCALL_TTY_WRITE]     => syscall_tty_write,     "tty_write";
+    [SYSCALL_OPEN_TTY_FD]   => syscall_open_tty_fd,   "open_tty_fd";
 
     // Window management
     [SYSCALL_ENUMERATE_WINDOWS]   => syscall_enumerate_windows,   "enumerate_windows";

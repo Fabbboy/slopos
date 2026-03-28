@@ -142,11 +142,14 @@ pub const fn sig_default_action(signum: u8) -> SigDefault {
 
 /// Signal frame pushed onto the user stack when delivering a signal.
 /// rt_sigreturn restores execution state from this frame.
+///
+/// The restorer address is NOT part of this frame — it is pushed as a
+/// separate 8-byte word on the stack before the frame (Linux convention).
+/// When the handler does `ret`, it pops the restorer into RIP, and RSP
+/// then points to this SignalFrame, which rt_sigreturn reads directly.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SignalFrame {
-    /// Restorer return address (pushed as the "return address" for the handler).
-    pub restorer: u64,
     /// Signal number being delivered.
     pub signum: u64,
     /// Saved general-purpose registers.

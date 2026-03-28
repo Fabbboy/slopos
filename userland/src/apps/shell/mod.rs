@@ -98,6 +98,25 @@ pub fn shell_pty_pair() -> Option<(u32, u32)> {
     }
 }
 
+/// Return the PTY master TTY index (not a file descriptor), or -1 if unavailable.
+///
+/// This is a kernel-internal TTY slot index used with `tty_write`/`tty_read`,
+/// not a POSIX file descriptor.  See [`SHELL_PTY_MASTER_FD`] for the fd.
+pub fn shell_pty_master() -> i32 {
+    SHELL_PTY_MASTER.load(Ordering::Relaxed)
+}
+
+/// Raw file descriptor for the PTY master device.
+///
+/// Distinct from [`SHELL_PTY_MASTER`] which stores a kernel TTY slot index.
+/// This fd is obtained from `open_tty_fd` and can be used with `read`/`write`/`close`.
+static SHELL_PTY_MASTER_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Store the raw file descriptor for the PTY master device.
+fn set_shell_pty_master_fd(fd: i32) {
+    SHELL_PTY_MASTER_FD.store(fd, Ordering::Relaxed);
+}
+
 pub(crate) const PROMPT_BUF_MAX: usize = 280;
 
 // Fallback: matches the previous hardcoded `[/path] $ ` format.
@@ -279,8 +298,8 @@ pub fn shell_user_main() {
 fn shell_interactive_main() {
     use slopos_abi::signal::SIGINT;
 
-    use crate::syscall::process;
     use crate::syscall::window;
+    use crate::syscall::{fs, process};
 
     display::shell_console_init();
     display::shell_console_clear();
@@ -293,6 +312,13 @@ fn shell_interactive_main() {
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     if let Ok((master, slave)) = process::openpty() {
         set_shell_pty_pair(master, slave);
+        if let Ok(master_fd) = process::open_tty_fd(master) {
+            if let Ok(slave_fd) = fs::ioctl_tiocgptpeer(master_fd.raw()) {
+                set_shell_pty_master_fd(master_fd.into_raw());
+                let _ = fs::dup2(slave_fd.raw(), 0);
+                // slave_fd dropped here, auto-closed
+            }
+        }
     }
     exec::initialize_job_control();
     let _ = process::ignore_signal(SIGINT);

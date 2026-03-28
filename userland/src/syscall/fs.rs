@@ -12,7 +12,7 @@ use super::RawFd;
 use super::error::{SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
-use slopos_abi::syscall::{TIOCSCTTY, UserPollFd, UserTermios, UserTimeval};
+use slopos_abi::syscall::{TIOCGPTPEER, TIOCSCTTY, UserPollFd, UserTermios, UserTimeval};
 use slopos_abi::{UserFsList, UserFsStat};
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -34,25 +34,37 @@ use slopos_slibc::pal::{Pal, Sys};
 /// * `EACCES` - Permission denied
 /// * `EINVAL` - Invalid flags
 #[inline(always)]
-pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<RawFd> {
+pub fn open_path(path: *const c_char, flags: u32) -> SyscallResult<super::OwnedFd> {
     Sys::open(path as *const u8, flags as i32, 0)
-        .map(|fd| fd as RawFd)
+        // SAFETY: fd is a valid descriptor just returned by the kernel.
+        .map(|fd| unsafe { super::OwnedFd::from_raw(fd as RawFd) })
         .map_err(Into::into)
 }
 
 /// Open a file using a CStr path.
 #[inline(always)]
-pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<RawFd> {
+pub fn open_cstr(path: &CStr, flags: u32) -> SyscallResult<super::OwnedFd> {
     open_path(path.as_ptr(), flags)
 }
 
-/// Close a file descriptor.
+/// Close a file descriptor by raw number.
 ///
-/// # Errors
-/// * `EBADF` - Invalid file descriptor
+/// Prefer dropping an `OwnedFd` instead.  This is the low-level escape
+/// hatch for closing well-known fds (0/1/2) or fds extracted via
+/// `OwnedFd::into_raw()`.
 #[inline(always)]
-pub fn close_fd(fd: RawFd) -> SyscallResult<()> {
+pub fn close_fd_raw(fd: RawFd) -> SyscallResult<()> {
     Sys::close(fd).map_err(Into::into)
+}
+
+/// Close an owned file descriptor, returning any kernel error.
+///
+/// Extracts the raw fd (preventing the `Drop` double-close), then
+/// performs the close syscall.  On failure the fd is already consumed
+/// — the kernel closed it or it was invalid.
+#[inline(always)]
+pub fn close_fd(fd: super::OwnedFd) -> SyscallResult<()> {
+    close_fd_raw(fd.into_raw())
 }
 
 /// Read from a file descriptor into a buffer.
@@ -155,11 +167,18 @@ pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()>
     demux(result).map(|_| ())
 }
 
+/// Duplicate a file descriptor, returning a new `OwnedFd`.
 #[inline(always)]
-pub fn dup(fd: RawFd) -> SyscallResult<RawFd> {
-    Sys::dup(fd).map(|v| v as RawFd).map_err(Into::into)
+pub fn dup(fd: RawFd) -> SyscallResult<super::OwnedFd> {
+    Sys::dup(fd)
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as RawFd) })
+        .map_err(Into::into)
 }
 
+/// Duplicate `old_fd` onto `new_fd` (closing whatever was at `new_fd`).
+/// Returns the new fd number.  The `new_fd` slot is now a raw alias —
+/// its lifetime is NOT tracked by OwnedFd.
 #[inline(always)]
 pub fn dup2(old_fd: RawFd, new_fd: RawFd) -> SyscallResult<RawFd> {
     Sys::dup2(old_fd, new_fd)
@@ -172,15 +191,33 @@ pub fn lseek(fd: RawFd, offset: i64, whence: u32) -> SyscallResult<i64> {
     Sys::lseek(fd, offset, whence as i32).map_err(Into::into)
 }
 
+/// Create a pipe pair.  Returns `(read_end, write_end)` as `OwnedFd`.
 #[inline(always)]
-pub fn pipe(fds: &mut [i32; 2]) -> SyscallResult<()> {
-    Sys::pipe(fds as *mut [i32; 2]).map_err(Into::into)
+pub fn pipe() -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
+    let mut raw = [0i32; 2];
+    Sys::pipe(&mut raw as *mut [i32; 2]).map_err(super::SyscallError::from)?;
+    // SAFETY: raw fds are valid descriptors just returned by the kernel.
+    Ok(unsafe {
+        (
+            super::OwnedFd::from_raw(raw[0]),
+            super::OwnedFd::from_raw(raw[1]),
+        )
+    })
 }
 
+/// Create a pipe pair with flags.  Returns `(read_end, write_end)` as `OwnedFd`.
 #[inline(always)]
-pub fn pipe2(fds: &mut [i32; 2], flags: u32) -> SyscallResult<()> {
-    let result = unsafe { syscall2(SYSCALL_PIPE2, fds.as_mut_ptr() as u64, flags as u64) };
-    demux(result).map(|_| ())
+pub fn pipe2(flags: u32) -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
+    let mut raw = [0i32; 2];
+    let result = unsafe { syscall2(SYSCALL_PIPE2, raw.as_mut_ptr() as u64, flags as u64) };
+    demux(result)?;
+    // SAFETY: raw fds are valid descriptors just returned by the kernel.
+    Ok(unsafe {
+        (
+            super::OwnedFd::from_raw(raw[0]),
+            super::OwnedFd::from_raw(raw[1]),
+        )
+    })
 }
 
 #[inline(always)]
@@ -249,6 +286,15 @@ pub fn tcsetpgrp(fd: RawFd, pgid: u32) -> SyscallResult<()> {
 pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
     let result = unsafe { syscall3(SYSCALL_IOCTL, fd as u64, TIOCSCTTY, 0) };
     demux(result).map(|_| ())
+}
+
+/// Open the PTY slave peer of a master FD (TIOCGPTPEER ioctl).
+/// Properly calls pty_open_slave in the kernel, incrementing open_count.
+#[inline(always)]
+pub fn ioctl_tiocgptpeer(master_fd: RawFd) -> SyscallResult<super::OwnedFd> {
+    let result = unsafe { syscall3(SYSCALL_IOCTL, master_fd as u64, TIOCGPTPEER, 0) };
+    // SAFETY: v is a valid fd just returned by the kernel.
+    demux(result).map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
 }
 
 #[inline(always)]

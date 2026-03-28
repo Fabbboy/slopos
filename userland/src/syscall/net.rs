@@ -27,9 +27,10 @@ pub fn net_info(out: &mut UserNetInfo) -> i64 {
     unsafe { syscall1(SYSCALL_NET_INFO, out as *mut UserNetInfo as u64) as i64 }
 }
 
-pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<RawFd> {
+pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<super::OwnedFd> {
     Sys::socket(domain as i32, sock_type as i32, protocol as i32)
-        .map(|v| v as RawFd)
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
         .map_err(Into::into)
 }
 
@@ -46,7 +47,7 @@ pub fn listen(fd: RawFd, backlog: u32) -> SyscallResult<()> {
     Sys::listen(fd, backlog as i32).map_err(Into::into)
 }
 
-pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<RawFd> {
+pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<super::OwnedFd> {
     let mut addrlen = core::mem::size_of::<SockAddrIn>() as u32;
     let peer_ptr = peer
         .map(|p| p as *mut _ as *mut u8)
@@ -57,7 +58,8 @@ pub fn accept(fd: RawFd, peer: Option<&mut SockAddrIn>) -> SyscallResult<RawFd> 
         &mut addrlen as *mut u32
     };
     Sys::accept(fd, peer_ptr, addrlen_ptr)
-        .map(|v| v as RawFd)
+        // SAFETY: v is a valid fd just returned by the kernel.
+        .map(|v| unsafe { super::OwnedFd::from_raw(v as i32) })
         .map_err(Into::into)
 }
 

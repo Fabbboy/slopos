@@ -53,12 +53,26 @@ impl SchedFixture {
         if init_task_manager() != 0 {
             klog_info!("SCHED_TEST: Failed to init task manager");
             resume_all_aps_if_not_nested(aps_paused);
-            // Continue anyway - tests will fail if needed
+            panic!("SCHED_TEST: init_task_manager failed");
         }
         if init_scheduler() != 0 {
             klog_info!("SCHED_TEST: Failed to init scheduler");
             resume_all_aps_if_not_nested(aps_paused);
-            // Continue anyway - tests will fail if needed
+            panic!("SCHED_TEST: init_scheduler failed");
+        }
+
+        // Force-clear any stale inbox counts that accumulated between
+        // the previous fixture's drop and this init (e.g. from AP timer
+        // ticks that fired before pause took effect).
+        for cpu in 0..slopos_arch::pcr::get_cpu_count() {
+            if super::per_cpu::with_cpu_scheduler(cpu, |sched| {
+                sched.force_clear_inbox_count();
+            })
+            .is_none()
+            {
+                resume_all_aps_if_not_nested(aps_paused);
+                panic!("SCHED_TEST: CPU scheduler missing after init");
+            }
         }
 
         Self { aps_paused }
@@ -1864,12 +1878,10 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         (*task_ptr).last_cpu = cpu_id as u8; // last ran on the busy CPU
     }
 
-    // select_target_cpu should see that cpu_id is loaded and pick other_cpu.
     let target = super::per_cpu::select_target_cpu(task_ptr);
     match target {
         Some(t) if t == other_cpu => { /* expected — migrated to idle CPU */ }
         Some(t) if t == cpu_id => {
-            // This is the old buggy behaviour — always returning last_cpu.
             klog_info!(
                 "SCHED_TEST: select_target_cpu returned busy last_cpu {} instead of idle CPU {}",
                 cpu_id,

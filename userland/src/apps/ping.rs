@@ -338,12 +338,12 @@ pub fn ping_main(args: Vec<String>) -> ! {
     };
 
     let ident = (process::getpid() & 0xFFFF) as u16;
-    if let Err(_) = net::bind_addr(fd, [0, 0, 0, 0], ident) {
+    if let Err(_) = net::bind_addr(fd.raw(), [0, 0, 0, 0], ident) {
         write_stdout(b"ping: bind failed\n");
         std::process::exit(2);
     }
 
-    if let Err(_) = net::set_nonblocking(fd) {
+    if let Err(_) = net::set_nonblocking(fd.raw()) {
         write_stdout(b"ping: failed to set non-blocking\n");
         std::process::exit(2);
     }
@@ -388,7 +388,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
 
         if !stop_requested && !all_sent && now >= next_send {
             if !send_ping(
-                fd,
+                fd.raw(),
                 &target,
                 ident,
                 sequence,
@@ -416,7 +416,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
 
         let (stdin_ready, socket_ready, timed_out) = if stop_requested {
             let mut pfd = [UserPollFd {
-                fd,
+                fd: fd.raw(),
                 events: POLLIN,
                 revents: 0,
             }];
@@ -430,7 +430,7 @@ pub fn ping_main(args: Vec<String>) -> ! {
                     revents: 0,
                 },
                 UserPollFd {
-                    fd,
+                    fd: fd.raw(),
                     events: POLLIN,
                     revents: 0,
                 },
@@ -444,10 +444,10 @@ pub fn ping_main(args: Vec<String>) -> ! {
         };
 
         if socket_ready {
-            try_receive(fd, &clock_start, &mut stats, config.verbose);
+            try_receive(fd.raw(), &clock_start, &mut stats, config.verbose);
         }
 
-        if stdin_ready && !stop_requested && stdin_has_ctrl_c() {
+        if !stop_requested && stdin_ready && stdin_has_ctrl_c() {
             write_stdout(b"^C\n");
             stop_requested = true;
             continue;

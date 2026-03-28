@@ -299,6 +299,7 @@ impl PerCpuScheduler {
         self.schedule_calls.store(0, Ordering::Relaxed);
         self.initialized.store(true, Ordering::Release);
         self.clear_remote_inbox_with_ref_release();
+        self.inbox_count.store(0, Ordering::Relaxed);
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -394,6 +395,14 @@ impl PerCpuScheduler {
         } else {
             load
         }
+    }
+
+    /// Reset inbox_count to zero.  For test fixtures only — clears stale
+    /// counts that leak between test runs due to SMP timing.
+    #[cfg(feature = "itests")]
+    pub fn force_clear_inbox_count(&self) {
+        self.clear_remote_inbox_with_ref_release();
+        self.inbox_count.store(0, Ordering::Relaxed);
     }
 
     pub fn steal_task(&self) -> Option<*mut Task> {
