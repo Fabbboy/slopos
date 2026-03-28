@@ -102,10 +102,16 @@ build: _fs-image
 [doc("Build default ISO")]
 iso: build
     LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso}}" "{{build_dir}}"
 
 _iso-notests: build
     LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_notests}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
 _iso-tests: _fs-image-tests
@@ -114,6 +120,9 @@ _iso-tests: _fs-image-tests
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
             "slopos-drivers/qemu-exit kernel/builtin-tests"
     LIMINE_DIR={{limine_dir}} \
+    QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+    QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+    QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline}}"
 
 # ── QEMU boot ───────────────────────────────────────────────────────────────

@@ -36,6 +36,21 @@ mkdir -p "$ISO_ROOT/boot" "$ISO_ROOT/EFI/BOOT"
 cp "$KERNEL" "$ISO_ROOT/boot/kernel.elf"
 cp "$REPO_ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"
 
+# Inject framebuffer resolution into Limine config
+fb_w="${QEMU_FB_WIDTH:-1920}"
+fb_h="${QEMU_FB_HEIGHT:-1080}"
+if [ "${QEMU_FB_AUTO:-0}" != "0" ] && [ -x "$SCRIPT_DIR/detect_qemu_resolution.sh" ]; then
+    detected="$(QEMU_FB_WIDTH="$fb_w" QEMU_FB_HEIGHT="$fb_h" \
+        QEMU_FB_AUTO_POLICY="${QEMU_FB_AUTO_POLICY:-primary}" \
+        QEMU_FB_AUTO_OUTPUT="${QEMU_FB_AUTO_OUTPUT:-}" \
+        "$SCRIPT_DIR/detect_qemu_resolution.sh")" || true
+    if [ -n "$detected" ]; then
+        fb_w="${detected%% *}"
+        fb_h="${detected##* }"
+    fi
+fi
+printf '    resolution: %sx%s\n' "$fb_w" "$fb_h" >> "$ISO_ROOT/boot/limine.conf"
+
 if [ -n "$CMDLINE" ]; then
     printf '    cmdline: %s\n' "$CMDLINE" >> "$ISO_ROOT/boot/limine.conf"
 fi

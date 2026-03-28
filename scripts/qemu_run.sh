@@ -188,7 +188,15 @@ case "$MODE" in
         ;;
 esac
 
-VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height}")
+# Calculate VRAM needed for the requested resolution (2x headroom for firmware overhead)
+fb_vram_bytes=$((fb_width * fb_height * 4 * 2))
+vgamem_mb=$(( (fb_vram_bytes + 1048575) / 1048576 ))
+if [ "$vgamem_mb" -lt 16 ]; then vgamem_mb=16; fi
+# Round up to next power of 2 (QEMU requirement)
+p=1; while [ "$p" -lt "$vgamem_mb" ]; do p=$((p * 2)); done
+vgamem_mb=$p
+
+VIDEO_ARGS=(-vga none -device "VGA,edid=on,xres=${fb_width},yres=${fb_height},vgamem_mb=${vgamem_mb}")
 
 # Handle optional PCI devices
 PCI_ARGS=()
