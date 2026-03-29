@@ -1,0 +1,589 @@
+use super::constraints::{BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size};
+use super::event::{
+    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, WidgetEvent, hit_test,
+};
+use super::focus::FocusManager;
+use super::input::Keymap;
+use super::layout::{HStackWidget, PaddingWidget, SpacerWidget, VStackWidget};
+use super::paint::PaintContext;
+use super::style::StyleSheet;
+use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, next_widget_id};
+
+// ---------------------------------------------------------------------------
+// Test helper: a widget with a fixed measure size (no font dependency).
+// ---------------------------------------------------------------------------
+
+struct FixedSizeWidget {
+    id: WidgetId,
+    rect: Rect,
+    size: Size,
+    focus: FocusPolicy,
+}
+
+impl FixedSizeWidget {
+    fn new(width: i32, height: i32) -> Self {
+        Self {
+            id: next_widget_id(),
+            rect: Rect::ZERO,
+            size: Size::new(width, height),
+            focus: FocusPolicy::None,
+        }
+    }
+
+    fn focusable(width: i32, height: i32) -> Self {
+        Self {
+            id: next_widget_id(),
+            rect: Rect::ZERO,
+            size: Size::new(width, height),
+            focus: FocusPolicy::StrongFocus,
+        }
+    }
+}
+
+impl Widget for FixedSizeWidget {
+    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+        constraints.constrain(self.size)
+    }
+    fn layout(&mut self, rect: Rect) {
+        self.rect = rect;
+    }
+    fn paint(&self, _ctx: &mut PaintContext) {}
+    fn event(
+        &mut self,
+        _event: &WidgetEvent,
+        _phase: EventPhase,
+        _sink: &mut MessageSink,
+    ) -> EventResponse {
+        EventResponse::Ignored
+    }
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+    fn layout_rect(&self) -> Rect {
+        self.rect
+    }
+    fn focus_policy(&self) -> FocusPolicy {
+        self.focus
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BoxConstraints tests
+// ---------------------------------------------------------------------------
+
+fn test_tight_constraints() {
+    let c = BoxConstraints::tight(Size::new(100, 50));
+    assert!(c.is_tight());
+    assert_eq!(c.min_width, 100);
+    assert_eq!(c.max_width, 100);
+    assert_eq!(c.min_height, 50);
+    assert_eq!(c.max_height, 50);
+    // Clamping anything to tight returns the exact size.
+    assert_eq!(c.constrain(Size::new(200, 200)), Size::new(100, 50));
+    assert_eq!(c.constrain(Size::new(10, 5)), Size::new(100, 50));
+}
+
+fn test_loose_constraints() {
+    let c = BoxConstraints::loose(Size::new(300, 200));
+    assert!(!c.is_tight());
+    assert_eq!(c.min_width, 0);
+    assert_eq!(c.max_width, 300);
+    assert_eq!(c.min_height, 0);
+    assert_eq!(c.max_height, 200);
+    // Within range: unchanged.
+    assert_eq!(c.constrain(Size::new(150, 100)), Size::new(150, 100));
+    // Zero stays zero.
+    assert_eq!(c.constrain(Size::ZERO), Size::ZERO);
+}
+
+fn test_constrain_clamps() {
+    let c = BoxConstraints {
+        min_width: 50,
+        max_width: 200,
+        min_height: 30,
+        max_height: 100,
+    };
+    // Below min.
+    assert_eq!(c.constrain(Size::new(10, 5)), Size::new(50, 30));
+    // Above max.
+    assert_eq!(c.constrain(Size::new(999, 999)), Size::new(200, 100));
+    // In range.
+    assert_eq!(c.constrain(Size::new(100, 60)), Size::new(100, 60));
+}
+
+fn test_deflate() {
+    let c = BoxConstraints {
+        min_width: 100,
+        max_width: 400,
+        min_height: 50,
+        max_height: 300,
+    };
+    let insets = EdgeInsets::all(10);
+    let d = c.deflate(insets);
+    // horizontal = 20, vertical = 20
+    assert_eq!(d.min_width, 80);
+    assert_eq!(d.max_width, 380);
+    assert_eq!(d.min_height, 30);
+    assert_eq!(d.max_height, 280);
+}
+
+fn test_unbounded() {
+    let c = BoxConstraints::UNBOUNDED;
+    assert_eq!(c.min_width, 0);
+    assert_eq!(c.max_width, i32::MAX);
+    assert_eq!(c.min_height, 0);
+    assert_eq!(c.max_height, i32::MAX);
+    // Any size passes through.
+    assert_eq!(c.constrain(Size::new(9999, 9999)), Size::new(9999, 9999));
+}
+
+// ---------------------------------------------------------------------------
+// Rect tests
+// ---------------------------------------------------------------------------
+
+fn test_rect_contains() {
+    let r = Rect::new(10, 20, 100, 50);
+    // Inside.
+    assert!(r.contains(10, 20));
+    assert!(r.contains(50, 40));
+    assert!(r.contains(109, 69));
+    // On boundary (exclusive upper).
+    assert!(!r.contains(110, 20));
+    assert!(!r.contains(10, 70));
+    // Outside.
+    assert!(!r.contains(9, 20));
+    assert!(!r.contains(10, 19));
+    assert!(!r.contains(200, 200));
+}
+
+fn test_rect_intersect() {
+    let a = Rect::new(0, 0, 100, 100);
+    let b = Rect::new(50, 50, 100, 100);
+    let i = a.intersect(&b).expect("should intersect");
+    assert_eq!(i, Rect::new(50, 50, 50, 50));
+}
+
+fn test_rect_no_intersect() {
+    let a = Rect::new(0, 0, 50, 50);
+    let b = Rect::new(100, 100, 50, 50);
+    assert!(a.intersect(&b).is_none());
+    // Adjacent (touching edge, not overlapping).
+    let c = Rect::new(50, 0, 50, 50);
+    assert!(a.intersect(&c).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Layout tests (using FixedSizeWidget to avoid font dependency)
+// ---------------------------------------------------------------------------
+
+fn make_measure_ctx(style: &StyleSheet) -> MeasureCtx<'_> {
+    MeasureCtx { style }
+}
+
+fn test_vstack_measure() {
+    let style = StyleSheet::dark();
+    let mut ctx = make_measure_ctx(&style);
+    let children: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::new(80, 20)),
+        Box::new(FixedSizeWidget::new(60, 30)),
+        Box::new(FixedSizeWidget::new(100, 10)),
+    ];
+    let spacing = 5;
+    let mut vstack = VStackWidget::new(children, spacing, CrossAxisAlignment::Start);
+    let size = vstack.measure(BoxConstraints::UNBOUNDED, &mut ctx);
+    // Width = max(80, 60, 100) = 100
+    // Height = 20 + 5 + 30 + 5 + 10 = 70
+    assert_eq!(size, Size::new(100, 70));
+}
+
+fn test_hstack_measure() {
+    let style = StyleSheet::dark();
+    let mut ctx = make_measure_ctx(&style);
+    let children: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::new(40, 20)),
+        Box::new(FixedSizeWidget::new(60, 30)),
+    ];
+    let spacing = 10;
+    let mut hstack = HStackWidget::new(children, spacing, CrossAxisAlignment::Start);
+    let size = hstack.measure(BoxConstraints::UNBOUNDED, &mut ctx);
+    // Width = 40 + 10 + 60 = 110
+    // Height = max(20, 30) = 30
+    assert_eq!(size, Size::new(110, 30));
+}
+
+fn test_padding_measure() {
+    let style = StyleSheet::dark();
+    let mut ctx = make_measure_ctx(&style);
+    let child = Box::new(FixedSizeWidget::new(50, 30));
+    let insets = EdgeInsets::new(5, 10, 15, 20);
+    let mut padding = PaddingWidget::new(insets, child);
+    let size = padding.measure(BoxConstraints::UNBOUNDED, &mut ctx);
+    // Width = 50 + 20 + 10 = 80
+    // Height = 30 + 5 + 15 = 50
+    assert_eq!(size, Size::new(80, 50));
+}
+
+fn test_spacer_measure() {
+    let style = StyleSheet::dark();
+    let mut ctx = make_measure_ctx(&style);
+    let mut spacer = SpacerWidget::new(Length::Px(16));
+    let size = spacer.measure(BoxConstraints::UNBOUNDED, &mut ctx);
+    assert_eq!(size, Size::new(16, 16));
+}
+
+// ---------------------------------------------------------------------------
+// Focus tests
+// ---------------------------------------------------------------------------
+
+fn test_focus_next() {
+    let a = FixedSizeWidget::focusable(10, 10);
+    let b = FixedSizeWidget::focusable(10, 10);
+    let c = FixedSizeWidget::focusable(10, 10);
+    let id_a = a.id();
+    let id_b = b.id();
+
+    let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b), Box::new(c)];
+    let vstack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&vstack);
+
+    // First tab: focuses first widget.
+    fm.move_focus_next();
+    assert_eq!(fm.focused(), Some(id_a));
+
+    // Second tab: focuses second widget.
+    fm.move_focus_next();
+    assert_eq!(fm.focused(), Some(id_b));
+}
+
+fn test_focus_prev() {
+    let a = FixedSizeWidget::focusable(10, 10);
+    let b = FixedSizeWidget::focusable(10, 10);
+    let c = FixedSizeWidget::focusable(10, 10);
+    let id_c = c.id();
+
+    let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b), Box::new(c)];
+    let vstack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&vstack);
+
+    // Shift+Tab with no focus: goes to last widget.
+    fm.move_focus_prev();
+    assert_eq!(fm.focused(), Some(id_c));
+}
+
+fn test_focus_wrap() {
+    let a = FixedSizeWidget::focusable(10, 10);
+    let b = FixedSizeWidget::focusable(10, 10);
+    let id_a = a.id();
+    let id_b = b.id();
+
+    let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b)];
+    let vstack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&vstack);
+
+    // Focus last widget.
+    fm.set_focused(Some(id_b));
+
+    // Tab from last wraps to first.
+    fm.move_focus_next();
+    assert_eq!(fm.focused(), Some(id_a));
+
+    // Shift+Tab from first wraps to last.
+    fm.move_focus_prev();
+    assert_eq!(fm.focused(), Some(id_b));
+}
+
+fn test_focus_scope() {
+    let a = FixedSizeWidget::focusable(10, 10);
+    let b = FixedSizeWidget::focusable(10, 10);
+    let c = FixedSizeWidget::focusable(10, 10);
+    let id_a = a.id();
+    let id_b = b.id();
+    let id_c = c.id();
+
+    let children: Vec<Box<dyn Widget>> = vec![Box::new(a), Box::new(b), Box::new(c)];
+    let vstack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
+    let mut fm = FocusManager::new();
+    fm.rebuild_tab_chain(&vstack);
+
+    // Focus widget A.
+    fm.set_focused(Some(id_a));
+    assert_eq!(fm.focused(), Some(id_a));
+
+    // Push a scope containing only B and C.
+    fm.push_scope(vec![id_b, id_c]);
+    // Push scope focuses the first widget in the scope.
+    assert_eq!(fm.focused(), Some(id_b));
+
+    // Tab within scope: B -> C.
+    fm.move_focus_next();
+    assert_eq!(fm.focused(), Some(id_c));
+
+    // Tab wraps within scope: C -> B (not A).
+    fm.move_focus_next();
+    assert_eq!(fm.focused(), Some(id_b));
+
+    // Pop scope restores focus to A.
+    fm.pop_scope();
+    assert_eq!(fm.focused(), Some(id_a));
+}
+
+// ---------------------------------------------------------------------------
+// Keymap tests
+// ---------------------------------------------------------------------------
+
+fn test_keymap_basic() {
+    let km = Keymap::us_qwerty();
+    let no_mod = Modifiers::default();
+    // 'a' is scancode 0x1E.
+    assert_eq!(km.translate(0x1E, &no_mod), Key::Char('a'));
+    // 'z' is scancode 0x2C.
+    assert_eq!(km.translate(0x2C, &no_mod), Key::Char('z'));
+    // '1' is scancode 0x02.
+    assert_eq!(km.translate(0x02, &no_mod), Key::Char('1'));
+}
+
+fn test_keymap_shift() {
+    let km = Keymap::us_qwerty();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    // Shift + 'a' = 'A'.
+    assert_eq!(km.translate(0x1E, &shift), Key::Char('A'));
+    // Shift + '1' = '!'.
+    assert_eq!(km.translate(0x02, &shift), Key::Char('!'));
+    // Shift + '[' = '{'.
+    assert_eq!(km.translate(0x1A, &shift), Key::Char('{'));
+}
+
+fn test_keymap_special() {
+    let km = Keymap::us_qwerty();
+    let no_mod = Modifiers::default();
+    assert_eq!(km.translate(0x1C, &no_mod), Key::Named(NamedKey::Enter));
+    assert_eq!(km.translate(0x0E, &no_mod), Key::Named(NamedKey::Backspace));
+    assert_eq!(km.translate(0x01, &no_mod), Key::Named(NamedKey::Escape));
+    assert_eq!(km.translate(0x39, &no_mod), Key::Named(NamedKey::Space));
+    assert_eq!(km.translate(0x0F, &no_mod), Key::Named(NamedKey::Tab));
+}
+
+// ---------------------------------------------------------------------------
+// Hit test
+// ---------------------------------------------------------------------------
+
+fn test_hit_test_leaf() {
+    let mut w = FixedSizeWidget::new(100, 50);
+    w.layout(Rect::new(10, 20, 100, 50));
+    let result = hit_test(&w, 50, 40);
+    assert!(result.is_some());
+    let ht = result.unwrap();
+    assert_eq!(ht.target, w.id());
+    assert_eq!(ht.chain.len(), 1);
+}
+
+fn test_hit_test_miss() {
+    let mut w = FixedSizeWidget::new(100, 50);
+    w.layout(Rect::new(10, 20, 100, 50));
+    // Point outside widget.
+    let result = hit_test(&w, 0, 0);
+    assert!(result.is_none());
+    let result2 = hit_test(&w, 200, 200);
+    assert!(result2.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Additional edge-case tests
+// ---------------------------------------------------------------------------
+
+fn test_edge_insets_symmetric() {
+    let insets = EdgeInsets::symmetric(10, 5);
+    assert_eq!(insets.horizontal(), 20);
+    assert_eq!(insets.vertical(), 10);
+    assert_eq!(insets.left, 10);
+    assert_eq!(insets.right, 10);
+    assert_eq!(insets.top, 5);
+    assert_eq!(insets.bottom, 5);
+}
+
+fn test_box_constraints_loosen() {
+    let c = BoxConstraints {
+        min_width: 50,
+        max_width: 200,
+        min_height: 30,
+        max_height: 100,
+    };
+    let l = c.loosen();
+    assert_eq!(l.min_width, 0);
+    assert_eq!(l.max_width, 200);
+    assert_eq!(l.min_height, 0);
+    assert_eq!(l.max_height, 100);
+}
+
+fn test_deflate_unbounded() {
+    let c = BoxConstraints::UNBOUNDED;
+    let insets = EdgeInsets::all(10);
+    let d = c.deflate(insets);
+    // Unbounded max stays at i32::MAX.
+    assert_eq!(d.max_width, i32::MAX);
+    assert_eq!(d.max_height, i32::MAX);
+    assert_eq!(d.min_width, 0);
+    assert_eq!(d.min_height, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Public test runner (for boot-time invocation)
+// ---------------------------------------------------------------------------
+
+pub fn run_all_tests() -> bool {
+    let tests: &[(&str, fn())] = &[
+        ("tight_constraints", test_tight_constraints),
+        ("loose_constraints", test_loose_constraints),
+        ("constrain_clamps", test_constrain_clamps),
+        ("deflate", test_deflate),
+        ("unbounded", test_unbounded),
+        ("rect_contains", test_rect_contains),
+        ("rect_intersect", test_rect_intersect),
+        ("rect_no_intersect", test_rect_no_intersect),
+        ("vstack_measure", test_vstack_measure),
+        ("hstack_measure", test_hstack_measure),
+        ("padding_measure", test_padding_measure),
+        ("spacer_measure", test_spacer_measure),
+        ("focus_next", test_focus_next),
+        ("focus_prev", test_focus_prev),
+        ("focus_wrap", test_focus_wrap),
+        ("focus_scope", test_focus_scope),
+        ("keymap_basic", test_keymap_basic),
+        ("keymap_shift", test_keymap_shift),
+        ("keymap_special", test_keymap_special),
+        ("hit_test_leaf", test_hit_test_leaf),
+        ("hit_test_miss", test_hit_test_miss),
+        ("edge_insets_symmetric", test_edge_insets_symmetric),
+        ("box_constraints_loosen", test_box_constraints_loosen),
+        ("deflate_unbounded", test_deflate_unbounded),
+    ];
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    for (name, func) in tests {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func())).is_ok();
+        if ok {
+            passed += 1;
+        } else {
+            eprintln!("[FAIL] ui::tests::{}", name);
+            failed += 1;
+        }
+    }
+
+    eprintln!(
+        "[ui::tests] {} passed, {} failed, {} total",
+        passed,
+        failed,
+        passed + failed
+    );
+    failed == 0
+}
+
+#[cfg(test)]
+mod cfg_tests {
+    use super::*;
+
+    #[test]
+    fn tight_constraints() {
+        test_tight_constraints();
+    }
+    #[test]
+    fn loose_constraints() {
+        test_loose_constraints();
+    }
+    #[test]
+    fn constrain_clamps() {
+        test_constrain_clamps();
+    }
+    #[test]
+    fn deflate() {
+        test_deflate();
+    }
+    #[test]
+    fn unbounded() {
+        test_unbounded();
+    }
+    #[test]
+    fn rect_contains() {
+        test_rect_contains();
+    }
+    #[test]
+    fn rect_intersect() {
+        test_rect_intersect();
+    }
+    #[test]
+    fn rect_no_intersect() {
+        test_rect_no_intersect();
+    }
+    #[test]
+    fn vstack_measure() {
+        test_vstack_measure();
+    }
+    #[test]
+    fn hstack_measure() {
+        test_hstack_measure();
+    }
+    #[test]
+    fn padding_measure() {
+        test_padding_measure();
+    }
+    #[test]
+    fn spacer_measure() {
+        test_spacer_measure();
+    }
+    #[test]
+    fn focus_next() {
+        test_focus_next();
+    }
+    #[test]
+    fn focus_prev() {
+        test_focus_prev();
+    }
+    #[test]
+    fn focus_wrap() {
+        test_focus_wrap();
+    }
+    #[test]
+    fn focus_scope() {
+        test_focus_scope();
+    }
+    #[test]
+    fn keymap_basic() {
+        test_keymap_basic();
+    }
+    #[test]
+    fn keymap_shift() {
+        test_keymap_shift();
+    }
+    #[test]
+    fn keymap_special() {
+        test_keymap_special();
+    }
+    #[test]
+    fn hit_test_leaf() {
+        test_hit_test_leaf();
+    }
+    #[test]
+    fn hit_test_miss() {
+        test_hit_test_miss();
+    }
+    #[test]
+    fn edge_insets_symmetric() {
+        test_edge_insets_symmetric();
+    }
+    #[test]
+    fn box_constraints_loosen() {
+        test_box_constraints_loosen();
+    }
+    #[test]
+    fn deflate_unbounded() {
+        test_deflate_unbounded();
+    }
+}

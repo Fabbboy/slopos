@@ -2,7 +2,7 @@
 
 ## 0. Progress Summary
 
-> **Last updated**: 2026-03-29 (Phase 5 grab-hand cursor complete)
+> **Last updated**: 2026-03-29 (Phase 6 widget toolkit + app migration complete)
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
@@ -12,9 +12,9 @@
 | **Phase 4** — macOS Chrome | ✅ **Complete** | 100% | Full rip-and-replace in commit `27b29e7`. Menu bar (24px, clock, active app name), dock (magnification, running dots, pinned/running separator), traffic-light window decorations (12px circles, hover glyphs, 8px corner radius). Old taskbar/start menu deleted. App ID system (`SYSCALL_SURFACE_SET_APP_ID`) added. |
 | **Phase 5** — Window Interactions | ✅ **Complete** | 100% | Window move ✅, resize ✅, 8 directional resize cursors ✅, Super+LMB move ✅, scroll wheel ✅, grab-hand cursor ✅ (CSS/W3C two-cursor model: open hand on title-bar hover, closed fist during drag). 13 cursor shapes total. |
 | **Phase 5b** — Scroll Wheel & Axis Events | ✅ **Complete** | 100% | PS/2 IntelliMouse (ImPS/2 + ImExPS/2) probe, 4-byte packets, `PointerAxis` ABI event (value120 model), shell scroll-by-line. Traditional scroll direction. Partial-row rendering artifact fixed. Touchpad architecture documented for future phase. |
-| **Phase 6** — Widget Toolkit | ❌ **Not started** | 0% | No `widgets/` directory exists. |
+| **Phase 6** — Widget Toolkit | ✅ **Complete** | 100% | Iced-inspired retained-mode toolkit in `userland/src/ui/`. 16 widgets (Label, StyledLabel, Divider, Button, Checkbox, Image, ProgressBar, TextField, ScrollView, ListView, TabBar, Table, Menu, Dialog, Background, SizedBox). Type-safe `Length` enum, `MessageSink` for widget-to-app communication, `on_press: Option<MessageId>` (no silent no-ops), auto-detecting Divider orientation, single-source-of-truth item counts, position-aware pointer dispatch. Typed `Message` enums per app with exhaustive matching. Sysmon + File Manager fully migrated (legacy drawing code deleted). Widget Gallery demo app. `just test` passes (2265/2265). |
 
-**Next milestone**: Phase 6 (widget toolkit).
+**Next milestone**: Phase 7 (animation + polish).
 
 ---
 

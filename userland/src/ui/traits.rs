@@ -1,0 +1,135 @@
+use super::constraints::{BoxConstraints, Rect, Size};
+use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use super::paint::PaintContext;
+use super::style::StyleSheet;
+
+/// Unique identifier for a widget instance in the retained tree.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct WidgetId(pub u32);
+
+impl WidgetId {
+    pub const NONE: Self = Self(0);
+}
+
+/// Counter for generating unique widget IDs.
+static NEXT_WIDGET_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+pub fn next_widget_id() -> WidgetId {
+    WidgetId(NEXT_WIDGET_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Context passed during the measure phase.
+pub struct MeasureCtx<'a> {
+    pub style: &'a StyleSheet,
+}
+
+/// Every widget implements this trait. The framework calls these methods
+/// during each phase of the frame cycle.
+pub trait Widget {
+    /// Compute this widget's desired size given parent constraints.
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size;
+
+    /// Assign final position and size. Called top-down after measure.
+    fn layout(&mut self, rect: Rect);
+
+    /// Paint this widget into the paint context.
+    fn paint(&self, ctx: &mut PaintContext);
+
+    /// Handle an input event. Return whether the event was consumed.
+    /// Use `sink.emit(msg)` to send messages to the application.
+    fn event(
+        &mut self,
+        event: &WidgetEvent,
+        phase: EventPhase,
+        sink: &mut MessageSink,
+    ) -> EventResponse;
+
+    /// Return this widget's accessibility role.
+    fn role(&self) -> Role {
+        Role::None
+    }
+
+    /// Return this widget's accessible name.
+    fn accessible_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Focus policy: can this widget receive keyboard focus?
+    fn focus_policy(&self) -> FocusPolicy {
+        FocusPolicy::None
+    }
+
+    /// The unique ID of this widget instance.
+    fn id(&self) -> WidgetId;
+
+    /// The layout rect assigned during the last layout pass.
+    fn layout_rect(&self) -> Rect;
+
+    /// Access children for tree traversal.
+    fn children(&self) -> &[Box<dyn Widget>] {
+        &[]
+    }
+
+    /// Mutable access to children for tree traversal.
+    fn children_mut(&mut self) -> &mut [Box<dyn Widget>] {
+        &mut []
+    }
+
+    /// Flex weight for proportional space distribution in stacks.
+    /// Return 0 (default) for non-flexible children.
+    fn flex_weight(&self) -> u16 {
+        0
+    }
+
+    /// Whether this widget needs a repaint.
+    fn is_dirty(&self) -> bool {
+        true
+    }
+
+    /// Mark this widget as needing a repaint.
+    fn mark_dirty(&mut self) {}
+}
+
+/// Accessibility role (minimal set for v1).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Role {
+    None,
+    Button,
+    TextField,
+    Checkbox,
+    Label,
+    List,
+    ListItem,
+    ScrollArea,
+    Tab,
+    TabPanel,
+    Menu,
+    MenuItem,
+    Separator,
+    Group,
+    Window,
+}
+
+/// Focus policy for a widget.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum FocusPolicy {
+    /// Never focusable.
+    #[default]
+    None,
+    /// Focusable via Tab key.
+    TabFocus,
+    /// Focusable via mouse click only.
+    ClickFocus,
+    /// Focusable via both Tab and click.
+    StrongFocus,
+}
+
+impl FocusPolicy {
+    pub fn is_focusable(&self) -> bool {
+        !matches!(self, FocusPolicy::None)
+    }
+
+    pub fn is_tab_focusable(&self) -> bool {
+        matches!(self, FocusPolicy::TabFocus | FocusPolicy::StrongFocus)
+    }
+}

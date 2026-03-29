@@ -8,11 +8,7 @@ use crate::syscall::{
     net as sys_net,
 };
 
-use super::{
-    MAX_CPUS, REFRESH_INTERVAL_MS, col_cpu_pct_x, col_cpu_x, col_name_x, col_pid_x, col_pri_x,
-    col_runtime_x, col_state_x, process_header_h, process_header_y, process_row_h, process_rows_y,
-    process_status_h, task_name_bytes,
-};
+use super::{MAX_CPUS, REFRESH_INTERVAL_MS, task_name_bytes};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tab {
@@ -32,14 +28,6 @@ pub(crate) enum SortColumn {
     Runtime,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ContextMenu {
-    pub(crate) task_id: u32,
-    pub(crate) task_name: [u8; 32],
-    pub(crate) x: i32,
-    pub(crate) y: i32,
-}
-
 pub(crate) struct SysmonApp {
     pub(crate) active_tab: Tab,
     pub(crate) sys_info: UserSysInfo,
@@ -55,16 +43,12 @@ pub(crate) struct SysmonApp {
     pub(crate) task_cpu_pct: [u32; MAX_TASKS],
     pub(crate) cpu_usage_pct: [u32; MAX_CPUS],
     pub(crate) selected_row: usize,
-    pub(crate) scroll_offset: usize,
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
     pub(crate) last_refresh_ms: u64,
     pub(crate) confirm_kill: Option<u32>,
-    pub(crate) confirm_kill_hover: u8,
-    pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) sorted_indices: [usize; MAX_TASKS],
-    pub(crate) pointer_x: i32,
-    pub(crate) pointer_y: i32,
+    pub(crate) hardware_scroll_y: i32,
 }
 
 impl SysmonApp {
@@ -84,16 +68,12 @@ impl SysmonApp {
             task_cpu_pct: [0; MAX_TASKS],
             cpu_usage_pct: [0; MAX_CPUS],
             selected_row: 0,
-            scroll_offset: 0,
             sort_column: SortColumn::CpuPct,
             sort_ascending: false,
             last_refresh_ms: 0,
             confirm_kill: None,
-            confirm_kill_hover: 0,
-            context_menu: None,
             sorted_indices: [0; MAX_TASKS],
-            pointer_x: 0,
-            pointer_y: 0,
+            hardware_scroll_y: 0,
         };
         app.refresh_data();
         app
@@ -141,10 +121,7 @@ impl SysmonApp {
 
         if self.task_count == 0 {
             self.selected_row = 0;
-            self.scroll_offset = 0;
             self.confirm_kill = None;
-            self.context_menu = None;
-            self.confirm_kill_hover = 0;
         } else if self.selected_row >= self.task_count {
             self.selected_row = self.task_count - 1;
         }
@@ -152,7 +129,6 @@ impl SysmonApp {
         if let Some(pid) = self.confirm_kill {
             if self.find_task_index_by_pid(pid).is_none() {
                 self.confirm_kill = None;
-                self.confirm_kill_hover = 0;
             }
         }
     }
@@ -258,17 +234,6 @@ impl SysmonApp {
         }
     }
 
-    pub(crate) fn cycle_tab(&mut self) {
-        self.active_tab = match self.active_tab {
-            Tab::Overview => Tab::Processes,
-            Tab::Processes => Tab::Hardware,
-            Tab::Hardware => Tab::Overview,
-        };
-        self.confirm_kill = None;
-        self.confirm_kill_hover = 0;
-        self.context_menu = None;
-    }
-
     pub(crate) fn cycle_sort_for_column(&mut self, col: SortColumn) {
         if self.sort_column == col {
             self.sort_ascending = !self.sort_ascending;
@@ -284,85 +249,6 @@ impl SysmonApp {
             };
         }
         self.sort_tasks();
-    }
-
-    pub(crate) fn move_selection_up(&mut self) {
-        if self.selected_row > 0 {
-            self.selected_row -= 1;
-        }
-    }
-
-    pub(crate) fn move_selection_down(&mut self) {
-        if self.task_count == 0 {
-            self.selected_row = 0;
-        } else if self.selected_row + 1 < self.task_count {
-            self.selected_row += 1;
-        }
-    }
-
-    pub(crate) fn process_max_rows(&self, height: i32) -> usize {
-        let rows_h = (height - process_rows_y() - process_status_h()).max(0);
-        (rows_h / process_row_h()).max(0) as usize
-    }
-
-    pub(crate) fn ensure_process_scroll(&mut self, max_rows: usize) {
-        if self.task_count > 0 {
-            if self.selected_row < self.scroll_offset {
-                self.scroll_offset = self.selected_row;
-            }
-            if max_rows > 0 && self.selected_row >= self.scroll_offset + max_rows {
-                self.scroll_offset = self.selected_row + 1 - max_rows;
-            }
-        } else {
-            self.scroll_offset = 0;
-        }
-    }
-
-    pub(crate) fn process_row_from_pointer(&self, height: i32, pointer_y: i32) -> Option<usize> {
-        if pointer_y < process_rows_y() {
-            return None;
-        }
-        let max_rows = self.process_max_rows(height);
-        if max_rows == 0 {
-            return None;
-        }
-        let row = ((pointer_y - process_rows_y()) / process_row_h()) as usize;
-        if row >= max_rows {
-            return None;
-        }
-        let task_row = self.scroll_offset + row;
-        if task_row >= self.task_count {
-            return None;
-        }
-        Some(task_row)
-    }
-
-    pub(crate) fn process_sort_column_from_pointer(
-        &self,
-        pointer_x: i32,
-        pointer_y: i32,
-    ) -> Option<SortColumn> {
-        if pointer_y < process_header_y() || pointer_y >= process_header_y() + process_header_h() {
-            return None;
-        }
-
-        if pointer_x >= col_pid_x() && pointer_x < col_name_x() {
-            Some(SortColumn::Pid)
-        } else if pointer_x >= col_name_x() && pointer_x < col_state_x() {
-            Some(SortColumn::Name)
-        } else if pointer_x >= col_state_x() && pointer_x < col_cpu_pct_x() {
-            Some(SortColumn::State)
-        } else if pointer_x >= col_cpu_pct_x() && pointer_x < col_pri_x() {
-            Some(SortColumn::CpuPct)
-        } else if pointer_x >= col_pri_x() && pointer_x < col_cpu_x() {
-            Some(SortColumn::Priority)
-        } else if pointer_x >= col_cpu_x() && pointer_x < col_runtime_x() {
-            Some(SortColumn::Cpu)
-        } else if pointer_x >= col_runtime_x() {
-            Some(SortColumn::Runtime)
-        } else {
-            None
-        }
     }
 
     pub(crate) fn find_task_index_by_pid(&self, pid: u32) -> Option<usize> {

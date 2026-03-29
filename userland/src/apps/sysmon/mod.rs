@@ -1,177 +1,565 @@
-use slopos_abi::draw::Color32;
+use std::format;
+use std::string::String;
 
-use crate::appkit::{self, ControlFlow, Event, Window, WindowedApp};
-use crate::gfx::DrawBuffer;
-use crate::gfx::fill_rect;
-use crate::gfx::font;
+use slopos_abi::PAGE_SIZE;
+use slopos_abi::draw::Color32;
+use slopos_slibc::mem::malloc::heap_stats;
+
+use crate::syscall::process as sys_proc;
+use crate::ui::{
+    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, MessageId, Node,
+    ScrollDirection, ScrollbarVisibility, SortIndicator, TableColumn, TableColumnWidth,
+    TextAlignment,
+};
 
 mod format;
-mod hardware;
-mod overview;
-mod processes;
 mod state;
-mod widgets;
 
 pub(crate) use format::*;
-pub(crate) use state::{ContextMenu, SortColumn, SysmonApp, Tab};
+pub(crate) use state::{SortColumn, SysmonApp, Tab};
 
-pub(crate) const COLOR_BG: Color32 = Color32::rgb(0x0A, 0x0E, 0x14);
-pub(crate) const COLOR_TEXT: Color32 = Color32::rgb(0xD0, 0xD0, 0xD0);
+// Colors kept for format.rs (which imports them from super::).
 pub(crate) const COLOR_DIM: Color32 = Color32::rgb(0x60, 0x68, 0x70);
-pub(crate) const COLOR_BRIGHT: Color32 = Color32::rgb(0xFF, 0xFF, 0xFF);
-pub(crate) const COLOR_TAB_ACTIVE: Color32 = Color32::rgb(0x30, 0x6C, 0xB0);
-pub(crate) const COLOR_TAB_INACTIVE: Color32 = Color32::rgb(0x1A, 0x22, 0x2E);
-pub(crate) const COLOR_TAB_BAR: Color32 = Color32::rgb(0x12, 0x18, 0x20);
-pub(crate) const COLOR_HEADER: Color32 = Color32::rgb(0x18, 0x20, 0x2A);
-pub(crate) const COLOR_ROW_EVEN: Color32 = Color32::rgb(0x0E, 0x14, 0x1C);
-pub(crate) const COLOR_ROW_ODD: Color32 = Color32::rgb(0x12, 0x18, 0x22);
-pub(crate) const COLOR_ROW_SELECTED: Color32 = Color32::rgb(0x1E, 0x3A, 0x5C);
-pub(crate) const COLOR_BAR_LOW: Color32 = Color32::rgb(0x2E, 0xAA, 0x4E);
-pub(crate) const COLOR_BAR_MED: Color32 = Color32::rgb(0xCC, 0xAA, 0x22);
-pub(crate) const COLOR_BAR_HIGH: Color32 = Color32::rgb(0xCC, 0x33, 0x33);
-pub(crate) const COLOR_BAR_BG: Color32 = Color32::rgb(0x1A, 0x20, 0x28);
-pub(crate) const COLOR_SECTION: Color32 = Color32::rgb(0x50, 0x90, 0xD0);
 pub(crate) const COLOR_STATE_RUN: Color32 = Color32::rgb(0x44, 0xCC, 0x44);
 pub(crate) const COLOR_STATE_BLOCK: Color32 = Color32::rgb(0xCC, 0xAA, 0x44);
 pub(crate) const COLOR_STATE_READY: Color32 = Color32::rgb(0xCC, 0xCC, 0xCC);
-pub(crate) const COLOR_KILL_RED: Color32 = Color32::rgb(0xDD, 0x33, 0x33);
 
 pub(crate) const MAX_CPUS: usize = 16;
 pub(crate) const REFRESH_INTERVAL_MS: u64 = 1000;
-pub(crate) fn tab_height() -> i32 {
-    font::cell_height() + 10
-}
-pub(crate) fn tab_width() -> i32 {
-    font::cell_width() * 12
+
+const MSG_TAB: MessageId = MessageId::new(1);
+const MSG_SORT: MessageId = MessageId::new(2);
+const MSG_SELECT: MessageId = MessageId::new(3);
+const MSG_KILL: MessageId = MessageId::new(4);
+const MSG_CANCEL: MessageId = MessageId::new(5);
+const MSG_HW_SCROLL: MessageId = MessageId::new(6);
+
+#[derive(Clone, Debug)]
+pub enum SysmonMsg {
+    TabChanged(usize),
+    SortColumn(usize),
+    SelectRow(usize),
+    Kill,
+    Cancel,
+    HwScroll(i32),
+    Unknown(#[allow(dead_code)] MessageId),
 }
 
-pub(crate) fn process_header_y() -> i32 {
-    tab_height() + 2
-}
-pub(crate) fn process_header_h() -> i32 {
-    font::cell_height()
-}
-pub(crate) fn process_rows_y() -> i32 {
-    process_header_y() + process_header_h()
-}
-pub(crate) fn process_row_h() -> i32 {
-    font::cell_height()
-}
-pub(crate) fn process_status_h() -> i32 {
-    font::cell_height() + 4
+impl From<MessageId> for SysmonMsg {
+    fn from(m: MessageId) -> Self {
+        match m.id {
+            1 => SysmonMsg::TabChanged(m.payload as usize),
+            2 => SysmonMsg::SortColumn(m.payload as usize),
+            3 => SysmonMsg::SelectRow(m.payload as usize),
+            4 => SysmonMsg::Kill,
+            5 => SysmonMsg::Cancel,
+            6 => SysmonMsg::HwScroll(m.payload as i32),
+            _ => SysmonMsg::Unknown(m),
+        }
+    }
 }
 
-// Column positions derived from font cell width so the table adapts
-// to any monospace font size.
-pub(crate) fn col_pid_x() -> i32 {
-    font::cell_width()
-}
-pub(crate) fn col_name_x() -> i32 {
-    col_pid_x() + font::cell_width() * 6
-}
-pub(crate) fn col_state_x() -> i32 {
-    col_name_x() + font::cell_width() * 16
-}
-pub(crate) fn col_cpu_pct_x() -> i32 {
-    col_state_x() + font::cell_width() * 8
-}
-pub(crate) fn col_pri_x() -> i32 {
-    col_cpu_pct_x() + font::cell_width() * 8
-}
-pub(crate) fn col_cpu_x() -> i32 {
-    col_pri_x() + font::cell_width() * 6
-}
-pub(crate) fn col_runtime_x() -> i32 {
-    col_cpu_x() + font::cell_width() * 5
-}
+impl App for SysmonApp {
+    type Message = SysmonMsg;
 
-impl WindowedApp for SysmonApp {
-    fn init(&mut self, win: &mut Window) {
-        win.set_title("System Monitor");
-        win.set_app_id("org.slopos.sysmon");
-        win.request_redraw();
+    fn view(&self) -> Node {
+        Node::TabBar {
+            tabs: vec![
+                String::from("Overview"),
+                String::from("Processes"),
+                String::from("Hardware"),
+            ],
+            active: match self.active_tab {
+                Tab::Overview => 0,
+                Tab::Processes => 1,
+                Tab::Hardware => 2,
+            },
+            on_change: MSG_TAB,
+            content: vec![
+                self.view_overview(),
+                self.view_processes(),
+                self.view_hardware(),
+            ],
+        }
     }
 
-    fn refresh_interval_ms(&self) -> Option<u64> {
+    fn update(&mut self, msg: SysmonMsg) -> Action {
+        match msg {
+            SysmonMsg::TabChanged(tab) => {
+                self.active_tab = match tab {
+                    0 => Tab::Overview,
+                    1 => Tab::Processes,
+                    _ => Tab::Hardware,
+                };
+                self.confirm_kill = None;
+                Action::Rebuild
+            }
+            SysmonMsg::SortColumn(col_idx) => {
+                let col = match col_idx {
+                    0 => SortColumn::Pid,
+                    1 => SortColumn::Name,
+                    2 => SortColumn::State,
+                    3 => SortColumn::CpuPct,
+                    4 => SortColumn::Priority,
+                    5 => SortColumn::Cpu,
+                    _ => SortColumn::Runtime,
+                };
+                self.cycle_sort_for_column(col);
+                Action::Rebuild
+            }
+            SysmonMsg::SelectRow(row) => {
+                self.selected_row = row;
+                Action::Rebuild
+            }
+            SysmonMsg::Kill => {
+                if let Some(pid) = self.confirm_kill {
+                    let _ = sys_proc::kill(pid, 9);
+                    self.confirm_kill = None;
+                    self.refresh_data();
+                }
+                Action::Rebuild
+            }
+            SysmonMsg::Cancel => {
+                self.confirm_kill = None;
+                Action::Rebuild
+            }
+            SysmonMsg::HwScroll(y) => {
+                self.hardware_scroll_y = y;
+                Action::None
+            }
+            SysmonMsg::Unknown(_) => Action::None,
+        }
+    }
+
+    fn tick_interval_ms(&self) -> Option<u64> {
         Some(REFRESH_INTERVAL_MS)
     }
 
-    fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
-        match event {
-            Event::CloseRequest => return ControlFlow::Exit,
-            Event::PointerMotion { x, y } => {
-                self.pointer_x = x;
-                self.pointer_y = y;
-                if self.confirm_kill.is_some() {
-                    self.update_confirm_kill_hover(win.width() as i32, win.height() as i32);
-                }
-            }
-            Event::KeyPress { scancode, ascii } => {
-                if ascii == b'\t' {
-                    self.cycle_tab();
-                } else if self.active_tab == Tab::Processes {
-                    match scancode {
-                        0x48 => self.move_selection_up(),
-                        0x50 => self.move_selection_down(),
-                        _ => {}
-                    }
-                }
-            }
-            Event::PointerPress { button } => {
-                let width = win.width() as i32;
-                let height = win.height() as i32;
-                let (x, y) = (self.pointer_x, self.pointer_y);
-                if button == 1 {
-                    if self.handle_confirm_kill_click(width, height, x, y) {
-                        win.request_redraw();
-                        return ControlFlow::Continue;
-                    }
-                    if self.handle_context_menu_click(x, y) {
-                        win.request_redraw();
-                        return ControlFlow::Continue;
-                    }
-                    if self.handle_tab_click(x, y) {
-                        win.request_redraw();
-                        return ControlFlow::Continue;
-                    }
-                    if self.active_tab == Tab::Processes {
-                        self.handle_processes_left_click(width, height, x, y);
-                    }
-                } else if button == 2 {
-                    if self.active_tab == Tab::Processes && self.confirm_kill.is_none() {
-                        self.handle_processes_right_click(width, height, x, y);
-                    } else {
-                        self.context_menu = None;
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        win.request_redraw();
-        ControlFlow::Continue
+    fn tick(&mut self) -> Action {
+        self.refresh_data();
+        Action::Rebuild
     }
 
-    fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
-        let now = crate::syscall::core::get_time_ms();
-        if now.saturating_sub(self.last_refresh_ms) >= REFRESH_INTERVAL_MS {
-            self.refresh_data();
+    fn title(&self) -> &str {
+        "System Monitor"
+    }
+
+    fn app_id(&self) -> &str {
+        "org.slopos.sysmon"
+    }
+}
+
+impl SysmonApp {
+    fn view_overview(&self) -> Node {
+        let mut children: Vec<Node> = Vec::new();
+
+        // SYSTEM
+        children.push(label("SYSTEM"));
+        children.push(label(&format!(
+            "Uptime: {}",
+            format_uptime(self.last_refresh_ms)
+        )));
+        children.push(Node::Spacer {
+            size: Length::Px(8),
+        });
+
+        // CPU
+        children.push(label("CPU"));
+        for i in 0..self.cpu_count {
+            let pct = self.cpu_usage_pct[i];
+            children.push(Node::ProgressBar {
+                value: pct,
+                label: format!("CPU{} {:>3}%", self.percpu[i].cpu_id, pct),
+                color: None,
+            });
+        }
+        children.push(Node::Spacer {
+            size: Length::Px(8),
+        });
+
+        // MEMORY
+        children.push(label("MEMORY"));
+        let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
+        let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
+            .saturating_mul(PAGE_SIZE);
+        let mem_pct = if total_bytes == 0 {
+            0
+        } else {
+            ((used_bytes.saturating_mul(100) / total_bytes).min(100)) as u32
+        };
+        children.push(Node::ProgressBar {
+            value: mem_pct,
+            label: format!(
+                "Used: {} / {} ({}%)",
+                format_bytes_mib(used_bytes),
+                format_bytes_mib(total_bytes),
+                mem_pct
+            ),
+            color: None,
+        });
+        children.push(Node::Spacer {
+            size: Length::Px(8),
+        });
+
+        // TASKS
+        children.push(label("TASKS"));
+        let mut blocked = 0usize;
+        for i in 0..self.task_count {
+            if self.tasks[i].state == 3 {
+                blocked += 1;
+            }
+        }
+        let ready = self.sys_info.ready_tasks as usize;
+        let active = self.sys_info.active_tasks as usize;
+        children.push(label(&format!(
+            "{} total  {} active  {} ready  {} blocked",
+            self.task_count, active, ready, blocked
+        )));
+        children.push(Node::Spacer {
+            size: Length::Px(8),
+        });
+
+        // NETWORK
+        children.push(label("NETWORK"));
+        children.push(label("RX: 0.0 MiB (0 pkts)  TX: 0.0 MiB (0 pkts)"));
+        Node::Padding {
+            padding: EdgeInsets::all(10),
+            child: Box::new(Node::VStack {
+                spacing: 2,
+                align: CrossAxisAlignment::Stretch,
+                children,
+            }),
+        }
+    }
+
+    fn view_processes(&self) -> Node {
+        let sort_ind = |col: SortColumn| -> Option<SortIndicator> {
+            if self.sort_column == col {
+                Some(if self.sort_ascending {
+                    SortIndicator::Ascending
+                } else {
+                    SortIndicator::Descending
+                })
+            } else {
+                None
+            }
+        };
+
+        let columns = vec![
+            TableColumn {
+                label: String::from("PID"),
+                width: TableColumnWidth::Fixed(60),
+                sort_indicator: sort_ind(SortColumn::Pid),
+            },
+            TableColumn {
+                label: String::from("Name"),
+                width: TableColumnWidth::Flex(2),
+                sort_indicator: sort_ind(SortColumn::Name),
+            },
+            TableColumn {
+                label: String::from("State"),
+                width: TableColumnWidth::Fixed(70),
+                sort_indicator: sort_ind(SortColumn::State),
+            },
+            TableColumn {
+                label: String::from("CPU%"),
+                width: TableColumnWidth::Fixed(70),
+                sort_indicator: sort_ind(SortColumn::CpuPct),
+            },
+            TableColumn {
+                label: String::from("Pri"),
+                width: TableColumnWidth::Fixed(60),
+                sort_indicator: sort_ind(SortColumn::Priority),
+            },
+            TableColumn {
+                label: String::from("CPU"),
+                width: TableColumnWidth::Fixed(50),
+                sort_indicator: sort_ind(SortColumn::Cpu),
+            },
+            TableColumn {
+                label: String::from("Runtime"),
+                width: TableColumnWidth::Flex(1),
+                sort_indicator: sort_ind(SortColumn::Runtime),
+            },
+        ];
+
+        let mut rows: Vec<Vec<Node>> = Vec::new();
+        for row_idx in 0..self.task_count {
+            let Some(idx) = self.sorted_task_index(row_idx) else {
+                continue;
+            };
+            let task = &self.tasks[idx];
+            let (state_str, _) = task_state(task.state);
+            rows.push(vec![
+                cell(&format!("{}", task.task_id)),
+                cell(&truncate_name(&task_name_string(task), 16)),
+                cell(state_str),
+                cell(&format_pct(self.task_cpu_pct[idx])),
+                cell(priority_label(task.priority)),
+                cell(&format!("{}", task.last_cpu)),
+                cell(&format_runtime(task.total_runtime_us)),
+            ]);
         }
 
-        let width = fb.width() as i32;
-        let height = fb.height() as i32;
+        let selected = if self.task_count > 0 {
+            Some(self.selected_row)
+        } else {
+            None
+        };
 
-        fill_rect(fb, 0, 0, width, height, COLOR_BG);
-        self.draw_tab_bar(fb, width);
+        let table = Node::Table {
+            columns,
+            rows,
+            row_height: 20,
+            selected,
+            on_select: MSG_SELECT,
+            on_header_click: Some(MSG_SORT),
+        };
 
-        match self.active_tab {
-            Tab::Overview => self.draw_overview(fb, width, height),
-            Tab::Processes => self.draw_processes(fb, width, height),
-            Tab::Hardware => self.draw_hardware(fb, width, height),
+        let mut children: Vec<Node> = vec![Node::Expand {
+            weight: 1,
+            child: Box::new(table),
+        }];
+
+        // Kill confirmation dialog as overlay.
+        if let Some(pid) = self.confirm_kill {
+            let task_name = if let Some(idx) = self.find_task_index_by_pid(pid) {
+                task_name_string(&self.tasks[idx])
+            } else {
+                String::from("unknown")
+            };
+            children.push(Node::Dialog {
+                title: format!("Kill task '{}' (PID {})?", task_name, pid),
+                content: Box::new(Node::Label {
+                    text: String::from("This action cannot be undone."),
+                    alignment: TextAlignment::Center,
+                    wrap: true,
+                    max_lines: None,
+                }),
+                actions: vec![
+                    Node::Button {
+                        label: String::from("Kill"),
+                        on_press: Some(MSG_KILL),
+                        style: ButtonStyle::Destructive,
+                        enabled: true,
+                    },
+                    Node::Button {
+                        label: String::from("Cancel"),
+                        on_press: Some(MSG_CANCEL),
+                        style: ButtonStyle::Secondary,
+                        enabled: true,
+                    },
+                ],
+                on_dismiss: MSG_CANCEL,
+            });
         }
+
+        Node::VStack {
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
+            children,
+        }
+    }
+
+    fn view_hardware(&self) -> Node {
+        let mut children: Vec<Node> = Vec::new();
+
+        // PROCESSOR
+        children.push(label("PROCESSOR"));
+        children.push(kv_row("Model", &trim_ascii(&self.cpu_info.brand_string)));
+        children.push(kv_row("Vendor", &trim_ascii(&self.cpu_info.vendor)));
+        children.push(kv_row("Cores", &format!("{}", self.cpu_info.cpu_count)));
+        children.push(kv_row(
+            "Family/Model",
+            &format!(
+                "{} / {} / step {}",
+                self.cpu_info.family, self.cpu_info.model, self.cpu_info.stepping
+            ),
+        ));
+        children.push(kv_row(
+            "Features",
+            &format_cpu_features(self.cpu_info.features),
+        ));
+        children.push(Node::Divider);
+
+        // MEMORY
+        children.push(label("MEMORY"));
+        let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
+        let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
+            .saturating_mul(PAGE_SIZE);
+        let free_bytes = (self.sys_info.free_pages as u64).saturating_mul(PAGE_SIZE);
+        let mem_pct = if total_bytes == 0 {
+            0
+        } else {
+            ((used_bytes.saturating_mul(100) / total_bytes).min(100)) as u32
+        };
+        children.push(Node::ProgressBar {
+            value: mem_pct,
+            label: format!(
+                "{} / {} ({}%)",
+                format_bytes_mib(used_bytes),
+                format_bytes_mib(total_bytes),
+                mem_pct
+            ),
+            color: None,
+        });
+        children.push(kv_row(
+            "Total",
+            &format!(
+                "{} ({} pages)",
+                format_bytes_mib(total_bytes),
+                self.sys_info.total_pages
+            ),
+        ));
+        children.push(kv_row("Free", &format_bytes_mib(free_bytes)));
+        children.push(kv_row("Allocated", &format_bytes_mib(used_bytes)));
+        children.push(Node::Divider);
+
+        // SCHEDULER
+        children.push(label("SCHEDULER"));
+        children.push(kv_row(
+            "Ctx switches",
+            &format_number(self.sys_info.task_context_switches),
+        ));
+        children.push(kv_row(
+            "Sched switches",
+            &format_number(self.sys_info.scheduler_context_switches),
+        ));
+        children.push(kv_row(
+            "Yields",
+            &format_number(self.sys_info.scheduler_yields),
+        ));
+        children.push(kv_row(
+            "Schedule calls",
+            &format_number(self.sys_info.schedule_calls as u64),
+        ));
+        children.push(Node::Divider);
+
+        // HEAP
+        children.push(label("HEAP"));
+        let stats = heap_stats();
+        children.push(kv_row(
+            "Heap size",
+            &format_bytes_mib(stats.heap_size as u64),
+        ));
+        children.push(kv_row(
+            "Wilderness",
+            &format_bytes_mib(stats.wilderness as u64),
+        ));
+        children.push(kv_row(
+            "Mmap allocs",
+            &format_number(stats.mmap_count as u64),
+        ));
+        children.push(Node::Divider);
+
+        // NETWORK
+        children.push(label("NETWORK"));
+        let net_status = if self.net_info.nic_ready != 0 {
+            if self.net_info.link_up != 0 {
+                "Online"
+            } else {
+                "No link"
+            }
+        } else {
+            "Offline"
+        };
+        children.push(kv_row("Status", net_status));
+        children.push(kv_row(
+            "IP",
+            &format!(
+                "{}.{}.{}.{}",
+                self.net_info.ipv4[0],
+                self.net_info.ipv4[1],
+                self.net_info.ipv4[2],
+                self.net_info.ipv4[3]
+            ),
+        ));
+        children.push(kv_row(
+            "MAC",
+            &format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                self.net_info.mac[0],
+                self.net_info.mac[1],
+                self.net_info.mac[2],
+                self.net_info.mac[3],
+                self.net_info.mac[4],
+                self.net_info.mac[5]
+            ),
+        ));
+        children.push(Node::Divider);
+
+        // BOOT
+        children.push(label("BOOT"));
+        children.push(kv_row("Uptime", &format_uptime(self.last_refresh_ms)));
+        children.push(kv_row(
+            "Boot flags",
+            &format!("0x{:08x}", self.sys_info.boot_flags),
+        ));
+        children.push(kv_row(
+            "W/L Balance",
+            &format_number(self.sys_info.wl_balance as u64),
+        ));
+
+        Node::ScrollView {
+            direction: ScrollDirection::Vertical,
+            show_scrollbar: ScrollbarVisibility::WhenNeeded,
+            scroll_y: self.hardware_scroll_y,
+            on_scroll: Some(MSG_HW_SCROLL),
+            child: Box::new(Node::Padding {
+                padding: EdgeInsets::all(10),
+                child: Box::new(Node::VStack {
+                    spacing: 2,
+                    align: CrossAxisAlignment::Stretch,
+                    children,
+                }),
+            }),
+        }
+    }
+}
+
+fn label(text: &str) -> Node {
+    Node::Label {
+        text: String::from(text),
+        alignment: TextAlignment::Start,
+        wrap: false,
+        max_lines: None,
+    }
+}
+
+fn cell(text: &str) -> Node {
+    Node::Label {
+        text: String::from(text),
+        alignment: TextAlignment::Start,
+        wrap: false,
+        max_lines: None,
+    }
+}
+
+fn kv_row(key: &str, value: &str) -> Node {
+    Node::HStack {
+        spacing: 0,
+        align: CrossAxisAlignment::Center,
+        children: vec![
+            Node::Label {
+                text: String::from(key),
+                alignment: TextAlignment::Start,
+                wrap: false,
+                max_lines: None,
+            },
+            Node::Spacer {
+                size: Length::Px(8),
+            },
+            Node::Label {
+                text: String::from(value),
+                alignment: TextAlignment::Start,
+                wrap: false,
+                max_lines: None,
+            },
+        ],
     }
 }
 
 pub fn sysmon_main() -> ! {
-    appkit::run(SysmonApp::new(), 640, 480)
+    let app = SysmonApp::new();
+    crate::ui::run_app(app, 640, 480)
 }
